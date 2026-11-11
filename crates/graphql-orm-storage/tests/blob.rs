@@ -44,3 +44,13 @@ async fn collect_storage_stream_returns_original_bytes() {
 
     assert_eq!(bytes, Bytes::from_static(b"hello storage"));
 }
+
+#[tokio::test]
+async fn collect_does_not_preallocate_a_declared_size() {
+    use graphql_orm_storage::{StorageByteStream, collect_storage_stream};
+    // A provider may report a size the remote side declared.
+    let body = futures_util::stream::iter([Ok(bytes::Bytes::from_static(b"small"))]);
+    let stream = StorageByteStream::with_size_hint(Box::pin(body), u64::MAX);
+    let collected = collect_storage_stream(stream).await.expect("collect");
+    assert_eq!(collected.as_ref(), b"small");
+}

@@ -3,12 +3,34 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-11-09
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.8.1 to 0.9.0: SMB resource bounds and server identity
+
+Update the storage requirement to 0.9.0 and refresh the consumer lockfile. No
+key, object format or persisted-data migration is required.
+
+- Code that constructs `SmbStorageConfig` with a struct literal must set
+  `expected_server_guid`, `max_listing_depth`, `max_listing_entries` and
+  `listing_timeout`. Prefer `SmbStorageConfig::new` and assign fields.
+- A backend now pins the SMB server GUID from its first connection and refuses
+  a reconnect to a server reporting another GUID. If a server is replaced or
+  rebuilt, reconstruct the backend after confirming the change. To pin from the
+  first connection, record `SmbProbeResult::server_guid` and set
+  `expected_server_guid`. Clusters whose nodes report different GUIDs under one
+  name must pin a single node's name.
+- A listing deeper than 64 directories below the root prefix, larger than
+  1,000,000 entries, or longer than 15 minutes now fails with a non-retryable
+  error. Raise `max_listing_depth`, `max_listing_entries` or `listing_timeout`
+  for repositories that legitimately exceed them.
+- Authentication is unchanged and NTLM-only. If the service account's
+  password is short, shared or reused, replace it with a long random one used
+  only by this backend.
 
 ## 0.8.0 to 0.8.1: SMB response verification (GHSA-439h-2cx8-xwgx)
 

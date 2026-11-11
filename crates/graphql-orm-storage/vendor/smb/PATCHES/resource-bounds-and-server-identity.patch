@@ -1,0 +1,893 @@
+diff --git a/src/client/smb_client.rs b/src/client/smb_client.rs
+index bdea8b18..375b1875 100644
+--- a/src/client/smb_client.rs
++++ b/src/client/smb_client.rs
+@@ -201,9 +201,12 @@ impl Client {
+         user_name: &str,
+         password: String,
+     ) -> crate::Result<()> {
++        // Local patch (graphql-orm-storage): move the password into the
++        // zeroizing secret first, so no error path drops it as a plain String.
++        let password = Secret::from(password);
+         let identity = AuthIdentity {
+             username: sspi::Username::parse(user_name).map_err(|e| Error::SspiError(e.into()))?,
+-            password: Secret::from(password),
++            password,
+         };
+ 
+         self._share_connect(target, &identity).await?;
+@@ -593,10 +596,13 @@ impl Client {
+         username: &str,
+         password: String,
+     ) -> crate::Result<()> {
++        // Local patch (graphql-orm-storage): wrap the password before any
++        // fallible step.
++        let password = Secret::from(password);
+         let ipc_share = UncPath::ipc_share(server)?;
+         let identity = AuthIdentity {
+             username: sspi::Username::parse(username).map_err(|e| Error::SspiError(e.into()))?,
+-            password: Secret::from(password),
++            password,
+         };
+         self._share_connect(&ipc_share, &identity).await
+     }
+diff --git a/src/connection.rs b/src/connection.rs
+index a48d1831..bb764338 100644
+--- a/src/connection.rs
++++ b/src/connection.rs
+@@ -286,6 +286,14 @@ impl Connection {
+ 
+         let smb2_negotiate_response = response.message.content.to_negotiate()?;
+ 
++        // Local patch (graphql-orm-storage): refuse a server whose identity
++        // differs from the pinned one, before session setup sends credentials.
++        if let Some(expected) = self.config.expected_server_guid {
++            if smb2_negotiate_response.server_guid != expected {
++                return Err(Error::ServerGuidMismatch);
++            }
++        }
++
+         // well, only 3.1 is supported for starters.
+         let dialect_rev = smb2_negotiate_response.dialect_revision.try_into()?;
+         if dialect_rev > max_dialect || dialect_rev < min_dialect {
+@@ -925,14 +933,18 @@ impl Drop for ConnectionMessageHandler {
+ #[cfg(all(test, feature = "async"))]
+ impl ConnectionMessageHandler {
+     /// Test-only: a connection handler whose worker reads scripted bytes from
+-    /// `transport`, without negotiation.
++    /// `transport`, without negotiation. `expected` lists the message IDs of
++    /// the requests the scripted responses answer (local patch).
+     pub(crate) async fn with_test_transport(
+         transport: Box<dyn SmbTransport>,
++        expected: &[u64],
+     ) -> crate::Result<HandlerReference<Self>> {
+         let handler = HandlerReference::new(Self::new(Guid::generate(), None));
+         // The scripted response answers one request, which consumed its credit.
+         handler.curr_credits.acquire().await?.forget();
+-        let worker = WorkerImpl::start(transport, std::time::Duration::from_secs(5)).await?;
++        let worker =
++            WorkerImpl::start_expecting(transport, std::time::Duration::from_secs(5), expected)
++                .await?;
+         handler
+             .worker
+             .set(worker)
+@@ -940,3 +952,206 @@ impl ConnectionMessageHandler {
+         Ok(handler)
+     }
+ }
++
++/// Local patch (graphql-orm-storage): a pinned server identity is enforced
++/// during negotiation, before any session setup.
++#[cfg(all(test, feature = "async"))]
++mod server_identity_tests {
++    use super::*;
++    use futures_core::future::BoxFuture;
++    use futures_util::FutureExt;
++    use smb_msg::{Header, HeaderFlags, Status};
++    use std::sync::Arc;
++    use tokio::sync::Notify;
++
++    const SERVER_GUID: Guid = Guid::MAX;
++
++    /// Answers the client's first request with an SMB 2.1 NEGOTIATE response
++    /// naming `SERVER_GUID`, then behaves like an idle peer.
++    struct NegotiateOnlyServer {
++        response: Vec<u8>,
++        position: usize,
++        request_sent: Arc<Notify>,
++        written: Arc<std::sync::Mutex<Vec<u8>>>,
++    }
++
++    struct NotifyingWrite {
++        request_sent: Arc<Notify>,
++        written: Arc<std::sync::Mutex<Vec<u8>>>,
++    }
++
++    fn negotiate_response() -> Vec<u8> {
++        let header = Header {
++            credit_charge: 0,
++            status: Status::Success as u32,
++            command: Command::Negotiate,
++            credit_request: 1,
++            flags: HeaderFlags::new().with_server_to_redir(true),
++            next_command: 0,
++            message_id: 0,
++            tree_id: Some(0),
++            async_id: None,
++            session_id: 0,
++            signature: 0,
++        };
++        let mut message = std::io::Cursor::new(Vec::new());
++        header.write_le(&mut message).unwrap();
++        let mut body = Vec::new();
++        body.extend_from_slice(&0x41_u16.to_le_bytes()); // StructureSize
++        body.extend_from_slice(&1_u16.to_le_bytes()); // SecurityMode: signing enabled
++        body.extend_from_slice(&0x0210_u16.to_le_bytes()); // DialectRevision: SMB 2.1
++        body.extend_from_slice(&0_u16.to_le_bytes()); // NegotiateContextCount
++        body.extend_from_slice(&<[u8; 16]>::from(SERVER_GUID));
++        body.extend_from_slice(&0_u32.to_le_bytes()); // Capabilities
++        for _ in 0..3 {
++            body.extend_from_slice(&65_536_u32.to_le_bytes()); // Max transact/read/write
++        }
++        body.extend_from_slice(&0_u64.to_le_bytes()); // SystemTime
++        body.extend_from_slice(&0_u64.to_le_bytes()); // ServerStartTime
++        body.extend_from_slice(&0x80_u16.to_le_bytes()); // SecurityBufferOffset
++        body.extend_from_slice(&0_u16.to_le_bytes()); // SecurityBufferLength
++        body.extend_from_slice(&0_u32.to_le_bytes()); // NegotiateContextOffset
++        body.push(0); // Buffer
++        let mut message = message.into_inner();
++        message.extend_from_slice(&body);
++        let mut framed = (message.len() as u32).to_be_bytes().to_vec();
++        framed.extend_from_slice(&message);
++        framed
++    }
++
++    impl SmbTransport for NegotiateOnlyServer {
++        fn connect<'a>(
++            &'a mut self,
++            _server_name: &'a str,
++            _address: SocketAddr,
++        ) -> BoxFuture<'a, smb_transport::error::Result<()>> {
++            async { Ok(()) }.boxed()
++        }
++
++        fn default_port(&self) -> u16 {
++            445
++        }
++
++        fn split(
++            self: Box<Self>,
++        ) -> smb_transport::error::Result<(Box<dyn SmbTransportRead>, Box<dyn SmbTransportWrite>)>
++        {
++            let write = NotifyingWrite {
++                request_sent: self.request_sent.clone(),
++                written: self.written.clone(),
++            };
++            Ok((self, Box::new(write)))
++        }
++
++        fn remote_address(&self) -> smb_transport::error::Result<SocketAddr> {
++            Ok(SocketAddr::from(([127, 0, 0, 1], 445)))
++        }
++    }
++
++    impl SmbTransportRead for NegotiateOnlyServer {
++        fn receive_exact<'a>(
++            &'a mut self,
++            out_buf: &'a mut [u8],
++        ) -> BoxFuture<'a, smb_transport::error::Result<()>> {
++            async move {
++                if self.position == 0 {
++                    self.request_sent.notified().await;
++                }
++                let end = self.position + out_buf.len();
++                if end > self.response.len() {
++                    std::future::pending::<()>().await;
++                    return Err(TransportError::NotConnected);
++                }
++                out_buf.copy_from_slice(&self.response[self.position..end]);
++                self.position = end;
++                Ok(())
++            }
++            .boxed()
++        }
++    }
++
++    impl SmbTransportWrite for NegotiateOnlyServer {
++        fn send_raw<'a>(
++            &'a mut self,
++            _buf: &'a [u8],
++        ) -> BoxFuture<'a, smb_transport::error::Result<()>> {
++            async { Ok(()) }.boxed()
++        }
++    }
++
++    impl SmbTransportWrite for NotifyingWrite {
++        fn send_raw<'a>(
++            &'a mut self,
++            buf: &'a [u8],
++        ) -> BoxFuture<'a, smb_transport::error::Result<()>> {
++            self.written.lock().unwrap().extend_from_slice(buf);
++            self.request_sent.notify_one();
++            async { Ok(()) }.boxed()
++        }
++    }
++
++    /// The SMB2 commands of the framed requests in `written`.
++    fn sent_commands(written: &[u8]) -> Vec<u16> {
++        let mut commands = Vec::new();
++        let mut rest = written;
++        while rest.len() >= 4 {
++            let length = u32::from_be_bytes(rest[..4].try_into().unwrap()) as usize;
++            let message = &rest[4..4 + length];
++            commands.push(u16::from_le_bytes([message[12], message[13]]));
++            rest = &rest[4 + length..];
++        }
++        commands
++    }
++
++    async fn negotiate_with(
++        expected_server_guid: Option<Guid>,
++    ) -> (crate::Result<Connection>, Vec<u16>) {
++        let written = Arc::new(std::sync::Mutex::new(Vec::new()));
++        let transport = NegotiateOnlyServer {
++            response: negotiate_response(),
++            position: 0,
++            request_sent: Arc::new(Notify::new()),
++            written: written.clone(),
++        };
++        let config = ConnectionConfig {
++            smb2_only_negotiate: true,
++            min_dialect: Some(Dialect::Smb021),
++            max_dialect: Some(Dialect::Smb021),
++            expected_server_guid,
++            ..ConnectionConfig::default()
++        };
++        let result = tokio::time::timeout(
++            std::time::Duration::from_secs(10),
++            Connection::from_transport(Box::new(transport), "server", Guid::generate(), config),
++        )
++        .await
++        .expect("negotiation must complete");
++        let commands = sent_commands(&written.lock().unwrap());
++        (result, commands)
++    }
++
++    #[tokio::test]
++    async fn the_expected_server_identity_is_accepted() {
++        let (result, _) = negotiate_with(Some(SERVER_GUID)).await;
++        let connection = result.expect("the pinned server must negotiate");
++        assert_eq!(
++            connection.conn_info().unwrap().negotiation.server_guid,
++            SERVER_GUID
++        );
++    }
++
++    #[tokio::test]
++    async fn a_changed_server_identity_is_refused_before_session_setup() {
++        let (result, commands) = negotiate_with(Some(Guid::ZERO)).await;
++        assert!(
++            matches!(result, Err(Error::ServerGuidMismatch)),
++            "{:?}",
++            result.err()
++        );
++        assert_eq!(
++            commands,
++            vec![Command::Negotiate as u16],
++            "only the NEGOTIATE request may be sent"
++        );
++    }
++}
+diff --git a/src/connection/config.rs b/src/connection/config.rs
+index febd7cc0..ebb08845 100644
+--- a/src/connection/config.rs
++++ b/src/connection/config.rs
+@@ -1,5 +1,6 @@
+ //! Connection configuration settings.
+ 
++use smb_dtyp::Guid;
+ use std::time::Duration;
+ 
+ use smb_msg::Dialect;
+@@ -158,6 +159,13 @@ pub struct ConnectionConfig {
+     /// their respective `set_*_info` counterparts (such as [`ResourceHandle::set_info`][crate::ResourceHandle::set_info]),
+     /// [`Directory::query`][crate::Directory::query] and [`Directory::watch`][crate::Directory::watch] operations.
+     pub default_transaction_size: Option<u32>,
++
++    /// Local patch (graphql-orm-storage): when set, negotiation fails with
++    /// [`Error::ServerGuidMismatch`][crate::Error::ServerGuidMismatch] if the
++    /// server reports another GUID, before any session setup sends
++    /// credentials. The GUID is not authenticated during negotiation; this
++    /// detects a changed server, not an impostor that copies its GUID.
++    pub expected_server_guid: Option<Guid>,
+ }
+ 
+ impl ConnectionConfig {
+diff --git a/src/connection/worker/parallel/async_backend.rs b/src/connection/worker/parallel/async_backend.rs
+index 61b7b537..faf4bf59 100644
+--- a/src/connection/worker/parallel/async_backend.rs
++++ b/src/connection/worker/parallel/async_backend.rs
+@@ -25,35 +25,54 @@ impl AsyncBackend {
+     ) {
+         log::debug!("Starting worker loop.");
+         let self_ref = self.as_ref();
++        let mut consecutive_errors = 0_usize;
+         loop {
+             match self_ref
+                 .handle_next_recv(rtransport.as_mut(), &worker)
+                 .await
+             {
+-                Ok(_) => {}
++                Ok(_) => consecutive_errors = 0,
+                 Err(Error::TransportError(TransportError::NotConnected)) => {
+                     log::error!("Connection was force-closed by the server.");
+                     self_ref.token.cancel();
+                     break;
+                 }
++                // Local patch (graphql-orm-storage): any other transport error
++                // (reset, broken pipe, invalid framing) leaves the stream
++                // unusable, and retrying it immediately would spin. End the
++                // connection so the caller can reconnect.
++                Err(Error::TransportError(e)) => {
++                    log::error!("Transport failed; closing the connection: {e}");
++                    self_ref.token.cancel();
++                    break;
++                }
+                 Err(Error::ConnectionStopped) => {
+                     break;
+                 }
+                 Err(e) => {
+                     log::error!("Error in worker loop: {e}");
++                    // Local patch (graphql-orm-storage): a message that fails
++                    // to process is skipped, but a run of failures ends the
++                    // connection rather than looping without progress.
++                    consecutive_errors += 1;
++                    if consecutive_errors >= Self::MAX_CONSECUTIVE_RECEIVE_ERRORS {
++                        log::error!("Too many consecutive receive errors; closing the connection.");
++                        self_ref.token.cancel();
++                        break;
++                    }
+                 }
+             }
+         }
+ 
+         // Cleanup
+         log::debug!("Cleaning up worker loop.");
+-        if let Ok(mut state) = worker.state.lock().await {
+-            for (_, tx) in state.awaiting.drain() {
+-                let _notify_result = tx.send(Err(Error::ConnectionStopped));
+-            }
+-        }
++        worker.receive_loop_ended().await;
+     }
+ 
++    /// Local patch (graphql-orm-storage): consecutive failed incoming messages
++    /// after which the receive loop closes the connection.
++    const MAX_CONSECUTIVE_RECEIVE_ERRORS: usize = 64;
++
+     async fn loop_send(
+         self: Arc<Self>,
+         mut wtransport: Box<dyn SmbTransportWrite>,
+diff --git a/src/connection/worker/parallel/base.rs b/src/connection/worker/parallel/base.rs
+index 87463921..cfbde99e 100644
+--- a/src/connection/worker/parallel/base.rs
++++ b/src/connection/worker/parallel/base.rs
+@@ -3,11 +3,14 @@ use crate::connection::worker::Worker;
+ use crate::msg_handler::ReceiveOptions;
+ use crate::sync_helpers::*;
+ use maybe_async::*;
+-use smb_msg::ResponseContent;
++use smb_msg::{ResponseContent, Status};
+ use smb_transport::{IoVec, SmbTransport, SmbTransportWrite, TransportError};
+ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+ use std::time::Duration;
+-use std::{collections::HashMap, sync::Arc};
++use std::{
++    collections::{BTreeMap, BTreeSet, HashMap},
++    sync::Arc,
++};
+ 
+ use crate::{
+     Error,
+@@ -51,7 +54,21 @@ where
+     timeout: AtomicU64,
+ }
+ 
++/// Local patch (graphql-orm-storage): the largest number of request message
++/// IDs tracked as awaiting a response. Legitimate in-flight requests are
++/// bounded by the server's credit grant; common servers grant at most 8192.
++/// When exceeded, the oldest (lowest) ID is forgotten, and its late response is
++/// discarded like any other unsolicited message.
++pub(crate) const MAX_OUTSTANDING_REQUESTS: usize = 8192;
++
++/// Local patch (graphql-orm-storage): the largest number of responses held
++/// before a task receives them. A response is normally received immediately
++/// after its request is sent; when exceeded, the oldest held response is
++/// dropped, so a server cannot grow this buffer without bound.
++pub(crate) const MAX_PENDING_RESPONSES: usize = 256;
++
+ /// Holds state for the worker, regarding messages to be received:
++/// - outstanding: message IDs of requests sent and not yet answered.
+ /// - awaiting: tasks that are waiting for a specific message ID.
+ /// - pending: messages that are waiting to be receive()-d.
+ #[derive(Debug)]
+@@ -60,10 +77,15 @@ where
+     T: MultiWorkerBackend,
+     T::AwaitingNotifier: std::fmt::Debug,
+ {
++    /// Local patch (graphql-orm-storage): message IDs this client sent and
++    /// still expects a response for. A response for any other ID is dropped.
++    pub outstanding: BTreeSet<u64>,
+     /// Stores the awaiting tasks that are waiting for a specific message ID.
+     pub awaiting: HashMap<u64, T::AwaitingNotifier>,
+-    /// Stores the pending messages, waiting to be receive()-d.
+-    pub pending: HashMap<u64, crate::Result<IncomingMessage>>,
++    /// Stores the pending messages, waiting to be receive()-d. Bounded by
++    /// [`MAX_PENDING_RESPONSES`]; message IDs increase, so the first entry is
++    /// the oldest.
++    pub pending: BTreeMap<u64, crate::Result<IncomingMessage>>,
+ }
+ 
+ impl<T> WorkerAwaitState<T>
+@@ -73,8 +95,47 @@ where
+ {
+     fn new() -> Self {
+         Self {
++            outstanding: BTreeSet::new(),
+             awaiting: HashMap::new(),
+-            pending: HashMap::new(),
++            pending: BTreeMap::new(),
++        }
++    }
++
++    /// Local patch (graphql-orm-storage): records a sent request's message ID.
++    pub(crate) fn expect_response(&mut self, msg_id: u64) {
++        self.outstanding.insert(msg_id);
++        while self.outstanding.len() > MAX_OUTSTANDING_REQUESTS {
++            self.outstanding.pop_first();
++        }
++    }
++
++    /// Local patch (graphql-orm-storage): accepts a response only for a
++    /// message ID this client sent. An interim (STATUS_PENDING) response keeps
++    /// the ID outstanding for its final response; any other response
++    /// completes it.
++    fn accept_response(&mut self, msg_id: u64, msg: &crate::Result<IncomingMessage>) -> bool {
++        if !self.outstanding.contains(&msg_id) {
++            return false;
++        }
++        let interim = matches!(
++            msg,
++            Ok(m) if m.message.header.flags.async_command()
++                && m.message.header.status == Status::Pending as u32
++        );
++        if !interim {
++            self.outstanding.remove(&msg_id);
++        }
++        true
++    }
++
++    /// Local patch (graphql-orm-storage): holds a response until it is
++    /// received, dropping the oldest held response beyond the bound.
++    fn hold_response(&mut self, msg_id: u64, msg: crate::Result<IncomingMessage>) {
++        self.pending.insert(msg_id, msg);
++        while self.pending.len() > MAX_PENDING_RESPONSES {
++            if let Some((dropped, _)) = self.pending.pop_first() {
++                log::warn!("Dropping unreceived response for message ID {dropped}.");
++            }
+         }
+     }
+ }
+@@ -90,6 +151,51 @@ where
+         self.stopped.load(std::sync::atomic::Ordering::SeqCst)
+     }
+ 
++    /// Local patch (graphql-orm-storage): starts the worker with `expected`
++    /// message IDs already outstanding, before the receive loop reads. Tests
++    /// use this to script responses to requests they did not send.
++    pub(crate) async fn start_expecting(
++        transport: Box<dyn SmbTransport>,
++        timeout: Duration,
++        expected: &[u64],
++    ) -> crate::Result<Arc<Self>> {
++        // Build the worker
++        let (tx, rx) = T::make_send_channel_pair();
++        let mut state = WorkerAwaitState::new();
++        for msg_id in expected {
++            state.expect_response(*msg_id);
++        }
++        let worker = Arc::new(ParallelWorker::<T> {
++            state: Mutex::new(state),
++            backend_impl: Default::default(),
++            transformer: Transformer::default(),
++            notify_messages_channel: Default::default(),
++            sender: tx,
++            stopped: AtomicBool::new(false),
++            timeout: AtomicU64::new(u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX)),
++        });
++
++        worker
++            .backend_impl
++            .lock()
++            .await?
++            .replace(T::start(transport, worker.clone(), rx).await?);
++
++        Ok(worker)
++    }
++
++    /// Local patch (graphql-orm-storage): marks the worker stopped after its
++    /// receive loop ended, and fails every awaiting task, so later receives
++    /// fail immediately instead of waiting for a response that cannot arrive.
++    pub(crate) async fn receive_loop_ended(&self) {
++        if let Ok(mut state) = self.state.lock().await {
++            self.stopped.store(true, Ordering::SeqCst);
++            for (_, tx) in state.awaiting.drain() {
++                let _notify_result = T::send_notify(tx, Err(Error::ConnectionStopped));
++            }
++        }
++    }
++
+     /// This is a function that should be used by multi worker implementations (async/mtd),
+     /// after gettting a messages from the server, this function processes it and
+     /// notifies the awaiting tasks.
+@@ -153,15 +259,27 @@ where
+ 
+         // Update the state: If awaited, wake up the task. Else, store it.
+         let mut state = self.state.lock().await?;
++        // Local patch (graphql-orm-storage): drop a response for a message ID
++        // this client did not send, or that was already answered.
++        if !state.accept_response(msg_id, &msg) {
++            log::warn!("Discarding unsolicited response for message ID {msg_id}.");
++            return Ok(());
++        }
+         let message_waiter = state.awaiting.remove(&msg_id);
+         match message_waiter {
+             Some(tx) => {
+                 log::trace!("Waking up awaiting task for key {msg_id}.");
+-                T::send_notify(tx, msg)?;
++                // Local patch (graphql-orm-storage): a task that stopped
++                // waiting (for example, timed out) is not a receive error.
++                if T::send_notify(tx, msg).is_err() {
++                    log::debug!(
++                        "Task awaiting message ID {msg_id} is gone; dropping its response."
++                    );
++                }
+             }
+             None => {
+                 log::trace!("Storing message until awaited: {msg_id}.",);
+-                state.pending.insert(msg_id, msg);
++                state.hold_response(msg_id, msg);
+             }
+         }
+         Ok(())
+@@ -213,25 +331,7 @@ where
+         transport: Box<dyn SmbTransport>,
+         timeout: Duration,
+     ) -> crate::Result<Arc<Self>> {
+-        // Build the worker
+-        let (tx, rx) = T::make_send_channel_pair();
+-        let worker = Arc::new(ParallelWorker::<T> {
+-            state: Mutex::new(WorkerAwaitState::new()),
+-            backend_impl: Default::default(),
+-            transformer: Transformer::default(),
+-            notify_messages_channel: Default::default(),
+-            sender: tx,
+-            stopped: AtomicBool::new(false),
+-            timeout: AtomicU64::new(u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX)),
+-        });
+-
+-        worker
+-            .backend_impl
+-            .lock()
+-            .await?
+-            .replace(T::start(transport, worker.clone(), rx).await?);
+-
+-        Ok(worker)
++        Self::start_expecting(transport, timeout, &[]).await
+     }
+ 
+     async fn stop(&self) -> crate::Result<()> {
+@@ -265,6 +365,10 @@ where
+             None
+         };
+ 
++        // Local patch (graphql-orm-storage): register the ID before the request
++        // can reach the server, so its response is never mistaken as unsolicited.
++        self.state.lock().await?.expect_response(id);
++
+         let message = T::wrap_msg_to_send(message);
+ 
+         self.sender.send(message).await.map_err(|_| {
+@@ -331,3 +435,254 @@ where
+             .finish()
+     }
+ }
++
++/// Local patch (graphql-orm-storage): regression tests bounding the resources
++/// a server can make the worker hold, and the receive loop's error handling.
++#[cfg(all(test, feature = "async"))]
++mod tests {
++    use super::super::ParallelWorker;
++    use super::*;
++    use binrw::BinWrite;
++    use futures_core::future::BoxFuture;
++    use futures_util::FutureExt;
++    use smb_msg::{Command, EchoResponse, Header, HeaderFlags};
++    use smb_transport::SmbTransportRead;
++    use std::io::Cursor;
++    use std::net::SocketAddr;
++    use std::sync::atomic::AtomicUsize;
++    use tokio::sync::Notify;
++
++    /// Serves scripted server messages, signals when they are exhausted, then
++    /// behaves like an idle peer.
++    struct ScriptedTransport {
++        incoming: Vec<u8>,
++        position: usize,
++        exhausted: Arc<Notify>,
++    }
++
++    /// Fails every read immediately with a connection reset, counting reads.
++    struct ResetTransport {
++        reads: Arc<AtomicUsize>,
++    }
++
++    struct DiscardWrite;
++
++    fn split_with_discard(
++        read: Box<dyn SmbTransportRead>,
++    ) -> smb_transport::error::Result<(Box<dyn SmbTransportRead>, Box<dyn SmbTransportWrite>)> {
++        Ok((read, Box::new(DiscardWrite)))
++    }
++
++    macro_rules! test_transport {
++        ($name:ty) => {
++            impl SmbTransport for $name {
++                fn connect<'a>(
++                    &'a mut self,
++                    _server_name: &'a str,
++                    _address: SocketAddr,
++                ) -> BoxFuture<'a, smb_transport::error::Result<()>> {
++                    async { Ok(()) }.boxed()
++                }
++
++                fn default_port(&self) -> u16 {
++                    445
++                }
++
++                fn split(
++                    self: Box<Self>,
++                ) -> smb_transport::error::Result<(
++                    Box<dyn SmbTransportRead>,
++                    Box<dyn SmbTransportWrite>,
++                )> {
++                    split_with_discard(self)
++                }
++
++                fn remote_address(&self) -> smb_transport::error::Result<SocketAddr> {
++                    Ok(SocketAddr::from(([127, 0, 0, 1], 445)))
++                }
++            }
++
++            impl SmbTransportWrite for $name {
++                fn send_raw<'a>(
++                    &'a mut self,
++                    _buf: &'a [u8],
++                ) -> BoxFuture<'a, smb_transport::error::Result<()>> {
++                    async { Ok(()) }.boxed()
++                }
++            }
++        };
++    }
++    test_transport!(ScriptedTransport);
++    test_transport!(ResetTransport);
++
++    impl SmbTransportRead for ScriptedTransport {
++        fn receive_exact<'a>(
++            &'a mut self,
++            out_buf: &'a mut [u8],
++        ) -> BoxFuture<'a, smb_transport::error::Result<()>> {
++            async move {
++                let end = self.position + out_buf.len();
++                if end > self.incoming.len() {
++                    self.exhausted.notify_one();
++                    std::future::pending::<()>().await;
++                    return Err(TransportError::NotConnected);
++                }
++                out_buf.copy_from_slice(&self.incoming[self.position..end]);
++                self.position = end;
++                Ok(())
++            }
++            .boxed()
++        }
++    }
++
++    impl SmbTransportRead for ResetTransport {
++        fn receive_exact<'a>(
++            &'a mut self,
++            _out_buf: &'a mut [u8],
++        ) -> BoxFuture<'a, smb_transport::error::Result<()>> {
++            self.reads.fetch_add(1, Ordering::SeqCst);
++            async {
++                // Yield like a ready socket would, so a retrying loop is
++                // observable on the single-threaded test runtime.
++                tokio::task::yield_now().await;
++                Err(TransportError::IoError(std::io::Error::from(
++                    std::io::ErrorKind::ConnectionReset,
++                )))
++            }
++            .boxed()
++        }
++    }
++
++    impl SmbTransportWrite for DiscardWrite {
++        fn send_raw<'a>(
++            &'a mut self,
++            _buf: &'a [u8],
++        ) -> BoxFuture<'a, smb_transport::error::Result<()>> {
++            async { Ok(()) }.boxed()
++        }
++    }
++
++    /// An unsigned, sessionless ECHO response for `message_id`, as any party
++    /// that can reach the client's socket could send before authentication.
++    fn response(message_id: u64) -> Vec<u8> {
++        let header = Header {
++            credit_charge: 1,
++            status: Status::Success as u32,
++            command: Command::Echo,
++            credit_request: 1,
++            flags: HeaderFlags::new().with_server_to_redir(true),
++            next_command: 0,
++            message_id,
++            tree_id: Some(0),
++            async_id: None,
++            session_id: 0,
++            signature: 0,
++        };
++        let mut message = Cursor::new(Vec::new());
++        header.write_le(&mut message).unwrap();
++        EchoResponse::default().write_le(&mut message).unwrap();
++        let message = message.into_inner();
++        let mut framed = Vec::with_capacity(message.len() + 4);
++        framed.extend_from_slice(&(message.len() as u32).to_be_bytes());
++        framed.extend_from_slice(&message);
++        framed
++    }
++
++    /// Starts a worker that reads `incoming` with `expected` IDs outstanding,
++    /// and returns once every scripted message has been processed.
++    async fn worker_after_script(incoming: Vec<u8>, expected: &[u64]) -> Arc<ParallelWorker> {
++        let exhausted = Arc::new(Notify::new());
++        let transport = ScriptedTransport {
++            incoming,
++            position: 0,
++            exhausted: exhausted.clone(),
++        };
++        let worker =
++            ParallelWorker::start_expecting(Box::new(transport), Duration::from_secs(5), expected)
++                .await
++                .unwrap();
++        tokio::time::timeout(Duration::from_secs(10), exhausted.notified())
++            .await
++            .expect("the scripted messages must be read");
++        worker
++    }
++
++    #[tokio::test]
++    async fn unsolicited_response_flood_is_not_held() {
++        let incoming: Vec<u8> = (100..1_100).flat_map(response).collect();
++        let worker = worker_after_script(incoming, &[]).await;
++        let state = worker.state.lock().await.unwrap();
++        assert!(
++            state.pending.is_empty(),
++            "held {} responses to requests that were never sent",
++            state.pending.len()
++        );
++    }
++
++    #[tokio::test]
++    async fn held_responses_to_sent_requests_are_bounded() {
++        let count = MAX_PENDING_RESPONSES as u64 + 50;
++        let expected: Vec<u64> = (1..=count).collect();
++        let incoming: Vec<u8> = expected.iter().copied().flat_map(response).collect();
++        let worker = worker_after_script(incoming, &expected).await;
++        let state = worker.state.lock().await.unwrap();
++        assert_eq!(state.pending.len(), MAX_PENDING_RESPONSES);
++        // The oldest responses are the ones dropped.
++        assert_eq!(state.pending.keys().next().copied(), Some(51));
++    }
++
++    #[tokio::test]
++    async fn a_request_is_answered_once() {
++        let incoming: Vec<u8> = [7, 7, 7].into_iter().flat_map(response).collect();
++        let worker = worker_after_script(incoming, &[7]).await;
++        {
++            let state = worker.state.lock().await.unwrap();
++            assert_eq!(state.pending.len(), 1);
++            assert!(state.outstanding.is_empty());
++        }
++        let options = ReceiveOptions::new().with_msg_id_filter(7);
++        worker.receive_next(&options).await.unwrap();
++        let options = options.with_timeout(Duration::from_millis(50));
++        assert!(matches!(
++            worker.receive_next(&options).await,
++            Err(Error::OperationTimeout(..))
++        ));
++    }
++
++    #[::core::prelude::v1::test]
++    fn outstanding_request_ids_are_bounded() {
++        let mut state = WorkerAwaitState::<super::super::async_backend::AsyncBackend>::new();
++        for msg_id in 0..(MAX_OUTSTANDING_REQUESTS as u64 + 10) {
++            state.expect_response(msg_id);
++        }
++        assert_eq!(state.outstanding.len(), MAX_OUTSTANDING_REQUESTS);
++        assert_eq!(state.outstanding.first().copied(), Some(10));
++    }
++
++    #[tokio::test]
++    async fn receive_loop_stops_after_a_transport_failure() {
++        let reads = Arc::new(AtomicUsize::new(0));
++        let transport = ResetTransport {
++            reads: reads.clone(),
++        };
++        let worker =
++            ParallelWorker::start_expecting(Box::new(transport), Duration::from_secs(5), &[1])
++                .await
++                .unwrap();
++        tokio::time::sleep(Duration::from_millis(200)).await;
++        let observed = reads.load(Ordering::SeqCst);
++        assert_eq!(
++            observed, 1,
++            "the receive loop retried a failed transport {observed} times"
++        );
++        // Later receives fail immediately rather than waiting for a response.
++        let options = ReceiveOptions::new().with_msg_id_filter(1);
++        let result = tokio::time::timeout(Duration::from_secs(1), worker.receive_next(&options))
++            .await
++            .expect("a receive on a failed connection must not wait");
++        assert!(
++            matches!(result, Err(Error::ConnectionStopped)),
++            "{result:?}"
++        );
++    }
++}
+diff --git a/src/error.rs b/src/error.rs
+index ced229ab..a2b671ce 100644
+--- a/src/error.rs
++++ b/src/error.rs
+@@ -20,6 +20,11 @@ pub enum Error {
+     /// request it answered is unknown (GHSA-439h-2cx8-xwgx).
+     #[error("Unverified message rejected, {0}")]
+     UnverifiedMessage(String),
++    /// Local patch (graphql-orm-storage): the server reported a GUID other
++    /// than [`ConnectionConfig::expected_server_guid`][crate::ConnectionConfig::expected_server_guid]
++    /// during negotiation. The connection was refused before session setup.
++    #[error("Server GUID does not match the expected server identity")]
++    ServerGuidMismatch,
+     #[error("IO Error: {0}")]
+     IoError(#[from] std::io::Error),
+     #[error("Binrw Error: {0}")]
+diff --git a/src/session/channel.rs b/src/session/channel.rs
+index 86fd4ea3..f21eedb4 100644
+--- a/src/session/channel.rs
++++ b/src/session/channel.rs
+@@ -523,10 +523,13 @@ mod tests {
+             SESSION_ID,
+             Arc::new(RwLock::new(session)),
+         )));
+-        let upstream = ConnectionMessageHandler::with_test_transport(Box::new(ScriptedTransport {
+-            incoming,
+-            position: 0,
+-        }))
++        let upstream = ConnectionMessageHandler::with_test_transport(
++            Box::new(ScriptedTransport {
++                incoming,
++                position: 0,
++            }),
++            &[MESSAGE_ID],
++        )
+         .await
+         .unwrap();
+         let worker = upstream.worker().unwrap();

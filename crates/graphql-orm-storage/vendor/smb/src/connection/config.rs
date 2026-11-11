@@ -1,5 +1,6 @@
 //! Connection configuration settings.
 
+use smb_dtyp::Guid;
 use std::time::Duration;
 
 use smb_msg::Dialect;
@@ -158,6 +159,13 @@ pub struct ConnectionConfig {
     /// their respective `set_*_info` counterparts (such as [`ResourceHandle::set_info`][crate::ResourceHandle::set_info]),
     /// [`Directory::query`][crate::Directory::query] and [`Directory::watch`][crate::Directory::watch] operations.
     pub default_transaction_size: Option<u32>,
+
+    /// Local patch (graphql-orm-storage): when set, negotiation fails with
+    /// [`Error::ServerGuidMismatch`][crate::Error::ServerGuidMismatch] if the
+    /// server reports another GUID, before any session setup sends
+    /// credentials. The GUID is not authenticated during negotiation; this
+    /// detects a changed server, not an impostor that copies its GUID.
+    pub expected_server_guid: Option<Guid>,
 }
 
 impl ConnectionConfig {

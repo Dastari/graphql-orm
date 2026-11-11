@@ -4,7 +4,7 @@ use bytes::Bytes;
 use futures_util::{StreamExt, stream};
 use graphql_orm_storage::{
     BlobPutOptions, BlobStore, SmbDialect, SmbProbeOptions, SmbStorageBackend, SmbStorageConfig,
-    StorageByteStream, collect_storage_stream,
+    StorageByteStream, StorageProviderErrorKind, collect_storage_stream,
 };
 use secrecy::SecretString;
 use uuid::Uuid;
@@ -520,6 +520,269 @@ async fn samba_reconnects_after_server_restart() {
         .expect("delete after reconnect");
 }
 
+fn owned_fixture() -> VerifiedSambaFixture {
+    verified_samba_fixture(
+        env::var("SMB_TEST_CONTAINER_NAME").ok(),
+        env::var("SMB_TEST_FIXTURE_RUN").ok(),
+        |container| {
+            let ownership = std::process::Command::new("docker")
+                .args([
+                    "inspect",
+                    "--format",
+                    "{{index .Config.Labels \"graphql-orm.samba-fixture-run\"}}",
+                    container,
+                ])
+                .output()
+                .map_err(|_| "cannot inspect managed fixture".to_string())?;
+            if !ownership.status.success() {
+                return Err("cannot verify managed fixture ownership".to_string());
+            }
+            String::from_utf8(ownership.stdout)
+                .map_err(|_| "invalid ownership response".to_string())
+        },
+    )
+    .expect("this test requires verified fixture ownership")
+}
+
+fn assert_refused(error: &graphql_orm_storage::StorageError, expected: StorageProviderErrorKind) {
+    match error {
+        graphql_orm_storage::StorageError::RemoteProvider {
+            kind, retryable, ..
+        } => {
+            assert_eq!(*kind, expected, "{error}");
+            assert!(!retryable, "{error}");
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the managed Samba container harness"]
+async fn samba_self_nesting_listing_terminates() {
+    let fixture = owned_fixture();
+    let root = format!("graphql-orm-storage-loop/{}", Uuid::new_v4());
+    let mut config = test_config(root.clone());
+    config.max_listing_depth = 8;
+    let store = SmbStorageBackend::connect(config).await.expect("connect");
+    store
+        .put_blob(
+            "seed.bin",
+            StorageByteStream::from_bytes(Bytes::from_static(b"seed")),
+            BlobPutOptions::default(),
+        )
+        .await
+        .expect("create the listing root");
+    // A server-side link to its own directory nests the tree without end.
+    let link = format!("/share/{root}/loop");
+    let docker_exec = |args: &[&str]| {
+        fixture.run_with(|container| {
+            let status = std::process::Command::new("docker")
+                .args(["exec", container])
+                .args(args)
+                .status()
+                .map_err(|_| "cannot run in owned fixture".to_string())?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err("owned fixture command failed".to_string())
+            }
+        })
+    };
+    docker_exec(&["ln", "-s", ".", &link]).expect("create a self-nesting directory");
+
+    let result = tokio::time::timeout(Duration::from_secs(60), store.list_blobs("")).await;
+    docker_exec(&["rm", "-f", &link]).expect("remove the self-nesting directory");
+    let error = result
+        .expect("a self-nesting listing must terminate")
+        .expect_err("a self-nesting listing must fail instead of returning a partial listing");
+    assert_refused(&error, StorageProviderErrorKind::Protocol);
+    assert!(
+        error.to_string().contains("maximum directory depth of 8"),
+        "{error}"
+    );
+
+    assert_eq!(store.list_blobs("").await.expect("list"), ["seed.bin"]);
+    store.delete_blob("seed.bin").await.expect("delete");
+}
+
+/// Forwards SMB connections to a switchable local server, recording the SMB2
+/// command of each request the client sends to each server port.
+struct SwitchingProxy {
+    port: u16,
+    target: Arc<std::sync::atomic::AtomicU16>,
+    connections: Arc<std::sync::Mutex<Vec<tokio::task::AbortHandle>>>,
+    requests: Arc<std::sync::Mutex<Vec<(u16, u16)>>>,
+}
+
+impl SwitchingProxy {
+    async fn start(target: u16) -> Self {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind proxy");
+        let proxy = Self {
+            port: listener.local_addr().expect("proxy address").port(),
+            target: Arc::new(std::sync::atomic::AtomicU16::new(target)),
+            connections: Arc::default(),
+            requests: Arc::default(),
+        };
+        let target = Arc::clone(&proxy.target);
+        let connections = Arc::clone(&proxy.connections);
+        let requests = Arc::clone(&proxy.requests);
+        tokio::spawn(async move {
+            while let Ok((client, _)) = listener.accept().await {
+                let port = target.load(std::sync::atomic::Ordering::SeqCst);
+                let Ok(server) =
+                    tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).await
+                else {
+                    continue;
+                };
+                let (mut client_read, mut client_write) = client.into_split();
+                let (mut server_read, mut server_write) = server.into_split();
+                let requests = Arc::clone(&requests);
+                let upstream = tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut pending = Vec::new();
+                    let mut buffer = vec![0_u8; 64 * 1024];
+                    while let Ok(read) = client_read.read(&mut buffer).await {
+                        if read == 0 || server_write.write_all(&buffer[..read]).await.is_err() {
+                            break;
+                        }
+                        pending.extend_from_slice(&buffer[..read]);
+                        while pending.len() >= 4 {
+                            let length =
+                                u32::from_be_bytes(pending[..4].try_into().unwrap()) as usize;
+                            if pending.len() < 4 + length {
+                                break;
+                            }
+                            let message = &pending[4..4 + length];
+                            let command = if message.starts_with(b"\xfeSMB") && length >= 14 {
+                                u16::from_le_bytes([message[12], message[13]])
+                            } else {
+                                u16::MAX
+                            };
+                            requests.lock().unwrap().push((port, command));
+                            pending.drain(..4 + length);
+                        }
+                    }
+                });
+                let downstream = tokio::spawn(async move {
+                    let _ = tokio::io::copy(&mut server_read, &mut client_write).await;
+                });
+                let mut connections = connections.lock().unwrap();
+                connections.push(upstream.abort_handle());
+                connections.push(downstream.abort_handle());
+            }
+        });
+        proxy
+    }
+
+    /// Sends new connections to `target` and drops every current connection.
+    fn switch_to(&self, target: u16) {
+        self.target
+            .store(target, std::sync::atomic::Ordering::SeqCst);
+        for connection in self.connections.lock().unwrap().drain(..) {
+            connection.abort();
+        }
+    }
+
+    fn commands_sent_to(&self, target: u16) -> Vec<u16> {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(port, _)| *port == target)
+            .map(|(_, command)| *command)
+            .collect()
+    }
+}
+
+const SMB2_NEGOTIATE: u16 = 0;
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires two managed Samba servers with the same credentials"]
+async fn samba_reconnect_refuses_a_server_with_another_identity() {
+    let primary_port: u16 = env::var("SMB_TEST_PORT")
+        .expect("SMB_TEST_PORT")
+        .parse()
+        .expect("primary port");
+    let other_port: u16 = env::var("SMB_TEST_ALTERNATE_PORT")
+        .expect("SMB_TEST_ALTERNATE_PORT names a second server with the same credentials")
+        .parse()
+        .expect("alternate port");
+    let root = format!("graphql-orm-storage-identity/{}", Uuid::new_v4());
+
+    // An explicit pin refuses a server whose GUID differs from the first
+    // connection on, and accepts the server it names.
+    let mut pinned = test_config(root.clone());
+    pinned.expected_server_guid = Some(Uuid::new_v4());
+    let error = SmbStorageBackend::connect(pinned.clone())
+        .await
+        .expect_err("an unexpected server identity must be refused");
+    assert_refused(&error, StorageProviderErrorKind::SecurityNegotiation);
+    let probe = SmbStorageBackend::probe(
+        test_config(root.clone()),
+        SmbProbeOptions {
+            create_prefix: true,
+        },
+    )
+    .await
+    .expect("probe");
+    assert!(!probe.server_guid.is_nil());
+    pinned.expected_server_guid = Some(probe.server_guid);
+    SmbStorageBackend::connect(pinned)
+        .await
+        .expect("the pinned server is accepted");
+
+    // Without an explicit pin, the first connection pins the server.
+    let proxy = SwitchingProxy::start(primary_port).await;
+    let mut config = test_config(root);
+    config.port = proxy.port;
+    let store = SmbStorageBackend::connect(config).await.expect("connect");
+    store
+        .put_blob(
+            "identity/blob.bin",
+            StorageByteStream::from_bytes(Bytes::from_static(b"pinned")),
+            BlobPutOptions::default(),
+        )
+        .await
+        .expect("write to the pinned server");
+
+    // The same name now answers from another server that accepts the same
+    // credentials. The reconnect must stop before authenticating.
+    proxy.switch_to(other_port);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let error = store
+        .list_blobs("")
+        .await
+        .expect_err("a reconnect to another server must be refused");
+    assert_refused(&error, StorageProviderErrorKind::SecurityNegotiation);
+    let sent = proxy.commands_sent_to(other_port);
+    assert!(
+        !sent.is_empty(),
+        "the reconnect must reach the other server"
+    );
+    assert!(
+        sent.iter().all(|command| *command == SMB2_NEGOTIATE),
+        "only NEGOTIATE may reach a server with another identity, sent {sent:?}"
+    );
+    assert_eq!(store.diagnostics().await.reconnects, 0);
+
+    // The pinned server is accepted again.
+    proxy.switch_to(primary_port);
+    assert_eq!(
+        store
+            .list_blobs("")
+            .await
+            .expect("reconnect to the pinned server"),
+        ["identity/blob.bin"]
+    );
+    assert_eq!(store.diagnostics().await.reconnects, 1);
+    store
+        .delete_blob("identity/blob.bin")
+        .await
+        .expect("delete");
+}
+
 // A restart capability is constructed only after a successful ownership read.
 struct VerifiedSambaFixture {
     container: String,
@@ -527,6 +790,9 @@ struct VerifiedSambaFixture {
 impl VerifiedSambaFixture {
     fn restart_with(&self, restart: impl FnOnce(&str) -> Result<(), String>) -> Result<(), String> {
         restart(&self.container)
+    }
+    fn run_with(&self, command: impl FnOnce(&str) -> Result<(), String>) -> Result<(), String> {
+        command(&self.container)
     }
 }
 fn verified_samba_fixture(

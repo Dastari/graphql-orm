@@ -33,6 +33,12 @@ use crate::{
 const DEFAULT_PORT: u16 = 445;
 const DEFAULT_TRANSFER_CONCURRENCY: usize = 8;
 const DEFAULT_DIRECTORY_CACHE_CAPACITY: usize = 4_096;
+/// Default deepest directory nesting a listing descends below the root.
+const DEFAULT_MAX_LISTING_DEPTH: usize = 64;
+/// Default most directory entries (files and directories) one listing enumerates.
+const DEFAULT_MAX_LISTING_ENTRIES: usize = 1_000_000;
+/// Default overall deadline for one complete listing.
+const DEFAULT_LISTING_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const READ_CHUNK_SIZE: usize = 256 * 1024;
 // SMB2 MaxWriteSize is the maximum WRITE payload and excludes SMB framing,
 // signing, and encryption overhead. Limit smb-rs requests to one MiB anyway,
@@ -94,9 +100,12 @@ pub struct SmbStorageConfig {
     pub share: String,
     /// Optional provider root expressed as a safe blob-key prefix.
     pub root_prefix: Option<String>,
-    /// Username used for NTLM authentication.
+    /// Username used for NTLM authentication. Use a dedicated, least-privilege
+    /// service account for this backend.
     pub username: String,
-    /// Password used for NTLM authentication. Debug output is redacted.
+    /// Password used for NTLM authentication. Debug output is redacted. NTLM
+    /// exposes a challenge response that can be attacked offline, so use a
+    /// long, random password that is not used anywhere else.
     pub password: SecretString,
     /// Optional NTLM domain or workgroup.
     pub domain: Option<String>,
@@ -112,6 +121,22 @@ pub struct SmbStorageConfig {
     pub operation_timeout: Duration,
     /// Maximum number of simultaneous streaming transfers.
     pub max_transfer_concurrency: usize,
+    /// Server GUID the server must report during negotiation. When `None`, the
+    /// GUID reported by the first successful connection is pinned instead.
+    /// Either way, a reconnect to a server reporting another GUID is refused
+    /// before authentication. See [`SmbProbeResult::server_guid`].
+    pub expected_server_guid: Option<Uuid>,
+    /// Deepest directory nesting a listing descends below the root prefix;
+    /// 64 by default. A deeper listing fails instead of returning a partial
+    /// result.
+    pub max_listing_depth: usize,
+    /// Most directory entries, files and directories, one listing may
+    /// enumerate; 1,000,000 by default. A larger listing fails instead of
+    /// returning a partial result.
+    pub max_listing_entries: usize,
+    /// Overall deadline for one complete listing, in addition to
+    /// `operation_timeout` for each request; 15 minutes by default.
+    pub listing_timeout: Duration,
 }
 
 impl SmbStorageConfig {
@@ -137,6 +162,10 @@ impl SmbStorageConfig {
             connect_timeout: Duration::from_secs(10),
             operation_timeout: Duration::from_secs(60),
             max_transfer_concurrency: DEFAULT_TRANSFER_CONCURRENCY,
+            expected_server_guid: None,
+            max_listing_depth: DEFAULT_MAX_LISTING_DEPTH,
+            max_listing_entries: DEFAULT_MAX_LISTING_ENTRIES,
+            listing_timeout: DEFAULT_LISTING_TIMEOUT,
         }
     }
 
@@ -162,8 +191,19 @@ impl SmbStorageConfig {
         if self.port == 0 {
             return Err(invalid_config("port must be greater than zero"));
         }
-        if self.connect_timeout.is_zero() || self.operation_timeout.is_zero() {
+        if self.connect_timeout.is_zero()
+            || self.operation_timeout.is_zero()
+            || self.listing_timeout.is_zero()
+        {
             return Err(invalid_config("timeouts must be greater than zero"));
+        }
+        if self.max_listing_depth == 0 || self.max_listing_entries == 0 {
+            return Err(invalid_config(
+                "listing depth and entry limits must be greater than zero",
+            ));
+        }
+        if self.expected_server_guid.is_some_and(|guid| guid.is_nil()) {
+            return Err(invalid_config("expected server GUID must not be nil"));
         }
         if self.max_transfer_concurrency == 0 {
             return Err(invalid_config(
@@ -203,6 +243,10 @@ impl fmt::Debug for SmbStorageConfig {
             .field("connect_timeout", &self.connect_timeout)
             .field("operation_timeout", &self.operation_timeout)
             .field("max_transfer_concurrency", &self.max_transfer_concurrency)
+            .field("expected_server_guid", &self.expected_server_guid)
+            .field("max_listing_depth", &self.max_listing_depth)
+            .field("max_listing_entries", &self.max_listing_entries)
+            .field("listing_timeout", &self.listing_timeout)
             .finish()
     }
 }
@@ -240,6 +284,10 @@ pub struct SmbProbeResult {
     pub max_transact_size: u32,
     /// Conservative payload limit used for each WRITE request by this backend.
     pub write_request_payload_limit: usize,
+    /// Server GUID reported during negotiation. Record it in
+    /// [`SmbStorageConfig::expected_server_guid`] to pin the server from the
+    /// first connection. It is not secret and does not authenticate the server.
+    pub server_guid: Uuid,
 }
 
 /// Redaction-safe counters for monitoring long-running SMB transfers.
@@ -296,6 +344,7 @@ struct SmbDiagnosticCounters {
 
 #[derive(Clone, Copy, Debug)]
 struct SmbConnectionProperties {
+    server_guid: Uuid,
     negotiated_dialect: SmbDialect,
     signing_active: bool,
     encryption_active: bool,
@@ -381,6 +430,8 @@ impl DirectoryCache {
 
 struct SmbStorageBackendInner {
     config: Arc<SmbStorageConfig>,
+    /// Server GUID pinned by the first connection; reconnects must match it.
+    server_guid: Uuid,
     client: RwLock<ConnectedClient>,
     reconnect_gate: Semaphore,
     transfer_limit: Arc<Semaphore>,
@@ -414,11 +465,12 @@ impl SmbStorageBackend {
         config.validate()?;
         let transfer_concurrency = config.max_transfer_concurrency;
         let config = Arc::new(config);
-        let client = connect_client(&config, 0).await?;
+        let client = connect_client(&config, 0, config.expected_server_guid).await?;
         tracing::info!(
             target: "graphql_orm_storage::smb",
             event = "connected",
             generation = client.generation,
+            server_guid = %client.properties.server_guid,
             dialect = ?client.properties.negotiated_dialect,
             signing_active = client.properties.signing_active,
             encryption_active = client.properties.encryption_active,
@@ -430,6 +482,7 @@ impl SmbStorageBackend {
         Ok(Self {
             inner: Arc::new(SmbStorageBackendInner {
                 config,
+                server_guid: client.properties.server_guid,
                 client: RwLock::new(client),
                 reconnect_gate: Semaphore::new(1),
                 transfer_limit: Arc::new(Semaphore::new(transfer_concurrency)),
@@ -535,15 +588,23 @@ impl SmbStorageBackend {
             )
             .await?;
         let loaded = backend.get_blob(&key).await?;
-        let actual = crate::collect_storage_stream(loaded.body).await?;
+        // Read no more than was written, whatever size the server declares.
+        let actual = match loaded.metadata.and_then(|metadata| metadata.size_bytes) {
+            Some(size) if size == expected.len() as u64 => {
+                collect_bounded(loaded.body, expected.len()).await
+            }
+            _ => Err(probe_mismatch()),
+        };
+        let actual = match actual {
+            Ok(actual) => actual,
+            Err(error) => {
+                let _ = backend.delete_blob(&key).await;
+                return Err(error);
+            }
+        };
         if actual != expected {
             let _ = backend.delete_blob(&key).await;
-            return Err(remote_error(
-                StorageProviderErrorKind::Protocol,
-                "probe",
-                "probe file contents did not match",
-                false,
-            ));
+            return Err(probe_mismatch());
         }
         backend.delete_blob(&key).await?;
 
@@ -562,6 +623,7 @@ impl SmbStorageBackend {
             max_write_size: info.max_write_size,
             max_transact_size: info.max_transact_size,
             write_request_payload_limit: info.write_request_payload_limit,
+            server_guid: info.server_guid,
         })
     }
 
@@ -593,7 +655,8 @@ impl SmbStorageBackend {
             let jitter = u64::from(Uuid::new_v4().as_bytes()[0]) % 75;
             tokio::time::sleep(Duration::from_millis(delay + jitter)).await;
             let generation = failed_generation.saturating_add(1);
-            match connect_client(&self.inner.config, generation).await {
+            match connect_client(&self.inner.config, generation, Some(self.inner.server_guid)).await
+            {
                 Ok(client) => {
                     let properties = client.properties;
                     *self.inner.client.write().await = client;
@@ -1157,93 +1220,252 @@ impl SmbStorageBackend {
     }
 
     async fn collect_keys_once(&self, client: &Client) -> Result<Vec<String>, StorageError> {
-        let base = self.share_path()?;
-        let start = self.inner.config.root_prefix.clone().unwrap_or_default();
-        // Each entry records whether the directory was discovered by enumeration.
-        let mut stack = vec![(start, false)];
-        let mut keys = Vec::new();
-
-        while let Some((directory_path, discovered)) = stack.pop() {
-            let target = base.clone().with_path(&directory_path);
-            let resource = match self
-                .with_timeout(
-                    "list",
-                    client.create_file(
-                        &target,
-                        &FileCreateArgs::make_open_existing(
-                            DirAccessMask::new()
-                                .with_list_directory(true)
-                                .with_synchronize(true)
-                                .into(),
-                        ),
-                    ),
-                )
-                .await
-            {
-                Ok(resource) => resource,
-                Err(error) => {
-                    listing_open_failure(&directory_path, discovered, error)?;
-                    continue;
-                }
-            };
-            let directory = match resource {
-                Resource::Directory(directory) => Arc::new(directory),
-                other => {
-                    let _ = close_resource(other).await;
-                    listing_not_directory(&directory_path, discovered)?;
-                    continue;
-                }
-            };
-            let mut entries = self
-                .with_timeout(
-                    "list",
-                    Directory::query::<FileFullDirectoryInformation>(&directory, "*"),
-                )
-                .await?;
-            loop {
-                let entry =
-                    tokio::time::timeout(self.inner.config.operation_timeout, entries.next())
-                        .await
-                        .map_err(|_| {
-                            remote_error(
-                                StorageProviderErrorKind::Timeout,
-                                "list",
-                                "operation timed out",
-                                true,
-                            )
-                        })?;
-                let Some(entry) = entry else {
-                    break;
-                };
-                let entry = entry.map_err(|error| map_smb_error("list", error))?;
-                let name = entry.file_name.to_string();
-                if name == "." || name == ".." {
-                    continue;
-                }
-                let child = if directory_path.is_empty() {
-                    name
-                } else {
-                    format!("{directory_path}/{name}")
-                };
-                if entry.file_attributes.directory() {
-                    stack.push((child, true));
-                } else if !is_temp_key(&child) {
-                    let key = match &self.inner.config.root_prefix {
-                        Some(root) => child
-                            .strip_prefix(root)
-                            .and_then(|rest| rest.strip_prefix('/'))
-                            .unwrap_or(&child)
-                            .to_string(),
-                        None => child,
-                    };
-                    keys.push(key);
-                }
-            }
-            drop(entries);
-            self.with_timeout("close", directory.close()).await?;
-        }
+        let config = &self.inner.config;
+        let source = SmbListingSource {
+            backend: self,
+            client,
+            base: self.share_path()?,
+        };
+        let start = config.root_prefix.clone().unwrap_or_default();
+        let files = bounded_listing(&source, start, ListingLimits::from_config(config)).await?;
+        let mut keys: Vec<String> = files
+            .into_iter()
+            .filter(|child| !is_temp_key(child))
+            .map(|child| match &config.root_prefix {
+                Some(root) => child
+                    .strip_prefix(root.as_str())
+                    .and_then(|rest| rest.strip_prefix('/'))
+                    .unwrap_or(&child)
+                    .to_string(),
+                None => child,
+            })
+            .collect();
         keys.sort();
         Ok(keys)
+    }
+}
+
+/// Resource bounds for one recursive listing. A listing that reaches a bound
+/// fails; it never returns a partial result.
+#[derive(Clone, Copy, Debug)]
+struct ListingLimits {
+    max_depth: usize,
+    max_entries: usize,
+    timeout: Duration,
+}
+
+impl ListingLimits {
+    fn from_config(config: &SmbStorageConfig) -> Self {
+        Self {
+            max_depth: config.max_listing_depth,
+            max_entries: config.max_listing_entries,
+            timeout: config.listing_timeout,
+        }
+    }
+}
+
+/// Counts the entries one listing has enumerated against its limit.
+#[derive(Debug)]
+struct ListingBudget {
+    max_entries: usize,
+    entries: usize,
+}
+
+impl ListingBudget {
+    /// Records one enumerated entry, failing once the limit is exceeded.
+    fn record_entry(&mut self) -> Result<(), StorageError> {
+        self.entries += 1;
+        if self.entries > self.max_entries {
+            return Err(listing_limit_exceeded(format!(
+                "listing enumerated more than {} entries",
+                self.max_entries
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// One enumerated directory entry, excluding `.` and `..`.
+#[derive(Debug)]
+struct ListedEntry {
+    name: String,
+    directory: bool,
+}
+
+/// Enumerates single directories for [`walk_listing`].
+#[async_trait]
+trait ListingSource: Sync {
+    /// Lists `path`, recording each entry in `budget` as it is enumerated.
+    /// Returns `None` for a path the listing may skip (see
+    /// [`listing_open_failure`]).
+    async fn list_directory(
+        &self,
+        path: &str,
+        discovered: bool,
+        budget: &mut ListingBudget,
+    ) -> Result<Option<Vec<ListedEntry>>, StorageError>;
+}
+
+/// Walks the tree under `start` within `limits`, returning file paths
+/// relative to the share. The overall deadline is not retryable: a listing
+/// that cannot finish in time would not finish on a retry either.
+async fn bounded_listing<S: ListingSource>(
+    source: &S,
+    start: String,
+    limits: ListingLimits,
+) -> Result<Vec<String>, StorageError> {
+    tokio::time::timeout(limits.timeout, walk_listing(source, start, limits))
+        .await
+        .map_err(|_| {
+            remote_error(
+                StorageProviderErrorKind::Timeout,
+                "list",
+                format!(
+                    "listing did not complete within {:?}; refusing to return a partial listing",
+                    limits.timeout
+                ),
+                false,
+            )
+        })?
+}
+
+async fn walk_listing<S: ListingSource>(
+    source: &S,
+    start: String,
+    limits: ListingLimits,
+) -> Result<Vec<String>, StorageError> {
+    let mut budget = ListingBudget {
+        max_entries: limits.max_entries,
+        entries: 0,
+    };
+    // Each entry records whether enumeration discovered the directory, and
+    // its depth below the start.
+    let mut stack = vec![(start, false, 0_usize)];
+    let mut files = Vec::new();
+    while let Some((directory_path, discovered, depth)) = stack.pop() {
+        let Some(entries) = source
+            .list_directory(&directory_path, discovered, &mut budget)
+            .await?
+        else {
+            continue;
+        };
+        for entry in entries {
+            let child = if directory_path.is_empty() {
+                entry.name
+            } else {
+                format!("{directory_path}/{}", entry.name)
+            };
+            if entry.directory {
+                // A self-nesting directory (for example, a server-side link
+                // to an ancestor) would otherwise be listed forever.
+                if depth >= limits.max_depth {
+                    return Err(listing_limit_exceeded(format!(
+                        "listing exceeded the maximum directory depth of {} at {child:?}",
+                        limits.max_depth
+                    )));
+                }
+                stack.push((child, true, depth + 1));
+            } else {
+                files.push(child);
+            }
+        }
+    }
+    Ok(files)
+}
+
+fn listing_limit_exceeded(reason: String) -> StorageError {
+    remote_error(
+        StorageProviderErrorKind::Protocol,
+        "list",
+        format!("{reason}; refusing to return a partial listing"),
+        false,
+    )
+}
+
+struct SmbListingSource<'a> {
+    backend: &'a SmbStorageBackend,
+    client: &'a Client,
+    base: UncPath,
+}
+
+#[async_trait]
+impl ListingSource for SmbListingSource<'_> {
+    async fn list_directory(
+        &self,
+        directory_path: &str,
+        discovered: bool,
+        budget: &mut ListingBudget,
+    ) -> Result<Option<Vec<ListedEntry>>, StorageError> {
+        let target = self.base.clone().with_path(directory_path);
+        let resource = match self
+            .backend
+            .with_timeout(
+                "list",
+                self.client.create_file(
+                    &target,
+                    &FileCreateArgs::make_open_existing(
+                        DirAccessMask::new()
+                            .with_list_directory(true)
+                            .with_synchronize(true)
+                            .into(),
+                    ),
+                ),
+            )
+            .await
+        {
+            Ok(resource) => resource,
+            Err(error) => {
+                listing_open_failure(directory_path, discovered, error)?;
+                return Ok(None);
+            }
+        };
+        let directory = match resource {
+            Resource::Directory(directory) => Arc::new(directory),
+            other => {
+                let _ = close_resource(other).await;
+                listing_not_directory(directory_path, discovered)?;
+                return Ok(None);
+            }
+        };
+        let operation_timeout = self.backend.inner.config.operation_timeout;
+        let mut entries = self
+            .backend
+            .with_timeout(
+                "list",
+                Directory::query::<FileFullDirectoryInformation>(&directory, "*"),
+            )
+            .await?;
+        let mut listed = Vec::new();
+        loop {
+            let entry = tokio::time::timeout(operation_timeout, entries.next())
+                .await
+                .map_err(|_| {
+                    remote_error(
+                        StorageProviderErrorKind::Timeout,
+                        "list",
+                        "operation timed out",
+                        true,
+                    )
+                })?;
+            let Some(entry) = entry else {
+                break;
+            };
+            let entry = entry.map_err(|error| map_smb_error("list", error))?;
+            let name = entry.file_name.to_string();
+            if name == "." || name == ".." {
+                continue;
+            }
+            budget.record_entry()?;
+            listed.push(ListedEntry {
+                name,
+                directory: entry.file_attributes.directory(),
+            });
+        }
+        drop(entries);
+        self.backend
+            .with_timeout("close", directory.close())
+            .await?;
+        Ok(Some(listed))
     }
 }
 
@@ -1936,11 +2158,18 @@ fn incomplete_listing(directory_path: &str, reason: &str) -> StorageError {
     )
 }
 
+/// Connects, authenticates and opens the share.
+///
+/// When `expected_server_guid` is set, every connection the client makes
+/// refuses a server reporting another GUID during negotiation, before session
+/// setup sends the NTLM response.
 async fn connect_client(
     config: &SmbStorageConfig,
     generation: u64,
+    expected_server_guid: Option<Uuid>,
 ) -> Result<ConnectedClient, StorageError> {
     let connection = ConnectionConfig {
+        expected_server_guid: expected_server_guid.map(guid_from_uuid),
         port: Some(config.port),
         timeout: Some(config.connect_timeout),
         min_dialect: Some(config.min_dialect.protocol()),
@@ -1991,6 +2220,11 @@ async fn connect_client(
             false,
         )
     })?;
+    let server_guid = uuid_from_guid(info.negotiation.server_guid);
+    if expected_server_guid.is_some_and(|expected| expected != server_guid) {
+        // Unreachable while negotiation enforces the pin; fail closed anyway.
+        return Err(map_smb_error("connect", smb::Error::ServerGuidMismatch));
+    }
     let negotiated_dialect = SmbDialect::from_protocol(info.negotiation.dialect_rev);
     let max_read_size = info.negotiation.max_read_size;
     let max_write_size = info.negotiation.max_write_size;
@@ -2009,6 +2243,7 @@ async fn connect_client(
         client: Arc::new(client),
         generation,
         properties: SmbConnectionProperties {
+            server_guid,
             negotiated_dialect,
             signing_active,
             encryption_active,
@@ -2018,6 +2253,39 @@ async fn connect_client(
             write_request_payload_limit,
         },
     })
+}
+
+/// Collects at most `limit` bytes, failing as soon as the stream yields more.
+/// Unlike [`crate::collect_storage_stream`], it never trusts a size hint.
+async fn collect_bounded(stream: StorageByteStream, limit: usize) -> Result<Bytes, StorageError> {
+    let mut bytes = bytes::BytesMut::with_capacity(limit);
+    let mut inner = stream.into_inner();
+    while let Some(chunk) = inner.next().await {
+        let chunk = chunk?;
+        if chunk.len() > limit - bytes.len() {
+            return Err(probe_mismatch());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes.freeze())
+}
+
+fn probe_mismatch() -> StorageError {
+    remote_error(
+        StorageProviderErrorKind::Protocol,
+        "probe",
+        "probe file contents did not match",
+        false,
+    )
+}
+
+/// Converts between the SMB wire GUID and its standard UUID form.
+fn guid_from_uuid(uuid: Uuid) -> smb::Guid {
+    smb::Guid::from(uuid.to_bytes_le())
+}
+
+fn uuid_from_guid(guid: smb::Guid) -> Uuid {
+    Uuid::from_bytes_le(<[u8; 16]>::from(guid))
 }
 
 async fn close_resource(resource: Resource) -> smb::Result<()> {
@@ -2163,6 +2431,9 @@ fn map_smb_error(operation: &'static str, error: smb::Error) -> StorageError {
             // The client rejected an unsigned or unencrypted response before
             // evaluating its status. Its operation's outcome is unknown.
             smb::Error::UnverifiedMessage(_) => StorageProviderErrorKind::SecurityNegotiation,
+            // The server's identity changed; it was refused before any
+            // credential was sent. Retrying cannot succeed.
+            smb::Error::ServerGuidMismatch => StorageProviderErrorKind::SecurityNegotiation,
             _ => StorageProviderErrorKind::Protocol,
         },
     };
@@ -2387,6 +2658,242 @@ mod tests {
         assert!(config.require_signing);
         assert!(!config.require_encryption);
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn listing_limits_and_server_pin_defaults_and_validation() {
+        let defaults = config();
+        assert_eq!(defaults.max_listing_depth, DEFAULT_MAX_LISTING_DEPTH);
+        assert_eq!(defaults.max_listing_entries, DEFAULT_MAX_LISTING_ENTRIES);
+        assert_eq!(defaults.listing_timeout, DEFAULT_LISTING_TIMEOUT);
+        assert_eq!(defaults.expected_server_guid, None);
+        for update in [
+            (|config: &mut SmbStorageConfig| config.max_listing_depth = 0)
+                as fn(&mut SmbStorageConfig),
+            |config| config.max_listing_entries = 0,
+            |config| config.listing_timeout = Duration::ZERO,
+            |config| config.expected_server_guid = Some(Uuid::nil()),
+        ] {
+            let mut config = config();
+            update(&mut config);
+            assert!(config.validate().is_err(), "{config:?}");
+        }
+    }
+
+    /// A scripted directory tree for [`walk_listing`]. It records each entry
+    /// in the budget as the SMB source does.
+    struct FakeListing {
+        entries: fn(&str) -> Vec<(String, bool)>,
+        delay: Duration,
+        directories_listed: AtomicU64,
+    }
+
+    impl FakeListing {
+        fn new(entries: fn(&str) -> Vec<(String, bool)>) -> Self {
+            Self {
+                entries,
+                delay: Duration::ZERO,
+                directories_listed: AtomicU64::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ListingSource for FakeListing {
+        async fn list_directory(
+            &self,
+            path: &str,
+            _discovered: bool,
+            budget: &mut ListingBudget,
+        ) -> Result<Option<Vec<ListedEntry>>, StorageError> {
+            self.directories_listed.fetch_add(1, Ordering::SeqCst);
+            if !self.delay.is_zero() {
+                tokio::time::sleep(self.delay).await;
+            }
+            let mut listed = Vec::new();
+            for (name, directory) in (self.entries)(path) {
+                budget.record_entry()?;
+                listed.push(ListedEntry { name, directory });
+            }
+            Ok(Some(listed))
+        }
+    }
+
+    fn limits(max_depth: usize, max_entries: usize, timeout: Duration) -> ListingLimits {
+        ListingLimits {
+            max_depth,
+            max_entries,
+            timeout,
+        }
+    }
+
+    fn assert_partial_listing_refused(error: &StorageError, reason: &str) {
+        match error {
+            StorageError::RemoteProvider {
+                operation,
+                message,
+                retryable,
+                ..
+            } => {
+                assert_eq!(operation, "list");
+                assert!(!retryable, "a listing limit must not be retried: {message}");
+                assert!(message.contains(reason), "{message}");
+                assert!(message.contains("refusing to return a partial listing"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn self_nesting_directory_listing_terminates_at_the_depth_limit() {
+        // Every directory contains itself, as a server-side loop would.
+        let source = FakeListing::new(|_| vec![("loop".to_string(), true)]);
+        let error = bounded_listing(
+            &source,
+            "root".to_string(),
+            limits(16, usize::MAX, Duration::from_secs(30)),
+        )
+        .await
+        .expect_err("a self-nesting listing must fail");
+        assert_partial_listing_refused(&error, "maximum directory depth of 16");
+        assert_eq!(source.directories_listed.load(Ordering::SeqCst), 17);
+    }
+
+    #[tokio::test]
+    async fn listing_entry_limit_bounds_a_flooding_directory() {
+        let source = FakeListing::new(|path| {
+            if path.is_empty() {
+                (0..10)
+                    .map(|index| (format!("directory-{index}"), true))
+                    .collect()
+            } else {
+                (0..1_000)
+                    .map(|index| (format!("file-{index}"), false))
+                    .collect()
+            }
+        });
+        let error = bounded_listing(
+            &source,
+            String::new(),
+            limits(64, 2_500, Duration::from_secs(30)),
+        )
+        .await
+        .expect_err("an oversized listing must fail");
+        assert_partial_listing_refused(&error, "more than 2500 entries");
+        assert_eq!(source.directories_listed.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn listing_deadline_bounds_a_slow_endless_listing() {
+        let mut source = FakeListing::new(|_| vec![("loop".to_string(), true)]);
+        source.delay = Duration::from_millis(5);
+        let started = Instant::now();
+        let error = bounded_listing(
+            &source,
+            String::new(),
+            limits(usize::MAX, usize::MAX, Duration::from_millis(100)),
+        )
+        .await
+        .expect_err("a listing that cannot finish must time out");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_partial_listing_refused(&error, "did not complete within");
+        assert!(matches!(
+            error,
+            StorageError::RemoteProvider {
+                kind: StorageProviderErrorKind::Timeout,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn listing_within_limits_returns_every_file() {
+        let source = FakeListing::new(|path| match path {
+            "" => vec![("a".to_string(), true), ("top.bin".to_string(), false)],
+            "a" => vec![("b".to_string(), true), ("one.bin".to_string(), false)],
+            "a/b" => vec![("two.bin".to_string(), false)],
+            other => panic!("unexpected directory {other}"),
+        });
+        // Exactly at the limits: depth 2 and 5 entries.
+        let mut files = bounded_listing(
+            &source,
+            String::new(),
+            limits(2, 5, Duration::from_secs(30)),
+        )
+        .await
+        .expect("listing within limits");
+        files.sort();
+        assert_eq!(files, ["a/b/two.bin", "a/one.bin", "top.bin"]);
+    }
+
+    #[tokio::test]
+    async fn probe_read_is_bounded_whatever_size_the_server_declares() {
+        let pulled = Arc::new(AtomicU64::new(0));
+        let counter = Arc::clone(&pulled);
+        // An endless body that claims to be as large as possible.
+        let body = stream::repeat_with(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Ok(Bytes::from_static(&[0x5a; 10]))
+        });
+        let stream = StorageByteStream::with_size_hint(Box::pin(body), u64::MAX);
+        let error = collect_bounded(stream, 16)
+            .await
+            .expect_err("a body larger than the probe must be rejected");
+        assert!(matches!(
+            error,
+            StorageError::RemoteProvider {
+                kind: StorageProviderErrorKind::Protocol,
+                retryable: false,
+                ..
+            }
+        ));
+        assert_eq!(pulled.load(Ordering::SeqCst), 2);
+
+        let exact = StorageByteStream::with_size_hint(
+            Box::pin(stream::iter([
+                Ok(Bytes::from_static(&[1; 10])),
+                Ok(Bytes::from_static(&[2; 6])),
+            ])),
+            u64::MAX,
+        );
+        assert_eq!(collect_bounded(exact, 16).await.expect("exact").len(), 16);
+    }
+
+    #[test]
+    fn server_guid_conversion_round_trips_in_standard_form() {
+        let uuid = Uuid::parse_str("00112233-4455-6677-8899-aabbccddeeff").unwrap();
+        let guid = guid_from_uuid(uuid);
+        // The wire form stores the first three fields little-endian.
+        assert_eq!(
+            <[u8; 16]>::from(guid),
+            [
+                0x33, 0x22, 0x11, 0x00, 0x55, 0x44, 0x77, 0x66, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+                0xee, 0xff
+            ]
+        );
+        assert_eq!(uuid_from_guid(guid), uuid);
+    }
+
+    #[test]
+    fn changed_server_identity_is_a_non_retryable_security_failure() {
+        let error = map_smb_error("connect", smb::Error::ServerGuidMismatch);
+        assert!(!error.is_retryable());
+        assert_eq!(
+            provider_error_kind(&error),
+            Some(StorageProviderErrorKind::SecurityNegotiation)
+        );
+    }
+
+    #[test]
+    fn a_failed_transport_is_reported_as_a_lost_connection() {
+        // The worker closes a connection whose transport failed; later requests
+        // fail with ConnectionStopped and trigger a bounded reconnect.
+        let error = map_smb_error("read", smb::Error::ConnectionStopped);
+        assert!(error.is_retryable());
+        assert_eq!(
+            provider_error_kind(&error),
+            Some(StorageProviderErrorKind::ConnectionLost)
+        );
     }
 
     #[test]

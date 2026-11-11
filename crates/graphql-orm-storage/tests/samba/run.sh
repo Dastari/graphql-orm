@@ -197,3 +197,18 @@ SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP
 SMB_TEST_FIXTURE_RUN="$RUN_ID" \
   run_test sdk_directory_drop_releases_directory_arc "$SMB_TEST_CARGO" test --locked --features smb --test smb_directory_stream \
   sdk_directory_drop_releases_directory_arc -- --ignored --exact --nocapture
+
+# Resource-bound and server-identity regressions.
+SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
+SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
+SMB_TEST_CONTAINER_NAME="$NORMAL_ID" SMB_TEST_FIXTURE_RUN="$RUN_ID" \
+  run_test samba_self_nesting_listing_terminates "$SMB_TEST_CARGO" test --locked --features smb --test smb_integration \
+  samba_self_nesting_listing_terminates -- --ignored --exact --nocapture
+
+# The constrained server accepts the same credentials but has another server
+# GUID, so it stands in for a different server answering for the same name.
+SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
+SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
+SMB_TEST_ALTERNATE_PORT="$CONSTRAINED_PORT" \
+  run_test samba_reconnect_refuses_a_server_with_another_identity "$SMB_TEST_CARGO" test --locked --features smb --test smb_integration \
+  samba_reconnect_refuses_a_server_with_another_identity -- --ignored --exact --nocapture

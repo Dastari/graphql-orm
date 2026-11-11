@@ -72,7 +72,15 @@ impl fmt::Debug for StorageByteStream {
     }
 }
 
+/// Largest buffer [`collect_storage_stream`] preallocates from a size hint.
+/// Providers may report a size the remote side declared, so the hint is never
+/// trusted for allocation beyond this; larger bodies grow as bytes arrive.
+const MAX_COLLECT_PREALLOCATION: usize = 8 * 1024 * 1024;
+
 /// Collects a storage byte stream into one byte buffer.
+///
+/// The whole body is held in memory. Use it only for bodies whose size the
+/// caller bounds; the size hint is used for preallocation up to 8 MiB only.
 ///
 /// # Errors
 ///
@@ -81,7 +89,8 @@ pub async fn collect_storage_stream(stream: StorageByteStream) -> Result<Bytes, 
     let capacity = stream
         .size_hint()
         .and_then(|size| usize::try_from(size).ok())
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .min(MAX_COLLECT_PREALLOCATION);
     let mut bytes = BytesMut::with_capacity(capacity);
     let mut inner = stream.into_inner();
 

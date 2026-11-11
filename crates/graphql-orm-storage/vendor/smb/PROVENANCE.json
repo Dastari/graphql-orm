@@ -34,6 +34,23 @@
       ],
       "scope": "Owner-local security patch, not an upstream backport: session-bound receives verify signature or encryption before evaluating the response status, and reject unverified or other-session messages with the typed Error::UnverifiedMessage. Unsigned responses are permitted only for the MS-SMB2 3.2.5.1.3 STATUS_PENDING exemption and SESSION_SETUP before session setup completes, and only for a status the caller does not accept. The worker treats interim STATUS_PENDING responses as untrusted and validates them against the request's own session (ReceiveOptions::session_id, set by the channel handler), never the interim's header: it discards an interim that names another session or whose request session is unknown, and an unencrypted interim on an encryption-required session. An interim never binds the async ID of the final response or completes the request. On a signing-only session a later forged interim can still overwrite the async ID recorded for cancellation. Includes the in-crate regression tests.",
       "upstream": "afiffon/smb-rs main has the same ordering; not yet reported upstream. Replace with a reviewed upstream fix when one is released."
+    },
+    {
+      "id": "resource-bounds-and-server-identity",
+      "patch_file": "PATCHES/resource-bounds-and-server-identity.patch",
+      "patch_sha256": "07d9aaddf261e457e103c4823d4ed3fd5ea73cd0639dc15d991f521f9b2d5797",
+      "applies_after": "PATCHES/ghsa-439h-2cx8-xwgx.patch",
+      "runtime_changed_files": [
+        "src/client/smb_client.rs",
+        "src/connection.rs",
+        "src/connection/config.rs",
+        "src/connection/worker/parallel/async_backend.rs",
+        "src/connection/worker/parallel/base.rs",
+        "src/error.rs",
+        "src/session/channel.rs"
+      ],
+      "scope": "Owner-local hardening patch, not an upstream backport. The parallel worker records the message ID of each request it sends and accepts a response only for an outstanding ID; an interim STATUS_PENDING keeps the ID outstanding, any other response completes it. Unsolicited responses are discarded, at most MAX_PENDING_RESPONSES (256) responses are held before a task receives them (oldest dropped), and at most MAX_OUTSTANDING_REQUESTS (8192) IDs are tracked (oldest forgotten). A response for a task that stopped waiting is dropped without a receive error. The async receive loop closes the connection on any transport error and after 64 consecutive failed messages, instead of logging and retrying; it then marks the worker stopped and fails awaiting tasks, so later receives fail at once. ConnectionConfig gains expected_server_guid: negotiation fails with the typed Error::ServerGuidMismatch, before session setup, when the server reports another GUID. Client::share_connect and ipc_connect wrap the password in sspi's zeroizing Secret before any fallible step. Test-only: ParallelWorker::start_expecting and the ConnectionMessageHandler::with_test_transport expected-ID argument register scripted responses; the earlier patch's channel tests pass their message ID. Includes the in-crate regression tests. The multi-threaded backend, not built by storage, is unchanged.",
+      "upstream": "afiffon/smb-rs main stores unsolicited responses without a bound and retries non-NotConnected transport errors; not yet reported upstream. Replace with a reviewed upstream fix when one is released."
     }
   ],
   "license": {
@@ -126,7 +143,7 @@
       "vendor_path": "src/client/smb_client.rs",
       "upstream_sha256": "c1689c442764b66a5110776f7f26583fbd6743529814cfcbf62d1060982fc8af",
       "bytes": 34644,
-      "allowed_change": "verbatim"
+      "allowed_change": "exact resource-bounds-and-server-identity local patch hunks"
     },
     {
       "archive_path": "src/client/unc_path.rs",
@@ -161,7 +178,7 @@
       "vendor_path": "src/connection/config.rs",
       "upstream_sha256": "0bcff87788c9b1fcbc8a9eb43d5d62637bfb1c3c537c2b8ea21be2d678bbb5cc",
       "bytes": 8247,
-      "allowed_change": "verbatim"
+      "allowed_change": "exact resource-bounds-and-server-identity local patch hunks"
     },
     {
       "archive_path": "src/connection/connection_info.rs",
@@ -189,7 +206,7 @@
       "vendor_path": "src/connection/worker/parallel/async_backend.rs",
       "upstream_sha256": "4f752fa1f1b444439127a86718e45bb460a5ab21ba980addff18efc07fcbc39d",
       "bytes": 7187,
-      "allowed_change": "verbatim"
+      "allowed_change": "exact resource-bounds-and-server-identity local patch hunks"
     },
     {
       "archive_path": "src/connection/worker/parallel/backend_trait.rs",
@@ -203,7 +220,7 @@
       "vendor_path": "src/connection/worker/parallel/base.rs",
       "upstream_sha256": "362e0838d7962eb5e5fd4f1bc738221aa19ad01e57cca985062fa1df123788bc",
       "bytes": 11824,
-      "allowed_change": "verbatim"
+      "allowed_change": "exact resource-bounds-and-server-identity local patch hunks"
     },
     {
       "archive_path": "src/connection/worker/parallel/threading_backend.rs",
@@ -245,7 +262,7 @@
       "vendor_path": "src/connection.rs",
       "upstream_sha256": "1b18fcbc38b57680d71b9bfe1df1934980d0be624c02df9564b0cd608204ef92",
       "bytes": 33316,
-      "allowed_change": "exact GHSA-439h-2cx8-xwgx local patch hunks"
+      "allowed_change": "exact GHSA-439h-2cx8-xwgx and resource-bounds-and-server-identity local patch hunks"
     },
     {
       "archive_path": "src/crypto/encryption.rs",
@@ -294,7 +311,7 @@
       "vendor_path": "src/error.rs",
       "upstream_sha256": "207ef1789463663a8f5a521510cc051d7fad888718aef80f661caff0f06c0205",
       "bytes": 4656,
-      "allowed_change": "exact GHSA-439h-2cx8-xwgx local patch hunks"
+      "allowed_change": "exact GHSA-439h-2cx8-xwgx and resource-bounds-and-server-identity local patch hunks"
     },
     {
       "archive_path": "src/lib.rs",
@@ -357,7 +374,7 @@
       "vendor_path": "src/session/channel.rs",
       "upstream_sha256": "16c1f1e6094c7bc608c5f0ef8351cf81d58d4c4b4ffa94b09cf49e40bac42097",
       "bytes": 9248,
-      "allowed_change": "exact GHSA-439h-2cx8-xwgx local patch hunks"
+      "allowed_change": "exact GHSA-439h-2cx8-xwgx and resource-bounds-and-server-identity local patch hunks"
     },
     {
       "archive_path": "src/session/encryptor_decryptor.rs",
@@ -524,31 +541,31 @@
     "docs/parallelize.md": "3c1ee4091ec89713f1c42cbf352a9f91f1f1e361ade0aa87fe4017992308896a",
     "docs/threading_models.md": "dff7137e32efaf65cbcfabf7aef391ede927862913b21c310809676f248fdbf0",
     "src/client/config.rs": "b6aba66f93091f628acca9fe006ccb9cd972bece234ea250be23cc23f8672cb4",
-    "src/client/smb_client.rs": "c1689c442764b66a5110776f7f26583fbd6743529814cfcbf62d1060982fc8af",
+    "src/client/smb_client.rs": "f5745c8c37159ef674c56ac9885172727041b20744ad9e12f9748581e6bec82d",
     "src/client/unc_path.rs": "0616a01719f7caa818d595d58c26388c2e4e77f2e62c85f89bd3b8ca4fbcb50b",
     "src/client.rs": "bcabea1294b7d239069bce2f08ce6f637f71d63a4d16571984a01310cfa4b4cd",
     "src/compression.rs": "a0027a1e84fefbdd11acebe00a2602b5de35f591bf8151c58bc033f5bc5810b0",
     "src/connection/README.md": "25bca086cc23f2812b628d5eb8ec2cf164a0fbd769b894f5b39584b0e777cf81",
-    "src/connection/config.rs": "0bcff87788c9b1fcbc8a9eb43d5d62637bfb1c3c537c2b8ea21be2d678bbb5cc",
+    "src/connection/config.rs": "3703f6591a769fd169b7b3f186477590f18656705eb9e4fcb59f68bb0d888283",
     "src/connection/connection_info.rs": "93deb79937468d30602c2abac429f5a3bf42735967086b2a0849b4067b8d0a5a",
     "src/connection/preauth_hash.rs": "6d70f1071d868abd760c36962ec05e023e460d1525ec0145ac128a6e556b8692",
     "src/connection/transformer.rs": "a43bd31e005c1d8d54f83c04ea31478ce44ea466f03ad915ffa83411983f6014",
-    "src/connection/worker/parallel/async_backend.rs": "4f752fa1f1b444439127a86718e45bb460a5ab21ba980addff18efc07fcbc39d",
+    "src/connection/worker/parallel/async_backend.rs": "44449660d00dd5b623e81e4705c680f2ff4ca05b8662b30df99368713bf6e9b0",
     "src/connection/worker/parallel/backend_trait.rs": "5f4d382aa2b1c90a12c933a63cb9c95bb5291a80ab74b6040a50c06f696cfa3c",
-    "src/connection/worker/parallel/base.rs": "362e0838d7962eb5e5fd4f1bc738221aa19ad01e57cca985062fa1df123788bc",
+    "src/connection/worker/parallel/base.rs": "0f9204f9b9c622b9f75d09c2d1855da17b90afdb57250ed064507725f067aadd",
     "src/connection/worker/parallel/threading_backend.rs": "e2fae4116dc3e1077442b7c0badb47f03c617094500e9bbc4d3f2b667734f8a0",
     "src/connection/worker/parallel.rs": "884120860fc59b82225d2cd05626e01e65541981de326eb6781ec1ac5444a65f",
     "src/connection/worker/single_worker.rs": "16c36362a3b4100c0290b94a99e19aefd0a0512494fdebf282b7bfc44c3a2a69",
     "src/connection/worker/worker_trait.rs": "22fff54789cfca6280ea50f74e58c6b6c303bf9561d14a26b6dec9c87a0a7693",
     "src/connection/worker.rs": "e62939d506059552d112a4dd4bc982c54f80a479eb01a3c83a5a17e4752b1958",
-    "src/connection.rs": "599ba99dbeeefe04bc134a3948d1f39ccbc5317301d9c327679f9afb58dd85f6",
+    "src/connection.rs": "648dc86bad8c499971d22e8faf0d0cbfa7ff7ff8fa1a0229451011bff993ce1b",
     "src/crypto/encryption.rs": "6cbf79bec47a488bcfd41c2ef8911428bd2816a209034370505c75a91045ee14",
     "src/crypto/kbkdf.rs": "ddb22a78289486f828badccd2e7edfabc7390edbe069340cde74b3ad3878531d",
     "src/crypto/signing.rs": "d5452c66e11db57a201cff6db00e06c2c371ae1ffaa79f0cc0f237c9436c497b",
     "src/crypto.rs": "caa6ca9c5da0cf74af840280c2774eedf978310d1ffc22f1463bdfe98565b310",
     "src/dialects.rs": "3823f8f12c292b6cd6cdd109b66ee83f85eaf6976098048c37a01adf99963e83",
     "src/docs.rs": "19eda91a4d63f37ab548c7ae8653d33fbe70d51859229b2c85ebe3b8600c8ff6",
-    "src/error.rs": "b299197a13a3b022733f6f608a998f74453dacf5108eb4ad1683902485971a89",
+    "src/error.rs": "acbc8cb14dfb45e947b71954cd2b0cc37e58d0fd2f0614238048d1f9ac1c74eb",
     "src/lib.rs": "083170a318d7e6c15533c0ccbefb407034b2da2c025adaa92dea3183acb86b05",
     "src/msg_handler.rs": "191595229c0a55a2e8cc389d5f4e7e97e1a59ca5578d491ccc02edf8a21f6301",
     "src/resource/directory.rs": "b56910d3140a4bf20123ff9fc7f299dd33dc2608c4d2d01db0b6d0a243fe8d4d",
@@ -557,7 +574,7 @@
     "src/resource/pipe.rs": "195ef0cdd14d7463dddc48a9b85e7e97e25e81e8dc55101cdc78a9b8fe676f8a",
     "src/resource.rs": "5f88a0e9686a41a63777bc195e02e79d866fe7c3867e768304b2a6a3402e3b45",
     "src/session/authenticator.rs": "aace47a5a09c8c9570cbecbcf86cfd16ff2ee55aa381dc811e1bf7e24f698c01",
-    "src/session/channel.rs": "bd99d93aacd6d704ac6903a1d3df4bdb8a944916df4d2afd34e450e8635ee343",
+    "src/session/channel.rs": "56a1a9d984b30212f0ff289145dfe9506ede11f822592a17acf31e12f1a85126",
     "src/session/encryptor_decryptor.rs": "6bbe6417927d696bb5c26a8e94ddd4f2d8863c56084b41c7aa1d0a7fbe73f068",
     "src/session/setup.rs": "0767645f540b2a5ff7cd1f9c58415b2a4a54f310eda7f50365c6d0e8248d9dbd",
     "src/session/signer.rs": "74edc505f2ba558028000d145fe8a88447529a9b20b0f738b0afbaec5c0778aa",

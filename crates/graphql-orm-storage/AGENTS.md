@@ -72,6 +72,13 @@ This crate is a reusable storage companion for applications that use `graphql-or
   patch in `vendor/smb/PROVENANCE.json` and `scripts/verify-smb-backport.py`,
   and run `scripts/test-smb-vendor.sh`.
 
+- Bound every server-driven resource: the vendored worker accepts responses
+  only for message IDs it sent and holds a bounded number, its receive loop
+  ends on transport failure, and listings fail at their depth, entry and time
+  limits rather than returning a partial result. Never adopt a changed server
+  GUID on reconnect; the pin is checked during negotiation, before session
+  setup sends credentials.
+
 - Lock release requires explicit single-attempt deletion through
   `delete_blob_once`; never fall back to retrying ordinary deletion after a
   mutation may have reached the server. Ambiguous outcomes require quiescing

@@ -286,6 +286,14 @@ impl Connection {
 
         let smb2_negotiate_response = response.message.content.to_negotiate()?;
 
+        // Local patch (graphql-orm-storage): refuse a server whose identity
+        // differs from the pinned one, before session setup sends credentials.
+        if let Some(expected) = self.config.expected_server_guid {
+            if smb2_negotiate_response.server_guid != expected {
+                return Err(Error::ServerGuidMismatch);
+            }
+        }
+
         // well, only 3.1 is supported for starters.
         let dialect_rev = smb2_negotiate_response.dialect_revision.try_into()?;
         if dialect_rev > max_dialect || dialect_rev < min_dialect {
@@ -925,18 +933,225 @@ impl Drop for ConnectionMessageHandler {
 #[cfg(all(test, feature = "async"))]
 impl ConnectionMessageHandler {
     /// Test-only: a connection handler whose worker reads scripted bytes from
-    /// `transport`, without negotiation.
+    /// `transport`, without negotiation. `expected` lists the message IDs of
+    /// the requests the scripted responses answer (local patch).
     pub(crate) async fn with_test_transport(
         transport: Box<dyn SmbTransport>,
+        expected: &[u64],
     ) -> crate::Result<HandlerReference<Self>> {
         let handler = HandlerReference::new(Self::new(Guid::generate(), None));
         // The scripted response answers one request, which consumed its credit.
         handler.curr_credits.acquire().await?.forget();
-        let worker = WorkerImpl::start(transport, std::time::Duration::from_secs(5)).await?;
+        let worker =
+            WorkerImpl::start_expecting(transport, std::time::Duration::from_secs(5), expected)
+                .await?;
         handler
             .worker
             .set(worker)
             .map_err(|_| Error::InvalidState("Worker is already set".into()))?;
         Ok(handler)
+    }
+}
+
+/// Local patch (graphql-orm-storage): a pinned server identity is enforced
+/// during negotiation, before any session setup.
+#[cfg(all(test, feature = "async"))]
+mod server_identity_tests {
+    use super::*;
+    use futures_core::future::BoxFuture;
+    use futures_util::FutureExt;
+    use smb_msg::{Header, HeaderFlags, Status};
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+
+    const SERVER_GUID: Guid = Guid::MAX;
+
+    /// Answers the client's first request with an SMB 2.1 NEGOTIATE response
+    /// naming `SERVER_GUID`, then behaves like an idle peer.
+    struct NegotiateOnlyServer {
+        response: Vec<u8>,
+        position: usize,
+        request_sent: Arc<Notify>,
+        written: Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    struct NotifyingWrite {
+        request_sent: Arc<Notify>,
+        written: Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    fn negotiate_response() -> Vec<u8> {
+        let header = Header {
+            credit_charge: 0,
+            status: Status::Success as u32,
+            command: Command::Negotiate,
+            credit_request: 1,
+            flags: HeaderFlags::new().with_server_to_redir(true),
+            next_command: 0,
+            message_id: 0,
+            tree_id: Some(0),
+            async_id: None,
+            session_id: 0,
+            signature: 0,
+        };
+        let mut message = std::io::Cursor::new(Vec::new());
+        header.write_le(&mut message).unwrap();
+        let mut body = Vec::new();
+        body.extend_from_slice(&0x41_u16.to_le_bytes()); // StructureSize
+        body.extend_from_slice(&1_u16.to_le_bytes()); // SecurityMode: signing enabled
+        body.extend_from_slice(&0x0210_u16.to_le_bytes()); // DialectRevision: SMB 2.1
+        body.extend_from_slice(&0_u16.to_le_bytes()); // NegotiateContextCount
+        body.extend_from_slice(&<[u8; 16]>::from(SERVER_GUID));
+        body.extend_from_slice(&0_u32.to_le_bytes()); // Capabilities
+        for _ in 0..3 {
+            body.extend_from_slice(&65_536_u32.to_le_bytes()); // Max transact/read/write
+        }
+        body.extend_from_slice(&0_u64.to_le_bytes()); // SystemTime
+        body.extend_from_slice(&0_u64.to_le_bytes()); // ServerStartTime
+        body.extend_from_slice(&0x80_u16.to_le_bytes()); // SecurityBufferOffset
+        body.extend_from_slice(&0_u16.to_le_bytes()); // SecurityBufferLength
+        body.extend_from_slice(&0_u32.to_le_bytes()); // NegotiateContextOffset
+        body.push(0); // Buffer
+        let mut message = message.into_inner();
+        message.extend_from_slice(&body);
+        let mut framed = (message.len() as u32).to_be_bytes().to_vec();
+        framed.extend_from_slice(&message);
+        framed
+    }
+
+    impl SmbTransport for NegotiateOnlyServer {
+        fn connect<'a>(
+            &'a mut self,
+            _server_name: &'a str,
+            _address: SocketAddr,
+        ) -> BoxFuture<'a, smb_transport::error::Result<()>> {
+            async { Ok(()) }.boxed()
+        }
+
+        fn default_port(&self) -> u16 {
+            445
+        }
+
+        fn split(
+            self: Box<Self>,
+        ) -> smb_transport::error::Result<(Box<dyn SmbTransportRead>, Box<dyn SmbTransportWrite>)>
+        {
+            let write = NotifyingWrite {
+                request_sent: self.request_sent.clone(),
+                written: self.written.clone(),
+            };
+            Ok((self, Box::new(write)))
+        }
+
+        fn remote_address(&self) -> smb_transport::error::Result<SocketAddr> {
+            Ok(SocketAddr::from(([127, 0, 0, 1], 445)))
+        }
+    }
+
+    impl SmbTransportRead for NegotiateOnlyServer {
+        fn receive_exact<'a>(
+            &'a mut self,
+            out_buf: &'a mut [u8],
+        ) -> BoxFuture<'a, smb_transport::error::Result<()>> {
+            async move {
+                if self.position == 0 {
+                    self.request_sent.notified().await;
+                }
+                let end = self.position + out_buf.len();
+                if end > self.response.len() {
+                    std::future::pending::<()>().await;
+                    return Err(TransportError::NotConnected);
+                }
+                out_buf.copy_from_slice(&self.response[self.position..end]);
+                self.position = end;
+                Ok(())
+            }
+            .boxed()
+        }
+    }
+
+    impl SmbTransportWrite for NegotiateOnlyServer {
+        fn send_raw<'a>(
+            &'a mut self,
+            _buf: &'a [u8],
+        ) -> BoxFuture<'a, smb_transport::error::Result<()>> {
+            async { Ok(()) }.boxed()
+        }
+    }
+
+    impl SmbTransportWrite for NotifyingWrite {
+        fn send_raw<'a>(
+            &'a mut self,
+            buf: &'a [u8],
+        ) -> BoxFuture<'a, smb_transport::error::Result<()>> {
+            self.written.lock().unwrap().extend_from_slice(buf);
+            self.request_sent.notify_one();
+            async { Ok(()) }.boxed()
+        }
+    }
+
+    /// The SMB2 commands of the framed requests in `written`.
+    fn sent_commands(written: &[u8]) -> Vec<u16> {
+        let mut commands = Vec::new();
+        let mut rest = written;
+        while rest.len() >= 4 {
+            let length = u32::from_be_bytes(rest[..4].try_into().unwrap()) as usize;
+            let message = &rest[4..4 + length];
+            commands.push(u16::from_le_bytes([message[12], message[13]]));
+            rest = &rest[4 + length..];
+        }
+        commands
+    }
+
+    async fn negotiate_with(
+        expected_server_guid: Option<Guid>,
+    ) -> (crate::Result<Connection>, Vec<u16>) {
+        let written = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let transport = NegotiateOnlyServer {
+            response: negotiate_response(),
+            position: 0,
+            request_sent: Arc::new(Notify::new()),
+            written: written.clone(),
+        };
+        let config = ConnectionConfig {
+            smb2_only_negotiate: true,
+            min_dialect: Some(Dialect::Smb021),
+            max_dialect: Some(Dialect::Smb021),
+            expected_server_guid,
+            ..ConnectionConfig::default()
+        };
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            Connection::from_transport(Box::new(transport), "server", Guid::generate(), config),
+        )
+        .await
+        .expect("negotiation must complete");
+        let commands = sent_commands(&written.lock().unwrap());
+        (result, commands)
+    }
+
+    #[tokio::test]
+    async fn the_expected_server_identity_is_accepted() {
+        let (result, _) = negotiate_with(Some(SERVER_GUID)).await;
+        let connection = result.expect("the pinned server must negotiate");
+        assert_eq!(
+            connection.conn_info().unwrap().negotiation.server_guid,
+            SERVER_GUID
+        );
+    }
+
+    #[tokio::test]
+    async fn a_changed_server_identity_is_refused_before_session_setup() {
+        let (result, commands) = negotiate_with(Some(Guid::ZERO)).await;
+        assert!(
+            matches!(result, Err(Error::ServerGuidMismatch)),
+            "{:?}",
+            result.err()
+        );
+        assert_eq!(
+            commands,
+            vec![Command::Negotiate as u16],
+            "only the NEGOTIATE request may be sent"
+        );
     }
 }
