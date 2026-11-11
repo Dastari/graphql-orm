@@ -313,11 +313,20 @@ from host code.
 The runtime scalar validators apply the input bounds while a request's
 arguments, variables and document defaults are validated, and accept stored
 forms only when output is resolved. Host field arguments and host input-object
-fields typed with a runtime scalar are therefore bounded like runtime inputs.
+fields typed with a runtime scalar are therefore bounded like runtime inputs,
+with one exception. When a list or input-object argument also contains a
+variable that the request omits and the operation defaults, async-graphql skips
+validation of the whole argument, so the values inside it are not checked. For
+example, in `echo(input: {document: "…", at: $t})` with `$t` defaulted and no
+variables sent, the literal `document` reaches the resolver unvalidated. Hosts
+must bound runtime scalar values they read from such arguments themselves.
+
 A `RuntimeHostField::argument` default typed with a runtime scalar, directly or
 in a list, is checked against the composer's scalar limits when the field is
-added, and an invalid default fails with `invalid_composition`. Defaults of host
-input-object fields are not checked.
+added, and an invalid default fails with `invalid_composition`. Other defaults
+are not checked at composition: `RuntimeHostField` defaults typed with a host
+input object, defaults of host input-object fields, and argument defaults on
+host objects added with `register()` or `subscription_root()`.
 
 TypeScript scalar mappings are strings for Int64/JSON/UUID/Bytes/DateTime. Use
 BigInt for integers, exact JSON parsing where number fidelity matters, Uint8Array
