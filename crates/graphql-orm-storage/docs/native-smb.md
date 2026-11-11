@@ -254,7 +254,11 @@ interrupted upload's temporary file that extra length before filtering it out.
 The temporary name does not include the target's name, so it fits the
 255-unit component limit for every valid name, and its random v4 UUID keeps it
 unique. Temporary files left by earlier versions, named
-`.<name>.<uuid>.uploading`, are still recognised and filtered. A server may
+`.<name>.<uuid>.uploading`, are still recognised and filtered. Only these two
+dot-prefixed forms, with a lowercase hyphenated UUID, are temporary: a key such
+as `report.<uuid>.uploading` is listed like any other, and writing a key whose
+name has a temporary form fails with `InvalidStorageKey`. The backend does not
+sweep interrupted uploads' temporary files. A server may
 refuse a long path itself; Samba on Linux, for example, rejects paths near
 4,096 bytes with `STATUS_OBJECT_NAME_INVALID`.
 

@@ -216,3 +216,49 @@ fn recording_metadata() -> BTreeMap<String, String> {
         ("auth_scope".to_string(), "recordings.read".to_string()),
     ])
 }
+
+#[tokio::test]
+async fn local_streaming_object_keys_ending_in_uploading_are_listed() {
+    let temp = TempDir::new().expect("temp dir");
+    let backend = LocalStorageBackend::new(temp.path());
+    let uuid = uuid::Uuid::new_v4();
+    let mut keys = [
+        "sessions/clip.uploading".to_string(),
+        format!("sessions/clip.{uuid}.uploading"),
+    ];
+    for key in &keys {
+        backend
+            .put_object_stream(
+                "recordings",
+                key,
+                None,
+                ObjectMetadata::new(),
+                StorageByteStream::from_bytes(Bytes::from_static(b"clip")),
+            )
+            .await
+            .expect("put stream");
+    }
+    let listed = backend
+        .list_objects("recordings", "")
+        .await
+        .expect("list")
+        .into_iter()
+        .map(|object| object.key)
+        .collect::<Vec<_>>();
+    keys.sort();
+    assert_eq!(listed, keys);
+
+    let reserved = format!("sessions/.{uuid}.uploading");
+    assert!(matches!(
+        backend
+            .put_object_stream(
+                "recordings",
+                &reserved,
+                None,
+                ObjectMetadata::new(),
+                StorageByteStream::from_bytes(Bytes::from_static(b"clip")),
+            )
+            .await,
+        Err(StorageError::InvalidStorageKey { .. })
+    ));
+}

@@ -27,7 +27,9 @@ use uuid::Uuid;
 
 use crate::{
     BlobBody, BlobListPage, BlobMetadata, BlobPutOptions, BlobStore, BlobWriteOutcome,
-    StorageBackend, StorageByteStream, StorageError, StorageProviderErrorKind, validate_blob_key,
+    StorageBackend, StorageByteStream, StorageError, StorageProviderErrorKind,
+    key::{TEMP_SUFFIX, is_canonical_uuid, is_temp_file_name, temp_file_name},
+    validate_blob_key,
 };
 
 const DEFAULT_PORT: u16 = 445;
@@ -65,7 +67,6 @@ const READ_CHUNK_SIZE: usize = 256 * 1024;
 const CONSERVATIVE_WRITE_REQUEST_CAP: usize = 1024 * 1024;
 const SMB2_CREDIT_UNIT: usize = 64 * 1024;
 const WRITE_PROGRESS_INTERVAL: u64 = 64 * 1024 * 1024;
-const TEMP_SUFFIX: &str = ".uploading";
 
 /// Lowest SMB2/SMB3 dialect accepted by a native SMB backend.
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
@@ -1450,10 +1451,17 @@ async fn walk_listing<S: ListingSource>(
 }
 
 /// Validates a caller's key: a safe relative key no longer than
-/// [`MAX_KEY_BYTES`], whose every component fits [`MAX_NAME_UTF16_UNITS`]. A
-/// key this backend could not list back is never written.
+/// [`MAX_KEY_BYTES`], whose every component fits [`MAX_NAME_UTF16_UNITS`],
+/// and whose name is not a temporary upload name. A key this backend could not
+/// list back is never written.
 fn check_key(key: &str) -> Result<(), StorageError> {
-    check_key_within(key, MAX_KEY_BYTES)
+    check_key_within(key, MAX_KEY_BYTES)?;
+    if is_temp_key(key) {
+        return Err(StorageError::InvalidStorageKey {
+            key: key.to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn check_key_within(key: &str, max_bytes: usize) -> Result<(), StorageError> {
@@ -2587,7 +2595,7 @@ fn invalid_config(message: &str) -> StorageError {
 fn temp_key(key: &str) -> Result<String, StorageError> {
     check_key(key)?;
     let (parent, _) = key.rsplit_once('/').unwrap_or(("", key));
-    let temp_name = format!(".{}{TEMP_SUFFIX}", Uuid::new_v4());
+    let temp_name = temp_file_name();
     let temp = if parent.is_empty() {
         temp_name
     } else {
@@ -2597,15 +2605,23 @@ fn temp_key(key: &str) -> Result<String, StorageError> {
     Ok(temp)
 }
 
+/// Whether `key` names a temporary upload file this backend writes: exactly
+/// `.<uuid>.uploading`, or `.<name>.<uuid>.uploading` as versions before 0.9.0
+/// wrote, with the UUID in its lowercase hyphenated form. Any other name,
+/// including `<name>.<uuid>.uploading` without the leading dot, is a caller's
+/// key.
 fn is_temp_key(key: &str) -> bool {
-    let Some(name) = key.rsplit('/').next() else {
-        return false;
-    };
-    let Some(stem) = name.strip_suffix(TEMP_SUFFIX) else {
-        return false;
-    };
-    stem.rsplit_once('.')
-        .is_some_and(|(_, uuid)| Uuid::parse_str(uuid).is_ok())
+    let name = key.rsplit('/').next().unwrap_or(key);
+    is_temp_file_name(name) || is_legacy_temp_name(name)
+}
+
+/// Whether `name` is `.<name>.<uuid>.uploading`, the temporary name versions
+/// before 0.9.0 derived from the target's name.
+fn is_legacy_temp_name(name: &str) -> bool {
+    name.strip_prefix('.')
+        .and_then(|rest| rest.strip_suffix(TEMP_SUFFIX))
+        .and_then(|stem| stem.rsplit_once('.'))
+        .is_some_and(|(target, uuid)| !target.is_empty() && is_canonical_uuid(uuid))
 }
 
 fn map_io_error(operation: &'static str, error: std::io::Error) -> StorageError {
@@ -3572,6 +3588,43 @@ mod tests {
         )));
         assert!(!is_temp_key("nested/report.uploading"));
         assert!(!is_temp_key("nested/blob.not-a-uuid.uploading"));
+    }
+
+    #[test]
+    fn caller_keys_resembling_temporary_names_are_not_temporary() {
+        let uuid = Uuid::new_v4();
+        // Without the leading dot, a name is never one this backend wrote.
+        for key in [
+            format!("report.{uuid}.uploading"),
+            format!("nested/report.{uuid}.uploading"),
+            format!("nested/{uuid}.uploading"),
+            format!("nested/.{}.uploading", uuid.simple()),
+            format!(
+                "nested/.{}.uploading",
+                uuid.hyphenated().to_string().to_uppercase()
+            ),
+            format!("nested/..{uuid}.uploading"),
+            format!("nested/.{uuid}.uploading.bin"),
+            format!(".{uuid}.uploading/blob"),
+            "nested/.uploading".to_string(),
+            "nested/QUARTERLY.UPLOADING".to_string(),
+        ] {
+            assert!(!is_temp_key(&key), "{key} is a caller's key");
+            check_key(&key).unwrap_or_else(|error| panic!("{key} is writable: {error}"));
+        }
+        // Exactly the generated forms are temporary, and a caller cannot
+        // write a key with one.
+        for key in [
+            format!(".{uuid}.uploading"),
+            format!("nested/.{uuid}.uploading"),
+            format!("nested/.report.{uuid}.uploading"),
+        ] {
+            assert!(is_temp_key(&key), "{key} is temporary");
+            assert!(matches!(
+                check_key(&key),
+                Err(StorageError::InvalidStorageKey { .. })
+            ));
+        }
     }
 
     #[test]

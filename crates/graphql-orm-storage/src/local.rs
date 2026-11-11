@@ -10,13 +10,13 @@ use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio_util::io::ReaderStream;
-use uuid::Uuid;
 
 use crate::{
     BlobBody, BlobListPage, BlobMetadata, BlobPutOptions, BlobStore, BlobWriteOutcome,
     BoxedMultipartWriter, MultipartWriter, ObjectContentRange, ObjectInfo, ObjectMetadata,
     ObjectRangeBody, ObjectStorage, StorageBackend, StorageByteStream, StorageError,
     StorageObjectBody, StoredObject, StreamingObjectStore, collect_storage_stream,
+    key::{is_temp_file_name, temp_file_name},
     validate_blob_key, validate_object_bucket,
 };
 
@@ -64,8 +64,12 @@ impl LocalStorageBackend {
 
     /// Removes stale temporary upload files under the local storage root.
     ///
-    /// Files are considered temporary when their filename ends with
-    /// `.uploading`. Callers should schedule this periodically if the process
+    /// Only files named exactly `.<uuid>.uploading`, the form this backend
+    /// writes, are considered temporary; a file whose name merely ends with
+    /// `.uploading` is a stored object and is never removed. Temporary files
+    /// left by versions before 0.9.1, named `<name>.<uuid>.uploading`, cannot
+    /// be told apart from stored objects and are not removed either; see the
+    /// migration guide. Callers should schedule this periodically if the process
     /// may be interrupted during writes. Symbolic links (including directory
     /// links and cycles) are skipped. This does not protect against a concurrent
     /// local actor replacing a path after inspection; the trusted-root contract
@@ -160,8 +164,8 @@ impl BlobStore for LocalStorageBackend {
         _options: BlobPutOptions,
     ) -> Result<BlobWriteOutcome, StorageError> {
         let path = self.path_for(key)?;
-        create_parent_dir(&path).await?;
         let temp_path = temp_path_for(&path, key)?;
+        create_parent_dir(&path).await?;
 
         let write_result = write_stream_to_temp(&temp_path, body).await;
         let outcome = match write_result {
@@ -187,8 +191,8 @@ impl BlobStore for LocalStorageBackend {
         _options: BlobPutOptions,
     ) -> Result<Option<BlobWriteOutcome>, StorageError> {
         let path = self.path_for(key)?;
-        create_parent_dir(&path).await?;
         let temp_path = temp_path_for(&path, key)?;
+        create_parent_dir(&path).await?;
 
         let outcome = match write_stream_to_temp(&temp_path, body).await {
             Ok(outcome) => outcome,
@@ -330,8 +334,8 @@ impl BlobStore for LocalStorageBackend {
     async fn copy_blob(&self, from: &str, to: &str) -> Result<(), StorageError> {
         let from_path = self.path_for(from)?;
         let to_path = self.path_for(to)?;
-        create_parent_dir(&to_path).await?;
         let temp_path = temp_path_for(&to_path, to)?;
+        create_parent_dir(&to_path).await?;
 
         match tokio::fs::copy(&from_path, &temp_path).await {
             Ok(_) => {}
@@ -437,10 +441,10 @@ impl StreamingObjectStore for LocalStorageBackend {
     ) -> Result<BoxedMultipartWriter, StorageError> {
         let object_path = self.object_path_for(bucket, key)?;
         let metadata_path = self.object_metadata_path_for(bucket, key)?;
-        create_parent_dir(&object_path).await?;
-        create_parent_dir(&metadata_path).await?;
         let temp_path = temp_path_for(&object_path, key)?;
         let metadata_temp_path = temp_path_for(&metadata_path, key)?;
+        create_parent_dir(&object_path).await?;
+        create_parent_dir(&metadata_path).await?;
         let file = tokio::fs::File::create(&temp_path)
             .await
             .map_err(|source| StorageError::io(&temp_path, source))?;
@@ -750,14 +754,24 @@ pub(crate) async fn create_parent_dir(path: &Path) -> Result<(), StorageError> {
         .map_err(|source| StorageError::io(parent, source))
 }
 
+/// Derives the unique temporary path a write fills before renaming it over
+/// `path`: `.<uuid>.uploading` beside the target.
+///
+/// A target whose name is itself a temporary name is refused, so that listing
+/// and [`LocalStorageBackend::sweep_temp_files`] never mistake a caller's
+/// object for an interrupted upload.
 pub(crate) fn temp_path_for(path: &Path, key: &str) -> Result<PathBuf, StorageError> {
+    let invalid = || StorageError::InvalidStorageKey {
+        key: key.to_string(),
+    };
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| StorageError::InvalidStorageKey {
-            key: key.to_string(),
-        })?;
-    Ok(path.with_file_name(format!("{file_name}.{}.uploading", Uuid::new_v4())))
+        .ok_or_else(invalid)?;
+    if is_temp_file_name(file_name) {
+        return Err(invalid());
+    }
+    Ok(path.with_file_name(temp_file_name()))
 }
 
 async fn write_stream_to_temp(
@@ -801,10 +815,13 @@ async fn write_object_metadata(path: &Path, object: &ObjectInfo) -> Result<(), S
         .map_err(|source| StorageError::io(path, source))
 }
 
+/// Whether `path` names a temporary upload file this backend writes. Only the
+/// exact `.<uuid>.uploading` form qualifies; any other name, including one
+/// that merely ends in `.uploading`, is a caller's object.
 fn is_uploading_temp_file(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(|name| name.ends_with(".uploading"))
+        .is_some_and(is_temp_file_name)
 }
 
 fn is_internal_storage_path(root: &Path, path: &Path) -> bool {

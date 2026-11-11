@@ -38,6 +38,10 @@ fn extension_parser_rejects_unsafe_extension_candidates() {
     assert_eq!(file_extension("artifact.jp/g"), None);
     assert_eq!(file_extension("artifact.jp\\g"), None);
     assert_eq!(file_extension("artifact.jp\0g"), None);
+    // Backends name temporary upload files with this extension.
+    assert_eq!(file_extension("quarterly.uploading"), None);
+    assert_eq!(file_extension("quarterly.UPLOADING"), None);
+    assert_eq!(file_extension("quarterly.uploading.pdf"), Some("pdf"));
 }
 
 #[test]

@@ -101,9 +101,17 @@ A non-retryable flag does not mean that storage was unchanged.
 `copy_blob` may use provider-side copy and does not return a SHA-256 checksum.
 Callers can use `head_blob` after copying when they need backend metadata.
 
-The local provider writes through temporary `.uploading` files. Host
-applications can call `LocalStorageBackend::sweep_temp_files` periodically to
-remove stale temp files.
+The local provider writes through a temporary `.<uuid>.uploading` file beside
+the target and renames it into place. Only that exact form, with a lowercase
+hyphenated UUID, is temporary: listings skip it, and
+`LocalStorageBackend::sweep_temp_files` removes it once it is older than the
+given age. Any other name ending in `.uploading` is a stored object, listed and
+never swept, and a write to a key whose name has the temporary form fails with
+`InvalidStorageKey`. Host applications can call `sweep_temp_files`
+periodically to remove stale temp files. Temporary files left by local
+versions before 0.9.1, named `<name>.<uuid>.uploading`, are indistinguishable
+from stored objects and are neither hidden nor swept; see the
+[migration guide](../MIGRATION.md).
 
 ## Key Safety
 

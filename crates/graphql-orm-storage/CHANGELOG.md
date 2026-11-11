@@ -10,6 +10,34 @@ supersedes: []
 
 # Changelog
 
+## 0.9.1 (unreleased)
+
+- Only treat the backend's own upload temp files as temporary. The local
+  backend treated every file whose name ended in `.uploading` as an
+  interrupted upload: listings skipped it and `sweep_temp_files` deleted it
+  once it was older than the threshold. A stored object could have such a
+  name, for example when `StorageService` kept the extension of a client
+  filename such as `report.UPLOADING`.
+- The local backend now writes its temporary files as `.<uuid>.uploading`
+  beside the target, as SMB does, and listings and `sweep_temp_files` act on
+  that exact form only, with the UUID in lowercase hyphenated form. Any other
+  name ending in `.uploading` is a stored object.
+- Local temporary files left by earlier versions, named
+  `<name>.<uuid>.uploading`, cannot be told apart from stored objects. They
+  are now listed and are not swept; see the migration guide.
+- SMB no longer hides keys such as `report.<uuid>.uploading`: only
+  `.<uuid>.uploading` and the `.<name>.<uuid>.uploading` form written before
+  0.9.0 are temporary.
+- Local and SMB writes refuse a key whose name is a temporary name with
+  `InvalidStorageKey`, so a written object is never filtered or swept. The
+  local backend refuses it before creating any directory.
+- `file_extension` returns `None` for the extension `uploading` in any case,
+  so `StorageService` never generates a key ending in `.uploading`, and a
+  sweep by an older version sharing the root cannot remove objects stored
+  through `StorageService`. Direct `BlobStore` callers may still write names
+  that an older version's sweep removes; see the migration guide.
+- No public API, configuration or object format change.
+
 ## 0.9.0 (unreleased)
 
 - Breaking: `SmbStorageConfig` gains `expected_server_guid`,
