@@ -538,3 +538,57 @@ async fn bootstrap_survives_concurrent_session_event_churn() {
         "the reader must have raced the writer at least once"
     );
 }
+
+/// Delegated and sessionless request credentials never act as the full user.
+fn refused_request_principals(owner: &AuthPrincipal) -> [AuthPrincipal; 2] {
+    let AuthPrincipal::User(user) = owner.clone() else {
+        unreachable!("cancellation fixture owner is a user session")
+    };
+    let mut delegated = user.clone();
+    delegated.token_claims.grant_kind =
+        Some(agql_auth::AccessTokenGrantKind::SessionBoundDelegation);
+    delegated.token_claims.actor = Some(agql_auth::ActorIdentity {
+        sub: "ai-coordinator".to_owned(),
+        amr: vec!["service".to_owned()],
+    });
+    delegated.token_claims.operation = Some(agql_auth::ExactOperationBinding::new(
+        "RecordsCount",
+        "sha256:reviewed-document",
+    ));
+    let mut sessionless = user;
+    sessionless.token_claims.grant_kind = Some(agql_auth::AccessTokenGrantKind::Sessionless);
+    [
+        AuthPrincipal::User(delegated),
+        AuthPrincipal::User(sessionless),
+    ]
+}
+
+#[tokio::test]
+async fn delegated_request_principal_cannot_cancel_a_run() {
+    let fixture = fixture().await;
+    let (session, running) = active_run(&fixture).await;
+    for refused in refused_request_principals(&fixture.owner) {
+        assert!(matches!(
+            fixture
+                .cancellation
+                .request_cancellation(
+                    &refused,
+                    CancelAiRunInput {
+                        session_id: session.id,
+                        run_id: running.run_id().0,
+                        client_request_id: Uuid::new_v4(),
+                    },
+                )
+                .await,
+            Err(AiError::ReauthorizationFailed)
+        ));
+    }
+    assert!(
+        fixture
+            .runs
+            .cancellation(&running)
+            .await
+            .expect("cancellation lookup should succeed")
+            .is_none()
+    );
+}

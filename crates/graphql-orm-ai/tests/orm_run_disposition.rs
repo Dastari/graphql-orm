@@ -1161,3 +1161,62 @@ fn a_clean_last_turn_does_not_prove_the_whole_run_was_unstarted() {
         }
     }
 }
+
+#[tokio::test]
+async fn delegated_request_principal_cannot_dispose_of_a_failure() {
+    let fixture = fixture().await;
+    let session = session(&fixture).await;
+    let sent = failed_run(
+        &fixture,
+        session.id,
+        AiRunState::Failed,
+        "agent_rule_budget_exceeded",
+        Some("agent_rule_budget_exceeded"),
+    )
+    .await;
+    let AuthPrincipal::User(user) = fixture.owner.clone() else {
+        unreachable!("disposition fixture owner is a user session")
+    };
+    let mut delegated = user.clone();
+    delegated.token_claims.grant_kind =
+        Some(agql_auth::AccessTokenGrantKind::SessionBoundDelegation);
+    delegated.token_claims.actor = Some(agql_auth::ActorIdentity {
+        sub: "ai-coordinator".to_owned(),
+        amr: vec!["service".to_owned()],
+    });
+    let mut sessionless = user;
+    sessionless.token_claims.grant_kind = Some(agql_auth::AccessTokenGrantKind::Sessionless);
+    for refused in [
+        AuthPrincipal::User(delegated),
+        AuthPrincipal::User(sessionless),
+    ] {
+        assert!(matches!(
+            fixture
+                .dispositions
+                .retry_run(
+                    &refused,
+                    RetryAiRunInput {
+                        session_id: session.id,
+                        run_id: sent.run_id,
+                        client_request_id: Uuid::new_v4(),
+                    },
+                )
+                .await,
+            Err(AiError::ReauthorizationFailed)
+        ));
+        assert!(matches!(
+            fixture
+                .dispositions
+                .acknowledge_run_failure(
+                    &refused,
+                    AcknowledgeAiRunFailureInput {
+                        session_id: session.id,
+                        run_id: sent.run_id,
+                        client_request_id: Uuid::new_v4(),
+                    },
+                )
+                .await,
+            Err(AiError::ReauthorizationFailed)
+        ));
+    }
+}

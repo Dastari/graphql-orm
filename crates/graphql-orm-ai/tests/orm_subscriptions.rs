@@ -557,3 +557,26 @@ async fn durable_replay_fallback_delivers_without_an_in_process_wakeup() {
     assert!(delivered.closed.is_none());
     assert_eq!(delivered.event.expect("event").sequence, 1);
 }
+
+/// The stream refreshes its principal through the resolver, so a delegated or
+/// sessionless credential would otherwise read as the full user.
+#[tokio::test]
+async fn delegated_request_principal_cannot_open_a_session_event_stream() {
+    let (sessions, subscriptions, principal, _active) = services(Duration::from_secs(60)).await;
+    let session = create_session(&sessions, &principal).await;
+    for grant_kind in [
+        agql_auth::AccessTokenGrantKind::SessionBoundDelegation,
+        agql_auth::AccessTokenGrantKind::Sessionless,
+    ] {
+        let AuthPrincipal::User(mut refused) = principal.clone() else {
+            unreachable!("subscription fixture principal is a user session")
+        };
+        refused.token_claims.grant_kind = Some(grant_kind);
+        assert!(matches!(
+            subscriptions
+                .session_events(AuthPrincipal::User(refused), AiSessionId(session.id), 0)
+                .await,
+            Err(AiError::ReauthorizationFailed)
+        ));
+    }
+}

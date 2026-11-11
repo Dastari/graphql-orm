@@ -55,6 +55,10 @@ fn jittered_backoff(base: Duration, attempt: u32, session_id: Uuid) -> Duration 
 
 /// Durable subscription service. Broadcast events are commit-only wakeup hints;
 /// every client item is re-read from protected durable storage.
+///
+/// Opening a stream refuses a sessionless or session-bound delegated credential
+/// with [`AiError::ReauthorizationFailed`]: the stream refreshes its principal
+/// through the resolver, which would yield the full user behind it.
 pub struct OrmAiSubscriptionService {
     sessions: Arc<OrmAiSessionService>,
     principal_resolver: Arc<dyn CurrentPrincipalResolver>,

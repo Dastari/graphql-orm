@@ -22,6 +22,10 @@ use crate::{
 const MAXIMUM_BROWSER_ARGUMENT_BYTES: usize = 64 * 1024;
 
 /// Generated-ORM result-preview service for application hosts.
+///
+/// Request methods refuse a sessionless or session-bound delegated credential
+/// with [`AiError::ReauthorizationFailed`] before any read or write: resolving
+/// such a credential would yield the full user behind it.
 pub struct OrmAiToolCallResultPreviewService {
     database: Database<DefaultWriteBackend>,
     runtime: Arc<crate::AiRuntime>,
@@ -109,7 +113,7 @@ impl AiToolCallResultPreviewService for OrmAiToolCallResultPreviewService {
                 "invalid tool result preview identity".to_owned(),
             ));
         }
-        let requested_reference = crate::principal_projection::admission_reference(
+        let requested_reference = crate::principal_projection::request_admission_reference(
             self.principal_projection.as_deref(),
             principal,
         )?;

@@ -326,6 +326,10 @@ impl AiConsumedApproval {
 }
 
 /// Protected approval lifecycle using generated ORM APIs only.
+///
+/// Request methods refuse a sessionless or session-bound delegated credential
+/// with [`AiError::ReauthorizationFailed`] before any read or write: resolving
+/// such a credential would yield the full user behind it.
 #[derive(Clone)]
 pub struct OrmAiApprovalService {
     database: Database<DefaultWriteBackend>,
@@ -1055,7 +1059,7 @@ impl OrmAiApprovalService {
         principal: &AuthPrincipal,
     ) -> Result<AuthPrincipal, AiError> {
         Ok(self
-            .resolve_current(&crate::principal_projection::admission_reference(
+            .resolve_current(&crate::principal_projection::request_admission_reference(
                 self.principal_projection.as_deref(),
                 principal,
             )?)
@@ -4130,5 +4134,164 @@ mod tests {
             fixture.run_service.heartbeat(&running).await,
             Err(AiError::Conflict)
         ));
+    }
+
+    /// A session-bound delegation narrowed to one exact operation for `principal`.
+    fn delegated_request_principal(principal: &AuthPrincipal) -> AuthPrincipal {
+        let AuthPrincipal::User(mut user) = principal.clone() else {
+            unreachable!("approval fixture principal is a user session")
+        };
+        user.token_claims.grant_kind =
+            Some(agql_auth::AccessTokenGrantKind::SessionBoundDelegation);
+        user.token_claims.actor = Some(agql_auth::ActorIdentity {
+            sub: "ai-coordinator".to_owned(),
+            amr: vec!["service".to_owned()],
+        });
+        user.token_claims.resource_type = Some("graphql_operation".to_owned());
+        user.token_claims.resource_id = Some("records_count".to_owned());
+        user.token_claims.operation = Some(agql_auth::ExactOperationBinding::new(
+            "RecordsCount",
+            "sha256:reviewed-document",
+        ));
+        AuthPrincipal::User(user)
+    }
+
+    /// A sessionless access-token grant for the same user.
+    fn sessionless_request_principal(principal: &AuthPrincipal) -> AuthPrincipal {
+        let AuthPrincipal::User(mut user) = principal.clone() else {
+            unreachable!("approval fixture principal is a user session")
+        };
+        user.token_claims.grant_kind = Some(agql_auth::AccessTokenGrantKind::Sessionless);
+        AuthPrincipal::User(user)
+    }
+
+    #[tokio::test]
+    async fn delegated_request_principal_cannot_decide_an_approval() {
+        let fixture = fixture().await;
+        let (requested, _) = request_wait(&fixture, fixture.now + Duration::minutes(10)).await;
+        let id = requested.approval_id();
+        let view = fixture
+            .approval_service
+            .approval(&fixture.principal, id)
+            .await
+            .unwrap()
+            .unwrap();
+        for refused in [
+            delegated_request_principal(&fixture.principal),
+            sessionless_request_principal(&fixture.principal),
+        ] {
+            for decision in [AiApprovalDecision::Approve, AiApprovalDecision::Deny] {
+                let error = fixture
+                    .approval_service
+                    .decide_approval(
+                        &refused,
+                        DecideAiApprovalInput {
+                            id: id.0,
+                            decision,
+                            expected_version: view.row_version,
+                        },
+                    )
+                    .await
+                    .expect_err("a delegated or sessionless credential must not decide");
+                assert!(matches!(error, AiError::ReauthorizationFailed), "{error:?}");
+            }
+        }
+        let record = AiApprovalRecord::find_by_id(&fixture.database, &id.0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.state, "pending");
+        assert_eq!(record.row_version, view.row_version);
+    }
+
+    #[tokio::test]
+    async fn delegated_request_principal_cannot_revoke_an_approval() {
+        let fixture = fixture().await;
+        let (requested, _) = request_wait(&fixture, fixture.now + Duration::minutes(10)).await;
+        let id = requested.approval_id();
+        let view = fixture
+            .approval_service
+            .approval(&fixture.principal, id)
+            .await
+            .unwrap()
+            .unwrap();
+        let approved = fixture
+            .approval_service
+            .decide_approval(
+                &fixture.principal,
+                DecideAiApprovalInput {
+                    id: id.0,
+                    decision: AiApprovalDecision::Approve,
+                    expected_version: view.row_version,
+                },
+            )
+            .await
+            .expect("the session owner should approve");
+        for refused in [
+            delegated_request_principal(&fixture.principal),
+            sessionless_request_principal(&fixture.principal),
+        ] {
+            let error = fixture
+                .approval_service
+                .revoke_approval(
+                    &refused,
+                    RevokeAiApprovalInput {
+                        id: id.0,
+                        expected_version: approved.row_version,
+                    },
+                )
+                .await
+                .expect_err("a delegated or sessionless credential must not revoke");
+            assert!(matches!(error, AiError::ReauthorizationFailed), "{error:?}");
+        }
+        let record = AiApprovalRecord::find_by_id(&fixture.database, &id.0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.state, "approved");
+        assert_eq!(record.row_version, approved.row_version);
+    }
+
+    #[tokio::test]
+    async fn delegated_request_principal_cannot_read_approvals() {
+        let fixture = fixture().await;
+        let (requested, _) = request_wait(&fixture, fixture.now + Duration::minutes(10)).await;
+        let id = requested.approval_id();
+        let session_id = requested.lease().session_id();
+        let page = || {
+            KeysetConnectionInput {
+                first: Some(10),
+                ..Default::default()
+            }
+            .validate(10, 20)
+            .unwrap()
+        };
+        assert_eq!(
+            fixture
+                .approval_service
+                .approvals(&fixture.principal, session_id, page())
+                .await
+                .unwrap()
+                .edges
+                .len(),
+            1
+        );
+        for refused in [
+            delegated_request_principal(&fixture.principal),
+            sessionless_request_principal(&fixture.principal),
+        ] {
+            let error = fixture
+                .approval_service
+                .approval(&refused, id)
+                .await
+                .expect_err("a delegated or sessionless credential must not read a preview");
+            assert!(matches!(error, AiError::ReauthorizationFailed), "{error:?}");
+            let error = fixture
+                .approval_service
+                .approvals(&refused, session_id, page())
+                .await
+                .expect_err("a delegated or sessionless credential must not list approvals");
+            assert!(matches!(error, AiError::ReauthorizationFailed), "{error:?}");
+        }
     }
 }

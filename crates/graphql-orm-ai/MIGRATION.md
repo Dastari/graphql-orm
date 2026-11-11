@@ -3,12 +3,47 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-11-10
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.128.0 to 0.129.0: delegated and sessionless request credentials
+
+Approval, proposal and run-control roots now refuse a request credential whose
+`AccessTokenGrantKind` is `SessionBoundDelegation` or `Sessionless`. They
+return `ReauthorizationFailed`, whose GraphQL code is
+`AI_REAUTHORIZATION_FAILED`, before reading, decrypting or writing anything.
+This matches the existing `AiRunAuthorization` refusal at run issuance.
+
+Affected:
+
+- `OrmAiApprovalService`: `aiApprovals`, `aiApproval`, `decideAiApproval` and
+  `revokeAiApproval`.
+- `OrmAiProposalService`: `aiProposals`, `aiProposal`, `reviewAiProposal` and
+  `record_applied_outcome`.
+- `OrmAiRunCancellationService`, `OrmAiRunDispositionService` (retry and
+  acknowledgement) and `OrmAiToolCallResultPreviewService`.
+- Opening `OrmAiSubscriptionService` session-event streams and
+  `OrmAiInboxService` inbox streams.
+
+Previously these roots resolved a delegation to its parent user session and
+acted as that full user, ignoring the delegation's actor, resource and
+operation binding. Reads are refused as well as decisions, so a delegated
+credential cannot see approval or proposal previews.
+
+If a host sent delegated or sessionless access tokens to these roots, for
+example from a coordinator or review service, send the user's own
+session-bound access token (`AccessTokenGrantKind::UserSession` or no grant
+kind) instead. Ordinary user sessions and API-token principals are
+unaffected; API tokens remain subject to the host access policy, and recent MFA
+still requires a user session. Session submission without
+`AiRunAuthorization` is unchanged.
+
+No public Rust API, GraphQL SDL, persistent schema or data migration change.
+`AI_SCHEMA_MODULE_VERSION` is unchanged.
 
 ## 0.127.0 to 0.128.0: enforced runtime closure after restore
 

@@ -15147,6 +15147,33 @@ mod tests {
             Some(json!({"recordId": "54"}))
         );
         assert_eq!(preview.preview.0, json!({"record": {"recordId": "54"}}));
+        // Delegated and sessionless request credentials never read a preview
+        // through the full user they were derived from.
+        for grant_kind in [
+            agql_auth::AccessTokenGrantKind::SessionBoundDelegation,
+            agql_auth::AccessTokenGrantKind::Sessionless,
+        ] {
+            let AuthPrincipal::User(mut refused) = fixture.principal.clone() else {
+                unreachable!("tool fixture principal is a user session")
+            };
+            refused.token_claims.grant_kind = Some(grant_kind);
+            refused.token_claims.actor = Some(agql_auth::ActorIdentity {
+                sub: "ai-coordinator".to_owned(),
+                amr: vec!["service".to_owned()],
+            });
+            assert!(matches!(
+                preview_service
+                    .result_preview(
+                        &AuthPrincipal::User(refused),
+                        AiToolCallResultPreviewInput {
+                            session_id: fixture.lease.session_id().0,
+                            tool_call_id: persisted.id().0,
+                        },
+                    )
+                    .await,
+                Err(AiError::ReauthorizationFailed)
+            ));
+        }
         let result_only_preview_service = OrmAiToolCallResultPreviewService::new(
             fixture.database.clone(),
             fixture.runtime.clone(),

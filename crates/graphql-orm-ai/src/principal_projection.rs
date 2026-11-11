@@ -152,6 +152,43 @@ impl fmt::Debug for AiPrincipalProjection {
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+/// Refuses a request credential that must not act as the user behind it.
+///
+/// Current-principal resolution maps a session-bound delegation to the parent
+/// user session it is bound to, which drops the delegation's actor, resource
+/// and operation narrowing. A sessionless grant has no session to resolve.
+/// Approval, proposal, run-control, tool-result preview and stream roots
+/// rehydrate their caller this way before deciding or disclosing, so they
+/// accept neither grant, as run issuance does. The refusal carries no reason.
+pub(crate) fn refuse_delegated_request(principal: &AuthPrincipal) -> Result<(), AiError> {
+    match principal {
+        AuthPrincipal::User(user)
+            if matches!(
+                user.token_claims.grant_kind,
+                Some(
+                    agql_auth::AccessTokenGrantKind::Sessionless
+                        | agql_auth::AccessTokenGrantKind::SessionBoundDelegation
+                )
+            ) =>
+        {
+            Err(AiError::ReauthorizationFailed)
+        }
+        _ => Ok(()),
+    }
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+/// The reference a request root resolves for its caller, after
+/// `refuse_delegated_request`.
+pub(crate) fn request_admission_reference(
+    projection: Option<&AiPrincipalProjection>,
+    principal: &AuthPrincipal,
+) -> Result<PrincipalReference, AiError> {
+    refuse_delegated_request(principal)?;
+    admission_reference(projection, principal)
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 /// The reference an admitting service persists or resolves for a caller.
 pub(crate) fn admission_reference(
     projection: Option<&AiPrincipalProjection>,
@@ -164,7 +201,9 @@ pub(crate) fn admission_reference(
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
-/// Admits a durable stream. Without a projection the caller's own principal
+/// Admits a durable stream. Delegated and sessionless credentials are refused
+/// because the stream refreshes its principal through the resolver. Without a
+/// projection the caller's own principal
 /// and reference are used, unchanged. With one, the projected reference is
 /// strictly resolved before the first page and must come back exactly, for the
 /// same principal kind and subject; the stream starts from that current
@@ -174,6 +213,7 @@ pub(crate) async fn admit_stream(
     resolver: &dyn CurrentPrincipalResolver,
     principal: AuthPrincipal,
 ) -> Result<(PrincipalReference, AuthPrincipal), AiError> {
+    refuse_delegated_request(&principal)?;
     let Some(projection) = projection else {
         return Ok((principal.reference(), principal));
     };
