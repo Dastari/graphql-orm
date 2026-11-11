@@ -159,22 +159,28 @@ impl fmt::Debug for AiPrincipalProjection {
 /// and operation narrowing. A sessionless grant has no session to resolve.
 /// Approval, proposal, run-control, tool-result preview and stream roots
 /// rehydrate their caller this way before deciding or disclosing, so they
-/// accept neither grant, as run issuance does. The refusal carries no reason.
+/// accept neither grant, as run issuance does. A credential with no grant kind
+/// that still carries an actor or an exact operation binding is narrowed the
+/// same way and is refused before it reaches the host resolver. A resource
+/// binding alone is not refused: ordinary user sessions carry one. The refusal
+/// carries no reason.
 pub(crate) fn refuse_delegated_request(principal: &AuthPrincipal) -> Result<(), AiError> {
-    match principal {
-        AuthPrincipal::User(user)
-            if matches!(
-                user.token_claims.grant_kind,
-                Some(
-                    agql_auth::AccessTokenGrantKind::Sessionless
-                        | agql_auth::AccessTokenGrantKind::SessionBoundDelegation
-                )
-            ) =>
-        {
-            Err(AiError::ReauthorizationFailed)
-        }
-        _ => Ok(()),
+    let AuthPrincipal::User(user) = principal else {
+        return Ok(());
+    };
+    let claims = &user.token_claims;
+    let refused = match claims.grant_kind {
+        Some(
+            agql_auth::AccessTokenGrantKind::Sessionless
+            | agql_auth::AccessTokenGrantKind::SessionBoundDelegation,
+        ) => true,
+        Some(agql_auth::AccessTokenGrantKind::UserSession) => false,
+        None => claims.actor.is_some() || claims.operation.is_some(),
+    };
+    if refused {
+        return Err(AiError::ReauthorizationFailed);
     }
+    Ok(())
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -402,5 +408,69 @@ mod tests {
             admission_reference(None, &principal).unwrap(),
             principal.reference()
         );
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    #[test]
+    fn delegated_or_narrowed_request_credentials_are_refused() {
+        let refused = |principal: &AuthPrincipal| {
+            matches!(
+                refuse_delegated_request(principal),
+                Err(AiError::ReauthorizationFailed)
+            )
+        };
+        let with_claims = |edit: &dyn Fn(&mut AccessTokenMetadata)| {
+            let AuthPrincipal::User(mut user) = user("tenant-a") else {
+                unreachable!()
+            };
+            edit(&mut user.token_claims);
+            AuthPrincipal::User(user)
+        };
+        let actor = || agql_auth::ActorIdentity {
+            sub: "ai-coordinator".into(),
+            amr: vec!["service".into()],
+        };
+        let operation =
+            || agql_auth::ExactOperationBinding::new("RecordsCount", "sha256:reviewed-document");
+
+        // Ordinary sessions, with or without a grant kind or a resource binding.
+        assert!(!refused(&user("tenant-a")));
+        assert!(!refused(&with_claims(&|claims| claims.grant_kind = None)));
+        assert!(!refused(&with_claims(&|claims| {
+            claims.grant_kind = None;
+            claims.resource_type = Some("record".into());
+            claims.resource_id = Some("record-1".into());
+        })));
+        assert!(!refused(&with_claims(&|claims| {
+            claims.resource_type = Some("record".into());
+            claims.resource_id = Some("record-1".into());
+        })));
+
+        // Delegated and sessionless grants.
+        for kind in [
+            AccessTokenGrantKind::SessionBoundDelegation,
+            AccessTokenGrantKind::Sessionless,
+        ] {
+            assert!(refused(&with_claims(
+                &|claims| claims.grant_kind = Some(kind)
+            )));
+        }
+
+        // No grant kind, but narrowed by an actor or an exact operation.
+        assert!(refused(&with_claims(&|claims| {
+            claims.grant_kind = None;
+            claims.actor = Some(actor());
+        })));
+        assert!(refused(&with_claims(&|claims| {
+            claims.grant_kind = None;
+            claims.operation = Some(operation());
+        })));
+        assert!(refused(&with_claims(&|claims| {
+            claims.grant_kind = None;
+            claims.actor = Some(actor());
+            claims.operation = Some(operation());
+            claims.resource_type = Some("graphql_operation".into());
+            claims.resource_id = Some("records_count".into());
+        })));
     }
 }

@@ -98,7 +98,8 @@ details are bounded to 2 MiB of serialized JSON, including escaping.
 
 Approval reads, decisions and revocation accept only an ordinary user-session
 or API-token request credential. A session-bound delegation or sessionless
-grant is refused with `AI_REAUTHORIZATION_FAILED` before any read, decryption
+grant, or a credential with no grant kind that carries an actor or exact
+operation binding, is refused with `AI_REAUTHORIZATION_FAILED` before any read, decryption
 or write, as run issuance does: current-principal resolution maps a
 delegation to the parent user session, which would drop its actor, resource
 and operation narrowing. Reads refuse too, so a delegated credential can see

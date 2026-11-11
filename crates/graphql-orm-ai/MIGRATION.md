@@ -16,7 +16,10 @@ Approval, proposal and run-control roots now refuse a request credential whose
 `AccessTokenGrantKind` is `SessionBoundDelegation` or `Sessionless`. They
 return `ReauthorizationFailed`, whose GraphQL code is
 `AI_REAUTHORIZATION_FAILED`, before reading, decrypting or writing anything.
-This matches the existing `AiRunAuthorization` refusal at run issuance.
+This matches the existing `AiRunAuthorization` refusal at run issuance. A
+credential with no grant kind is refused the same way when it carries an actor
+or an exact operation binding; a resource binding alone, which ordinary user
+sessions carry, is not refused.
 
 Affected:
 

@@ -1219,4 +1219,36 @@ async fn delegated_request_principal_cannot_dispose_of_a_failure() {
             Err(AiError::ReauthorizationFailed)
         ));
     }
+
+    // Durable state is unchanged: no disposition record and no retry run.
+    let bootstrap = fixture
+        .sessions
+        .conversation_bootstrap(&fixture.owner, AiSessionId(session.id), 20, 20, 100)
+        .await
+        .expect("bootstrap should succeed");
+    assert!(
+        bootstrap.active_runs.is_empty(),
+        "a refused retry must not author a run"
+    );
+    let source = bootstrap
+        .terminal_runs
+        .iter()
+        .find(|run| run.id == sent.run_id)
+        .expect("the source run should stay terminal");
+    assert_eq!(source.state, "failed");
+    assert_eq!(source.failure_disposition, None);
+    // The owner can still dispose of it, so no refused attempt claimed it.
+    let retried = fixture
+        .dispositions
+        .retry_run(
+            &fixture.owner,
+            RetryAiRunInput {
+                session_id: session.id,
+                run_id: sent.run_id,
+                client_request_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .expect("the owner's own session should still admit the retry");
+    assert_eq!(retried.disposition, AiRunDisposition::Retried);
 }

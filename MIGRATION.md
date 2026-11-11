@@ -13,7 +13,8 @@ supersedes: []
 ## AI 0.128.0 to 0.129.0: delegated and sessionless request credentials
 
 Approval, proposal and run-control roots refuse `SessionBoundDelegation` and
-`Sessionless` request credentials with `AI_REAUTHORIZATION_FAILED`. Clients
+`Sessionless` request credentials, and credentials with no grant kind that
+carry an actor or exact operation binding, with `AI_REAUTHORIZATION_FAILED`. Clients
 that sent such tokens to approve, review, cancel, retry, read previews or open
 session and inbox streams must send the user's own session access token. No
 data migration is needed. See the
