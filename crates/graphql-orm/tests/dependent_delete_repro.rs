@@ -1898,3 +1898,81 @@ async fn hook_ddl_revalidates_catalogue_and_rolls_back_rows_and_events() {
         }
     }
 }
+/// ORM dependent deletes journal every row they change: the root delete, the
+/// cascaded child and leaf deletes and the set-null update. On PostgreSQL the
+/// database-side recorder writes the entries, and the dependent-delete trigger
+/// check accepts the recorder trigger.
+#[cfg(feature = "change-journal")]
+#[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
+async fn dependent_deletes_are_journaled() {
+    use graphql_orm::graphql::orm::{BackupChangeAction, ChangeWindow};
+    let pool = fixture("dependent-journal").await;
+    let hook = Hook::default();
+    let mut db = Database::with_mutation_hook(pool.clone(), hook.clone()).with_change_journal();
+    let policy = || Policy {
+        deny_entity: false,
+        deny_field: false,
+    };
+    db.set_entity_policy(policy());
+    db.set_field_policy(policy());
+    db.ensure_change_journal_recorder(&graphql_orm_entity_metadata())
+        .await
+        .unwrap();
+    let registry =
+        StaticDependentDeletes::<DefaultBackend>::new(RuntimeDependentLimits::new(10, 4).unwrap())
+            .register::<DeleteParent>()
+            .unwrap()
+            .register::<DeleteChild>()
+            .unwrap()
+            .register::<DeleteLeaf>()
+            .unwrap()
+            .register::<DeleteNull>()
+            .unwrap();
+    let schema = schema_builder(db.clone())
+        .data(AuthSubject::new("test-principal"))
+        .data(registry)
+        .finish();
+    let response = schema
+        .execute("mutation { deleteDeleteParent(id: \"parent\") { success } }")
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let mut entries = db
+        .export_changes(ChangeWindow {
+            after_snapshot_id: None,
+            until: i64::MAX,
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|change| {
+            (
+                change.entity_name,
+                change.table_name,
+                change.primary_key,
+                change.action == BackupChangeAction::Delete,
+            )
+        })
+        .collect::<Vec<_>>();
+    entries.sort();
+    let entry = |entity: &str, table: &str, key: &str, delete: bool| {
+        (
+            entity.to_string(),
+            table.to_string(),
+            key.to_string(),
+            delete,
+        )
+    };
+    assert_eq!(
+        entries,
+        vec![
+            entry("DeleteChild", "delete_children", "child", true),
+            entry("DeleteLeaf", "delete_leaves", "leaf", true),
+            entry("DeleteNull", "delete_nulls", "null", false),
+            entry("DeleteParent", "delete_parents", "parent", true),
+        ]
+    );
+}

@@ -247,6 +247,13 @@ impl crate::db::Database {
         database_identity(self.pool()).await
     }
 
+    /// Create the change journal table if it is missing and secure it.
+    ///
+    /// On PostgreSQL this enables RLS on the journal and, when the caller owns
+    /// it, drops the `INSERT` policy that earlier releases created. It does
+    /// not install the database-side recorder, without which PostgreSQL
+    /// journaled writes fail: apply the schema target, or call
+    /// [`Self::ensure_change_journal_recorder`] as the schema owner.
     pub async fn ensure_change_journal_table(&self) -> crate::Result<()> {
         if !cfg!(feature = "change-journal") {
             return Err(sqlx::Error::Protocol(
@@ -255,6 +262,49 @@ impl crate::db::Database {
             ));
         }
         ensure_change_journal_table(self.pool()).await
+    }
+
+    /// Create the change journal and, on PostgreSQL, the database-side
+    /// recorder for `entities`.
+    ///
+    /// On PostgreSQL the database, not the runtime role, records journal
+    /// entries: an `AFTER INSERT OR UPDATE OR DELETE` row trigger on each
+    /// single-key entity table calls the `SECURITY DEFINER` function
+    /// `graphql_orm.record_change_journal_entry()`, which runs as its owner
+    /// with `search_path = pg_catalog, pg_temp`. The journal has RLS enabled
+    /// and no policies; every privilege beyond `SELECT` other roles hold on
+    /// it, and `EXECUTE` on the recorder, is revoked. Run this, or apply the
+    /// schema target, as the
+    /// role that owns the entity tables and the journal; never as the runtime
+    /// role.
+    ///
+    /// On SQLite this is [`Self::ensure_change_journal_table`].
+    pub async fn ensure_change_journal_recorder(
+        &self,
+        entities: &[&'static EntityMetadata],
+    ) -> crate::Result<()> {
+        if !cfg!(feature = "change-journal") {
+            return Err(sqlx::Error::Protocol(
+                "change journal support requires the graphql-orm change-journal feature"
+                    .to_string(),
+            ));
+        }
+        #[cfg(feature = "postgres")]
+        {
+            let tables =
+                super::rls::change_journal_tables(&super::SchemaModel::from_entities(entities));
+            let mut tx = self.pool().begin().await?;
+            for statement in super::rls::postgres_change_journal_recorder_sql(&tables) {
+                sqlx::query(&statement).execute(&mut *tx).await?;
+            }
+            tx.commit().await?;
+            Ok(())
+        }
+        #[cfg(not(feature = "postgres"))]
+        {
+            let _ = entities;
+            ensure_change_journal_table(self.pool()).await
+        }
     }
 
     pub async fn export_changes(&self, window: ChangeWindow) -> crate::Result<Vec<BackupChange>> {
@@ -434,25 +484,11 @@ async fn ensure_change_journal_table(pool: &DbPool) -> crate::Result<()> {
     );
 
     #[cfg(feature = "postgres")]
-    let sql = format!(
-        "CREATE TABLE IF NOT EXISTS {} (
-            id UUID PRIMARY KEY,
-            entity_name TEXT NOT NULL,
-            table_name TEXT NOT NULL,
-            primary_key TEXT NOT NULL,
-            action TEXT NOT NULL,
-            changed_at BIGINT NOT NULL,
-            transaction_id TEXT NULL,
-            row_hash TEXT NULL,
-            actor_id TEXT NULL,
-            correlation_id TEXT NULL
-        )",
-        quote_identifier(CHANGE_JOURNAL_TABLE)
-    );
+    let sql = super::rls::postgres_change_journal_table_sql();
 
     sqlx::query(&sql).execute(pool).await?;
-    // The journal names every tenant's keys. Only privileged roles read it:
-    // a role subject to RLS may append entries but never read or alter them.
+    // The journal names every tenant's keys and drives restore deletes. Only
+    // privileged roles read or write it; the database-side recorder appends.
     #[cfg(feature = "postgres")]
     sqlx::query(&super::rls::postgres_ensure_change_log_rls_sql())
         .execute(pool)
@@ -480,6 +516,9 @@ where
             "the change journal cannot record composite-key entity {}; back it up with full snapshots",
             event.entity_name
         )));
+    }
+    if B::DIALECT == super::DatabaseBackend::Postgres {
+        return verify_postgres_change_journal_recorder(hook_ctx, event).await;
     }
 
     let action = match event.action {
@@ -520,6 +559,397 @@ where
     ];
     hook_ctx.execute(&sql, &values).await?;
     Ok(())
+}
+
+/// Turn on database-side journal recording for an ORM write transaction.
+///
+/// On PostgreSQL the recorder trigger records changes only in transactions
+/// that set [`super::rls::CHANGE_JOURNAL_SETTING`]. The setting selects
+/// transactions; it cannot name the entity, key or action of an entry. Restore
+/// imports never set it, so they do not journal.
+pub(crate) async fn begin_change_journal_transaction<B>(
+    db: &crate::db::Database<B>,
+    tx: &mut B::Transaction<'_>,
+) -> crate::Result<()>
+where
+    B: super::WriteBackend,
+{
+    if !cfg!(feature = "change-journal")
+        || B::DIALECT != super::DatabaseBackend::Postgres
+        || current_backend() != super::DatabaseBackend::Postgres
+        || !db.change_journal_enabled()
+    {
+        return Ok(());
+    }
+    // A utility statement: unlike `SELECT set_config(...)` it takes no MVCC
+    // snapshot, so callers that must lock before their first snapshot (such
+    // as dependent deletes) are unaffected.
+    B::execute_in_transaction(
+        tx,
+        &format!("SET LOCAL {} = 'on'", super::rls::CHANGE_JOURNAL_SETTING),
+        &[],
+    )
+    .await?;
+    Ok(())
+}
+
+impl<B> super::MutationContext<'_, B>
+where
+    B: super::WriteBackend,
+{
+    /// Check that PostgreSQL's change journal recorder will record writes to
+    /// `metadata`'s table in this transaction.
+    ///
+    /// Journaled ORM writes run this check once per table before they rely on
+    /// the recorder. Hosts can call it to fail fast at startup. It returns the
+    /// specific reason on failure. On SQLite it always succeeds.
+    ///
+    /// A current role that acts as the journal owner (is a member of the
+    /// owning role, as a superuser always is) passes the privilege part of the
+    /// check, because it can already do anything the checked privileges would
+    /// allow. `validate_target` reports such a role; run it with the runtime
+    /// pool.
+    #[doc(hidden)]
+    pub async fn check_change_journal_recorder(
+        &mut self,
+        metadata: &'static EntityMetadata,
+    ) -> crate::Result<()> {
+        if B::DIALECT != super::DatabaseBackend::Postgres {
+            return Ok(());
+        }
+        check_postgres_change_journal_recorder(self, metadata).await
+    }
+}
+
+/// Fail closed unless the PostgreSQL recorder records `event`'s table in this
+/// transaction. The check runs once per table per transaction.
+async fn verify_postgres_change_journal_recorder<B>(
+    hook_ctx: &mut super::MutationContext<'_, B>,
+    event: &MutationEvent,
+) -> crate::Result<()>
+where
+    B: super::WriteBackend,
+{
+    if hook_ctx
+        .change_journal_verified_tables
+        .contains(&event.table_name)
+    {
+        return Ok(());
+    }
+    check_postgres_change_journal_recorder(hook_ctx, event.metadata).await?;
+    hook_ctx
+        .change_journal_verified_tables
+        .push(event.table_name);
+    Ok(())
+}
+
+/// Privilege condition shared by the recorder check and its diagnosis: the
+/// current role either acts as the journal owner (is a member of it), or
+/// holds no table or column privilege on the journal beyond `SELECT` and no
+/// `EXECUTE` on the recorder, directly, through `PUBLIC`, or through any role
+/// it is a member of, including `NOINHERIT` memberships it can `SET ROLE` to.
+/// A role with `TRIGGER` on the journal could run code as its owner, one with
+/// `INSERT` or `UPDATE` could write entries if it bypasses RLS, and one with
+/// `EXECUTE` on the recorder could attach it to other triggers.
+const RECORDER_PRIVILEGES_CLEAN: &str = "(pg_catalog.pg_has_role(CURRENT_USER, j.relowner, 'MEMBER')
+          OR (NOT EXISTS (
+                  SELECT 1
+                  FROM (SELECT j.relacl AS acl
+                        UNION ALL
+                        SELECT att.attacl FROM pg_catalog.pg_attribute att
+                        WHERE att.attrelid = j.oid AND att.attnum > 0 AND NOT att.attisdropped) acls
+                  CROSS JOIN LATERAL pg_catalog.aclexplode(acls.acl) acl
+                  WHERE acl.privilege_type <> 'SELECT' AND acl.grantee <> j.relowner
+                    AND CASE WHEN acl.grantee = 0 THEN true
+                             ELSE pg_catalog.pg_has_role(CURRENT_USER, acl.grantee, 'MEMBER') END)
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM pg_catalog.aclexplode(COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner))) acl
+                  WHERE acl.privilege_type = 'EXECUTE' AND acl.grantee <> p.proowner
+                    AND CASE WHEN acl.grantee = 0 THEN true
+                             ELSE pg_catalog.pg_has_role(CURRENT_USER, acl.grantee, 'MEMBER') END)))";
+
+/// The registry is owned by the recorder's owner and grants no role other
+/// than its owner anything beyond `SELECT`, at table or column level.
+const REGISTRY_INTACT: &str = "EXISTS (
+              SELECT 1 FROM pg_catalog.pg_class g
+              WHERE g.oid = pg_catalog.to_regclass('graphql_orm.change_journal_tables')
+                AND g.relowner = p.proowner
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM (SELECT g.relacl AS acl
+                          UNION ALL
+                          SELECT att.attacl FROM pg_catalog.pg_attribute att
+                          WHERE att.attrelid = g.oid AND att.attnum > 0 AND NOT att.attisdropped) acls
+                    CROSS JOIN LATERAL pg_catalog.aclexplode(acls.acl) acl
+                    WHERE acl.grantee <> g.relowner AND acl.privilege_type <> 'SELECT'))";
+
+/// The recorder check for one table.
+///
+/// It requires the recording setting, a `session_replication_role` other
+/// than `replica`, and an intact recorder trigger on the table: enabled,
+/// unconditional, of the exact type, the only trigger on the table calling the
+/// unmodified recorder, which the table owner owns, with arguments naming
+/// this table's schema and name, entity, declared table and key, and an
+/// existing journal owned by that owner that carries no trigger or rule. The
+/// current role must not hold privileges that would let it run code as the
+/// journal owner (see [`RECORDER_PRIVILEGES_CLEAN`]).
+async fn check_postgres_change_journal_recorder<B>(
+    hook_ctx: &mut super::MutationContext<'_, B>,
+    metadata: &'static EntityMetadata,
+) -> crate::Result<()>
+where
+    B: super::WriteBackend,
+{
+    // The main check names the registry directly. Probe the schema and the
+    // registry first, each in its own statement, so a deployment that has
+    // not applied the plan yet, or a role without `USAGE` on the schema,
+    // gets a guided error rather than a raw lookup failure.
+    if let Some(message) = probe_postgres_change_journal_registry(hook_ctx).await? {
+        return Err(sqlx::Error::Protocol(format!(
+            "{message}; writes to {} would not be journaled",
+            metadata.table_name
+        )));
+    }
+    let key = metadata
+        .primary_keys
+        .first()
+        .copied()
+        .unwrap_or(metadata.primary_key);
+    let sql_type = super::SchemaModel::from_entities(&[metadata])
+        .tables
+        .into_iter()
+        .next()
+        .and_then(|table| {
+            table
+                .columns
+                .into_iter()
+                .find(|column| column.name == key)
+                .map(|column| column.sql_type)
+        })
+        .unwrap_or_default();
+    let mut expected_arguments = Vec::new();
+    for argument in [
+        metadata.entity_name,
+        metadata.table_name,
+        key,
+        super::rls::change_journal_key_encoding(&sql_type),
+    ] {
+        expected_arguments.extend_from_slice(argument.as_bytes());
+        expected_arguments.push(0);
+    }
+    // The table the ORM's own writes reach: the declared path rendered as the
+    // ORM renders it. A bare name must resolve in the journal's schema.
+    let table = super::rls::change_journal_orm_path(metadata.table_name);
+    let qualified = !super::dialect::identifier_path_is_bare(metadata.table_name);
+    let sql = format!(
+        "SELECT 1
+        FROM pg_catalog.pg_trigger tr
+        JOIN pg_catalog.pg_class t ON t.oid = tr.tgrelid
+        JOIN pg_catalog.pg_namespace tn ON tn.oid = t.relnamespace
+        JOIN pg_catalog.pg_proc p ON p.oid = tr.tgfoid
+        JOIN pg_catalog.pg_namespace pn ON pn.oid = p.pronamespace
+        CROSS JOIN LATERAL (
+            SELECT pg_catalog.convert_from(
+                pg_catalog.substr(tr.tgargs, 1, GREATEST(pg_catalog.position(tr.tgargs, '\\x00'::bytea) - 1, 0)),
+                'UTF8'
+            ) AS journal_schema,
+            pg_catalog.substr(tr.tgargs, pg_catalog.position(tr.tgargs, '\\x00'::bytea) + 1) AS entry_arguments
+        ) args
+        JOIN pg_catalog.pg_class j
+          ON j.oid = pg_catalog.to_regclass(pg_catalog.format('%I.%I', args.journal_schema, ?))
+        WHERE tr.tgrelid = pg_catalog.to_regclass(?)
+          AND tr.tgname = ? AND NOT tr.tgisinternal AND tr.tgenabled = 'O'
+          AND tr.tgtype = ? AND tr.tgqual IS NULL AND tr.tgnargs = 7
+          AND pn.nspname = 'graphql_orm' AND p.proname = ? AND p.pronargs = 0
+          AND p.prosecdef AND p.prosrc = ? AND p.proconfig = ARRAY[?]::pg_catalog.text[]
+          AND p.proowner = t.relowner AND j.relowner = p.proowner AND j.relkind = 'r'
+          AND pg_catalog.position(tr.tgargs, '\\x00'::bytea) > 1
+          AND args.entry_arguments = pg_catalog.convert_to(tn.nspname::pg_catalog.text, 'UTF8') || '\\x00'::bytea
+              || pg_catalog.convert_to(t.relname::pg_catalog.text, 'UTF8') || '\\x00'::bytea || ?
+          AND args.journal_schema NOT LIKE 'pg\\_temp%'
+          AND args.journal_schema NOT LIKE 'pg\\_toast\\_temp%'
+          AND (? OR tn.nspname::pg_catalog.text = args.journal_schema)
+          AND EXISTS (
+              SELECT 1 FROM graphql_orm.change_journal_tables r
+              WHERE r.journal_schema = args.journal_schema AND r.declared_table = ?
+                AND r.entity_name = ? AND r.key_column = ? AND r.relid::pg_catalog.oid = tr.tgrelid
+          )
+          AND {REGISTRY_INTACT}
+          AND NOT EXISTS (
+              SELECT 1 FROM pg_catalog.pg_trigger other
+              WHERE other.tgrelid = tr.tgrelid AND other.tgfoid = tr.tgfoid AND other.oid <> tr.oid
+          )
+          AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger jt WHERE jt.tgrelid = j.oid AND NOT jt.tgisinternal)
+          AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite jr WHERE jr.ev_class = j.oid)
+          AND {RECORDER_PRIVILEGES_CLEAN}
+          AND pg_catalog.current_setting(?, true) = 'on'
+          AND pg_catalog.current_setting('session_replication_role') <> 'replica'"
+    );
+    let values = vec![
+        SqlValue::String(CHANGE_JOURNAL_TABLE.to_string()),
+        SqlValue::String(table.clone()),
+        SqlValue::String(super::rls::CHANGE_JOURNAL_TRIGGER.to_string()),
+        SqlValue::Int(i64::from(super::rls::CHANGE_JOURNAL_TRIGGER_TYPE)),
+        SqlValue::String(super::rls::CHANGE_JOURNAL_FUNCTION.to_string()),
+        SqlValue::String(super::rls::CHANGE_JOURNAL_FUNCTION_BODY.to_string()),
+        SqlValue::String(super::rls::CHANGE_JOURNAL_FUNCTION_CONFIG.to_string()),
+        SqlValue::Bytes(expected_arguments),
+        SqlValue::Bool(qualified),
+        SqlValue::String(metadata.table_name.to_string()),
+        SqlValue::String(metadata.entity_name.to_string()),
+        SqlValue::String(key.to_string()),
+        SqlValue::String(super::rls::CHANGE_JOURNAL_SETTING.to_string()),
+    ];
+    if !hook_ctx.fetch_rows(&sql, &values).await?.is_empty() {
+        return Ok(());
+    }
+    Err(sqlx::Error::Protocol(
+        diagnose_postgres_change_journal_recorder(hook_ctx, metadata.table_name).await?,
+    ))
+}
+
+/// Describe why the registry cannot be read by this transaction, if it cannot.
+async fn probe_postgres_change_journal_registry<B>(
+    hook_ctx: &mut super::MutationContext<'_, B>,
+) -> crate::Result<Option<String>>
+where
+    B: super::WriteBackend,
+{
+    if hook_ctx
+        .fetch_rows(
+            "SELECT 1 WHERE pg_catalog.to_regnamespace('graphql_orm') IS NOT NULL
+               AND pg_catalog.has_schema_privilege(pg_catalog.to_regnamespace('graphql_orm')::pg_catalog.oid, 'USAGE')",
+            &[],
+        )
+        .await?
+        .is_empty()
+    {
+        return Ok(Some(
+            "the current role has no USAGE on schema graphql_orm, or it does not exist; apply the schema target or Database::ensure_change_journal_recorder as the schema owner, which grants USAGE to PUBLIC".to_string(),
+        ));
+    }
+    if hook_ctx
+        .fetch_rows(
+            "SELECT 1 WHERE pg_catalog.to_regclass('graphql_orm.change_journal_tables') IS NOT NULL",
+            &[],
+        )
+        .await?
+        .is_empty()
+    {
+        return Ok(Some(format!(
+            "the change journal registry {} does not exist; apply the schema target or Database::ensure_change_journal_recorder as the schema owner",
+            super::rls::CHANGE_JOURNAL_REGISTRY
+        )));
+    }
+    Ok(None)
+}
+
+/// Name the first reason the recorder check failed for `table_name`.
+async fn diagnose_postgres_change_journal_recorder<B>(
+    hook_ctx: &mut super::MutationContext<'_, B>,
+    table_name: &str,
+) -> crate::Result<String>
+where
+    B: super::WriteBackend,
+{
+    let setting = vec![SqlValue::String(
+        super::rls::CHANGE_JOURNAL_SETTING.to_string(),
+    )];
+    if hook_ctx
+        .fetch_rows(
+            "SELECT 1 WHERE pg_catalog.current_setting(?, true) = 'on'",
+            &setting,
+        )
+        .await?
+        .is_empty()
+    {
+        return Ok(format!(
+            "change journal recording is not enabled in this transaction ({} is not 'on'), so writes to {table_name} would not be journaled",
+            super::rls::CHANGE_JOURNAL_SETTING
+        ));
+    }
+    if hook_ctx
+        .fetch_rows(
+            "SELECT 1 WHERE pg_catalog.current_setting('session_replication_role') <> 'replica'",
+            &[],
+        )
+        .await?
+        .is_empty()
+    {
+        return Ok(format!(
+            "session_replication_role is replica, so the change journal trigger on {table_name} would not fire"
+        ));
+    }
+    // Resolved through the session search_path, as the journal itself is.
+    let journal = [
+        SqlValue::String(format!("\"{CHANGE_JOURNAL_TABLE}\"")),
+        SqlValue::String(super::rls::CHANGE_JOURNAL_FUNCTION.to_string()),
+    ];
+    if !hook_ctx
+        .fetch_rows(
+            "SELECT 1 FROM pg_catalog.pg_class j WHERE j.oid = pg_catalog.to_regclass(?)
+               AND (EXISTS (SELECT 1 FROM pg_catalog.pg_trigger jt WHERE jt.tgrelid = j.oid AND NOT jt.tgisinternal)
+                    OR EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite jr WHERE jr.ev_class = j.oid))",
+            &journal[..1],
+        )
+        .await?
+        .is_empty()
+    {
+        return Ok(format!(
+            "the change journal table carries a trigger or rule, which would run as its owner; remove it before journaling writes to {table_name}"
+        ));
+    }
+    let privileges = format!(
+        "SELECT 1 FROM pg_catalog.pg_class j
+         JOIN pg_catalog.pg_proc p
+           ON p.oid = pg_catalog.to_regprocedure(pg_catalog.format('graphql_orm.%I()', ?::pg_catalog.text))
+         WHERE j.oid = pg_catalog.to_regclass(?) AND NOT {RECORDER_PRIVILEGES_CLEAN}"
+    );
+    let privilege_values = vec![journal[1].clone(), journal[0].clone()];
+    if !hook_ctx
+        .fetch_rows(&privileges, &privilege_values)
+        .await?
+        .is_empty()
+    {
+        return Ok(format!(
+            "the current role holds a privilege other than SELECT on the change journal, or EXECUTE on graphql_orm.{}(); revoke it before journaling writes to {table_name}",
+            super::rls::CHANGE_JOURNAL_FUNCTION
+        ));
+    }
+    let registry_integrity = format!(
+        "SELECT 1 FROM pg_catalog.pg_proc p
+         WHERE p.oid = pg_catalog.to_regprocedure(pg_catalog.format('graphql_orm.%I()', ?::pg_catalog.text))
+           AND {REGISTRY_INTACT}"
+    );
+    if hook_ctx
+        .fetch_rows(&registry_integrity, &journal[1..])
+        .await?
+        .is_empty()
+    {
+        return Ok(format!(
+            "the change journal registry {} is not owned by the recorder's owner, or a role other than its owner holds a privilege on it beyond SELECT; revoke it, or apply the schema target, before journaling writes to {table_name}",
+            super::rls::CHANGE_JOURNAL_REGISTRY
+        ));
+    }
+    let registry = vec![SqlValue::String(table_name.to_string())];
+    if hook_ctx
+        .fetch_rows(
+            "SELECT 1 FROM pg_catalog.pg_class g
+             WHERE g.oid = pg_catalog.to_regclass('graphql_orm.change_journal_tables')
+               AND EXISTS (SELECT 1 FROM graphql_orm.change_journal_tables r WHERE r.declared_table = ?)",
+            &registry,
+        )
+        .await?
+        .is_empty()
+    {
+        return Ok(format!(
+            "the change journal registry has no binding for table {table_name}; apply the schema target or Database::ensure_change_journal_recorder as the schema owner"
+        ));
+    }
+    Ok(format!(
+        "the change journal recorder, or its registry binding, is missing or altered on table {table_name}; apply the schema target or Database::ensure_change_journal_recorder as the schema owner"
+    ))
 }
 
 async fn export_changes(pool: &DbPool, window: ChangeWindow) -> crate::Result<Vec<BackupChange>> {
@@ -644,6 +1074,15 @@ async fn import_table_rows(
 
     validate_import_rows(entity, rows)?;
     let mut tx = pool.begin().await?;
+    // Restore never journals, even when a role or database default turns the
+    // recording setting on for every session.
+    #[cfg(feature = "postgres")]
+    sqlx::query(&format!(
+        "SET LOCAL {} = 'off'",
+        super::rls::CHANGE_JOURNAL_SETTING
+    ))
+    .execute(&mut *tx)
+    .await?;
     let count = table_row_count_on(&mut tx, &entity.table_name).await?;
     if count != 0 {
         return Err(sqlx::Error::Protocol(format!(

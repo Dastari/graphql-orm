@@ -35,6 +35,8 @@ run_dependent_deletes() {
 
 run_sqlite() {
   cargo test -p graphql-orm --locked --no-default-features --features sqlite --test dependent_delete_repro --test dependent_delete_ui
+  cargo test -p graphql-orm --locked --no-default-features --features sqlite,change-journal \
+    --test dependent_delete_repro --test backup_roundtrip --test generated_error_sanitization
   cargo test -p graphql-orm --locked --no-default-features --features sqlite,runtime-graphql \
     --lib --test runtime_graphql --test runtime_strings --test runtime_queries --test runtime_relations \
     --test runtime_mutations --test runtime_migrations --test runtime_schema_ir --test runtime_migration_memory \
@@ -125,7 +127,9 @@ run_postgres_legacy() {
     --test uuid_contract \
     -- --include-ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features postgres,change-journal \
-    --test postgres_rls_coverage -- --include-ignored --test-threads=1
+    --test postgres_rls_coverage --test postgres_change_journal_paths \
+    --test dependent_delete_repro --test backup_roundtrip \
+    -- --include-ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features sqlite \
     --test federation_end_to_end_fixture -- --ignored node_lookup_through_the_router_on_owned_postgres
 }

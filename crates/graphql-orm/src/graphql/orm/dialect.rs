@@ -907,6 +907,14 @@ fn identifier_path_parts(identifier: &str) -> impl Iterator<Item = &str> {
     })
 }
 
+/// Whether a declared table path has a single part, with no schema.
+pub(crate) fn identifier_path_is_bare(path: &str) -> bool {
+    identifier_path_parts(path)
+        .filter(|part| !part.is_empty())
+        .count()
+        == 1
+}
+
 impl DatabaseBackend {
     fn reserved_identifiers(self) -> &'static [&'static str] {
         match self {

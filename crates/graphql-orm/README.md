@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.125.0 records PostgreSQL change-journal entries in the database
+instead of the runtime role, and journaled writes require the recorder
+trigger. Upgrade ORM/macros together; see the
+[root migration guide](../../MIGRATION.md#01250-postgresql-records-change-journal-entries-in-the-database).
+
 Version 0.124.0 evaluates operation assurance for runtime GraphQL query and
 mutation roots before request preparation, so a refused root reaches neither
 the database nor host read authorization. Assurance evaluators now receive an

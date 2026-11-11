@@ -46,6 +46,106 @@ Choosing the in-place path for a restored store re-opens consumed approvals.
 See the
 [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01270-to-01280-enforced-runtime-closure-after-restore).
 
+## 0.125.0: PostgreSQL records change-journal entries in the database
+
+Upgrade runtime and macros together. This affects PostgreSQL deployments that
+enable the `change-journal` feature. SQLite is unchanged.
+
+On PostgreSQL the database now records change-journal entries through a row
+trigger on each single-key entity table. The runtime role no longer writes
+`__graphql_orm_change_log` and needs no privilege on it.
+
+There is no mixed-version window. Applying the 0.125.0 plan drops the journal
+`INSERT` policy and revokes the grants that 0.124.x writers use, so their
+journaled writes fail immediately. A 0.125.0 writer's journaled writes fail
+until the plan has been applied. During any overlap between the two, journaled
+writes fail. Cut over in this order:
+
+1. Stop every 0.124.x process that writes through a journal-enabled
+   `Database`.
+2. As the role that owns the entity tables and the journal, apply the schema
+   target (`plan_schema_target` and `apply_schema_target` with the
+   `change-journal` feature), or call
+   `database.ensure_change_journal_recorder(&graphql_orm_entity_metadata())`.
+   Either one:
+   - creates the journal and the registry `graphql_orm.change_journal_tables`
+     if they are missing, and binds each single-key table in the registry;
+   - drops the `INSERT` policy that 0.120.0 added;
+   - revokes every table or column privilege other than `SELECT` that a role
+     other than its owner holds on the journal, and on the registry;
+   - grants `SELECT` on the registry, and `USAGE` on schema `graphql_orm`, to
+     `PUBLIC`, so every runtime role can run the pre-write check;
+   - creates `graphql_orm.record_change_journal_entry()`, revokes `EXECUTE` on
+     it from every role other than its owner, and drops any trigger calling it
+     under another name;
+   - installs the `graphql_orm_change_journal` trigger on every single-key
+     table.
+
+   `ensure_change_journal_table` alone does not install the recorder, and a
+   0.125.0 writer that starts before this step fails every journaled write
+   with an error naming the missing registry.
+
+   If a journal or registry grant survives the revoke, for example one made
+   by another grantor, the plan raises and rolls back without applying
+   anything. Revoke that grant as its grantor, then apply the plan again.
+3. Revoke what the plan does not manage: any `TRIGGER` privilege that
+   runtime roles hold on entity tables, and any recorder trigger that
+   validation reports which the applying role could not drop. Nothing drops a
+   correctly named recorder trigger on a table outside the target; validation
+   reports it as a warning, because another schema target may manage that
+   table. Drop it if none does. `SELECT`
+   grants on the journal are kept and survive re-applying the plan; with no
+   policies they read nothing unless the role also has `BYPASSRLS`, so grant
+   `SELECT` to a dedicated `BYPASSRLS` export role if one reads the journal,
+   and revoke it from runtime roles. Runtime roles need `USAGE` on schema
+   `graphql_orm`, which the plan grants to `PUBLIC`; if you revoke that,
+   grant `USAGE` to each runtime role instead. Do not grant `EXECUTE` on the
+   recorder: a blanket `GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA graphql_orm`
+   includes it, and journaled writes by that role then fail.
+4. Run `validate_target` with the runtime pool and refuse to serve on errors.
+   It reports:
+   - a remaining journal policy;
+   - journal table or column privileges beyond `SELECT`, and `EXECUTE` on the
+     recorder;
+   - a trigger or rule on the journal;
+   - a missing or modified recorder function;
+   - a missing registry, one not owned by the recorder's owner, and registry
+     table or column privileges beyond `SELECT` held by other roles;
+   - for each single-key table of the target, a missing registry binding, one
+     whose table no longer exists, one bound to another table than the ORM's
+     writes reach, or one with another entity or key column;
+   - a missing, altered or differently named recorder trigger, one recording
+     into another journal, or one on a table outside the target;
+   - a runtime role that acts as the journal owner.
+5. Start the 0.125.0 processes.
+
+Re-apply the schema target whenever entity tables are added, so new tables
+get the trigger.
+
+Behaviour changes:
+
+- Only rows changed in ORM write transactions on a journal-enabled `Database`
+  are recorded. Raw SQL outside those transactions and migrations are not, and
+  restore imports never are, even with a role default that turns recording on.
+- `changed_at` uses the database clock in whole seconds, not the application
+  clock.
+- An update that changes a primary key records a `delete` of the old key and
+  a `create` of the new one.
+- Tables owned by a different role than the recorder function fail journaled
+  writes. Keep the journal, the entity tables and the recorder under one
+  schema-owner role.
+- Partitioned tables are not supported for the journal: a partitioned
+  journal, or a partitioned entity table, makes journaled writes fail.
+- The journal requires PostgreSQL 13 or later.
+- Each journaled table is bound in the owner-maintained registry
+  `graphql_orm.change_journal_tables` to the table the ORM's writes reach:
+  the declared path is rendered as the ORM renders it, so `Users` binds to
+  `users` and `"Users"` to `"Users"`. A bare entity table name must resolve
+  in the journal's schema, which is where both the ORM's unqualified names and
+  the journal resolve; the plan fails for a bare-named table elsewhere, so
+  qualify its table path. Re-apply the target after renaming or moving an
+  entity table.
+
 ## 0.124.0: assurance evaluators take a request check
 
 Upgrade runtime and macros together. No data conversion is required.

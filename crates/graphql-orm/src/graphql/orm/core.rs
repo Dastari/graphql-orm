@@ -899,6 +899,12 @@ pub struct MutationContext<'tx, B: WriteBackend = DefaultWriteBackend> {
     deferred_events: Vec<Box<dyn DeferredEventEmitter<B>>>,
     deferred_actions: Vec<Box<dyn PostCommitActionRunner<B>>>,
     hook_depth: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Tables whose PostgreSQL change journal recorder this transaction has verified.
+    #[cfg_attr(
+        not(all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))),
+        allow(dead_code)
+    )]
+    pub(crate) change_journal_verified_tables: Vec<&'static str>,
 }
 
 /// Narrow transaction-bound capability for regulated retention maintenance.
@@ -1335,6 +1341,7 @@ where
             deferred_events: Vec::new(),
             deferred_actions: Vec::new(),
             hook_depth: Default::default(),
+            change_journal_verified_tables: Vec::new(),
         }
     }
 
@@ -1344,7 +1351,8 @@ where
         db: &'tx crate::db::Database<B>,
         mode: TransactionMode,
     ) -> crate::Result<Self> {
-        let tx = B::begin_write_transaction(db.pool(), mode).await?;
+        let mut tx = B::begin_write_transaction(db.pool(), mode).await?;
+        super::begin_change_journal_transaction(db, &mut tx).await?;
         Ok(Self::new_with_mode(db, tx, mode))
     }
 
@@ -1358,6 +1366,7 @@ where
     ) -> crate::Result<Self> {
         let mut tx = B::begin_write_transaction(db.pool(), mode).await?;
         B::apply_auth_context_to_write_transaction(&mut tx, auth).await?;
+        super::begin_change_journal_transaction(db, &mut tx).await?;
         Ok(Self::new_with_mode(db, tx, mode))
     }
 
@@ -1530,6 +1539,7 @@ where
             deferred_events,
             deferred_actions,
             hook_depth: _,
+            change_journal_verified_tables: _,
         } = self;
         B::commit_write_transaction(tx).await?;
         for event in deferred_events {

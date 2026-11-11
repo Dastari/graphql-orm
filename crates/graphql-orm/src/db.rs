@@ -1542,6 +1542,9 @@ where
                 B::clear_retention_context(&mut tx)
                     .await
                     .map_err(classify_transaction_error::<B>)?;
+                crate::graphql::orm::begin_change_journal_transaction(self, &mut tx)
+                    .await
+                    .map_err(classify_transaction_error::<B>)?;
                 let mutation = crate::graphql::orm::MutationContext::new_with_mode(
                     self,
                     tx,
@@ -1634,6 +1637,9 @@ where
                     .await
                     .map_err(classify_transaction_error::<B>)?;
                 B::apply_auth_context_to_write_transaction(&mut tx, auth)
+                    .await
+                    .map_err(classify_transaction_error::<B>)?;
+                crate::graphql::orm::begin_change_journal_transaction(self, &mut tx)
                     .await
                     .map_err(classify_transaction_error::<B>)?;
                 let mut context =
