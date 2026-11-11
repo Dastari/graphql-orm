@@ -3,12 +3,18 @@ title: "graphql-orm"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-10
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm`
+
+Version 0.123.0 makes runtime GraphQL reject date-time and JSON input whose
+canonical form cannot be read back: date-times that rounding or offsets move
+outside the years 0001 to 9999, and JSON whose re-serialized text exceeds the
+scalar text bound. Upgrade ORM/macros together; see the
+[root migration guide](../../MIGRATION.md#01230-runtime-date-time-and-json-values-must-be-readable).
 
 Version 0.122.0 extends operation assurance to runtime GraphQL roots,
 unregistered mutations under a default policy, Federation entity resolvers and

@@ -96,6 +96,19 @@ fn json_bounds(
     Ok(())
 }
 
+/// Accept a decoded value only if `encode` can return its canonical form,
+/// which is what is stored and later read. Canonicalization can lengthen the
+/// input: a date-time gains fractional digits, and serde_json re-serializes
+/// `1e15` as `1000000000000000.0`. A value bounded only by its input text
+/// could otherwise be stored and then fail every read of its field.
+fn readable(
+    value: RuntimeValue,
+    limits: RuntimeScalarLimits,
+) -> Result<RuntimeValue, RuntimeGraphqlError> {
+    encode(&value, limits)?;
+    Ok(value)
+}
+
 pub(super) fn decode(
     kind: RuntimeValueKind,
     value: &Value,
@@ -126,9 +139,13 @@ pub(super) fn decode(
             RuntimeValueKind::Uuid => uuid::Uuid::parse_str(v)
                 .map(RuntimeValue::Uuid)
                 .map_err(|_| invalid()),
-            RuntimeValueKind::DateTime if v.len() <= 64 => RuntimeDateTime::parse(v)
-                .map(RuntimeValue::DateTime)
-                .map_err(|_| invalid()),
+            // `parse` also rejects canonical years outside 0001 to 9999.
+            RuntimeValueKind::DateTime if v.len() <= 64 => readable(
+                RuntimeDateTime::parse(v)
+                    .map(RuntimeValue::DateTime)
+                    .map_err(|_| invalid())?,
+                limits,
+            ),
             RuntimeValueKind::Bytes => {
                 let max_encoded = limits
                     .max_decoded_bytes
@@ -149,8 +166,8 @@ pub(super) fn decode(
                 // serde_json's recursion guard also limits parsing before walking.
                 json_number_bounds(v)?;
                 let json = serde_json::from_str(v).map_err(|_| invalid())?;
-                json_bounds(&json, limits)?;
-                Ok(RuntimeValue::Json(json))
+                // Encoding applies the tree bounds and bounds the canonical text.
+                readable(RuntimeValue::Json(json), limits)
             }
             // Exact text for the field's definition; never rounded.
             RuntimeValueKind::Decimal(definition) => parse_runtime_decimal(definition, v)
@@ -355,6 +372,84 @@ mod tests {
                 value
             );
         }
+    }
+    /// Every accepted input value must encode, because its canonical form is
+    /// what is stored and later returned.
+    fn assert_round_trips(kind: RuntimeValueKind, text: &str, limits: RuntimeScalarLimits) {
+        let value = decode(kind, &Value::String(text.into()), limits).unwrap();
+        let encoded = encode(&value, limits).unwrap();
+        assert_eq!(decode(kind, &encoded, limits).unwrap(), value, "{text}");
+    }
+    #[test]
+    fn datetime_inputs_whose_canonical_year_leaves_0001_to_9999_are_rejected() {
+        let limits = RuntimeScalarLimits::default();
+        for text in [
+            "0001-01-01T00:00:00Z",
+            "9999-12-31T23:59:59.9999994Z",
+            "9999-12-31T23:59:59.999999Z",
+        ] {
+            assert_round_trips(RuntimeValueKind::DateTime, text, limits);
+        }
+        for text in [
+            "9999-12-31T23:59:59.9999995Z",
+            "9999-12-31T23:59:59.9999999Z",
+            "9999-12-31T23:00:00-01:00",
+            "0001-01-01T00:00:00+00:01",
+            "0000-01-01T00:00:00Z",
+            "9999-12-31T23:59:60Z",
+        ] {
+            assert!(
+                decode(
+                    RuntimeValueKind::DateTime,
+                    &Value::String(text.into()),
+                    limits
+                )
+                .is_err(),
+                "{text}"
+            );
+        }
+        // The 20-byte input is canonicalized to 27 bytes, which must also fit.
+        let short = RuntimeScalarLimits {
+            max_text_bytes: 26,
+            ..limits
+        };
+        assert!(
+            decode(
+                RuntimeValueKind::DateTime,
+                &Value::String("2026-01-01T00:00:00Z".into()),
+                short
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn json_inputs_are_bounded_by_their_canonical_serialization() {
+        // `1e15` is re-serialized as `1000000000000000.0`.
+        let limits = RuntimeScalarLimits {
+            max_text_bytes: 39,
+            ..Default::default()
+        };
+        assert_round_trips(RuntimeValueKind::Json, "[1e15,1e15]", limits);
+        let limits = RuntimeScalarLimits {
+            max_text_bytes: 38,
+            ..limits
+        };
+        assert_round_trips(RuntimeValueKind::Json, "[1e15]", limits);
+        assert!(
+            decode(
+                RuntimeValueKind::Json,
+                &Value::String("[1e15,1e15]".into()),
+                limits
+            )
+            .is_err()
+        );
+        // Under the default limits a 20 KiB input expands past 64 KiB.
+        let limits = RuntimeScalarLimits::default();
+        let text = format!("[{}]", vec!["1e15"; 4000].join(","));
+        assert!(text.len() <= limits.max_text_bytes);
+        assert!(decode(RuntimeValueKind::Json, &Value::String(text), limits).is_err());
+        let text = format!("[{}]", vec!["1e15"; 3000].join(","));
+        assert_round_trips(RuntimeValueKind::Json, &text, limits);
     }
     #[test]
     fn uuid_datetime_carry_and_json_text_are_canonical() {

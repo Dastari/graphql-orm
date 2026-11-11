@@ -261,7 +261,9 @@ impl<'de> serde::Deserialize<'de> for RuntimeFloat {
 ///
 /// Inputs use RFC 3339. Offsets are normalized to UTC, precision is rounded
 /// to PostgreSQL-compatible microseconds, and serialization always uses
-/// `YYYY-MM-DDTHH:MM:SS.ffffffZ`.
+/// `YYYY-MM-DDTHH:MM:SS.ffffffZ`. Parsing accepts only values whose canonical
+/// UTC year is 0001 to 9999, the range that SQLite text and PostgreSQL
+/// `timestamptz` both store and read back.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RuntimeDateTime(String);
 
@@ -271,12 +273,16 @@ impl RuntimeDateTime {
     /// # Errors
     ///
     /// Returns [`RuntimeRecordErrorCode::InvalidValue`] when `value` is not a
-    /// valid RFC 3339 date-time.
+    /// valid RFC 3339 date-time, or when offset normalization or rounding moves
+    /// it outside the years 0001 to 9999. For example,
+    /// `9999-12-31T23:59:59.9999995Z` rounds into year 10000 and is rejected.
+    /// So is the leap second `9999-12-31T23:59:60Z`, which PostgreSQL stores
+    /// as year 10000.
     pub fn parse(value: &str) -> Result<Self, RuntimeRecordError> {
         let parsed = chrono::DateTime::parse_from_rfc3339(value).map_err(|error| {
             RuntimeRecordError::new(RuntimeRecordErrorCode::InvalidValue).with_source(error)
         })?;
-        Ok(Self::from_utc(parsed.with_timezone(&Utc)))
+        Self::from_utc(parsed.with_timezone(&Utc)).within_portable_years()
     }
 
     /// Parse an RFC 3339 date-time exactly, normalizing its offset to UTC but
@@ -285,8 +291,9 @@ impl RuntimeDateTime {
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeRecordErrorCode::InvalidValue`] for an invalid date-time
-    /// or one with nonzero nanoseconds below microsecond precision.
+    /// Returns [`RuntimeRecordErrorCode::InvalidValue`] for an invalid date-time,
+    /// one with nonzero nanoseconds below microsecond precision, or one whose
+    /// UTC year is outside 0001 to 9999.
     pub fn parse_exact(value: &str) -> Result<Self, RuntimeRecordError> {
         let parsed = chrono::DateTime::parse_from_rfc3339(value).map_err(|error| {
             RuntimeRecordError::new(RuntimeRecordErrorCode::InvalidValue).with_source(error)
@@ -296,7 +303,46 @@ impl RuntimeDateTime {
                 RuntimeRecordErrorCode::InvalidValue,
             ));
         }
+        Self::from_utc(parsed.with_timezone(&Utc)).within_portable_years()
+    }
+
+    /// Decode stored SQLite text without the range check, so a row written
+    /// before the check existed can still be read. Strict RFC 3339 cannot
+    /// spell the signed extended years those rows may hold, such as
+    /// `+10000-01-01T00:00:00.000000Z`, so retry them with chrono's general
+    /// parser.
+    #[cfg(feature = "sqlite")]
+    pub(crate) fn parse_stored(value: &str) -> Result<Self, RuntimeRecordError> {
+        let parsed = chrono::DateTime::parse_from_rfc3339(value)
+            .or_else(|error| {
+                if value.starts_with(['+', '-']) {
+                    value.parse::<chrono::DateTime<chrono::FixedOffset>>()
+                } else {
+                    Err(error)
+                }
+            })
+            .map_err(|error| {
+                RuntimeRecordError::new(RuntimeRecordErrorCode::InvalidValue).with_source(error)
+            })?;
         Ok(Self::from_utc(parsed.with_timezone(&Utc)))
+    }
+
+    /// Keep the canonical form readable on every backend. It has exactly
+    /// 27 bytes for a four-digit year. Chrono can also produce year zero and
+    /// signed extended years: SQLite would store their text but strict
+    /// RFC 3339 cannot read it back, and PostgreSQL refuses both. PostgreSQL
+    /// also stores the final leap second of 9999 as year 10000.
+    fn within_portable_years(self) -> Result<Self, RuntimeRecordError> {
+        if self.0.len() == 27
+            && !self.0.starts_with("0000-")
+            && !self.0.starts_with("9999-12-31T23:59:60")
+        {
+            Ok(self)
+        } else {
+            Err(RuntimeRecordError::new(
+                RuntimeRecordErrorCode::InvalidValue,
+            ))
+        }
     }
 
     /// Canonicalize a UTC date-time to portable microsecond precision.
@@ -1310,7 +1356,7 @@ impl RuntimeRowDecoder for super::SqliteBackend {
                 .map(RuntimeValue::Bytes)
                 .unwrap_or(RuntimeValue::Null)),
             RuntimeValueKind::DateTime => match sqlite_get_optional::<String>(row, field)? {
-                Some(value) => RuntimeDateTime::parse(&value)
+                Some(value) => RuntimeDateTime::parse_stored(&value)
                     .map(RuntimeValue::DateTime)
                     .map_err(|error| error.for_field(field)),
                 None => Ok(RuntimeValue::Null),

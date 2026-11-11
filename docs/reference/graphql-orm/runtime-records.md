@@ -3,7 +3,7 @@ title: "Runtime values, records, handles, and row decoding"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-21
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -25,7 +25,13 @@ an explicit selected SQL `NULL`; it is not an omitted/default write state.
 `RuntimeDateTime` accepts RFC 3339, normalizes offsets to UTC, rounds to the
 microsecond precision PostgreSQL stores, and serializes with six fractional
 digits (`YYYY-MM-DDTHH:MM:SS.ffffffZ`). This gives SQLite text and PostgreSQL
-`TIMESTAMPTZ` the same logical value. It does not infer datetime, UUID, JSON,
+`TIMESTAMPTZ` the same logical value. `parse`, `parse_exact` and
+deserialization reject a value whose canonical UTC year is outside 0001 to
+9999, because neither backend reads it back. Normalization can move a
+four-digit input outside that range: `9999-12-31T23:59:59.9999995Z` rounds
+into year 10000, and `0001-01-01T00:00:00+01:00` is in year 0000 in UTC. The
+leap second `9999-12-31T23:59:60Z` is rejected too, because PostgreSQL stores
+it as year 10000. It does not infer datetime, UUID, JSON,
 or any other kind from an untrusted catalog value: decoding always follows the
 validated field's declared `RuntimeValueKind`.
 

@@ -3,7 +3,7 @@ title: Runtime GraphQL reads and checked composition
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-31
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -268,10 +268,10 @@ write authorities remain authoritative.
 | Kind | GraphQL wire representation |
 | --- | --- |
 | Integer and count | `RuntimeInt64`: canonical signed decimal string; full i64 range, no plus/leading zeros/negative zero/numeric coercion |
-| JSON | `RuntimeJson`: bounded valid JSON text on input and output; SQL NULL is GraphQL null; JSON null is non-null string `"null"` |
+| JSON | `RuntimeJson`: bounded valid JSON text on input and output; the input bound also applies to the canonical re-serialized text; SQL NULL is GraphQL null; JSON null is non-null string `"null"` |
 | UUID | `RuntimeUuid`: valid UUID string input, lowercase hyphenated output |
 | Bytes | `RuntimeBytes`: canonical padded RFC4648 base64, bounded decoded bytes |
-| DateTime | `RuntimeDateTime`: RFC3339 input, UTC `YYYY-MM-DDTHH:MM:SS.ffffffZ` output; existing microsecond rounding |
+| DateTime | `RuntimeDateTime`: RFC3339 input, UTC `YYYY-MM-DDTHH:MM:SS.ffffffZ` output; existing microsecond rounding; the canonical UTC year must be 0001 to 9999 |
 | Float | finite GraphQL Float, existing RuntimeFloat normalization |
 | Boolean/String | ordinary GraphQL Boolean/String, no string normalization |
 | Decimal | `Decimal` (the static decimal scalar name): strict decimal string or integer input for the field's definition, float numbers rejected; output the canonical string with exactly `scale` fractional digits. Registered with `RuntimeDecimalFilter` only when a composition has a decimal field |
@@ -281,6 +281,22 @@ must. Integer JSON tokens must fit i64 (negative) or u64 (nonnegative), and
 fractional/exponent tokens must fit finite f64. Integer overflow is rejected,
 rather than silently falling back to a rounded floating-point value. JSON strings include their JSON quotes in the scalar text. Non-null JSON
 fields can contain JSON null. Unloaded fields are errors, never SQL NULL.
+
+Input is accepted only when its canonical form, the form that is stored and
+returned, can be read back. serde_json re-serializes some numbers at greater
+length, for example `1e15` as `1000000000000000.0`, so `max_text_bytes` bounds
+the canonical JSON text as well as the input text. A date-time is rejected when
+offset normalization or microsecond rounding moves it outside the years 0001 to
+9999: `9999-12-31T23:59:59.9999995Z` rounds into year 10000, and
+`0001-01-01T00:00:00+01:00` is in year 0000 in UTC. The leap second
+`9999-12-31T23:59:60Z` is also rejected, because PostgreSQL stores it as year
+10000. These are rejected with `invalid_graphql_input` before any write;
+PostgreSQL refuses the first two forms.
+Earlier releases could store such a date-time as SQLite text, such as
+`+10000-01-01T00:00:00.000000Z`. The SQLite reader still decodes those rows,
+so they no longer fail every page that contains them. Because output must also
+be valid scalar input, the out-of-range field itself reports an error until the
+row is corrected.
 
 TypeScript scalar mappings are strings for Int64/JSON/UUID/Bytes/DateTime. Use
 BigInt for integers, exact JSON parsing where number fidelity matters, Uint8Array

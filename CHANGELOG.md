@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-10
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -15,6 +15,14 @@ This file is the authoritative user-facing release chronology. The former
 for historical context.
 
 ## Unreleased
+
+## 0.123.0
+
+ORM runtime/macros **0.123.0**.
+
+- **Fix/breaking:** runtime GraphQL rejects date-time and JSON input whose canonical form cannot be read back. A `RuntimeDateTime` input is rejected when offset normalization or microsecond rounding moves its UTC year outside 0001 to 9999. For example, `9999-12-31T23:59:59.9999995Z` rounds into year 10000. The leap second `9999-12-31T23:59:60Z` is also rejected, because PostgreSQL stores it as year 10000 and its reader then returned a value that runtime GraphQL could not output. Previously SQLite stored such a value as `+10000-01-01T00:00:00.000000Z`, which the reader could not parse, so every page containing the row failed for every caller; PostgreSQL refused the write. A `RuntimeJson` input is now also bounded by the length of its canonical re-serialization. Previously only the input text was checked, but output applies the same `max_text_bytes` bound to the re-serialized text, and serde_json prints `1e15` as `1000000000000000.0`. A document within the input bound could therefore be stored and then fail every read of the field. Both are rejected with `invalid_graphql_input` before any write.
+- **Breaking:** `RuntimeDateTime::parse`, `parse_exact` and deserialization return `InvalidValue` for a canonical year outside 0001 to 9999, which also covers runtime filter and cursor values.
+- **Fix:** the SQLite runtime reader still decodes date-times that earlier releases stored with a signed extended year or year 0000, so such a row no longer fails every page that contains it. Runtime GraphQL output must be valid scalar input, so the out-of-range field itself reports an error until the row is corrected, including year-0000 values that were previously returned. Static entity date and JSON fields are unaffected: they are stored without canonicalization or an output bound. See the 0.123.0 migration guide.
 
 ## 0.122.0
 
