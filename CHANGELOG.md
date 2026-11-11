@@ -16,6 +16,20 @@ for historical context.
 
 ## Unreleased
 
+## 0.122.0
+
+ORM runtime/macros **0.122.0**.
+
+- **Breaking:** operation assurance now covers every root it can see.
+  - Runtime create, update, delete and link mutations, `RuntimeHostField` roots, runtime collection roots, `node` and live subscriptions enforce the installed `AssuranceEnforcement` with their own coordinate. Mutations check before any write, and subscriptions before registration.
+  - A mutation missing from the registry is evaluated against the configured interactive mutation default instead of being allowed. Strict mode still refuses it.
+  - Federation entity resolvers enforce the entity's get-by-id root (for example `Query.zone`) as well as any classification registered for `Query._entities`.
+  - `#[graphql_orm_custom_operations]` installs `DeclaredAssuranceGuard` with the root's own kind on each described root, composing an existing host guard, or the root attribute's guard, after it with `.and`. A described root with more than one `#[graphql(...)]` attribute, a `flatten` or `derived(...)` resolver, or a `rename_fields` root attribute fails to compile. So does a described root whose async-graphql root attribute is missing, renamed through an import alias (for example `#[GqlObject]`), of the wrong kind for `kind`, duplicated, or placed above `#[graphql_orm_custom_operations]`.
+- **API:** `RuntimeGraphqlComposer::register_assurance_operations`, `OperationAssuranceRegistryBuilder::{new, register_runtime, contains}`, `OperationAssuranceRegistry::{config, unregistered_mutation_roots, ensure_mutation_roots_registered, ensure_schema_sdl}` and `AssuranceEnforcement::finish_schema`.
+  - `OperationAssuranceOrigin` gains `Runtime`; `AssuranceRegistryError` gains `UnregisteredMutations` and `InvalidSchema`.
+  - Under strict classification, `RuntimeGraphqlComposer::finish` with enforcement installed through `data` fails with `assurance_unclassified` unless every mutation root is registered and classified. `finish_schema` does the same for static schemas.
+- **Upgrade warning:** with a default interactive mutation policy, runtime mutations, host mutation fields and unregistered custom mutations now demand step-up too. See the 0.122.0 migration guide.
+
 ## 0.121.0
 
 ORM runtime/macros **0.121.0**.

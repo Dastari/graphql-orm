@@ -1,6 +1,7 @@
 use convert_case::{Case, Casing};
 use proc_macro::TokenStream;
 use quote::{ToTokens, quote};
+use syn::ext::IdentExt;
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
 use syn::{
@@ -180,35 +181,298 @@ impl Parse for CustomRootArgs {
     }
 }
 
+/// Every item of a target's `#[graphql(...)]` attributes, list forms included.
+fn graphql_metas(attrs: &[syn::Attribute]) -> syn::Result<Vec<Meta>> {
+    let mut metas = Vec::new();
+    for attr in attrs.iter().filter(|attr| attr.path().is_ident("graphql")) {
+        match &attr.meta {
+            Meta::Path(_) => {}
+            Meta::List(list) => {
+                metas.extend(list.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)?)
+            }
+            Meta::NameValue(other) => {
+                return Err(syn::Error::new_spanned(other, "expected `#[graphql(...)]`"));
+            }
+        }
+    }
+    Ok(metas)
+}
+
 fn graphql_attribute_value(attrs: &[syn::Attribute], key: &str) -> syn::Result<Option<String>> {
     let mut result = None;
-    for attr in attrs.iter().filter(|attr| attr.path().is_ident("graphql")) {
-        attr.parse_nested_meta(|nested| {
-            if nested.path.is_ident(key) {
-                let lit: syn::LitStr = nested.value()?.parse()?;
-                if result.replace(lit.value()).is_some() {
-                    return Err(nested.error(format!("duplicate graphql {key}")));
-                }
-            } else if nested.input.peek(Token![=]) {
-                let _: syn::Expr = nested.value()?.parse()?;
-            }
-            Ok(())
-        })?;
+    for meta in graphql_metas(attrs)? {
+        let Meta::NameValue(value) = meta else {
+            continue;
+        };
+        if !value.path.is_ident(key) {
+            continue;
+        }
+        let syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(lit),
+            ..
+        }) = &value.value
+        else {
+            return Err(syn::Error::new_spanned(
+                &value.value,
+                format!("graphql {key} must be a string"),
+            ));
+        };
+        if result.replace(lit.value()).is_some() {
+            return Err(syn::Error::new_spanned(
+                &value.path,
+                format!("duplicate graphql {key}"),
+            ));
+        }
     }
     Ok(result)
 }
 
+/// The source text of a `guard` value, as async-graphql reads it: a string
+/// literal holds the expression, any other value is the expression itself.
+fn guard_source(value: &syn::Expr) -> String {
+    match value {
+        syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(lit),
+            ..
+        }) => lit.value(),
+        expression => expression.to_token_stream().to_string(),
+    }
+}
+
+/// The async-graphql root attribute a path names, when it is one this macro
+/// recognises: `Object` or `Subscription`, bare (without a leading `::`) or
+/// under `async_graphql::` or `graphql_orm::async_graphql::` (with or without
+/// a leading `::`).
+fn root_attribute_kind(path: &syn::Path) -> Option<&'static str> {
+    let segments = path
+        .segments
+        .iter()
+        .map(|segment| {
+            segment
+                .arguments
+                .is_none()
+                .then(|| segment.ident.to_string())
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let (last, prefix) = segments.split_last()?;
+    let kind = match last.as_str() {
+        "Object" => "Object",
+        "Subscription" => "Subscription",
+        _ => return None,
+    };
+    let prefix = prefix.iter().map(String::as_str).collect::<Vec<_>>();
+    match prefix.as_slice() {
+        [] if path.leading_colon.is_none() => Some(kind),
+        ["async_graphql"] | ["graphql_orm", "async_graphql"] => Some(kind),
+        _ => None,
+    }
+}
+
+/// Check the root's own `#[Object(...)]` or `#[Subscription(...)]` attribute
+/// and return its impl-level guard, if any.
+///
+/// The root attribute must be exactly one recognised path of the declared
+/// kind, so its guard and `rename_fields` are always seen: an alias or a
+/// missing attribute fails to compile rather than hiding them.
+///
+/// async-graphql applies an impl-level guard only to resolvers without their
+/// own guard. Every described resolver receives a guard, so the impl-level one
+/// is composed into it explicitly. `rename_fields` would rename the exposed
+/// fields away from their catalogued coordinates, so it is rejected.
+fn root_attribute_guard(item: &ItemImpl, kind: &str) -> syn::Result<Option<String>> {
+    let expected = if kind == "subscription" {
+        "Subscription"
+    } else {
+        "Object"
+    };
+    let mut roots = item
+        .attrs
+        .iter()
+        .filter_map(|attr| root_attribute_kind(attr.path()).map(|found| (attr, found)));
+    let Some((attr, found)) = roots.next() else {
+        return Err(syn::Error::new(
+            item.impl_token.span,
+            format!(
+                "`#[graphql_orm_custom_operations]` must be followed by \
+                 `#[async_graphql::{expected}]` (or `#[{expected}]`, \
+                 `#[graphql_orm::async_graphql::{expected}]`); renamed imports are not \
+                 recognised"
+            ),
+        ));
+    };
+    if let Some((extra, _)) = roots.next() {
+        return Err(syn::Error::new_spanned(
+            extra,
+            "a described custom root takes a single async-graphql root attribute",
+        ));
+    }
+    if found != expected {
+        return Err(syn::Error::new_spanned(
+            attr,
+            format!("`kind = \"{kind}\"` requires `#[{expected}]`, not `#[{found}]`"),
+        ));
+    }
+    let mut guard = None;
+    let Meta::List(list) = &attr.meta else {
+        return Ok(None);
+    };
+    for meta in list.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)? {
+        if meta.path().is_ident("rename_fields") {
+            return Err(syn::Error::new_spanned(
+                meta,
+                "described custom roots do not support `rename_fields`; name renamed \
+                 resolvers with `#[graphql(name = \"...\")]` so the catalogued and \
+                 exposed coordinates agree",
+            ));
+        }
+        if let Meta::NameValue(value) = &meta
+            && value.path.is_ident("guard")
+        {
+            guard = Some(guard_source(&value.value));
+        }
+    }
+    Ok(guard)
+}
+
+/// Reject resolver flags that expose fields under coordinates other than the
+/// catalogued one, or serve fields without the resolver's guard.
+fn reject_unmodelled_resolver_flags(attrs: &[syn::Attribute]) -> syn::Result<()> {
+    for meta in graphql_metas(attrs)? {
+        let path = meta.path();
+        if path.is_ident("flatten") {
+            return Err(syn::Error::new_spanned(
+                meta,
+                "described custom roots do not support `#[graphql(flatten)]`: the flattened \
+                 fields would be served without this resolver's assurance guard",
+            ));
+        }
+        if path.is_ident("derived") {
+            return Err(syn::Error::new_spanned(
+                meta,
+                "described custom roots do not support `#[graphql(derived(...))]`: a derived \
+                 field is exposed under an uncatalogued name; describe it as its own resolver",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Install operation assurance on one described resolver.
+///
+/// async-graphql reads only the first `#[graphql(...)]` attribute of a
+/// resolver, so a described root must have at most one. The installed guard is
+/// always `DeclaredAssuranceGuard::new(<root kind>)`; a host guard is kept and
+/// composed after it with `GuardExt::and`, so the host guard cannot replace,
+/// weaken, or misclassify the assurance check.
+fn install_assurance_guard(
+    method: &mut syn::ImplItemFn,
+    assurance_guard: &str,
+    root_guard: Option<&str>,
+) -> syn::Result<()> {
+    let compose = |host: &str| {
+        format!("::graphql_orm::async_graphql::GuardExt::and({assurance_guard}, {host})")
+    };
+    // Without its own guard, async-graphql would have applied the root's.
+    let default_guard = root_guard.map_or_else(|| assurance_guard.to_owned(), compose);
+    // `single_graphql_attribute` has already rejected any later attribute.
+    let Some(attr) = method
+        .attrs
+        .iter_mut()
+        .find(|attr| attr.path().is_ident("graphql"))
+    else {
+        let guard = syn::LitStr::new(&default_guard, method.sig.ident.span());
+        method
+            .attrs
+            .push(syn::parse_quote!(#[graphql(guard = #guard)]));
+        return Ok(());
+    };
+    let span = attr
+        .path()
+        .get_ident()
+        .map_or_else(proc_macro2::Span::call_site, proc_macro2::Ident::span);
+    let mut items = match &attr.meta {
+        Meta::Path(_) => Punctuated::<Meta, Token![,]>::new(),
+        Meta::List(list) => {
+            list.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)?
+        }
+        Meta::NameValue(other) => {
+            return Err(syn::Error::new_spanned(
+                other,
+                "expected `#[graphql(...)]` on a described custom root",
+            ));
+        }
+    };
+    let mut guards = items
+        .iter_mut()
+        .filter_map(|item| match item {
+            Meta::NameValue(value) if value.path.is_ident("guard") => Some(value),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if guards.len() > 1 {
+        return Err(syn::Error::new_spanned(
+            &guards[1].path,
+            "duplicate graphql guard",
+        ));
+    }
+    if let Some(guard) = guards.pop() {
+        let composed = compose(&guard_source(&guard.value));
+        guard.value = syn::Expr::Lit(syn::ExprLit {
+            attrs: Vec::new(),
+            lit: syn::Lit::Str(syn::LitStr::new(&composed, span)),
+        });
+    } else {
+        let guard = syn::LitStr::new(&default_guard, span);
+        items.push(syn::parse_quote!(guard = #guard));
+    }
+    attr.meta = syn::parse_quote!(graphql(#items));
+    Ok(())
+}
+
+/// Reject a resolver with more than one `#[graphql(...)]` attribute.
+///
+/// async-graphql reads only the first, so a flag such as `skip` or `entity`, a
+/// name or a guard in a later attribute would mean one thing to this macro and
+/// another to the schema. This runs before any other attribute is read.
+fn single_graphql_attribute(attrs: &[syn::Attribute]) -> syn::Result<()> {
+    if let Some(extra) = attrs
+        .iter()
+        .filter(|attr| attr.path().is_ident("graphql"))
+        .nth(1)
+    {
+        return Err(syn::Error::new_spanned(
+            extra,
+            "a described custom root takes a single `#[graphql(...)]` attribute; \
+             async-graphql reads only the first",
+        ));
+    }
+    Ok(())
+}
+
+/// A boolean resolver flag as async-graphql reads it: `key` or `key = <bool>`.
 fn has_graphql_flag(attrs: &[syn::Attribute], key: &str) -> syn::Result<bool> {
     let mut found = false;
-    for attr in attrs.iter().filter(|attr| attr.path().is_ident("graphql")) {
-        attr.parse_nested_meta(|nested| {
-            if nested.path.is_ident(key) {
-                found = true;
-            } else if nested.input.peek(Token![=]) {
-                let _: syn::Expr = nested.value()?.parse()?;
+    for meta in graphql_metas(attrs)? {
+        if !meta.path().is_ident(key) {
+            continue;
+        }
+        found = match &meta {
+            Meta::Path(_) => true,
+            Meta::NameValue(syn::MetaNameValue {
+                value:
+                    syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Bool(value),
+                        ..
+                    }),
+                ..
+            }) => value.value,
+            other => {
+                return Err(syn::Error::new_spanned(
+                    other,
+                    format!("graphql {key} must be a flag or a boolean"),
+                ));
             }
-            Ok(())
-        })?;
+        };
     }
     Ok(found)
 }
@@ -430,6 +694,16 @@ pub(crate) fn expand(args: TokenStream, input: TokenStream) -> TokenStream {
         Ok(item) => item,
         Err(error) => return error.to_compile_error().into(),
     };
+    let kind_variant = match args.kind.as_str() {
+        "query" => "Query",
+        "mutation" => "Mutation",
+        _ => "Subscription",
+    };
+    // Every described root enforces its own assurance coordinate first.
+    let assurance_guard = format!(
+        "::graphql_orm::graphql::assurance::DeclaredAssuranceGuard::new(\
+         ::graphql_orm::graphql::orm::GraphqlOperationKind::{kind_variant})"
+    );
     let kind = match args.kind.as_str() {
         "query" => quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Query },
         "mutation" => quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation },
@@ -475,6 +749,10 @@ pub(crate) fn expand(args: TokenStream, input: TokenStream) -> TokenStream {
             .expect("custom mutation AI execution metadata must validate")
         }
     });
+    let root_guard = match root_attribute_guard(&item, &args.kind) {
+        Ok(guard) => guard,
+        Err(error) => return error.to_compile_error().into(),
+    };
     let self_ty = item.self_ty.clone();
     let mut descriptors = Vec::new();
     let mut field_names = std::collections::BTreeSet::new();
@@ -485,6 +763,11 @@ pub(crate) fn expand(args: TokenStream, input: TokenStream) -> TokenStream {
         let ImplItem::Fn(method) = impl_item else {
             continue;
         };
+        if let Err(error) = single_graphql_attribute(&method.attrs)
+            .and_then(|()| reject_unmodelled_resolver_flags(&method.attrs))
+        {
+            return error.to_compile_error().into();
+        }
         match has_graphql_flag(&method.attrs, "skip") {
             Ok(true) => continue,
             Ok(false) => {}
@@ -494,8 +777,19 @@ pub(crate) fn expand(args: TokenStream, input: TokenStream) -> TokenStream {
             Ok(options) => options,
             Err(error) => return error.to_compile_error().into(),
         };
+        let entity = match has_graphql_flag(&method.attrs, "entity") {
+            Ok(entity) => entity,
+            Err(error) => return error.to_compile_error().into(),
+        };
+        if !entity {
+            if let Err(error) =
+                install_assurance_guard(method, &assurance_guard, root_guard.as_deref())
+            {
+                return error.to_compile_error().into();
+            }
+        }
         let explicit = semantic_options.description.clone();
-        let method_name = method.sig.ident.to_string();
+        let method_name = method.sig.ident.unraw().to_string();
         let field_name = match graphql_attribute_value(&method.attrs, "name") {
             Ok(Some(name)) => name,
             Ok(None) => method_name.to_case(Case::Camel),
@@ -551,7 +845,7 @@ pub(crate) fn expand(args: TokenStream, input: TokenStream) -> TokenStream {
                 .to_compile_error()
                 .into();
             };
-            let rust_name = pat.ident.to_string();
+            let rust_name = pat.ident.unraw().to_string();
             let graphql_name = match graphql_attribute_value(&argument.attrs, "name") {
                 Ok(Some(name)) => name,
                 Ok(None) => rust_name.to_case(Case::Camel),

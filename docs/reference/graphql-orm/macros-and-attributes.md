@@ -627,8 +627,15 @@ can wrap it in a generic descriptor extension.
 
 ## Handwritten root semantic metadata
 
-Place `#[graphql_orm_custom_operations]` before the corresponding
-`async-graphql` `Object`, `Mutation`, or `Subscription` attribute:
+Place `#[graphql_orm_custom_operations]` directly before exactly one
+`async-graphql` root attribute: `Object` for `kind = "query"` or
+`kind = "mutation"`, and `Subscription` for `kind = "subscription"`. Write it as
+`Object`, `async_graphql::Object`, `::async_graphql::Object`,
+`graphql_orm::async_graphql::Object` or `::graphql_orm::async_graphql::Object`,
+or the same forms of `Subscription`. A renamed import
+such as `use async_graphql::Object as GqlObject`, a missing root attribute, a
+kind mismatch or a second root attribute fails to compile, because the macro
+must read the root's `guard` and `rename_fields`:
 
 ```rust,ignore
 #[graphql_orm_custom_operations(kind = "query", authorization = true)]
@@ -659,6 +666,18 @@ attributes, then `async-graphql`'s default camel-case convention. Descriptions
 use the same explicit/doc/fallback rules and are emitted into SDL. Unknown attributes,
 unbounded descriptions, malformed GraphQL types, duplicate root coordinates,
 and stale fingerprints fail closed.
+
+Each described root, except `#[graphql(entity)]` resolvers, also gets
+`DeclaredAssuranceGuard::new(GraphqlOperationKind::…)` with the root's own kind,
+so it enforces an installed `AssuranceEnforcement`. A root's own `guard` is kept
+and composed after it, as `DeclaredAssuranceGuard::new(…).and(<host guard>)`.
+A root-level `guard` on the `Object` or `Subscription` attribute is composed the
+same way into resolvers without their own guard. A described root takes a single
+`#[graphql(...)]` attribute; async-graphql reads only the first, so the macro
+rejects others. It also rejects `flatten` and `derived(...)` on described
+resolvers, and `rename_fields` on the root attribute, because each would serve a
+field without its guard or under an uncatalogued coordinate. See
+[operation assurance](../../architecture/operation-assurance.md).
 
 Custom scalar and enum result leaves carry an explicit project-neutral
 `result_disclosure`. Without a declaration they default to

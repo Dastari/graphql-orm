@@ -3,7 +3,7 @@ title: "Operation Assurance And Step-Up Classification"
 kind: architecture
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-11-10
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -28,6 +28,12 @@ runtime.
 not fail on unclassified mutations. Installing no `AssuranceEnforcement` is
 also a compatibility no-op. Queries and subscriptions never inherit a recent-
 authentication requirement.
+
+A configured default covers every mutation that reaches enforcement. That
+includes a mutation the registry does not contain, which is treated as
+interactive. Strict classification instead rejects an unregistered or
+unclassified mutation as misconfigured. A registry knows only the operations it
+was built from, so register every root the schema serves.
 
 Strict adoption is explicit:
 
@@ -89,9 +95,45 @@ async fn rotate_credential(&self) -> bool {
 }
 ```
 
+`#[graphql_orm_custom_operations]` adds this guard, with the root's own kind,
+to each described root. A host guard is composed after it as
+`DeclaredAssuranceGuard::new(…).and(HostGuard)`, so the host guard cannot
+replace, weaken or misclassify it. A guard on the root's `Object` or
+`Subscription` attribute is composed the same way into resolvers without
+their own guard. A described root takes a single `#[graphql(...)]` attribute.
+It cannot use `flatten`, which serves another object's fields without the
+resolver's guard, or `derived`, which exposes the resolver under an
+uncatalogued name. The root's attribute cannot use `rename_fields`; name
+resolvers explicitly instead.
+
+The root must carry exactly one recognised async-graphql root attribute of its
+declared kind (`Object` for queries and mutations, `Subscription` for
+subscriptions), directly below `#[graphql_orm_custom_operations]`. A missing
+attribute, an import alias such as `#[GqlObject]`, a kind mismatch, a second
+root attribute, or a root attribute placed above the macro fails to compile, so
+the root's guard and `rename_fields` are never silently unread.
+
 Generated query, mutation, and subscription resolvers call the same enforcement
 hook automatically. Without installed enforcement the call is a no-op, which
 preserves existing schemas.
+
+Enforcement keys on the exact root coordinate. A resolver that runs below
+another root passes its own coordinate to `enforce_operation_assurance`.
+Generated Federation entity resolvers, emitted for an entity's
+`federation_key`, run below `_entities`: they enforce the entity's get-by-id
+query root and any classification registered for `_entities`. A handwritten
+`#[graphql(entity)]` resolver gets no assurance check from the ORM. Generated
+dependent deletes use their own delete root.
+
+## Runtime GraphQL Roots
+
+Runtime collection roots, `node`, generated and link mutations,
+`RuntimeHostField` roots and live subscriptions enforce their own coordinate.
+Mutations are checked before their write, and subscriptions before
+registration. `RuntimeGraphqlComposer::register_assurance_operations` adds
+module roots as `runtime` origin operations and host fields as `custom`
+operations. Coordinates the builder already holds keep their registration.
+See [runtime GraphQL](../reference/graphql-orm/runtime-graphql.md#operation-assurance).
 
 ## Authoritative Server Enforcement
 
@@ -132,6 +174,13 @@ Use `registry.ensure_complete()` or `registry.audit().assert_complete()` in a
 schema test. Only exposed mutations participate in this completeness gate;
 queries and subscriptions may remain unclassified.
 
+Completeness covers registered operations only. To prove the registry covers
+the served schema, call `registry.ensure_schema_sdl(&schema.sdl())`, or
+finish a static schema with `enforcement.finish_schema(builder)`. Under strict
+classification the latter fails with `UnregisteredMutations` for any
+unregistered Mutation root field. A runtime composer applies the same check in
+`finish` when strict enforcement is installed through `data`.
+
 `ASSURANCE_DIRECTIVE_DEFINITIONS` contains the provider-neutral directive
 definitions. `registry.schema_metadata()` emits a directive use for every
 required or exempt field, for example:
@@ -149,7 +198,7 @@ operation identity.
 
 - generated fingerprint or stable custom operation identity;
 - query/mutation/subscription kind and exact `Root.field` coordinate;
-- generated/custom origin and actor class;
+- generated, runtime, or custom origin and actor class;
 - policy ID for requirements;
 - explicit reason for exemptions; and
 - a format version and SHA-256 fingerprint.

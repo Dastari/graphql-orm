@@ -331,6 +331,7 @@ pub(crate) fn federation_entity_resolver_tokens(
     relation_preload_single: &proc_macro2::TokenStream,
     keys: &[ResolvedFederationKey],
     scope_enforcements: &[proc_macro2::TokenStream],
+    single_read_field: &str,
 ) -> proc_macro2::TokenStream {
     let resolvers = keys
         .iter()
@@ -382,6 +383,14 @@ pub(crate) fn federation_entity_resolver_tokens(
                 <#struct_name as ::graphql_orm::graphql::orm::Entity>::entity_name(),
             )?;
                     #scope_enforcement
+                    // The context field is `_entities`. This resolver stands in for
+                    // the entity's get-by-id root, so enforce that coordinate, and
+                    // any classification registered for `_entities` itself.
+                    ::graphql_orm::graphql::assurance::enforce_operation_assurance(
+                        ctx,
+                        ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
+                        #single_read_field,
+                    )?;
                     ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
                         ctx,
                         ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
@@ -498,6 +507,7 @@ pub(crate) fn node_id_entity_resolver_tokens(
     relation_preload_single: &proc_macro2::TokenStream,
     parts: &[NodeIdPart],
     scope_enforcement: &proc_macro2::TokenStream,
+    single_read_field: &str,
 ) -> proc_macro2::TokenStream {
     let typename = struct_name.to_string();
     let part_count = parts.len();
@@ -564,6 +574,13 @@ pub(crate) fn node_id_entity_resolver_tokens(
                 return Ok(None);
             }
             #scope_enforcement
+            // The context field is `_entities`: enforce the get-by-id root's
+            // coordinate and any classification registered for `_entities`.
+            ::graphql_orm::graphql::assurance::enforce_operation_assurance(
+                ctx,
+                ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
+                #single_read_field,
+            )?;
             ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
                 ctx,
                 ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,

@@ -53,8 +53,10 @@
 //! projection, disclosure policy, or runtime limit.
 //!
 //! Generated root resolvers also call the runtime's provider-neutral assurance
-//! hook before database work. The hook preserves existing behavior when no
-//! enforcement is installed. Assurance policy IDs, custom-field registration,
+//! hook before database work. Federation entity resolvers pass their entity's
+//! get-by-id root coordinate, and `#[graphql_orm_custom_operations]` adds a
+//! `DeclaredAssuranceGuard` to each described root. The hook preserves
+//! existing behavior when no enforcement is installed. Assurance policy IDs, custom-field registration,
 //! schema defaults, completeness audits, directives, and manifests belong to
 //! the runtime `OperationAssuranceRegistry` rather than derive attributes.
 //!

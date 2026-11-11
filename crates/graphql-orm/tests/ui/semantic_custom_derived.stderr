@@ -1,0 +1,5 @@
+error: described custom roots do not support `#[graphql(derived(...))]`: a derived field is exposed under an uncatalogued name; describe it as its own resolver
+ --> tests/ui/semantic_custom_derived.rs:9:15
+  |
+9 |     #[graphql(derived(name = "secret_text", into = "String"))]
+  |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

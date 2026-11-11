@@ -1,0 +1,5 @@
+error: `kind = "subscription"` requires `#[Subscription]`, not `#[Object]`
+ --> tests/ui/semantic_custom_root_kind_mismatch.rs:7:1
+  |
+7 | #[graphql_orm::async_graphql::Object]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

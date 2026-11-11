@@ -345,9 +345,11 @@ impl<B: RuntimeMutationBackend> RuntimeGraphqlComposer<B> {
     }
     pub fn mutation_field(mut self, field: RuntimeHostField) -> Result<Self, RuntimeGraphqlError> {
         let (name, field, semantic) = field.into_parts(GraphqlOperationKind::Mutation)?;
-        if !super::module::valid_name(&name, false) || !self.mutation_roots.insert(name) {
+        if !super::module::valid_name(&name, false) || !self.mutation_roots.insert(name.clone()) {
             return Err(RuntimeGraphqlError::new("name_collision"));
         }
+        self.host_roots
+            .insert((GraphqlOperationKind::Mutation, name));
         self.mutation = Some(
             self.mutation
                 .take()
@@ -370,12 +372,22 @@ fn fields<B: RuntimeMutationBackend>(
                 return Err(RuntimeGraphqlError::new("name_collision"));
             }
             let database = database.clone();
+            let root = name.clone();
             let field = Field::new(
                 &name,
                 TypeRef::named_nn(format!("{object}MutationPayload")),
                 move |ctx| {
                     let database = database.clone();
-                    FieldFuture::new(async move { execute(database, ctx).await.map(Some) })
+                    let root = root.clone();
+                    FieldFuture::new(async move {
+                        // Step-up precedes the write attempt and its cached outcome.
+                        crate::graphql::assurance::enforce_operation_assurance(
+                            ctx.ctx,
+                            GraphqlOperationKind::Mutation,
+                            &root,
+                        )?;
+                        execute(database, ctx).await.map(Some)
+                    })
                 },
             )
             .description(match link {

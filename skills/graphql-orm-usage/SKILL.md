@@ -586,6 +586,9 @@ See [strict authorization](../../docs/reference/graphql-orm/strict-authorization
 - **Metadata grants nothing.** Operation catalogues, fingerprints, directives and
   `authorization = true` describe a contract and enforce none of it. Assurance requirements do nothing
   until `AssuranceEnforcement` is installed, and they supplement authorization rather than replace it.
+  The registry only knows what it was built from: add runtime roots with
+  `RuntimeGraphqlComposer::register_assurance_operations` and check static schemas with
+  `AssuranceEnforcement::finish_schema`. An unregistered mutation still gets the default policy.
 - **The router doesn't protect joined fields.** Its gate covers root fields. A joined entity is
   authorized only by the subgraph that owns it, so an entity that isn't universally readable needs its
   own policy there.
