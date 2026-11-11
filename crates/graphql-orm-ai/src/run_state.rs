@@ -381,10 +381,20 @@ pub struct AiRunRetryEvidence {
 ///   `provider_pre_transport_failed` and `provider_budget_denied` codes also
 ///   require this whole-run absence proof: they prove only the last turn was
 ///   unstarted and cannot erase an earlier possible provider/tool effect.
+/// - A run closed with `principal_reference_delegated`, in any terminal state,
+///   is refused. Its stored principal reference was a delegated or sessionless
+///   credential's, and the run was closed before any worker acted on it.
 pub fn classify_run_retry(
     evidence: AiRunRetryEvidence,
     outcome_code: Option<&str>,
 ) -> AiRunRetryAdmission {
+    if outcome_code == Some(crate::principal_projection::DELEGATED_REFERENCE_CODE) {
+        return if evidence.produced_assistant_output {
+            AiRunRetryAdmission::RefusedAlreadyAnswered
+        } else {
+            AiRunRetryAdmission::RefusedUncertain
+        };
+    }
     match evidence.terminal {
         AiRunTerminalEvent::RecoveryRequired => {
             if evidence.produced_assistant_output {

@@ -297,7 +297,7 @@ impl AiSubscriptionService for OrmAiSubscriptionService {
                         }
                     }
                     Tick::Reauthorize => {
-                        match resolver.resolve(&principal_reference).await {
+                        match crate::principal_projection::resolve_current_reference(resolver.as_ref(), &principal_reference).await {
                             Ok(resolved) => {
                                 grace_deadline = None;
                                 grace_attempt = 0;

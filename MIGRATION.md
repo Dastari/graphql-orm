@@ -10,6 +10,17 @@ supersedes: []
 
 # Migration Guide
 
+## AI 0.130.0 to 0.131.0: legacy delegated stored principal references
+
+Runs and session-title work queued before 0.130.0 with a delegated or
+sessionless principal reference now fail closed automatically. Workers refuse
+to resolve such a reference, and the claim paths close these rows with
+`principal_reference_delegated` before any provider, tool, approval or host
+callback. The 0.130.0 manual cleanup remains valid but is no longer required.
+Hosts that match error codes should add `principal_reference_delegated`. No
+data migration is needed. See the
+[AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01300-to-01310-legacy-delegated-stored-principal-references).
+
 ## AI 0.129.0 to 0.130.0: delegated and sessionless session credentials
 
 Message submission, every other `OrmAiSessionService` root, attachment roots and inbox pages refuse

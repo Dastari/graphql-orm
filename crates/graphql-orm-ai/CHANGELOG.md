@@ -10,6 +10,18 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.131.0
+
+- **Security:** fail closed on work queued before 0.130.0 with a delegated or sessionless stored principal reference. Such a reference has a grant kind of `SessionBoundDelegation` or `Sessionless`, or no grant kind and an actor subject or exact operation binding. Workers resolved it to the parent user session and acted with the full user's authority until the reference expired. Every resolution of a principal reference now goes through one shared check that refuses this shape before the host `CurrentPrincipalResolver` is called, with the same `ReauthorizationFailed` an expired or revoked reference produces. This covers run execution, provider egress, tools, rules, checkpoints, context compaction, provider output and sessions, UI intents, proposals, approvals, capability delivery, OpenAI background reconciliation, subscription waits and title work.
+- **Security:** the claim paths close these legacy rows before any lease reaches a worker, with the safe reason code `principal_reference_delegated`. Nothing is resolved, decrypted, protected or sent to a provider, and no tool runs or approval is consumed.
+  - `OrmAiRunService::claim_next` finishes a queued or retry-scheduled run as `Failed` in its claim transaction, with an attempt outcome, an `ai.run.principal_refused` audit event and the canonical metadata-only `run_failed` event, and claims the next eligible run instead.
+  - `OrmAiRunService::claim_next_approved` never resumes such a run. It expires the approval, audited as `ai.approval.expired` with the same reason code.
+  - `OrmAiApprovalWaitReconciliationService::reconcile_waits` cancels a pending or approved wait without resolving the reference or calling the wait or content-protection policy, expires a live approval, and reports it in the new `AiApprovalWaitReconciliationReport::cancelled_delegated` count. Only the canonical `run_cancelled` event is written. A malformed wait still closes as `RecoveryRequired`, with the same code.
+  - `OrmAiSessionTitleWorkService::claim_next` fails queued, retry-scheduled or expired-lease title work in place and claims the next eligible job.
+- **Behaviour change:** `classify_run_retry` refuses a run closed with `principal_reference_delegated` in any terminal state, so these runs are not retryable. The owner can send the message again with their own session credential.
+
+No current path can create such a row, so only legacy rows are affected. The 0.130.0 manual cleanup steps remain valid and are now enforced automatically. No GraphQL SDL, persistent schema or data migration change; `AI_SCHEMA_MODULE_VERSION` is unchanged. See the migration guide.
+
 ## Unreleased - 0.130.0
 
 - **Breaking:** refuse delegated and sessionless principals on session submission. `OrmAiSessionService::send_message` persisted the request credential's admission reference as the new run's principal. Unless the host installed `with_run_authorization`, a `SessionBoundDelegation` or `Sessionless` credential could therefore queue a run: `with_submission_admission` accepted it because the host resolver returned the same reference. Workers then resolved that reference to the parent user session, so session authorization, content protection and the approval consumption that resumes the run acted as the full user. Submission now returns `ReauthorizationFailed` (`AI_REAUTHORIZATION_FAILED`) for such a credential, and for one with no grant kind that carries an actor or an exact operation binding, before any policy call, encryption or write, whether or not run authorization or submission admission is configured. No message, run, title work, event or inbox event is stored.

@@ -887,11 +887,12 @@ impl AuthenticatedToolBridge {
             let target = self
                 .targets
                 .validate_contract(&request.contract, &request.document)?;
-            let principal = self
-                .principal_resolver
-                .resolve(principal_reference)
-                .await
-                .map_err(|_| ToolExecutionError::Reauthorization)?;
+            let principal = crate::principal_projection::resolve_current_reference(
+                self.principal_resolver.as_ref(),
+                principal_reference,
+            )
+            .await
+            .map_err(|_| ToolExecutionError::Reauthorization)?;
             let authorization = self
                 .authorization_policy
                 .authorize_request(&principal, descriptor, &request)
@@ -954,11 +955,12 @@ impl AuthenticatedToolBridge {
         }
         self.targets
             .validate_contract(&request.contract, &request.document)?;
-        let principal = self
-            .principal_resolver
-            .resolve(principal_reference)
-            .await
-            .map_err(|_| ToolExecutionError::Reauthorization)?;
+        let principal = crate::principal_projection::resolve_current_reference(
+            self.principal_resolver.as_ref(),
+            principal_reference,
+        )
+        .await
+        .map_err(|_| ToolExecutionError::Reauthorization)?;
         let authorization = self
             .authorization_policy
             .authorize_request(&principal, descriptor, request)

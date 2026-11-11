@@ -773,11 +773,12 @@ impl OrmAiContextCompactionService {
         lease: &AiRunLease,
         scope: &AiScope,
     ) -> Result<(agql_auth::ResolvedPrincipal, AiContentProtectionPolicy), AiError> {
-        let principal = self
-            .principal_resolver
-            .resolve(lease.principal_reference())
-            .await
-            .map_err(|_| AiError::ReauthorizationFailed)?;
+        let principal = crate::principal_projection::resolve_current_reference(
+            self.principal_resolver.as_ref(),
+            lease.principal_reference(),
+        )
+        .await
+        .map_err(|_| AiError::ReauthorizationFailed)?;
         let now = self.clock.now();
         if principal.resolved_at() > now
             || now - principal.resolved_at() > self.limits.maximum_principal_age

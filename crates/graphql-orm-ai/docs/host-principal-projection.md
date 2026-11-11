@@ -77,6 +77,12 @@ admission or any write, whether or not admission or run authorization is
 installed. Every other session root and the inbox page refuse the same
 credentials before any read.
 
+Workers apply the same rule to stored references. Every resolution of a
+persisted run or title-work reference refuses that delegated shape before the
+host resolver is called, as it refuses an expired reference, and the claim
+paths close legacy rows queued before 0.130.0 with
+`principal_reference_delegated` (AI 0.131.0).
+
 Without these methods every service behaves exactly as before.
 
 ## Composition with run authorization

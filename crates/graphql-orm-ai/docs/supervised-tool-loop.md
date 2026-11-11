@@ -111,6 +111,12 @@ refuse them too, so a delegated credential can neither queue a run that
 workers resolve to the full user nor read what it cannot stream. Approval and
 review clients must use the user's own session credential.
 
+A wait stored before 0.130.0 with such a credential's reference never resumes.
+`claim_next_approved` expires its approval, and the approval-wait reconciler
+cancels the run with `principal_reference_delegated` without resolving the
+reference or calling the wait or content-protection policy. Queued runs with
+that reference fail at `claim_next` with the same code.
+
 ## Proved refusals and uncertain execution
 
 A trusted execution owner may attest refusal before admission, dispatch,

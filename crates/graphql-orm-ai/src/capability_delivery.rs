@@ -1072,10 +1072,12 @@ impl AiCapabilityDiscoveryBroker {
         &self,
         reference: &PrincipalReference,
     ) -> Result<ResolvedPrincipal, AiError> {
-        self.principal_resolver
-            .resolve(reference)
-            .await
-            .map_err(|_| AiError::ReauthorizationFailed)
+        crate::principal_projection::resolve_current_reference(
+            self.principal_resolver.as_ref(),
+            reference,
+        )
+        .await
+        .map_err(|_| AiError::ReauthorizationFailed)
     }
 }
 
