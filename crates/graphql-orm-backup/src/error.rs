@@ -41,6 +41,53 @@ pub enum BackupError {
     #[error("restore target is not empty")]
     RestoreTargetNotEmpty,
 
+    /// The repository handle has no [`crate::ManifestAuthenticator`], so
+    /// manifests can be neither trusted nor sealed. Nothing was read or written.
+    #[error("manifest authentication is not configured for this repository")]
+    ManifestAuthenticationRequired,
+
+    /// Host key material was rejected.
+    #[error("invalid manifest key: {reason}")]
+    InvalidManifestKey { reason: String },
+
+    /// A manifest's seal is missing, malformed, made with an unknown key, or
+    /// does not match its contents.
+    #[error("manifest authentication failed for {key}: {reason}")]
+    ManifestAuthenticationFailed { key: String, reason: String },
+
+    /// An unauthenticated legacy manifest was refused by the configured
+    /// [`crate::LegacyManifestPolicy`].
+    #[error("unauthenticated legacy manifest for snapshot {snapshot_id} refused by policy")]
+    LegacyManifestRefused { snapshot_id: uuid::Uuid },
+
+    #[error("unsupported manifest format version {format_version} at {key}")]
+    UnsupportedManifestFormat { key: String, format_version: u32 },
+
+    /// A manifest names a different snapshot than the path it was read from.
+    #[error("manifest at {key} names snapshot {actual}, expected {expected}")]
+    ManifestSnapshotMismatch {
+        key: String,
+        expected: uuid::Uuid,
+        actual: uuid::Uuid,
+    },
+
+    /// A manifest entry points outside the namespace it owns.
+    #[error("invalid manifest entry in snapshot {snapshot_id}: {reason}")]
+    InvalidManifestEntry {
+        snapshot_id: uuid::Uuid,
+        reason: String,
+    },
+
+    /// An object's live-store key is not a valid key, or is outside the
+    /// sink's [`crate::RestoreKeyScope`].
+    #[error("restore target key {storage_key} rejected: {reason}")]
+    RestoreTargetRejected { storage_key: String, reason: String },
+
+    /// The live store already holds different content at an object's key.
+    /// Object restore never overwrites it.
+    #[error("restore target already holds different content at {storage_key}")]
+    RestoreObjectConflict { storage_key: String },
+
     #[error(
         "restore schema is incompatible: backup backend/hash {backup_backend}/{backup_schema_hash}, target backend/hash {target_backend}/{target_schema_hash}"
     )]

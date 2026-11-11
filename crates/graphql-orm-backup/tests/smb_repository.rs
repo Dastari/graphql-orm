@@ -51,7 +51,8 @@ async fn full_smb_snapshot_lifecycle_and_locking() {
             .await
             .expect("repository SMB connect"),
     );
-    let repository = BlobStoreBackupRepository::new(repository_store);
+    let repository = BlobStoreBackupRepository::new(repository_store)
+        .with_manifest_authenticator(test_manifest_authenticator());
     let restore_store: Arc<dyn BlobStore> = Arc::new(
         SmbStorageBackend::connect(config(format!("{test_root}/restored-objects")))
             .await
@@ -96,7 +97,10 @@ async fn full_smb_snapshot_lifecycle_and_locking() {
     restore_objects(
         &repository,
         &loaded,
-        &BlobStoreRestoreObjectSink::new(Arc::clone(&restore_store)),
+        &BlobStoreRestoreObjectSink::new(
+            Arc::clone(&restore_store),
+            graphql_orm_backup::RestoreKeyScope::prefixes(["originals"]).expect("restore scope"),
+        ),
     )
     .await
     .expect("restore stored object");
@@ -109,6 +113,46 @@ async fn full_smb_snapshot_lifecycle_and_locking() {
             .await
             .expect("collect restored object"),
         objects.bytes
+    );
+
+    // A second read that serves other bytes fails at the end of the stream, so
+    // SMB's conditional create discards the file instead of committing it.
+    let swap_store: Arc<dyn BlobStore> = Arc::new(
+        SmbStorageBackend::connect(config(format!("{test_root}/swap-restore")))
+            .await
+            .expect("swap restore SMB connect"),
+    );
+    let swapping = SwappingRepository {
+        inner: repository.clone(),
+        key: loaded.objects[0].content_key.clone(),
+        forged: Bytes::from(vec![0x66; objects.bytes.len()]),
+        reads: Arc::default(),
+    };
+    let error = restore_objects(
+        &swapping,
+        &loaded,
+        &BlobStoreRestoreObjectSink::new(
+            Arc::clone(&swap_store),
+            graphql_orm_backup::RestoreKeyScope::prefixes(["originals"]).expect("restore scope"),
+        ),
+    )
+    .await
+    .expect_err("swapped object refused");
+    assert!(matches!(error, BackupError::ChecksumMismatch { .. }));
+    assert!(
+        !swap_store
+            .blob_exists("originals/large-object.bin")
+            .await
+            .expect("swap target exists check"),
+        "SMB discarded the aborted conditional create"
+    );
+    assert!(
+        swap_store
+            .list_blobs("")
+            .await
+            .expect("list swap store")
+            .is_empty(),
+        "no temporary file remains"
     );
 
     let second_id = Uuid::new_v4();
@@ -149,6 +193,42 @@ async fn full_smb_snapshot_lifecycle_and_locking() {
         .await
         .expect("delete second snapshot");
     assert_eq!(deleted.retained_snapshots, 0);
+}
+
+/// Serves the genuine object on the first read and forged bytes afterwards.
+struct SwappingRepository {
+    inner: BlobStoreBackupRepository,
+    key: String,
+    forged: Bytes,
+    reads: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait]
+impl BackupRepository for SwappingRepository {
+    fn manifest_authenticator(&self) -> Option<&graphql_orm_backup::ManifestAuthenticator> {
+        self.inner.manifest_authenticator()
+    }
+    async fn get_blob_stream(&self, key: &str) -> Result<StorageByteStream, BackupError> {
+        if key == self.key && self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0 {
+            return Ok(StorageByteStream::from_bytes(self.forged.clone()));
+        }
+        self.inner.get_blob_stream(key).await
+    }
+    async fn get_blob(&self, key: &str) -> Result<Bytes, BackupError> {
+        self.inner.get_blob(key).await
+    }
+    async fn put_blob(&self, key: &str, body: Bytes) -> Result<(), BackupError> {
+        self.inner.put_blob(key, body).await
+    }
+    async fn blob_exists(&self, key: &str) -> Result<bool, BackupError> {
+        self.inner.blob_exists(key).await
+    }
+    async fn list_blobs(&self, prefix: &str) -> Result<Vec<String>, BackupError> {
+        self.inner.list_blobs(prefix).await
+    }
+    async fn delete_blob(&self, key: &str) -> Result<(), BackupError> {
+        self.inner.delete_blob(key).await
+    }
 }
 
 fn request(snapshot_id: Uuid, created_at: i64) -> FullBackupRequest {
@@ -257,4 +337,10 @@ impl BackupObjectIndex for TestObjects {
             chunks,
         ))))
     }
+}
+
+fn test_manifest_authenticator() -> graphql_orm_backup::ManifestAuthenticator {
+    graphql_orm_backup::ManifestAuthenticator::new(
+        graphql_orm_backup::ManifestKey::from_bytes(&[7; 32]).expect("test manifest key"),
+    )
 }

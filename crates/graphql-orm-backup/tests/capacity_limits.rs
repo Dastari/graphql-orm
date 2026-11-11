@@ -71,8 +71,9 @@ fn decompression_rejects_expansion_and_allows_reviewed_larger_limits() {
 async fn native_repository_streams_while_buffered_read_obeys_configured_limit() {
     use graphql_orm_backup::{BackupCapacityLimits, BackupRepository, LocalBackupRepository};
     let root = tempfile::TempDir::new().expect("owned repository");
-    let repository =
-        LocalBackupRepository::new(root.path()).with_capacity_limits(BackupCapacityLimits {
+    let repository = LocalBackupRepository::new(root.path())
+        .with_manifest_authenticator(test_manifest_authenticator())
+        .with_capacity_limits(BackupCapacityLimits {
             buffered_bytes: BackupByteLimit::Bytes(3),
             ..BackupCapacityLimits::default()
         });
@@ -141,4 +142,10 @@ fn decoder_rejects_oversized_history_window_before_reading_output() {
             .expect("valid empty frame with explicitly accepted library window policy")
             .is_empty()
     );
+}
+
+fn test_manifest_authenticator() -> graphql_orm_backup::ManifestAuthenticator {
+    graphql_orm_backup::ManifestAuthenticator::new(
+        graphql_orm_backup::ManifestKey::from_bytes(&[7; 32]).expect("test manifest key"),
+    )
 }

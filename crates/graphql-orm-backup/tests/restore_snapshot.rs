@@ -17,7 +17,8 @@ use uuid::Uuid;
 #[tokio::test]
 async fn restore_snapshot_round_trips_full_backup_rows() {
     let temp = TempDir::new().expect("temp dir");
-    let repository = LocalBackupRepository::new(temp.path());
+    let repository = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
     let rows = vec![
         backup_row("users", "1", &[("name", "Ada")]),
         backup_row("users", "2", &[("name", "Grace")]),
@@ -57,7 +58,8 @@ async fn restore_snapshot_round_trips_full_backup_rows() {
 #[tokio::test]
 async fn restore_snapshot_dry_run_validates_and_parses_without_applying() {
     let temp = TempDir::new().expect("temp dir");
-    let repository = LocalBackupRepository::new(temp.path());
+    let repository = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
     let source = MockDatabase::with_tables(vec![BackupTableExport {
         table_name: "users".to_string(),
         rows: vec![backup_row("users", "1", &[("name", "Ada")])],
@@ -85,7 +87,8 @@ async fn restore_snapshot_dry_run_validates_and_parses_without_applying() {
 #[tokio::test]
 async fn restore_snapshot_refuses_non_empty_empty_database_target() {
     let temp = TempDir::new().expect("temp dir");
-    let repository = LocalBackupRepository::new(temp.path());
+    let repository = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
     let source = MockDatabase::with_tables(vec![BackupTableExport {
         table_name: "users".to_string(),
         rows: Vec::new(),
@@ -116,7 +119,8 @@ async fn restore_snapshot_refuses_non_empty_empty_database_target() {
 #[tokio::test]
 async fn restore_snapshot_rejects_schema_hash_mismatch_before_target_checks_or_writes() {
     let temp = TempDir::new().expect("temp dir");
-    let repository = LocalBackupRepository::new(temp.path());
+    let repository = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
     let source = MockDatabase::with_tables(vec![BackupTableExport {
         table_name: "users".to_string(),
         rows: vec![backup_row("users", "1", &[("name", "Ada")])],
@@ -155,7 +159,8 @@ async fn restore_snapshot_rejects_schema_hash_mismatch_before_target_checks_or_w
 #[tokio::test]
 async fn restore_snapshot_rejects_backend_mismatch_during_dry_run() {
     let temp = TempDir::new().expect("temp dir");
-    let repository = LocalBackupRepository::new(temp.path());
+    let repository = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
     let source = MockDatabase::with_tables(vec![BackupTableExport {
         table_name: "users".to_string(),
         rows: Vec::new(),
@@ -185,7 +190,8 @@ async fn restore_snapshot_rejects_backend_mismatch_during_dry_run() {
 #[tokio::test]
 async fn restore_objects_loads_verified_object_bytes_into_sink() {
     let temp = TempDir::new().expect("temp dir");
-    let repository = LocalBackupRepository::new(temp.path());
+    let repository = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
     let object_bytes = Bytes::from_static(b"object");
     let object_hash = bytes_sha256_hex(&object_bytes);
     let source = MockDatabase::with_tables(vec![BackupTableExport {
@@ -437,7 +443,8 @@ async fn object_sizes_are_observed_for_new_deduplicated_and_historical_restores(
         write_manifest,
     };
     let temp = TempDir::new().expect("owned repository");
-    let repository = LocalBackupRepository::new(temp.path());
+    let repository = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
     let object_bytes = Bytes::from_static(b"actual object bytes");
     let actual_size = object_bytes.len() as u64;
     let source = MockDatabase::with_tables(vec![BackupTableExport {
@@ -519,6 +526,9 @@ struct VersionedObjectRepository {
 
 #[async_trait]
 impl BackupRepository for VersionedObjectRepository {
+    fn manifest_authenticator(&self) -> Option<&graphql_orm_backup::ManifestAuthenticator> {
+        Some(&TEST_MANIFEST_AUTHENTICATOR)
+    }
     async fn get_blob_stream(
         &self,
         key: &str,
@@ -575,13 +585,16 @@ async fn manifest_for_object_restore(
 }
 
 #[tokio::test]
-async fn changed_content_after_size_preflight_fails_after_sink_receives_second_version() {
+async fn changed_content_after_size_preflight_never_reaches_the_sink() {
     let temp = TempDir::new().expect("owned repository");
     let original = Bytes::from_static(b"original");
     let replacement = Bytes::from_static(b"replacement is longer");
-    let manifest =
-        manifest_for_object_restore(&LocalBackupRepository::new(temp.path()), original.clone())
-            .await;
+    let manifest = manifest_for_object_restore(
+        &LocalBackupRepository::new(temp.path())
+            .with_manifest_authenticator(test_manifest_authenticator()),
+        original.clone(),
+    )
+    .await;
     let repository = VersionedObjectRepository {
         key: manifest.objects[0].content_key.clone(),
         preflight_bytes: original.clone(),
@@ -599,21 +612,21 @@ async fn changed_content_after_size_preflight_fails_after_sink_receives_second_v
         if expected == bytes_sha256_hex(&original) && actual == bytes_sha256_hex(&replacement))
     );
     assert_eq!(repository.reads.load(Ordering::SeqCst), 2);
-    let received = sink.restored();
-    assert_eq!(received.len(), 1);
-    assert_eq!(received[0].0.size_bytes, original.len() as u64);
-    assert_eq!(received[0].1, replacement);
-    // Preflight size describes the first read. A failed second read may already
-    // have changed the sink, which must remain an unpublished staging target.
+    // The stream fails at its end on a digest mismatch, so the buffered sink
+    // never receives the second version.
+    assert!(sink.restored().is_empty());
 }
 
 #[tokio::test]
 async fn corrupt_object_preflight_rejects_before_invoking_sink() {
     let temp = TempDir::new().expect("owned repository");
     let original = Bytes::from_static(b"original");
-    let manifest =
-        manifest_for_object_restore(&LocalBackupRepository::new(temp.path()), original.clone())
-            .await;
+    let manifest = manifest_for_object_restore(
+        &LocalBackupRepository::new(temp.path())
+            .with_manifest_authenticator(test_manifest_authenticator()),
+        original.clone(),
+    )
+    .await;
     let corrupt = Bytes::from_static(b"corrupt");
     let repository = VersionedObjectRepository {
         key: manifest.objects[0].content_key.clone(),
@@ -634,3 +647,12 @@ async fn corrupt_object_preflight_rejects_before_invoking_sink() {
     assert_eq!(repository.reads.load(Ordering::SeqCst), 1);
     assert!(sink.restored().is_empty());
 }
+
+fn test_manifest_authenticator() -> graphql_orm_backup::ManifestAuthenticator {
+    graphql_orm_backup::ManifestAuthenticator::new(
+        graphql_orm_backup::ManifestKey::from_bytes(&[7; 32]).expect("test manifest key"),
+    )
+}
+
+static TEST_MANIFEST_AUTHENTICATOR: std::sync::LazyLock<graphql_orm_backup::ManifestAuthenticator> =
+    std::sync::LazyLock::new(test_manifest_authenticator);

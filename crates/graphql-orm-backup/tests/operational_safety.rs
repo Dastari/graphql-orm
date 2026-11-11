@@ -15,7 +15,8 @@ use uuid::Uuid;
 #[tokio::test]
 async fn create_full_backup_refuses_active_repository_lock() {
     let temp = TempDir::new().expect("temp dir");
-    let repository = LocalBackupRepository::new(temp.path());
+    let repository = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
     repository
         .put_blob(
             "locks/repository.lock",
@@ -41,7 +42,8 @@ async fn create_full_backup_refuses_active_repository_lock() {
 #[tokio::test]
 async fn prune_deletes_expired_snapshots_and_unreferenced_objects() {
     let temp = TempDir::new().expect("temp dir");
-    let repository = LocalBackupRepository::new(temp.path());
+    let repository = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
     let database = MockDatabase;
 
     let first_object = Bytes::from_static(b"first object");
@@ -109,7 +111,8 @@ async fn prune_deletes_expired_snapshots_and_unreferenced_objects() {
 #[tokio::test]
 async fn delete_snapshot_removes_snapshot_and_unreferenced_objects() {
     let temp = TempDir::new().expect("temp dir");
-    let repository = LocalBackupRepository::new(temp.path());
+    let repository = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
     let database = MockDatabase;
 
     let first_object = Bytes::from_static(b"first object");
@@ -288,7 +291,8 @@ impl BackupObjectIndex for MockObjectIndex {
 async fn expired_holder_cannot_be_taken_over_or_release_a_new_owner() {
     use graphql_orm_backup::RepositoryLock;
     let temp = TempDir::new().expect("temp dir");
-    let repository = LocalBackupRepository::new(temp.path());
+    let repository = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
     let options = RepositoryLockOptions {
         stale_after_seconds: -1,
     };
@@ -328,7 +332,8 @@ async fn expired_holder_cannot_be_taken_over_or_release_a_new_owner() {
 async fn dropped_holder_leaves_lock_for_offline_recovery() {
     use graphql_orm_backup::RepositoryLock;
     let temp = TempDir::new().expect("temp dir");
-    let repository = LocalBackupRepository::new(temp.path());
+    let repository = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
     let options = RepositoryLockOptions::default();
     {
         let _holder = RepositoryLock::acquire(&repository, &options)
@@ -364,6 +369,9 @@ impl TruncatedListingRepository {
 impl BackupRepository for TruncatedListingRepository {
     fn capacity_limits(&self) -> BackupCapacityLimits {
         self.inner.capacity_limits()
+    }
+    fn manifest_authenticator(&self) -> Option<&graphql_orm_backup::ManifestAuthenticator> {
+        self.inner.manifest_authenticator()
     }
     async fn delete_blob_once(&self, key: &str) -> Result<(), BackupError> {
         self.inner.delete_blob_once(key).await
@@ -431,7 +439,8 @@ async fn two_full_snapshots(repository: &LocalBackupRepository) -> (String, Stri
 #[tokio::test]
 async fn prune_refuses_to_sweep_objects_after_a_truncated_snapshot_listing() {
     let temp = TempDir::new().expect("temp dir");
-    let local = LocalBackupRepository::new(temp.path());
+    let local = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
     let (first_hash, second_hash) = two_full_snapshots(&local).await;
     // The newest manifest is missing from the listing prune plans with.
     let repository = TruncatedListingRepository::new(local, snapshot_manifest_key(second_id()), 1);
@@ -466,7 +475,8 @@ async fn prune_refuses_to_sweep_objects_after_a_truncated_snapshot_listing() {
 #[tokio::test]
 async fn delete_snapshot_refuses_a_listing_that_omits_a_stored_parent() {
     let temp = TempDir::new().expect("temp dir");
-    let local = LocalBackupRepository::new(temp.path());
+    let local = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
     let object = Bytes::from_static(b"parent object");
     let hash = bytes_sha256_hex(&object);
     create_full_backup(
@@ -555,7 +565,8 @@ async fn snapshot_keys(repository: &dyn BackupRepository) -> Vec<String> {
 #[tokio::test]
 async fn delete_snapshot_refuses_a_parent_whose_child_was_transiently_unlisted() {
     let temp = TempDir::new().expect("temp dir");
-    let local = LocalBackupRepository::new(temp.path());
+    let local = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
     let object = Bytes::from_static(b"parent object");
     let hash = bytes_sha256_hex(&object);
     create_full_backup(
@@ -595,7 +606,8 @@ async fn delete_snapshot_refuses_a_parent_whose_child_was_transiently_unlisted()
 #[tokio::test]
 async fn prune_refuses_to_expire_the_parent_of_a_transiently_unlisted_newest_child() {
     let temp = TempDir::new().expect("temp dir");
-    let local = LocalBackupRepository::new(temp.path());
+    let local = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
     let object = Bytes::from_static(b"chain object");
     let hash = bytes_sha256_hex(&object);
     create_full_backup(
@@ -644,4 +656,10 @@ async fn prune_refuses_to_expire_the_parent_of_a_transiently_unlisted_newest_chi
             .await
             .expect("exists check")
     );
+}
+
+fn test_manifest_authenticator() -> graphql_orm_backup::ManifestAuthenticator {
+    graphql_orm_backup::ManifestAuthenticator::new(
+        graphql_orm_backup::ManifestKey::from_bytes(&[7; 32]).expect("test manifest key"),
+    )
 }

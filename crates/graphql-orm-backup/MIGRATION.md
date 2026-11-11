@@ -3,12 +3,78 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-backup-maintainers
-last_reviewed: 2026-11-09
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.12.1 to 0.13.0: authenticated manifests and constrained restore targets
+
+This is a breaking change. Read the
+[trust model](docs/architecture.md#trust-model) first. Storage stays on its
+current version.
+
+1. **Provision a manifest key.** Generate at least 32 random bytes and keep
+   them in the host's secret store, separate from the backup repository and
+   from anyone who can write it. Use one key per repository or environment.
+   Losing the key makes the repository's manifests unverifiable.
+2. **Attach it to every repository handle** that backs up, restores,
+   verifies, compacts or prunes:
+
+   ```rust,ignore
+   let authenticator = ManifestAuthenticator::new(ManifestKey::from_bytes(&key_material)?);
+   let repository = LocalBackupRepository::new(root).with_manifest_authenticator(authenticator);
+   // or BlobStoreBackupRepository::new(store).with_manifest_authenticator(authenticator)
+   ```
+
+   Custom `BackupRepository` implementations, including wrappers, must
+   implement `manifest_authenticator`. The default returns `None`, which fails
+   closed with `ManifestAuthenticationRequired`.
+3. **Constrain object restore.** `BlobStoreRestoreObjectSink::new(store, scope)`
+   now needs a `RestoreKeyScope`. Use `RestoreKeyScope::prefixes([...])` for
+   the live-store namespaces your objects use, or
+   `RestoreKeyScope::entire_store()` only for a store that holds nothing but
+   restored objects. The sink no longer overwrites: restore into an empty
+   staging namespace, and treat `RestoreObjectConflict` as a target that
+   already holds different data. The live store must support atomic
+   conditional create; the bundled local, S3 and SMB backends do.
+   Custom sinks may override `RestoreObjectSink::check_restore_target`.
+4. **Migrate existing snapshots.** Snapshots written by 0.12.x and earlier are
+   format 1 and are refused with `LegacyManifestRefused`. While you still trust
+   the repository:
+   - Record each snapshot you need with its manifest `checksum` (the
+     `checksum` field of `snapshots/{id}/manifest.json`), ideally from a copy
+     taken before upgrading, and configure
+     `LegacyManifestPolicy::TrustPinned` with that map. Prefer this to
+     `TrustUnauthenticated`, which accepts any well-formed legacy manifest,
+     including one a repository writer adds later.
+   - Take a new full backup, or `compact_chain` each chain you need into a
+     sealed synthetic full.
+   - Prune or delete the legacy snapshots under the same policy.
+   - Remove the legacy policy. `prune` and `delete_snapshot` refuse to run
+     while any listed manifest fails authentication.
+5. **Update error handling** for the new `BackupError` variants and the
+   `BackupSnapshotManifest::authentication` field. Code that builds manifests
+   by hand must use `BACKUP_FORMAT_VERSION` (now 2), canonical content keys
+   from `database_table_key`, `database_changes_key` and `object_content_key`,
+   and lowercase SHA-256 digests, then seal with `write_manifest` or
+   `authenticate_manifest`.
+6. **Check custom sinks and compaction ids.** A custom `RestoreObjectSink`
+   must read each object stream to its end and must discard a write whose
+   stream ends in an error. `restore_objects` now reports a digest mismatch
+   that way, and a sink that stops reading early fails with
+   `ChecksumMismatch`. `compact_chain` refuses a `snapshot_id` that already
+   exists; pass a new id.
+7. **Check backup inputs.** Backups now refuse table names that are not a
+   single safe key segment, non-hex digests, and object storage keys that fail
+   `graphql-orm-storage` key validation, before writing anything.
+
+Stored payloads and the repository layout are unchanged. Earlier releases
+ignore the new `authentication` field, so they can still read 0.13.0
+manifests without verifying them; do not keep older releases pointed at a
+repository you rely on.
 
 ## 0.12.0 to 0.12.1: fail-closed pruning (GHSA-439h-2cx8-xwgx)
 

@@ -181,10 +181,25 @@ fn sample_manifest(
         objects: Vec::new(),
         tombstones: Vec::new(),
         checksum: String::new(),
+        authentication: None,
     };
-    set_manifest_checksum(&mut manifest).expect("set checksum");
+    if graphql_orm_backup::validate_manifest_entries(&manifest).is_ok() {
+        graphql_orm_backup::authenticate_manifest(&TEST_AUTHENTICATOR, &mut manifest)
+            .expect("seal manifest");
+    } else {
+        // Fixtures for the pure chain validator may be structurally invalid
+        // and so cannot be sealed.
+        set_manifest_checksum(&mut manifest).expect("set checksum");
+    }
     manifest
 }
+
+static TEST_AUTHENTICATOR: std::sync::LazyLock<graphql_orm_backup::ManifestAuthenticator> =
+    std::sync::LazyLock::new(|| {
+        graphql_orm_backup::ManifestAuthenticator::new(
+            graphql_orm_backup::ManifestKey::from_bytes(&[7; 32]).expect("test manifest key"),
+        )
+    });
 
 fn full_id() -> Uuid {
     Uuid::parse_str("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa").expect("valid uuid")
@@ -201,6 +216,10 @@ struct RecordingRepository {
 
 #[async_trait]
 impl BackupRepository for RecordingRepository {
+    fn manifest_authenticator(&self) -> Option<&graphql_orm_backup::ManifestAuthenticator> {
+        Some(&TEST_AUTHENTICATOR)
+    }
+
     async fn delete_blob_once(&self, key: &str) -> Result<(), BackupError> {
         self.delete_blob(key).await
     }

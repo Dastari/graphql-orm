@@ -3,7 +3,7 @@ title: "Snapshot Format"
 kind: reference
 status: active
 owner: graphql-orm-backup-maintainers
-last_reviewed: 2026-10-27
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -37,8 +37,52 @@ The manifest records:
 - object entries
 - tombstones
 - manifest checksum
+- authentication seal
 
-The manifest checksum is the SHA-256 of the serialized manifest with the `checksum` field cleared.
+The manifest checksum is the SHA-256 of the serialized manifest with the
+`checksum` and `authentication` fields cleared. It detects corruption only.
+
+## Manifest Authentication
+
+`format_version` 2 manifests carry an `authentication` seal:
+
+```json
+{
+  "authentication": {
+    "algorithm": "HmacSha256",
+    "key_id": "0123456789abcdef",
+    "mac": "<64 lowercase hex digits>"
+  }
+}
+```
+
+`mac` is HMAC-SHA256 over the label
+`graphql-orm-backup/manifest/hmac-sha256/v2` and a newline, followed by the
+same canonical bytes as the checksum. The MAC key and the public `key_id` are
+derived from the host's `ManifestKey` with HKDF-SHA256. Readers reject unknown
+fields, so every accepted field is covered by the seal. Format version 1
+manifests have no `authentication` field and are read only under an explicit
+`LegacyManifestPolicy`. Other versions are refused. See the
+[trust model](architecture.md#trust-model).
+
+## Key Constraints
+
+Readers refuse a manifest unless:
+
+- it names the snapshot id of the `snapshots/{snapshot_id}/manifest.json`
+  path it was read from;
+- each object's `content_key` is exactly
+  `objects/sha256/{first_two}/{next_two}/{sha256_hex}` for its own digest;
+- each table or change `content_key` is exactly this snapshot's
+  `database/tables/{table_name}.jsonl.zst` or
+  `database/changes/{table_name}.jsonl.zst` key;
+- every digest is 64 lowercase hex digits and every table name is a single
+  safe key segment; and
+- full and synthetic-full snapshots have no parent and no changes, and
+  incremental snapshots have a different parent and no full tables.
+
+Object `storage_key` values are live-store keys. They must be valid
+`graphql-orm-storage` blob keys; backup refuses other keys before writing.
 
 ## Object Blobs
 

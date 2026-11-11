@@ -123,7 +123,7 @@ fn sample_manifest() -> BackupSnapshotManifest {
             tables: vec![TableBackupEntry {
                 table_name: "storage".to_string(),
                 row_count: 1,
-                content_key: "snapshots/snapshot/database/tables/storage.jsonl.zst".to_string(),
+                content_key: graphql_orm_backup::database_table_key(snapshot_id(), "storage"),
                 sha256_hex: table_hash,
             }],
             changes: Vec::new(),
@@ -143,6 +143,7 @@ fn sample_manifest() -> BackupSnapshotManifest {
             deleted_at: 1_775_174_401,
         }],
         checksum: String::new(),
+        authentication: None,
     }
 }
 

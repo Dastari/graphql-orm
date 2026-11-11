@@ -3,12 +3,76 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-backup-maintainers
-last_reviewed: 2026-11-09
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Changelog
+
+## 0.13.0 (unreleased)
+
+Breaking: manifests are authenticated with a host-held key and restore targets
+are constrained. See [MIGRATION.md](MIGRATION.md) and the
+[trust model](docs/architecture.md#trust-model).
+
+- Security: restore, object restore, verification, compaction, pruning and
+  snapshot deletion trusted any manifest whose plain SHA-256 checksum matched.
+  Anyone able to write the backup repository could therefore recompute the
+  checksum and choose every restored row, and every live-store key that
+  `BlobStoreRestoreObjectSink` overwrote. Manifests are now sealed with
+  HMAC-SHA256 under an HKDF-derived key from a host-held `ManifestKey`, and
+  every manifest read verifies the seal before using the manifest.
+- Added `ManifestKey`, `ManifestAuthenticator` (with key rotation through
+  `with_previous_key`), `LegacyManifestPolicy`, `ManifestMac`,
+  `authenticate_manifest`, `verify_manifest_authenticity` and
+  `validate_manifest_entries`. Repository handles carry the authenticator:
+  `LocalBackupRepository::with_manifest_authenticator`,
+  `BlobStoreBackupRepository::with_manifest_authenticator`, and the new
+  `BackupRepository::manifest_authenticator` method, whose default returns
+  `None`. Without an authenticator, every manifest read and write fails with
+  `ManifestAuthenticationRequired`, and backups refuse before writing.
+- Manifest format version 2 adds the `authentication` seal. Readers reject
+  unknown fields and unsupported versions, and bind each manifest to its path:
+  `load_manifest` refuses a manifest whose snapshot id differs from the
+  requested one. Format 1 (legacy) manifests are refused with
+  `LegacyManifestRefused` unless the host selects `TrustPinned` or
+  `TrustUnauthenticated`.
+- Content keys must match their entries: object keys must be the
+  `objects/sha256/...` address of their own digest, and table and change keys
+  must be their own snapshot's key for a single-segment table name. Digests
+  must be lowercase SHA-256 hex. Backups refuse invalid table names, digests
+  and object storage keys before writing.
+- `restore_objects` authenticates the manifest it is given, then validates
+  every live-store key with `graphql-orm-storage` key rules and the new
+  `RestoreObjectSink::check_restore_target` before restoring any object.
+- `BlobStoreRestoreObjectSink::new` takes a required `RestoreKeyScope`. The
+  sink writes only inside it, creates objects with an atomic conditional write,
+  leaves identical existing content in place and fails with
+  `RestoreObjectConflict` instead of overwriting different content.
+- Restore and compaction check each table and change payload's digest on the
+  exact bytes they decode, not only during the earlier verification read, so a
+  repository that serves different bytes on a later read cannot inject rows or
+  have them sealed into a synthetic full.
+- `restore_objects` streams each object through a digest check that fails at
+  the end of the stream on a mismatch, so the sink's conditional create aborts
+  before committing. Buffering sinks no longer receive mismatched bytes, and a
+  sink that returns success without reading the whole object fails with
+  `ChecksumMismatch`.
+- `prune` and `delete_snapshot` refuse a handle without an authenticator
+  before acquiring the repository lock, so they write nothing.
+- `compact_chain` refuses a `snapshot_id` that already has a manifest, with
+  `InvalidManifestChain`, instead of overwriting that snapshot.
+- Snapshot listings recognise only canonical lowercase hyphenated snapshot ids
+  in manifest keys.
+- New `BackupError` variants: `ManifestAuthenticationRequired`,
+  `InvalidManifestKey`, `ManifestAuthenticationFailed`,
+  `LegacyManifestRefused`, `UnsupportedManifestFormat`,
+  `ManifestSnapshotMismatch`, `InvalidManifestEntry`, `RestoreTargetRejected`
+  and `RestoreObjectConflict`.
+- `verify_manifest_checksum` and `verify_object_checksums` are unchanged in
+  purpose but now documented as integrity checks, not authentication.
+  `verify_object_checksums` also validates entry namespaces.
 
 ## 0.12.1 (unreleased)
 

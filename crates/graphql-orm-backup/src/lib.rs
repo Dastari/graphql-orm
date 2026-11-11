@@ -13,6 +13,18 @@
 //! provider code can be shared without routing backup keys through primary
 //! object metadata.
 //!
+//! # Trust model
+//!
+//! The backup repository is untrusted storage. Every manifest is sealed with
+//! HMAC-SHA256 under a host-held [`ManifestKey`] that travels with the
+//! repository handle as a [`ManifestAuthenticator`] and is never written to the
+//! repository. Every manifest read verifies the seal, binds the manifest to
+//! its snapshot path and checks that each content key stays in its namespace.
+//! Handles without an authenticator fail closed. [`restore_objects`] also
+//! validates every live-store key before writing, and
+//! [`BlobStoreRestoreObjectSink`] writes only inside a [`RestoreKeyScope`]
+//! without overwriting.
+//!
 //! # Full Backup
 //!
 //! ```no_run
@@ -69,6 +81,7 @@
 //! # }
 //! ```
 
+mod authentication;
 mod backup;
 mod capacity;
 mod database;
@@ -86,6 +99,9 @@ mod repository;
 mod restore;
 mod verify;
 
+pub use authentication::{
+    LegacyManifestPolicy, MIN_MANIFEST_KEY_BYTES, ManifestAuthenticator, ManifestKey,
+};
 pub use backup::{
     BackupExecutionOptions, CompactChainRequest, CompactChainResult, DATABASE_EXPORT_FORMAT,
     DEFAULT_OBJECT_CONCURRENCY, FullBackupRequest, FullBackupResult, IncrementalBackupRequest,
@@ -107,9 +123,11 @@ pub use local_repository::LocalBackupRepository;
 pub use lock::{DEFAULT_LOCK_STALE_AFTER_SECONDS, RepositoryLock, RepositoryLockOptions};
 pub use manifest::{
     BACKUP_FORMAT_VERSION, BackupCompression, BackupKind, BackupSnapshotManifest, BackupTombstone,
-    DatabaseBackupManifest, ObjectBackupEntry, TableBackupEntry, compress_payload,
+    DatabaseBackupManifest, LEGACY_BACKUP_FORMAT_VERSION, ManifestMac, ManifestMacAlgorithm,
+    ObjectBackupEntry, TableBackupEntry, authenticate_manifest, compress_payload,
     decompress_payload, decompress_payload_with_limit, load_manifest, load_manifest_chain,
-    manifest_checksum, set_manifest_checksum, validate_manifest_chain, verify_manifest_checksum,
+    manifest_checksum, set_manifest_checksum, validate_manifest_chain, validate_manifest_entries,
+    verify_manifest_authenticity, verify_manifest_checksum,
 };
 pub use object_index::{BackupObjectIndex, BackupObjectRef};
 #[cfg(feature = "orm")]
@@ -119,8 +137,8 @@ pub use prune::{DeleteSnapshotResult, KeepPolicy, PruneResult, delete_snapshot, 
 pub use repository::{BackupRepository, BlobStoreBackupRepository};
 pub use restore::{
     BlobStoreRestoreObjectSink, RestoreContext, RestoreFailurePhase, RestoreFailureProgress,
-    RestoreMode, RestoreObjectSink, RestoreResult, ensure_empty_restore_target, restore_objects,
-    restore_snapshot,
+    RestoreKeyScope, RestoreMode, RestoreObjectSink, RestoreResult, ensure_empty_restore_target,
+    restore_objects, restore_snapshot,
 };
 pub use verify::{
     VerificationOptions, verify_manifest_and_objects, verify_manifest_and_objects_with_options,

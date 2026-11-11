@@ -161,7 +161,10 @@ fn manifest_with_table_hash(table_hash: String) -> BackupSnapshotManifest {
             tables: vec![TableBackupEntry {
                 table_name: "users".to_string(),
                 row_count: 1,
-                content_key: "snapshots/snapshot/database/tables/users.jsonl.zst".to_string(),
+                content_key: graphql_orm_backup::database_table_key(
+                    Uuid::parse_str("bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb").expect("valid uuid"),
+                    "users",
+                ),
                 sha256_hex: table_hash,
             }],
             changes: Vec::new(),
@@ -169,5 +172,6 @@ fn manifest_with_table_hash(table_hash: String) -> BackupSnapshotManifest {
         objects: Vec::new(),
         tombstones: Vec::new(),
         checksum: String::new(),
+        authentication: None,
     }
 }

@@ -3,7 +3,7 @@ title: "graphql-orm-backup Agent Guide"
 kind: reference
 status: active
 owner: graphql-orm-backup-maintainers
-last_reviewed: 2026-08-10
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -41,6 +41,12 @@ This crate is a reusable backup and restore companion for applications that use 
   [Cargo.lock](../../Cargo.lock) and published workspace release manifest own
   the external authorization revision. This crate must not enable or depend
   directly on application authorization.
+- The backup repository is untrusted. Every manifest read must verify its
+  host-keyed seal, bind it to its snapshot path, and validate entry
+  namespaces before use; repository handles without a
+  `ManifestAuthenticator` fail closed. Never accept a manifest on its plain
+  checksum, and never let object restore write a live-store key outside the
+  sink's scope or over existing content. See `docs/architecture.md#trust-model`.
 - Applying and dry-run restore compare the manifest backend/schema hash with
   the target before target checks or writes. Preserve that fail-closed
   preflight.

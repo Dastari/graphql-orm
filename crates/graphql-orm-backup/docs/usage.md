@@ -3,7 +3,7 @@ title: "Usage Guide"
 kind: reference
 status: active
 owner: graphql-orm-backup-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -27,6 +27,9 @@ writes, restore orchestration, compaction, pruning, and verification.
   referenced by a snapshot.
 - `BackupSnapshotManifest`: durable record of a snapshot's database files,
   object files, checksums, schema hash, and application metadata.
+- `ManifestKey` and `ManifestAuthenticator`: host-held key that seals and
+  verifies manifests. Every repository handle needs one; see the
+  [trust model](architecture.md#trust-model).
 - `RestoreContext`: explicit restore mode and safety flags.
 - `RestoreObjectSink`: application hook for rehydrating object bytes.
 - `KeepPolicy`: retention rule used by `prune`.
@@ -38,15 +41,19 @@ Full snapshot creation is implemented through `create_full_backup`.
 ```rust
 use graphql_orm_backup::{
     BackupObjectIndex, FullBackupRequest, GraphqlOrmBackupAdapter,
-    LocalBackupRepository, create_full_backup,
+    LocalBackupRepository, ManifestAuthenticator, ManifestKey, create_full_backup,
 };
 use uuid::Uuid;
 
 async fn run_backup(
     database: &dyn GraphqlOrmBackupAdapter,
     objects: &dyn BackupObjectIndex,
+    // At least 32 random bytes from the host's secret store.
+    manifest_key_material: &[u8],
 ) -> Result<(), graphql_orm_backup::BackupError> {
-    let repository = LocalBackupRepository::new("./backups");
+    let key = ManifestKey::from_bytes(manifest_key_material)?;
+    let repository = LocalBackupRepository::new("./backups")
+        .with_manifest_authenticator(ManifestAuthenticator::new(key));
 
     let result = create_full_backup(
         &repository,
@@ -176,7 +183,8 @@ bypass database-native policy.
 
 `BlobStoreRestoreObjectSink` (available without the `orm` feature) writes
 restored object bytes back to a `graphql-orm-storage` `BlobStore` at each
-object's original storage key.
+object's original storage key, only inside its `RestoreKeyScope` and never over
+existing content. See [restore semantics](restore-semantics.md#object-restore).
 
 ## Incremental Backup
 
@@ -191,14 +199,14 @@ use graphql_orm_backup::{
 use uuid::Uuid;
 
 async fn run_incremental(
+    repository: &LocalBackupRepository,
     database: &dyn GraphqlOrmBackupAdapter,
     objects: &dyn BackupObjectIndex,
     parent_snapshot_id: Uuid,
 ) -> Result<(), graphql_orm_backup::BackupError> {
-    let repository = LocalBackupRepository::new("./backups");
 
     create_incremental_backup(
-        &repository,
+        repository,
         database,
         objects,
         IncrementalBackupRequest {
@@ -221,8 +229,10 @@ tracking.
 
 ## Restore
 
-`restore_snapshot` loads and validates the manifest chain, verifies payload
-checksums, parses compressed JSON Lines, and calls the database adapter.
+`restore_snapshot` loads, authenticates and validates the manifest chain,
+verifies payload checksums, parses compressed JSON Lines, and calls the
+database adapter. The repository handle must carry the host's
+`ManifestAuthenticator`.
 
 ```rust
 use graphql_orm_backup::{
@@ -253,16 +263,26 @@ calling adapter restore methods.
 Object rehydration is separate:
 
 ```rust
+use std::sync::Arc;
+
 use graphql_orm_backup::{
-    BackupRepository, BackupSnapshotManifest, RestoreObjectSink, restore_objects,
+    BackupRepository, BlobStoreRestoreObjectSink, RestoreKeyScope, load_manifest,
+    restore_objects,
 };
+use graphql_orm_storage::BlobStore;
+use uuid::Uuid;
 
 async fn restore_object_store(
     repository: &dyn BackupRepository,
-    manifest: &BackupSnapshotManifest,
-    sink: &dyn RestoreObjectSink,
+    live_store: Arc<dyn BlobStore>,
+    snapshot_id: Uuid,
 ) -> Result<(), graphql_orm_backup::BackupError> {
-    restore_objects(repository, manifest, sink).await
+    let manifest = load_manifest(repository, snapshot_id).await?;
+    let sink = BlobStoreRestoreObjectSink::new(
+        live_store,
+        RestoreKeyScope::prefixes(["media"])?,
+    );
+    restore_objects(repository, &manifest, &sink).await
 }
 ```
 
@@ -393,11 +413,14 @@ Use `BlobStoreBackupRepository` when an application already has a
 ```rust
 use std::sync::Arc;
 
-use graphql_orm_backup::BlobStoreBackupRepository;
+use graphql_orm_backup::{BlobStoreBackupRepository, ManifestAuthenticator};
 use graphql_orm_storage::BlobStore;
 
-fn backup_repository(store: Arc<dyn BlobStore>) -> BlobStoreBackupRepository {
-    BlobStoreBackupRepository::new(store)
+fn backup_repository(
+    store: Arc<dyn BlobStore>,
+    authenticator: ManifestAuthenticator,
+) -> BlobStoreBackupRepository {
+    BlobStoreBackupRepository::new(store).with_manifest_authenticator(authenticator)
 }
 ```
 
@@ -423,7 +446,7 @@ async fn verify(
 
 Verification checks:
 
-- manifest checksum
+- manifest seal, checksum, format version and entry namespaces
 - object blob checksums
 - table export blob checksums
 - incremental change blob checksums
