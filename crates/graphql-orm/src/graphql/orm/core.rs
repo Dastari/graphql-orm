@@ -907,6 +907,45 @@ pub struct MutationContext<'tx, B: WriteBackend = DefaultWriteBackend> {
     pub(crate) change_journal_verified_tables: Vec<&'static str>,
 }
 
+/// Savepoint and session statements change no rows.
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+fn is_transaction_control(sql: &str) -> bool {
+    let keyword = sql
+        .trim_start()
+        .split(|c: char| c.is_whitespace())
+        .next()
+        .unwrap_or("");
+    [
+        "SAVEPOINT",
+        "RELEASE",
+        "ROLLBACK",
+        "SAVE",
+        "BEGIN",
+        "COMMIT",
+        "SET",
+    ]
+    .iter()
+    .any(|control| keyword.eq_ignore_ascii_case(control))
+}
+
+/// Tracks one generated write operation on a [`MutationContext`].
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+#[doc(hidden)]
+pub struct WriteTracker {
+    state: std::sync::Arc<super::runtime_transaction::RuntimeTransactionState>,
+    start: usize,
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+impl WriteTracker {
+    /// Poison the transaction when the operation failed after changing rows.
+    pub fn finish<T, E>(self, result: &Result<T, E>) {
+        if result.is_err() && self.state.writes() != self.start {
+            self.state.poison();
+        }
+    }
+}
+
 /// Narrow transaction-bound capability for regulated retention maintenance.
 ///
 /// Values of this type can only be created by
@@ -1437,7 +1476,31 @@ where
         sql: &str,
         values: &[SqlValue],
     ) -> crate::Result<B::WriteResult> {
-        B::execute_in_transaction(&mut self.tx, sql, values).await
+        let result = B::execute_in_transaction(&mut self.tx, sql, values).await?;
+        // Count statements, not affected rows: SQLite's change count is not
+        // reset by transaction-control statements such as SAVEPOINT.
+        if !is_transaction_control(sql) {
+            self.runtime_state.note_write();
+        }
+        Ok(result)
+    }
+
+    /// Record a write that changed rows through [`Self::fetch_rows`], such as
+    /// `UPDATE ... RETURNING`.
+    #[doc(hidden)]
+    pub fn __note_write(&self) {
+        self.runtime_state.note_write();
+    }
+
+    /// Start tracking one generated write operation. If it then fails after
+    /// changing rows, [`WriteTracker::finish`] makes this transaction
+    /// uncommittable, so a caller cannot commit its partial effects.
+    #[doc(hidden)]
+    pub fn __track_writes(&self) -> WriteTracker {
+        WriteTracker {
+            state: self.runtime_state.clone(),
+            start: self.runtime_state.writes(),
+        }
     }
 
     /// Exact affected-row count for a backend write result.
@@ -1515,6 +1578,11 @@ where
         for event in self.deferred_events.drain(..) {
             event.emit(self.db);
         }
+    }
+
+    /// Whether a row this transaction wrote failed the row write policy.
+    pub(crate) fn write_refused(&self) -> bool {
+        self.runtime_state.write_refused()
     }
 
     pub(crate) fn runtime_cannot_commit(&self) -> bool {
@@ -1986,6 +2054,10 @@ where
         self.mutation.rollback().await
     }
 
+    pub(crate) fn write_refused(&self) -> bool {
+        self.mutation.write_refused()
+    }
+
     /// Append a row through the entity's normal generated insert path.
     ///
     /// This enables a host schema to record a separate redacted purge fact in
@@ -2073,6 +2145,11 @@ where
             )
             .await
             .map_err(|error| sqlx::Error::Protocol(format!("{error:?}")))?;
+        // A declared write policy needs its row provider here too, before selection.
+        self.mutation
+            .db
+            .ensure_row_write_provider(metadata.entity_name, metadata.write_policy)
+            .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
         if filter.is_empty() {
             return Err(sqlx::Error::Protocol(
                 "retention purge requires a non-empty typed filter".to_string(),

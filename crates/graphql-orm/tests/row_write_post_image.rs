@@ -683,7 +683,13 @@ async fn compare_and_swap_checks_the_written_row_and_rolls_back_its_savepoint() 
             })
         })
         .await;
-    assert!(outcome.is_err(), "{outcome:?}");
+    assert!(
+        matches!(
+            &outcome,
+            Err(TransactionError::Rejected(error)) if error.code == OrmErrorCode::Forbidden
+        ),
+        "{outcome:?}"
+    );
     assert_eq!(count(&pool, "versioned_notes", REPOSITORY_ACTOR).await, 1);
 }
 
@@ -707,7 +713,13 @@ async fn a_refused_written_row_poisons_the_callers_transaction() {
             })
         })
         .await;
-    assert!(outcome.is_err(), "{outcome:?}");
+    assert!(
+        matches!(
+            &outcome,
+            Err(TransactionError::Rejected(error)) if error.code == OrmErrorCode::Forbidden
+        ),
+        "{outcome:?}"
+    );
     assert_eq!(count(&pool, "owned_notes", "actor-b").await, 0);
     assert_eq!(count(&pool, "owned_notes", REPOSITORY_ACTOR).await, 0);
 
@@ -861,4 +873,139 @@ async fn a_declared_write_policy_without_a_row_provider_is_misconfigured_in_ever
             .unwrap();
         assert_eq!(rows, 0);
     }
+}
+
+/// Refuses the After hook of a note named `after-refuses`, and the Before hook of
+/// a versioned-note update, which compare-and-swap runs after its `UPDATE`.
+struct RefusingHook;
+impl graphql_orm::graphql::orm::MutationHook for RefusingHook {
+    fn on_mutation<'a>(
+        &'a self,
+        _ctx: Option<&'a async_graphql::Context<'_>>,
+        _context: &'a mut graphql_orm::graphql::orm::MutationContext<'_>,
+        event: &'a graphql_orm::graphql::orm::MutationEvent,
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<()>> {
+        use graphql_orm::graphql::orm::MutationPhase;
+        Box::pin(async move {
+            let named = |name: &str| {
+                event
+                    .after::<OwnedNote>()
+                    .ok()
+                    .flatten()
+                    .is_some_and(|note| note.name == name)
+            };
+            if (event.entity_name == "OwnedNote"
+                && event.phase == MutationPhase::After
+                && named("after-refuses"))
+                || (event.entity_name == "VersionedNote" && event.phase == MutationPhase::Before)
+            {
+                return Err(async_graphql::Error::new("hook refused"));
+            }
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_failure_after_a_write_poisons_the_callers_transaction() {
+    let (mut db, pool) = database().await;
+    db.set_mutation_hook(RefusingHook);
+    // The After hook fails after the row is inserted; the caller ignores it.
+    let outcome = db
+        .transaction(TransactionMode::StateMachine, |tx| {
+            Box::pin(async move {
+                let ignored = tx
+                    .insert::<OwnedNote>(CreateOwnedNoteInput {
+                        name: "after-refuses".to_string(),
+                        slug: "after".to_string(),
+                        owner_user_id: REPOSITORY_ACTOR.to_string(),
+                    })
+                    .await;
+                assert!(ignored.is_err());
+                Ok(())
+            })
+        })
+        .await;
+    assert!(
+        matches!(&outcome, Err(TransactionError::Rejected(_))),
+        "{outcome:?}"
+    );
+    assert_eq!(count(&pool, "owned_notes", REPOSITORY_ACTOR).await, 0);
+
+    sqlx::query("INSERT INTO versioned_notes (id, owner_user_id, version) VALUES ('v', ?, 0)")
+        .bind(REPOSITORY_ACTOR)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Compare-and-swap runs its Before hook after the UPDATE: the savepoint undoes
+    // the swap and the transaction still cannot commit.
+    let outcome = db
+        .transaction(TransactionMode::StateMachine, |tx| {
+            Box::pin(async move {
+                let ignored = tx
+                    .compare_and_swap::<VersionedNote>(
+                        &"v".to_string(),
+                        0,
+                        VersionedNoteWhereInput::default(),
+                        UpdateVersionedNoteInput {
+                            owner_user_id: Some(REPOSITORY_ACTOR.to_string()),
+                        },
+                    )
+                    .await;
+                assert!(ignored.is_err());
+                let current = tx
+                    .find_by_id::<VersionedNote>(&"v".to_string())
+                    .await
+                    .map_err(OrmPublicError::from)?
+                    .expect("row still present");
+                assert_eq!(current.version, 0);
+                Ok(())
+            })
+        })
+        .await;
+    assert!(
+        matches!(&outcome, Err(TransactionError::Rejected(_))),
+        "{outcome:?}"
+    );
+    assert_eq!(count(&pool, "versioned_notes", REPOSITORY_ACTOR).await, 1);
+}
+
+#[tokio::test]
+async fn a_refusal_before_any_write_leaves_the_transaction_usable() {
+    let (db, pool) = database().await;
+    sqlx::query(
+        "INSERT INTO versioned_notes (id, owner_user_id, version) VALUES ('theirs', 'actor-b', 0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    db.transaction(TransactionMode::StateMachine, |tx| {
+        Box::pin(async move {
+            // The existing row is not writable: CAS refuses before its UPDATE and
+            // releases its savepoint.
+            let refused = tx
+                .compare_and_swap::<VersionedNote>(
+                    &"theirs".to_string(),
+                    0,
+                    VersionedNoteWhereInput::default(),
+                    UpdateVersionedNoteInput {
+                        owner_user_id: Some(REPOSITORY_ACTOR.to_string()),
+                    },
+                )
+                .await;
+            assert_eq!(refusal(refused), "FORBIDDEN");
+            tx.insert::<OwnedNote>(CreateOwnedNoteInput {
+                name: "after".to_string(),
+                slug: "after".to_string(),
+                owner_user_id: REPOSITORY_ACTOR.to_string(),
+            })
+            .await
+            .map_err(OrmPublicError::from)?;
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
+    assert_eq!(count(&pool, "owned_notes", REPOSITORY_ACTOR).await, 1);
+    assert_eq!(count(&pool, "versioned_notes", "actor-b").await, 1);
 }

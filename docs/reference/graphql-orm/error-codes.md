@@ -3,7 +3,7 @@ title: "Public ORM Error-Code Contract"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-31
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -28,7 +28,7 @@ constraint names, filesystem paths, and configuration strings stay server-side.
 | `PAGE_LIMIT_EXCEEDED` | Requested page size exceeds configured max |
 | `SERVICE_UNAVAILABLE` | Temporary dependency failure |
 | `INTERNAL_ERROR` | Unexpected failure |
-| `AUTHORIZATION_MISCONFIGURED` | Strict mode missing required policy provider |
+| `AUTHORIZATION_MISCONFIGURED` | A declared policy key has no provider. Under `DeclaredPoliciesRequired` this covers every key; in every mode it covers an entity `write_policy` without a row provider on generated writes |
 
 ## GraphQL Extensions
 

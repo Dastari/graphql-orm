@@ -1686,6 +1686,15 @@ where
                         return Err(classified);
                     }
                 };
+                if context.write_refused() {
+                    context
+                        .rollback()
+                        .await
+                        .map_err(classify_transaction_error::<B>)?;
+                    return Err(crate::graphql::orm::TransactionError::Rejected(
+                        OrmPublicError::forbidden(),
+                    ));
+                }
                 context
                     .commit_and_emit()
                     .await
@@ -1779,6 +1788,16 @@ where
                         return Err(classified);
                     }
                 };
+                // A refused written row rolls back as the refusal it is.
+                if context.write_refused() {
+                    context
+                        .rollback()
+                        .await
+                        .map_err(classify_transaction_error::<B>)?;
+                    return Err(crate::graphql::orm::TransactionError::Rejected(
+                        OrmPublicError::forbidden(),
+                    ));
+                }
                 if context.runtime_cannot_commit() {
                     context
                         .rollback()

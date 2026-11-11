@@ -57,7 +57,9 @@ including `LegacyPermissive` and `ExplicitPolicyForAllExposedOperations`.
 Without a row provider, every generated write of such an entity fails with
 `AUTHORIZATION_MISCONFIGURED` before it looks up any row. This covers creates,
 updates, upserts, deletes and bulk writes on GraphQL, repository and transaction
-paths. An entity with no row isolation still needs a provider; one that allows
+paths, and retention purges. A dependent delete checks every entity registered
+in its `StaticDependentDeletes` before it selects or locks any dependent. An
+entity with no row isolation still needs a provider; one that allows
 its rows is enough.
 
 An entity that declares no policy has no such requirement: with `auth: "required"`, any authenticated
@@ -98,8 +100,12 @@ updates, transaction helpers and dependent `set_null` updates. A refusal is
 `FORBIDDEN` and rolls the write back. In a caller-owned transaction, such as
 `Database::transaction` or a `MutationContext` in a hook, the refusal also
 blocks the commit. `commit_and_emit` then rolls back and returns `FORBIDDEN`,
-even if the caller ignored the error. `compare_and_swap` also rolls back its
-savepoint at once. Updates and upserts still check the existing row first. A client-writable owner or tenant column therefore can't
+even if the caller ignored the error, and `Database::transaction` returns
+`TransactionError::Rejected` with `FORBIDDEN`. `compare_and_swap` rolls back its
+savepoint on any failure after it opens, including a refused existing row. Any
+generated write helper that fails after changing rows, for example in an
+`After` hook or on a cardinality check, also leaves a caller-owned transaction
+uncommittable. A refusal before any row changes leaves the transaction usable. Updates and upserts still check the existing row first. A client-writable owner or tenant column therefore can't
 create a row outside the caller's write scope or move one out of it.
 
 **The returned row.** Generated GraphQL create, update and upsert payloads

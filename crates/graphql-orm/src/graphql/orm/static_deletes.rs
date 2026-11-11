@@ -486,6 +486,12 @@ impl<B: StaticDeleteBackend> StaticDependentDeletes<B> {
         expected: Option<i64>,
     ) -> Result<(Option<String>, Vec<Box<dyn StaticCommittedNotification<B>>>)> {
         let db = ctx.data::<crate::db::Database<B>>()?;
+        // Every registered entity that declares a write policy needs its row
+        // provider, checked before any dependent is selected or locked.
+        for adapter in self.entities.values() {
+            let metadata = adapter.metadata();
+            db.ensure_row_write_provider(metadata.entity_name, metadata.write_policy)?;
+        }
         let auth = ctx.data_opt::<DbAuthContext>();
         let mut tx = MutationContext::<B>::begin(db, TransactionMode::StateMachine)
             .await

@@ -10,8 +10,19 @@ pub(crate) struct RuntimeTransactionState {
     poisoned: AtomicBool,
     /// A row this transaction wrote failed the row write policy.
     refused_write: AtomicBool,
+    /// Generated writes that changed at least one row.
+    writes: AtomicUsize,
 }
 impl RuntimeTransactionState {
+    pub(crate) fn note_write(&self) {
+        self.writes.fetch_add(1, Ordering::SeqCst);
+    }
+    pub(crate) fn writes(&self) -> usize {
+        self.writes.load(Ordering::SeqCst)
+    }
+    pub(crate) fn poison(&self) {
+        self.poisoned.store(true, Ordering::SeqCst);
+    }
     pub(crate) fn refuse_write(&self) {
         self.refused_write.store(true, Ordering::SeqCst);
     }

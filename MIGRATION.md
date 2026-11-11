@@ -75,14 +75,19 @@ for the new row too, so a policy that refuses that surface now also refuses
 repository creates. Allow the rows the host writes there, or write them through
 a path the policy allows. Dependent-delete `set_null` updates check the nulled
 child row as well. A refused written row also blocks the commit of a
-caller-owned transaction: `commit_and_emit` rolls back and returns `FORBIDDEN`
-even when the caller ignored the error.
+caller-owned transaction: `commit_and_emit` rolls back and returns `FORBIDDEN`,
+and `Database::transaction` returns `TransactionError::Rejected` with
+`FORBIDDEN`, even when the caller ignored the error. A generated write that
+fails after changing rows, such as an `After` hook refusal, now also leaves a
+caller-owned transaction uncommittable. Hosts that caught such errors and
+committed anyway must roll back instead.
 
 **A `write_policy` needs a row provider in every mode.** An entity that
 declares an entity-level `write_policy` uses it as its row write policy key.
 In every `AuthorizationMode`, its generated creates, updates, upserts, deletes
 and bulk writes now fail with `AUTHORIZATION_MISCONFIGURED` before any lookup
-when no `RowPolicy` is installed. Install one; a provider that allows the rows
+when no `RowPolicy` is installed. So do retention purges, and dependent
+deletes check every registered entity before selecting any row. Install one; a provider that allows the rows
 of entities without row isolation is enough. Most affected:
 
 - **Create-only and append-only entities** that declare only an entity-level
