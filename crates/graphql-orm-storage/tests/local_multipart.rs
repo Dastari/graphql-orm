@@ -7,7 +7,8 @@ mod multipart_conformance;
 use std::sync::Arc;
 
 use graphql_orm_storage::{
-    BlobStore, LocalStorageBackend, MultipartBlobStore, MultipartStartOptions, StorageService,
+    BlobStore, LocalStorageBackend, MultipartBlobStore, MultipartStartOptions,
+    MultipartUploadHandle, StorageError, StorageService,
 };
 use multipart_conformance::{Make, part};
 use tempfile::TempDir;
@@ -176,4 +177,41 @@ async fn a_retry_after_a_crash_past_publishing_recognises_its_own_object() {
         store.list_parts(&other).await.expect("parts remain").len(),
         1
     );
+}
+
+#[tokio::test]
+async fn multipart_refuses_a_temp_shaped_key_without_creating_directories() {
+    let temp = TempDir::new().expect("temp dir");
+    let backend = backend(temp.path());
+    let reserved = format!("reserved/.{}.uploading", uuid::Uuid::new_v4());
+
+    assert!(matches!(
+        backend
+            .start_multipart(&reserved, MultipartStartOptions::default())
+            .await,
+        Err(StorageError::InvalidStorageKey { .. })
+    ));
+    assert!(!temp.path().join("reserved").exists());
+
+    // A persisted handle naming such a key (for example, one started by an
+    // earlier version) is refused at completion before any directory is made.
+    let started = backend
+        .start_multipart("videos/ok.webm", MultipartStartOptions::default())
+        .await
+        .expect("start");
+    let receipt = backend
+        .upload_part(&started, 1, part(1, PART).1)
+        .await
+        .expect("upload part");
+    let crafted = MultipartUploadHandle {
+        key: reserved.clone(),
+        ..started.clone()
+    };
+    assert!(matches!(
+        backend.complete_multipart(&crafted, &[receipt]).await,
+        Err(StorageError::InvalidStorageKey { .. })
+    ));
+    assert!(!temp.path().join("reserved").exists());
+    assert!(!temp.path().join("videos/ok.webm").exists());
+    backend.abort_multipart(&started).await.expect("abort");
 }

@@ -33,7 +33,9 @@ supersedes: []
   local backend refuses it before creating any directory.
 - `file_extension` returns `None` for the extension `uploading` in any case,
   so `StorageService` never generates a key ending in `.uploading`, and a
-  sweep by an older version sharing the root cannot remove new objects.
+  sweep by an older version sharing the root cannot remove objects stored
+  through `StorageService`. Direct `BlobStore` callers may still write names
+  that an older version's sweep removes; see the migration guide.
 - No public API, configuration or object format change.
 
 ## 0.9.0 (unreleased)

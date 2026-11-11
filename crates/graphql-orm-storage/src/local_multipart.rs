@@ -379,6 +379,9 @@ impl MultipartBlobStore for LocalStorageBackend {
     ) -> Result<MultipartCompleteOutcome, StorageError> {
         let (dir, lock) = self.upload_paths(handle)?;
         let target = self.path_for(&handle.key)?;
+        // Refuse a temporary-shaped key before taking the lock or creating any
+        // directory.
+        let temp = temp_path_for(&target, &handle.key)?;
         let key = handle.key.clone();
         let parts = parts.to_vec();
         let limits = self.multipart_limits();
@@ -399,7 +402,6 @@ impl MultipartBlobStore for LocalStorageBackend {
                 path: target.clone(),
             })?;
             std::fs::create_dir_all(parent).map_err(io(parent))?;
-            let temp = temp_path_for(&target, &key)?;
             let assembled = (|| {
                 let mut output = File::create(&temp).map_err(io(&temp))?;
                 let mut hasher = Sha256::new();

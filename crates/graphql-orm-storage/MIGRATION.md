@@ -27,6 +27,9 @@ API, configuration or object format change is required.
   delete files under the root matching `*.<uuid>.uploading` that do not begin
   with a dot and that you did not store. Do not automate this for roots that
   may hold stored objects with such names.
+- Upgrade every writer that shares a local root together. During a
+  mixed-version rollout, a 0.9.1 listing shows an earlier writer's in-flight
+  `<name>.<uuid>.uploading` temporary file as an ordinary key.
 - Stop running a sweep from an earlier version against a root a 0.9.1 writer
   uses; the earlier sweep still removes any file ending in `.uploading`.
   `StorageService` no longer generates such keys, but direct `BlobStore`
