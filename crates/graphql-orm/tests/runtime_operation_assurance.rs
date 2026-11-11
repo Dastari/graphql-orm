@@ -16,14 +16,16 @@ use graphql_orm::async_graphql::{
     self, ErrorExtensions, Request, Variables,
     dynamic::{FieldFuture, FieldValue, Schema, TypeRef},
 };
+use graphql_orm::futures::StreamExt;
 use graphql_orm::graphql::assurance::*;
 use graphql_orm::graphql::runtime::*;
 use graphql_orm::{graphql::orm::*, prelude::*};
 use serde_json::{Value, json};
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
+use std::time::Duration;
 
 type Backend = SqliteBackend;
 
@@ -82,9 +84,46 @@ fn collection(id: &str, name: &str, plural: &str) -> RuntimeCollection {
 }
 /// Posts link to tags through `ra_post_tags`, so the module has every runtime
 /// mutation root: `createPost`, `updatePost`, `deletePost` and `updatePostTagsLinks`.
+/// Comments cascade from their post, and events carry a local `node` identity
+/// and an `eventChanged` live subscription.
 fn definition() -> RuntimeSchema {
     let mut post = collection("post", "Post", "Posts");
     let tag = collection("tag", "Tag", "Tags");
+    let mut comment = collection("comment", "Comment", "Comments");
+    comment
+        .fields
+        .push(field("comment.post", "postId", RuntimeValueKind::Integer));
+    comment.relations.push(RuntimeRelation {
+        description: None,
+        classification: None,
+        export: None,
+        id: RelationId::new("post").unwrap(),
+        api_name: "post".into(),
+        target: cid("post"),
+        key_pairs: vec![RelationKeyPair {
+            source: fid("comment.post"),
+            target: fid("post.id"),
+        }],
+        cardinality: RelationCardinality::One,
+        enforce_foreign_key: true,
+        on_delete: Some(DeletePolicy::Cascade),
+        join: None,
+    });
+    let mut event = collection("event", "Event", "Events");
+    let mut version = field("event.rowVersion", "rowVersion", RuntimeValueKind::Integer);
+    version.default = Some(RuntimeDefault::Literal("1".into()));
+    event.fields = vec![
+        field("event.id", "id", RuntimeValueKind::String),
+        field("event.label", "label", RuntimeValueKind::String),
+        version,
+    ];
+    event.node_identity = Some(RuntimeNodeIdentity {
+        version_field: fid("event.rowVersion"),
+    });
+    event.live_subscriptions = Some(RuntimeLiveSubscriptions {
+        subscription_key_limit: 2,
+        deleted_images: false,
+    });
     post.relations.push(RuntimeRelation {
         description: None,
         classification: None,
@@ -111,7 +150,7 @@ fn definition() -> RuntimeSchema {
     RuntimeSchema {
         repository_only: false,
         format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
-        collections: vec![post, tag],
+        collections: vec![post, tag, comment, event],
     }
 }
 
@@ -193,10 +232,12 @@ impl RuntimeReadAuthority for Reads {
     }
 }
 
-/// Denies every requirement with `STEP_UP_REQUIRED`, recording the policy.
+/// Records every evaluated policy. Until `satisfied` is set it denies with
+/// `STEP_UP_REQUIRED`; afterwards the caller has completed step-up.
 #[derive(Clone, Debug, Default)]
 struct StepUp {
     policies: Arc<Mutex<Vec<String>>>,
+    satisfied: Arc<AtomicBool>,
 }
 impl AssuranceRequirementEvaluator for StepUp {
     fn enforce(
@@ -207,10 +248,29 @@ impl AssuranceRequirementEvaluator for StepUp {
     ) -> async_graphql::Result<()> {
         assert_eq!(actor_class, AssuranceActorClass::Interactive);
         self.policies.lock().unwrap().push(policy_id.to_owned());
+        if self.satisfied.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         Err(
             async_graphql::Error::new("additional authentication is required")
                 .extend_with(|_, extensions| extensions.set("code", "STEP_UP_REQUIRED")),
         )
+    }
+}
+
+/// Counts live registrations; delivers nothing.
+struct LiveSource {
+    tx: tokio::sync::broadcast::Sender<RuntimeLiveEvent>,
+    opened: AtomicUsize,
+}
+impl RuntimeLiveSource for LiveSource {
+    fn subscribe(
+        &self,
+        _: &SchemaFingerprint,
+        _: &CollectionId,
+    ) -> Result<tokio::sync::broadcast::Receiver<RuntimeLiveEvent>, RuntimeGraphqlError> {
+        self.opened.fetch_add(1, Ordering::SeqCst);
+        Ok(self.tx.subscribe())
     }
 }
 
@@ -220,6 +280,7 @@ struct Fixture {
     environment: Arc<RuntimeMutationEnvironment>,
     intents: Arc<AtomicUsize>,
     host_calls: Arc<AtomicUsize>,
+    live: Arc<LiveSource>,
 }
 impl Fixture {
     async fn new() -> Self {
@@ -263,6 +324,8 @@ impl Fixture {
         for sql in [
             "INSERT INTO ra_post (id, label) VALUES (1, 'first')",
             "INSERT INTO ra_tag (id, label) VALUES (10, 'red')",
+            "INSERT INTO ra_comment (id, label, postid) VALUES (100, 'note', 1)",
+            "INSERT INTO ra_event (id, label) VALUES ('e1', 'opened')",
         ] {
             Backend::fetch_rows(db.pool(), sql, &[]).await.unwrap();
         }
@@ -272,6 +335,10 @@ impl Fixture {
             environment,
             intents: Default::default(),
             host_calls: Default::default(),
+            live: Arc::new(LiveSource {
+                tx: tokio::sync::broadcast::channel(4).0,
+                opened: AtomicUsize::new(0),
+            }),
         }
     }
     fn schema(&self) -> &Arc<ValidatedRuntimeSchema> {
@@ -282,9 +349,35 @@ impl Fixture {
             self.schema().clone(),
             RuntimeGraphqlOptions::default()
                 .with_cursor_profile(RuntimeCursorProfile::Unprotected)
-                .with_mutations(Default::default()),
+                .with_live_source(self.live.clone(), RuntimeLiveProfile::NativeRls)
+                .with_mutations({
+                    let mut options = RuntimeGraphqlMutationOptions::default();
+                    options.dependent_changes = Some(RuntimeDependentLimits::default());
+                    options.links_in_writes = true;
+                    options
+                }),
         )
         .unwrap()
+    }
+    fn request(&self, query: &str) -> Request {
+        let schema = self.schema();
+        Request::new(query)
+            .variables(Variables::from_json(
+                json!({"schema": schema.fingerprint().to_string()}),
+            ))
+            .data(
+                RuntimeGraphqlRequest::<Backend>::new(
+                    schema.fingerprint(),
+                    Arc::new(Reads),
+                    None,
+                    Default::default(),
+                )
+                .with_mutation_environment(self.environment.clone())
+                .with_write_authority(Arc::new(Writes {
+                    schema: schema.clone(),
+                    intents: self.intents.clone(),
+                })),
+            )
     }
     fn host_field(&self) -> RuntimeHostField {
         let calls = self.host_calls.clone();
@@ -311,29 +404,7 @@ impl Fixture {
             .unwrap()
     }
     async fn run(&self, api: &Schema, query: &str) -> Value {
-        let schema = self.schema();
-        let response = api
-            .execute(
-                Request::new(query)
-                    .variables(Variables::from_json(
-                        json!({"schema": schema.fingerprint().to_string()}),
-                    ))
-                    .data(
-                        RuntimeGraphqlRequest::<Backend>::new(
-                            schema.fingerprint(),
-                            Arc::new(Reads),
-                            None,
-                            Default::default(),
-                        )
-                        .with_mutation_environment(self.environment.clone())
-                        .with_write_authority(Arc::new(Writes {
-                            schema: schema.clone(),
-                            intents: self.intents.clone(),
-                        })),
-                    ),
-            )
-            .await;
-        serde_json::to_value(&response).unwrap()
+        serde_json::to_value(api.execute(self.request(query)).await).unwrap()
     }
     async fn count(&self, table: &str) -> i64 {
         let rows = Backend::fetch_rows(
@@ -406,6 +477,7 @@ async fn assert_nothing_written(f: &Fixture, response: &Value, root: &str) {
     );
     assert_eq!(f.count("ra_post").await, 1, "{root} changed rows");
     assert_eq!(f.count("ra_post_tags").await, 0, "{root} changed links");
+    assert_eq!(f.count("ra_comment").await, 1, "{root} changed dependents");
     assert_eq!(
         f.label().await.as_deref(),
         Some("first"),
@@ -592,5 +664,139 @@ async fn strict_classification_refuses_unregistered_runtime_mutation_roots() {
         ))
         .finish()
         .unwrap();
+    f.finish().await;
+}
+
+/// Runtime mutation roots are refused until step-up is met, then run: create
+/// with opt-in links, update, link changes, a cascading delete and a host field.
+#[tokio::test]
+async fn runtime_mutations_run_once_assurance_is_satisfied() {
+    let f = Fixture::new().await;
+    let evaluator = StepUp::default();
+    let composer = f.composer();
+    let mut builder = OperationAssuranceRegistryBuilder::new(
+        AssuranceSchemaConfig::legacy()
+            .with_default_interactive_mutation_policy(POLICY)
+            .unwrap()
+            .with_strict_mutation_classification(true),
+    );
+    composer
+        .register_assurance_operations(&mut builder)
+        .unwrap();
+    let api = composer
+        .data(AssuranceEnforcement::new(
+            Arc::new(builder.build().unwrap()),
+            Arc::new(evaluator.clone()),
+        ))
+        .finish()
+        .unwrap();
+    let steps = [
+        (
+            "createPost",
+            r#"mutation($schema: String!) { createPost(expectedSchema: $schema, input: {id: "2", label: "new"}, links: {tags: {add: [{id: "10"}]}}) { record { id } } }"#,
+        ),
+        MUTATIONS[1],
+        MUTATIONS[3],
+        MUTATIONS[2],
+        MUTATIONS[4],
+    ];
+    for (root, query) in steps {
+        let response = f.run(&api, query).await;
+        assert_nothing_written(&f, &response, root).await;
+    }
+
+    evaluator.satisfied.store(true, Ordering::SeqCst);
+    for (root, query) in steps {
+        let response = f.run(&api, query).await;
+        assert!(response.get("errors").is_none(), "{root}: {response}");
+        if root == "updatePost" {
+            assert_eq!(f.label().await.as_deref(), Some("changed"));
+        }
+    }
+    // Post 2 was created with its tag link; post 1, its link and its cascaded
+    // comment are gone; the host field ran.
+    assert_eq!(f.count("ra_post").await, 1);
+    assert_eq!(f.label().await, None);
+    assert_eq!(f.count("ra_post_tags").await, 1);
+    assert_eq!(f.count("ra_comment").await, 0);
+    assert_eq!(f.host_calls.load(Ordering::SeqCst), 1);
+    assert!(f.intents.load(Ordering::SeqCst) > 0);
+    assert_eq!(evaluator.policies.lock().unwrap().len(), steps.len() * 2);
+    f.finish().await;
+}
+
+/// `node` and the `eventChanged` live subscription enforce their own
+/// coordinates: no lookup result and no live registration before step-up.
+#[tokio::test]
+async fn node_and_live_subscription_roots_enforce_their_coordinates() {
+    let f = Fixture::new().await;
+    let evaluator = StepUp::default();
+    let composer = f.composer();
+    let mut builder = OperationAssuranceRegistryBuilder::new(AssuranceSchemaConfig::legacy());
+    composer
+        .register_assurance_operations(&mut builder)
+        .unwrap();
+    builder
+        .require(GraphqlOperationKind::Query, "node", "read.recent-auth")
+        .unwrap()
+        .require(
+            GraphqlOperationKind::Subscription,
+            "eventChanged",
+            "live.recent-auth",
+        )
+        .unwrap();
+    let api = composer
+        .data(AssuranceEnforcement::new(
+            Arc::new(builder.build().unwrap()),
+            Arc::new(evaluator.clone()),
+        ))
+        .finish()
+        .unwrap();
+    let id = graphql_orm::graphql::federation::encode_node_id("Event", vec!["e1".into()]);
+    let node = format!(
+        "{{ node(NodeId: {}) {{ NodeId ... on Event {{ label }} }} }}",
+        serde_json::to_string(&id.0).unwrap()
+    );
+    const LIVE: &str = r#"subscription { eventChanged(keys: ["e1"]) { id } }"#;
+
+    let refused = f.run(&api, &node).await;
+    assert_eq!(
+        step_up_code(&refused),
+        Some("STEP_UP_REQUIRED"),
+        "{refused}"
+    );
+    assert_eq!(refused["data"]["node"], Value::Null, "{refused}");
+    let mut stream = api.execute_stream(f.request(LIVE)).boxed();
+    let first = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .expect("a refused subscription answers at once")
+        .expect("one error frame");
+    assert_eq!(first.errors.len(), 1, "{first:?}");
+    assert_eq!(
+        first.errors[0].message,
+        "additional authentication is required"
+    );
+    drop(stream);
+    assert_eq!(f.live.opened.load(Ordering::SeqCst), 0);
+
+    evaluator.satisfied.store(true, Ordering::SeqCst);
+    let admitted = f.run(&api, &node).await;
+    assert!(admitted.get("errors").is_none(), "{admitted}");
+    assert_eq!(admitted["data"]["node"]["label"], "opened");
+    let mut stream = api.execute_stream(f.request(LIVE)).boxed();
+    // An admitted registration subscribes and waits for events.
+    let pending = tokio::time::timeout(Duration::from_millis(500), stream.next()).await;
+    assert!(pending.is_err(), "unexpected frame: {pending:?}");
+    assert_eq!(f.live.opened.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        evaluator.policies.lock().unwrap().as_slice(),
+        [
+            "read.recent-auth",
+            "live.recent-auth",
+            "read.recent-auth",
+            "live.recent-auth"
+        ]
+    );
+    drop(stream);
     f.finish().await;
 }

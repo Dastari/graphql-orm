@@ -10,7 +10,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use graphql_orm::async_graphql::ErrorExtensions;
+use graphql_orm::async_graphql::{ErrorExtensions, Guard};
 use graphql_orm::prelude::*;
 
 #[derive(GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -52,11 +52,58 @@ impl DescribedAssuranceMutations {
     }
 }
 
+/// Counts host guard evaluations for the request.
+#[derive(Default)]
+struct HostGuardCalls(AtomicUsize);
+
+struct HostGuard;
+
+impl Guard for HostGuard {
+    async fn check(
+        &self,
+        ctx: &graphql_orm::async_graphql::Context<'_>,
+    ) -> graphql_orm::async_graphql::Result<()> {
+        if let Some(calls) = ctx.data_opt::<Arc<HostGuardCalls>>() {
+            calls.0.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+}
+
+/// Described roots whose own guards would otherwise skip or misclassify
+/// assurance: the attribute composes the correct check before each of them.
+#[derive(Default)]
+struct HostGuardedMutations;
+
+#[graphql_orm_custom_operations(kind = "mutation")]
+#[graphql_orm::async_graphql::Object]
+impl HostGuardedMutations {
+    /// Runs a host-guarded action.
+    #[graphql(guard = "HostGuard")]
+    async fn host_guarded(&self) -> bool {
+        true
+    }
+
+    /// Declares assurance with the query kind on a mutation root.
+    #[graphql(guard = "DeclaredAssuranceGuard::new(GraphqlOperationKind::Query).and(HostGuard)")]
+    async fn wrong_kind(&self) -> bool {
+        true
+    }
+
+    /// Offers assurance only as an alternative to the host guard.
+    #[graphql(guard = HostGuard.or(DeclaredAssuranceGuard::new(GraphqlOperationKind::Mutation)))]
+    async fn either_guard(&self) -> bool {
+        true
+    }
+}
+
+const HOST_GUARDED: [&str; 3] = ["hostGuarded", "wrongKind", "eitherGuard"];
+
 schema_roots! {
     backend: "sqlite",
     entities: [AssuranceRecord],
     extra_mutation_types: [CustomAssuranceMutations],
-    described_mutation_types: [DescribedAssuranceMutations],
+    described_mutation_types: [DescribedAssuranceMutations, HostGuardedMutations],
 }
 
 #[derive(Clone)]
@@ -117,14 +164,21 @@ fn registry() -> OperationAssuranceRegistry {
             "service operation uses a non-interactive principal",
         )
         .unwrap();
-    builder
-        .register_custom(
-            "custom:rotate-key:v1",
-            GraphqlOperationKind::Mutation,
-            "rotateKey",
-            AssuranceActorClass::Interactive,
-        )
-        .unwrap();
+    for (operation_id, field) in [
+        ("custom:rotate-key:v1", "rotateKey"),
+        ("custom:host-guarded:v1", "hostGuarded"),
+        ("custom:wrong-kind:v1", "wrongKind"),
+        ("custom:either-guard:v1", "eitherGuard"),
+    ] {
+        builder
+            .register_custom(
+                operation_id,
+                GraphqlOperationKind::Mutation,
+                field,
+                AssuranceActorClass::Interactive,
+            )
+            .unwrap();
+    }
     builder.build().unwrap()
 }
 
@@ -272,11 +326,78 @@ async fn strict_schema_build_refuses_unregistered_mutation_roots()
     };
     assert_eq!(
         missing.iter().map(ToString::to_string).collect::<Vec<_>>(),
-        ["Mutation.rotateKey"]
+        [
+            "Mutation.eitherGuard",
+            "Mutation.hostGuarded",
+            "Mutation.rotateKey",
+            "Mutation.wrongKind",
+        ]
     );
 
     AssuranceEnforcement::new(Arc::new(registry()), denying(&calls))
         .finish_schema(schema_builder(database))?;
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+/// Admits every requirement, counting evaluations.
+#[derive(Debug, Default)]
+struct AdmittingEvaluator(AtomicUsize);
+
+impl AssuranceRequirementEvaluator for AdmittingEvaluator {
+    fn enforce(
+        &self,
+        _ctx: &graphql_orm::async_graphql::Context<'_>,
+        _actor_class: AssuranceActorClass,
+        _policy_id: &str,
+    ) -> graphql_orm::async_graphql::Result<()> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// A host guard, a wrong-kind assurance guard or an `.or` alternative cannot
+/// bypass the mutation coordinate's default requirement, even unregistered.
+#[tokio::test]
+async fn host_guards_compose_after_the_described_root_assurance_check()
+-> Result<(), Box<dyn std::error::Error>> {
+    let config = AssuranceSchemaConfig::legacy()
+        .with_default_interactive_mutation_policy("interactive.recent-auth")
+        .unwrap();
+    let registry = Arc::new(
+        OperationAssuranceRegistry::builder(graphql_orm_operation_catalog(), config)
+            .build()
+            .unwrap(),
+    );
+
+    let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:").await?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let host = Arc::new(HostGuardCalls::default());
+    let denied = schema_builder(database.clone())
+        .data(AuthSubject::new("user-1"))
+        .data(host.clone())
+        .data(AssuranceEnforcement::new(registry.clone(), denying(&calls)))
+        .finish();
+    for field in HOST_GUARDED {
+        let response = denied.execute(format!("mutation {{ {field} }}")).await;
+        assert!(step_up(&response), "{field}: {:?}", response.errors);
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), HOST_GUARDED.len());
+    assert_eq!(host.0.load(Ordering::SeqCst), 0);
+
+    let admitting = Arc::new(AdmittingEvaluator::default());
+    let admitted = schema_builder(database)
+        .data(AuthSubject::new("user-1"))
+        .data(host.clone())
+        .data(AssuranceEnforcement::new(registry, admitting.clone()))
+        .finish();
+    for field in HOST_GUARDED {
+        let response = admitted.execute(format!("mutation {{ {field} }}")).await;
+        assert!(response.errors.is_empty(), "{field}: {:?}", response.errors);
+        assert_eq!(response.data.into_json()?[field], true);
+    }
+    // Each host guard still runs once the assurance check admits the caller.
+    assert_eq!(host.0.load(Ordering::SeqCst), HOST_GUARDED.len());
+    assert!(admitting.0.load(Ordering::SeqCst) >= HOST_GUARDED.len());
     Ok(())
 }

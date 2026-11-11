@@ -17,6 +17,7 @@ impl graphql_orm::async_graphql::Guard for HostGuard {
 #[graphql_orm_custom_operations(kind = "mutation")]
 #[graphql_orm::async_graphql::Object]
 impl Mutation {
+    #[graphql(name = "rotateKey")]
     #[graphql(guard = "HostGuard")]
     async fn rotate_key(&self) -> bool {
         true

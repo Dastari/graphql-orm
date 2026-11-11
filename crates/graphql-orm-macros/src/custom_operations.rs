@@ -198,21 +198,81 @@ fn graphql_attribute_value(attrs: &[syn::Attribute], key: &str) -> syn::Result<O
     Ok(result)
 }
 
-/// The `guard` expression of a resolver's `#[graphql(...)]` attributes, as tokens.
-fn graphql_guard(attrs: &[syn::Attribute]) -> syn::Result<Option<String>> {
-    let mut guard = None;
-    for attr in attrs.iter().filter(|attr| attr.path().is_ident("graphql")) {
-        attr.parse_nested_meta(|nested| {
-            if nested.path.is_ident("guard") {
-                let value: syn::Expr = nested.value()?.parse()?;
-                guard = Some(value.to_token_stream().to_string());
-            } else if nested.input.peek(Token![=]) {
-                let _: syn::Expr = nested.value()?.parse()?;
-            }
-            Ok(())
-        })?;
+/// Install operation assurance on one described resolver.
+///
+/// async-graphql reads only the first `#[graphql(...)]` attribute of a
+/// resolver, so a described root must have at most one. The installed guard is
+/// always `DeclaredAssuranceGuard::new(<root kind>)`; a host guard is kept and
+/// composed after it with `GuardExt::and`, so the host guard cannot replace,
+/// weaken, or misclassify the assurance check.
+fn install_assurance_guard(method: &mut syn::ImplItemFn, assurance_guard: &str) -> syn::Result<()> {
+    let mut graphql = method
+        .attrs
+        .iter_mut()
+        .filter(|attr| attr.path().is_ident("graphql"));
+    let Some(attr) = graphql.next() else {
+        let guard = syn::LitStr::new(assurance_guard, method.sig.ident.span());
+        method
+            .attrs
+            .push(syn::parse_quote!(#[graphql(guard = #guard)]));
+        return Ok(());
+    };
+    if let Some(extra) = graphql.next() {
+        return Err(syn::Error::new_spanned(
+            extra,
+            "a described custom root takes a single `#[graphql(...)]` attribute; \
+             async-graphql reads only the first",
+        ));
     }
-    Ok(guard)
+    let span = attr
+        .path()
+        .get_ident()
+        .map_or_else(proc_macro2::Span::call_site, proc_macro2::Ident::span);
+    let mut items = match &attr.meta {
+        Meta::Path(_) => Punctuated::<Meta, Token![,]>::new(),
+        Meta::List(list) => {
+            list.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)?
+        }
+        Meta::NameValue(other) => {
+            return Err(syn::Error::new_spanned(
+                other,
+                "expected `#[graphql(...)]` on a described custom root",
+            ));
+        }
+    };
+    let mut guards = items
+        .iter_mut()
+        .filter_map(|item| match item {
+            Meta::NameValue(value) if value.path.is_ident("guard") => Some(value),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if guards.len() > 1 {
+        return Err(syn::Error::new_spanned(
+            &guards[1].path,
+            "duplicate graphql guard",
+        ));
+    }
+    if let Some(guard) = guards.pop() {
+        let host = match &guard.value {
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(lit),
+                ..
+            }) => lit.value(),
+            expression => expression.to_token_stream().to_string(),
+        };
+        let composed =
+            format!("::graphql_orm::async_graphql::GuardExt::and({assurance_guard}, {host})");
+        guard.value = syn::Expr::Lit(syn::ExprLit {
+            attrs: Vec::new(),
+            lit: syn::Lit::Str(syn::LitStr::new(&composed, span)),
+        });
+    } else {
+        let guard = syn::LitStr::new(assurance_guard, span);
+        items.push(syn::parse_quote!(guard = #guard));
+    }
+    attr.meta = syn::parse_quote!(graphql(#items));
+    Ok(())
 }
 
 fn has_graphql_flag(attrs: &[syn::Attribute], key: &str) -> syn::Result<bool> {
@@ -452,14 +512,10 @@ pub(crate) fn expand(args: TokenStream, input: TokenStream) -> TokenStream {
         "mutation" => "Mutation",
         _ => "Subscription",
     };
-    // Every described root enforces its own assurance coordinate. A resolver
-    // with its own guard must compose this one explicitly.
-    let assurance_guard = syn::LitStr::new(
-        &format!(
-            "::graphql_orm::graphql::assurance::DeclaredAssuranceGuard::new(\
-             ::graphql_orm::graphql::orm::GraphqlOperationKind::{kind_variant})"
-        ),
-        proc_macro2::Span::call_site(),
+    // Every described root enforces its own assurance coordinate first.
+    let assurance_guard = format!(
+        "::graphql_orm::graphql::assurance::DeclaredAssuranceGuard::new(\
+         ::graphql_orm::graphql::orm::GraphqlOperationKind::{kind_variant})"
     );
     let kind = match args.kind.as_str() {
         "query" => quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Query },
@@ -530,47 +586,8 @@ pub(crate) fn expand(args: TokenStream, input: TokenStream) -> TokenStream {
             Err(error) => return error.to_compile_error().into(),
         };
         if !entity {
-            match graphql_guard(&method.attrs) {
-                // async-graphql reads one `#[graphql(...)]` per resolver, so
-                // the guard joins an existing attribute rather than adding one.
-                Ok(None) => match method
-                    .attrs
-                    .iter_mut()
-                    .find(|attr| attr.path().is_ident("graphql"))
-                    .map(|attr| &mut attr.meta)
-                {
-                    Some(Meta::List(list)) => {
-                        if !list.tokens.is_empty() {
-                            list.tokens.extend(quote! { , });
-                        }
-                        list.tokens.extend(quote! { guard = #assurance_guard });
-                    }
-                    Some(other) => {
-                        return syn::Error::new_spanned(
-                            other,
-                            "expected `#[graphql(...)]` on a described custom root",
-                        )
-                        .to_compile_error()
-                        .into();
-                    }
-                    None => method
-                        .attrs
-                        .push(syn::parse_quote!(#[graphql(guard = #assurance_guard)])),
-                },
-                Ok(Some(guard)) if guard.contains("DeclaredAssuranceGuard") => {}
-                Ok(Some(_)) => {
-                    return syn::Error::new_spanned(
-                        &method.sig.ident,
-                        format!(
-                            "a described custom root with its own guard must compose operation \
-                             assurance explicitly, for example \
-                             `guard = \"DeclaredAssuranceGuard::new(GraphqlOperationKind::{kind_variant}).and(YourGuard)\"`"
-                        ),
-                    )
-                    .to_compile_error()
-                    .into();
-                }
-                Err(error) => return error.to_compile_error().into(),
+            if let Err(error) = install_assurance_guard(method, &assurance_guard) {
+                return error.to_compile_error().into();
             }
         }
         let explicit = semantic_options.description.clone();

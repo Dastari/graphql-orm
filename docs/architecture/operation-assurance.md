@@ -95,9 +95,11 @@ async fn rotate_credential(&self) -> bool {
 }
 ```
 
-`#[graphql_orm_custom_operations]` adds this guard to each described root. A
-described root with its own guard must compose `DeclaredAssuranceGuard`
-explicitly, for example `.and(HostGuard)`, or it fails to compile.
+`#[graphql_orm_custom_operations]` adds this guard, with the root's own kind,
+to each described root. A host guard is composed after it as
+`DeclaredAssuranceGuard::new(…).and(HostGuard)`, so the host guard cannot
+replace, weaken or misclassify it. A described root takes a single
+`#[graphql(...)]` attribute.
 
 Generated query, mutation, and subscription resolvers call the same enforcement
 hook automatically. Without installed enforcement the call is a no-op, which
@@ -105,8 +107,8 @@ preserves existing schemas.
 
 Enforcement keys on the exact root coordinate. A resolver that runs below
 another root passes its own coordinate to `enforce_operation_assurance`.
-Federation entity resolvers run below `_entities` and use the entity's
-get-by-id query root. Generated dependent deletes use their own delete root.
+Federation entity resolvers run below `_entities`: they enforce the entity's
+get-by-id query root and any classification registered for `_entities`. Generated dependent deletes use their own delete root.
 
 ## Runtime GraphQL Roots
 

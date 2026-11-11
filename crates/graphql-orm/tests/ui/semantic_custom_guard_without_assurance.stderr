@@ -1,5 +1,0 @@
-error: a described custom root with its own guard must compose operation assurance explicitly, for example `guard = "DeclaredAssuranceGuard::new(GraphqlOperationKind::Mutation).and(YourGuard)"`
-  --> tests/ui/semantic_custom_guard_without_assurance.rs:21:14
-   |
-21 |     async fn rotate_key(&self) -> bool {
-   |              ^^^^^^^^^^

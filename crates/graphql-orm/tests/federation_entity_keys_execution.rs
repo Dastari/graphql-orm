@@ -434,3 +434,40 @@ async fn entity_resolvers_enforce_the_single_read_assurance_coordinate() {
     assert_eq!(direct.errors.len(), 1, "{:?}", direct.data);
     assert_eq!(evaluator.0.lock().unwrap().len(), 2);
 }
+
+/// A classification registered for `Query._entities` itself is enforced too.
+#[tokio::test]
+async fn entity_resolvers_also_enforce_a_registered_entities_coordinate() {
+    let database =
+        graphql_orm::db::Database::with_entity_policy(zone_pool().await, allowing_policy());
+    let mut builder = OperationAssuranceRegistry::builder(
+        zones::graphql_orm_operation_catalog(),
+        AssuranceSchemaConfig::legacy(),
+    );
+    builder
+        .register_custom(
+            "custom:entities:v1",
+            graphql_orm::graphql::orm::GraphqlOperationKind::Query,
+            "_entities",
+            AssuranceActorClass::Service,
+        )
+        .unwrap()
+        .require(
+            graphql_orm::graphql::orm::GraphqlOperationKind::Query,
+            "_entities",
+            "service.router",
+        )
+        .unwrap();
+    let evaluator = Arc::new(StepUpRequired::default());
+    let schema = zones::schema_builder(database)
+        .data(AuthSubject::new("user-1"))
+        .data(AssuranceEnforcement::new(
+            Arc::new(builder.build().unwrap()),
+            evaluator.clone(),
+        ))
+        .finish();
+
+    let response = schema.execute(entities_query(&["zone-1"], "id")).await;
+    assert_eq!(response.errors.len(), 1, "{:?}", response.data);
+    assert_eq!(evaluator.0.lock().unwrap().as_slice(), ["service.router"]);
+}

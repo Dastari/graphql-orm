@@ -661,11 +661,11 @@ unbounded descriptions, malformed GraphQL types, duplicate root coordinates,
 and stale fingerprints fail closed.
 
 Each described root, except `#[graphql(entity)]` resolvers, also gets
-`guard = "DeclaredAssuranceGuard::new(GraphqlOperationKind::…)"`, so it
-enforces an installed `AssuranceEnforcement`. A root with its own `guard` must
-compose that guard explicitly, for example
-`DeclaredAssuranceGuard::new(GraphqlOperationKind::Mutation).and(HostGuard)`.
-Otherwise it fails to compile. See
+`DeclaredAssuranceGuard::new(GraphqlOperationKind::…)` with the root's own kind,
+so it enforces an installed `AssuranceEnforcement`. A root's own `guard` is kept
+and composed after it, as `DeclaredAssuranceGuard::new(…).and(<host guard>)`.
+A described root takes a single `#[graphql(...)]` attribute; async-graphql reads
+only the first, so the macro rejects others. See
 [operation assurance](../../architecture/operation-assurance.md).
 
 Custom scalar and enum result leaves carry an explicit project-neutral

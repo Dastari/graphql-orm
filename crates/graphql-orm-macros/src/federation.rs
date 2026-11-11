@@ -383,12 +383,17 @@ pub(crate) fn federation_entity_resolver_tokens(
                 <#struct_name as ::graphql_orm::graphql::orm::Entity>::entity_name(),
             )?;
                     #scope_enforcement
-                    // The context field is `_entities`; assurance uses the
-                    // entity's get-by-id root, which this resolver stands in for.
+                    // The context field is `_entities`. This resolver stands in for
+                    // the entity's get-by-id root, so enforce that coordinate, and
+                    // any classification registered for `_entities` itself.
                     ::graphql_orm::graphql::assurance::enforce_operation_assurance(
                         ctx,
                         ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
                         #single_read_field,
+                    )?;
+                    ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
+                        ctx,
+                        ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
                     )?;
                     let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                     let pool = db.pool();
@@ -569,11 +574,16 @@ pub(crate) fn node_id_entity_resolver_tokens(
                 return Ok(None);
             }
             #scope_enforcement
-            // The context field is `_entities`; use the get-by-id root's coordinate.
+            // The context field is `_entities`: enforce the get-by-id root's
+            // coordinate and any classification registered for `_entities`.
             ::graphql_orm::graphql::assurance::enforce_operation_assurance(
                 ctx,
                 ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
                 #single_read_field,
+            )?;
+            ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
+                ctx,
+                ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
             )?;
             let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
             let pool = db.pool();

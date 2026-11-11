@@ -29,14 +29,16 @@ Behaviour changes when an `AssuranceEnforcement` is installed:
   it as misconfigured. Without a default, non-strict schemas keep the old
   behaviour.
 - Federation entity resolvers enforce the entity's get-by-id query root, for
-  example `Query.zone`, instead of `Query._entities`, which is never
-  registered. A requirement on that root now applies to `_entities` fetches too.
-- `#[graphql_orm_custom_operations]` adds
-  `guard = "DeclaredAssuranceGuard::new(GraphqlOperationKind::…)"` to every
-  described root. A root that already has a `guard` must include
-  `DeclaredAssuranceGuard` itself, for example
-  `guard = "DeclaredAssuranceGuard::new(GraphqlOperationKind::Mutation).and(HostGuard)"`.
-  Otherwise it no longer compiles.
+  example `Query.zone`, so a requirement on that root now applies to
+  `_entities` fetches too. A classification registered for `Query._entities`
+  itself is still enforced as well.
+- `#[graphql_orm_custom_operations]` installs
+  `DeclaredAssuranceGuard::new(GraphqlOperationKind::…)` with the root's own
+  kind on every described root. An existing `guard` is kept and composed after
+  it, as `DeclaredAssuranceGuard::new(…).and(<host guard>)`, so a host guard
+  cannot replace or weaken the assurance check. A described root must use a
+  single `#[graphql(...)]` attribute; async-graphql ignores any others, and the
+  macro now rejects them.
 
 To upgrade:
 
