@@ -396,6 +396,29 @@ Choosing the in-place path for a restored store re-opens consumed approvals.
 See the
 [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01270-to-01280-enforced-runtime-closure-after-restore).
 
+## 0.126.0: repository callers keep public hook refusal codes
+
+Upgrade runtime and macros together. No schema or data migration is needed.
+
+A `MutationHook` error on a repository write, retention purge or
+`Database::transaction` now reaches the caller with its code and message when
+it is a deliberate public refusal: its `code` extension is an ORM public code
+(for example `OrmPublicError::with_message(OrmErrorCode::Conflict, "...")
+.into_graphql_error()`), or it is an `OrmPublicError` returned with `?`. The
+second form previously read as `INTERNAL_ERROR`, as did any refusal from a
+retention purge hook.
+
+Any other hook error, including one with an application-defined code, now has
+`code == InternalError` and the default `message` on repository paths.
+Previously `message` held the hook's text. `into_graphql_error()` and
+generated GraphQL mutations still render such a refusal as the hook wrote it.
+Hosts that read `OrmPublicError::message` for an application-defined refusal
+should give it an ORM public code, or render it with `into_graphql_error()`.
+
+Entity-access and retention row-write refusals on repository reads and writes
+now keep their public code, so a denied entity write reads as `FORBIDDEN`
+instead of `INTERNAL_ERROR`.
+
 ## 0.125.0: PostgreSQL records change-journal entries in the database
 
 Upgrade runtime and macros together. This affects PostgreSQL deployments that

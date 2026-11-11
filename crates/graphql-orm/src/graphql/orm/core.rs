@@ -1068,7 +1068,7 @@ where
                 EntityAccessSurface::Repository,
             )
             .await
-            .map_err(|error| sqlx::Error::Protocol(format!("{error:?}")))?;
+            .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
         let query = self.query;
         let rows = query.fetch_all_in_transaction(self.hook_ctx).await?;
         authorize_repository_rows::<T, B>(self.hook_ctx.database(), rows).await
@@ -1086,7 +1086,7 @@ where
                 EntityAccessSurface::Repository,
             )
             .await
-            .map_err(|error| sqlx::Error::Protocol(format!("{error:?}")))?;
+            .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
         let query = self.query;
         let row = query.fetch_one_in_transaction(self.hook_ctx).await?;
         let Some(row) = row else {
@@ -1111,7 +1111,7 @@ where
                 EntityAccessSurface::Repository,
             )
             .await
-            .map_err(|error| sqlx::Error::Protocol(format!("{error:?}")))?;
+            .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
         let database = self.hook_ctx.database();
         let visibility = database
             .read_visibility::<T>(None, EntityAccessSurface::Repository)
@@ -1819,7 +1819,7 @@ where {
                 EntityAccessSurface::Repository,
             )
             .await
-            .map_err(|error| sqlx::Error::Protocol(format!("{error:?}")))?;
+            .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
         let row = T::find_by_id_in_mutation_context(self, id).await?;
         let Some(row) = row else {
             return Ok(None);
@@ -1849,7 +1849,7 @@ where {
                 EntityAccessSurface::Repository,
             )
             .await
-            .map_err(|error| sqlx::Error::Protocol(format!("{error:?}")))?;
+            .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
         let row = T::find_by_key_in_mutation_context(self, key).await?;
         let Some(row) = row else {
             return Ok(None);
@@ -1958,7 +1958,9 @@ where {
             )
             .await
             .map_err(|error| {
-                crate::graphql::errors::OrmPublicError::internal(format!("{error:?}"))
+                crate::graphql::errors::OrmPublicError::from(
+                    crate::graphql::errors::sqlx_error_from_graphql(error),
+                )
             })?;
         if page.include_total_count && self.db.row_policy().is_some() {
             return Err(crate::graphql::errors::OrmPublicError::new(
@@ -2001,7 +2003,9 @@ where {
             )
             .await
             .map_err(|error| {
-                crate::graphql::errors::OrmPublicError::internal(format!("{error:?}"))
+                crate::graphql::errors::OrmPublicError::from(
+                    crate::graphql::errors::sqlx_error_from_graphql(error),
+                )
             })?;
         if page.include_total_count && self.db.row_policy().is_some() {
             return Err(crate::graphql::errors::OrmPublicError::new(
@@ -2158,7 +2162,7 @@ where
                 EntityAccessSurface::RetentionMaintenance,
             )
             .await
-            .map_err(|error| sqlx::Error::Protocol(format!("{error:?}")))?;
+            .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
         // A declared write policy needs its row provider here too, before selection.
         self.mutation
             .db
@@ -2195,7 +2199,7 @@ where
                     entity as &(dyn Any + Send + Sync),
                 )
                 .await
-                .map_err(|error| sqlx::Error::Protocol(format!("{error:?}")))?;
+                .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
             let state = entity_state(entity)?;
             self.mutation
                 .run_mutation_hook(
@@ -2213,7 +2217,7 @@ where
                     },
                 )
                 .await
-                .map_err(|error| sqlx::Error::Protocol(format!("{error:?}")))?;
+                .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
             states.push(state);
         }
 
@@ -2253,7 +2257,7 @@ where
                     },
                 )
                 .await
-                .map_err(|error| sqlx::Error::Protocol(format!("{error:?}")))?;
+                .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
             T::retention_queue_changed_event(&mut self.mutation, entity).await?;
         }
 
@@ -2347,7 +2351,7 @@ async fn ensure_transaction_entity_write_access<T: Entity, B: WriteBackend>(
         EntityAccessSurface::Repository,
     )
     .await
-    .map_err(|error| sqlx::Error::Protocol(format!("{error:?}")))
+    .map_err(crate::graphql::errors::sqlx_error_from_graphql)
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]

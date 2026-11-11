@@ -89,10 +89,17 @@ pub struct OrmPublicError {
     pub(crate) internal: Option<String>,
     pub(crate) retryable: bool,
     denied_write_field: Option<Box<str>>,
-    // An authored refusal's own extensions. Not the whole `async_graphql::Error`,
-    // whose type-erased source would make this public type lose its auto traits.
-    application_extensions: Option<Box<Option<async_graphql::ErrorExtensionValues>>>,
+    // An authored refusal's own message and extensions, rendered only at the
+    // GraphQL boundary. Not the whole `async_graphql::Error`, whose type-erased
+    // source would make this public type lose its auto traits.
+    application_refusal: Option<Box<ApplicationRefusal>>,
     pub(crate) runtime_mutation_code: Option<&'static str>,
+}
+
+#[derive(Clone)]
+struct ApplicationRefusal {
+    message: String,
+    extensions: Option<async_graphql::ErrorExtensionValues>,
 }
 
 impl fmt::Debug for OrmPublicError {
@@ -132,7 +139,7 @@ impl OrmPublicError {
             retryable: false,
             runtime_mutation_code: None,
             denied_write_field: None,
-            application_extensions: None,
+            application_refusal: None,
         }
     }
 
@@ -146,7 +153,7 @@ impl OrmPublicError {
             retryable: false,
             runtime_mutation_code: None,
             denied_write_field: None,
-            application_extensions: None,
+            application_refusal: None,
         }
     }
 
@@ -249,9 +256,12 @@ impl OrmPublicError {
     /// Convert into a GraphQL error, preserving explicit application callback extensions.
     /// Infrastructure failures expose only safe ORM extensions.
     pub fn into_graphql_error(self) -> async_graphql::Error {
-        if let Some(extensions) = self.application_extensions {
-            let mut error = async_graphql::Error::new(self.message);
-            error.extensions = *extensions;
+        if let Some(refusal) = self.application_refusal {
+            if let Some(internal) = &self.internal {
+                tracing_log_internal(&self.code, internal);
+            }
+            let mut error = async_graphql::Error::new(refusal.message);
+            error.extensions = refusal.extensions;
             return error;
         }
         let mut error = async_graphql::Error::new(self.message.clone());
@@ -383,6 +393,12 @@ pub fn graphql_error_from_loader(error: String) -> async_graphql::Error {
 
 /// Preserve an application callback's explicit message and extensions through SQLx.
 /// Only call this at a trusted GraphQL callback boundary; never with driver text.
+///
+/// Repository callers see the callback's code and message only when it carries an
+/// allow-listed ORM public `code` extension, or is a typed [`OrmPublicError`]
+/// propagated with `?`. Any other authored error reads as `INTERNAL_ERROR` with
+/// the default message; [`OrmPublicError::into_graphql_error`] still renders it
+/// as the callback wrote it, matching generated GraphQL mutations.
 #[doc(hidden)]
 pub fn sqlx_error_from_graphql(error: async_graphql::Error) -> sqlx::Error {
     let category = error
@@ -394,24 +410,36 @@ pub fn sqlx_error_from_graphql(error: async_graphql::Error) -> sqlx::Error {
             _ => None,
         });
     // `?` in a callback converts through `From<T: Display>`, which records a source and
-    // takes the failure's own text as the message. That is not an authored refusal.
+    // takes the failure's own text as the message. That is not an authored refusal,
+    // unless the source is itself a typed public error the host constructed.
     if error.source.is_some() && category.is_none() {
+        let source = error.source.as_ref();
+        if let Some(public) = source.and_then(|source| source.downcast_ref::<OrmPublicError>()) {
+            return sqlx_error_from_public(public.clone());
+        }
         return sqlx_error_from_public(
-            error
-                .source
-                .as_ref()
+            source
                 .and_then(|source| source.downcast_ref::<sqlx::Error>())
                 .map(OrmPublicError::from_sqlx)
                 .unwrap_or_else(|| OrmPublicError::internal(error.message.clone())),
         );
     }
-    let mut public = OrmPublicError::new(
-        category
-            .and_then(public_code)
-            .unwrap_or(OrmErrorCode::InternalError),
-    );
-    public.message = error.message.clone();
-    public.application_extensions = Some(Box::new(error.extensions));
+    let code = category
+        .and_then(public_code)
+        .unwrap_or(OrmErrorCode::InternalError);
+    let mut public = OrmPublicError::new(code);
+    if code == OrmErrorCode::InternalError {
+        // Only an allow-listed public code marks the message as safe for
+        // repository callers; any other message stays a server-side diagnostic.
+        public.internal = Some(error.message.clone());
+    } else {
+        public.message = error.message.clone();
+    }
+    // The GraphQL boundary still renders the authored refusal as written.
+    public.application_refusal = Some(Box::new(ApplicationRefusal {
+        message: error.message,
+        extensions: error.extensions,
+    }));
     sqlx_error_from_public(public)
 }
 
