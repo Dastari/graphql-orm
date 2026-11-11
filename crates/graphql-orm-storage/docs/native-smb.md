@@ -220,7 +220,11 @@ client receives. The backend bounds the resources that input can consume:
 | --- | --- | --- | --- |
 | Listing depth below the root prefix | 64 | `max_listing_depth` | Non-retryable `Protocol` error |
 | Entries one listing enumerates | 1,000,000 | `max_listing_entries` | Non-retryable `Protocol` error |
-| Duration of one complete listing | 15 minutes | `listing_timeout` | Non-retryable `Timeout` error |
+| Bytes of names and paths one listing accumulates | 256 MiB | `max_listing_bytes` | Non-retryable `Protocol` error |
+| Duration of one complete listing, including its retry | 15 minutes | `listing_timeout` | Non-retryable `Timeout` error |
+| Length of one listed name | 255 UTF-16 code units | Fixed (MS-FSCC component limit) | Non-retryable `Protocol` error |
+| Length of one key, written or listed | 4,096 bytes | Fixed | Write: `InvalidStorageKey`; listing: non-retryable `Protocol` error |
+| Pages in one `list_blobs_page` continuation chain | 1,024 pages and `max_listing_entries` keys | Fixed; entries follow `max_listing_entries` | Non-retryable `Protocol` error |
 | Request message IDs awaiting a response | 8,192 | Fixed in the vendored client | Oldest is forgotten |
 | Responses held before a task receives them | 256 | Fixed in the vendored client | Oldest is dropped |
 | Probe file read | 16 bytes | Fixed | Non-retryable `Protocol` error |
@@ -232,6 +236,28 @@ ancestor, which would otherwise be listed forever; `operation_timeout` still
 bounds each request. Raise the limits for repositories that legitimately
 exceed them.
 
+The byte budget counts the text of every name enumerated and every path the
+listing builds, plus a fixed 64-byte allowance per entry for its allocation,
+and it is never released during the listing, so it overestimates what is held.
+Without it, deep directories with long names followed by many short names in
+the deepest one would repeat the long parent path in every key within the
+entry and depth limits. Names longer than a valid component and keys longer
+than 4,096 bytes fail the listing; the backend also refuses to write such a key,
+so everything it writes can be listed back.
+
+`listing_timeout` is one deadline for the whole listing. If an attempt fails
+with a retryable error, the backend reconnects and lists once more, and the
+reconnect and the second attempt share the same deadline.
+
+`list_blobs` lists the tree once and filters it by prefix. `list_blobs_page`
+must list the whole tree for every page, because SMB has no ordered,
+resumable enumeration, so prefer `list_blobs`. Its continuation tokens are
+opaque, begin with `smb1:`, and carry the page and key counts of their chain:
+a chain fails after 1,024 pages or after returning more than
+`max_listing_entries` keys in total, so a server that adds names between
+pages cannot keep a paged listing going forever. A token this backend did not
+issue is rejected with `PreconditionFailed`.
+
 The worker accepts a response only for a message ID this client sent and that
 has not been answered. A response to any other ID, including one sent before
 authentication, is discarded without being stored. An interim
@@ -242,6 +268,10 @@ a connection reset, instead of retrying the failed socket in a loop, and after
 64 consecutive messages that fail to process. Requests waiting on that
 connection fail at once with `ConnectionLost`, which triggers the bounded
 reconnect.
+
+Connections do not follow DFS referrals, so the client connects only to the
+configured server, and server-to-client notifications are disabled. The backend
+takes no leases or oplocks that need them.
 
 `probe` checks that the declared size of the probe file equals the 16 bytes it
 wrote and reads no more than that. `collect_storage_stream` preallocates at

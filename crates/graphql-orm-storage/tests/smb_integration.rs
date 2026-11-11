@@ -160,6 +160,26 @@ async fn samba_round_trip_streaming_listing_and_atomic_create() {
         store.list_blobs("nested").await.expect("list prefix"),
         vec!["nested/small.bin".to_string()]
     );
+    // Paging returns the same keys through the backend's bounded tokens.
+    let first = store
+        .list_blobs_page("", None, 1)
+        .await
+        .expect("first page");
+    assert_eq!(first.keys, ["large/stream.bin"]);
+    let token = first.next_continuation.expect("a second page");
+    let second = store
+        .list_blobs_page("", Some(token), 1)
+        .await
+        .expect("second page");
+    assert_eq!(second.keys, ["nested/small.bin"]);
+    assert!(second.next_continuation.is_none());
+    assert!(
+        store
+            .list_blobs_page("", Some("large/stream.bin".to_string()), 1)
+            .await
+            .is_err(),
+        "a token this backend did not issue must be rejected"
+    );
 
     let left = Arc::clone(&store);
     let right = Arc::clone(&store);

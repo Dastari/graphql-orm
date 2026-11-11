@@ -16,8 +16,9 @@ Update the storage requirement to 0.9.0 and refresh the consumer lockfile. No
 key, object format or persisted-data migration is required.
 
 - Code that constructs `SmbStorageConfig` with a struct literal must set
-  `expected_server_guid`, `max_listing_depth`, `max_listing_entries` and
-  `listing_timeout`. Prefer `SmbStorageConfig::new` and assign fields.
+  `expected_server_guid`, `max_listing_depth`, `max_listing_entries`,
+  `max_listing_bytes` and `listing_timeout`. Prefer `SmbStorageConfig::new` and
+  assign fields.
 - A backend now pins the SMB server GUID from its first connection and refuses
   a reconnect to a server reporting another GUID. If a server is replaced or
   rebuilt, reconstruct the backend after confirming the change. To pin from the
@@ -27,7 +28,19 @@ key, object format or persisted-data migration is required.
 - A listing deeper than 64 directories below the root prefix, larger than
   1,000,000 entries, or longer than 15 minutes now fails with a non-retryable
   error. Raise `max_listing_depth`, `max_listing_entries` or `listing_timeout`
-  for repositories that legitimately exceed them.
+  for repositories that legitimately exceed them. A listing that accumulates
+  more than 256 MiB of names and paths fails the same way; raise
+  `max_listing_bytes`. `listing_timeout` now covers the retry after a
+  reconnect.
+- A listed name longer than 255 UTF-16 code units, or a key longer than 4,096
+  bytes, fails the listing, and keys longer than 4,096 bytes are rejected on
+  write with `InvalidStorageKey`.
+- `list_blobs_page` continuation tokens changed format. Do not persist them
+  across an upgrade; restart a paged listing instead. A chain fails after
+  1,024 pages or `max_listing_entries` keys, so prefer `list_blobs`, which now
+  lists the tree once.
+- DFS referrals are no longer followed. Configure the server that holds the
+  share directly.
 - Authentication is unchanged and NTLM-only. If the service account's
   password is short, shared or reused, replace it with a long random one used
   only by this backend.

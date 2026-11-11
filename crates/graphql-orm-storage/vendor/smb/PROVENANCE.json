@@ -38,7 +38,7 @@
     {
       "id": "resource-bounds-and-server-identity",
       "patch_file": "PATCHES/resource-bounds-and-server-identity.patch",
-      "patch_sha256": "07d9aaddf261e457e103c4823d4ed3fd5ea73cd0639dc15d991f521f9b2d5797",
+      "patch_sha256": "0319b7afa56689c1c08dc228a4b0f7afff8aefdfe83def1b1cf3ff69042994ff",
       "applies_after": "PATCHES/ghsa-439h-2cx8-xwgx.patch",
       "runtime_changed_files": [
         "src/client/smb_client.rs",
@@ -558,7 +558,7 @@
     "src/connection/worker/single_worker.rs": "16c36362a3b4100c0290b94a99e19aefd0a0512494fdebf282b7bfc44c3a2a69",
     "src/connection/worker/worker_trait.rs": "22fff54789cfca6280ea50f74e58c6b6c303bf9561d14a26b6dec9c87a0a7693",
     "src/connection/worker.rs": "e62939d506059552d112a4dd4bc982c54f80a479eb01a3c83a5a17e4752b1958",
-    "src/connection.rs": "648dc86bad8c499971d22e8faf0d0cbfa7ff7ff8fa1a0229451011bff993ce1b",
+    "src/connection.rs": "fbb3bf38948926ca1716e5d96a70d7a9811892b2aff6388ebce02ca9003d2eba",
     "src/crypto/encryption.rs": "6cbf79bec47a488bcfd41c2ef8911428bd2816a209034370505c75a91045ee14",
     "src/crypto/kbkdf.rs": "ddb22a78289486f828badccd2e7edfabc7390edbe069340cde74b3ad3878531d",
     "src/crypto/signing.rs": "d5452c66e11db57a201cff6db00e06c2c371ae1ffaa79f0cc0f237c9436c497b",

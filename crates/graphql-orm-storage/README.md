@@ -23,12 +23,14 @@ restrictive permissions. See the [local filesystem trust boundary](docs/blob-sto
 before using local directories or OS-mounted shares.
 
 Version 0.9.0 bounds what an SMB server can make the native client hold or
-repeat. Listings have depth, entry and overall-time limits and fail instead of
+repeat. Listings have depth, entry, byte, name-length and overall-time limits,
+`list_blobs` lists once, and paged listings end; listings fail instead of
 returning a partial result; the client drops responses to requests it did not
 send, holds a bounded number of early responses, and closes a failed
 connection instead of retrying it in a loop. Reconnects refuse a server whose
-GUID changed before any credential is sent. `SmbStorageConfig` gains
-`expected_server_guid` and listing-limit fields. Authentication remains
+GUID changed before any credential is sent. DFS referrals and server
+notifications are disabled. `SmbStorageConfig` gains `expected_server_guid`
+and listing-limit fields. Authentication remains
 NTLM-only; use a long, random, single-purpose service-account password. See
 [server identity](docs/native-smb.md#server-identity),
 [resource bounds](docs/native-smb.md#resource-bounds) and the
