@@ -714,3 +714,37 @@ async fn title_completion_refuses_a_closed_epoch() {
         .expect("session should exist");
     assert_ne!(unchanged.title, "Generated incident title");
 }
+
+#[tokio::test]
+async fn first_message_read_refuses_a_closed_epoch() {
+    let fixture = fixture().await;
+    default_session_with_message(&fixture, "Explain this incident").await;
+    let claim = fixture
+        .title_work
+        .claim_next("title-worker-closed-read")
+        .await
+        .expect("claim should succeed")
+        .expect("title work should exist");
+    fixture
+        .title_work
+        .open_first_message(&claim)
+        .await
+        .expect("a live epoch opens the first message");
+
+    let database = fixture.sessions.database().clone();
+    OrmAiRuntimeRecoveryService::new(
+        database.clone(),
+        std::sync::Arc::new(agql_auth::SystemClock),
+    )
+    .reconcile_restore(
+        &OrmAiRestoreFactCollector::new(database),
+        "closed-epoch-test",
+        None,
+    )
+    .await
+    .expect("restore closure should record a closed epoch");
+    assert!(matches!(
+        fixture.title_work.open_first_message(&claim).await,
+        Err(AiError::RuntimeNotReady)
+    ));
+}

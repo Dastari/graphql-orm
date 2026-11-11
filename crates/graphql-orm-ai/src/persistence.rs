@@ -2499,9 +2499,10 @@ pub(crate) struct AiRuntimeRecoveryRecord {
     ///
     /// A constant default and a separate unique index keep the column
     /// addable to an existing table on every backend; SQLite refuses
-    /// `ADD COLUMN ... UNIQUE`. Recorded epochs start at 1. A current row
-    /// below 1 or at `i64::MAX` is never live and never yields a readiness
-    /// proof, so the store stays closed.
+    /// `ADD COLUMN ... UNIQUE`. Recorded epochs occupy `1..i64::MAX`. A
+    /// current row outside that range is never live and never yields a
+    /// readiness proof, and no epoch is recorded at such a position: a
+    /// successor beyond `i64::MAX - 1` fails instead.
     #[sortable]
     #[graphql_orm(default = "0")]
     pub epoch_sequence: i64,

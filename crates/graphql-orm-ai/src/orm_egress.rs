@@ -280,6 +280,47 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn audit_refuses_while_the_store_epoch_is_closed() {
+        let (_directory, audit) = fixture().await;
+        let manifest = manifest();
+        let open = AiEgressDecision::allow(&manifest, "v1", "synthetic-user");
+        audit
+            .record(&manifest, &open)
+            .await
+            .expect("a live epoch records the decision");
+        crate::orm_runtime_recovery::close_test_epoch(audit.database()).await;
+        let closed = AiEgressDecision::allow(&manifest, "v1", "synthetic-user");
+        assert!(matches!(
+            audit.record(&manifest, &closed).await,
+            Err(AiError::RuntimeNotReady)
+        ));
+        let id = closed.id.0;
+        let stored = audit
+            .database()
+            .transaction(TransactionMode::Default, move |tx| {
+                Box::pin(async move {
+                    tx.query::<AiEgressEventRecord>()
+                        .filter(AiEgressEventRecordWhereInput {
+                            id: Some(UuidFilter {
+                                eq: Some(id),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .fetch_one()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .unwrap();
+        assert!(
+            stored.is_none(),
+            "a closed epoch records no egress decision"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_audit_writes_preserve_every_decision() {
         let (_directory, audit) = fixture().await;

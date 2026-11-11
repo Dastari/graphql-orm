@@ -17,7 +17,8 @@ startup, worker and restore behaviour.
 
 **Schema.** Apply the normal `AiSchemaModule` migration to version `0.77.0`
 before starting any worker. It adds `epoch_sequence` (a non-null integer
-column, `INTEGER` on SQLite and `BIGINT` on PostgreSQL, with `DEFAULT 0` and
+column, `INTEGER` on SQLite and `BIGINT` on PostgreSQL and SQL Server, with
+`DEFAULT 0` and
 the separate unique index
 `graphql_orm_ai_runtime_recovery_epoch_sequence`) and `recorded_locally_at`
 to `graphql_orm_ai_runtime_recovery`, which earlier releases never wrote, and

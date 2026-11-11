@@ -791,12 +791,13 @@ async fn current_epoch(
         .map_err(OrmPublicError::from)
 }
 
+/// The ledger position after `current`. Refuses when either position is
+/// outside the recordable range, so no epoch is ever recorded at a position
+/// that every fence would refuse.
 fn next_sequence(current: i64) -> Result<i64, OrmPublicError> {
-    if current < 1 {
-        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
-    }
     current
         .checked_add(1)
+        .filter(|next| valid_epoch_sequence(current) && valid_epoch_sequence(*next))
         .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))
 }
 
@@ -1220,6 +1221,37 @@ pub(crate) async fn close_test_epoch(database: &Database<DefaultWriteBackend>) {
         })
         .await
         .expect("a closed test epoch should insert");
+}
+
+/// Appends a live successor epoch to a test store, as an in-place module
+/// upgrade would, without changing any other row.
+#[cfg(all(test, feature = "sqlite"))]
+pub(crate) async fn advance_test_epoch(database: &Database<DefaultWriteBackend>) {
+    database
+        .transaction(TransactionMode::StateMachine, |tx| {
+            Box::pin(async move {
+                let current = current_epoch(tx)
+                    .await?
+                    .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                insert_epoch(
+                    tx,
+                    PreparedEpoch {
+                        id: Uuid::new_v4(),
+                        sequence: next_sequence(current.epoch_sequence)?,
+                        module_fingerprint: current.module_fingerprint,
+                        state: EPOCH_STATE_LIVE,
+                        fatal_issue_count: 0,
+                        warning_count: 0,
+                        action_counts: serde_json::json!({}),
+                        operator_subject: None,
+                        now: 1,
+                    },
+                )
+                .await
+            })
+        })
+        .await
+        .expect("a live successor test epoch should insert");
 }
 
 #[cfg(all(test, feature = "sqlite"))]
@@ -2069,6 +2101,154 @@ mod tests {
             })
             .await;
         assert!(matches!(refused, Err(error) if is_epoch_not_live(error.public_error())));
+    }
+
+    async fn ledger_row(
+        database: &Database<SqliteBackend>,
+        sequence: i64,
+        state: &'static str,
+        module_fingerprint: String,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    insert_epoch(
+                        tx,
+                        PreparedEpoch {
+                            id,
+                            sequence,
+                            module_fingerprint,
+                            state,
+                            fatal_issue_count: 0,
+                            warning_count: 0,
+                            action_counts: serde_json::json!({}),
+                            operator_subject: None,
+                            now: 1_800_000_000,
+                        },
+                    )
+                    .await
+                })
+            })
+            .await
+            .expect("ledger row should insert");
+        id
+    }
+
+    #[tokio::test]
+    async fn out_of_range_sequences_never_open_close_or_acknowledge() {
+        let fingerprint = ai_schema_module_fingerprint().expect("fingerprint");
+        for sequence in [0, -7, i64::MAX] {
+            for state in [EPOCH_STATE_LIVE, EPOCH_STATE_RESTORE_CLOSED] {
+                let database = database().await;
+                let (recovery, runs, _) = services(&database);
+                let row = ledger_row(&database, sequence, state, fingerprint.clone()).await;
+                let queued = seed_run(&database, "queued").await;
+                assert!(
+                    matches!(
+                        recovery.readiness_proof().await,
+                        Err(AiError::RuntimeNotReady)
+                    ),
+                    "sequence {sequence} {state} must not yield a proof"
+                );
+                assert!(matches!(
+                    runs.claim_next("range-worker").await,
+                    Err(AiError::RuntimeNotReady)
+                ));
+                assert!(
+                    matches!(
+                        recovery
+                            .reconcile_restore(
+                                &OrmAiRestoreFactCollector::new(recovery.database.clone()),
+                                fingerprint.clone(),
+                                None,
+                            )
+                            .await,
+                        Err(AiError::PersistenceFailed)
+                    ),
+                    "sequence {sequence} {state} must not record a closure"
+                );
+                assert_eq!(run(&database, queued).await.state, "queued");
+                assert!(matches!(
+                    recovery
+                        .acknowledge_reviewed_restore(row, "operator", "reviewed")
+                        .await,
+                    Err(AiError::Conflict)
+                ));
+                assert!(matches!(
+                    recovery
+                        .acknowledge_in_place_upgrade("operator", "upgraded in place")
+                        .await,
+                    Err(AiError::Conflict)
+                ));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_last_recordable_sequence_refuses_any_successor() {
+        let fingerprint = ai_schema_module_fingerprint().expect("fingerprint");
+        let last = i64::MAX - 1;
+
+        // A live epoch at the last position stays usable but takes no
+        // successor: neither a module upgrade nor a restore closure.
+        let store = database().await;
+        let (recovery, _, _) = services(&store);
+        let live = ledger_row(&store, last, EPOCH_STATE_LIVE, fingerprint.clone()).await;
+        assert_eq!(
+            recovery
+                .readiness_proof()
+                .await
+                .expect("a valid live epoch yields a proof")
+                .epoch_id(),
+            live
+        );
+        let queued = seed_run(&store, "queued").await;
+        assert!(matches!(
+            recovery
+                .reconcile_restore(
+                    &OrmAiRestoreFactCollector::new(recovery.database.clone()),
+                    fingerprint.clone(),
+                    None,
+                )
+                .await,
+            Err(AiError::PersistenceFailed)
+        ));
+        assert_eq!(run(&store, queued).await.state, "queued");
+
+        let upgraded = database().await;
+        let (recovery, _, _) = services(&upgraded);
+        ledger_row(
+            &upgraded,
+            last,
+            EPOCH_STATE_LIVE,
+            "previous-module".to_owned(),
+        )
+        .await;
+        assert!(matches!(
+            recovery.readiness_proof().await,
+            Err(AiError::PersistenceFailed)
+        ));
+
+        let closed = database().await;
+        let (recovery, _, _) = services(&closed);
+        let closure = ledger_row(
+            &closed,
+            last,
+            EPOCH_STATE_RESTORE_CLOSED,
+            fingerprint.clone(),
+        )
+        .await;
+        assert!(matches!(
+            recovery
+                .acknowledge_reviewed_restore(closure, "operator", "reviewed")
+                .await,
+            Err(AiError::PersistenceFailed)
+        ));
+        assert!(matches!(
+            recovery.readiness_proof().await,
+            Err(AiError::RuntimeNotReady)
+        ));
     }
 
     #[tokio::test]

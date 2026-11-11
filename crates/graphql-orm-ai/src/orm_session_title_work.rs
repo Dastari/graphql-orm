@@ -492,10 +492,15 @@ impl AiSessionTitleWorkService for OrmAiSessionTitleWorkService {
             return Err(AiError::PersistenceFailed);
         }
         let message_id = message.id;
+        let active_claim = claim.clone();
         let block = self
             .database
             .transaction(TransactionMode::Default, move |tx| {
                 Box::pin(async move {
+                    // Re-check the claim and the store's live epoch in the
+                    // same transaction that reads the protected block, before
+                    // any plaintext reaches the host generator.
+                    load_active_claim(tx, &active_claim, now).await?;
                     tx.query::<AiMessageBlockRecord>()
                         .filter(AiMessageBlockRecordWhereInput {
                             message_id: Some(UuidFilter {

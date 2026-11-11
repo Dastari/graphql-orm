@@ -2179,6 +2179,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reservation_refuses_a_lease_from_an_earlier_live_epoch() {
+        let fixture = fixture(100).await;
+        let run = seed_running_run(&fixture.database, &fixture.principal, fixture.now).await;
+        let valid = request(run.0, run.1, run.2, 20, "successor-epoch", fixture.now);
+        // A live successor epoch (as after a module upgrade) sits above the
+        // epoch the run's lease was granted under.
+        crate::orm_runtime_recovery::advance_test_epoch(&fixture.database).await;
+        assert!(matches!(
+            fixture.service.reserve(&fixture.principal, valid).await,
+            Err(AiError::Conflict)
+        ));
+        assert_eq!(counter_count(&fixture.database).await, 0);
+    }
+
+    #[tokio::test]
     async fn reservation_and_commit_reconciliation_are_idempotent_and_release_unused_capacity() {
         let fixture = fixture(100).await;
         let run = seed_running_run(&fixture.database, &fixture.principal, fixture.now).await;

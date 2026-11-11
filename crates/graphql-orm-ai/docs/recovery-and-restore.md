@@ -220,7 +220,7 @@ Choosing the in-place path for a restored store re-opens consumed approvals,
 because approval consumptions, consent revocations and run progress made
 after the backup were rolled back with it.
 
-Two further properties are deliberate:
+These properties are deliberate:
 
 - A module upgrade records a live successor epoch. Leases granted under the
   previous epoch stop validating, so in-flight runs fail their next fenced
@@ -229,7 +229,11 @@ Two further properties are deliberate:
   epochs start at 1 and the column is uniquely indexed. A current row with a
   sequence below 1 (including the column default 0) or at `i64::MAX` is never
   treated as live or as an acknowledgeable restore closure, so it never
-  yields a readiness proof and the store stays closed.
+  yields a readiness proof and the store stays closed. No epoch is ever
+  recorded at such a position: the last recordable position is
+  `i64::MAX - 1`, and a module upgrade, restore closure or acknowledgement
+  that would need a successor beyond it fails with `PersistenceFailed` and
+  changes nothing.
 - A new store opens on its own only if `readiness_proof` runs before its
   first run, approval or egress consent is created. Open the gate at host
   startup, before serving any AI request; a store that already holds work
