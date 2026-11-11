@@ -3,12 +3,51 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-11-09
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.8.1 to 0.9.0: SMB resource bounds and server identity
+
+Update the storage requirement to 0.9.0 and refresh the consumer lockfile. No
+key, object format or persisted-data migration is required.
+
+- Code that constructs `SmbStorageConfig` with a struct literal must set
+  `expected_server_guid`, `max_listing_depth`, `max_listing_entries`,
+  `max_listing_bytes` and `listing_timeout`. Prefer `SmbStorageConfig::new` and
+  assign fields.
+- A backend now pins the SMB server GUID from its first connection and refuses
+  a reconnect to a server reporting another GUID. If a server is replaced or
+  rebuilt, reconstruct the backend after confirming the change. To pin from the
+  first connection, record `SmbProbeResult::server_guid` and set
+  `expected_server_guid`. Clusters whose nodes report different GUIDs under one
+  name must pin a single node's name.
+- A listing deeper than 64 directories below the root prefix, larger than
+  1,000,000 entries, or longer than 15 minutes now fails with a non-retryable
+  error. Raise `max_listing_depth`, `max_listing_entries` or `listing_timeout`
+  for repositories that legitimately exceed them. A listing that accumulates
+  more than 256 MiB of names and paths fails the same way; raise
+  `max_listing_bytes`. `listing_timeout` now covers the retry after a
+  reconnect.
+- A listed name longer than 255 UTF-16 code units, or a key longer than 4,096
+  bytes, fails the listing. Keys longer than 4,096 bytes, or with a component
+  longer than 255 UTF-16 code units, are rejected on write with
+  `InvalidStorageKey`.
+- `put_blob` now names its temporary upload file `.<uuid>.uploading` instead
+  of `.<name>.<uuid>.uploading`. Tools that look for interrupted uploads should
+  match both forms; the backend filters both.
+- `list_blobs_page` continuation tokens changed format. Do not persist them
+  across an upgrade; restart a paged listing instead. A chain fails after
+  1,024 pages or `max_listing_entries` keys, so prefer `list_blobs`, which now
+  lists the tree once.
+- DFS referrals are no longer followed. Configure the server that holds the
+  share directly.
+- Authentication is unchanged and NTLM-only. If the service account's
+  password is short, shared or reused, replace it with a long random one used
+  only by this backend.
 
 ## 0.8.0 to 0.8.1: SMB response verification (GHSA-439h-2cx8-xwgx)
 

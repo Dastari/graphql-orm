@@ -3,7 +3,7 @@ title: "Native SMB2/SMB3 Blob Storage"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-11-09
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -28,6 +28,15 @@ Storage 0.8.1 adds one owner-local security patch for
 recorded as `PATCHES/ghsa-439h-2cx8-xwgx.patch`. It is not an upstream
 backport: upstream smb-rs has the same ordering. See
 [response verification](#response-verification).
+
+Storage 0.9.0 adds a second owner-local patch,
+`PATCHES/resource-bounds-and-server-identity.patch`, applied after the first. It
+bounds the client state a server can make the worker hold, closes a connection
+whose transport failed instead of retrying it in a loop, refuses a directory
+reply larger than the buffer it requested, adds an optional server-GUID pin to
+`ConnectionConfig`, and wraps the password in its zeroizing secret before any
+fallible step. See [server identity](#server-identity) and
+[resource bounds](#resource-bounds).
 The protocol/authentication companions, cryptographic versions and feature
 selection remain pinned to the existing 0.10.2 family; this is not an adoption
 of the newer SDK's crypto graph.
@@ -35,9 +44,9 @@ of the newer SDK's crypto graph.
 [Provenance](../vendor/smb/PROVENANCE.json) records the registry archive checksum,
 original file hashes, the immutable backport and local patches, and the
 MIT-license source. `python3 scripts/verify-smb-backport.py --archive <smb-0.10.2.crate>`
-reverses both patches offline and compares the result with the archive.
+reverses every patch offline and compares the result with the archive.
 `scripts/test-smb-vendor.sh` runs the vendored unit tests, including the
-regression tests for the local patch, on a temporary copy with the archived
+regression tests for the local patches, on a temporary copy with the archived
 lockfile under `--locked`. CI runs both. The exact upstream
 license is retained as [LICENSE](../vendor/smb/LICENSE). The archive's original
 `Cargo.lock` is preserved as `Cargo.lock.upstream` for provenance only; the
@@ -73,7 +82,8 @@ with optional domain/workgroup, signing, SMB3 encryption, explicit
 `FILE_CREATE`, flush/close, rename, recursive enumeration, delete, async
 requests, and SMB credit concurrency. Kerberos, SMB1, guest/anonymous sessions,
 QUIC, RDMA, and application-managed DFS namespaces are outside this backend's
-supported contract.
+supported contract. Optional Kerberos support is tracked in
+[#585](https://github.com/Dastari/graphql-orm/issues/585).
 
 ## Configuration
 
@@ -107,8 +117,58 @@ paths, UNC paths, or SMB URLs.
 `root_prefix` and blob keys are `/`-separated relative keys. Empty segments,
 `.`, `..`, absolute paths, backslashes, NUL, and platform prefixes are rejected.
 Passwords use `SecretString`, are redacted from `Debug`, and never enter errors
-or probe results. Hosts own encrypted persistence, rotation, authorization, and
-audit; this crate does not serialize credentials.
+or probe results. The backend moves the password straight into the SMB
+client's zeroizing secret, and no plain copy outlives the connection call.
+Hosts own encrypted persistence, rotation, authorization, and audit; this crate
+does not serialize credentials.
+
+## Authentication
+
+Authentication is NTLM only (`ntlm,!kerberos,!pku2u`). NTLM does not
+authenticate the server before the client answers its challenge. A party that
+answers for the configured server name cannot complete the session, because the
+final `SESSION_SETUP` response must be signed with a key derived from the
+password. It has, however, received the NTLM challenge response, which can be
+attacked offline to recover the password or relayed to another service.
+
+Operators should therefore:
+
+- use a dedicated, single-purpose service account with access only to the
+  backup share;
+- give it a long, randomly generated password that is not used anywhere else,
+  so an offline attack is impractical, and rotate it if exposure is suspected;
+- restrict the network path to the file server, and require SMB signing on
+  every other service that accepts the account, so a relayed response is
+  rejected; and
+- set [`expected_server_guid`](#server-identity) so a changed server is
+  refused before authentication.
+
+## Server identity
+
+Every connection negotiates first and reads the server GUID before session
+setup sends the NTLM response. The first successful connection pins that GUID,
+or the operator pins it in advance with `SmbStorageConfig::expected_server_guid`;
+`SmbProbeResult::server_guid` reports the value to record. The pin is enforced
+inside the vendored client's negotiation, for every connection it makes,
+including the connection made after DNS is resolved again on reconnect.
+
+A server reporting another GUID is refused with a non-retryable
+`SecurityNegotiation` error, and only the `NEGOTIATE` request has been sent to
+it. The reconnect stops at the first refusal instead of trying again. A later
+operation that needs a connection negotiates again and is refused the same way,
+without sending credentials. The backend never adopts the new identity: replacing or rebuilding the server
+requires constructing a new backend, with a new pin, after the operator has
+confirmed the change.
+
+The server GUID is not secret and is not authenticated during negotiation. For
+example, Samba derives it from the server's NetBIOS name. The pin detects a
+different server answering for the configured name, such as a failover or
+redirection to another host, and stops the credential exchange from being
+repeated against it on every transient failure. It does not stop an impostor
+that has observed and copies the real server's GUID; only server
+authentication, such as Kerberos, does that. A cluster whose nodes report
+different GUIDs under one name will refuse reconnects to another node; pin one
+node's name instead.
 
 ## Response verification
 
@@ -151,6 +211,93 @@ directory reported by enumeration is not found, or does not open as a
 directory, the listing fails with a non-retryable `Protocol` error instead of
 silently omitting its subtree. This backend never removes directories, so this
 indicates outside modification of the share.
+
+## Resource bounds
+
+A server, or a party that can reach the client's socket, controls what the
+client receives. The backend bounds the resources that input can consume:
+
+| Bound | Default | Configuration | When exceeded |
+| --- | --- | --- | --- |
+| Listing depth below the root prefix | 64 | `max_listing_depth` | Non-retryable `Protocol` error |
+| Entries one listing enumerates | 1,000,000 | `max_listing_entries` | Non-retryable `Protocol` error |
+| Bytes of names and paths one listing accumulates | 256 MiB | `max_listing_bytes` | Non-retryable `Protocol` error |
+| Duration of one complete listing, including its retry | 15 minutes | `listing_timeout` | Non-retryable `Timeout` error |
+| Length of one listed name | 255 UTF-16 code units | Fixed (MS-FSCC component limit) | Non-retryable `Protocol` error |
+| Length of one key, written or listed | 4,096 bytes | Fixed | Write: `InvalidStorageKey`; listing: non-retryable `Protocol` error |
+| Length of one key component, written | 255 UTF-16 code units | Fixed (MS-FSCC component limit) | `InvalidStorageKey` |
+| One `QUERY_DIRECTORY` reply | The requested output buffer | Fixed in the vendored client | Non-retryable `Protocol` error |
+| Pages in one `list_blobs_page` continuation chain | 1,024 pages and `max_listing_entries` keys | Fixed; entries follow `max_listing_entries` | Non-retryable `Protocol` error |
+| Request message IDs awaiting a response | 8,192 | Fixed in the vendored client | Oldest is forgotten |
+| Responses held before a task receives them | 256 | Fixed in the vendored client | Oldest is dropped |
+| Probe file read | 16 bytes | Fixed | Non-retryable `Protocol` error |
+
+A listing that reaches a limit fails instead of returning a partial listing,
+because callers such as backup pruning treat a listing as complete. The depth
+limit stops a self-nesting directory, such as a server-side link to an
+ancestor, which would otherwise be listed forever; `operation_timeout` still
+bounds each request. Raise the limits for repositories that legitimately
+exceed them.
+
+The byte budget counts the text of every name enumerated and every path the
+listing builds, plus a fixed 64-byte allowance per entry for its allocation,
+and it is never released during the listing, so it overestimates what is held.
+Without it, deep directories with long names followed by many short names in
+the deepest one would repeat the long parent path in every key within the
+entry and depth limits. Names longer than a valid component and keys longer
+than 4,096 bytes fail the listing; the backend also refuses to write such a key,
+or a key with a component longer than 255 UTF-16 code units, so everything it
+writes can be listed back. The limits apply to the caller's key: `put_blob`
+writes first to a temporary `.<uuid>.uploading` name beside the target, which
+may be up to 48 bytes longer than a key at the limit, and listings allow an
+interrupted upload's temporary file that extra length before filtering it out.
+The temporary name does not include the target's name, so it fits the
+255-unit component limit for every valid name, and its random v4 UUID keeps it
+unique. Temporary files left by earlier versions, named
+`.<name>.<uuid>.uploading`, are still recognised and filtered. A server may
+refuse a long path itself; Samba on Linux, for example, rejects paths near
+4,096 bytes with `STATUS_OBJECT_NAME_INVALID`.
+
+The vendored client refuses a `QUERY_DIRECTORY` reply larger than the output
+buffer it requested before decoding its entries, so one reply cannot expand
+into more entries than the budget counts. The reply's bytes are still received
+in full first, within the transport's 16 MiB frame limit. When a listing stops
+at a limit, the backend closes the open directory handle before returning the
+error.
+
+`listing_timeout` is one deadline for the whole listing. If an attempt fails
+with a retryable error, the backend reconnects and lists once more, and the
+reconnect and the second attempt share the same deadline.
+
+`list_blobs` lists the tree once and filters it by prefix. `list_blobs_page`
+must list the whole tree for every page, because SMB has no ordered,
+resumable enumeration, so prefer `list_blobs`. Its continuation tokens are
+opaque, begin with `smb1:`, and carry the page and key counts of their chain:
+a chain fails after 1,024 pages or after returning more than
+`max_listing_entries` keys in total, so a server that adds names between
+pages cannot keep a paged listing going forever. A token this backend did not
+issue is rejected with `PreconditionFailed`. A malformed token, or one whose
+chain has used its 1,024 pages, is refused before the tree is listed.
+
+The worker accepts a response only for a message ID this client sent and that
+has not been answered. A response to any other ID, including one sent before
+authentication, is discarded without being stored. An interim
+`STATUS_PENDING` keeps its ID outstanding for the final response.
+
+The worker closes the connection when its transport fails, for example after
+a connection reset, instead of retrying the failed socket in a loop, and after
+64 consecutive messages that fail to process. Requests waiting on that
+connection fail at once with `ConnectionLost`, which triggers the bounded
+reconnect.
+
+Connections do not follow DFS referrals, so the client connects only to the
+configured server, and server-to-client notifications are disabled. The backend
+takes no leases or oplocks that need them.
+
+`probe` checks that the declared size of the probe file equals the 16 bytes it
+wrote and reads no more than that. `collect_storage_stream` preallocates at
+most 8 MiB from a size hint; it still collects the whole body, so use it only
+for bodies whose size the caller bounds.
 
 ## Atomicity and streaming
 
@@ -205,8 +352,9 @@ payload sets.
 `SmbStorageBackend::probe` connects, negotiates, authenticates, opens the share,
 optionally creates the prefix, lists it, round-trips random bytes, compares, and
 deletes the probe. Its result reports the negotiated dialect, signing and
-encryption state, maximum read/write/transact sizes, and the effective bounded
-WRITE payload, in addition to reachability and read/write facts.
+encryption state, maximum read/write/transact sizes, the effective bounded
+WRITE payload and the server GUID, in addition to reachability and read/write
+facts.
 
 `SmbStorageBackend::diagnostics` returns a redaction-safe snapshot suitable for
 polling during long backups. It includes active/completed/failed uploads,
@@ -225,7 +373,7 @@ runtime configuration or credentials in support bundles.
 
 Run `crates/graphql-orm-storage/tests/samba/run.sh` from the workspace root for
 the owned Samba protocol and complete backup lifecycle suite. It uses `cargo`
-by default. Set `SMB_TEST_CARGO` to an executable path to run all nine unchanged
+by default. Set `SMB_TEST_CARGO` to an executable path to run all eleven
 Cargo/test invocations through a host's resource-controlled Cargo runner:
 
 ```sh

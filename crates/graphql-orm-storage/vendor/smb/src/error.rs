@@ -20,6 +20,11 @@ pub enum Error {
     /// request it answered is unknown (GHSA-439h-2cx8-xwgx).
     #[error("Unverified message rejected, {0}")]
     UnverifiedMessage(String),
+    /// Local patch (graphql-orm-storage): the server reported a GUID other
+    /// than [`ConnectionConfig::expected_server_guid`][crate::ConnectionConfig::expected_server_guid]
+    /// during negotiation. The connection was refused before session setup.
+    #[error("Server GUID does not match the expected server identity")]
+    ServerGuidMismatch,
     #[error("IO Error: {0}")]
     IoError(#[from] std::io::Error),
     #[error("Binrw Error: {0}")]

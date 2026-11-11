@@ -201,9 +201,12 @@ impl Client {
         user_name: &str,
         password: String,
     ) -> crate::Result<()> {
+        // Local patch (graphql-orm-storage): move the password into the
+        // zeroizing secret first, so no error path drops it as a plain String.
+        let password = Secret::from(password);
         let identity = AuthIdentity {
             username: sspi::Username::parse(user_name).map_err(|e| Error::SspiError(e.into()))?,
-            password: Secret::from(password),
+            password,
         };
 
         self._share_connect(target, &identity).await?;
@@ -593,10 +596,13 @@ impl Client {
         username: &str,
         password: String,
     ) -> crate::Result<()> {
+        // Local patch (graphql-orm-storage): wrap the password before any
+        // fallible step.
+        let password = Secret::from(password);
         let ipc_share = UncPath::ipc_share(server)?;
         let identity = AuthIdentity {
             username: sspi::Username::parse(username).map_err(|e| Error::SspiError(e.into()))?,
-            password: Secret::from(password),
+            password,
         };
         self._share_connect(&ipc_share, &identity).await
     }

@@ -3,7 +3,7 @@ title: "graphql-orm-storage"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-11-09
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -21,6 +21,20 @@ bytes in database rows.
 The local backend requires a trusted, exclusively managed filesystem root and
 restrictive permissions. See the [local filesystem trust boundary](docs/blob-store.md#local-filesystem-trust-boundary)
 before using local directories or OS-mounted shares.
+
+Version 0.9.0 bounds what an SMB server can make the native client hold or
+repeat. Listings have depth, entry, byte, name-length and overall-time limits,
+`list_blobs` lists once, and paged listings end; listings fail instead of
+returning a partial result; the client drops responses to requests it did not
+send, holds a bounded number of early responses, and closes a failed
+connection instead of retrying it in a loop. Reconnects refuse a server whose
+GUID changed before any credential is sent. DFS referrals and server
+notifications are disabled. `SmbStorageConfig` gains `expected_server_guid`
+and listing-limit fields. Authentication remains
+NTLM-only; use a long, random, single-purpose service-account password. See
+[server identity](docs/native-smb.md#server-identity),
+[resource bounds](docs/native-smb.md#resource-bounds) and the
+[migration guide](MIGRATION.md).
 
 Version 0.8.1 fixes [GHSA-439h-2cx8-xwgx](https://github.com/Dastari/graphql-orm/security/advisories/GHSA-439h-2cx8-xwgx):
 the native SMB client now verifies signing or encryption before it acts on a

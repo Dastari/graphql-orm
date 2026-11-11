@@ -523,10 +523,13 @@ mod tests {
             SESSION_ID,
             Arc::new(RwLock::new(session)),
         )));
-        let upstream = ConnectionMessageHandler::with_test_transport(Box::new(ScriptedTransport {
-            incoming,
-            position: 0,
-        }))
+        let upstream = ConnectionMessageHandler::with_test_transport(
+            Box::new(ScriptedTransport {
+                incoming,
+                position: 0,
+            }),
+            &[MESSAGE_ID],
+        )
         .await
         .unwrap();
         let worker = upstream.worker().unwrap();

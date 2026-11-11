@@ -15,6 +15,8 @@ PATCH = '5614aa2e0d3090d1051cae66858014c17432c959a817bfd0a628b778f3ad78ba'
 LOCAL_PATCHES = (
     ('GHSA-439h-2cx8-xwgx', 'PATCHES/ghsa-439h-2cx8-xwgx.patch',
      '43e3a9ad68936fe5b0a675caf890edfaf7099904604d4c91cfbc7ca3a881a0e6'),
+    ('resource-bounds-and-server-identity', 'PATCHES/resource-bounds-and-server-identity.patch',
+     'd400954a1d448b4bc5aa8bb28cc3c67bf1ee85e8ac4ceff2133b6a265a0114d6'),
 )
 LICENSE = '59889992272e339d6af995962dca57cb4565c364255f9a453b0f6f20b0365816'
 ROOT = Path(__file__).resolve().parents[1]

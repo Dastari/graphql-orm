@@ -3,7 +3,7 @@ title: "Storage configuration and limits"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-08-12
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -31,7 +31,7 @@ process construction; do not serialize, log, or place secrets in source.
 | Type | Use | Defaults and limits |
 | --- | --- | --- |
 | [`S3StorageConfig`](../src/s3.rs) | `endpoint_url`, `region`, `bucket`, optional `key_prefix`, `access_key_id`, `secret_access_key`, and explicit `path_style`. | No defaults; secrets are redacted from `Debug`. Multipart part size is internal (currently 8 MiB), not a host contract. |
-| [`SmbStorageConfig`](../src/smb.rs) | `server`, `port`, `share`, optional `root_prefix`/`domain`, `username`, secret `password`, dialect, signing/encryption, timeouts, transfer concurrency. | `new` defaults: port 445, SMB 3.0 minimum, signing on, encryption off, 10 s connect, 60 s operation, 8 transfers. Port/timeouts/concurrency must be positive; encryption requires SMB 3.0+. |
+| [`SmbStorageConfig`](../src/smb.rs) | `server`, `port`, `share`, optional `root_prefix`/`domain`, `username`, secret `password`, dialect, signing/encryption, timeouts, transfer concurrency, optional `expected_server_guid`, listing limits (`max_listing_depth`, `max_listing_entries`, `max_listing_bytes`, `listing_timeout`). | `new` defaults: port 445, SMB 3.0 minimum, signing on, encryption off, 10 s connect, 60 s operation, 8 transfers, server GUID pinned on first connection, listing depth 64, 1,000,000 listing entries, 256 MiB of listed names, 15 min listing deadline including its retry. Port, timeouts, concurrency and listing limits must be positive; a pinned GUID must not be nil; encryption requires SMB 3.0+. See [server identity](native-smb.md#server-identity) and [resource bounds](native-smb.md#resource-bounds). |
 | [`SmbProbeOptions`](../src/smb.rs) | `create_prefix` controls whether a probe creates a missing root prefix. | Defaults false. Use only a test-owned or operator-approved share. |
 | [`AzureBlobStorageConfig`](../src/azure.rs) | Future Azure declaration fields. | Not operational; all backend operations return `UnsupportedBackend`. |
 | [`BlobPutOptions`](../src/blob.rs) | Optional `content_type`. | Defaults to `None`; conditional create is `put_blob_if_not_exists`, not an option flag. |

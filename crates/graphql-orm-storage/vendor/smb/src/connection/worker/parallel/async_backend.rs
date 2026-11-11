@@ -25,14 +25,24 @@ impl AsyncBackend {
     ) {
         log::debug!("Starting worker loop.");
         let self_ref = self.as_ref();
+        let mut consecutive_errors = 0_usize;
         loop {
             match self_ref
                 .handle_next_recv(rtransport.as_mut(), &worker)
                 .await
             {
-                Ok(_) => {}
+                Ok(_) => consecutive_errors = 0,
                 Err(Error::TransportError(TransportError::NotConnected)) => {
                     log::error!("Connection was force-closed by the server.");
+                    self_ref.token.cancel();
+                    break;
+                }
+                // Local patch (graphql-orm-storage): any other transport error
+                // (reset, broken pipe, invalid framing) leaves the stream
+                // unusable, and retrying it immediately would spin. End the
+                // connection so the caller can reconnect.
+                Err(Error::TransportError(e)) => {
+                    log::error!("Transport failed; closing the connection: {e}");
                     self_ref.token.cancel();
                     break;
                 }
@@ -41,18 +51,27 @@ impl AsyncBackend {
                 }
                 Err(e) => {
                     log::error!("Error in worker loop: {e}");
+                    // Local patch (graphql-orm-storage): a message that fails
+                    // to process is skipped, but a run of failures ends the
+                    // connection rather than looping without progress.
+                    consecutive_errors += 1;
+                    if consecutive_errors >= Self::MAX_CONSECUTIVE_RECEIVE_ERRORS {
+                        log::error!("Too many consecutive receive errors; closing the connection.");
+                        self_ref.token.cancel();
+                        break;
+                    }
                 }
             }
         }
 
         // Cleanup
         log::debug!("Cleaning up worker loop.");
-        if let Ok(mut state) = worker.state.lock().await {
-            for (_, tx) in state.awaiting.drain() {
-                let _notify_result = tx.send(Err(Error::ConnectionStopped));
-            }
-        }
+        worker.receive_loop_ended().await;
     }
+
+    /// Local patch (graphql-orm-storage): consecutive failed incoming messages
+    /// after which the receive loop closes the connection.
+    const MAX_CONSECUTIVE_RECEIVE_ERRORS: usize = 64;
 
     async fn loop_send(
         self: Arc<Self>,

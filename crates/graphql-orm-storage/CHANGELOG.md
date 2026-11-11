@@ -3,12 +3,76 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-11-09
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Changelog
+
+## 0.9.0 (unreleased)
+
+- Breaking: `SmbStorageConfig` gains `expected_server_guid`,
+  `max_listing_depth`, `max_listing_entries`, `max_listing_bytes` and
+  `listing_timeout`.
+  `SmbStorageConfig::new` sets the defaults; code that builds the struct
+  literally must add the fields. `SmbProbeResult` gains `server_guid`.
+- Server identity: every SMB connection negotiates and checks the server GUID
+  before session setup sends the NTLM response. The first connection pins the
+  GUID unless `expected_server_guid` pins it in advance. A reconnect to a
+  server reporting another GUID is refused with a non-retryable
+  `SecurityNegotiation` error after sending only `NEGOTIATE`, instead of
+  repeating the credential exchange against it on each of three attempts. The
+  check runs inside the vendored client's negotiation, so a fresh DNS
+  resolution cannot bypass it. The GUID is not authenticated; see the
+  documented limits.
+- Listings are bounded: depth 64 below the root prefix, 1,000,000 entries,
+  256 MiB of names and paths, and 15 minutes overall by default, all
+  configurable. The deadline covers the retry after a reconnect. A listed name
+  longer than 255 UTF-16 code units, or a key longer than 4,096 bytes, fails
+  the listing, and the backend refuses to write a key longer than 4,096 bytes.
+  The 4,096-byte limit and a 255-unit limit on each component apply to the
+  caller's key, also through `put_blob`, whose temporary upload name is now
+  `.<uuid>.uploading` so that it fits any valid name; older temporary names
+  are still recognised. A `QUERY_DIRECTORY` reply larger than the requested
+  output buffer is refused before it is decoded, and a listing that stops at a
+  limit closes its directory handle.
+  A self-nesting directory now fails the listing with a non-retryable
+  `Protocol` error instead of being listed forever. A listing that reaches any
+  limit fails rather than returning a partial result.
+- `SmbStorageBackend` implements `list_blobs` with a single listing instead of
+  re-listing the tree for every 1,000-key page. `list_blobs_page` tokens now
+  begin with `smb1:` and carry their chain's page and key counts. A chain fails
+  after 1,024 pages or `max_listing_entries` keys, so a server that keeps adding
+  names cannot make a paged listing run forever. Tokens from earlier versions
+  are rejected with `PreconditionFailed`. A malformed or exhausted token is
+  refused before the tree is listed.
+- Connections no longer follow DFS referrals, which this backend does not
+  support, and no longer enable server-to-client notifications. The vendored
+  async notification handler never drained its channel, so the receive loop
+  could stall after ten notifications.
+- The vendored client accepts a response only for a message ID it sent and
+  that is still unanswered, holds at most 256 responses that no task is yet
+  waiting for, and tracks at most 8,192 outstanding request IDs. Earlier, any
+  response, signed or not and even before authentication, was stored without
+  limit, at up to 16 MiB each.
+- The vendored receive loop closes the connection on any transport failure,
+  and after 64 consecutive messages that fail to process, instead of logging
+  and retrying immediately. Waiting requests fail at once and trigger the
+  bounded reconnect.
+- `probe` checks the probe file's declared size and reads at most the 16 bytes
+  it wrote. `collect_storage_stream` preallocates at most 8 MiB from a size
+  hint.
+- The vendored client wraps the password in its zeroizing secret before any
+  fallible step, so no error path drops it as a plain string.
+- Authentication remains NTLM-only. The documentation now describes the
+  exposure and recommends a long, random, single-purpose service-account
+  password. Optional Kerberos support is tracked in
+  [#585](https://github.com/Dastari/graphql-orm/issues/585).
+- The vendor changes are one new owner-local patch,
+  `PATCHES/resource-bounds-and-server-identity.patch`, recorded in the vendor
+  provenance with its regression tests.
+- No key, object format or persisted-data change.
 
 ## 0.8.1 (unreleased)
 
