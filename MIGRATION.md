@@ -55,8 +55,9 @@ Behaviour changes when an `AssuranceEnforcement` is installed:
 
   Use `Object` for `kind = "query"` and `kind = "mutation"`, and
   `Subscription` for `kind = "subscription"`. The accepted paths are `Object`,
-  `async_graphql::Object` and `graphql_orm::async_graphql::Object`, each with or
-  without a leading `::`, and the same forms of `Subscription`. These now fail
+  `async_graphql::Object`, `::async_graphql::Object`,
+  `graphql_orm::async_graphql::Object` or `::graphql_orm::async_graphql::Object`,
+  and the same forms of `Subscription`. These now fail
   to compile:
   - a missing root attribute;
   - an import alias such as `use async_graphql::Object as GqlObject` with

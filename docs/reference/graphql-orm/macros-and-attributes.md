@@ -630,8 +630,9 @@ can wrap it in a generic descriptor extension.
 Place `#[graphql_orm_custom_operations]` directly before exactly one
 `async-graphql` root attribute: `Object` for `kind = "query"` or
 `kind = "mutation"`, and `Subscription` for `kind = "subscription"`. Write it as
-`Object`, `async_graphql::Object`, `graphql_orm::async_graphql::Object` (with or
-without a leading `::`), or the same forms of `Subscription`. A renamed import
+`Object`, `async_graphql::Object`, `::async_graphql::Object`,
+`graphql_orm::async_graphql::Object` or `::graphql_orm::async_graphql::Object`,
+or the same forms of `Subscription`. A renamed import
 such as `use async_graphql::Object as GqlObject`, a missing root attribute, a
 kind mismatch or a second root attribute fails to compile, because the macro
 must read the root's `guard` and `rename_fields`:

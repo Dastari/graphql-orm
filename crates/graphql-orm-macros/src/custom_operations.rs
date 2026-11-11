@@ -240,8 +240,9 @@ fn guard_source(value: &syn::Expr) -> String {
 }
 
 /// The async-graphql root attribute a path names, when it is one this macro
-/// recognises: `Object` or `Subscription`, bare or under `async_graphql::` or
-/// `graphql_orm::async_graphql::`, with or without a leading `::`.
+/// recognises: `Object` or `Subscription`, bare (without a leading `::`) or
+/// under `async_graphql::` or `graphql_orm::async_graphql::` (with or without
+/// a leading `::`).
 fn root_attribute_kind(path: &syn::Path) -> Option<&'static str> {
     let segments = path
         .segments
