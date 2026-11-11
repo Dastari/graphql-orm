@@ -13,8 +13,8 @@ use super::migrations::{
 };
 use super::owned_schema::{SchemaRef, StepRef};
 use super::rls::{
-    build_schema_target_rls_plan, validate_protected_rls_tables, validate_rls_enforcement_state,
-    validate_rls_models,
+    build_schema_target_rls_plan, validate_change_journal, validate_protected_rls_tables,
+    validate_rls_enforcement_state, validate_rls_models,
 };
 use super::{IntrospectionBackend, MigrationBackend, OrmBackend, RlsIntrospectionBackend};
 use crate::db::Database;
@@ -84,6 +84,9 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
     /// enforced for this database handle's connection role (see
     /// [`Self::validate_rls_enforcement`]), and drift diagnostics for the
     /// search document tables of RLS entities and for the change journal.
+    /// With the `change-journal` feature it also reports drift in the
+    /// journal's database-side recorder on PostgreSQL: a missing or altered
+    /// recorder function or trigger on any single-key table in the target.
     /// Run it with the runtime pool: the role being checked is the one the
     /// pool connects as.
     pub async fn validate_target(
@@ -95,7 +98,7 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
     {
         let current = B::introspect_schema(self.database.pool()).await?;
         let schema = self.validate(&current, &target.schema)?;
-        let live = if target.rls.entities.is_empty() {
+        let live = if target.rls.entities.is_empty() && !cfg!(feature = "change-journal") {
             None
         } else {
             B::introspect_rls_enforcement(self.database.pool()).await?
@@ -110,6 +113,13 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
             let mut diagnostics =
                 validate_rls_models(B::DIALECT, self.policy(), &current_rls, &target.rls);
             diagnostics.extend(validate_protected_rls_tables(
+                B::DIALECT,
+                self.policy(),
+                &current_rls,
+                live.as_ref(),
+                target,
+            ));
+            diagnostics.extend(validate_change_journal(
                 B::DIALECT,
                 self.policy(),
                 &current_rls,

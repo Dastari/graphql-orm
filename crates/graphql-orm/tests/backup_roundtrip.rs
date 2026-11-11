@@ -40,7 +40,9 @@ async fn change_journal_records_generated_repository_writes()
     let pool = setup_pool().await?;
     let database = graphql_orm::db::Database::new(pool.clone()).with_change_journal();
     apply_schema(&database, "2026051403_backup_change_journal").await?;
-    database.ensure_change_journal_table().await?;
+    database
+        .ensure_change_journal_recorder(&graphql_orm_entity_metadata())
+        .await?;
 
     let account = BackupRtAccount::insert(
         &database,
@@ -75,6 +77,79 @@ async fn change_journal_records_generated_repository_writes()
     assert_eq!(changes[0].entity_name, "BackupRtAccount");
     assert_eq!(changes[0].table_name, "backup_rt_accounts");
     assert_eq!(changes[0].primary_key, account.id.to_string());
+    assert_eq!(changes[0].action, BackupChangeAction::Create);
+    Ok(())
+}
+
+/// Restore imports never journal, even while the database-side recorder is
+/// installed and the target database journals its own writes.
+#[cfg(feature = "change-journal")]
+#[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
+async fn restore_does_not_journal_while_writes_do() -> Result<(), Box<dyn std::error::Error>> {
+    let source_pool = setup_pool().await?;
+    let source = graphql_orm::db::Database::new(source_pool.clone());
+    apply_schema(&source, "2026051404_backup_journal_source").await?;
+    let account = BackupRtAccount::insert(
+        &source,
+        CreateBackupRtAccountInput {
+            email: "restore@example.com".to_string(),
+            password_hash: "secret-hash".to_string(),
+            reset_token: None,
+            profile: BackupProfile::default(),
+            preferences: None,
+            avatar: vec![1],
+            nickname: None,
+            balance: Decimal::new(1, 0),
+            credit_limit: None,
+        },
+    )
+    .await?;
+    let snapshot_schema =
+        source.schema_snapshot("2026051404_backup_journal", &graphql_orm_entity_metadata());
+    let mut snapshot = source.begin_consistent_snapshot().await?;
+    let mut rows_by_table = BTreeMap::new();
+    for descriptor in source.list_backup_entities(&graphql_orm_entity_metadata()) {
+        let rows = source.export_table_rows(&mut snapshot, &descriptor).await?;
+        rows_by_table.insert(descriptor.table_name, rows);
+    }
+    drop(snapshot);
+
+    let dest_pool = setup_pool().await?;
+    let dest = graphql_orm::db::Database::new(dest_pool.clone()).with_change_journal();
+    apply_schema(&dest, "2026051405_backup_journal_dest").await?;
+    dest.ensure_change_journal_recorder(&graphql_orm_entity_metadata())
+        .await?;
+    let dest_schema =
+        dest.schema_snapshot("2026051404_backup_journal", &graphql_orm_entity_metadata());
+    dest.restore_backup_rows(
+        &snapshot_schema,
+        &dest_schema,
+        &rows_by_table,
+        &RestoreContext::empty_database(),
+    )
+    .await?;
+    let window = ChangeWindow {
+        after_snapshot_id: None,
+        until: i64::MAX,
+    };
+    assert!(dest.export_changes(window.clone()).await?.is_empty());
+
+    let note = BackupRtNote::insert(
+        &dest,
+        CreateBackupRtNoteInput {
+            account_id: account.id,
+            body: "after restore".to_string(),
+        },
+    )
+    .await?;
+    let changes = dest.export_changes(window).await?;
+    assert_eq!(changes.len(), 1, "{changes:?}");
+    assert_eq!(changes[0].entity_name, "BackupRtNote");
+    assert_eq!(changes[0].primary_key, note.id.to_string());
     assert_eq!(changes[0].action, BackupChangeAction::Create);
     Ok(())
 }

@@ -186,7 +186,8 @@ jobs:
           CARGO_BUILD_JOBS: "1"
         run: |
           cargo test -p graphql-orm --locked --no-default-features --features postgres --test owned_postgres_lifecycle --test postgres_rls --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test migration_composite_uniques -- --include-ignored --test-threads=1
-          cargo test -p graphql-orm --locked --no-default-features --features postgres,change-journal --test postgres_rls_coverage -- --include-ignored --test-threads=1
+          cargo test -p graphql-orm --locked --no-default-features --features postgres,change-journal --test postgres_rls_coverage --test dependent_delete_repro --test backup_roundtrip -- --include-ignored --test-threads=1
+          cargo test -p graphql-orm --locked --no-default-features --features sqlite,change-journal --test dependent_delete_repro --test backup_roundtrip --test generated_error_sanitization
       - name: Execute the global node lookup through the router on owned PostgreSQL
         env:
           CARGO_BUILD_JOBS: "2"

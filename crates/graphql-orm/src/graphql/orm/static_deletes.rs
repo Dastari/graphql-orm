@@ -219,7 +219,11 @@ impl StaticDeleteBackend for PostgresBackend {
             // own RLS search-document trigger only deletes from its search
             // table, which holds no foreign keys or entity rows; it is exempt
             // only when it fires normally, has the exact type, arguments and
-            // target, and calls the unmodified ORM function.
+            // target, and calls the unmodified ORM function. The ORM's change
+            // journal trigger only appends to the journal, which likewise holds
+            // no foreign keys or entity rows; it is exempt only when it fires
+            // normally, has the exact type, and calls the unmodified recorder
+            // owned by the table owner.
             let owned_tables = ownership
                 .tables()
                 .map(|table| table.to_string())
@@ -228,7 +232,7 @@ impl StaticDeleteBackend for PostgresBackend {
                 .iter()
                 .map(|table| super::search::search_table_name(table))
                 .collect::<Vec<_>>();
-            let triggered:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_trigger tr JOIN pg_class t ON t.oid=tr.tgrelid JOIN pg_namespace n ON n.oid=t.relnamespace JOIN pg_proc p ON p.oid=tr.tgfoid JOIN pg_namespace pn ON pn.oid=p.pronamespace LEFT JOIN pg_constraint con ON con.oid=tr.tgconstraint WHERE n.nspname=current_schema() AND t.relname=ANY($1) AND NOT COALESCE(tr.tgisinternal AND pn.nspname='pg_catalog' AND con.contype IN ('f','u','x'),false) AND NOT (NOT tr.tgisinternal AND tr.tgname=$2 AND tr.tgenabled='O' AND tr.tgtype=$4 AND tr.tgnargs=4 AND pn.nspname='graphql_orm' AND p.proname=$3 AND p.pronargs=0 AND NOT p.prosecdef AND p.prosrc=$5 AND p.proconfig=ARRAY[$6]::text[] AND EXISTS (SELECT 1 FROM unnest($1::text[], $7::text[]) AS e(base, search) WHERE e.base=t.relname AND (string_to_array(encode(tr.tgargs,'escape'),'\\000'))[1]=current_schema() AND (string_to_array(encode(tr.tgargs,'escape'),'\\000'))[2]=e.search)))").bind(&owned_tables).bind(super::rls::SEARCH_DELETE_TRIGGER).bind(super::rls::SEARCH_DELETE_FUNCTION).bind(i16::try_from(super::rls::SEARCH_DELETE_TRIGGER_TYPE).unwrap_or(0)).bind(super::rls::SEARCH_DELETE_FUNCTION_BODY).bind(super::rls::SEARCH_DELETE_FUNCTION_CONFIG).bind(&owned_search_tables).fetch_one(tx.as_mut()).await?;
+            let triggered:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_trigger tr JOIN pg_class t ON t.oid=tr.tgrelid JOIN pg_namespace n ON n.oid=t.relnamespace JOIN pg_proc p ON p.oid=tr.tgfoid JOIN pg_namespace pn ON pn.oid=p.pronamespace LEFT JOIN pg_constraint con ON con.oid=tr.tgconstraint WHERE n.nspname=current_schema() AND t.relname=ANY($1) AND NOT COALESCE(tr.tgisinternal AND pn.nspname='pg_catalog' AND con.contype IN ('f','u','x'),false) AND NOT (NOT tr.tgisinternal AND tr.tgname=$2 AND tr.tgenabled='O' AND tr.tgtype=$4 AND tr.tgnargs=4 AND pn.nspname='graphql_orm' AND p.proname=$3 AND p.pronargs=0 AND NOT p.prosecdef AND p.prosrc=$5 AND p.proconfig=ARRAY[$6]::text[] AND EXISTS (SELECT 1 FROM unnest($1::text[], $7::text[]) AS e(base, search) WHERE e.base=t.relname AND (string_to_array(encode(tr.tgargs,'escape'),'\\000'))[1]=current_schema() AND (string_to_array(encode(tr.tgargs,'escape'),'\\000'))[2]=e.search)) AND NOT (NOT tr.tgisinternal AND tr.tgname=$8 AND tr.tgenabled='O' AND tr.tgtype=$9 AND tr.tgqual IS NULL AND tr.tgnargs=5 AND pn.nspname='graphql_orm' AND p.proname=$10 AND p.pronargs=0 AND p.prosecdef AND p.proowner=t.relowner AND p.prosrc=$11 AND p.proconfig=ARRAY[$6]::text[]))").bind(&owned_tables).bind(super::rls::SEARCH_DELETE_TRIGGER).bind(super::rls::SEARCH_DELETE_FUNCTION).bind(i16::try_from(super::rls::SEARCH_DELETE_TRIGGER_TYPE).unwrap_or(0)).bind(super::rls::SEARCH_DELETE_FUNCTION_BODY).bind(super::rls::SEARCH_DELETE_FUNCTION_CONFIG).bind(&owned_search_tables).bind(super::rls::CHANGE_JOURNAL_TRIGGER).bind(i16::try_from(super::rls::CHANGE_JOURNAL_TRIGGER_TYPE).unwrap_or(0)).bind(super::rls::CHANGE_JOURNAL_FUNCTION).bind(super::rls::CHANGE_JOURNAL_FUNCTION_BODY).fetch_one(tx.as_mut()).await?;
             if triggered {
                 return Err(sqlx::Error::Protocol("Dependent delete refused".into()));
             }

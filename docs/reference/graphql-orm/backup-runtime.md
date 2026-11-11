@@ -3,7 +3,7 @@ title: "Backup Runtime API"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-10
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -124,21 +124,36 @@ expectation.
 
 ## Change Journal
 
-Enable the `change-journal` feature and prepare the internal table:
+Enable the `change-journal` feature and prepare the journal:
 
 ```rust
 let database = Database::new(pool).with_change_journal();
-database.ensure_change_journal_table().await?;
+// As the schema owner. On SQLite this only creates the journal table.
+database
+    .ensure_change_journal_recorder(&graphql_orm_entity_metadata())
+    .await?;
 ```
 
-Generated GraphQL/repository writes and `MutationContext` writes pass through the existing
-transactional mutation event path, so journal rows are written in the same transaction as the data
-change. Restore imports do not use generated mutation paths, so restore does not pollute the journal.
+Applying the schema target with the feature enabled does the same on PostgreSQL.
 
-On PostgreSQL only privileged roles can read the journal. `ensure_change_journal_table` enables
-RLS on `__graphql_orm_change_log` with a single `INSERT` policy, so a role subject to RLS can still
-append entries but cannot read, update or delete them. Create the table as the schema owner and grant the
-runtime role `INSERT` on it. `export_changes` runs with `SET LOCAL row_security = off`, so it
-reads every entry as the table owner or a `BYPASSRLS` role and fails with a PostgreSQL error for a
-role subject to RLS, rather than exporting an empty journal. See
-[PostgreSQL RLS](postgres.md#orm-managed-tables).
+Generated GraphQL/repository writes and `MutationContext` writes record their changes in the same
+transaction as the data change. On SQLite the ORM writes each entry from the transactional
+mutation event path. On PostgreSQL the database records them: an `AFTER INSERT OR UPDATE OR
+DELETE` row trigger on each single-key entity table calls a `SECURITY DEFINER` recorder that takes
+the key from the changed row and the action from the operation. ORM write transactions turn
+recording on with a transaction-local setting; a journaled write fails and rolls back if its
+table's recorder trigger is missing or altered. Dependent deletes, cascades and set-null updates
+journal like any other change. An update that changes a primary key journals a `delete` of the old
+key and a `create` of the new one. `changed_at` is whole seconds from the database clock on
+PostgreSQL and from the application clock on SQLite. Composite-key entities are refused.
+
+Restore imports do not use generated mutation paths and never turn PostgreSQL recording on, so
+restore does not pollute the journal.
+
+On PostgreSQL only privileged roles can read or write the journal. It has RLS enabled and no
+policies, so a role subject to RLS can neither read nor write entries; the recorder runs as the
+journal owner. Create the journal, the tables and the recorder as the schema owner, and grant the
+runtime role nothing on the journal. `export_changes` runs with `SET LOCAL row_security = off`, so
+it reads every entry as the table owner or a `BYPASSRLS` role and fails with a PostgreSQL error for
+a role subject to RLS, rather than exporting an empty journal. See
+[PostgreSQL RLS](postgres.md#change-journal-recorder).

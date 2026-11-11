@@ -4552,6 +4552,81 @@ impl RlsIntrospectionBackend for super::PostgresBackend {
                 security_definer: row.try_get("security_definer")?,
             });
         }
+        let journal_triggers = sqlx::query(
+            "SELECT n.nspname AS schema_name, c.relname AS table_name,
+                    t.tgenabled::text AS enabled, t.tgtype::int4 AS trigger_type,
+                    t.tgqual IS NOT NULL AS conditional,
+                    (pn.nspname = 'graphql_orm' AND p.proname = $2 AND p.pronargs = 0)
+                        AS calls_orm_function,
+                    p.proowner = c.relowner AS function_owns_table,
+                    p.proowner::oid::int8 AS function_owner,
+                    t.tgnargs::int4 AS argument_count, t.tgargs AS arguments
+             FROM pg_trigger t
+             JOIN pg_class c ON c.oid = t.tgrelid
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             JOIN pg_proc p ON p.oid = t.tgfoid
+             JOIN pg_namespace pn ON pn.oid = p.pronamespace
+             WHERE NOT t.tgisinternal AND t.tgname = $1",
+        )
+        .bind(super::rls::CHANGE_JOURNAL_TRIGGER)
+        .bind(super::rls::CHANGE_JOURNAL_FUNCTION)
+        .fetch_all(&mut *conn)
+        .await?;
+        for row in journal_triggers {
+            let argument_count: i32 = row.try_get("argument_count")?;
+            let raw: Vec<u8> = row.try_get("arguments")?;
+            // `tgargs` stores each argument NUL-terminated.
+            let arguments = raw
+                .split(|byte| *byte == 0)
+                .take(usize::try_from(argument_count).unwrap_or(0))
+                .map(|argument| String::from_utf8_lossy(argument).into_owned())
+                .collect::<Vec<_>>();
+            let function_owner: i64 = row.try_get("function_owner")?;
+            let journal_owned_by_function_owner = match arguments.first() {
+                Some(schema) => {
+                    sqlx::query_scalar::<_, bool>(
+                        "SELECT EXISTS (SELECT 1 FROM pg_class j
+                         WHERE j.oid = to_regclass(format('%I.%I', $1::text, $2::text))
+                           AND j.relowner::oid::int8 = $3)",
+                    )
+                    .bind(schema)
+                    .bind(super::rls::CHANGE_LOG_TABLE)
+                    .bind(function_owner)
+                    .fetch_one(&mut *conn)
+                    .await?
+                }
+                None => false,
+            };
+            live.change_journal_triggers.insert(
+                table_key(row.try_get("schema_name")?, row.try_get("table_name")?),
+                super::rls::LiveChangeJournalTrigger {
+                    enabled: row.try_get("enabled")?,
+                    trigger_type: row.try_get("trigger_type")?,
+                    conditional: row.try_get("conditional")?,
+                    calls_orm_function: row.try_get("calls_orm_function")?,
+                    function_owns_table: row.try_get("function_owns_table")?,
+                    arguments,
+                    journal_owned_by_function_owner,
+                },
+            );
+        }
+        let journal_function = sqlx::query(
+            "SELECT p.prosrc AS body, p.prosecdef AS security_definer,
+                    COALESCE(p.proconfig, ARRAY[]::text[]) AS config
+             FROM pg_proc p
+             JOIN pg_namespace n ON n.oid = p.pronamespace
+             WHERE n.nspname = 'graphql_orm' AND p.proname = $1 AND p.pronargs = 0",
+        )
+        .bind(super::rls::CHANGE_JOURNAL_FUNCTION)
+        .fetch_optional(&mut *conn)
+        .await?;
+        if let Some(row) = journal_function {
+            live.change_journal_function = Some(super::rls::LiveChangeJournalFunction {
+                body: row.try_get("body")?,
+                config: row.try_get("config")?,
+                security_definer: row.try_get("security_definer")?,
+            });
+        }
         let policies = sqlx::query(
             "SELECT schemaname, tablename, policyname FROM pg_policies
              ORDER BY schemaname, tablename, policyname",

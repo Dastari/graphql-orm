@@ -106,30 +106,45 @@ pub fn build_rls_policy_plan(
 ///   forces RLS) and per-command policies that expose a document only while
 ///   its base row is visible, plus a `BEFORE DELETE` trigger on the base table
 ///   that removes the document while the base row is still visible;
-/// - an existing `__graphql_orm_change_log` becomes privileged to read: RLS
-///   is enabled with a single `INSERT` policy, so a role subject to RLS can
-///   still append journal entries but never read, update or delete them.
+/// - an existing `__graphql_orm_change_log` gets RLS enabled with no
+///   policies, so a role subject to RLS can neither read nor write it.
 ///
-/// Statements are produced only for PostgreSQL under `Managed` or `PlanOnly`
-/// when the target declares at least one RLS entity.
+/// With the `change-journal` feature, the plan also creates the change
+/// journal and its database-side recorder: a `SECURITY DEFINER` trigger
+/// function and an `AFTER INSERT OR UPDATE OR DELETE` row trigger on every
+/// single-key table in the target. Each trigger records the journal's
+/// schema when it is created.
+///
+/// Statements are produced only for PostgreSQL under `Managed` or `PlanOnly`,
+/// when the target declares at least one RLS entity or the `change-journal`
+/// feature is enabled.
 pub fn build_schema_target_rls_plan(
     backend: DatabaseBackend,
     policy: SchemaPolicy,
     target: &SchemaTarget,
 ) -> RlsPolicyPlan {
     let mut plan = build_rls_policy_plan(backend, policy, &target.rls);
-    if plan.statements.is_empty() {
-        return plan;
-    }
-    let search_tables = rls_search_tables(target);
-    if !search_tables.is_empty() {
-        plan.statements.push(postgres_search_delete_function_sql());
-        for search in &search_tables {
-            plan.statements
-                .extend(render_postgres_search_table_rls_sql(search));
+    let journal = (cfg!(feature = "change-journal")
+        && backend == DatabaseBackend::Postgres
+        && matches!(policy, SchemaPolicy::Managed | SchemaPolicy::PlanOnly))
+    .then(|| change_journal_tables(&target.schema));
+    if !plan.statements.is_empty() {
+        let search_tables = rls_search_tables(target);
+        if !search_tables.is_empty() {
+            plan.statements.push(postgres_search_delete_function_sql());
+            for search in &search_tables {
+                plan.statements
+                    .extend(render_postgres_search_table_rls_sql(search));
+            }
+        }
+        if journal.is_none() {
+            plan.statements.push(postgres_change_log_rls_sql());
         }
     }
-    plan.statements.push(postgres_change_log_rls_sql());
+    if let Some(tables) = journal {
+        plan.statements
+            .extend(postgres_change_journal_recorder_sql(&tables));
+    }
     plan
 }
 
@@ -321,37 +336,215 @@ pub fn postgres_search_delete_function_sql() -> String {
     )
 }
 
-/// Restrict reads of an existing change journal to privileged roles.
+/// Make an existing change journal readable and writable only by privileged
+/// roles.
 ///
-/// RLS is enabled (not forced) with one `INSERT ... WITH CHECK (true)` policy:
-/// a role subject to RLS can still append entries, but never read, update or
-/// delete them. The table owner, which is never the runtime role in a correctly
-/// provisioned deployment, and `BYPASSRLS` roles read the journal for
-/// incremental backup export.
+/// RLS is enabled (not forced) with no policies, so a role subject to RLS can
+/// neither read nor write entries. The `INSERT` policy that earlier releases
+/// created is dropped, and `INSERT`, `UPDATE`, `DELETE` and `TRUNCATE` are
+/// revoked from `PUBLIC`. Entries are recorded by the database-side recorder,
+/// `graphql_orm.record_change_journal_entry()`, which runs as the journal
+/// owner. The owner and `BYPASSRLS` roles read the journal for incremental
+/// backup export.
 pub fn postgres_change_log_rls_sql() -> String {
     let backend = DatabaseBackend::Postgres;
     let table = backend.quote_identifier(CHANGE_LOG_TABLE);
-    let policy = backend.quote_identifier(&policy_name(CHANGE_LOG_TABLE, RlsOperation::Insert));
+    let policy = backend.quote_identifier(&legacy_change_log_policy_name());
     format!(
-        "DO $graphql_orm$ BEGIN IF to_regclass({regclass}) IS NOT NULL THEN ALTER TABLE {table} ENABLE ROW LEVEL SECURITY; DROP POLICY IF EXISTS {policy} ON {table}; CREATE POLICY {policy} ON {table} FOR INSERT WITH CHECK (true); END IF; END $graphql_orm$",
+        "DO $graphql_orm$ BEGIN IF to_regclass({regclass}) IS NOT NULL THEN ALTER TABLE {table} ENABLE ROW LEVEL SECURITY; DROP POLICY IF EXISTS {policy} ON {table}; REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON {table} FROM PUBLIC; END IF; END $graphql_orm$",
         regclass = sql_string_literal(&table),
     )
 }
 
+/// Name of the `INSERT ... WITH CHECK (true)` journal policy created by
+/// graphql-orm 0.120.0 to 0.124.x. Current plans drop it.
+pub(crate) fn legacy_change_log_policy_name() -> String {
+    policy_name(CHANGE_LOG_TABLE, RlsOperation::Insert)
+}
+
 /// Idempotently secure the change journal when it is created or opened.
 ///
-/// Unlike [`postgres_change_log_rls_sql`], this changes nothing on a journal
-/// that is already secured, so a non-owner can call it.
+/// Unlike [`postgres_change_log_rls_sql`], this changes nothing that the
+/// calling role cannot change: RLS is enabled when it is off, and the earlier
+/// releases' `INSERT` policy is dropped only when the caller owns the table.
 #[cfg(feature = "postgres")]
 pub(crate) fn postgres_ensure_change_log_rls_sql() -> String {
     let backend = DatabaseBackend::Postgres;
     let table = backend.quote_identifier(CHANGE_LOG_TABLE);
-    let policy_name = policy_name(CHANGE_LOG_TABLE, RlsOperation::Insert);
+    let policy_name = legacy_change_log_policy_name();
     let policy = backend.quote_identifier(&policy_name);
     format!(
-        "DO $graphql_orm$ BEGIN IF NOT (SELECT relrowsecurity FROM pg_class WHERE oid = to_regclass({regclass})) THEN ALTER TABLE {table} ENABLE ROW LEVEL SECURITY; END IF; IF NOT EXISTS (SELECT 1 FROM pg_policy WHERE polrelid = to_regclass({regclass}) AND polname = {name}) THEN CREATE POLICY {policy} ON {table} FOR INSERT WITH CHECK (true); END IF; END $graphql_orm$",
+        "DO $graphql_orm$ BEGIN IF NOT (SELECT relrowsecurity FROM pg_class WHERE oid = to_regclass({regclass})) THEN ALTER TABLE {table} ENABLE ROW LEVEL SECURITY; END IF; IF EXISTS (SELECT 1 FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid WHERE p.polrelid = to_regclass({regclass}) AND p.polname = {name} AND pg_has_role(c.relowner, 'USAGE')) THEN DROP POLICY {policy} ON {table}; END IF; END $graphql_orm$",
         regclass = sql_string_literal(&table),
         name = sql_string_literal(&policy_name),
+    )
+}
+
+/// PostgreSQL DDL for the change journal table.
+pub(crate) fn postgres_change_journal_table_sql() -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS {} (
+            id UUID PRIMARY KEY,
+            entity_name TEXT NOT NULL,
+            table_name TEXT NOT NULL,
+            primary_key TEXT NOT NULL,
+            action TEXT NOT NULL,
+            changed_at BIGINT NOT NULL,
+            transaction_id TEXT NULL,
+            row_hash TEXT NULL,
+            actor_id TEXT NULL,
+            correlation_id TEXT NULL
+        )",
+        DatabaseBackend::Postgres.quote_identifier(CHANGE_LOG_TABLE)
+    )
+}
+
+/// Trigger name used on every table whose changes the journal records.
+pub(crate) const CHANGE_JOURNAL_TRIGGER: &str = "graphql_orm_change_journal";
+
+/// Trigger function that records one journal entry per changed row.
+pub(crate) const CHANGE_JOURNAL_FUNCTION: &str = "record_change_journal_entry";
+
+/// Transaction-local setting the ORM turns on for its own write transactions.
+///
+/// It only selects which transactions are recorded. The entity, key and
+/// action of every entry come from the trigger and the changed row, so a
+/// session that sets it can at most journal its own real changes.
+#[cfg_attr(
+    not(any(
+        all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
+        all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
+    )),
+    allow(dead_code)
+)]
+pub(crate) const CHANGE_JOURNAL_SETTING: &str = "graphql_orm.change_journal";
+
+/// `tgtype` of an `AFTER INSERT OR UPDATE OR DELETE ... FOR EACH ROW` trigger.
+pub(crate) const CHANGE_JOURNAL_TRIGGER_TYPE: i32 = 1 | 4 | 8 | 16;
+
+/// `search_path` pinned on `graphql_orm.record_change_journal_entry()`, in the
+/// stored `pg_proc.proconfig` form.
+pub(crate) const CHANGE_JOURNAL_FUNCTION_CONFIG: &str = SEARCH_DELETE_FUNCTION_CONFIG;
+
+/// Body of `graphql_orm.record_change_journal_entry()`.
+///
+/// Arguments: journal schema, entity name, table name, key column, key
+/// encoding (`text` or `bin`). The function runs as its owner, the journal
+/// owner, with a pinned `search_path` and schema-qualified names. It records
+/// only while [`CHANGE_JOURNAL_SETTING`] is `on`, refuses to run for a table
+/// its owner does not own (such as a session's temporary table), and derives
+/// each entry's key and action from the changed row and `TG_OP`. An update
+/// that changes the key records a `delete` of the old key and a `create` of
+/// the new one.
+pub(crate) const CHANGE_JOURNAL_FUNCTION_BODY: &str = " DECLARE entry_key pg_catalog.text; previous_key pg_catalog.text; key_sql pg_catalog.text; entry_sql pg_catalog.text; changed_at pg_catalog.int8; BEGIN IF TG_NARGS <> 5 OR TG_WHEN <> 'AFTER' OR TG_LEVEL <> 'ROW' THEN RAISE EXCEPTION 'graphql-orm change journal trigger is misconfigured'; END IF; IF pg_catalog.current_setting('graphql_orm.change_journal', true) IS DISTINCT FROM 'on' THEN RETURN NULL; END IF; IF TG_ARGV[0] LIKE 'pg\\_temp%' OR TG_ARGV[0] LIKE 'pg\\_toast\\_temp%' OR NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c WHERE c.oid = TG_RELID AND c.relpersistence <> 't' AND pg_catalog.pg_get_userbyid(c.relowner) = CURRENT_USER) THEN RAISE EXCEPTION 'graphql-orm change journal trigger is attached to a table its recorder does not own'; END IF; IF TG_ARGV[4] = 'bin' THEN key_sql := 'SELECT ''bin:''::pg_catalog.text || pg_catalog.encode(($1).%I, ''hex'')'; ELSIF TG_ARGV[4] = 'text' THEN key_sql := 'SELECT ($1).%I::pg_catalog.text'; ELSE RAISE EXCEPTION 'graphql-orm change journal trigger has an unknown key encoding'; END IF; IF TG_OP <> 'DELETE' THEN EXECUTE pg_catalog.format(key_sql, TG_ARGV[3]) INTO entry_key USING NEW; END IF; IF TG_OP <> 'INSERT' THEN EXECUTE pg_catalog.format(key_sql, TG_ARGV[3]) INTO previous_key USING OLD; END IF; changed_at := pg_catalog.floor(pg_catalog.date_part('epoch', pg_catalog.clock_timestamp()))::pg_catalog.int8; entry_sql := pg_catalog.format('INSERT INTO %I.%I (id, entity_name, table_name, primary_key, action, changed_at) VALUES (pg_catalog.gen_random_uuid(), $1, $2, $3, $4, $5)', TG_ARGV[0], '__graphql_orm_change_log'); IF TG_OP = 'UPDATE' AND previous_key IS NOT DISTINCT FROM entry_key THEN EXECUTE entry_sql USING TG_ARGV[1], TG_ARGV[2], entry_key, 'update'::pg_catalog.text, changed_at; ELSE IF TG_OP <> 'INSERT' THEN EXECUTE entry_sql USING TG_ARGV[1], TG_ARGV[2], previous_key, 'delete'::pg_catalog.text, changed_at; END IF; IF TG_OP <> 'DELETE' THEN EXECUTE entry_sql USING TG_ARGV[1], TG_ARGV[2], entry_key, 'create'::pg_catalog.text, changed_at; END IF; END IF; RETURN NULL; END ";
+
+/// One table whose changes the PostgreSQL change journal records.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ChangeJournalTable {
+    pub(crate) entity_name: String,
+    /// Table path, as declared on the entity.
+    pub(crate) table_name: String,
+    /// Single primary-key column.
+    pub(crate) primary_key: String,
+    /// `bin` for binary keys, otherwise `text`; matches the ORM event id.
+    pub(crate) encoding: &'static str,
+}
+
+impl ChangeJournalTable {
+    /// Trigger arguments after the journal schema, in order.
+    pub(crate) fn trigger_arguments(&self) -> [&str; 4] {
+        [
+            self.entity_name.as_str(),
+            self.table_name.as_str(),
+            self.primary_key.as_str(),
+            self.encoding,
+        ]
+    }
+}
+
+/// Key encoding for a primary-key SQL type, matching the ORM event id:
+/// binary keys use [`super::binary_key_id`], every other key its text form.
+pub(crate) fn change_journal_key_encoding(sql_type: &str) -> &'static str {
+    match sql_type.trim().to_ascii_lowercase().as_str() {
+        "bytea" => "bin",
+        _ => "text",
+    }
+}
+
+/// Tables the journal records: every single-key table in `schema`.
+///
+/// Composite-key tables are left out; the ORM refuses to journal them.
+pub(crate) fn change_journal_tables(schema: &super::core::SchemaModel) -> Vec<ChangeJournalTable> {
+    let mut tables = schema
+        .tables
+        .iter()
+        .filter_map(|table| {
+            let [primary_key] = table.primary_keys() else {
+                return None;
+            };
+            let sql_type = table
+                .columns
+                .iter()
+                .find(|column| &column.name == primary_key)
+                .map(|column| column.sql_type.as_str())
+                .unwrap_or_default();
+            Some(ChangeJournalTable {
+                entity_name: table.entity_name.clone(),
+                table_name: table.table_name.clone(),
+                primary_key: primary_key.clone(),
+                encoding: change_journal_key_encoding(sql_type),
+            })
+        })
+        .collect::<Vec<_>>();
+    tables.sort_by(|left, right| left.table_name.cmp(&right.table_name));
+    tables.dedup_by(|left, right| left.table_name == right.table_name);
+    tables
+}
+
+/// Create the PostgreSQL change journal and its database-side recorder.
+///
+/// The statements create and secure `__graphql_orm_change_log` (see
+/// [`postgres_change_log_rls_sql`]), create
+/// `graphql_orm.record_change_journal_entry()` as `SECURITY DEFINER` with
+/// `search_path = pg_catalog, pg_temp`, revoke its `EXECUTE` from `PUBLIC`,
+/// and (re)create an `AFTER INSERT OR UPDATE OR DELETE` row trigger named
+/// `graphql_orm_change_journal` on each table. Each trigger records the
+/// journal's schema, resolved once when it is created, so neither a session's
+/// `search_path` nor a temporary table of the same name can redirect entries.
+///
+/// Run them as the role that owns the journal and the tables. The recorder
+/// runs as that owner, so the runtime role needs no privilege on the journal.
+pub(crate) fn postgres_change_journal_recorder_sql(tables: &[ChangeJournalTable]) -> Vec<String> {
+    let mut statements = vec![
+        "CREATE SCHEMA IF NOT EXISTS graphql_orm".to_string(),
+        postgres_change_journal_table_sql(),
+        postgres_change_log_rls_sql(),
+        format!(
+            "CREATE OR REPLACE FUNCTION graphql_orm.{CHANGE_JOURNAL_FUNCTION}() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $graphql_orm${CHANGE_JOURNAL_FUNCTION_BODY}$graphql_orm$"
+        ),
+        format!("REVOKE ALL ON FUNCTION graphql_orm.{CHANGE_JOURNAL_FUNCTION}() FROM PUBLIC"),
+    ];
+    statements.extend(tables.iter().map(render_change_journal_trigger_sql));
+    statements
+}
+
+/// (Re)create one table's change journal trigger.
+fn render_change_journal_trigger_sql(table: &ChangeJournalTable) -> String {
+    let backend = DatabaseBackend::Postgres;
+    let base = backend.quote_identifier_path(&table.table_name);
+    let journal_regclass = sql_string_literal(&backend.quote_identifier(CHANGE_LOG_TABLE));
+    let trigger = backend.quote_identifier(CHANGE_JOURNAL_TRIGGER);
+    let [entity, table_name, key, encoding] = table.trigger_arguments().map(sql_string_literal);
+    format!(
+        "DO $graphql_orm$ DECLARE journal pg_catalog.regclass := pg_catalog.to_regclass({journal_regclass}); journal_schema pg_catalog.text; BEGIN \
+         IF journal IS NULL THEN RAISE EXCEPTION USING ERRCODE = '42P01', MESSAGE = 'graphql-orm change journal table does not exist'; END IF; \
+         SELECT n.nspname INTO journal_schema FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = journal; \
+         IF journal_schema LIKE 'pg\\_temp%' OR journal_schema LIKE 'pg\\_toast\\_temp%' THEN RAISE EXCEPTION USING ERRCODE = '42P01', MESSAGE = 'graphql-orm change journal table resolves to a temporary table'; END IF; \
+         DROP TRIGGER IF EXISTS {trigger} ON {base}; \
+         EXECUTE format('CREATE TRIGGER %I AFTER INSERT OR UPDATE OR DELETE ON %s FOR EACH ROW EXECUTE FUNCTION graphql_orm.{CHANGE_JOURNAL_FUNCTION}(%L, %L, %L, %L, %L)', {trigger_name}, {base_literal}, journal_schema, {entity}, {table_name}, {key}, {encoding}); \
+         END $graphql_orm$",
+        trigger_name = sql_string_literal(CHANGE_JOURNAL_TRIGGER),
+        base_literal = sql_string_literal(&base),
     )
 }
 
@@ -675,6 +868,43 @@ pub struct LiveRlsEnforcement {
     pub search_delete_function: Option<LiveSearchDeleteFunction>,
     /// Every policy name per table key, including `FOR ALL` policies.
     pub policy_names: std::collections::BTreeMap<String, Vec<String>>,
+    /// ORM change journal triggers, by table key.
+    pub change_journal_triggers: std::collections::BTreeMap<String, LiveChangeJournalTrigger>,
+    /// Live `graphql_orm.record_change_journal_entry()` definition, when present.
+    pub change_journal_function: Option<LiveChangeJournalFunction>,
+}
+
+/// A live trigger named [`CHANGE_JOURNAL_TRIGGER`].
+#[doc(hidden)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LiveChangeJournalTrigger {
+    /// `pg_trigger.tgenabled` (`O` fires in ordinary sessions).
+    pub enabled: String,
+    /// `pg_trigger.tgtype`; 29 is `AFTER INSERT OR UPDATE OR DELETE ... FOR EACH ROW`.
+    pub trigger_type: i32,
+    /// Whether the trigger has a `WHEN` condition.
+    pub conditional: bool,
+    /// Whether it executes `graphql_orm.record_change_journal_entry()`.
+    pub calls_orm_function: bool,
+    /// Whether the function owner also owns the table.
+    pub function_owns_table: bool,
+    /// Trigger arguments in order.
+    pub arguments: Vec<String>,
+    /// Whether the schema named by the first argument holds a change journal
+    /// owned by the function owner.
+    pub journal_owned_by_function_owner: bool,
+}
+
+/// The live `graphql_orm.record_change_journal_entry()` definition.
+#[doc(hidden)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LiveChangeJournalFunction {
+    /// `pg_proc.prosrc`.
+    pub body: String,
+    /// `pg_proc.proconfig`.
+    pub config: Vec<String>,
+    /// `pg_proc.prosecdef`.
+    pub security_definer: bool,
 }
 
 /// A live trigger named [`SEARCH_DELETE_TRIGGER`].
@@ -891,38 +1121,150 @@ pub(crate) fn validate_protected_rls_tables(
         }
     }
 
-    if let Some(change_log) = current.get(CHANGE_LOG_TABLE) {
-        if !change_log.enabled {
-            diagnostics.push(rls_diagnostic(
-                SchemaDiagnosticSeverity::Error,
-                CHANGE_LOG_TABLE,
-                format!("RLS is not enabled on {CHANGE_LOG_TABLE}"),
-            ));
+    diagnostics
+}
+
+/// Validate the change journal's row security and, with the
+/// `change-journal` feature, its database-side recorder.
+///
+/// Applies to PostgreSQL under `Managed`, `ValidateOnly` and `PlanOnly` when
+/// the target declares an RLS entity or the feature is enabled. The journal
+/// must have RLS enabled and no policies: any policy, including the `INSERT`
+/// policy of earlier releases, lets a role subject to RLS read or write
+/// entries. With the feature, the journal must exist, the recorder function
+/// must match the definition graphql-orm installs, and every single-key table
+/// in the target must carry an intact recorder trigger.
+pub(crate) fn validate_change_journal(
+    backend: DatabaseBackend,
+    policy: SchemaPolicy,
+    current: &[LiveRlsTable],
+    live: Option<&LiveRlsEnforcement>,
+    target: &SchemaTarget,
+) -> Vec<SchemaDiagnostic> {
+    let recorder = cfg!(feature = "change-journal");
+    if backend != DatabaseBackend::Postgres
+        || (!recorder && target.rls.entities.is_empty())
+        || matches!(
+            policy,
+            SchemaPolicy::ExternalReadOnly | SchemaPolicy::ExternalWritable
+        )
+    {
+        return Vec::new();
+    }
+    let mut diagnostics = Vec::new();
+    let error = |message: String| {
+        rls_diagnostic(SchemaDiagnosticSeverity::Error, CHANGE_LOG_TABLE, message)
+    };
+    match current
+        .iter()
+        .find(|table| normalize_table_key(&table.table_name) == CHANGE_LOG_TABLE)
+    {
+        Some(change_log) => {
+            if !change_log.enabled {
+                diagnostics.push(error(format!("RLS is not enabled on {CHANGE_LOG_TABLE}")));
+            }
+            let mut names = change_log
+                .policies
+                .iter()
+                .map(|policy| policy.policy_name.clone())
+                .collect::<Vec<_>>();
+            if let Some(live) = live
+                && let Some(all) = live.policy_names.get(CHANGE_LOG_TABLE)
+            {
+                names.extend(all.iter().cloned());
+            }
+            names.sort();
+            names.dedup();
+            for name in names {
+                diagnostics.push(error(format!(
+                    "Unexpected RLS policy {name} on {CHANGE_LOG_TABLE} lets a role subject to RLS read or write journal entries; re-apply the schema target"
+                )));
+            }
         }
-        let name = policy_name(CHANGE_LOG_TABLE, RlsOperation::Insert);
-        let insert_only = change_log.policies.iter().any(|live_policy| {
-            live_policy.policy_name == name
-                && live_policy.operation == RlsOperation::Insert
-                && live_policy
-                    .check_expression
-                    .as_deref()
-                    .map(canonical_policy_expr)
-                    .as_deref()
-                    == Some("true")
+        None if recorder => {
+            diagnostics.push(error(format!(
+                "Missing change journal table {CHANGE_LOG_TABLE}"
+            )));
+        }
+        None => {}
+    }
+    if !recorder {
+        return diagnostics;
+    }
+    let Some(live) = live else {
+        return diagnostics;
+    };
+    let function_matches = live
+        .change_journal_function
+        .as_ref()
+        .is_some_and(|function| {
+            function.body == CHANGE_JOURNAL_FUNCTION_BODY
+                && function.config == [CHANGE_JOURNAL_FUNCTION_CONFIG]
+                && function.security_definer
         });
-        if !insert_only {
+    if !function_matches {
+        diagnostics.push(error(format!(
+            "graphql_orm.{CHANGE_JOURNAL_FUNCTION}() is missing or differs from the definition graphql-orm installs"
+        )));
+    }
+    for table in change_journal_tables(&target.schema) {
+        if let Some(message) = change_journal_trigger_problem(live, &table) {
             diagnostics.push(rls_diagnostic(
                 SchemaDiagnosticSeverity::Error,
-                CHANGE_LOG_TABLE,
-                format!("Missing RLS policy {name} on {CHANGE_LOG_TABLE}"),
+                &table.table_name,
+                message,
             ));
-        }
-        if let Some(live) = live {
-            report_unexpected_policies(&mut diagnostics, live, CHANGE_LOG_TABLE, &[name]);
         }
     }
-
     diagnostics
+}
+
+/// Describe why the live change journal trigger for `table` would not record
+/// its changes, if it would not.
+fn change_journal_trigger_problem(
+    live: &LiveRlsEnforcement,
+    table: &ChangeJournalTable,
+) -> Option<String> {
+    let name = &table.table_name;
+    let Some(trigger) = live.change_journal_triggers.get(&normalize_table_key(name)) else {
+        return Some(format!(
+            "Missing change journal trigger {CHANGE_JOURNAL_TRIGGER} on {name}"
+        ));
+    };
+    if trigger.enabled != "O" {
+        return Some(format!(
+            "Change journal trigger {CHANGE_JOURNAL_TRIGGER} on {name} does not fire in ordinary sessions (tgenabled = {})",
+            trigger.enabled
+        ));
+    }
+    if trigger.trigger_type != CHANGE_JOURNAL_TRIGGER_TYPE
+        || trigger.conditional
+        || !trigger.calls_orm_function
+    {
+        return Some(format!(
+            "Change journal trigger {CHANGE_JOURNAL_TRIGGER} on {name} is not an unconditional AFTER INSERT OR UPDATE OR DELETE row trigger calling graphql_orm.{CHANGE_JOURNAL_FUNCTION}()"
+        ));
+    }
+    let expected = table.trigger_arguments();
+    let arguments_match = matches!(
+        trigger.arguments.as_slice(),
+        [schema, rest @ ..]
+            if !schema.starts_with("pg_temp")
+                && !schema.starts_with("pg_toast_temp")
+                && rest.iter().map(String::as_str).eq(expected)
+    );
+    if !arguments_match || !trigger.journal_owned_by_function_owner {
+        return Some(format!(
+            "Change journal trigger {CHANGE_JOURNAL_TRIGGER} on {name} does not record {} by key {} into a {CHANGE_LOG_TABLE} owned by the recorder's owner",
+            table.entity_name, table.primary_key
+        ));
+    }
+    if !trigger.function_owns_table {
+        return Some(format!(
+            "graphql_orm.{CHANGE_JOURNAL_FUNCTION}() is not owned by the owner of {name}; apply the schema target as the role that owns the tables and the journal"
+        ));
+    }
+    None
 }
 
 /// Describe why the live search-document delete trigger for `search` would

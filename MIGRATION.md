@@ -46,6 +46,51 @@ Choosing the in-place path for a restored store re-opens consumed approvals.
 See the
 [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01270-to-01280-enforced-runtime-closure-after-restore).
 
+## 0.125.0: PostgreSQL records change-journal entries in the database
+
+Upgrade runtime and macros together. This affects PostgreSQL deployments that
+enable the `change-journal` feature. SQLite is unchanged.
+
+On PostgreSQL the database now records change-journal entries through a row
+trigger on each single-key entity table. The runtime role no longer writes
+`__graphql_orm_change_log` and needs no privilege on it. A journaled ORM write
+fails, and rolls back, until the recorder is installed on its table.
+
+Before serving traffic with 0.125.0:
+
+1. As the role that owns the entity tables and the journal, apply the schema
+   target (`plan_schema_target` and `apply_schema_target` with the
+   `change-journal` feature), or call
+   `database.ensure_change_journal_recorder(&graphql_orm_entity_metadata())`.
+   Either one creates the journal if it is missing, drops the `INSERT` policy
+   that 0.120.0 added, creates `graphql_orm.record_change_journal_entry()`, and
+   installs the `graphql_orm_change_journal` trigger on every single-key table.
+   `ensure_change_journal_table` alone does not install the recorder.
+2. Revoke the runtime role's journal grants, for example
+   `REVOKE ALL ON __graphql_orm_change_log FROM application_runtime`. Do not
+   grant `EXECUTE` on `graphql_orm.record_change_journal_entry()`. A blanket
+   `GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA graphql_orm` includes it. The
+   recorder refuses tables its owner does not own, but the grant is
+   unnecessary.
+3. Run `validate_target` with the runtime pool and refuse to serve on errors.
+   It reports a remaining journal policy, a missing or modified recorder
+   function, and a missing or altered trigger.
+4. Re-apply the schema target whenever entity tables are added, so new
+   tables get the trigger.
+
+Behaviour changes:
+
+- Only rows changed in ORM write transactions on a journal-enabled `Database`
+  are recorded. Raw SQL outside those transactions, migrations and restore
+  imports are not.
+- `changed_at` uses the database clock in whole seconds, not the application
+  clock.
+- An update that changes a primary key records a `delete` of the old key and
+  a `create` of the new one.
+- Tables owned by a different role than the recorder function fail journaled
+  writes. Keep the journal, the entity tables and the recorder under one
+  schema-owner role.
+
 ## 0.124.0: assurance evaluators take a request check
 
 Upgrade runtime and macros together. No data conversion is required.

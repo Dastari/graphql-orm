@@ -59,6 +59,25 @@ pub use backend::*;
     all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
     all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
 ))]
+pub(crate) use backup::begin_change_journal_transaction;
+/// Multi-backend and MSSQL builds do not journal.
+#[cfg(all(
+    any(feature = "sqlite", feature = "postgres", feature = "mssql"),
+    not(any(
+        all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
+        all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
+    ))
+))]
+pub(crate) async fn begin_change_journal_transaction<B: WriteBackend>(
+    _db: &crate::db::Database<B>,
+    _tx: &mut B::Transaction<'_>,
+) -> crate::Result<()> {
+    Ok(())
+}
+#[cfg(any(
+    all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
+    all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
+))]
 pub use backup::*;
 pub use core::*;
 pub use dialect::*;
