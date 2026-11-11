@@ -4319,12 +4319,29 @@ impl SchemaAbi {
     }
 }
 
+/// One pending [`SchemaStage`] planned against the stage before it, or against
+/// the live schema for the first pending stage.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlannedSchemaStage {
     pub version: String,
     pub description: String,
     pub target_schema_hash: String,
     pub plan: MigrationPlan,
+}
+
+impl PlannedSchemaStage {
+    /// The stage's steps classified with the same rules as
+    /// [`SchemaManager::plan_migration_to_entities`](super::SchemaManager::plan_migration_to_entities).
+    ///
+    /// Stage application refuses these steps according to [`ApplyOptions`].
+    pub fn steps(&self) -> Vec<PlannedMigrationStep> {
+        super::migrations::classify_migration_steps(&self.plan.steps)
+    }
+
+    /// The highest step risk in this stage, or `None` when it has no steps.
+    pub fn highest_risk(&self) -> Option<MigrationRisk> {
+        self.steps().into_iter().map(|step| step.risk).max()
+    }
 }
 
 impl From<&EntityMetadata> for TableModel {
@@ -4971,7 +4988,8 @@ impl SchemaValidationReport {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+/// Risk of one migration step, ordered from least to most risky.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MigrationRisk {
     Additive,
     Compatible,

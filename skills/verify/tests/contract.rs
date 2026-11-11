@@ -1390,6 +1390,40 @@ async fn a_migration_plan_drops_entities_left_out_of_it() {
 }
 
 #[tokio::test]
+async fn a_schema_stage_that_drops_entities_is_refused_without_opt_in() {
+    use graphql_orm::graphql::orm::{SchemaStage, SchemaStageRunner};
+
+    let db = database().await;
+    seed(&db).await;
+    let stages = [SchemaStage::from_entities(
+        "partial-stage",
+        "partial stage",
+        &[Customer::metadata()],
+    )];
+    let refusal = db.apply_schema_stages(&stages).await.unwrap_err();
+    assert!(
+        matches!(
+            &refusal,
+            graphql_orm::sqlx::Error::Protocol(message)
+                if message.starts_with("Migration partial-stage contains destructive step")
+                    && message.ends_with("set allow_destructive to apply it")
+        ),
+        "{refusal:?}"
+    );
+    assert_eq!(Order::count_all(&db).await.unwrap(), 1);
+    db.apply_schema_stages_with_options(
+        &stages,
+        ApplyOptions {
+            allow_destructive: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(Order::count_all(&db).await.is_err());
+}
+
+#[tokio::test]
 async fn additive_only_rejects_a_plan_with_a_non_additive_step() {
     let db = database().await;
     let partial = db
