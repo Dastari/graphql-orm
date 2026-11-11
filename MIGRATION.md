@@ -3,12 +3,73 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-10
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.123.0: runtime date-time and JSON input must be readable
+
+**Behaviour change: some runtime GraphQL inputs that used to be accepted are rejected.**
+
+Runtime GraphQL now accepts a `RuntimeDateTime` or `RuntimeJson` value only when
+its canonical form, the form that is stored and returned, can be read back on
+every backend:
+
+- A date-time whose UTC year after offset normalization and microsecond
+  rounding is outside 0001 to 9999 is rejected with `invalid_graphql_input`.
+  Examples: `9999-12-31T23:59:59.9999995Z` (rounds into year 10000),
+  `9999-12-31T23:30:00-01:00` and `0001-01-01T00:00:00+01:00`. The leap second
+  `9999-12-31T23:59:60Z` is rejected too, because PostgreSQL stores it as year
+  10000. `9999-12-31T23:59:59.9999994Z` and `0001-01-01T00:00:00Z` are still
+  accepted.
+- A JSON document is rejected when the text SQLite or PostgreSQL returns would
+  exceed `RuntimeScalarLimits::max_text_bytes`, even when its input text fits.
+  serde_json prints `1e15` back as `1000000000000000.0`, and PostgreSQL returns
+  `1e16` as `10000000000000000` and `1e42` as `9.999999999999999e+41`. Both
+  backends' results are checked whichever backend is in use. A document
+  containing the largest f64 values, such as `1.7976931348623157e308`, is
+  rejected because PostgreSQL returns it in a form serde_json cannot read.
+- A `RuntimeHostField::argument` default typed with a runtime scalar, directly
+  or in a list, must now decode with the composer's scalar limits, or
+  `query_field` and `mutation_field` fail with `invalid_composition`. Request
+  values for host field arguments are bounded as before.
+- `RuntimeDateTime::parse` and `parse_exact` return
+  `RuntimeRecordErrorCode::InvalidValue` for the same date-times. Runtime create
+  and update requests refuse a date-time that is not `is_portable()`, so a
+  deserialized or previously stored out-of-range value can be read and compared
+  but not written.
+
+Output no longer applies the input limits. Every stored value the reader can
+decode is returned as stored, including in NOT NULL fields: out-of-range
+date-times written by earlier releases, and JSON, bytes or strings longer than
+the input limits, for example after a limit was lowered. `max_response_bytes`
+still bounds each response. Clients that tightened `RuntimeScalarLimits` to cap
+output should use `RuntimeGraphqlLimits::max_response_bytes`.
+
+No schema migration is required. Clients cannot send an out-of-range stored
+date-time back as input, so you may want to find and correct those rows. On
+SQLite, where earlier releases could store them as text:
+
+```sql
+SELECT id, at FROM my_table
+WHERE at IS NOT NULL
+  AND (length(at) <> 27 OR at LIKE '0000-%' OR at LIKE '9999-12-31T23:59:60%');
+```
+
+On PostgreSQL, which refused the other forms but stored the final leap second
+of 9999 as year 10000:
+
+```sql
+SELECT id, at FROM my_table WHERE at >= '10000-01-01 00:00:00+00';
+```
+
+To find JSON documents near the input bound, compare `length(document)` on
+SQLite, which stores the canonical text. On PostgreSQL `length(document::text)`
+is only approximate: `jsonb` prints numbers without exponents and adds spaces,
+while the runtime reader re-serializes compactly.
 
 ## 0.122.0: operation assurance on runtime, custom and Federation roots
 

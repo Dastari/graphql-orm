@@ -267,6 +267,78 @@ fn runtime_values_are_owned_deterministic_and_portable() {
     }
 }
 
+/// Rounding and offset normalization can move a four-digit input outside the
+/// years 0001 to 9999. Such a canonical form cannot be read back, so parsing
+/// rejects it instead of producing it.
+#[test]
+fn date_time_canonical_form_stays_within_years_0001_to_9999() {
+    for (input, canonical) in [
+        ("0001-01-01T00:00:00Z", "0001-01-01T00:00:00.000000Z"),
+        ("0001-01-01T00:59:00+00:59", "0001-01-01T00:00:00.000000Z"),
+        ("9999-12-31T23:59:59.999999Z", "9999-12-31T23:59:59.999999Z"),
+        (
+            "9999-12-31T23:59:59.9999994Z",
+            "9999-12-31T23:59:59.999999Z",
+        ),
+        ("2016-12-31T23:59:60Z", "2016-12-31T23:59:60.000000Z"),
+    ] {
+        assert_eq!(RuntimeDateTime::parse(input).unwrap().as_str(), canonical);
+    }
+    for input in [
+        "9999-12-31T23:59:59.9999995Z",
+        "9999-12-31T23:59:59.999999999Z",
+        "9999-12-31T23:30:00-01:00",
+        "0001-01-01T00:00:00+01:00",
+        "0000-06-01T00:00:00Z",
+        // PostgreSQL stores this leap second as year 10000.
+        "9999-12-31T23:59:60Z",
+    ] {
+        assert_eq!(
+            RuntimeDateTime::parse(input).unwrap_err().code(),
+            RuntimeRecordErrorCode::InvalidValue,
+            "{input}"
+        );
+    }
+    assert_eq!(
+        RuntimeDateTime::parse_exact("0001-01-01T00:00:00Z")
+            .unwrap()
+            .as_str(),
+        "0001-01-01T00:00:00.000000Z"
+    );
+    for input in ["9999-12-31T23:30:00-01:00", "0001-01-01T00:00:00+01:00"] {
+        assert_eq!(
+            RuntimeDateTime::parse_exact(input).unwrap_err().code(),
+            RuntimeRecordErrorCode::InvalidValue,
+            "{input}"
+        );
+    }
+    assert!(
+        RuntimeDateTime::parse("2026-01-01T00:00:00Z")
+            .unwrap()
+            .is_portable()
+    );
+}
+
+/// Deserialization accepts a value a backend may already hold, so records and
+/// cursors that carry it round-trip; such a value is reported as not portable.
+#[test]
+fn deserialized_date_times_keep_stored_out_of_range_values() {
+    for stored in [
+        "+10000-01-01T00:00:00.000000Z",
+        "0000-12-31T23:00:00.000000Z",
+        "9999-12-31T23:59:60.000000Z",
+    ] {
+        let value: RuntimeDateTime = serde_json::from_str(&format!("\"{stored}\"")).unwrap();
+        assert_eq!(value.as_str(), stored);
+        assert!(!value.is_portable(), "{stored}");
+        let record = RuntimeValue::DateTime(value);
+        let text = serde_json::to_string(&record).unwrap();
+        assert_eq!(serde_json::from_str::<RuntimeValue>(&text).unwrap(), record);
+        assert!(RuntimeDateTime::parse(stored).is_err(), "{stored}");
+    }
+    assert!(serde_json::from_str::<RuntimeDateTime>(r#""not a date""#).is_err());
+}
+
 #[test]
 fn validated_handles_reject_unknown_cross_collection_duplicate_and_stale_inputs() {
     let schema = test_schema("runtime_customers");

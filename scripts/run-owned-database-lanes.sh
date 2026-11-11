@@ -208,11 +208,11 @@ case "${lane}" in
     ;;
   runtime-live)
     cargo test -p graphql-orm --locked --no-default-features --features sqlite,runtime-graphql \
-      --lib --test runtime_graphql --test runtime_mutations --test runtime_queries --test runtime_relations \
-      --test runtime_live --test runtime_search_graphql --test runtime_search_writes -- --test-threads=1
+      --lib --test runtime_graphql --test runtime_mutations --test runtime_scalar_readback --test runtime_queries \
+      --test runtime_relations --test runtime_live --test runtime_search_graphql --test runtime_search_writes -- --test-threads=1
     cargo test -p graphql-orm --locked --no-default-features --features postgres,runtime-graphql \
-      --lib --test runtime_graphql --test runtime_mutations --test runtime_live --test runtime_search_graphql \
-      --test runtime_search_writes --test runtime_search_ir -- --test-threads=1
+      --lib --test runtime_graphql --test runtime_mutations --test runtime_scalar_readback --test runtime_live \
+      --test runtime_search_graphql --test runtime_search_writes --test runtime_search_ir -- --test-threads=1
     ;;
   runtime-search-catalog)
     for backend in sqlite postgres; do

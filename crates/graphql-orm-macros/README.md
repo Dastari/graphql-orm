@@ -3,12 +3,17 @@ title: "graphql-orm-macros"
 kind: reference
 status: active
 owner: graphql-orm-macros-maintainers
-last_reviewed: 2026-11-10
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm-macros`
+
+Version 0.123.0 makes runtime GraphQL reject date-time and JSON input whose
+canonical form cannot be read back, and return every stored value the reader
+can decode without the input limits. Upgrade ORM/macros together; see the
+[root migration guide](../../MIGRATION.md#01230-runtime-date-time-and-json-input-must-be-readable).
 
 Version 0.122.0 extends operation assurance to runtime GraphQL roots,
 unregistered mutations under a default policy, Federation entity resolvers and

@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-10
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -15,6 +15,19 @@ This file is the authoritative user-facing release chronology. The former
 for historical context.
 
 ## Unreleased
+
+## 0.123.0
+
+ORM runtime/macros **0.123.0**.
+
+- **Fix/breaking:** runtime GraphQL rejects date-time and JSON input whose canonical form cannot be read back, with `invalid_graphql_input` before any write.
+  - A `RuntimeDateTime` input is rejected when offset normalization or microsecond rounding moves its UTC year outside 0001 to 9999. For example, `9999-12-31T23:59:59.9999995Z` rounds into year 10000. The leap second `9999-12-31T23:59:60Z` is rejected too, because PostgreSQL stores it as year 10000. Previously SQLite stored `+10000-01-01T00:00:00.000000Z`, which its reader could not parse, so every page containing the row failed for every caller.
+  - A `RuntimeJson` input is also bounded by the length of the text SQLite and PostgreSQL return, computed with the serde_json the reader uses. serde_json re-serializes `1e15` as `1000000000000000.0`. PostgreSQL `jsonb` prints numbers without exponents: `1e16` returns as `10000000000000000`, and `1e42` as 43 digits that read back as `9.999999999999999e+41`. Previously only the input text was bounded, so a document of about 20 KB could be stored, return as about 74 KB, and then fail every read of the field. A document containing the largest f64 values, such as `1.7976931348623157e308`, is rejected too: `jsonb` returns them as digits serde_json cannot read, so previously every read of the row failed on PostgreSQL.
+- **Fix:** output renders every stored value the reader can decode, without the input limits. Date-times outside 0001 to 9999 that earlier releases stored, such as `+10000-01-01T00:00:00.000000Z` or `0000-12-31T23:00:00.000000Z`, and JSON, bytes or strings longer than the input limits, are returned as stored, including in NOT NULL fields. Previously one such value failed the whole connection or mutation payload. `max_response_bytes` still bounds each response. `RuntimeScalarLimits` now applies to input only.
+- **Fix:** keyset cursors over such a date-time can be reopened. PostgreSQL binds a year above 9999 without its sign, and year 0000 and below as ` BC` years.
+- **Breaking:** a `RuntimeHostField::argument` default typed with a runtime scalar, directly or in a list, must decode with the composer's scalar input limits. `query_field` and `mutation_field` fail with `invalid_composition` otherwise. Host field arguments and host input-object fields keep the runtime scalar input bounds, except for values inside a list or input-object argument that also uses an omitted, defaulted variable: async-graphql does not validate those, so hosts must bound them themselves. `RuntimeHostField` defaults typed with a host input object, and argument defaults on host objects added with `register()` or `subscription_root()`, are not checked at composition.
+- **Breaking:** `RuntimeDateTime::parse` and `parse_exact` return `InvalidValue` for a canonical year outside 0001 to 9999 or the leap second `9999-12-31T23:59:60`. Deserialization still accepts values a backend may hold. New `RuntimeDateTime::is_portable` reports whether a value is in range, and runtime create and update requests refuse to write one that is not.
+- Static entity date and JSON fields are unaffected: they are stored without canonicalization or an output bound. See the 0.123.0 migration guide.
 
 ## 0.122.0
 

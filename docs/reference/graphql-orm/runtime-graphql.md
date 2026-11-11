@@ -3,7 +3,7 @@ title: Runtime GraphQL reads and checked composition
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-31
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -268,10 +268,10 @@ write authorities remain authoritative.
 | Kind | GraphQL wire representation |
 | --- | --- |
 | Integer and count | `RuntimeInt64`: canonical signed decimal string; full i64 range, no plus/leading zeros/negative zero/numeric coercion |
-| JSON | `RuntimeJson`: bounded valid JSON text on input and output; SQL NULL is GraphQL null; JSON null is non-null string `"null"` |
+| JSON | `RuntimeJson`: valid JSON text; on input, bounded including the text SQLite and PostgreSQL read back; output returns the stored document; SQL NULL is GraphQL null; JSON null is non-null string `"null"` |
 | UUID | `RuntimeUuid`: valid UUID string input, lowercase hyphenated output |
-| Bytes | `RuntimeBytes`: canonical padded RFC4648 base64, bounded decoded bytes |
-| DateTime | `RuntimeDateTime`: RFC3339 input, UTC `YYYY-MM-DDTHH:MM:SS.ffffffZ` output; existing microsecond rounding |
+| Bytes | `RuntimeBytes`: canonical padded RFC4648 base64; decoded bytes bounded on input |
+| DateTime | `RuntimeDateTime`: RFC3339 input, UTC `YYYY-MM-DDTHH:MM:SS.ffffffZ` output; existing microsecond rounding; on input the canonical UTC year must be 0001 to 9999, and output returns a stored value outside that range as stored |
 | Float | finite GraphQL Float, existing RuntimeFloat normalization |
 | Boolean/String | ordinary GraphQL Boolean/String, no string normalization |
 | Decimal | `Decimal` (the static decimal scalar name): strict decimal string or integer input for the field's definition, float numbers rejected; output the canonical string with exactly `scale` fractional digits. Registered with `RuntimeDecimalFilter` only when a composition has a decimal field |
@@ -281,6 +281,52 @@ must. Integer JSON tokens must fit i64 (negative) or u64 (nonnegative), and
 fractional/exponent tokens must fit finite f64. Integer overflow is rejected,
 rather than silently falling back to a rounded floating-point value. JSON strings include their JSON quotes in the scalar text. Non-null JSON
 fields can contain JSON null. Unloaded fields are errors, never SQL NULL.
+
+Input is accepted only when its canonical form, the form that is stored and
+returned, can be read back on SQLite and PostgreSQL. `max_text_bytes` bounds the
+input text and also the JSON text each backend returns, computed with the
+serde_json the reader uses. serde_json re-serializes `1e15` as
+`1000000000000000.0`. PostgreSQL `jsonb` prints numbers without exponents, so
+`1e16` returns as `10000000000000000`, read back as an integer and printed in
+full, and `1e42` returns as 43 digits, read back as `9.999999999999999e+41`.
+`jsonb` cannot return the largest f64 values, such as
+`1.7976931348623157e308`, in a form serde_json can read, so those are rejected.
+The reader re-serializes JSON compactly, so `jsonb` spacing and key order do
+not count. A date-time is rejected when offset normalization or microsecond
+rounding moves it outside the years 0001 to 9999: `9999-12-31T23:59:59.9999995Z`
+rounds into year 10000, and `0001-01-01T00:00:00+01:00` is in year 0000 in UTC.
+The leap second `9999-12-31T23:59:60Z` is also rejected, because PostgreSQL
+stores it as year 10000. These are rejected with `invalid_graphql_input` before
+any write.
+
+Output renders every stored value the reader can decode, without the input
+bounds, and the scalar validators accept those forms. A row written by an
+earlier release, by host code or under a higher limit is returned as stored:
+a date-time such as `+10000-01-01T00:00:00.000000Z` or
+`0000-12-31T23:00:00.000000Z`, and JSON, bytes or strings longer than the input
+limits. `max_response_bytes` still bounds the whole response. Such a value is
+also a valid cursor position, so pages resume across it, including PostgreSQL
+` BC` years, which read back as year 0000 and below. Clients cannot send an
+out-of-range date-time back as input, and runtime mutations refuse to write one
+from host code.
+
+The runtime scalar validators apply the input bounds while a request's
+arguments, variables and document defaults are validated, and accept stored
+forms only when output is resolved. Host field arguments and host input-object
+fields typed with a runtime scalar are therefore bounded like runtime inputs,
+with one exception. When a list or input-object argument also contains a
+variable that the request omits and the operation defaults, async-graphql skips
+validation of the whole argument, so the values inside it are not checked. For
+example, in `echo(input: {document: "…", at: $t})` with `$t` defaulted and no
+variables sent, the literal `document` reaches the resolver unvalidated. Hosts
+must bound runtime scalar values they read from such arguments themselves.
+
+A `RuntimeHostField::argument` default typed with a runtime scalar, directly or
+in a list, is checked against the composer's scalar limits when the field is
+added, and an invalid default fails with `invalid_composition`. Other defaults
+are not checked at composition: `RuntimeHostField` defaults typed with a host
+input object, defaults of host input-object fields, and argument defaults on
+host objects added with `register()` or `subscription_root()`.
 
 TypeScript scalar mappings are strings for Int64/JSON/UUID/Bytes/DateTime. Use
 BigInt for integers, exact JSON parsing where number fidelity matters, Uint8Array

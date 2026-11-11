@@ -261,8 +261,10 @@ fn unsupported_profiles_and_nonportable_values_fail_before_record_disclosure() {
             Err(RuntimeFilterErrorCode::UnsupportedSemantics)
         );
     }
-    for raw in ["2016-12-31T23:59:60Z", "0000-01-01T00:00:00Z"] {
-        let value = RuntimeDateTime::parse(raw).unwrap();
+    // Year 0000 is no longer a constructible runtime value; leap seconds remain.
+    assert!(RuntimeDateTime::parse("0000-01-01T00:00:00Z").is_err());
+    {
+        let value = RuntimeDateTime::parse("2016-12-31T23:59:60Z").unwrap();
         let b = builder(&s);
         let n = b
             .compare(

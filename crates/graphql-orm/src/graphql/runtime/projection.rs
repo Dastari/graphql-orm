@@ -378,8 +378,7 @@ impl ProjectedPlan {
                                     async_graphql::Value::Null
                                 }
                                 Some(value) if value.kind() == Some(declared.kind) => {
-                                    super::scalar::encode(value, limits.scalars)
-                                        .map_err(|_| failed())?
+                                    super::scalar::encode(value)
                                 }
                                 _ => return Err(failed()),
                             };

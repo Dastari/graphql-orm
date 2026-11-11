@@ -344,7 +344,8 @@ impl<B: RuntimeMutationBackend> RuntimeGraphqlComposer<B> {
         Ok(self)
     }
     pub fn mutation_field(mut self, field: RuntimeHostField) -> Result<Self, RuntimeGraphqlError> {
-        let (name, field, semantic) = field.into_parts(GraphqlOperationKind::Mutation)?;
+        let (name, field, semantic) =
+            field.into_parts(GraphqlOperationKind::Mutation, self.limits.scalars)?;
         if !super::module::valid_name(&name, false) || !self.mutation_roots.insert(name.clone()) {
             return Err(RuntimeGraphqlError::new("name_collision"));
         }
@@ -1236,10 +1237,7 @@ async fn execute_once<B: RuntimeMutationBackend>(
             .state(field)
             .map_err(|_| committed_error("mutation_payload_failed"))?
         {
-            RuntimeFieldState::Value(value) => {
-                super::scalar::encode(value, prepared.limits.scalars)
-                    .map_err(|_| committed_error("mutation_payload_failed"))?
-            }
+            RuntimeFieldState::Value(value) => super::scalar::encode(value),
             RuntimeFieldState::Null => Value::Null,
             RuntimeFieldState::Unloaded => return Err(committed_error("mutation_payload_failed")),
         };

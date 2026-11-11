@@ -261,7 +261,16 @@ impl<'de> serde::Deserialize<'de> for RuntimeFloat {
 ///
 /// Inputs use RFC 3339. Offsets are normalized to UTC, precision is rounded
 /// to PostgreSQL-compatible microseconds, and serialization always uses
-/// `YYYY-MM-DDTHH:MM:SS.ffffffZ`.
+/// `YYYY-MM-DDTHH:MM:SS.ffffffZ`. [`parse`](Self::parse) and
+/// [`parse_exact`](Self::parse_exact) accept only values whose canonical UTC
+/// year is 0001 to 9999, the range that SQLite text and PostgreSQL
+/// `timestamptz` both store and read back.
+///
+/// Deserialization instead accepts any value a backend may already hold, such
+/// as `+10000-01-01T00:00:00.000000Z` stored by an earlier release, so records
+/// and cursors that carry such a value still round-trip. Such a value can be
+/// read and compared, but runtime mutations refuse to write it; see
+/// [`is_portable`](Self::is_portable).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RuntimeDateTime(String);
 
@@ -271,12 +280,16 @@ impl RuntimeDateTime {
     /// # Errors
     ///
     /// Returns [`RuntimeRecordErrorCode::InvalidValue`] when `value` is not a
-    /// valid RFC 3339 date-time.
+    /// valid RFC 3339 date-time, or when offset normalization or rounding moves
+    /// it outside the years 0001 to 9999. For example,
+    /// `9999-12-31T23:59:59.9999995Z` rounds into year 10000 and is rejected.
+    /// So is the leap second `9999-12-31T23:59:60Z`, which PostgreSQL stores
+    /// as year 10000.
     pub fn parse(value: &str) -> Result<Self, RuntimeRecordError> {
         let parsed = chrono::DateTime::parse_from_rfc3339(value).map_err(|error| {
             RuntimeRecordError::new(RuntimeRecordErrorCode::InvalidValue).with_source(error)
         })?;
-        Ok(Self::from_utc(parsed.with_timezone(&Utc)))
+        Self::from_utc(parsed.with_timezone(&Utc)).portable()
     }
 
     /// Parse an RFC 3339 date-time exactly, normalizing its offset to UTC but
@@ -285,8 +298,9 @@ impl RuntimeDateTime {
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeRecordErrorCode::InvalidValue`] for an invalid date-time
-    /// or one with nonzero nanoseconds below microsecond precision.
+    /// Returns [`RuntimeRecordErrorCode::InvalidValue`] for an invalid date-time,
+    /// one with nonzero nanoseconds below microsecond precision, or one whose
+    /// UTC year is outside 0001 to 9999.
     pub fn parse_exact(value: &str) -> Result<Self, RuntimeRecordError> {
         let parsed = chrono::DateTime::parse_from_rfc3339(value).map_err(|error| {
             RuntimeRecordError::new(RuntimeRecordErrorCode::InvalidValue).with_source(error)
@@ -296,7 +310,56 @@ impl RuntimeDateTime {
                 RuntimeRecordErrorCode::InvalidValue,
             ));
         }
+        Self::from_utc(parsed.with_timezone(&Utc)).portable()
+    }
+
+    /// Decode a value a backend already holds, or its serialized form, without
+    /// the range check, so a row written before the check existed can still be
+    /// read, returned and used as a cursor or comparison value. Strict
+    /// RFC 3339 cannot spell the signed extended years those rows may hold,
+    /// such as `+10000-01-01T00:00:00.000000Z`, so retry them with chrono's
+    /// general parser. The result is never new stored data: runtime mutations
+    /// refuse to write a value that is not [`is_portable`](Self::is_portable).
+    pub(crate) fn parse_stored(value: &str) -> Result<Self, RuntimeRecordError> {
+        let parsed = chrono::DateTime::parse_from_rfc3339(value)
+            .or_else(|error| {
+                if value.starts_with(['+', '-']) {
+                    value.parse::<chrono::DateTime<chrono::FixedOffset>>()
+                } else {
+                    Err(error)
+                }
+            })
+            .map_err(|error| {
+                RuntimeRecordError::new(RuntimeRecordErrorCode::InvalidValue).with_source(error)
+            })?;
         Ok(Self::from_utc(parsed.with_timezone(&Utc)))
+    }
+
+    /// Whether this value can be stored and read back on every backend: its
+    /// canonical UTC year is 0001 to 9999 and it is not the leap second
+    /// `9999-12-31T23:59:60`. Values from [`parse`](Self::parse) and
+    /// [`parse_exact`](Self::parse_exact) always are. A deserialized or
+    /// previously stored value may not be, and runtime mutations refuse to
+    /// write it.
+    pub fn is_portable(&self) -> bool {
+        // The canonical form has exactly 27 bytes for a four-digit year.
+        // Chrono can also produce year zero and signed extended years: SQLite
+        // would store their text but strict RFC 3339 cannot read it back, and
+        // PostgreSQL refuses both. PostgreSQL also stores the final leap
+        // second of 9999 as year 10000.
+        self.0.len() == 27
+            && !self.0.starts_with("0000-")
+            && !self.0.starts_with("9999-12-31T23:59:60")
+    }
+
+    fn portable(self) -> Result<Self, RuntimeRecordError> {
+        if self.is_portable() {
+            Ok(self)
+        } else {
+            Err(RuntimeRecordError::new(
+                RuntimeRecordErrorCode::InvalidValue,
+            ))
+        }
     }
 
     /// Canonicalize a UTC date-time to portable microsecond precision.
@@ -338,7 +401,7 @@ impl<'de> serde::Deserialize<'de> for RuntimeDateTime {
         D: serde::Deserializer<'de>,
     {
         let value = <String as serde::Deserialize>::deserialize(deserializer)?;
-        Self::parse(&value).map_err(serde::de::Error::custom)
+        Self::parse_stored(&value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -1310,7 +1373,7 @@ impl RuntimeRowDecoder for super::SqliteBackend {
                 .map(RuntimeValue::Bytes)
                 .unwrap_or(RuntimeValue::Null)),
             RuntimeValueKind::DateTime => match sqlite_get_optional::<String>(row, field)? {
-                Some(value) => RuntimeDateTime::parse(&value)
+                Some(value) => RuntimeDateTime::parse_stored(&value)
                     .map(RuntimeValue::DateTime)
                     .map_err(|error| error.for_field(field)),
                 None => Ok(RuntimeValue::Null),

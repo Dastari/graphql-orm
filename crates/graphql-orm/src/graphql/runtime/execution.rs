@@ -417,7 +417,11 @@ impl<B: RuntimeReadBackend> Extension for Guard<B> {
                     .map_err(|error| vec![server(error)])?;
             }
         }
-        next.run(ctx).await.map_err(|_| vec![server(invalid())])
+        // Argument, variable and default values are validated in this step:
+        // the runtime scalars apply their input bounds only while it runs.
+        super::scalar::validating_input(next.run(ctx))
+            .await
+            .map_err(|_| vec![server(invalid())])
     }
     async fn execute(
         &self,
@@ -1064,7 +1068,7 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
                     continue;
                 }
                 let value = match record.state(field).map_err(|_| invalid())? {
-                    RuntimeFieldState::Value(v) => scalar::encode(v, self.limits.scalars)?,
+                    RuntimeFieldState::Value(v) => scalar::encode(v),
                     RuntimeFieldState::Null => Value::Null,
                     RuntimeFieldState::Unloaded => {
                         return Err(RuntimeGraphqlError::new("projection_mismatch"));
