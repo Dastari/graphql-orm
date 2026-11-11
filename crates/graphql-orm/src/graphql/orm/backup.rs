@@ -717,6 +717,9 @@ where
         &super::DatabaseBackend::Postgres,
         metadata.table_name,
     );
+    // A bare declared name binds to the table of that name in the journal's
+    // schema, as the recorder requires; a qualified path resolves exactly.
+    let qualified = super::dialect::postgres_identifier_path_names(metadata.table_name).len() == 2;
     let sql = format!(
         "SELECT 1
         FROM pg_catalog.pg_trigger tr
@@ -744,6 +747,7 @@ where
               || pg_catalog.convert_to(t.relname::pg_catalog.text, 'UTF8') || '\\x00'::bytea || ?
           AND args.journal_schema NOT LIKE 'pg\\_temp%'
           AND args.journal_schema NOT LIKE 'pg\\_toast\\_temp%'
+          AND (? OR tn.nspname::pg_catalog.text = args.journal_schema)
           AND NOT EXISTS (
               SELECT 1 FROM pg_catalog.pg_trigger other
               WHERE other.tgrelid = tr.tgrelid AND other.tgfoid = tr.tgfoid AND other.oid <> tr.oid
@@ -763,6 +767,7 @@ where
         SqlValue::String(super::rls::CHANGE_JOURNAL_FUNCTION_BODY.to_string()),
         SqlValue::String(super::rls::CHANGE_JOURNAL_FUNCTION_CONFIG.to_string()),
         SqlValue::Bytes(expected_arguments),
+        SqlValue::Bool(qualified),
         SqlValue::String(super::rls::CHANGE_JOURNAL_SETTING.to_string()),
     ];
     if !hook_ctx.fetch_rows(&sql, &values).await?.is_empty() {

@@ -1992,7 +1992,8 @@ async fn recorder_refuses_triggers_that_do_not_match_their_table()
         "{copied:?}"
     );
     assert!(journal_entries(&owner, "copied-key").await?.is_empty());
-    let other = journal_errors_on(&owner, "rls_cov_plain").await?;
+    // Triggers found by catalog scan are keyed by their quoted schema and name.
+    let other = journal_errors_on(&owner, "\"public\".\"rls_cov_plain\"").await?;
     assert!(
         other.iter().any(|message| message.contains("journal_copy")),
         "{other:?}"
@@ -2088,12 +2089,25 @@ async fn recorder_refuses_triggers_that_do_not_match_their_table()
         copies, 0,
         "the plan drops recorder triggers under other names"
     );
-    let stray = journal_errors_on(&owner, "journal_aux_side").await?;
+    // It can only record its own table's changes, so another schema target
+    // may own it: a warning, not an error.
+    let report = graphql_orm::db::Database::new(owner.clone())
+        .schema()
+        .validate_target(&graphql_orm_schema_target())
+        .await?;
+    let stray = report
+        .rls_diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.table.as_deref() == Some("\"journal_aux\".\"side\""))
+        .collect::<Vec<_>>();
     assert!(
-        stray
-            .iter()
-            .any(|message| message.contains("not a single-key table of this target")),
-        "{stray:?}"
+        stray.iter().any(|diagnostic| {
+            diagnostic.severity == SchemaDiagnosticSeverity::Warning
+                && diagnostic
+                    .message
+                    .contains("not on a single-key table of this target")
+        }),
+        "{stray:#?}"
     );
     sqlx::query("DROP SCHEMA journal_aux CASCADE")
         .execute(&owner)

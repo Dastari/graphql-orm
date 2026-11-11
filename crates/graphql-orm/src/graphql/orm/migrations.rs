@@ -4600,7 +4600,7 @@ impl RlsIntrospectionBackend for super::PostgresBackend {
             let relation_schema: String = row.try_get("schema_name")?;
             let relation_name: String = row.try_get("table_name")?;
             live.change_journal_triggers.insert(
-                table_key(relation_schema.clone(), relation_name.clone()),
+                super::rls::change_journal_table_key(&relation_schema, &relation_name),
                 super::rls::LiveChangeJournalTrigger {
                     relation_schema,
                     relation_name,
@@ -4627,7 +4627,10 @@ impl RlsIntrospectionBackend for super::PostgresBackend {
         .await?;
         for row in recorder_triggers {
             live.change_journal_recorder_triggers.push((
-                table_key(row.try_get("schema_name")?, row.try_get("table_name")?),
+                super::rls::change_journal_table_key(
+                    &row.try_get::<String, _>("schema_name")?,
+                    &row.try_get::<String, _>("table_name")?,
+                ),
                 row.try_get("trigger_name")?,
             ));
         }
@@ -4644,6 +4647,13 @@ impl RlsIntrospectionBackend for super::PostgresBackend {
         )
         .bind(&journal_regclass)
         .fetch_all(&mut *conn)
+        .await?;
+        live.change_journal_schema = sqlx::query_scalar(
+            "SELECT n.nspname::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE c.oid = to_regclass($1)",
+        )
+        .bind(&journal_regclass)
+        .fetch_optional(&mut *conn)
         .await?;
         live.change_journal_owned_by_current_role = sqlx::query_scalar(
             "SELECT COALESCE((SELECT pg_has_role(current_user, c.relowner, 'MEMBER')

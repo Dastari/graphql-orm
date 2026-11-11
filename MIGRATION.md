@@ -80,8 +80,11 @@ writes fail. Cut over in this order:
    grantor, the plan raises and rolls back without applying anything. Revoke
    that grant as its grantor, then apply the plan again.
 3. Revoke what the plan does not manage: any `TRIGGER` privilege that
-   runtime roles hold on entity tables, and any correctly named recorder
-   trigger that validation reports on a table outside every schema target. `SELECT`
+   runtime roles hold on entity tables, and any recorder trigger that
+   validation reports which the applying role could not drop. Nothing drops a
+   correctly named recorder trigger on a table outside the target; validation
+   reports it as a warning, because another schema target may manage that
+   table. Drop it if none does. `SELECT`
    grants on the journal are kept and survive re-applying the plan; with no
    policies they read nothing unless the role also has `BYPASSRLS`, so grant
    `SELECT` to a dedicated `BYPASSRLS` export role if one reads the journal,
@@ -117,6 +120,12 @@ Behaviour changes:
   schema-owner role.
 - Partitioned tables are not supported for the journal: a partitioned
   journal, or a partitioned entity table, makes journaled writes fail.
+- The journal requires PostgreSQL 13 or later.
+- A bare entity table name must resolve in the journal's schema, which is
+  where both the ORM's unqualified names and the journal resolve. The plan
+  fails for a bare-named table elsewhere; qualify its table path. Quoted
+  paths such as `"Users"` or `app."a.b"` resolve with the ORM's identifier
+  rules.
 
 ## 0.124.0: assurance evaluators take a request check
 

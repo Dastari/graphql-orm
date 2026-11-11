@@ -177,9 +177,22 @@ With the `change-journal` feature, the database, not the runtime role, records j
   key encoding (`bin:<hex>` for `bytea` keys, otherwise the key's text form).
 
 The plan also drops any trigger that calls the recorder under a name other than
-`graphql_orm_change_journal`; graphql-orm never installs one. It leaves correctly named triggers
-on tables outside the target, which another schema target in the same database may manage, and
-validation reports them.
+`graphql_orm_change_journal` on a table the applying role acts as owner of; graphql-orm never
+installs one, and validation reports any it cannot drop. Partition clones go with their parent,
+which relies on `pg_trigger.tgparentid`: the journal requires PostgreSQL 13 or later.
+
+Nothing drops a correctly named recorder trigger on a table outside the target. Another schema
+target in the same database may manage that table, so validation reports it as a `Warning`, not
+an `Error`. Because the recorder binds the declared table to the table it fires on, such a trigger
+can only record that table's own changes under its own name. If no schema target manages the
+table, the trigger is unexpected: an operator has to drop it.
+
+The declared table is the entity's table path as written, such as `users`, `"Users"`,
+`app."Orders"` or `app."a.b"`. When a trigger is installed, the path is resolved with the ORM's
+PostgreSQL identifier rules: split at unquoted dots, quoted parts unescaped, unquoted parts taken
+literally. A qualified path must name the table's schema and name exactly. A bare name must name a
+table in the journal's schema, which is where the ORM's unqualified names and the journal itself
+resolve; qualify entity tables that live elsewhere. Installation fails otherwise.
 
 The recorder runs as its owner, which is also the journal owner. It records only while the
 transaction-local setting `graphql_orm.change_journal` is `on`. ORM write transactions on a
@@ -191,20 +204,20 @@ changes. The recorder raises instead of recording unless all of these hold:
 - it fires as an `AFTER` row trigger named `graphql_orm_change_journal`;
 - the table it fires on is the schema and name baked into its arguments, is not temporary, and is
   owned by the recorder's owner;
-- the declared table it records is that table's name, alone or qualified with its schema;
+- the declared table it records, resolved with the same rules, names that table: a qualified path
+  its schema and name exactly, a bare name that table in the journal's schema;
 - the key column is the table's sole primary-key column;
 - the journal exists in the recorded schema as an ordinary table, is owned by the recorder's
   owner, carries no non-internal trigger or rule, and grants `TRIGGER` to no other role.
 
-The recorder locks the journal before checking for triggers, so no trigger can be added until the
-transaction ends. Under `REPEATABLE READ` or `SERIALIZABLE`, the trigger lookup reads the
-transaction's snapshot and can miss a trigger committed just before the lock. Only the owner or a
-role holding `TRIGGER` can add one, and the recorder refuses while any other role holds `TRIGGER`,
-so that window is limited to the owner itself.
+The recorder locks the journal before checking for triggers, so no trigger can be added after the
+check until the transaction ends. Under `REPEATABLE READ` or `SERIALIZABLE`, the trigger lookup
+reads the transaction's snapshot, so it can miss a trigger committed after that snapshot was taken
+and before the lock. The `TRIGGER` refusal narrows this to triggers added by a role that held
+`TRIGGER` at that moment and no longer does, or by the owner.
 
-The entity name in the arguments is not tied to the table by the database. A correctly named
-recorder trigger on an owner-owned table outside the target records entries under the table's real
-name, which is not one the backup restores. Validation reports every such trigger.
+The entity name in the arguments is not tied to the table by the database. Validation compares it
+with the target for every managed table, and reports recorder triggers on other tables.
 
 A trigger on the journal would run as the journal owner whenever the recorder appends, which is
 why the journal must carry none and why no other role may hold `TRIGGER` on it. A role with
@@ -241,8 +254,11 @@ privileges would allow. Otherwise the write fails and rolls back, with an error 
 - any role other than the owner holding a table or column privilege on the journal beyond
   `SELECT`, or `EXECUTE` on the recorder;
 - any trigger or rule on the journal;
-- any trigger that calls the recorder under another name, and any correctly named recorder trigger
-  on a table that is not a single-key table of the target.
+- as an `Error`, any trigger that calls the recorder under another name; as a `Warning`, any
+  correctly named recorder trigger on a table that is not a single-key table of the target.
+
+Validation identifies tables by quoted schema and name, so `evil.users` and `public.evil_users`
+are reported separately.
 
 Run it with the runtime pool. With the owner pool it always reports that the role acts as the
 journal owner.
