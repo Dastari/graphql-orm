@@ -2675,7 +2675,7 @@ impl OrmAiApplicationToolCallService {
         route: &AiToolResultEgressRoute,
     ) -> Result<(), AiError> {
         route.validate()?;
-        if !self.runtime.start_gate().is_ready()
+        if !crate::orm_runtime_recovery::gate_admits_lease(self.runtime.start_gate(), lease)
             || result.session_id() != lease.session_id()
             || result.run_id() != lease.run_id()
             || result.attempt_id() != lease.attempt_id()
@@ -4269,7 +4269,7 @@ fn validate_provider_binding(
     result: &AiProviderCallResult,
     context: &AiApplicationToolCallContext,
 ) -> Result<(), AiError> {
-    if !service.runtime.start_gate().is_ready()
+    if !crate::orm_runtime_recovery::gate_admits_lease(service.runtime.start_gate(), lease)
         || result.session_id() != lease.session_id()
         || result.run_id() != lease.run_id()
         || result.attempt_id() != lease.attempt_id()
@@ -4595,6 +4595,9 @@ const fn risk_value(value: AiToolRisk) -> &'static str {
 }
 
 fn map_orm(error: OrmPublicError) -> AiError {
+    if crate::orm_runtime_recovery::is_epoch_not_live(&error) {
+        return AiError::RuntimeNotReady;
+    }
     match error.code {
         OrmErrorCode::InvalidInput
         | OrmErrorCode::CursorInvalid

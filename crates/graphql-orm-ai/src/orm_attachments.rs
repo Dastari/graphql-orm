@@ -2287,6 +2287,9 @@ fn map_transaction(error: TransactionError) -> AiError {
 }
 
 fn map_orm(error: OrmPublicError) -> AiError {
+    if crate::orm_runtime_recovery::is_epoch_not_live(&error) {
+        return AiError::RuntimeNotReady;
+    }
     match error.code {
         OrmErrorCode::InvalidInput
         | OrmErrorCode::CursorInvalid

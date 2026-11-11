@@ -3,7 +3,7 @@ title: GraphQL ORM AI production-readiness plan
 kind: plan
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-11-02
+last_reviewed: 2026-11-10
 review_by: 2026-12-02
 supersedes:
   - crates/graphql-orm-ai/docs/completion-plan.md
@@ -65,7 +65,11 @@ Current versions and dependency selectors come from the generated
 
 The current package and managed AI schema provide the protected runtime,
 provider adapters, exact completed-batch adoption, retention foundations,
-restore planning, and readiness observation contracts. Database-derived
+restore planning, and readiness observation contracts. A crate-owned recovery
+epoch ledger now gates runtime start and worker leases: a restored store stays
+closed, restore closure expires restored approvals and moves unfinished runs
+to `RecoveryRequired`, and an explicit operator acknowledgement reopens it.
+Complete restore audits are still outstanding. Database-derived
 collection covers bounded conservative run classification, approval and
 egress-consent revalidation candidates, and—when host-attested deployment
 ceilings are supplied—budget-policy and immutable pricing-catalog integrity

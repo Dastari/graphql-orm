@@ -935,6 +935,7 @@ impl OrmAiSubscriptionWaitService {
         self.database()
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
+                    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
                     let candidates = tx
                         .query::<AiSubscriptionWaiterRecord>()
                         .filter(AiSubscriptionWaiterRecordWhereInput {
@@ -1788,6 +1789,7 @@ impl OrmAiSubscriptionWaitService {
         self.database()
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
+                    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
                     let waiter = tx
                         .find_by_id::<AiSubscriptionWaiterRecord>(&claim.waiter_id.0)
                         .await
@@ -1956,6 +1958,7 @@ impl OrmAiSubscriptionWaitService {
         self.database()
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
+                    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
                     let waiter = tx
                         .find_by_id::<AiSubscriptionWaiterRecord>(&claim.waiter_id.0)
                         .await
@@ -4159,6 +4162,7 @@ mod tests {
             .apply_migration(&migration, ApplyOptions::default())
             .await
             .expect("AI schema applies");
+        crate::orm_runtime_recovery::open_test_epoch(&database).await;
         let now = OffsetDateTime::from_unix_timestamp(TEST_NOW).expect("test timestamp");
         let clock = Arc::new(FixedClock::new(now));
         let principal = test_principal();
@@ -4280,15 +4284,7 @@ mod tests {
             .expect("subscription runtime builds");
         runtime
             .start_gate()
-            .open(&crate::AiRuntimeReadinessReport {
-                module_fingerprint: runtime
-                    .start_gate()
-                    .expected_module_fingerprint()
-                    .to_owned(),
-                executor_bound: true,
-                restore_reconciled: true,
-                fatal_issue_count: 0,
-            })
+            .open(&crate::orm_runtime_recovery::open_test_epoch(&database).await)
             .expect("runtime opens");
         let run_service = OrmAiRunService::new(
             database.clone(),
@@ -4380,6 +4376,7 @@ mod tests {
             AiRunRecord::insert(
                 &self.database,
                 CreateAiRunRecordInput {
+                    recovery_epoch_id: None,
                     execution_selection: None,
                     id: run_id.0,
                     session_id: session_id.0,
@@ -4835,6 +4832,34 @@ mod tests {
                 .expect("later claim")
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn sqlite_wait_close_refuses_a_closed_epoch() {
+        let fixture = wait_fixture().await;
+        let registered = fixture.register().await;
+        let claim = fixture
+            .service
+            .claim_next("closed-epoch-worker")
+            .await
+            .expect("claim")
+            .expect("registered wait should claim");
+        // Revoked authority routes the claim to its close transaction.
+        fixture.principal_active.store(false, Ordering::SeqCst);
+        crate::orm_runtime_recovery::close_test_epoch(&fixture.database).await;
+        assert!(matches!(
+            fixture.service.process_claim(claim).await,
+            Err(AiError::RuntimeNotReady)
+        ));
+        let run = AiRunRecord::find_by_id(&fixture.database, &registered.run_id().0)
+            .await
+            .expect("run loads")
+            .expect("run exists");
+        assert_eq!(run.state, AiRunState::WaitingSubscription.as_str());
+        assert!(matches!(
+            fixture.service.claim_next("closed-epoch-worker-2").await,
+            Err(AiError::RuntimeNotReady)
+        ));
     }
 
     #[tokio::test]

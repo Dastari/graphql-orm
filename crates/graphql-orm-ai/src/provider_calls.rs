@@ -4419,7 +4419,7 @@ impl AiProviderCallExecutor {
                 .await
                 .map_err(classify_unstarted_provider_error)?;
         }
-        if !self.runtime.start_gate().is_ready()
+        if !crate::orm_runtime_recovery::gate_admits_lease(self.runtime.start_gate(), &lease)
             || lease.state() != AiRunState::Running
             || plan.budget.session_id != lease.session_id()
             || plan.budget.run_id != lease.run_id()
@@ -6972,6 +6972,7 @@ mod tests {
             .apply_migration(&migration, ApplyOptions::default())
             .await
             .expect("AI schema should apply");
+        crate::orm_runtime_recovery::open_test_epoch(&database).await;
 
         let principal = AuthPrincipal::User(AuthUser {
             user_id: "provider-user".to_owned(),
@@ -7014,6 +7015,7 @@ mod tests {
         AiRunRecord::insert(
             &database,
             CreateAiRunRecordInput {
+                recovery_epoch_id: None,
                 execution_selection: None,
                 id: run_id.0,
                 session_id: session_id.0,
@@ -7389,15 +7391,7 @@ mod tests {
             .expect("test runtime should build");
         runtime
             .start_gate()
-            .open(&AiRuntimeReadinessReport {
-                module_fingerprint: runtime
-                    .start_gate()
-                    .expected_module_fingerprint()
-                    .to_owned(),
-                executor_bound: true,
-                restore_reconciled: true,
-                fatal_issue_count: 0,
-            })
+            .open(&crate::orm_runtime_recovery::open_test_epoch(&database).await)
             .expect("test runtime should open");
 
         Fixture {
@@ -9221,6 +9215,75 @@ mod tests {
 
     #[cfg(feature = "provider-openai-core")]
     #[tokio::test]
+    async fn background_terminal_commit_refuses_a_closed_epoch() {
+        let test = background_reconciliation_fixture_with_observation(
+            AiOpenAiBackgroundReconciliationWindows::default(),
+            AiOpenAiBackgroundReconciliationLimits::default(),
+            Arc::new(AllowAccess),
+            ProviderBackgroundObservation::new(
+                ProviderBackgroundStatus::Completed,
+                vec![ProviderEvent::TextDelta {
+                    text: "terminal background output".to_owned(),
+                }],
+                Some(ProviderBackgroundUsage::new(12, 5, 3)),
+            )
+            .expect("terminal observation should validate"),
+        )
+        .await;
+        test.clock.advance_seconds(10);
+        let claim = test
+            .service
+            .claim_next("reconciler-closed-epoch")
+            .await
+            .expect("claim should not fail")
+            .expect("submission should be eligible");
+        let retrieval = OrmAiOpenAiBackgroundRetrievalService::new(
+            test.fixture.database.clone(),
+            test.fixture.runtime.clone(),
+            test.fixture.audit.clone(),
+            Arc::new(test.clock.clone()),
+            AiOpenAiBackgroundRetrievalRoute::new("mock-profile", "local-mock", "retrieval-v1")
+                .expect("retrieval route should validate"),
+            AiOpenAiBackgroundRetrievalLimits::default(),
+        );
+        let observation = retrieval
+            .retrieve(&claim)
+            .await
+            .expect("terminal response should retrieve");
+        let terminal = OrmAiOpenAiBackgroundTerminalService::new(
+            test.fixture.database.clone(),
+            test.fixture.runtime.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(test.clock.clone()),
+            AiProviderOutputLimits::default(),
+            Duration::minutes(5),
+        )
+        .expect("terminal service limits should validate");
+
+        // The gate stays open in memory; only the store's epoch closes.
+        crate::orm_runtime_recovery::close_test_epoch(&test.fixture.database).await;
+        assert!(test.fixture.runtime.start_gate().is_ready());
+        assert!(matches!(
+            terminal.commit(&observation).await,
+            Err(AiError::RuntimeNotReady)
+        ));
+        let submission = AiProviderBackgroundSubmissionRecord::find_by_id(
+            &test.fixture.database,
+            &test.accepted.submission_id(),
+        )
+        .await
+        .expect("submission lookup should succeed")
+        .expect("submission should exist");
+        assert_ne!(submission.state, "completed");
+        assert!(submission.reconciled_at.is_none());
+        assert!(matches!(
+            test.service.heartbeat(&claim).await,
+            Err(AiError::RuntimeNotReady)
+        ));
+    }
+
+    #[cfg(feature = "provider-openai-core")]
+    #[tokio::test]
     async fn terminal_completion_commits_one_protected_exactly_once_graph() {
         let usage = ProviderBackgroundUsage::new(12, 5, 3);
         let test = background_reconciliation_fixture_with_observation(
@@ -10452,6 +10515,7 @@ mod tests {
             .apply_migration(&current_plan, ApplyOptions::default())
             .await
             .expect("background submission table should migrate without row rewrites");
+        crate::orm_runtime_recovery::open_test_epoch(&database).await;
     }
 
     #[cfg(feature = "provider-openai-core")]
@@ -11448,6 +11512,66 @@ mod tests {
         assert!(matches!(error, AiError::PreTransportBudgetDenied));
         assert_eq!(fixture.mock.request_count(), 0);
         assert_eq!(reservation_state(&fixture.database).await, "released");
+    }
+
+    #[tokio::test]
+    async fn a_gate_opened_for_another_store_cannot_dispatch_this_stores_lease() {
+        let fixture = fixture(vec![
+            ProviderEvent::ResponseStarted {
+                response_id: Some("mock-response".to_owned()),
+            },
+            ProviderEvent::ResponseCompleted {
+                response_id: Some("mock-response".to_owned()),
+            },
+        ])
+        .await;
+        // Reopen the runtime with a live proof minted from a different store.
+        let other = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
+            .await
+            .expect("in-memory SQLite should open");
+        let other_plan = other
+            .schema()
+            .plan_migration_to_entities(
+                "provider-call-other-store",
+                "other AI store",
+                AiSchemaModule.entities(),
+            )
+            .await
+            .expect("other AI schema should plan");
+        other
+            .schema()
+            .apply_migration(&other_plan, ApplyOptions::default())
+            .await
+            .expect("other AI schema should apply");
+        let other_proof = crate::orm_runtime_recovery::open_test_epoch(&other).await;
+        fixture.runtime.start_gate().close();
+        fixture
+            .runtime
+            .start_gate()
+            .open(&other_proof)
+            .expect("the other store's proof is valid for its own store");
+        assert!(fixture.runtime.start_gate().is_ready());
+        assert_ne!(
+            fixture.runtime.start_gate().epoch_id(),
+            fixture.lease.recovery_epoch_id()
+        );
+
+        let executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8_192, 64 * 1_024)
+                .expect("test provider limits should validate"),
+        );
+        assert!(
+            executor
+                .execute(&fixture.lease, plan(&fixture))
+                .await
+                .is_err()
+        );
+        assert_eq!(fixture.mock.request_count(), 0);
     }
 
     #[tokio::test]

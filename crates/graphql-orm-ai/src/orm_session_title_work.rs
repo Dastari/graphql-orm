@@ -285,6 +285,7 @@ impl OrmAiSessionTitleWorkService {
         self.database
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
+                    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
                     let mut candidates = tx
                         .query::<AiSessionTitleWorkRecord>()
                         .filter(AiSessionTitleWorkRecordWhereInput {
@@ -491,10 +492,15 @@ impl AiSessionTitleWorkService for OrmAiSessionTitleWorkService {
             return Err(AiError::PersistenceFailed);
         }
         let message_id = message.id;
+        let active_claim = claim.clone();
         let block = self
             .database
             .transaction(TransactionMode::Default, move |tx| {
                 Box::pin(async move {
+                    // Re-check the claim and the store's live epoch in the
+                    // same transaction that reads the protected block, before
+                    // any plaintext reaches the host generator.
+                    load_active_claim(tx, &active_claim, now).await?;
                     tx.query::<AiMessageBlockRecord>()
                         .filter(AiMessageBlockRecordWhereInput {
                             message_id: Some(UuidFilter {
@@ -740,6 +746,7 @@ impl AiSessionTitleWorkService for OrmAiSessionTitleWorkService {
                         return Ok(TitleCompletion::Applied(Box::new(session)));
                     }
                     validate_active_claim_record(&work, &claim, now)?;
+                    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
                     let session = tx
                         .find_by_id::<AiSessionRecord>(&claim.session_id.0)
                         .await
@@ -944,6 +951,7 @@ async fn load_active_claim(
         .map_err(OrmPublicError::from)?
         .ok_or_else(OrmPublicError::not_found)?;
     validate_active_claim_record(&current, claim, now)?;
+    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
     Ok(current)
 }
 

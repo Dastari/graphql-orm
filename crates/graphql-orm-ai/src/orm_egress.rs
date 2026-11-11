@@ -51,6 +51,9 @@ impl AiEgressDecisionAudit for OrmAiEgressDecisionAudit {
                 // SQLite must acquire its write lock before reading the existing record.
                 .transaction(TransactionMode::StateMachine, move |tx| {
                     Box::pin(async move {
+                        // No egress decision is recorded, and so no data
+                        // leaves, while the store's epoch is closed.
+                        crate::orm_runtime_recovery::require_live_epoch(tx).await?;
                         if let Some(existing) = tx
                             .query::<AiEgressEventRecord>()
                             .filter(AiEgressEventRecordWhereInput {
@@ -197,6 +200,9 @@ const fn reason_value(value: AiEgressReason) -> &'static str {
 }
 
 fn map_transaction(error: TransactionError) -> AiError {
+    if crate::orm_runtime_recovery::is_epoch_not_live(error.public_error()) {
+        return AiError::RuntimeNotReady;
+    }
     let public = error.public_error();
     match public.code {
         OrmErrorCode::InvalidInput
@@ -247,6 +253,7 @@ mod tests {
             .apply_migration(&plan, ApplyOptions::default())
             .await
             .unwrap();
+        crate::orm_runtime_recovery::open_test_epoch(&database).await;
         (directory, OrmAiEgressDecisionAudit::new(database))
     }
 
@@ -271,6 +278,47 @@ mod tests {
             policy_version: "v1".into(),
             consent_reference: None,
         }
+    }
+
+    #[tokio::test]
+    async fn audit_refuses_while_the_store_epoch_is_closed() {
+        let (_directory, audit) = fixture().await;
+        let manifest = manifest();
+        let open = AiEgressDecision::allow(&manifest, "v1", "synthetic-user");
+        audit
+            .record(&manifest, &open)
+            .await
+            .expect("a live epoch records the decision");
+        crate::orm_runtime_recovery::close_test_epoch(audit.database()).await;
+        let closed = AiEgressDecision::allow(&manifest, "v1", "synthetic-user");
+        assert!(matches!(
+            audit.record(&manifest, &closed).await,
+            Err(AiError::RuntimeNotReady)
+        ));
+        let id = closed.id.0;
+        let stored = audit
+            .database()
+            .transaction(TransactionMode::Default, move |tx| {
+                Box::pin(async move {
+                    tx.query::<AiEgressEventRecord>()
+                        .filter(AiEgressEventRecordWhereInput {
+                            id: Some(UuidFilter {
+                                eq: Some(id),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .fetch_one()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .unwrap();
+        assert!(
+            stored.is_none(),
+            "a closed epoch records no egress decision"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

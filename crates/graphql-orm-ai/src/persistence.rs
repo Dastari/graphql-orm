@@ -1145,6 +1145,9 @@ pub(crate) struct AiRunRecord {
     pub error_code: Option<String>,
     /// Latest exact coordinator checkpoint for recovery classification.
     pub latest_checkpoint_id: Option<graphql_orm::uuid::Uuid>,
+    /// Recovery epoch the current lease was granted under. A lease is valid
+    /// only while this equals the store's current live epoch.
+    pub recovery_epoch_id: Option<graphql_orm::uuid::Uuid>,
     /// Idempotency key that won the owner cancellation fence.
     pub cancellation_request_id: Option<graphql_orm::uuid::Uuid>,
     /// Server timestamp at which cancellation became terminal.
@@ -2464,11 +2467,21 @@ pub(crate) struct AiEgressEventRecord {
     pub created_at: i64,
 }
 
-/// Restore/recovery epoch and runtime start gate.
+/// Crate-owned runtime recovery epoch ledger.
+///
+/// The latest row (by `epoch_sequence`) decides whether workers may claim
+/// runs or consume approvals. `recorded_locally_at` is excluded from portable
+/// backups, so a row restored from a portable backup is never live and the
+/// restored store stays closed until [`crate::OrmAiRuntimeRecoveryService`]
+/// records a new epoch.
 #[backend_selected_graphql_entity(
     table = "graphql_orm_ai_runtime_recovery",
     plural = "GraphqlOrmAiRuntimeRecovery",
-    default_sort = "created_at DESC"
+    default_sort = "created_at DESC",
+    unique_index(
+        name = "graphql_orm_ai_runtime_recovery_epoch_sequence",
+        columns = ["epoch_sequence"]
+    )
 )]
 #[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
 #[cfg_attr(
@@ -2479,16 +2492,33 @@ pub(crate) struct AiEgressEventRecord {
 pub(crate) struct AiRuntimeRecoveryRecord {
     /// Recovery epoch ID.
     #[primary_key]
+    #[graphql_orm(auto_generated = false)]
     #[filterable(type = "uuid")]
     pub id: graphql_orm::uuid::Uuid,
+    /// Strictly increasing ledger position; the highest value is current.
+    ///
+    /// A constant default and a separate unique index keep the column
+    /// addable to an existing table on every backend; SQLite refuses
+    /// `ADD COLUMN ... UNIQUE`. Recorded epochs occupy `1..i64::MAX`. A
+    /// current row outside that range is never live and never yields a
+    /// readiness proof, and no epoch is recorded at such a position: a
+    /// successor beyond `i64::MAX - 1` fails instead.
+    #[sortable]
+    #[graphql_orm(default = "0")]
+    pub epoch_sequence: i64,
     /// Schema module version.
     pub module_version: String,
     /// Schema module fingerprint.
     pub module_fingerprint: String,
-    /// Dry-run/applied state.
+    /// `live` or `restore_closed`.
     pub state: String,
-    /// Runtime start gate.
+    /// Whether this epoch was recorded as able to open the runtime.
     pub start_gate_open: bool,
+    /// Set when this deployment recorded the row. Portable backups exclude
+    /// it, so a row restored from a portable backup is neither live nor an
+    /// acknowledgeable restore closure.
+    #[backup(exclude)]
+    pub recorded_locally_at: Option<i64>,
     /// Fatal issue count.
     pub fatal_issue_count: i64,
     /// Warning count.
@@ -2511,7 +2541,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.76.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.77.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 

@@ -143,6 +143,13 @@ async fn chat_completions_profiles_round_trip_and_refuse_retention() {
         .apply_migration(&plan, ApplyOptions::default())
         .await
         .expect("AI schema should apply");
+    graphql_orm_ai::OrmAiRuntimeRecoveryService::new(
+        database.clone(),
+        std::sync::Arc::new(agql_auth::SystemClock),
+    )
+    .readiness_proof()
+    .await
+    .expect("a test store should record its first live epoch");
     let now = OffsetDateTime::from_unix_timestamp(OffsetDateTime::now_utc().unix_timestamp())
         .expect("now");
     let service = OrmAiConfigurationService::new(

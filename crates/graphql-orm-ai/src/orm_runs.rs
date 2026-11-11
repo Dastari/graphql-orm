@@ -115,6 +115,7 @@ pub struct AiRunLease {
     state: AiRunState,
     retry_count: u32,
     latest_checkpoint_id: Option<Uuid>,
+    recovery_epoch_id: Option<Uuid>,
 }
 
 impl AiRunLease {
@@ -177,6 +178,15 @@ impl AiRunLease {
         self.latest_checkpoint_id
     }
 
+    /// Recovery epoch the lease was granted under.
+    ///
+    /// Every fenced write re-checks inside its transaction that this equals
+    /// the store's current live epoch, and gate-guarded services require it
+    /// to equal [`crate::AiRuntimeStartGate::epoch_id`].
+    pub const fn recovery_epoch_id(&self) -> Option<Uuid> {
+        self.recovery_epoch_id
+    }
+
     #[cfg(test)]
     pub(crate) fn test_running(principal_reference: PrincipalReference) -> Self {
         Self {
@@ -192,6 +202,7 @@ impl AiRunLease {
             state: AiRunState::Running,
             retry_count: 0,
             latest_checkpoint_id: None,
+            recovery_epoch_id: None,
         }
     }
 
@@ -1092,6 +1103,7 @@ impl OrmAiRunService {
         self.database
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
+                    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
                     let mut candidates = Vec::new();
                     for state in [
                         AiRunState::Leased,
@@ -2382,6 +2394,7 @@ impl OrmAiRunService {
                         .await
                         .map_err(OrmPublicError::from)?
                         .ok_or_else(OrmPublicError::not_found)?;
+                    require_current_lease_epoch(tx, &current, &lease).await?;
                     let stored_reference: PrincipalReference =
                         serde_json::from_value(current.principal_reference.clone())
                             .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
@@ -2501,6 +2514,7 @@ impl OrmAiRunService {
                         .await
                         .map_err(OrmPublicError::from)?
                         .ok_or_else(OrmPublicError::not_found)?;
+                    require_current_lease_epoch(tx, &current, &lease).await?;
                     let stored_reference: PrincipalReference =
                         serde_json::from_value(current.principal_reference.clone())
                             .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
@@ -2643,6 +2657,7 @@ impl OrmAiRunService {
                         .await
                         .map_err(OrmPublicError::from)?
                         .ok_or_else(OrmPublicError::not_found)?;
+                    require_current_lease_epoch(tx, &current, &lease).await?;
                     let stored_reference: PrincipalReference =
                         serde_json::from_value(current.principal_reference.clone())
                             .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
@@ -4343,6 +4358,7 @@ impl OrmAiRunService {
         database
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
+                    let epoch = crate::orm_runtime_recovery::require_live_epoch(tx).await?;
                     let mut candidates = Vec::new();
                     for state in [AiRunState::Queued, AiRunState::RetryScheduled] {
                         let mut rows = tx
@@ -4401,6 +4417,7 @@ impl OrmAiRunService {
                                 state: Some(AiRunState::Leased.as_str().to_owned()),
                                 attempt_id: Some(Some(attempt.id)),
                                 lease_owner: Some(Some(worker_id)),
+                                recovery_epoch_id: Some(Some(epoch)),
                                 lease_generation: Some(generation),
                                 lease_expires_at: Some(Some(expiry.unix_timestamp())),
                                 lease_heartbeat_at: Some(Some(now.unix_timestamp())),
@@ -4443,6 +4460,7 @@ impl OrmAiRunService {
         database
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
+                    let epoch = crate::orm_runtime_recovery::require_live_epoch(tx).await?;
                     let mut approvals = tx
                         .query::<AiApprovalRecord>()
                         .filter(AiApprovalRecordWhereInput {
@@ -4787,6 +4805,7 @@ impl OrmAiRunService {
                                     lease_generation: resumed_attempt
                                         .map(|(_, generation)| generation),
                                     lease_owner: Some(Some(worker_id.clone())),
+                                    recovery_epoch_id: Some(Some(epoch)),
                                     lease_expires_at: Some(Some(expiry.unix_timestamp())),
                                     lease_heartbeat_at: Some(Some(now.unix_timestamp())),
                                     error_code: Some(Some("approval_resume_claimed".to_owned())),
@@ -5620,6 +5639,23 @@ pub(crate) fn exact_state(state: &str) -> AiRunRecordWhereInput {
     }
 }
 
+/// Requires, inside the caller's transaction, that the store's current epoch
+/// is live and that both the run row and `lease` were granted under it.
+///
+/// Every lease-fenced write calls this, either through
+/// [`load_and_validate_active_lease`] or beside its own inline lease check.
+pub(crate) async fn require_current_lease_epoch(
+    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    run: &AiRunRecord,
+    lease: &AiRunLease,
+) -> Result<(), OrmPublicError> {
+    let epoch = crate::orm_runtime_recovery::require_live_epoch(tx).await?;
+    if run.recovery_epoch_id != Some(epoch) || lease.recovery_epoch_id != Some(epoch) {
+        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+    }
+    Ok(())
+}
+
 pub(crate) async fn load_and_validate_active_lease(
     tx: &mut MutationContext<'_, DefaultWriteBackend>,
     lease: &AiRunLease,
@@ -5630,6 +5666,7 @@ pub(crate) async fn load_and_validate_active_lease(
         .await
         .map_err(OrmPublicError::from)?
         .ok_or_else(OrmPublicError::not_found)?;
+    require_current_lease_epoch(tx, &current, lease).await?;
     let state = persisted_state(&current)?;
     let stored_reference: PrincipalReference =
         serde_json::from_value(current.principal_reference.clone())
@@ -5685,6 +5722,7 @@ pub(crate) fn lease_from_record(record: &AiRunRecord) -> Result<AiRunLease, OrmP
         retry_count: u32::try_from(record.retry_count)
             .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?,
         latest_checkpoint_id: record.latest_checkpoint_id,
+        recovery_epoch_id: record.recovery_epoch_id,
     })
 }
 
@@ -6187,6 +6225,9 @@ pub(crate) fn canonical_second(value: OffsetDateTime) -> OffsetDateTime {
 
 fn map_transaction(error: TransactionError) -> AiError {
     let public = error.public_error();
+    if crate::orm_runtime_recovery::is_epoch_not_live(public) {
+        return AiError::RuntimeNotReady;
+    }
     match public.code {
         OrmErrorCode::InvalidInput
         | OrmErrorCode::CursorInvalid
@@ -6229,6 +6270,7 @@ mod tests {
             .apply_migration(&plan, ApplyOptions::default())
             .await
             .expect("AI schema should apply");
+        crate::orm_runtime_recovery::open_test_epoch(&database).await;
 
         let now = OffsetDateTime::from_unix_timestamp(1_800_000_000)
             .expect("test timestamp should be valid");
@@ -6284,6 +6326,7 @@ mod tests {
         AiRunRecord::insert(
             &fixture.database,
             CreateAiRunRecordInput {
+                recovery_epoch_id: None,
                 execution_selection: None,
                 id: run_id.0,
                 session_id: session_id.0,
@@ -7997,6 +8040,112 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn inline_fenced_event_writes_refuse_a_closed_epoch() {
+        let fixture = fixture().await;
+        seed_queued(&fixture).await;
+        let lease = fixture
+            .service
+            .claim_next("event-worker")
+            .await
+            .expect("claim should succeed")
+            .expect("queued run should lease");
+        let lease = fixture
+            .service
+            .start(&lease)
+            .await
+            .expect("run should start");
+        let live = || PreparedLiveDeltaEvent {
+            id: Uuid::new_v4(),
+            event_type: "provider_live_delta".to_owned(),
+            protected_payload: serde_json::json!({}),
+            correlation_id: "live-correlation".to_owned(),
+            provider_kind: "local_harness".to_owned(),
+            provider_model: "event-model".to_owned(),
+            budget_reservation_id: Uuid::new_v4(),
+            expected_owner_principal_kind: "user".to_owned(),
+            expected_owner_subject: "run-user".to_owned(),
+            expected_scope_kind: "tenant".to_owned(),
+            expected_scope_id: "tenant-run".to_owned(),
+            expected_tenant_id: None,
+        };
+        let activity = || PreparedProviderActivityEvent {
+            id: Uuid::new_v4(),
+            inbox_event_id: Uuid::new_v4(),
+            protected_payload: serde_json::json!({}),
+            protected_inbox_payload: serde_json::json!({}),
+            correlation_id: "activity-correlation".to_owned(),
+            provider_kind: "local_harness".to_owned(),
+            provider_model: "event-model".to_owned(),
+            budget_reservation_id: Uuid::new_v4(),
+            expected_owner_principal_kind: "user".to_owned(),
+            expected_owner_subject: "run-user".to_owned(),
+            expected_scope_kind: "tenant".to_owned(),
+            expected_scope_id: "tenant-run".to_owned(),
+            expected_tenant_id: None,
+        };
+        let ui = || PreparedUiIntentEvent {
+            id: Uuid::new_v4(),
+            inbox_event_id: Uuid::new_v4(),
+            protected_payload: serde_json::json!({}),
+            protected_inbox_payload: serde_json::json!({}),
+            correlation_id: "ui-correlation".to_owned(),
+            provider_kind: "local_harness".to_owned(),
+            provider_model: "event-model".to_owned(),
+            provider_response_id: None,
+            budget_reservation_id: Uuid::new_v4(),
+            usage: AiBudgetAmounts::default(),
+            cached_input_tokens: 0,
+            expected_owner_principal_kind: "user".to_owned(),
+            expected_owner_subject: "run-user".to_owned(),
+            expected_scope_kind: "tenant".to_owned(),
+            expected_scope_id: "tenant-run".to_owned(),
+            expected_tenant_id: None,
+        };
+
+        // While the epoch is live these writes get past the epoch check and
+        // fail on their unrelated, deliberately invalid event bindings.
+        let open = [
+            fixture
+                .service
+                .append_live_delta_event(&lease, live())
+                .await,
+            fixture
+                .service
+                .append_provider_activity_event(&lease, activity())
+                .await,
+            fixture
+                .service
+                .append_ui_intent_event(&lease, ui())
+                .await
+                .map(|_| ()),
+        ];
+        for result in open {
+            assert!(result.is_err());
+            assert!(!matches!(result, Err(AiError::RuntimeNotReady)));
+        }
+
+        crate::orm_runtime_recovery::close_test_epoch(&fixture.database).await;
+        assert!(matches!(
+            fixture
+                .service
+                .append_live_delta_event(&lease, live())
+                .await,
+            Err(AiError::RuntimeNotReady)
+        ));
+        assert!(matches!(
+            fixture
+                .service
+                .append_provider_activity_event(&lease, activity())
+                .await,
+            Err(AiError::RuntimeNotReady)
+        ));
+        assert!(matches!(
+            fixture.service.append_ui_intent_event(&lease, ui()).await,
+            Err(AiError::RuntimeNotReady)
+        ));
     }
 }
 

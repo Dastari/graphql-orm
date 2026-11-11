@@ -100,6 +100,9 @@ impl OrmAiLiveDeltaService {
         lease: &AiRunLease,
         scope: &AiScope,
     ) -> Result<(ResolvedPrincipal, AiContentProtectionPolicy), AiError> {
+        if !crate::orm_runtime_recovery::gate_admits_lease(self.runtime.start_gate(), lease) {
+            return Err(AiError::RuntimeNotReady);
+        }
         let principal = self
             .runtime
             .resolve_current_principal(lease.principal_reference())
@@ -442,6 +445,9 @@ fn valid_reference(value: &str) -> bool {
 }
 
 fn map_orm(error: OrmPublicError) -> AiError {
+    if crate::orm_runtime_recovery::is_epoch_not_live(&error) {
+        return AiError::RuntimeNotReady;
+    }
     use graphql_orm::graphql::errors::OrmErrorCode;
     match error.code {
         OrmErrorCode::InvalidInput

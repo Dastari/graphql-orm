@@ -10,6 +10,19 @@ supersedes: []
 
 # Migration Guide
 
+## AI 0.127.0 to 0.128.0: enforced runtime closure after restore
+
+Apply AI schema module `0.77.0` before restarting all workers. No row data
+migration is needed. Open each runtime with
+`OrmAiRuntimeRecoveryService::open_start_gate` on the store its workers use,
+instead of a host-built `AiRuntimeReadinessReport`; claims refuse with
+`RuntimeNotReady` until the store has a live epoch. After upgrading in place,
+call `acknowledge_in_place_upgrade` once. If the store was restored from a
+backup, use `reconcile_restore` + `acknowledge_reviewed_restore` instead.
+Choosing the in-place path for a restored store re-opens consumed approvals.
+See the
+[AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01270-to-01280-enforced-runtime-closure-after-restore).
+
 ## 0.124.0: assurance evaluators take a request check
 
 Upgrade runtime and macros together. No data conversion is required.

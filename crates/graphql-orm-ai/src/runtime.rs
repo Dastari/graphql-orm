@@ -22,11 +22,11 @@ use crate::{
 };
 use graphql_orm::graphql::orm::{AiMutationExecutionPolicy, OrmSchemaModule, SchemaModuleCatalog};
 
-/// Host-attested inputs accepted by the current runtime start gate.
+/// Host-built readiness summary used for operational telemetry.
 ///
-/// This report does not prove that a restore plan was applied or validated.
-/// Restored deployments must keep the gate closed until the future applied-
-/// restore validator can supply crate-owned readiness authority.
+/// This report cannot open [`AiRuntimeStartGate`]. Opening requires an
+/// [`AiRuntimeReadinessProof`] minted by the crate from the recovery epoch
+/// ledger.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AiRuntimeReadinessReport {
     /// Compiled module fingerprint validated against managed schema/restore.
@@ -39,35 +39,85 @@ pub struct AiRuntimeReadinessReport {
     pub fatal_issue_count: u64,
 }
 
-/// Runtime start gate that remains closed until explicit host attestation.
+/// Crate-minted authority to open one runtime start gate.
+///
+/// Only [`crate::OrmAiRuntimeRecoveryService`] creates this value, and only
+/// after it has read or recorded a live recovery epoch for the exact compiled
+/// module fingerprint in one store. An epoch row restored from a portable
+/// backup is never live. A file-level or physical database restore carries
+/// the deployment-local marker with the rows, so the crate cannot detect it;
+/// run [`crate::OrmAiRuntimeRecoveryService::reconcile_restore`] after any
+/// such restore.
+///
+/// The proof is bound to its store through its epoch: leases record the
+/// epoch they were granted under, fenced writes require that epoch to be the
+/// store's current live epoch, and gate-guarded services refuse a lease whose
+/// epoch differs from the gate's. Mint the proof from the store the runtime's
+/// workers use. The proof does not prove that restore integrity audits ran;
+/// after a restore it exists only once an operator has acknowledged the
+/// reviewed closure.
+#[derive(Debug, PartialEq, Eq)]
+pub struct AiRuntimeReadinessProof {
+    module_fingerprint: String,
+    epoch_id: uuid::Uuid,
+}
+
+impl AiRuntimeReadinessProof {
+    #[cfg_attr(not(any(feature = "sqlite", feature = "postgres")), allow(dead_code))]
+    pub(crate) fn new(module_fingerprint: String, epoch_id: uuid::Uuid) -> Self {
+        Self {
+            module_fingerprint,
+            epoch_id,
+        }
+    }
+
+    /// Compiled module fingerprint the live epoch was recorded for.
+    pub fn module_fingerprint(&self) -> &str {
+        &self.module_fingerprint
+    }
+
+    /// Live recovery epoch this proof was minted from.
+    pub const fn epoch_id(&self) -> uuid::Uuid {
+        self.epoch_id
+    }
+}
+
+/// Runtime start gate that stays closed until the crate mints a readiness
+/// proof from a live recovery epoch.
 #[derive(Debug)]
 pub struct AiRuntimeStartGate {
     expected_module_fingerprint: String,
     ready: AtomicBool,
+    epoch_id: std::sync::Mutex<Option<uuid::Uuid>>,
 }
 
 impl AiRuntimeStartGate {
-    fn new(expected_module_fingerprint: String) -> Self {
+    pub(crate) fn new(expected_module_fingerprint: String) -> Self {
         Self {
             expected_module_fingerprint,
             ready: AtomicBool::new(false),
+            epoch_id: std::sync::Mutex::new(None),
         }
     }
 
-    /// Opens the gate only for host-attested matching schema, bound execution,
-    /// completed reconciliation, and zero fatal issues.
+    /// Opens the gate for a crate-minted proof of a live recovery epoch.
     ///
-    /// This compatibility API validates report consistency but does not prove
-    /// database repair application. It must not be used to reopen a restored
-    /// store until the applied-restore validator is implemented.
-    pub fn open(&self, report: &AiRuntimeReadinessReport) -> Result<(), AiError> {
-        if report.module_fingerprint != self.expected_module_fingerprint
-            || !report.executor_bound
-            || !report.restore_reconciled
-            || report.fatal_issue_count != 0
-        {
+    /// Obtain the proof from
+    /// [`crate::OrmAiRuntimeRecoveryService::readiness_proof`] for the store
+    /// this runtime's workers use, or call
+    /// [`crate::OrmAiRuntimeRecoveryService::open_start_gate`]. A host-built
+    /// [`AiRuntimeReadinessReport`] is not accepted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::RuntimeNotReady`] when the proof was minted for a
+    /// different compiled module fingerprint.
+    pub fn open(&self, proof: &AiRuntimeReadinessProof) -> Result<(), AiError> {
+        if proof.module_fingerprint != self.expected_module_fingerprint {
             return Err(AiError::RuntimeNotReady);
         }
+        let mut epoch = self.epoch_id.lock().map_err(|_| AiError::RuntimeNotReady)?;
+        *epoch = Some(proof.epoch_id);
         self.ready.store(true, Ordering::Release);
         Ok(())
     }
@@ -75,11 +125,22 @@ impl AiRuntimeStartGate {
     /// Closes the gate immediately, for restore, shutdown, or fatal drift.
     pub fn close(&self) {
         self.ready.store(false, Ordering::Release);
+        if let Ok(mut epoch) = self.epoch_id.lock() {
+            *epoch = None;
+        }
     }
 
     /// Returns whether workers/provider calls may start.
     pub fn is_ready(&self) -> bool {
         self.ready.load(Ordering::Acquire)
+    }
+
+    /// Recovery epoch the gate was opened for, while it is open.
+    pub fn epoch_id(&self) -> Option<uuid::Uuid> {
+        if !self.is_ready() {
+            return None;
+        }
+        self.epoch_id.lock().ok().and_then(|epoch| *epoch)
     }
 
     /// Returns the compiled module fingerprint.
@@ -2012,15 +2073,7 @@ impl AiRuntimeBuilder {
                 )
             })?;
 
-        let schema_module = AiSchemaModule;
-        let catalog = SchemaModuleCatalog::compose(&[&schema_module as &dyn OrmSchemaModule])
-            .map_err(|error| AiError::InvalidConfiguration(error.to_string()))?;
-        let fingerprint = catalog
-            .modules()
-            .first()
-            .ok_or_else(|| AiError::InvalidConfiguration("AI schema module is empty".to_owned()))?
-            .fingerprint
-            .clone();
+        let fingerprint = ai_schema_module_fingerprint()?;
         let tool_bridge = AuthenticatedToolBridge::new(
             principal_resolver.clone(),
             tool_authorization_policy,
@@ -2085,4 +2138,18 @@ impl AiRuntimeBuilder {
             start_gate: AiRuntimeStartGate::new(fingerprint),
         })
     }
+}
+
+/// Compiled fingerprint of [`AiSchemaModule`], shared by the start gate and
+/// the recovery epoch ledger.
+pub(crate) fn ai_schema_module_fingerprint() -> Result<String, AiError> {
+    let schema_module = AiSchemaModule;
+    let catalog = SchemaModuleCatalog::compose(&[&schema_module as &dyn OrmSchemaModule])
+        .map_err(|error| AiError::InvalidConfiguration(error.to_string()))?;
+    Ok(catalog
+        .modules()
+        .first()
+        .ok_or_else(|| AiError::InvalidConfiguration("AI schema module is empty".to_owned()))?
+        .fingerprint
+        .clone())
 }

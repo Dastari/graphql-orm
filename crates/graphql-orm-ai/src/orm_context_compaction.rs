@@ -1415,6 +1415,7 @@ mod tests {
             .apply_migration(&migration, ApplyOptions::default())
             .await
             .expect("AI schema should apply");
+        crate::orm_runtime_recovery::open_test_epoch(&database).await;
 
         let now = OffsetDateTime::now_utc();
         let principal = AuthPrincipal::User(AuthUser {
@@ -1516,6 +1517,7 @@ mod tests {
         AiRunRecord::insert(
             &database,
             CreateAiRunRecordInput {
+                recovery_epoch_id: None,
                 execution_selection: None,
                 id: Uuid::new_v4(),
                 session_id,

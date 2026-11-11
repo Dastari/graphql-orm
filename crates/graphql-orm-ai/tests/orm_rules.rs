@@ -166,6 +166,13 @@ async fn service(hierarchy: Vec<AiScope>) -> OrmAiRulePolicyService {
         .apply_migration(&plan, ApplyOptions::default())
         .await
         .expect("rule schema should apply");
+    graphql_orm_ai::OrmAiRuntimeRecoveryService::new(
+        database.clone(),
+        std::sync::Arc::new(agql_auth::SystemClock),
+    )
+    .readiness_proof()
+    .await
+    .expect("a test store should record its first live epoch");
     OrmAiRulePolicyService::new(
         database,
         Arc::new(AllowRules),

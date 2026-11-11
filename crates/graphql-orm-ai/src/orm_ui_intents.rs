@@ -513,6 +513,9 @@ fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
 }
 
 fn map_orm(error: OrmPublicError) -> AiError {
+    if crate::orm_runtime_recovery::is_epoch_not_live(&error) {
+        return AiError::RuntimeNotReady;
+    }
     use graphql_orm::graphql::errors::OrmErrorCode;
     match error.code {
         OrmErrorCode::InvalidInput
@@ -641,6 +644,7 @@ mod tests {
             .apply_migration(&plan, ApplyOptions::default())
             .await
             .expect("AI schema should apply");
+        crate::orm_runtime_recovery::open_test_epoch(&database).await;
         let now = OffsetDateTime::from_unix_timestamp(1_800_000_000)
             .expect("fixed timestamp should be valid");
         let principal = AuthPrincipal::User(AuthUser {
@@ -732,6 +736,7 @@ mod tests {
         AiRunRecord::insert(
             &fixture.database,
             CreateAiRunRecordInput {
+                recovery_epoch_id: None,
                 execution_selection: None,
                 id: run_id.0,
                 session_id: session_id.0,

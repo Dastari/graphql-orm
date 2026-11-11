@@ -4693,6 +4693,9 @@ fn map_transaction(error: TransactionError) -> AiError {
 
 fn map_orm(error: impl Into<OrmPublicError>) -> AiError {
     let error = error.into();
+    if crate::orm_runtime_recovery::is_epoch_not_live(&error) {
+        return AiError::RuntimeNotReady;
+    }
     match error.code {
         OrmErrorCode::InvalidInput
         | OrmErrorCode::CursorInvalid
@@ -4957,6 +4960,7 @@ mod tests {
             .apply_migration(&plan, ApplyOptions::default())
             .await
             .expect("retention schema should apply");
+        crate::orm_runtime_recovery::open_test_epoch(&database).await;
         database
     }
 
@@ -5146,6 +5150,7 @@ mod tests {
         AiRunRecord::insert(
             database,
             CreateAiRunRecordInput {
+                recovery_epoch_id: None,
                 execution_selection: None,
                 id: run_id,
                 session_id,
@@ -5326,6 +5331,7 @@ mod tests {
         AiRunRecord::insert(
             database,
             CreateAiRunRecordInput {
+                recovery_epoch_id: None,
                 execution_selection: None,
                 id: run_id,
                 session_id,
@@ -6951,6 +6957,7 @@ mod tests {
         AiRunRecord::insert(
             &database,
             CreateAiRunRecordInput {
+                recovery_epoch_id: None,
                 execution_selection: None,
                 id: current_run_id,
                 session_id,
@@ -6976,6 +6983,7 @@ mod tests {
         AiRunRecord::insert(
             &database,
             CreateAiRunRecordInput {
+                recovery_epoch_id: None,
                 execution_selection: None,
                 id: final_run_id,
                 session_id,
@@ -7119,6 +7127,7 @@ mod tests {
         AiRunRecord::insert(
             &database,
             CreateAiRunRecordInput {
+                recovery_epoch_id: None,
                 execution_selection: None,
                 id: active_run_id,
                 session_id,
@@ -7935,6 +7944,7 @@ mod tests {
         AiRunRecord::insert(
             &database,
             CreateAiRunRecordInput {
+                recovery_epoch_id: None,
                 execution_selection: None,
                 id: run_id,
                 session_id,

@@ -188,6 +188,13 @@ async fn fixture() -> Fixture {
         .apply_migration(&plan, ApplyOptions::default())
         .await
         .expect("AI schema migration should apply");
+    graphql_orm_ai::OrmAiRuntimeRecoveryService::new(
+        database.clone(),
+        std::sync::Arc::new(agql_auth::SystemClock),
+    )
+    .readiness_proof()
+    .await
+    .expect("a test store should record its first live epoch");
 
     let owner = principal("title-owner");
     let clock = Arc::new(FixedClock::new(
@@ -333,6 +340,13 @@ async fn schema_upgrade_conservatively_fences_preexisting_titles_and_converges()
         .apply_migration(&upgrade, ApplyOptions::default())
         .await
         .expect("current AI schema should preserve the previous row");
+    graphql_orm_ai::OrmAiRuntimeRecoveryService::new(
+        database.clone(),
+        std::sync::Arc::new(agql_auth::SystemClock),
+    )
+    .readiness_proof()
+    .await
+    .expect("a test store should record its first live epoch");
     let upgraded = CurrentTitleLifecycleSession::find_by_id(&database, &session_id)
         .await
         .expect("upgraded session should load")
@@ -658,4 +672,79 @@ async fn archive_preserves_title_commit_and_delete_never_resurrects_a_session() 
             .expect("hidden lookup should succeed")
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn title_completion_refuses_a_closed_epoch() {
+    let fixture = fixture().await;
+    let session = default_session_with_message(&fixture, "Explain this incident").await;
+    let claim = fixture
+        .title_work
+        .claim_next("title-worker-closed-epoch")
+        .await
+        .expect("claim should succeed")
+        .expect("title work should exist");
+
+    let database = fixture.sessions.database().clone();
+    let recovery = OrmAiRuntimeRecoveryService::new(
+        database.clone(),
+        std::sync::Arc::new(agql_auth::SystemClock),
+    );
+    recovery
+        .reconcile_restore(
+            &OrmAiRestoreFactCollector::new(database),
+            "closed-epoch-test",
+            None,
+        )
+        .await
+        .expect("restore closure should record a closed epoch");
+
+    assert!(matches!(
+        fixture
+            .title_work
+            .complete(&claim, "Generated incident title".to_owned())
+            .await,
+        Err(AiError::RuntimeNotReady)
+    ));
+    let unchanged = fixture
+        .sessions
+        .session(&fixture.owner, AiSessionId(session.id))
+        .await
+        .expect("session read should succeed")
+        .expect("session should exist");
+    assert_ne!(unchanged.title, "Generated incident title");
+}
+
+#[tokio::test]
+async fn first_message_read_refuses_a_closed_epoch() {
+    let fixture = fixture().await;
+    default_session_with_message(&fixture, "Explain this incident").await;
+    let claim = fixture
+        .title_work
+        .claim_next("title-worker-closed-read")
+        .await
+        .expect("claim should succeed")
+        .expect("title work should exist");
+    fixture
+        .title_work
+        .open_first_message(&claim)
+        .await
+        .expect("a live epoch opens the first message");
+
+    let database = fixture.sessions.database().clone();
+    OrmAiRuntimeRecoveryService::new(
+        database.clone(),
+        std::sync::Arc::new(agql_auth::SystemClock),
+    )
+    .reconcile_restore(
+        &OrmAiRestoreFactCollector::new(database),
+        "closed-epoch-test",
+        None,
+    )
+    .await
+    .expect("restore closure should record a closed epoch");
+    assert!(matches!(
+        fixture.title_work.open_first_message(&claim).await,
+        Err(AiError::RuntimeNotReady)
+    ));
 }

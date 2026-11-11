@@ -106,6 +106,13 @@ async fn apply_schema(database: &Database<SqliteBackend>, name: &str) {
         .apply_migration(&plan, ApplyOptions::default())
         .await
         .expect("schema applies");
+    graphql_orm_ai::OrmAiRuntimeRecoveryService::new(
+        database.clone(),
+        std::sync::Arc::new(agql_auth::SystemClock),
+    )
+    .readiness_proof()
+    .await
+    .expect("a test store should record its first live epoch");
 }
 
 async fn services(
@@ -146,6 +153,13 @@ async fn services_with_replay_page_size(
         .apply_migration(&plan, ApplyOptions::default())
         .await
         .expect("schema applies");
+    graphql_orm_ai::OrmAiRuntimeRecoveryService::new(
+        database.clone(),
+        std::sync::Arc::new(agql_auth::SystemClock),
+    )
+    .readiness_proof()
+    .await
+    .expect("a test store should record its first live epoch");
     let sessions = Arc::new(OrmAiSessionService::new(
         database,
         Arc::new(AllowAll),

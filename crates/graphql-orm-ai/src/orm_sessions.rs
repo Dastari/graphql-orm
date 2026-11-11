@@ -1764,6 +1764,7 @@ impl AiSessionService for OrmAiSessionService {
                     .await
                     .map_err(OrmPublicError::from)?;
                     tx.insert::<AiRunRecord>(CreateAiRunRecordInput {
+                        recovery_epoch_id: None,
                         execution_selection: current.execution_selection.clone(),
                         id: run_id,
                         session_id,
@@ -2176,6 +2177,9 @@ pub(crate) fn map_transaction(error: TransactionError) -> AiError {
 }
 
 pub(crate) fn map_orm(error: OrmPublicError) -> AiError {
+    if crate::orm_runtime_recovery::is_epoch_not_live(&error) {
+        return AiError::RuntimeNotReady;
+    }
     match error.code {
         OrmErrorCode::InvalidInput
         | OrmErrorCode::CursorInvalid

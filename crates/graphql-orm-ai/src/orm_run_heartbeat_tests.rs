@@ -45,6 +45,7 @@ async fn fixture(retries: usize) -> Fixture {
         .apply_migration(&plan, ApplyOptions::default())
         .await
         .unwrap();
+    crate::orm_runtime_recovery::open_test_epoch(&database).await;
     let clock = FixedClock::new(OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap());
     let principal = AuthPrincipal::User(AuthUser {
         user_id: "heartbeat-owner".into(),
@@ -81,6 +82,7 @@ async fn fixture(retries: usize) -> Fixture {
     AiRunRecord::insert(
         &database,
         CreateAiRunRecordInput {
+            recovery_epoch_id: None,
             execution_selection: None,
             id: Uuid::new_v4(),
             session_id,
