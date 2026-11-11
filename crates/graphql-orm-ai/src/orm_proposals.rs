@@ -101,6 +101,10 @@ impl AiPersistedProposal {
 }
 
 /// Protected proposal staging service using generated ORM APIs only.
+///
+/// Request methods refuse a sessionless or session-bound delegated credential
+/// with [`AiError::ReauthorizationFailed`] before any read or write: resolving
+/// such a credential would yield the full user behind it.
 #[derive(Clone)]
 pub struct OrmAiProposalService {
     database: Database<DefaultWriteBackend>,
@@ -295,7 +299,7 @@ impl OrmAiProposalService {
     ) -> Result<AuthPrincipal, AiError> {
         Ok(self
             .resolve_current(
-                &crate::principal_projection::admission_reference(
+                &crate::principal_projection::request_admission_reference(
                     self.principal_projection.as_deref(),
                     principal,
                 )?,
@@ -1308,5 +1312,154 @@ mod tests {
             .await
             .expect("proposal connection should load");
         assert_eq!(connection.edges.len(), 1);
+    }
+
+    fn refused_request_principals(principal: &AuthPrincipal) -> [AuthPrincipal; 2] {
+        let AuthPrincipal::User(user) = principal.clone() else {
+            unreachable!("proposal fixture principal is a user session")
+        };
+        let mut delegated = user.clone();
+        delegated.token_claims.grant_kind =
+            Some(agql_auth::AccessTokenGrantKind::SessionBoundDelegation);
+        delegated.token_claims.actor = Some(agql_auth::ActorIdentity {
+            sub: "ai-coordinator".to_owned(),
+            amr: vec!["service".to_owned()],
+        });
+        delegated.token_claims.resource_type = Some("graphql_operation".to_owned());
+        delegated.token_claims.resource_id = Some("records_count".to_owned());
+        delegated.token_claims.operation = Some(agql_auth::ExactOperationBinding::new(
+            "RecordsCount",
+            "sha256:reviewed-document",
+        ));
+        let mut sessionless = user;
+        sessionless.token_claims.grant_kind = Some(agql_auth::AccessTokenGrantKind::Sessionless);
+        [
+            AuthPrincipal::User(delegated),
+            AuthPrincipal::User(sessionless),
+        ]
+    }
+
+    #[tokio::test]
+    async fn delegated_request_principal_cannot_review_read_or_link_a_proposal() {
+        let fixture = fixture().await;
+        let running = seed_running(&fixture).await;
+        let validated = fixture
+            .catalog
+            .validate(AiProposalDraft {
+                proposal_type: AiProposalTypeId::parse("application.summary.v1")
+                    .expect("proposal type should parse"),
+                session_id: running.session_id(),
+                run_id: running.run_id(),
+                scope: fixture.scope.clone(),
+                payload: serde_json::json!({"summary": "Initial suggestion"}),
+                sources: vec![AiDataSourceRef {
+                    kind: "record".to_owned(),
+                    reference: "record-54".to_owned(),
+                    classification: DataClassification::Confidential,
+                    trust: AiSourceTrust::ResolverResult,
+                }],
+                item_count: 1,
+            })
+            .expect("proposal should validate");
+        let persisted = fixture
+            .proposal_service
+            .persist_validated(&running, validated, Some(fixture.now + Duration::days(7)))
+            .await
+            .expect("proposal should persist through the current fence");
+        let view = fixture
+            .proposal_service
+            .proposal(&fixture.principal, persisted.proposal_id())
+            .await
+            .unwrap()
+            .expect("the owner should see the proposal");
+        let page = || {
+            KeysetConnectionInput {
+                first: Some(10),
+                ..Default::default()
+            }
+            .validate(10, 100)
+            .unwrap()
+        };
+        for refused in refused_request_principals(&fixture.principal) {
+            for decision in [
+                AiProposalReviewDecision::Accept,
+                AiProposalReviewDecision::Reject,
+            ] {
+                let error = fixture
+                    .proposal_service
+                    .review_proposal(
+                        &refused,
+                        ReviewAiProposalInput {
+                            id: view.id,
+                            decision,
+                            edited_payload: None,
+                            edited_item_count: None,
+                            expected_version: view.row_version,
+                        },
+                    )
+                    .await
+                    .expect_err("a delegated or sessionless credential must not review");
+                assert!(matches!(error, AiError::ReauthorizationFailed), "{error:?}");
+            }
+            let error = fixture
+                .proposal_service
+                .proposal(&refused, persisted.proposal_id())
+                .await
+                .expect_err("a delegated or sessionless credential must not read a proposal");
+            assert!(matches!(error, AiError::ReauthorizationFailed), "{error:?}");
+            let error = fixture
+                .proposal_service
+                .proposals(&refused, running.session_id(), page())
+                .await
+                .expect_err("a delegated or sessionless credential must not list proposals");
+            assert!(matches!(error, AiError::ReauthorizationFailed), "{error:?}");
+        }
+        let unchanged = fixture
+            .proposal_service
+            .proposal(&fixture.principal, persisted.proposal_id())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.state, "pending_review");
+        assert_eq!(unchanged.row_version, view.row_version);
+
+        fixture
+            .proposal_service
+            .review_proposal(
+                &fixture.principal,
+                ReviewAiProposalInput {
+                    id: view.id,
+                    decision: AiProposalReviewDecision::Accept,
+                    edited_payload: None,
+                    edited_item_count: None,
+                    expected_version: view.row_version,
+                },
+            )
+            .await
+            .expect("the owner should accept");
+        for refused in refused_request_principals(&fixture.principal) {
+            let error = fixture
+                .proposal_service
+                .record_applied_outcome(
+                    &refused,
+                    AiProposalAppliedOutcome {
+                        proposal_id: persisted.proposal_id(),
+                        resource_type: "record".to_owned(),
+                        resource_id: "resource-54".to_owned(),
+                        application_audit_ref: "audit-ordinary-mutation-1".to_owned(),
+                        applied_by_subject: fixture.principal.subject().to_owned(),
+                    },
+                )
+                .await
+                .expect_err("a delegated or sessionless credential must not link an outcome");
+            assert!(matches!(error, AiError::ReauthorizationFailed), "{error:?}");
+        }
+        let accepted = fixture
+            .proposal_service
+            .proposal(&fixture.principal, persisted.proposal_id())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(accepted.state, "accepted");
     }
 }

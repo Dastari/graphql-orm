@@ -3,7 +3,7 @@ title: "Supervised Mutation and Approval Execution"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-09-25
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -95,6 +95,19 @@ The approval service applies coarse access before decrypting and then calls
 consumption. Hosts enforce current session ownership and exact resource
 authority there. The compatible default delegates to the coarse hook. Preview
 details are bounded to 2 MiB of serialized JSON, including escaping.
+
+Approval reads, decisions and revocation accept only an ordinary user-session
+or API-token request credential. A session-bound delegation or sessionless
+grant, or a credential with no grant kind that carries an actor or exact
+operation binding, is refused with `AI_REAUTHORIZATION_FAILED` before any read, decryption
+or write, as run issuance does: current-principal resolution maps a
+delegation to the parent user session, which would drop its actor, resource
+and operation narrowing. Reads refuse too, so a delegated credential can see
+neither previews nor the approval list. The same rule applies to proposal
+listing, reads, review and applied-outcome linking, run cancellation, failure
+retry and acknowledgement, tool-result previews, and the session-event and
+inbox streams. Approval and review clients must use the user's own session
+credential.
 
 ## Proved refusals and uncertain execution
 

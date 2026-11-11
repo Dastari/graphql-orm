@@ -3,12 +3,19 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-11-10
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Changelog
+
+## Unreleased - 0.129.0
+
+- **Breaking:** refuse delegated and sessionless principals on approval and proposal decisions. `OrmAiApprovalService` (list, read, decide, revoke) and `OrmAiProposalService` (list, read, review, `record_applied_outcome`) now return `ReauthorizationFailed` (`AI_REAUTHORIZATION_FAILED`) for a request credential whose grant kind is `SessionBoundDelegation` or `Sessionless`, before any read, decryption or write. Current-principal resolution maps a session-bound delegation to its parent user session, so these roots previously evaluated access, ownership and recent MFA against the full user rather than the delegation's actor, resource and operation narrowing. Reads refuse too, so a delegated credential sees no approval or proposal preview. The run-issuance refusal in `AiRunAuthorization` is unchanged and uses the same code.
+- **Breaking:** the same refusal applies to the sibling request roots that rehydrate their caller: `OrmAiRunCancellationService`, `OrmAiRunDispositionService` (retry and acknowledgement), `OrmAiToolCallResultPreviewService`, and opening `OrmAiSubscriptionService` session-event and `OrmAiInboxService` inbox streams. A credential with no grant kind that carries an actor or an exact operation binding is refused the same way, before it reaches the host resolver; a resource binding alone is not refused. Ordinary user-session and API-token credentials are unaffected.
+
+See the migration guide. No public Rust API, GraphQL SDL, persistent schema or data migration change; `AI_SCHEMA_MODULE_VERSION` is unchanged.
 
 ## Unreleased - 0.128.0
 

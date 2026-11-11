@@ -68,6 +68,10 @@ impl Default for AiRunCancellationLimits {
 }
 
 /// Generated-ORM cancellation service for application hosts.
+///
+/// Request methods refuse a sessionless or session-bound delegated credential
+/// with [`AiError::ReauthorizationFailed`] before any read or write: resolving
+/// such a credential would yield the full user behind it.
 pub struct OrmAiRunCancellationService {
     database: Database<DefaultWriteBackend>,
     access_policy: Arc<dyn AiAccessPolicy>,
@@ -209,7 +213,7 @@ impl AiRunCancellationService for OrmAiRunCancellationService {
                 "invalid run cancellation identity".to_owned(),
             ));
         }
-        let requested_reference = crate::principal_projection::admission_reference(
+        let requested_reference = crate::principal_projection::request_admission_reference(
             self.principal_projection.as_deref(),
             principal,
         )?;

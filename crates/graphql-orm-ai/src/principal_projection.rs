@@ -152,6 +152,49 @@ impl fmt::Debug for AiPrincipalProjection {
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+/// Refuses a request credential that must not act as the user behind it.
+///
+/// Current-principal resolution maps a session-bound delegation to the parent
+/// user session it is bound to, which drops the delegation's actor, resource
+/// and operation narrowing. A sessionless grant has no session to resolve.
+/// Approval, proposal, run-control, tool-result preview and stream roots
+/// rehydrate their caller this way before deciding or disclosing, so they
+/// accept neither grant, as run issuance does. A credential with no grant kind
+/// that still carries an actor or an exact operation binding is narrowed the
+/// same way and is refused before it reaches the host resolver. A resource
+/// binding alone is not refused: ordinary user sessions carry one. The refusal
+/// carries no reason.
+pub(crate) fn refuse_delegated_request(principal: &AuthPrincipal) -> Result<(), AiError> {
+    let AuthPrincipal::User(user) = principal else {
+        return Ok(());
+    };
+    let claims = &user.token_claims;
+    let refused = match claims.grant_kind {
+        Some(
+            agql_auth::AccessTokenGrantKind::Sessionless
+            | agql_auth::AccessTokenGrantKind::SessionBoundDelegation,
+        ) => true,
+        Some(agql_auth::AccessTokenGrantKind::UserSession) => false,
+        None => claims.actor.is_some() || claims.operation.is_some(),
+    };
+    if refused {
+        return Err(AiError::ReauthorizationFailed);
+    }
+    Ok(())
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+/// The reference a request root resolves for its caller, after
+/// `refuse_delegated_request`.
+pub(crate) fn request_admission_reference(
+    projection: Option<&AiPrincipalProjection>,
+    principal: &AuthPrincipal,
+) -> Result<PrincipalReference, AiError> {
+    refuse_delegated_request(principal)?;
+    admission_reference(projection, principal)
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 /// The reference an admitting service persists or resolves for a caller.
 pub(crate) fn admission_reference(
     projection: Option<&AiPrincipalProjection>,
@@ -164,7 +207,9 @@ pub(crate) fn admission_reference(
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
-/// Admits a durable stream. Without a projection the caller's own principal
+/// Admits a durable stream. Delegated and sessionless credentials are refused
+/// because the stream refreshes its principal through the resolver. Without a
+/// projection the caller's own principal
 /// and reference are used, unchanged. With one, the projected reference is
 /// strictly resolved before the first page and must come back exactly, for the
 /// same principal kind and subject; the stream starts from that current
@@ -174,6 +219,7 @@ pub(crate) async fn admit_stream(
     resolver: &dyn CurrentPrincipalResolver,
     principal: AuthPrincipal,
 ) -> Result<(PrincipalReference, AuthPrincipal), AiError> {
+    refuse_delegated_request(&principal)?;
     let Some(projection) = projection else {
         return Ok((principal.reference(), principal));
     };
@@ -362,5 +408,69 @@ mod tests {
             admission_reference(None, &principal).unwrap(),
             principal.reference()
         );
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    #[test]
+    fn delegated_or_narrowed_request_credentials_are_refused() {
+        let refused = |principal: &AuthPrincipal| {
+            matches!(
+                refuse_delegated_request(principal),
+                Err(AiError::ReauthorizationFailed)
+            )
+        };
+        let with_claims = |edit: &dyn Fn(&mut AccessTokenMetadata)| {
+            let AuthPrincipal::User(mut user) = user("tenant-a") else {
+                unreachable!()
+            };
+            edit(&mut user.token_claims);
+            AuthPrincipal::User(user)
+        };
+        let actor = || agql_auth::ActorIdentity {
+            sub: "ai-coordinator".into(),
+            amr: vec!["service".into()],
+        };
+        let operation =
+            || agql_auth::ExactOperationBinding::new("RecordsCount", "sha256:reviewed-document");
+
+        // Ordinary sessions, with or without a grant kind or a resource binding.
+        assert!(!refused(&user("tenant-a")));
+        assert!(!refused(&with_claims(&|claims| claims.grant_kind = None)));
+        assert!(!refused(&with_claims(&|claims| {
+            claims.grant_kind = None;
+            claims.resource_type = Some("record".into());
+            claims.resource_id = Some("record-1".into());
+        })));
+        assert!(!refused(&with_claims(&|claims| {
+            claims.resource_type = Some("record".into());
+            claims.resource_id = Some("record-1".into());
+        })));
+
+        // Delegated and sessionless grants.
+        for kind in [
+            AccessTokenGrantKind::SessionBoundDelegation,
+            AccessTokenGrantKind::Sessionless,
+        ] {
+            assert!(refused(&with_claims(
+                &|claims| claims.grant_kind = Some(kind)
+            )));
+        }
+
+        // No grant kind, but narrowed by an actor or an exact operation.
+        assert!(refused(&with_claims(&|claims| {
+            claims.grant_kind = None;
+            claims.actor = Some(actor());
+        })));
+        assert!(refused(&with_claims(&|claims| {
+            claims.grant_kind = None;
+            claims.operation = Some(operation());
+        })));
+        assert!(refused(&with_claims(&|claims| {
+            claims.grant_kind = None;
+            claims.actor = Some(actor());
+            claims.operation = Some(operation());
+            claims.resource_type = Some("graphql_operation".into());
+            claims.resource_id = Some("records_count".into());
+        })));
     }
 }

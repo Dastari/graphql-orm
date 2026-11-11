@@ -343,7 +343,9 @@ the compiled test-backed recipe and the missing reusable bootstrap API.
   decryption; verified `AiApprovalAccessEvidence` lets the host enforce current
   session ownership and resource authority for requests, reads, decisions,
   revocations and consumption. Preview details have a 2 MiB serialized JSON
-  ceiling. Approval never replaces current resolver authorization.
+  ceiling. Approval never replaces current resolver authorization. Approval,
+  proposal and run-control roots refuse delegated and sessionless request
+  credentials.
 - Backend-neutral automatic query capabilities compiled from the finished SDL
   and canonical semantic catalogue into closed typed plans. Nested
   relationships and opt-in aggregate roots remain explicitly bounded, and

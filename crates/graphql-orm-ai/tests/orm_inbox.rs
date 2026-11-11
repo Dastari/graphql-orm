@@ -742,3 +742,24 @@ async fn pruning_fails_closed_for_an_unconfigured_scope() {
     assert_eq!(page.events.len(), 1);
     assert!(!page.reset_required);
 }
+
+/// The stream refreshes its principal through the resolver, so a delegated or
+/// sessionless credential would otherwise read as the full user.
+#[tokio::test]
+async fn delegated_request_principal_cannot_open_an_inbox_stream() {
+    let (_sessions, inbox, _pruning, _retention, owner, _active) =
+        services_with_limits(Duration::from_secs(60), 100, 100).await;
+    for grant_kind in [
+        agql_auth::AccessTokenGrantKind::SessionBoundDelegation,
+        agql_auth::AccessTokenGrantKind::Sessionless,
+    ] {
+        let AuthPrincipal::User(mut refused) = owner.clone() else {
+            unreachable!("inbox fixture owner is a user session")
+        };
+        refused.token_claims.grant_kind = Some(grant_kind);
+        assert!(matches!(
+            inbox.inbox_events(AuthPrincipal::User(refused), 0).await,
+            Err(AiError::ReauthorizationFailed)
+        ));
+    }
+}

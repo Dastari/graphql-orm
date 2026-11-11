@@ -454,6 +454,10 @@ enum PruneStreamOutcome {
 }
 
 /// Current-principal durable inbox service.
+///
+/// Opening a stream refuses a sessionless or session-bound delegated credential
+/// with [`AiError::ReauthorizationFailed`]: the stream refreshes its principal
+/// through the resolver, which would yield the full user behind it.
 pub struct OrmAiInboxService {
     database: Database<DefaultWriteBackend>,
     principal_resolver: Arc<dyn CurrentPrincipalResolver>,
