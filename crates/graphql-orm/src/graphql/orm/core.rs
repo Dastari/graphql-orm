@@ -1521,7 +1521,35 @@ where
         self.runtime_state.cannot_commit()
     }
 
+    /// Check a row this transaction has just written against the row write
+    /// policy. A refusal also blocks [`Self::commit_and_emit`], so a caller that
+    /// ignores the error cannot commit the refused row.
+    #[doc(hidden)]
+    pub async fn __ensure_written_row(
+        &mut self,
+        ctx: Option<&async_graphql::Context<'_>>,
+        entity_name: &'static str,
+        write_policy: Option<&'static str>,
+        surface: EntityAccessSurface,
+        row: &(dyn std::any::Any + Send + Sync),
+    ) -> async_graphql::Result<()> {
+        let result = self
+            .db
+            .ensure_writable_row(ctx, entity_name, write_policy, surface, row)
+            .await;
+        if result.is_err() {
+            self.runtime_state.refuse_write();
+        }
+        result
+    }
+
     pub async fn commit_and_emit(self) -> crate::Result<()> {
+        if self.runtime_state.write_refused() {
+            self.rollback().await?;
+            return Err(crate::graphql::errors::sqlx_error_from_public(
+                crate::graphql::errors::OrmPublicError::forbidden(),
+            ));
+        }
         if self.runtime_cannot_commit() {
             self.rollback().await?;
             return Err(crate::graphql::errors::sqlx_error_from_public(

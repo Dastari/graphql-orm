@@ -1348,6 +1348,26 @@ impl<B: OrmBackend> Database<B> {
         }
     }
 
+    /// Require a row policy provider for an entity that declares a write policy.
+    ///
+    /// Generated writes call this before any target lookup. A declared entity
+    /// `write_policy` is also the row write policy key, so a missing provider is
+    /// a misconfiguration in every [`AuthorizationMode`].
+    pub fn ensure_row_write_provider(
+        &self,
+        entity_name: &'static str,
+        write_policy: Option<&'static str>,
+    ) -> async_graphql::Result<()> {
+        if write_policy.is_some() && self.row_policy.is_none() {
+            return Err(OrmPublicError::new(OrmErrorCode::AuthorizationMisconfigured)
+                .with_internal(format!(
+                    "entity {entity_name} declares a row write policy key but no row policy provider is registered"
+                ))
+                .into_graphql_error());
+        }
+        Ok(())
+    }
+
     /// Decide whether a write may target an existing row it selected.
     ///
     /// Returns `Ok(true)` when [`Self::can_write_row`] allows the row. On the

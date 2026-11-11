@@ -1976,3 +1976,71 @@ async fn dependent_deletes_are_journaled() {
         ]
     );
 }
+
+/// Allows every row except a dependent `set_null` child whose parent link is gone.
+struct RefuseNulledChild;
+impl RowPolicy for RefuseNulledChild {
+    fn can_read_row<'a>(
+        &'a self,
+        _: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessSurface,
+        _: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(true) })
+    }
+    fn can_write_row<'a>(
+        &'a self,
+        _: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessSurface,
+        row: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async move {
+            Ok(row
+                .downcast_ref::<DeleteNull>()
+                .is_none_or(|row| row.parent_id.is_some()))
+        })
+    }
+}
+#[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
+async fn set_null_checks_the_nulled_child_row() {
+    let pool = fixture("dependent-set-null-written-row").await;
+    let mut db = Database::new(pool.clone());
+    db.set_entity_policy(Policy {
+        deny_entity: false,
+        deny_field: false,
+    });
+    db.set_field_policy(Policy {
+        deny_entity: false,
+        deny_field: false,
+    });
+    db.set_row_policy(RefuseNulledChild);
+    let registry =
+        StaticDependentDeletes::<DefaultBackend>::new(RuntimeDependentLimits::new(10, 4).unwrap())
+            .register::<DeleteParent>()
+            .unwrap()
+            .register::<DeleteChild>()
+            .unwrap()
+            .register::<DeleteLeaf>()
+            .unwrap()
+            .register::<DeleteNull>()
+            .unwrap();
+    let schema = schema_builder(db)
+        .data(AuthSubject::new("test-principal"))
+        .data(registry)
+        .finish();
+    let response = schema
+        .execute("mutation { deleteDeleteParent(id: \"parent\") { success } }")
+        .await;
+    assert_eq!(response.errors[0].message, "Dependent delete refused");
+    assert_intact(&pool).await;
+}

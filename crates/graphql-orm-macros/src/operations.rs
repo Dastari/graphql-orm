@@ -2100,7 +2100,7 @@ fn generate_graphql_operations_unfiltered(
     // The written row must itself satisfy the row write policy. Checked inside the
     // transaction before the After hook; a refusal rolls the write back.
     let graphql_post_image_check = quote! {
-        db.ensure_writable_row(
+        hook_ctx.__ensure_written_row(
             Some(ctx),
             #entity_name_lit,
             <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
@@ -2109,7 +2109,7 @@ fn generate_graphql_operations_unfiltered(
         ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
     };
     let repository_post_image_check = quote! {
-        db.ensure_writable_row(
+        hook_ctx.__ensure_written_row(
             None,
             #entity_name_lit,
             <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
@@ -4155,6 +4155,7 @@ fn generate_graphql_operations_unfiltered(
                 hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                 input: #create_input,
             ) -> ::graphql_orm::Result<::graphql_orm::graphql::orm::UpsertOutcome<Self>> {
+                hook_ctx.database().ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 hook_ctx.require_state_machine("upsert")?;
                 let db = hook_ctx.database().clone();
                 #composite_upsert_policy_guard
@@ -4278,6 +4279,7 @@ fn generate_graphql_operations_unfiltered(
                     ::graphql_orm::graphql::orm::EntityAccessKind::Write,
                     ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlMutation,
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
+                db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                 let mut input: #create_input = input.into();
                 let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin_with_auth(
                     db,
@@ -4428,6 +4430,7 @@ fn generate_graphql_operations_unfiltered(
                     ::graphql_orm::graphql::orm::EntityAccessKind::Write,
                     ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
                 ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
+                db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin(
                     db,
                     ::graphql_orm::graphql::orm::TransactionMode::StateMachine,
@@ -4463,6 +4466,7 @@ fn generate_graphql_operations_unfiltered(
                     ::graphql_orm::graphql::orm::EntityAccessKind::Write,
                     ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
                 ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
+                db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
 
                 let inputs: Vec<#create_input> = inputs.into_iter().collect();
                 if inputs.is_empty() {
@@ -4599,6 +4603,7 @@ fn generate_graphql_operations_unfiltered(
                     expected: #where_input,
                     mut input: #update_input,
                 ) -> ::graphql_orm::Result<::graphql_orm::graphql::orm::ConditionalUpdateOutcome<Self>> {
+                    hook_ctx.database().ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery, FromSqlRow, OrmBackend, SqlDialect, SqlValue};
 
                     #cas_begin_savepoint
@@ -4684,7 +4689,17 @@ fn generate_graphql_operations_unfiltered(
                         };
                     };
                     let entity = <Self as FromSqlRow<#backend_marker>>::from_row(row)?;
-                    #repository_post_image_check
+                    if let Err(error) = hook_ctx.__ensure_written_row(
+                        None,
+                        #entity_name_lit,
+                        <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
+                        ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
+                        &entity as &(dyn ::std::any::Any + Send + Sync),
+                    ).await {
+                        // Undo the refused row now; the context also stays uncommittable.
+                        #cas_rollback_savepoint
+                        return Err(::graphql_orm::graphql::errors::sqlx_error_from_graphql(error));
+                    }
                     hook_ctx.run_mutation_hook(
                         None,
                         &::graphql_orm::graphql::orm::MutationEvent {
@@ -4738,6 +4753,7 @@ fn generate_graphql_operations_unfiltered(
                         ::graphql_orm::graphql::orm::EntityAccessKind::Write,
                         ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
                     ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
+                    db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin(
                     db,
                     ::graphql_orm::graphql::orm::TransactionMode::Default,
@@ -5690,6 +5706,7 @@ fn generate_graphql_operations_unfiltered(
                     ::graphql_orm::graphql::orm::EntityAccessKind::Write,
                     ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlMutation,
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
+                db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                 let mut input: #create_input = input.into();
                 db.run_before_create(
                     Some(ctx),
@@ -6047,6 +6064,7 @@ fn generate_graphql_operations_unfiltered(
                     hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                     mut input: #create_input,
                 ) -> ::graphql_orm::Result<Self> {
+                    hook_ctx.database().ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     use ::graphql_orm::graphql::orm::{DatabaseEntity, SqlValue};
                     let db = hook_ctx.database().clone();
                     let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::internal(#entity_name_lit, hook_ctx);
@@ -6300,6 +6318,7 @@ fn generate_graphql_operations_unfiltered(
                     hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                     mut input: #create_input,
                 ) -> ::graphql_orm::Result<Self> {
+                    hook_ctx.database().ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     use ::graphql_orm::graphql::orm::SqlValue;
                     let db = hook_ctx.database().clone();
                     Self::__gom_require_repository_write_policy(&db)?;
@@ -6333,7 +6352,7 @@ fn generate_graphql_operations_unfiltered(
                     }
                     let entity = Self::__gom_fetch_by_key_on(hook_ctx, &key).await?
                         .ok_or(::graphql_orm::sqlx::Error::RowNotFound)?;
-                    db.ensure_writable_row(None, #entity_name_lit,
+                    hook_ctx.__ensure_written_row(None, #entity_name_lit,
                         <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
                         ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
                         &entity as &(dyn ::std::any::Any + Send + Sync),
@@ -6355,6 +6374,7 @@ fn generate_graphql_operations_unfiltered(
                     hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                     mut input: #create_input,
                 ) -> ::graphql_orm::Result<::graphql_orm::graphql::orm::InsertIfAbsentOutcome<Self>> {
+                    hook_ctx.database().ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     use ::graphql_orm::graphql::orm::SqlValue;
                     let db = hook_ctx.database().clone();
                     Self::__gom_require_repository_write_policy(&db)?;
@@ -6401,7 +6421,7 @@ fn generate_graphql_operations_unfiltered(
                     }
                     let entity = Self::__gom_fetch_by_key_on(hook_ctx, &key).await?
                         .ok_or(::graphql_orm::sqlx::Error::RowNotFound)?;
-                    db.ensure_writable_row(None, #entity_name_lit,
+                    hook_ctx.__ensure_written_row(None, #entity_name_lit,
                         <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
                         ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
                         &entity as &(dyn ::std::any::Any + Send + Sync),
@@ -6424,6 +6444,7 @@ fn generate_graphql_operations_unfiltered(
                     key: &#key_type,
                     mut input: #update_input,
                 ) -> ::graphql_orm::Result<Option<Self>> {
+                    hook_ctx.database().ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     use ::graphql_orm::graphql::orm::{OrmBackend, SqlDialect};
                     let db = hook_ctx.database().clone();
                     Self::__gom_require_repository_write_policy(&db)?;
@@ -6514,6 +6535,7 @@ fn generate_graphql_operations_unfiltered(
                     hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                     key: &#key_type,
                 ) -> ::graphql_orm::Result<bool> {
+                    hook_ctx.database().ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     use ::graphql_orm::graphql::orm::{OrmBackend, SqlDialect};
                     let db = hook_ctx.database().clone();
                     Self::__gom_require_repository_write_policy(&db)?;
@@ -6566,6 +6588,7 @@ fn generate_graphql_operations_unfiltered(
                     input: #update_input,
                     limit: ::graphql_orm::graphql::orm::MutationLimit,
                 ) -> ::graphql_orm::Result<::graphql_orm::graphql::orm::BoundedMutationOutcome> {
+                    hook_ctx.database().ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     where_input.__gom_require_scalar_write_filter().map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)?;
                     use ::graphql_orm::graphql::orm::{DatabaseFilter, EntityQuery};
                     let db = hook_ctx.database().clone();
@@ -6614,6 +6637,7 @@ fn generate_graphql_operations_unfiltered(
                     where_input: #where_input,
                     limit: ::graphql_orm::graphql::orm::MutationLimit,
                 ) -> ::graphql_orm::Result<::graphql_orm::graphql::orm::BoundedMutationOutcome> {
+                    hook_ctx.database().ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     where_input.__gom_require_scalar_write_filter().map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)?;
                     use ::graphql_orm::graphql::orm::{DatabaseFilter, EntityQuery};
                     let db = hook_ctx.database().clone();
@@ -6663,6 +6687,7 @@ fn generate_graphql_operations_unfiltered(
                     expected: #where_input,
                     mut input: #update_input,
                 ) -> ::graphql_orm::Result<::graphql_orm::graphql::orm::PredicateUpdateOutcome<Self>> {
+                    hook_ctx.database().ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     use ::graphql_orm::graphql::orm::{DatabaseFilter, EntityQuery, OrmBackend, SqlDialect};
                     let db = hook_ctx.database().clone();
                     Self::__gom_require_repository_write_policy(&db)?;
@@ -6981,6 +7006,7 @@ fn generate_graphql_operations_unfiltered(
                 input: #update_input,
                 limit: ::graphql_orm::graphql::orm::MutationLimit,
             ) -> ::graphql_orm::Result<::graphql_orm::graphql::orm::BoundedMutationOutcome> {
+                hook_ctx.database().ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 where_input.__gom_require_scalar_write_filter().map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)?;
                 use ::graphql_orm::graphql::orm::{DatabaseFilter, EntityQuery};
                 if where_input.is_empty() {
@@ -7026,6 +7052,7 @@ fn generate_graphql_operations_unfiltered(
                 where_input: #where_input,
                 limit: ::graphql_orm::graphql::orm::MutationLimit,
             ) -> ::graphql_orm::Result<::graphql_orm::graphql::orm::BoundedMutationOutcome> {
+                hook_ctx.database().ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 where_input.__gom_require_scalar_write_filter().map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)?;
                 use ::graphql_orm::graphql::orm::{DatabaseFilter, EntityQuery};
                 if where_input.is_empty() {
@@ -8620,6 +8647,7 @@ fn generate_graphql_operations_unfiltered(
                     ::graphql_orm::graphql::orm::EntityAccessKind::Write,
                     ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlMutation,
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
+                db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                 let mut input: #update_input = input.into();
                 let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin_with_auth(
                     db,
@@ -8805,6 +8833,7 @@ fn generate_graphql_operations_unfiltered(
                     ::graphql_orm::graphql::orm::EntityAccessKind::Write,
                     ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlMutation,
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
+                db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
 
                 let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin_with_auth(
                     db,
@@ -8939,6 +8968,9 @@ fn generate_graphql_operations_unfiltered(
                 ).await {
                     return Ok(#update_many_result_type::from_graphql_error(error));
                 }
+                if let Err(error) = db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy) {
+                    return Ok(#update_many_result_type::from_graphql_error(error));
+                }
                 let input: #update_input = input.into();
 
                 let filter = match where_input {
@@ -8990,6 +9022,9 @@ fn generate_graphql_operations_unfiltered(
                     ::graphql_orm::graphql::orm::EntityAccessKind::Write,
                     ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlMutation,
                 ).await {
+                    return Ok(#delete_many_result_type::from_graphql_error(error));
+                }
+                if let Err(error) = db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy) {
                     return Ok(#delete_many_result_type::from_graphql_error(error));
                 }
 
@@ -9134,6 +9169,7 @@ fn generate_graphql_operations_unfiltered(
                 hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                 mut input: #create_input,
             ) -> ::graphql_orm::Result<Self> {
+                hook_ctx.database().ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, SqlValue};
 
                 let db = hook_ctx.database().clone();
@@ -9217,6 +9253,7 @@ fn generate_graphql_operations_unfiltered(
                 id: &#pk_type_ty,
                 mut input: #update_input,
             ) -> ::graphql_orm::Result<Option<Self>> {
+                hook_ctx.database().ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow, SqlValue};
 
                 let current_entity = Self::__gom_fetch_by_id_on(hook_ctx, id).await?;
@@ -9333,6 +9370,7 @@ fn generate_graphql_operations_unfiltered(
                 where_input: #where_input,
                 input: #update_input,
             ) -> ::graphql_orm::Result<i64> {
+                hook_ctx.database().ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 where_input.__gom_require_scalar_write_filter().map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)?;
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery, FromSqlRow, SqlValue};
 
@@ -9473,6 +9511,7 @@ fn generate_graphql_operations_unfiltered(
                 hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                 id: &#pk_type_ty,
             ) -> ::graphql_orm::Result<bool> {
+                hook_ctx.database().ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, SqlValue};
 
                 let entity = Self::__gom_fetch_by_id_on(hook_ctx, id).await?;
@@ -9547,6 +9586,7 @@ fn generate_graphql_operations_unfiltered(
                 hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                 where_input: #where_input,
             ) -> ::graphql_orm::Result<i64> {
+                hook_ctx.database().ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 where_input.__gom_require_scalar_write_filter().map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)?;
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery, FromSqlRow};
 
@@ -9653,6 +9693,7 @@ fn generate_graphql_operations_unfiltered(
                         ::graphql_orm::graphql::orm::EntityAccessKind::Write,
                         ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
                     ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
+                    db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin(
                     db,
                     ::graphql_orm::graphql::orm::TransactionMode::Default,
@@ -9694,6 +9735,7 @@ fn generate_graphql_operations_unfiltered(
                     ::graphql_orm::graphql::orm::EntityAccessKind::Write,
                     ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
                 ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
+                db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
 
                 let inputs: Vec<#create_input> = inputs.into_iter().collect();
                 if inputs.is_empty() {
@@ -9762,6 +9804,7 @@ fn generate_graphql_operations_unfiltered(
                     ::graphql_orm::graphql::orm::EntityAccessKind::Write,
                     ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
                 ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
+                db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin(
                     db,
                     ::graphql_orm::graphql::orm::TransactionMode::StateMachine,
@@ -9918,6 +9961,7 @@ fn generate_graphql_operations_unfiltered(
                     ::graphql_orm::graphql::orm::EntityAccessKind::Write,
                     access_surface,
                 ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
+                db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin_with_auth(
                     db,
                     ::graphql_orm::graphql::orm::TransactionMode::StateMachine,
@@ -10065,7 +10109,7 @@ fn generate_graphql_operations_unfiltered(
                 for (previous, (_, _, mutation_changes)) in matched_entities.into_iter().zip(row_plans) {
                     let entity = Self::__gom_fetch_by_id_on(&mut hook_ctx, &previous.#pk_field).await?
                         .ok_or_else(|| Self::__gom_runtime_error("authorized bulk update row disappeared before after-hook"))?;
-                    db.ensure_writable_row(
+                    hook_ctx.__ensure_written_row(
                         graphql_ctx,
                         #entity_name_lit,
                         <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
@@ -10116,6 +10160,7 @@ fn generate_graphql_operations_unfiltered(
                     ::graphql_orm::graphql::orm::EntityAccessKind::Write,
                     ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
                 ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
+                db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin(
                     db,
                     ::graphql_orm::graphql::orm::TransactionMode::StateMachine,
@@ -10233,6 +10278,7 @@ fn generate_graphql_operations_unfiltered(
                     ::graphql_orm::graphql::orm::EntityAccessKind::Write,
                     ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
                 ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
+                db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
 
                 let inputs: Vec<#create_input> = inputs.into_iter().collect();
                 let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin(
@@ -10359,6 +10405,7 @@ fn generate_graphql_operations_unfiltered(
                     ::graphql_orm::graphql::orm::EntityAccessKind::Write,
                     access_surface,
                 ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
+                db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin_with_auth(
                     db,
                     ::graphql_orm::graphql::orm::TransactionMode::StateMachine,

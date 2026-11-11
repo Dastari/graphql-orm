@@ -71,9 +71,48 @@ struct OwnedEvent {
     owner_user_id: String,
 }
 
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
+)]
+#[graphql_entity(
+    table = "versioned_notes",
+    plural = "VersionedNotes",
+    default_sort = "id ASC"
+)]
+struct VersionedNote {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[filterable(type = "string")]
+    #[sortable]
+    id: String,
+    #[filterable(type = "string")]
+    owner_user_id: String,
+    #[graphql_orm(version, default = "0")]
+    version: i64,
+}
+
+/// Declares an entity write policy, which is also its row write policy key.
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
+)]
+#[graphql_entity(
+    table = "guarded_notes",
+    plural = "GuardedNotes",
+    default_sort = "name ASC",
+    write_policy = "notes.write"
+)]
+struct GuardedNote {
+    #[primary_key]
+    #[filterable(type = "uuid")]
+    pub id: graphql_orm::uuid::Uuid,
+    #[filterable(type = "string")]
+    #[sortable]
+    pub name: String,
+}
+
 schema_roots! {
     query_custom_ops: [],
-    entities: [OwnedNote, OwnedPair, OwnedEvent],
+    entities: [OwnedNote, OwnedPair, OwnedEvent, VersionedNote, GuardedNote],
 }
 
 /// Repository calls carry no request context; they act as this fixed host principal.
@@ -91,6 +130,8 @@ fn owner(row: &(dyn std::any::Any + Send + Sync)) -> Option<&str> {
         Some(&note.owner_user_id)
     } else if let Some(pair) = row.downcast_ref::<OwnedPair>() {
         Some(&pair.owner_user_id)
+    } else if let Some(note) = row.downcast_ref::<VersionedNote>() {
+        Some(&note.owner_user_id)
     } else {
         row.downcast_ref::<OwnedEvent>()
             .map(|event| event.owner_user_id.as_str())
@@ -161,6 +202,8 @@ async fn database() -> (graphql_orm::db::Database, sqlx::SqlitePool) {
         "CREATE TABLE owned_notes (id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT UNIQUE NOT NULL, owner_user_id TEXT NOT NULL)",
         "CREATE TABLE owned_pairs (tenant_key TEXT NOT NULL, item_key TEXT NOT NULL, owner_user_id TEXT NOT NULL, PRIMARY KEY (tenant_key, item_key))",
         "CREATE TABLE owned_events (id INTEGER NOT NULL, sequence INTEGER NOT NULL, owner_user_id TEXT NOT NULL, PRIMARY KEY (id, sequence))",
+        "CREATE TABLE versioned_notes (id TEXT PRIMARY KEY, owner_user_id TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 0)",
+        "CREATE TABLE guarded_notes (id TEXT PRIMARY KEY, name TEXT NOT NULL)",
     ] {
         sqlx::query(ddl).execute(&pool).await.unwrap();
     }
@@ -199,6 +242,30 @@ async fn run(schema: &AppSchema, query: impl Into<String>) -> serde_json::Value 
 
 fn error_code(response: &serde_json::Value) -> Option<&str> {
     response["errors"][0]["extensions"]["code"].as_str()
+}
+
+/// The public code of a refused repository call.
+fn refusal<T: std::fmt::Debug>(result: graphql_orm::Result<T>) -> &'static str {
+    OrmPublicError::from(result.expect_err("write must be refused"))
+        .code
+        .as_str()
+}
+
+fn slug(value: &str) -> OwnedNoteWhereInput {
+    OwnedNoteWhereInput {
+        slug: Some(graphql_orm::graphql::filters::StringFilter {
+            eq: Some(value.to_string()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+fn move_note_to(owner: &str) -> UpdateOwnedNoteInput {
+    UpdateOwnedNoteInput {
+        owner_user_id: Some(owner.to_string()),
+        ..Default::default()
+    }
 }
 
 /// Create a note owned by `owner` through that owner's own schema.
@@ -469,43 +536,40 @@ async fn repository_writes_check_the_written_row() {
         slug: slug.to_string(),
         owner_user_id: owner.to_string(),
     };
-    assert!(
-        OwnedNote::insert(&db, input("other", "actor-b"))
-            .await
-            .is_err()
+    assert_eq!(
+        refusal(OwnedNote::insert(&db, input("other", "actor-b")).await),
+        "FORBIDDEN"
     );
-    assert!(
-        OwnedNote::insert_many(
-            &db,
-            [input("ok", REPOSITORY_ACTOR), input("bad", "actor-b")]
-        )
-        .await
-        .is_err()
+    assert_eq!(
+        refusal(
+            OwnedNote::insert_many(
+                &db,
+                [input("ok", REPOSITORY_ACTOR), input("bad", "actor-b")]
+            )
+            .await
+        ),
+        "FORBIDDEN"
     );
     assert_eq!(count(&pool, "owned_notes", REPOSITORY_ACTOR).await, 0);
 
     let note = OwnedNote::insert(&db, input("mine", REPOSITORY_ACTOR))
         .await
         .unwrap();
-    let moved = OwnedNote::update_by_id(
-        &db,
-        &note.id,
-        UpdateOwnedNoteInput {
-            owner_user_id: Some("actor-b".to_string()),
-            ..Default::default()
-        },
-    )
-    .await;
-    assert!(moved.is_err(), "{moved:?}");
-    assert!(
-        OwnedNote::upsert(&db, input("mine", "actor-b"))
-            .await
-            .is_err()
+    assert_eq!(
+        refusal(OwnedNote::update_by_id(&db, &note.id, move_note_to("actor-b")).await),
+        "FORBIDDEN"
     );
-    assert!(
-        OwnedNote::upsert(&db, input("fresh", "actor-b"))
-            .await
-            .is_err()
+    assert_eq!(
+        refusal(OwnedNote::update_where(&db, slug("mine"), move_note_to("actor-b")).await),
+        "FORBIDDEN"
+    );
+    assert_eq!(
+        refusal(OwnedNote::upsert(&db, input("mine", "actor-b")).await),
+        "FORBIDDEN"
+    );
+    assert_eq!(
+        refusal(OwnedNote::upsert(&db, input("fresh", "actor-b")).await),
+        "FORBIDDEN"
     );
     assert_eq!(count(&pool, "owned_notes", "actor-b").await, 0);
     assert_eq!(count(&pool, "owned_notes", REPOSITORY_ACTOR).await, 1);
@@ -519,10 +583,9 @@ async fn composite_key_writes_check_the_written_row() {
         item_key: item.to_string(),
         owner_user_id: owner.to_string(),
     };
-    assert!(
-        OwnedPair::insert(&db, pair("other", "actor-b"))
-            .await
-            .is_err()
+    assert_eq!(
+        refusal(OwnedPair::insert(&db, pair("other", "actor-b")).await),
+        "FORBIDDEN"
     );
     OwnedPair::insert(&db, pair("mine", REPOSITORY_ACTOR))
         .await
@@ -531,24 +594,31 @@ async fn composite_key_writes_check_the_written_row() {
         tenant_key: "t".to_string(),
         item_key: "mine".to_string(),
     };
-    let moved = OwnedPair::update_by_key(
-        &db,
-        &key,
-        UpdateOwnedPairInput {
-            owner_user_id: Some("actor-b".to_string()),
-        },
-    )
-    .await;
-    assert!(moved.is_err(), "{moved:?}");
-    assert!(
-        OwnedPair::upsert(&db, pair("mine", "actor-b"))
-            .await
-            .is_err()
+    let to_b = || UpdateOwnedPairInput {
+        owner_user_id: Some("actor-b".to_string()),
+    };
+    assert_eq!(
+        refusal(OwnedPair::update_by_key(&db, &key, to_b()).await),
+        "FORBIDDEN"
     );
-    assert!(
-        OwnedPair::upsert(&db, pair("fresh", "actor-b"))
-            .await
-            .is_err()
+    let expected = OwnedPairWhereInput {
+        owner_user_id: Some(graphql_orm::graphql::filters::StringFilter {
+            eq: Some(REPOSITORY_ACTOR.to_string()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert_eq!(
+        refusal(OwnedPair::update_if(&db, &key, expected, to_b()).await),
+        "FORBIDDEN"
+    );
+    assert_eq!(
+        refusal(OwnedPair::upsert(&db, pair("mine", "actor-b")).await),
+        "FORBIDDEN"
+    );
+    assert_eq!(
+        refusal(OwnedPair::upsert(&db, pair("fresh", "actor-b")).await),
+        "FORBIDDEN"
     );
     assert_eq!(count(&pool, "owned_pairs", "actor-b").await, 0);
     assert_eq!(count(&pool, "owned_pairs", REPOSITORY_ACTOR).await, 1);
@@ -560,4 +630,236 @@ async fn composite_key_writes_check_the_written_row() {
     .await;
     assert_eq!(error_code(&response), Some("FORBIDDEN"), "{response}");
     assert_eq!(count(&pool, "owned_events", "actor-b").await, 0);
+}
+
+#[tokio::test]
+async fn compare_and_swap_checks_the_written_row_and_rolls_back_its_savepoint() {
+    let (db, pool) = database().await;
+    VersionedNote::insert(
+        &db,
+        CreateVersionedNoteInput {
+            id: "v".to_string(),
+            owner_user_id: REPOSITORY_ACTOR.to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    let swap = |owner: &str| UpdateVersionedNoteInput {
+        owner_user_id: Some(owner.to_string()),
+        ..Default::default()
+    };
+    let refused = VersionedNote::compare_and_swap(
+        &db,
+        &"v".to_string(),
+        0,
+        VersionedNoteWhereInput::default(),
+        swap("actor-b"),
+    )
+    .await;
+    assert_eq!(refusal(refused), "FORBIDDEN");
+    assert_eq!(count(&pool, "versioned_notes", "actor-b").await, 0);
+
+    // Inside a caller-owned transaction the refused swap is undone at once, and
+    // the transaction cannot commit even if the caller ignores the error.
+    let outcome = db
+        .transaction(TransactionMode::StateMachine, |tx| {
+            Box::pin(async move {
+                let ignored = tx
+                    .compare_and_swap::<VersionedNote>(
+                        &"v".to_string(),
+                        0,
+                        VersionedNoteWhereInput::default(),
+                        swap("actor-b"),
+                    )
+                    .await;
+                assert!(ignored.is_err());
+                let current = tx
+                    .find_by_id::<VersionedNote>(&"v".to_string())
+                    .await
+                    .map_err(OrmPublicError::from)?
+                    .expect("row still present");
+                assert_eq!(current.owner_user_id, REPOSITORY_ACTOR);
+                assert_eq!(current.version, 0);
+                Ok(())
+            })
+        })
+        .await;
+    assert!(outcome.is_err(), "{outcome:?}");
+    assert_eq!(count(&pool, "versioned_notes", REPOSITORY_ACTOR).await, 1);
+}
+
+#[tokio::test]
+async fn a_refused_written_row_poisons_the_callers_transaction() {
+    let (db, pool) = database().await;
+    let input = |slug: &str, owner: &str| CreateOwnedNoteInput {
+        name: "tx".to_string(),
+        slug: slug.to_string(),
+        owner_user_id: owner.to_string(),
+    };
+    let outcome = db
+        .transaction(TransactionMode::StateMachine, |tx| {
+            Box::pin(async move {
+                tx.insert::<OwnedNote>(input("allowed", REPOSITORY_ACTOR))
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                // The host swallows the refusal and tries to commit anyway.
+                let _ = tx.insert::<OwnedNote>(input("refused", "actor-b")).await;
+                Ok(())
+            })
+        })
+        .await;
+    assert!(outcome.is_err(), "{outcome:?}");
+    assert_eq!(count(&pool, "owned_notes", "actor-b").await, 0);
+    assert_eq!(count(&pool, "owned_notes", REPOSITORY_ACTOR).await, 0);
+
+    let mut context =
+        graphql_orm::graphql::orm::MutationContext::begin(&db, TransactionMode::StateMachine)
+            .await
+            .unwrap();
+    let note = context
+        .insert::<OwnedNote>(input("mine", REPOSITORY_ACTOR))
+        .await
+        .unwrap();
+    let _ = context
+        .update_by_id::<OwnedNote>(&note.id, move_note_to("actor-b"))
+        .await;
+    assert_eq!(refusal(context.commit_and_emit().await), "FORBIDDEN");
+    assert_eq!(count(&pool, "owned_notes", "actor-b").await, 0);
+    assert_eq!(count(&pool, "owned_notes", REPOSITORY_ACTOR).await, 0);
+}
+
+#[tokio::test]
+async fn graphql_refusals_for_readable_rows_and_hidden_upsert_targets() {
+    let (db, pool) = database().await;
+    let hidden = create_note(&db, "actor-a", "a").await;
+    let reader = run(
+        &schema(&db, "reader"),
+        format!("mutation {{ deleteOwnedNote(id: \"{hidden}\") {{ success }} }}"),
+    )
+    .await;
+    assert_eq!(error_code(&reader), Some("FORBIDDEN"), "{reader}");
+
+    // The upsert key is unique, so a hidden conflicting row cannot look absent.
+    let upsert = run(
+        &schema(&db, "actor-b"),
+        "mutation { upsertOwnedNote(input: { name: \"probe\", slug: \"a\", ownerUserId: \"actor-b\" }) { success } }",
+    )
+    .await;
+    assert_eq!(error_code(&upsert), Some("FORBIDDEN"), "{upsert}");
+    assert_eq!(note_name(&pool, &hidden).await, "secret");
+    assert_eq!(count(&pool, "owned_notes", "actor-a").await, 1);
+}
+
+#[tokio::test]
+async fn owners_receive_their_upserted_row() {
+    let (db, _pool) = database().await;
+    create_note(&db, "actor-a", "a").await;
+    let response = run(
+        &schema(&db, "actor-a"),
+        "mutation { upsertOwnedNote(input: { name: \"renamed\", slug: \"a\", ownerUserId: \"actor-a\" }) { action ownedNote { name } } }",
+    )
+    .await;
+    assert_eq!(
+        response["data"]["upsertOwnedNote"]["action"], "UPDATED",
+        "{response}"
+    );
+    assert_eq!(
+        response["data"]["upsertOwnedNote"]["ownedNote"]["name"], "renamed",
+        "{response}"
+    );
+}
+
+#[tokio::test]
+async fn delete_many_spanning_hidden_and_own_rows_deletes_only_the_callers() {
+    let (db, pool) = database().await;
+    create_note(&db, "actor-a", "a").await;
+    create_note(&db, "actor-b", "b").await;
+    let response = run(
+        &schema(&db, "actor-b"),
+        "mutation { deleteOwnedNotes(where: { name: { eq: \"secret\" } }) { success deletedCount } }",
+    )
+    .await;
+    assert_eq!(
+        response["data"]["deleteOwnedNotes"]["success"], true,
+        "{response}"
+    );
+    assert_eq!(
+        response["data"]["deleteOwnedNotes"]["deletedCount"], 1,
+        "{response}"
+    );
+    assert_eq!(count(&pool, "owned_notes", "actor-a").await, 1);
+    assert_eq!(count(&pool, "owned_notes", "actor-b").await, 0);
+}
+
+#[tokio::test]
+async fn a_declared_write_policy_without_a_row_provider_is_misconfigured_in_every_mode() {
+    use graphql_orm::graphql::auth::AuthorizationMode;
+    for mode in [
+        AuthorizationMode::LegacyPermissive,
+        AuthorizationMode::DeclaredPoliciesRequired,
+        AuthorizationMode::ExplicitPolicyForAllExposedOperations,
+    ] {
+        let (_, pool) = database().await;
+        let mut db = graphql_orm::db::Database::new(pool.clone())
+            .with_authorized_scan_config(AuthorizedScanConfig::new([5; 32], 8, 64))
+            .with_authorization_mode(mode);
+        db.set_entity_policy(AllowEntities);
+        let schema = schema(&db, "actor-a");
+        // Refused before any lookup: an absent id gets the same answer.
+        let missing = graphql_orm::uuid::Uuid::new_v4();
+        for query in [
+            "mutation { createGuardedNote(input: { name: \"x\" }) { success } }".to_string(),
+            format!(
+                "mutation {{ updateGuardedNote(id: \"{missing}\", input: {{ name: \"x\" }}) {{ success }} }}"
+            ),
+            format!("mutation {{ deleteGuardedNote(id: \"{missing}\") {{ success }} }}"),
+        ] {
+            let response = run(&schema, query).await;
+            assert_eq!(
+                error_code(&response),
+                Some("AUTHORIZATION_MISCONFIGURED"),
+                "{mode:?}: {response}"
+            );
+        }
+        for (field, selection) in [
+            (
+                "updateGuardedNotes",
+                "input: { name: \"x\" }) { success errorCode }",
+            ),
+            ("deleteGuardedNotes", ") { success errorCode }"),
+        ] {
+            let response = run(
+                &schema,
+                format!("mutation {{ {field}(where: {{ name: {{ eq: \"x\" }} }} {selection} }}"),
+            )
+            .await;
+            assert_eq!(
+                response["data"][field]["errorCode"], "AUTHORIZATION_MISCONFIGURED",
+                "{mode:?}: {response}"
+            );
+        }
+        assert_eq!(
+            refusal(
+                GuardedNote::insert(
+                    &db,
+                    CreateGuardedNoteInput {
+                        name: "x".to_string()
+                    }
+                )
+                .await
+            ),
+            "AUTHORIZATION_MISCONFIGURED",
+            "{mode:?}"
+        );
+        assert_eq!(
+            refusal(GuardedNote::delete_by_id(&db, &missing).await),
+            "AUTHORIZATION_MISCONFIGURED",
+            "{mode:?}"
+        );
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM guarded_notes")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0);
+    }
 }

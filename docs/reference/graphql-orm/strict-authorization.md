@@ -52,6 +52,14 @@ When `DeclaredPoliciesRequired` is active:
   so those need both an entity provider and a row provider. See
   [row policy on generated writes](#row-policy-on-generated-writes).
 
+The row provider requirement for an entity `write_policy` applies in every mode,
+including `LegacyPermissive` and `ExplicitPolicyForAllExposedOperations`.
+Without a row provider, every generated write of such an entity fails with
+`AUTHORIZATION_MISCONFIGURED` before it looks up any row. This covers creates,
+updates, upserts, deletes and bulk writes on GraphQL, repository and transaction
+paths. An entity with no row isolation still needs a provider; one that allows
+its rows is enough.
+
 An entity that declares no policy has no such requirement: with `auth: "required"`, any authenticated
 subject can use its generated operations.
 [#287](https://github.com/Dastari/graphql-orm/issues/287) tracks requiring an explicit decision.
@@ -87,17 +95,28 @@ and before the `After` hook. This covers GraphQL and repository writes,
 single-column and composite keys, append-only creates, `insert_many`,
 `insert_if_absent`, `upsert_many`, `update_if`, `compare_and_swap`, bounded
 updates, transaction helpers and dependent `set_null` updates. A refusal is
-`FORBIDDEN` and rolls the write back. Updates and upserts still check the
-existing row first. A client-writable owner or tenant column therefore can't
+`FORBIDDEN` and rolls the write back. In a caller-owned transaction, such as
+`Database::transaction` or a `MutationContext` in a hook, the refusal also
+blocks the commit. `commit_and_emit` then rolls back and returns `FORBIDDEN`,
+even if the caller ignored the error. `compare_and_swap` also rolls back its
+savepoint at once. Updates and upserts still check the existing row first. A client-writable owner or tenant column therefore can't
 create a row outside the caller's write scope or move one out of it.
 
 **The returned row.** Generated GraphQL create, update and upsert payloads
 contain the committed row only when the caller has entity read access and
-`can_read_row` allows the row. Otherwise the entity field is `null` and the
-payload still reports `success: true`, because the write has committed. Write
-access does not imply read access. A denied entity read or a policy error fails
-the field with `extensions.outcome = "committed"`. Field read policies still
-apply to a released row. Delete payloads never contain the row, and bulk
+`can_read_row` allows the row. Write access does not imply read access. The
+outcome depends on which check refuses:
+
+- `can_read_row` refuses the row: the payload's entity field is `null` and it
+  still reports `success: true`.
+- The caller lacks entity read access, or a policy returns an error: the
+  mutation field fails with an error carrying `extensions.outcome = "committed"`,
+  and the whole field is `null`. A principal with entity-level write access but
+  no read access that selects the entity gets this error; it should select only
+  `success`.
+
+Either way the write has committed, and no row is released. Field read
+policies still apply to a released row. Delete payloads never contain the row, and bulk
 payloads contain counts. Repository helpers return the written row to host
 code unchanged. Host code that passes it on to a client must check it with
 `Database::can_read_row` first.
@@ -113,7 +132,11 @@ existing row they select:
 | neither read nor write it | `success: false`, `error: "Entity not found"`, as for a missing row | row is left out: not written, counted or held against the `notify_with` 1,000-row bound |
 
 So the response never depends on rows the caller can't read or write, and a
-filter can't probe their columns. A write-only caller still writes rows it can't
+filter can't probe their columns. For a dependent delete this holds for the
+root row only. A dependent child row the caller can neither read nor write is
+not left out. Like any other unauthorized dependent, it makes the whole delete
+refuse with `Dependent delete refused`, so the refusal can reveal that such a
+child exists. A write-only caller still writes rows it can't
 read. Reading a row means entity read access plus `can_read_row`, which runs
 only for rows `can_write_row` refuses. An upsert whose conflicting row is
 unwritable refuses with `FORBIDDEN` whether or not the caller can read it. Its

@@ -74,16 +74,38 @@ writes call the policy with `ctx = None` and `EntityAccessSurface::Repository`
 for the new row too, so a policy that refuses that surface now also refuses
 repository creates. Allow the rows the host writes there, or write them through
 a path the policy allows. Dependent-delete `set_null` updates check the nulled
-child row as well. An entity that declares a `write_policy` now needs a
-row provider for creates too, not only for updates and deletes. Without one,
-creates fail with `AUTHORIZATION_MISCONFIGURED` under `DeclaredPoliciesRequired`
-and with `FORBIDDEN` under `ExplicitPolicyForAllExposedOperations`.
+child row as well. A refused written row also blocks the commit of a
+caller-owned transaction: `commit_and_emit` rolls back and returns `FORBIDDEN`
+even when the caller ignored the error.
+
+**A `write_policy` needs a row provider in every mode.** An entity that
+declares an entity-level `write_policy` uses it as its row write policy key.
+In every `AuthorizationMode`, its generated creates, updates, upserts, deletes
+and bulk writes now fail with `AUTHORIZATION_MISCONFIGURED` before any lookup
+when no `RowPolicy` is installed. Install one; a provider that allows the rows
+of entities without row isolation is enough. Most affected:
+
+- **Create-only and append-only entities** that declare only an entity-level
+  `write_policy` and run without a row provider. Their creates previously
+  succeeded in every mode, and now fail.
+- **`LegacyPermissive` databases** without a row provider. Their writes of
+  these entities were previously allowed.
+- **`ExplicitPolicyForAllExposedOperations` databases** without a row
+  provider. Updates and deletes of these entities previously returned
+  `FORBIDDEN`, or "Entity not found" for an absent id, and now return
+  `AUTHORIZATION_MISCONFIGURED`.
+
+Under `DeclaredPoliciesRequired`, updates and deletes already failed this way
+after their lookup; they now fail before it, and creates fail too.
 
 **Payloads need read access.** Generated GraphQL update and upsert payloads
-return `null` for the entity, with `success: true`, when the caller lacks entity
-read access or `can_read_row` refuses the row. Clients of write-only principals
-that read the returned row must read it through a query they are allowed to
-make, or select only `success`.
+release the committed row only to callers who may read it. When `can_read_row`
+refuses the row, the entity field is `null` and `success` stays `true`. When
+the caller lacks entity read access, the mutation field fails with an error
+carrying `extensions.outcome = "committed"` and is `null` as a whole. So a
+principal with entity-level write access but no read access that selects the
+entity now gets an error. Such clients must select only `success`, and read the
+row through a query they are allowed to make.
 
 **Hidden rows look missing.** A generated GraphQL update or delete of a row the
 caller can neither read nor write now returns `success: false` with
@@ -94,7 +116,9 @@ rows. A bulk write that relied on such a row to refuse the whole operation
 needs a narrower filter or a host-side check. Readable rows the caller may not
 write still refuse as before. `can_read_row` (and the entity read policy) now
 run for each targeted row that `can_write_row` refuses, so both must be cheap
-and side-effect free. Repository helpers are unchanged here.
+and side-effect free. Repository helpers are unchanged here. For a dependent
+delete only the root row is treated this way. A hidden dependent child still
+makes the whole delete refuse with `Dependent delete refused`.
 
 See [row policy on generated writes](docs/reference/graphql-orm/strict-authorization.md#row-policy-on-generated-writes).
 

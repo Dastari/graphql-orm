@@ -1126,32 +1126,18 @@ async fn deleted_preimage_opt_in_still_requires_immediate_current_authority() {
             // marked mutation. Provider absence must deny before deleting or
             // emitting; the ordinary-read-only mode above exercises a real
             // delete whose event is suppressed by the missing preimage grant.
-            // Without a provider the caller can neither read nor write the row,
-            // so the refusal is the missing-row answer and does not reveal it.
-            let missing = schema
-                .execute(request(
-                    &bundle,
-                    "mutation { deleteSecureRecord(id: \"record-absent\") { success error } }",
+            // A declared write policy without a row provider is a
+            // misconfiguration in every mode, refused before any lookup.
+            assert_eq!(deleted.errors.len(), 1);
+            assert_eq!(deleted.errors[0].message, "authorization is misconfigured");
+            assert_eq!(
+                deleted.errors[0]
+                    .extensions
+                    .as_ref()
+                    .and_then(|extensions| extensions.get("code").cloned()),
+                Some(graphql_orm::async_graphql::Value::from(
+                    "AUTHORIZATION_MISCONFIGURED"
                 ))
-                .await;
-            let refused = schema
-                .execute(request(
-                    &bundle,
-                    "mutation { deleteSecureRecord(id: \"record-1\") { success error } }",
-                ))
-                .await;
-            assert!(deleted.errors.is_empty(), "{:?}", deleted.errors);
-            assert_eq!(
-                deleted.data.into_json().unwrap()["deleteSecureRecord"]["success"],
-                false
-            );
-            assert_eq!(
-                serde_json::to_value(&refused).unwrap(),
-                serde_json::to_value(&missing).unwrap()
-            );
-            assert_eq!(
-                refused.data.into_json().unwrap()["deleteSecureRecord"]["error"],
-                "Entity not found"
             );
             let remaining: i64 =
                 sqlx::query_scalar("SELECT COUNT(*) FROM secure_records WHERE id = 'record-1'")
