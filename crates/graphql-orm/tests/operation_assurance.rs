@@ -435,3 +435,49 @@ async fn host_guards_compose_after_the_described_root_assurance_check()
     assert!(admitting.0.load(Ordering::SeqCst) >= HOST_GUARDED.len());
     Ok(())
 }
+
+/// Passes enforcement to resolvers only through `NextExecute::run_with_data`.
+struct EnforceThroughExecuteData(AssuranceEnforcement);
+impl graphql_orm::async_graphql::extensions::ExtensionFactory for EnforceThroughExecuteData {
+    fn create(&self) -> Arc<dyn graphql_orm::async_graphql::extensions::Extension> {
+        Arc::new(EnforceThroughExecuteData(self.0.clone()))
+    }
+}
+#[graphql_orm::async_graphql::async_trait::async_trait]
+impl graphql_orm::async_graphql::extensions::Extension for EnforceThroughExecuteData {
+    async fn execute(
+        &self,
+        ctx: &graphql_orm::async_graphql::extensions::ExtensionContext<'_>,
+        operation_name: Option<&str>,
+        next: graphql_orm::async_graphql::extensions::NextExecute<'_>,
+    ) -> graphql_orm::async_graphql::Response {
+        let mut data = graphql_orm::async_graphql::Data::default();
+        data.insert(self.0.clone());
+        next.run_with_data(ctx, operation_name, data).await
+    }
+}
+
+/// Enforcement an extension supplies through `run_with_data` is still found by
+/// generated resolvers and `DeclaredAssuranceGuard`; it is never skipped.
+#[tokio::test]
+async fn enforcement_passed_through_execute_data_is_enforced()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:").await?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let schema = schema_builder(database)
+        .data(AuthSubject::new("user-1"))
+        .extension(EnforceThroughExecuteData(AssuranceEnforcement::new(
+            Arc::new(registry()),
+            denying(&calls),
+        )))
+        .finish();
+    for mutation in [
+        r#"mutation { createAssuranceRecord(input: { value: "blocked" }) { success } }"#,
+        "mutation { rotateKey }",
+    ] {
+        let response = schema.execute(mutation).await;
+        assert!(step_up(&response), "{mutation}: {:?}", response.errors);
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    Ok(())
+}

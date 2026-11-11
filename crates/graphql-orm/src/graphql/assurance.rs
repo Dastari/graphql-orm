@@ -623,13 +623,19 @@ impl From<&RegisteredOperation> for OperationAssuranceManifestEntry {
 
 /// Request data an evaluator decides a requirement from.
 ///
-/// The same check is built for the resolver-level assurance check and for the
-/// runtime GraphQL request pre-pass, which runs before any resolver. It
-/// therefore exposes only data both can see: request data
-/// (`Request::data`), session data, then schema data, searched in that order.
-/// Data an extension adds through `NextExecute::run_with_data` is not visible.
+/// A resolver-level check searches the data its field context sees: data an
+/// extension passed to `NextExecute::run_with_data`, then request data
+/// (`Request::data`), session data and schema data, in that order, as
+/// `Context::data_opt` does.
+///
+/// The runtime GraphQL request pre-pass runs in an extension hook, before any
+/// resolver, and sees only request, session and schema data. Install
+/// [`AssuranceEnforcement`] and every evaluator input there: whatever exists
+/// only in `run_with_data` data is enforced by the resolver alone, after
+/// request preparation has read. A refusal from either check still stands.
 #[derive(Clone, Copy)]
 pub struct AssuranceCheck<'a> {
+    execute_data: Option<&'a async_graphql::Data>,
     query_data: Option<&'a async_graphql::Data>,
     session_data: &'a async_graphql::Data,
     schema_data: &'a async_graphql::Data,
@@ -644,6 +650,7 @@ impl<'a> AssuranceCheck<'a> {
         field_name: &'a str,
     ) -> Self {
         Self {
+            execute_data: ctx.execute_data,
             query_data: Some(&ctx.query_env.query_data),
             session_data: &ctx.query_env.session_data,
             schema_data: &ctx.schema_env.data,
@@ -659,6 +666,7 @@ impl<'a> AssuranceCheck<'a> {
         field_name: &'a str,
     ) -> Self {
         Self {
+            execute_data: None,
             query_data: ctx.query_data,
             session_data: ctx.session_data,
             schema_data: &ctx.schema_env.data,
@@ -667,11 +675,12 @@ impl<'a> AssuranceCheck<'a> {
         }
     }
 
-    /// Returns request, session or schema data of type `D`, in that order.
+    /// Returns data of type `D`, searched in the order the type documents.
     pub fn data_opt<D: std::any::Any + Send + Sync>(&self) -> Option<&'a D> {
         let id = std::any::TypeId::of::<D>();
-        self.query_data
+        self.execute_data
             .and_then(|data| data.get(&id))
+            .or_else(|| self.query_data.and_then(|data| data.get(&id)))
             .or_else(|| self.session_data.get(&id))
             .or_else(|| self.schema_data.get(&id))
             .and_then(|data| data.downcast_ref::<D>())
@@ -701,7 +710,7 @@ impl fmt::Debug for AssuranceCheck<'_> {
 ///
 /// Runtime GraphQL calls the evaluator before request preparation and again in
 /// the resolver, so it must decide from the [`AssuranceCheck`] alone and
-/// without side effects.
+/// without side effects. A root runs only if both evaluations admit it.
 pub trait AssuranceRequirementEvaluator: Send + Sync + fmt::Debug {
     /// Enforces the requirement against the current request before execution.
     fn enforce(

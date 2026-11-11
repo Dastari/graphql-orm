@@ -23,10 +23,13 @@ one-way evaluator backed by `agql-auth`, or implement
 runtime.
 
 An evaluator decides from an `AssuranceCheck`: the root's kind and field name,
-and the request, session and schema data of the current request. It receives no
-field context, so the same decision can be made before any resolver runs. It
-must have no side effects, because runtime GraphQL evaluates each query and
-mutation root twice.
+and the data of the current request. It receives no field context, so the same
+decision can be made before any resolver runs. In a resolver the check also
+sees data an extension passed to `run_with_data`; the runtime pre-pass sees
+only request, session and schema data, so install `AssuranceEnforcement` and
+evaluator inputs there. The evaluator must have no side effects, because
+runtime GraphQL evaluates each query and mutation root twice and runs it only
+if both evaluations admit it.
 
 ## Compatibility Default
 

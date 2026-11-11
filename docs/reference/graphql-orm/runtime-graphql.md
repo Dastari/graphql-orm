@@ -94,14 +94,27 @@ prepared. It gets no planning, database read, host `RuntimeReadAuthority`
 callback, payload or child-layer authorization, write authorization or host
 resolver call, and its resolver returns the refusal with the resolver-level
 error code and shape. Other roots in the same operation run as before. Each
-root's resolver then checks again, as defence in depth. A refusal from the
-pre-pass stands even if that later check would admit the root. Live
-subscriptions are checked by their resolver before registration.
+root's resolver then checks again, as defence in depth. Live subscriptions
+are checked by their resolver before registration.
 
-The evaluator therefore runs twice for a query or mutation root and must
-decide from its `AssuranceCheck` without side
-effects. The check exposes request, session and schema data. Data that another
-extension adds through `run_with_data` is not visible to it.
+The evaluator therefore runs twice for a query or mutation root, and a root
+runs only if both evaluations admit it:
+
+- A refusal from the pre-pass stands even if the resolver's check would admit
+  the root.
+- A refusal from the resolver's check also stands. If the pre-pass admits a
+  root and the resolver then refuses it, for example because step-up expired in
+  between, the root returns the refusal and nothing is written or returned. Its
+  request-preparation reads and host read-authority callbacks have already run.
+
+An evaluator must decide from its `AssuranceCheck` without side effects.
+
+Install `AssuranceEnforcement` and every evaluator input in schema data
+(`composer.data`), request data or session data. The pre-pass runs in an
+extension hook and sees only those. Data another extension passes to
+`NextExecute::run_with_data` is visible to the resolver's check alone. A root
+whose enforcement arrives that way is still refused by its resolver, but only
+after request preparation has read.
 
 Register the roots before building the registry, so hosts can require or
 exempt them:

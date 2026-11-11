@@ -1071,8 +1071,6 @@ impl AssuranceRequirementEvaluator for DenyFirst {
         _: AssuranceActorClass,
         _: &str,
     ) -> async_graphql::Result<()> {
-        assert_eq!(check.kind(), GraphqlOperationKind::Query);
-        assert_eq!(check.field_name(), "posts");
         assert!(check.data_opt::<RuntimeGraphqlRequest<Backend>>().is_some());
         if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
             return Err(
@@ -1084,14 +1082,148 @@ impl AssuranceRequirementEvaluator for DenyFirst {
     }
 }
 
-/// The pre-pass decision binds: a root it refused stays refused, unread, even
-/// when the resolver-level check would now admit it.
+/// The pre-pass decision binds: a root it refused stays refused, unread and
+/// unrun, even when the resolver-level check would now admit it. Covers each
+/// runtime resolver that returns the pre-pass refusal.
 #[tokio::test]
 async fn a_root_refused_before_preparation_stays_refused_in_its_resolver() {
     let f = Fixture::new().await;
-    let evaluator = Arc::new(DenyFirst::default());
+    let id = graphql_orm::graphql::federation::encode_node_id("Event", vec!["e1".into()]);
+    let node = format!(
+        "{{ node(NodeId: {}) {{ NodeId }} }}",
+        serde_json::to_string(&id.0).unwrap()
+    );
+    let cases = [
+        (
+            GraphqlOperationKind::Query,
+            "posts",
+            "{ posts { edges { node { id } } } }".to_owned(),
+        ),
+        (GraphqlOperationKind::Query, "node", node),
+        (
+            GraphqlOperationKind::Mutation,
+            "updatePost",
+            MUTATIONS[1].1.to_owned(),
+        ),
+        (
+            GraphqlOperationKind::Mutation,
+            "hostAction",
+            MUTATIONS[4].1.to_owned(),
+        ),
+    ];
+    for (kind, root, query) in &cases {
+        let evaluator = Arc::new(DenyFirst::default());
+        let composer = f.composer();
+        let mut builder = OperationAssuranceRegistryBuilder::new(AssuranceSchemaConfig::legacy());
+        composer
+            .register_assurance_operations(&mut builder)
+            .unwrap();
+        builder.require(*kind, root, "read.recent-auth").unwrap();
+        let api = composer
+            .data(AssuranceEnforcement::new(
+                Arc::new(builder.build().unwrap()),
+                evaluator.clone(),
+            ))
+            .finish()
+            .unwrap();
+        let (response, reads, acquired) = f.observe(&api, query).await;
+        assert_eq!(step_up_errors(&response), 1, "{root}: {response}");
+        assert_eq!(response["data"][*root], Value::Null, "{root}: {response}");
+        assert_eq!(
+            reads,
+            Vec::<String>::new(),
+            "{root} reached the read authority"
+        );
+        assert_eq!(acquired, 0, "{root} reached the database");
+        assert_nothing_written(&f, &response, root).await;
+        // The resolver-level check ran too, and admitted.
+        assert_eq!(evaluator.0.load(Ordering::SeqCst), 2, "{root}");
+    }
+    f.finish().await;
+}
+
+/// In one mutation operation, an admitted root commits and its payload is
+/// authorized, while a refused root beside it is neither prepared nor run.
+#[tokio::test]
+async fn an_admitted_mutation_commits_beside_a_refused_one() {
+    let f = Fixture::new().await;
+    let evaluator = StepUp::default();
     let composer = f.composer();
     let mut builder = OperationAssuranceRegistryBuilder::new(AssuranceSchemaConfig::legacy());
+    composer
+        .register_assurance_operations(&mut builder)
+        .unwrap();
+    builder
+        .require(GraphqlOperationKind::Mutation, "deletePost", POLICY)
+        .unwrap();
+    let api = composer
+        .data(AssuranceEnforcement::new(
+            Arc::new(builder.build().unwrap()),
+            Arc::new(evaluator.clone()),
+        ))
+        .finish()
+        .unwrap();
+    // Only the refused root selects a `tags` child layer, so a `tag` read
+    // check could come only from it.
+    let (response, reads, _) = f
+        .observe(
+            &api,
+            r#"mutation($schema: String!) {
+                made: createPost(expectedSchema: $schema, input: {id: "2", label: "new"}) { record { id label } }
+                gone: deletePost(expectedSchema: $schema, key: {id: "1"}) { record { id tags(first: 5) { edges { node { label } } } } }
+            }"#,
+        )
+        .await;
+    assert_eq!(step_up_errors(&response), 1, "{response}");
+    assert_eq!(
+        response["data"]["made"]["record"]["label"], "new",
+        "{response}"
+    );
+    assert!(response["data"].get("gone").is_none(), "{response}");
+    assert!(!reads.contains(&"tag".to_owned()), "{reads:?}");
+    assert!(reads.contains(&"post".to_owned()), "{reads:?}");
+    // The create committed; the delete and its cascade did not run.
+    assert_eq!(f.count("ra_post").await, 2);
+    assert_eq!(f.label().await.as_deref(), Some("first"));
+    assert_eq!(f.count("ra_comment").await, 1);
+    assert_eq!(f.intents.load(Ordering::SeqCst), 1);
+    f.finish().await;
+}
+
+/// Passes enforcement to resolvers only through `NextExecute::run_with_data`,
+/// which the request pre-pass cannot see.
+struct EnforceThroughExecuteData(AssuranceEnforcement);
+impl async_graphql::extensions::ExtensionFactory for EnforceThroughExecuteData {
+    fn create(&self) -> Arc<dyn async_graphql::extensions::Extension> {
+        Arc::new(EnforceThroughExecuteData(self.0.clone()))
+    }
+}
+#[async_graphql::async_trait::async_trait]
+impl async_graphql::extensions::Extension for EnforceThroughExecuteData {
+    async fn execute(
+        &self,
+        ctx: &async_graphql::extensions::ExtensionContext<'_>,
+        operation_name: Option<&str>,
+        next: async_graphql::extensions::NextExecute<'_>,
+    ) -> async_graphql::Response {
+        let mut data = async_graphql::Data::default();
+        data.insert(self.0.clone());
+        next.run_with_data(ctx, operation_name, data).await
+    }
+}
+
+/// Enforcement passed through `run_with_data` is never skipped: each runtime
+/// resolver refuses. The pre-pass cannot see it, so preparation still reads.
+#[tokio::test]
+async fn enforcement_passed_through_execute_data_still_refuses_in_resolvers() {
+    let f = Fixture::new().await;
+    let evaluator = StepUp::default();
+    let composer = f.composer();
+    let mut builder = OperationAssuranceRegistryBuilder::new(
+        AssuranceSchemaConfig::legacy()
+            .with_default_interactive_mutation_policy(POLICY)
+            .unwrap(),
+    );
     composer
         .register_assurance_operations(&mut builder)
         .unwrap();
@@ -1099,18 +1231,24 @@ async fn a_root_refused_before_preparation_stays_refused_in_its_resolver() {
         .require(GraphqlOperationKind::Query, "posts", "read.recent-auth")
         .unwrap();
     let api = composer
-        .data(AssuranceEnforcement::new(
+        .extension(EnforceThroughExecuteData(AssuranceEnforcement::new(
             Arc::new(builder.build().unwrap()),
-            evaluator.clone(),
-        ))
+            Arc::new(evaluator.clone()),
+        )))
         .finish()
         .unwrap();
-    let (response, reads, acquired) = f.observe(&api, "{ posts { edges { node { id } } } }").await;
-    assert_eq!(step_up_errors(&response), 1, "{response}");
-    assert_eq!(response["data"], Value::Null, "{response}");
-    assert_eq!(reads, Vec::<String>::new());
-    assert_eq!(acquired, 0);
-    // The resolver-level check ran too, and admitted.
-    assert_eq!(evaluator.0.load(Ordering::SeqCst), 2);
+    let (read, reads, _) = f.observe(&api, "{ posts { edges { node { id } } } }").await;
+    assert_eq!(step_up_errors(&read), 1, "{read}");
+    assert_eq!(read["data"], Value::Null, "{read}");
+    assert_eq!(reads, ["post"], "the pre-pass cannot see execute data");
+    for (root, query) in MUTATIONS {
+        let response = f.run(&api, query).await;
+        assert_nothing_written(&f, &response, root).await;
+    }
+    assert_eq!(
+        evaluator.policies.lock().unwrap().len(),
+        1 + MUTATIONS.len(),
+        "only resolvers evaluate"
+    );
     f.finish().await;
 }
