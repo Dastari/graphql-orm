@@ -646,7 +646,6 @@ async fn compare_and_swap_checks_the_written_row_and_rolls_back_its_savepoint() 
     .unwrap();
     let swap = |owner: &str| UpdateVersionedNoteInput {
         owner_user_id: Some(owner.to_string()),
-        ..Default::default()
     };
     let refused = VersionedNote::compare_and_swap(
         &db,
