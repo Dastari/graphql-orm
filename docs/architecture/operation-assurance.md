@@ -106,6 +106,13 @@ resolver's guard, or `derived`, which exposes the resolver under an
 uncatalogued name. The root's attribute cannot use `rename_fields`; name
 resolvers explicitly instead.
 
+The root must carry exactly one recognised async-graphql root attribute of its
+declared kind (`Object` for queries and mutations, `Subscription` for
+subscriptions), directly below `#[graphql_orm_custom_operations]`. A missing
+attribute, an import alias such as `#[GqlObject]`, a kind mismatch, a second
+root attribute, or a root attribute placed above the macro fails to compile, so
+the root's guard and `rename_fields` are never silently unread.
+
 Generated query, mutation, and subscription resolvers call the same enforcement
 hook automatically. Without installed enforcement the call is a no-op, which
 preserves existing schemas.

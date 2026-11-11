@@ -44,6 +44,31 @@ Behaviour changes when an `AssuranceEnforcement` is installed:
   `derived(...)`, and the root attribute cannot use `rename_fields`. Describe
   flattened or derived fields as resolvers of their own, and name renamed
   resolvers with `#[graphql(name = "...")]`.
+- A described root must carry exactly one async-graphql root attribute of its
+  kind, directly below `#[graphql_orm_custom_operations]`:
+
+  ```rust
+  #[graphql_orm_custom_operations(kind = "mutation")]
+  #[async_graphql::Object]
+  impl AdminMutations { /* ... */ }
+  ```
+
+  Use `Object` for `kind = "query"` and `kind = "mutation"`, and
+  `Subscription` for `kind = "subscription"`. The accepted paths are `Object`,
+  `async_graphql::Object` and `graphql_orm::async_graphql::Object`, each with or
+  without a leading `::`, and the same forms of `Subscription`. These now fail
+  to compile:
+  - a missing root attribute;
+  - an import alias such as `use async_graphql::Object as GqlObject` with
+    `#[GqlObject]`;
+  - the wrong kind, such as `#[Object]` with `kind = "subscription"`;
+  - a second root attribute;
+  - `#[Object]` or `#[Subscription]` placed above
+    `#[graphql_orm_custom_operations]`.
+
+  Replace an alias with one of the accepted paths and keep the macro above
+  the root attribute. Otherwise the macro could not read the root's `guard`
+  or `rename_fields`.
 
 To upgrade:
 
