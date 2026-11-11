@@ -724,6 +724,13 @@ impl ValidatedRuntimeSchema {
                 return Err(err(RuntimeMutationErrorCode::FieldDenied));
             }
             check_value(field, value, limits)?;
+            // A deserialized or previously stored date-time may be out of range;
+            // it can be read and compared, but is never written again.
+            if let RuntimeValue::DateTime(value) = value
+                && !value.is_portable()
+            {
+                return Err(err(RuntimeMutationErrorCode::InvalidInput));
+            }
         }
         let input_size = fields.iter().try_fold(0usize, |size, (_, value)| {
             let bytes = serde_json::to_vec(value)
@@ -793,7 +800,7 @@ fn bind_value(
     value: &RuntimeValue,
     values: &mut Vec<SqlValue>,
 ) -> String {
-    if let Some(value) = value_bind(value) {
+    if let Some(value) = value_bind(backend, value) {
         values.push(value);
         placeholder(backend, values.len(), field.value_kind())
     } else {

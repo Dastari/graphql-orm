@@ -261,9 +261,16 @@ impl<'de> serde::Deserialize<'de> for RuntimeFloat {
 ///
 /// Inputs use RFC 3339. Offsets are normalized to UTC, precision is rounded
 /// to PostgreSQL-compatible microseconds, and serialization always uses
-/// `YYYY-MM-DDTHH:MM:SS.ffffffZ`. Parsing accepts only values whose canonical
-/// UTC year is 0001 to 9999, the range that SQLite text and PostgreSQL
+/// `YYYY-MM-DDTHH:MM:SS.ffffffZ`. [`parse`](Self::parse) and
+/// [`parse_exact`](Self::parse_exact) accept only values whose canonical UTC
+/// year is 0001 to 9999, the range that SQLite text and PostgreSQL
 /// `timestamptz` both store and read back.
+///
+/// Deserialization instead accepts any value a backend may already hold, such
+/// as `+10000-01-01T00:00:00.000000Z` stored by an earlier release, so records
+/// and cursors that carry such a value still round-trip. Such a value can be
+/// read and compared, but runtime mutations refuse to write it; see
+/// [`is_portable`](Self::is_portable).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RuntimeDateTime(String);
 
@@ -282,7 +289,7 @@ impl RuntimeDateTime {
         let parsed = chrono::DateTime::parse_from_rfc3339(value).map_err(|error| {
             RuntimeRecordError::new(RuntimeRecordErrorCode::InvalidValue).with_source(error)
         })?;
-        Self::from_utc(parsed.with_timezone(&Utc)).within_portable_years()
+        Self::from_utc(parsed.with_timezone(&Utc)).portable()
     }
 
     /// Parse an RFC 3339 date-time exactly, normalizing its offset to UTC but
@@ -303,15 +310,16 @@ impl RuntimeDateTime {
                 RuntimeRecordErrorCode::InvalidValue,
             ));
         }
-        Self::from_utc(parsed.with_timezone(&Utc)).within_portable_years()
+        Self::from_utc(parsed.with_timezone(&Utc)).portable()
     }
 
-    /// Decode stored SQLite text without the range check, so a row written
-    /// before the check existed can still be read. Strict RFC 3339 cannot
-    /// spell the signed extended years those rows may hold, such as
-    /// `+10000-01-01T00:00:00.000000Z`, so retry them with chrono's general
-    /// parser.
-    #[cfg(feature = "sqlite")]
+    /// Decode a value a backend already holds, or its serialized form, without
+    /// the range check, so a row written before the check existed can still be
+    /// read, returned and used as a cursor or comparison value. Strict
+    /// RFC 3339 cannot spell the signed extended years those rows may hold,
+    /// such as `+10000-01-01T00:00:00.000000Z`, so retry them with chrono's
+    /// general parser. The result is never new stored data: runtime mutations
+    /// refuse to write a value that is not [`is_portable`](Self::is_portable).
     pub(crate) fn parse_stored(value: &str) -> Result<Self, RuntimeRecordError> {
         let parsed = chrono::DateTime::parse_from_rfc3339(value)
             .or_else(|error| {
@@ -327,16 +335,25 @@ impl RuntimeDateTime {
         Ok(Self::from_utc(parsed.with_timezone(&Utc)))
     }
 
-    /// Keep the canonical form readable on every backend. It has exactly
-    /// 27 bytes for a four-digit year. Chrono can also produce year zero and
-    /// signed extended years: SQLite would store their text but strict
-    /// RFC 3339 cannot read it back, and PostgreSQL refuses both. PostgreSQL
-    /// also stores the final leap second of 9999 as year 10000.
-    fn within_portable_years(self) -> Result<Self, RuntimeRecordError> {
-        if self.0.len() == 27
+    /// Whether this value can be stored and read back on every backend: its
+    /// canonical UTC year is 0001 to 9999 and it is not the leap second
+    /// `9999-12-31T23:59:60`. Values from [`parse`](Self::parse) and
+    /// [`parse_exact`](Self::parse_exact) always are. A deserialized or
+    /// previously stored value may not be, and runtime mutations refuse to
+    /// write it.
+    pub fn is_portable(&self) -> bool {
+        // The canonical form has exactly 27 bytes for a four-digit year.
+        // Chrono can also produce year zero and signed extended years: SQLite
+        // would store their text but strict RFC 3339 cannot read it back, and
+        // PostgreSQL refuses both. PostgreSQL also stores the final leap
+        // second of 9999 as year 10000.
+        self.0.len() == 27
             && !self.0.starts_with("0000-")
             && !self.0.starts_with("9999-12-31T23:59:60")
-        {
+    }
+
+    fn portable(self) -> Result<Self, RuntimeRecordError> {
+        if self.is_portable() {
             Ok(self)
         } else {
             Err(RuntimeRecordError::new(
@@ -384,7 +401,7 @@ impl<'de> serde::Deserialize<'de> for RuntimeDateTime {
         D: serde::Deserializer<'de>,
     {
         let value = <String as serde::Deserialize>::deserialize(deserializer)?;
-        Self::parse(&value).map_err(serde::de::Error::custom)
+        Self::parse_stored(&value).map_err(serde::de::Error::custom)
     }
 }
 

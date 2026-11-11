@@ -6,7 +6,12 @@ use crate::graphql::orm::{
 use async_graphql::Value;
 use base64::{Engine, engine::general_purpose::STANDARD};
 
-/// Scalar allocation and tree bounds, applied on input and output.
+/// Scalar allocation and tree bounds, applied to input values.
+///
+/// Output renders every stored value the reader can decode, without these
+/// bounds, so a row written before a limit was lowered, or by host code, is
+/// returned as stored. Response size is bounded by
+/// `RuntimeGraphqlLimits::max_response_bytes`.
 #[derive(Clone, Copy, Debug)]
 pub struct RuntimeScalarLimits {
     pub max_text_bytes: usize,
@@ -96,17 +101,72 @@ fn json_bounds(
     Ok(())
 }
 
-/// Accept a decoded value only if `encode` can return its canonical form,
-/// which is what is stored and later read. Canonicalization can lengthen the
-/// input: a date-time gains fractional digits, and serde_json re-serializes
-/// `1e15` as `1000000000000000.0`. A value bounded only by its input text
-/// could otherwise be stored and then fail every read of its field.
-fn readable(
-    value: RuntimeValue,
-    limits: RuntimeScalarLimits,
-) -> Result<RuntimeValue, RuntimeGraphqlError> {
-    encode(&value, limits)?;
-    Ok(value)
+/// Serialize JSON compactly, stopping as soon as the text exceeds `limit`.
+fn bounded_json_text(value: &serde_json::Value, limit: usize) -> Result<(), RuntimeGraphqlError> {
+    struct Bounded {
+        written: usize,
+        limit: usize,
+    }
+    impl std::io::Write for Bounded {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes.len() > self.limit.saturating_sub(self.written) {
+                return Err(std::io::Error::other("scalar_limit"));
+            }
+            self.written += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    serde_json::to_writer(&mut Bounded { written: 0, limit }, value).map_err(|_| invalid())
+}
+
+/// The document a PostgreSQL `jsonb` round trip reads back. `jsonb` stores
+/// numbers as `numeric` and prints them without exponents, and serde_json
+/// reads an integer token that fits `i64` or `u64` as an integer, printing
+/// every digit: `1e16` (4 bytes) returns as `10000000000000000` (17 bytes).
+/// Other numbers return as the same `f64`, and the reader re-serializes the
+/// document compactly, so `jsonb` spacing and key order do not change its
+/// length. Returns `None` when the round trip changes nothing.
+fn jsonb_read_back(value: &serde_json::Value) -> Option<serde_json::Value> {
+    use serde_json::Value as Json;
+    fn integral(number: &serde_json::Number) -> Option<serde_json::Number> {
+        let x = number.as_f64().filter(|_| number.is_f64())?;
+        // 2^64 and -2^63 are exact in f64.
+        if x.fract() != 0.0
+            || !(-9_223_372_036_854_775_808.0..18_446_744_073_709_551_616.0).contains(&x)
+        {
+            return None;
+        }
+        Some(if x < 0.0 {
+            serde_json::Number::from(x as i64)
+        } else {
+            serde_json::Number::from(x as u64)
+        })
+    }
+    fn changed(value: &Json) -> bool {
+        match value {
+            Json::Number(n) => integral(n).is_some(),
+            Json::Array(values) => values.iter().any(changed),
+            Json::Object(values) => values.values().any(changed),
+            _ => false,
+        }
+    }
+    fn convert(value: &Json) -> Json {
+        match value {
+            Json::Number(n) => integral(n).map_or_else(|| value.clone(), Json::Number),
+            Json::Array(values) => Json::Array(values.iter().map(convert).collect()),
+            Json::Object(values) => Json::Object(
+                values
+                    .iter()
+                    .map(|(key, value)| (key.clone(), convert(value)))
+                    .collect(),
+            ),
+            _ => value.clone(),
+        }
+    }
+    changed(value).then(|| convert(value))
 }
 
 pub(super) fn decode(
@@ -139,13 +199,16 @@ pub(super) fn decode(
             RuntimeValueKind::Uuid => uuid::Uuid::parse_str(v)
                 .map(RuntimeValue::Uuid)
                 .map_err(|_| invalid()),
-            // `parse` also rejects canonical years outside 0001 to 9999.
-            RuntimeValueKind::DateTime if v.len() <= 64 => readable(
-                RuntimeDateTime::parse(v)
-                    .map(RuntimeValue::DateTime)
-                    .map_err(|_| invalid())?,
-                limits,
-            ),
+            // `parse` also rejects canonical years outside 0001 to 9999. The
+            // canonical text is what is stored and returned, and is 27 bytes
+            // even for a shorter input, so it must fit the bound too.
+            RuntimeValueKind::DateTime if v.len() <= 64 => {
+                let value = RuntimeDateTime::parse(v).map_err(|_| invalid())?;
+                if value.as_str().len() > limits.max_text_bytes {
+                    return Err(invalid());
+                }
+                Ok(RuntimeValue::DateTime(value))
+            }
             RuntimeValueKind::Bytes => {
                 let max_encoded = limits
                     .max_decoded_bytes
@@ -166,8 +229,15 @@ pub(super) fn decode(
                 // serde_json's recursion guard also limits parsing before walking.
                 json_number_bounds(v)?;
                 let json = serde_json::from_str(v).map_err(|_| invalid())?;
-                // Encoding applies the tree bounds and bounds the canonical text.
-                readable(RuntimeValue::Json(json), limits)
+                json_bounds(&json, limits)?;
+                // Bound the text every backend reads back, not only the input:
+                // serde_json re-serializes `1e15` as `1000000000000000.0`, and
+                // PostgreSQL returns `1e16` as `10000000000000000`.
+                bounded_json_text(&json, limits.max_text_bytes)?;
+                if let Some(read_back) = jsonb_read_back(&json) {
+                    bounded_json_text(&read_back, limits.max_text_bytes)?;
+                }
+                Ok(RuntimeValue::Json(json))
             }
             // Exact text for the field's definition; never rounded.
             RuntimeValueKind::Decimal(definition) => parse_runtime_decimal(definition, v)
@@ -190,63 +260,53 @@ pub(super) fn decode(
     }
 }
 
-pub(super) fn encode(
-    value: &RuntimeValue,
+/// Whether `value` is a wire form this scalar can carry, input or output.
+///
+/// Output must pass the scalar's validator, and renders stored values without
+/// the input bounds: date-times that earlier releases stored outside the years
+/// 0001 to 9999, and JSON or bytes longer than the input limits. This accepts
+/// those forms. Every runtime input position also decodes with [`decode`],
+/// which applies the bounds.
+pub(super) fn wire_form_valid(
+    kind: RuntimeValueKind,
+    value: &Value,
     limits: RuntimeScalarLimits,
-) -> Result<Value, RuntimeGraphqlError> {
-    let output = match value {
+) -> bool {
+    if decode(kind, value, limits).is_ok() {
+        return true;
+    }
+    let Value::String(text) = value else {
+        return false;
+    };
+    match kind {
+        RuntimeValueKind::DateTime => {
+            text.len() <= 64
+                && RuntimeDateTime::parse_stored(text).is_ok_and(|value| value.as_str() == text)
+        }
+        RuntimeValueKind::Json => serde_json::from_str::<serde_json::Value>(text).is_ok(),
+        RuntimeValueKind::Bytes => STANDARD
+            .decode(text)
+            .is_ok_and(|bytes| STANDARD.encode(bytes) == *text),
+        _ => false,
+    }
+}
+
+/// Render a stored value. Never fails and applies no input bound, so one
+/// stored value cannot fail a whole page or payload.
+pub(super) fn encode(value: &RuntimeValue) -> Value {
+    match value {
         RuntimeValue::Null => Value::Null,
         RuntimeValue::Boolean(v) => Value::Boolean(*v),
         RuntimeValue::Integer(v) => Value::String(v.to_string()),
         RuntimeValue::Float(v) => Value::from(v.get()),
-        RuntimeValue::String(v) => {
-            if v.len() > limits.max_text_bytes {
-                return Err(invalid());
-            }
-            Value::String(v.clone())
-        }
+        RuntimeValue::String(v) => Value::String(v.clone()),
         RuntimeValue::Uuid(v) => Value::String(v.to_string()),
         RuntimeValue::DateTime(v) => Value::String(v.as_str().to_owned()),
         RuntimeValue::Decimal(v) => Value::String(canonical_runtime_decimal(*v)),
-        RuntimeValue::Bytes(v) => {
-            if v.len() > limits.max_decoded_bytes {
-                return Err(invalid());
-            }
-            Value::String(STANDARD.encode(v))
-        }
-        RuntimeValue::Json(v) => {
-            json_bounds(v, limits)?;
-            // Bound serialization itself, not only the allocated result.
-            struct Bounded {
-                bytes: Vec<u8>,
-                limit: usize,
-            }
-            impl std::io::Write for Bounded {
-                fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                    if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
-                        return Err(std::io::Error::other("scalar_limit"));
-                    }
-                    self.bytes.extend_from_slice(bytes);
-                    Ok(bytes.len())
-                }
-                fn flush(&mut self) -> std::io::Result<()> {
-                    Ok(())
-                }
-            }
-            let mut writer = Bounded {
-                bytes: Vec::new(),
-                limit: limits.max_text_bytes,
-            };
-            serde_json::to_writer(&mut writer, v).map_err(|_| invalid())?;
-            Value::String(String::from_utf8(writer.bytes).map_err(|_| invalid())?)
-        }
-    };
-    if let Value::String(v) = &output {
-        if v.len() > limits.max_text_bytes {
-            return Err(invalid());
-        }
+        RuntimeValue::Bytes(v) => Value::String(STANDARD.encode(v)),
+        // `Display` for a JSON value is its compact serialization.
+        RuntimeValue::Json(v) => Value::String(v.to_string()),
     }
-    Ok(output)
 }
 
 pub(super) const fn name(kind: RuntimeValueKind) -> &'static str {
@@ -279,12 +339,7 @@ mod tests {
         ] {
             let v = RuntimeValue::Integer(n);
             assert_eq!(
-                decode(
-                    RuntimeValueKind::Integer,
-                    &encode(&v, limits).unwrap(),
-                    limits
-                )
-                .unwrap(),
+                decode(RuntimeValueKind::Integer, &encode(&v), limits).unwrap(),
                 v
             );
         }
@@ -297,12 +352,12 @@ mod tests {
             RuntimeValue::Json(serde_json::json!({"π": [true, "hello", 9007199254740993u64]})),
         ] {
             assert_eq!(
-                decode(RuntimeValueKind::Json, &encode(&v, limits).unwrap(), limits).unwrap(),
+                decode(RuntimeValueKind::Json, &encode(&v), limits).unwrap(),
                 v
             );
         }
         assert_eq!(
-            encode(&RuntimeValue::Json(serde_json::Value::Null), limits).unwrap(),
+            encode(&RuntimeValue::Json(serde_json::Value::Null)),
             Value::String("null".into())
         );
         assert!(decode(RuntimeValueKind::Integer, &Value::from(1), limits).is_err());
@@ -332,7 +387,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            encode(&d, limits).unwrap(),
+            encode(&d),
             Value::String("2026-10-09T00:00:00.123456Z".into())
         );
         let limits = RuntimeScalarLimits {
@@ -363,12 +418,7 @@ mod tests {
             let value =
                 decode(RuntimeValueKind::Json, &Value::String(text.into()), limits).unwrap();
             assert_eq!(
-                decode(
-                    RuntimeValueKind::Json,
-                    &encode(&value, limits).unwrap(),
-                    limits
-                )
-                .unwrap(),
+                decode(RuntimeValueKind::Json, &encode(&value), limits).unwrap(),
                 value
             );
         }
@@ -377,7 +427,7 @@ mod tests {
     /// what is stored and later returned.
     fn assert_round_trips(kind: RuntimeValueKind, text: &str, limits: RuntimeScalarLimits) {
         let value = decode(kind, &Value::String(text.into()), limits).unwrap();
-        let encoded = encode(&value, limits).unwrap();
+        let encoded = encode(&value);
         assert_eq!(decode(kind, &encoded, limits).unwrap(), value, "{text}");
     }
     #[test]
@@ -461,7 +511,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            encode(&value, limits).unwrap(),
+            encode(&value),
             Value::String("67e55044-10b1-426f-9247-bb680e5fe0c8".into())
         );
         let value = decode(
@@ -471,29 +521,114 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            encode(&value, limits).unwrap(),
+            encode(&value),
             Value::String("2026-10-09T00:01:00.000000Z".into())
         );
         let value = RuntimeValue::Json(serde_json::Value::String("hello".into()));
         assert_eq!(
-            decode(
-                RuntimeValueKind::Json,
-                &encode(&value, limits).unwrap(),
-                limits
-            )
-            .unwrap(),
+            decode(RuntimeValueKind::Json, &encode(&value), limits).unwrap(),
             value
         );
         assert!(decode(RuntimeValueKind::Json, &Value::List(vec![]), limits).is_err());
+    }
+    /// Output renders stored values without the input bounds, and the shared
+    /// scalar validator accepts those forms; input decoding stays strict.
+    #[test]
+    fn stored_values_beyond_input_bounds_are_rendered_and_pass_the_validator() {
+        let limits = RuntimeScalarLimits {
+            max_text_bytes: 8,
+            max_decoded_bytes: 2,
+            ..Default::default()
+        };
+        let long_json = RuntimeValue::Json(serde_json::json!({"long": "text"}));
+        assert_eq!(
+            encode(&long_json),
+            Value::String(r#"{"long":"text"}"#.into())
+        );
+        let bytes = RuntimeValue::Bytes(vec![1, 2, 3, 4]);
+        assert_eq!(encode(&bytes), Value::String("AQIDBA==".into()));
+        for (kind, value) in [
+            (RuntimeValueKind::Json, encode(&long_json)),
+            (RuntimeValueKind::Bytes, encode(&bytes)),
+        ] {
+            assert!(wire_form_valid(kind, &value, limits));
+            assert!(decode(kind, &value, limits).is_err());
+        }
+        let limits = RuntimeScalarLimits::default();
+        for stored in [
+            "+10000-01-01T00:00:00.000000Z",
+            "0000-12-31T23:00:00.000000Z",
+            "9999-12-31T23:59:60.000000Z",
+        ] {
+            let value = Value::String(stored.into());
+            assert!(
+                wire_form_valid(RuntimeValueKind::DateTime, &value, limits),
+                "{stored}"
+            );
+            assert!(
+                decode(RuntimeValueKind::DateTime, &value, limits).is_err(),
+                "{stored}"
+            );
+        }
+        for invalid in ["+10000-01-01T00:00:00Z", "not a date", "2026-01-01"] {
+            assert!(!wire_form_valid(
+                RuntimeValueKind::DateTime,
+                &Value::String(invalid.into()),
+                limits
+            ));
+        }
+        assert!(!wire_form_valid(
+            RuntimeValueKind::Json,
+            &Value::String("{".into()),
+            limits
+        ));
+        assert!(!wire_form_valid(
+            RuntimeValueKind::Bytes,
+            &Value::String("AQI".into()),
+            limits
+        ));
+    }
+    #[test]
+    fn json_inputs_are_bounded_by_their_postgresql_read_back() {
+        // `jsonb` returns `1e16` as `10000000000000000`, read back as an integer.
+        let limits = RuntimeScalarLimits {
+            max_text_bytes: 38,
+            ..Default::default()
+        };
+        assert_round_trips(RuntimeValueKind::Json, "[1e16,-1e16]", limits);
+        let limits = RuntimeScalarLimits {
+            max_text_bytes: 37,
+            ..limits
+        };
         assert!(
-            encode(
-                &RuntimeValue::Json(serde_json::json!({"long":"text"})),
-                RuntimeScalarLimits {
-                    max_text_bytes: 4,
-                    ..limits
-                }
+            decode(
+                RuntimeValueKind::Json,
+                &Value::String("[1e16,-1e16]".into()),
+                limits
             )
             .is_err()
         );
+        // Outside i64/u64 the read back is the same f64, so nothing grows:
+        // the canonical text is `[1e+20,-1e+19,0.5]`.
+        let limits = RuntimeScalarLimits {
+            max_text_bytes: 18,
+            ..limits
+        };
+        assert_round_trips(RuntimeValueKind::Json, "[1e20,-1e19,0.5]", limits);
+        assert_eq!(
+            jsonb_read_back(&serde_json::json!([1e20, -1e19, 0.5, 7])),
+            None
+        );
+        assert_eq!(
+            jsonb_read_back(&serde_json::json!({"a": [1e16, -9.223372036854776e18]})),
+            Some(serde_json::json!({"a": [10_000_000_000_000_000u64, i64::MIN]}))
+        );
+        // Under the default limits about 20 KB of input returns as about 74 KB.
+        let limits = RuntimeScalarLimits::default();
+        let text = format!("[{}]", vec!["1e16"; 4095].join(","));
+        assert!(text.len() <= limits.max_text_bytes);
+        assert!(decode(RuntimeValueKind::Json, &Value::String(text), limits).is_err());
+        let text = format!("[{}]", vec!["1e16"; 3000].join(","));
+        assert_round_trips(RuntimeValueKind::Json, &text, limits);
     }
 }

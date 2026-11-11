@@ -26,13 +26,21 @@ type Backend = PostgresBackend;
 mod owned_postgres;
 
 const TABLE: &str = "readback_samples";
+/// Every field is NOT NULL, so a field error would null the whole connection.
+const STRICT_TABLE: &str = "readback_stricts";
 
-fn field(name: &str, kind: RuntimeValueKind, nullable: bool, key: bool) -> RuntimeField {
+fn field(
+    collection: &str,
+    name: &str,
+    kind: RuntimeValueKind,
+    nullable: bool,
+    key: bool,
+) -> RuntimeField {
     RuntimeField {
         description: None,
         classification: None,
         export: None,
-        id: FieldId::new(format!("sample.{name}")).unwrap(),
+        id: FieldId::new(format!("{collection}.{name}")).unwrap(),
         api_name: name.into(),
         physical_column: name.into(),
         value_kind: kind,
@@ -48,34 +56,60 @@ fn field(name: &str, kind: RuntimeValueKind, nullable: bool, key: bool) -> Runti
         auto_actor: None,
     }
 }
+fn collection(
+    id: &str,
+    type_name: &str,
+    table: &str,
+    fields: Vec<RuntimeField>,
+) -> RuntimeCollection {
+    RuntimeCollection {
+        node_identity: None,
+        live_subscriptions: None,
+        description: None,
+        classification: None,
+        id: CollectionId::new(id).unwrap(),
+        api_type_name: type_name.into(),
+        api_plural_name: format!("{type_name}s"),
+        physical_table: table.into(),
+        primary_key: vec![FieldId::new(format!("{id}.id")).unwrap()],
+        append_only: false,
+        retention_purge: false,
+        fields,
+        relations: vec![],
+        indexes: vec![],
+        composite_unique: vec![],
+        default_order: vec![],
+        label_fields: Vec::new(),
+        search: None,
+    }
+}
 fn definition() -> RuntimeSchema {
     RuntimeSchema {
         repository_only: false,
         format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
-        collections: vec![RuntimeCollection {
-            node_identity: None,
-            live_subscriptions: None,
-            description: None,
-            classification: None,
-            id: CollectionId::new("sample").unwrap(),
-            api_type_name: "Sample".into(),
-            api_plural_name: "Samples".into(),
-            physical_table: TABLE.into(),
-            primary_key: vec![FieldId::new("sample.id").unwrap()],
-            append_only: false,
-            retention_purge: false,
-            fields: vec![
-                field("id", RuntimeValueKind::Integer, false, true),
-                field("at", RuntimeValueKind::DateTime, true, false),
-                field("document", RuntimeValueKind::Json, true, false),
-            ],
-            relations: vec![],
-            indexes: vec![],
-            composite_unique: vec![],
-            default_order: vec![],
-            label_fields: Vec::new(),
-            search: None,
-        }],
+        collections: vec![
+            collection(
+                "sample",
+                "Sample",
+                TABLE,
+                vec![
+                    field("sample", "id", RuntimeValueKind::Integer, false, true),
+                    field("sample", "at", RuntimeValueKind::DateTime, true, false),
+                    field("sample", "document", RuntimeValueKind::Json, true, false),
+                ],
+            ),
+            collection(
+                "strict",
+                "Strict",
+                STRICT_TABLE,
+                vec![
+                    field("strict", "id", RuntimeValueKind::Integer, false, true),
+                    // Sortable, so a page can be ordered and resumed by it.
+                    field("strict", "at", RuntimeValueKind::DateTime, false, true),
+                    field("strict", "document", RuntimeValueKind::Json, false, false),
+                ],
+            ),
+        ],
     }
 }
 
@@ -102,18 +136,19 @@ impl RuntimeWriteAuthority<Backend> for Open {
         _: &'a mut MutationContext<'_, Backend>,
     ) -> BoxFuture<'a, Result<RuntimeWriteGrant, RuntimeMutationError>> {
         Box::pin(async move {
-            let collection = check.collection();
-            let fields = ["sample.id", "sample.at", "sample.document"]
-                .map(|id| {
-                    self.0
-                        .resolve_field(collection, &FieldId::new(id).unwrap())
-                        .unwrap()
-                })
-                .to_vec();
-            RuntimeWriteGrant::new(
-                self.0.resolve_projection(collection, &fields).unwrap(),
-                None,
-            )
+            let handle = check.collection();
+            let fields = self
+                .0
+                .schema()
+                .collections
+                .iter()
+                .find(|c| c.id == *handle.id())
+                .unwrap()
+                .fields
+                .iter()
+                .map(|f| self.0.resolve_field(handle, &f.id).unwrap())
+                .collect::<Vec<_>>();
+            RuntimeWriteGrant::new(self.0.resolve_projection(handle, &fields).unwrap(), None)
         })
     }
     fn authorize_preimage<'a>(
@@ -165,7 +200,7 @@ impl Fixture {
         let target = schema
             .physical_schema::<Backend>(Default::default())
             .unwrap();
-        let ownership = ManagedTableSet::new([TABLE.to_owned()]).unwrap();
+        let ownership = ManagedTableSet::new([TABLE.to_owned(), STRICT_TABLE.to_owned()]).unwrap();
         let plan = db
             .schema()
             .plan_owned_migration(
@@ -254,6 +289,19 @@ impl Fixture {
         )
         .await
     }
+    /// One page of the NOT NULL collection, ordered by its date-time.
+    async fn strict_page(&self, after: Option<&str>) -> serde_json::Value {
+        self.execute(
+            "query($after: String) { stricts(first: 1, after: $after, \
+               orderBy: [{field: at, direction: ASC}, {field: id, direction: ASC}]) { \
+               edges { node { id at document } } pageInfo { hasNextPage endCursor } } }",
+            serde_json::json!({ "after": after }),
+        )
+        .await
+    }
+    async fn sql(&self, sql: &str) {
+        Backend::fetch_rows(self.db.pool(), sql, &[]).await.unwrap();
+    }
     async fn count(&self) -> i64 {
         let rows = Backend::fetch_rows(
             self.db.pool(),
@@ -283,6 +331,11 @@ impl Fixture {
 fn expanding_document(count: usize) -> String {
     format!("[{}]", vec!["1e15"; count].join(","))
 }
+/// PostgreSQL `jsonb` returns `1e16` as `10000000000000000`, which serde_json
+/// reads back as an integer and prints in full.
+fn integral_document(count: usize) -> String {
+    format!("[{}]", vec!["1e16"; count].join(","))
+}
 
 #[tokio::test]
 async fn values_that_cannot_be_read_back_are_rejected_before_any_write() {
@@ -297,6 +350,8 @@ async fn values_that_cannot_be_read_back_are_rejected_before_any_write() {
         serde_json::json!({"id": "5", "at": "9999-12-31T23:59:60Z"}),
         // About 20 KiB of input becomes about 76 KiB of output.
         serde_json::json!({"id": "4", "document": expanding_document(4000)}),
+        // About 20 KiB of input returns from PostgreSQL as about 74 KiB.
+        serde_json::json!({"id": "6", "document": integral_document(4095)}),
     ] {
         let response = f.create(input.clone()).await;
         assert_eq!(
@@ -344,52 +399,186 @@ async fn boundary_values_are_stored_and_read_back() {
         response["data"]["createSample"]["record"]["document"],
         serde_json::json!(canonical)
     );
+    let response = f
+        .create(serde_json::json!({"id": "5", "document": integral_document(3000)}))
+        .await;
+    assert_eq!(response["errors"], serde_json::json!([]), "{response}");
     let page = f.list().await;
     assert_eq!(page["errors"], serde_json::json!([]), "{page}");
     let edges = page["data"]["samples"]["edges"].as_array().unwrap();
-    assert_eq!(edges.len(), 4, "{page}");
+    assert_eq!(edges.len(), 5, "{page}");
     for (edge, (id, _, at)) in edges.iter().zip(expected) {
         assert_eq!(edge["node"]["id"], serde_json::json!(id));
         assert_eq!(edge["node"]["at"], serde_json::json!(at));
     }
     assert_eq!(edges[3]["node"]["document"], serde_json::json!(canonical));
+    // SQLite returns `1e+16`; PostgreSQL returns `10000000000000000`. Either
+    // text is the same numbers, and either can be sent back as input.
+    let read_back = edges[4]["node"]["document"].as_str().unwrap().to_owned();
+    let numbers = serde_json::from_str::<Vec<serde_json::Value>>(&read_back).unwrap();
+    assert_eq!(numbers.len(), 3000);
+    assert!(
+        numbers.iter().all(|n| n.as_f64() == Some(1e16)),
+        "{read_back:.80}"
+    );
+    let response = f
+        .create(serde_json::json!({"id": "6", "document": read_back}))
+        .await;
+    assert_eq!(response["errors"], serde_json::json!([]), "{response}");
     f.finish().await;
 }
 
-/// Earlier releases could store a date-time outside 0001 to 9999 as SQLite
-/// text, including a signed extended year that strict RFC 3339 cannot parse.
-/// Such a row no longer fails the whole page: other rows and fields are
-/// returned, and only the out-of-range nullable field reports an error,
-/// because runtime GraphQL output must also be valid scalar input.
-#[cfg(feature = "sqlite")]
+/// Earlier releases, or host code, could store a date-time outside 0001 to
+/// 9999 or a JSON document longer than the input bound. Output renders such
+/// values as stored, even in NOT NULL fields where a field error would null
+/// the whole connection, and a page resumes across them by cursor.
 #[tokio::test]
-async fn previously_stored_out_of_range_years_fail_only_their_field_on_sqlite() {
-    let f = Fixture::new("scalar-readback-legacy").await;
-    Backend::fetch_rows(
-        f.db.pool(),
-        &format!(
-            "INSERT INTO {TABLE} (id, at, document) VALUES \
-             (1, '+10000-01-01T00:00:00.000000Z', '[1]'), \
-             (2, '0000-12-31T23:00:00.000000Z', '[2]'), \
-             (3, '2026-01-01T00:00:00.000000Z', '[3]')"
+async fn stored_values_beyond_input_bounds_are_returned_and_paged_as_stored() {
+    let f = Fixture::new("scalar-readback-stored").await;
+    // About 70 KB, beyond the default 64 KiB input bound.
+    let long = format!("[\"{}\"]", "x".repeat(70_000));
+    #[cfg(feature = "sqlite")]
+    let rows = [
+        (
+            "1",
+            "2026-01-01T00:00:00.000000Z",
+            "2026-01-01T00:00:00.000000Z",
         ),
-        &[],
-    )
-    .await
-    .unwrap();
-    let page = f.list().await;
-    assert_eq!(page["errors"].as_array().unwrap().len(), 2, "{page}");
-    let edges = page["data"]["samples"]["edges"].as_array().unwrap();
-    assert_eq!(edges.len(), 3, "{page}");
-    for (edge, (id, document)) in edges.iter().zip([("1", "[1]"), ("2", "[2]"), ("3", "[3]")]) {
-        assert_eq!(edge["node"]["id"], serde_json::json!(id));
-        assert_eq!(edge["node"]["document"], serde_json::json!(document));
+        (
+            "2",
+            "+10000-01-01T00:00:00.000000Z",
+            "+10000-01-01T00:00:00.000000Z",
+        ),
+        (
+            "3",
+            "0000-12-31T23:00:00.000000Z",
+            "0000-12-31T23:00:00.000000Z",
+        ),
+        (
+            "4",
+            "9999-12-31T23:59:60.000000Z",
+            "9999-12-31T23:59:60.000000Z",
+        ),
+    ];
+    // PostgreSQL refuses year 0000 and stores the final leap second of 9999
+    // as year 10000, which its reader returns as an extended year.
+    #[cfg(feature = "postgres")]
+    let rows = [
+        ("1", "2026-01-01 00:00:00+00", "2026-01-01T00:00:00.000000Z"),
+        (
+            "2",
+            "10000-01-01 00:00:00+00",
+            "+10000-01-01T00:00:00.000000Z",
+        ),
+        ("4", "9999-12-31T23:59:60Z", "+10000-01-01T00:00:00.000000Z"),
+    ];
+    for (id, stored, _) in &rows {
+        f.sql(&format!(
+            "INSERT INTO {STRICT_TABLE} (id, at, document) VALUES ({id}, '{stored}', '{long}')"
+        ))
+        .await;
     }
-    assert_eq!(edges[0]["node"]["at"], serde_json::Value::Null);
-    assert_eq!(edges[1]["node"]["at"], serde_json::Value::Null);
+    let page = f
+        .execute(
+            "{ stricts { edges { node { id at document } } } }",
+            serde_json::json!({}),
+        )
+        .await;
     assert_eq!(
-        edges[2]["node"]["at"],
-        serde_json::json!("2026-01-01T00:00:00.000000Z")
+        page["errors"],
+        serde_json::json!([]),
+        "{:.300}",
+        page.to_string()
     );
+    let edges = page["data"]["stricts"]["edges"].as_array().unwrap();
+    assert_eq!(edges.len(), rows.len());
+    for (edge, (id, _, at)) in edges.iter().zip(&rows) {
+        assert_eq!(edge["node"]["id"], serde_json::json!(id));
+        assert_eq!(edge["node"]["at"], serde_json::json!(at));
+        assert_eq!(edge["node"]["document"], serde_json::json!(long));
+    }
+    // Resume one row at a time; each cursor carries the stored date-time.
+    let (mut after, mut seen) = (None::<String>, Vec::new());
+    loop {
+        let page = f.strict_page(after.as_deref()).await;
+        assert_eq!(
+            page["errors"],
+            serde_json::json!([]),
+            "{:.300}",
+            page.to_string()
+        );
+        let connection = &page["data"]["stricts"];
+        for edge in connection["edges"].as_array().unwrap() {
+            seen.push(edge["node"]["id"].as_str().unwrap().to_owned());
+        }
+        if connection["pageInfo"]["hasNextPage"] != serde_json::json!(true) {
+            break;
+        }
+        after = Some(
+            connection["pageInfo"]["endCursor"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        );
+        assert!(seen.len() <= rows.len(), "{seen:?}");
+    }
+    seen.sort();
+    let mut expected = rows
+        .iter()
+        .map(|(id, _, _)| id.to_string())
+        .collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(seen, expected);
     f.finish().await;
+}
+
+/// A deserialized out-of-range date-time can be read and compared, but runtime
+/// mutations refuse to write it.
+#[test]
+fn deserialized_out_of_range_date_times_are_never_written() {
+    let schema = definition().validate().unwrap();
+    let sample = schema
+        .resolve_collection(&CollectionId::new("sample").unwrap())
+        .unwrap();
+    let field = |name: &str| {
+        schema
+            .resolve_field(&sample, &FieldId::new(format!("sample.{name}")).unwrap())
+            .unwrap()
+    };
+    for stored in [
+        "+10000-01-01T00:00:00.000000Z",
+        "0000-12-31T23:00:00.000000Z",
+        "9999-12-31T23:59:60.000000Z",
+    ] {
+        let at: RuntimeDateTime = serde_json::from_str(&format!("\"{stored}\"")).unwrap();
+        let values = [
+            (field("id"), RuntimeValue::Integer(1)),
+            (field("at"), RuntimeValue::DateTime(at.clone())),
+        ];
+        let error = schema
+            .runtime_create_request(&sample, &values, None, Default::default())
+            .unwrap_err();
+        assert_eq!(
+            error.code(),
+            RuntimeMutationErrorCode::InvalidInput,
+            "{stored}"
+        );
+        let key = schema
+            .runtime_key(&sample, &[(field("id"), RuntimeValue::Integer(1))])
+            .unwrap();
+        let error = schema
+            .runtime_update_request(
+                key,
+                &[(field("at"), RuntimeValue::DateTime(at))],
+                None,
+                None,
+                Default::default(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.code(),
+            RuntimeMutationErrorCode::InvalidInput,
+            "{stored}"
+        );
+    }
 }

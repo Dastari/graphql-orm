@@ -1064,7 +1064,7 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
                     continue;
                 }
                 let value = match record.state(field).map_err(|_| invalid())? {
-                    RuntimeFieldState::Value(v) => scalar::encode(v, self.limits.scalars)?,
+                    RuntimeFieldState::Value(v) => scalar::encode(v),
                     RuntimeFieldState::Null => Value::Null,
                     RuntimeFieldState::Unloaded => {
                         return Err(RuntimeGraphqlError::new("projection_mismatch"));

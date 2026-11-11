@@ -61,6 +61,9 @@ def check_orm_split(old, new):
                 .replace("--features postgres,runtime-graphql --lib --test runtime_graphql --test runtime_mutations -- --test-threads=1",
                          "--features postgres,runtime-graphql --lib --test runtime_graphql --test runtime_mutations --test runtime_search_graphql --test runtime_search_writes --test runtime_search_ir -- --test-threads=1")
                 .replace("--test runtime_search_graphql", "--test runtime_live --test runtime_search_graphql")
+                # Runtime operation assurance coverage was added after the qualified snapshot.
+                .replace("--test runtime_search_writes -- --test-threads=1",
+                         "--test runtime_search_writes --test runtime_operation_assurance -- --test-threads=1")
                 # Runtime scalar read-back coverage was added after the qualified snapshot.
                 .replace("--features sqlite,runtime-graphql --lib --test runtime_graphql --test runtime_mutations ",
                          "--features sqlite,runtime-graphql --lib --test runtime_graphql --test runtime_mutations --test runtime_scalar_readback ")

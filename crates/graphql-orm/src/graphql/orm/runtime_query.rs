@@ -1577,7 +1577,7 @@ fn decode_cursor(
     Ok((envelope.values, envelope.score))
 }
 
-pub(crate) fn value_bind(value: &RuntimeValue) -> Option<SqlValue> {
+pub(crate) fn value_bind(backend: DatabaseBackend, value: &RuntimeValue) -> Option<SqlValue> {
     match value {
         RuntimeValue::Null => None,
         RuntimeValue::Boolean(value) => Some(SqlValue::Bool(*value)),
@@ -1587,7 +1587,15 @@ pub(crate) fn value_bind(value: &RuntimeValue) -> Option<SqlValue> {
         RuntimeValue::Uuid(value) => Some(SqlValue::Uuid(*value)),
         RuntimeValue::Json(value) => Some(SqlValue::Json(value.clone())),
         RuntimeValue::Bytes(value) => Some(SqlValue::Bytes(value.clone())),
-        RuntimeValue::DateTime(value) => Some(SqlValue::String(value.as_str().to_string())),
+        // A stored value read back with a year above 9999, for example as a
+        // cursor or comparison value, is canonical `+10000-…` text. PostgreSQL
+        // casts the unsigned spelling `10000-…`; SQLite compares the stored text.
+        RuntimeValue::DateTime(value) => {
+            Some(SqlValue::String(match value.as_str().strip_prefix('+') {
+                Some(unsigned) if backend == DatabaseBackend::Postgres => unsigned.to_owned(),
+                _ => value.as_str().to_owned(),
+            }))
+        }
         // A scaled `i64` on SQLite and native `NUMERIC` on PostgreSQL.
         RuntimeValue::Decimal(value) => Some(SqlValue::Decimal(*value)),
     }
@@ -1650,7 +1658,7 @@ fn render_scoped(
         PredicateExpr::Compare { field, op, value } => {
             let column = ordered_column(backend, field);
             let bind = placeholder(backend, values.len() + 1, field.value_kind());
-            values.push(value_bind(value).expect("validated non-null literal"));
+            values.push(value_bind(backend, value).expect("validated non-null literal"));
             use RuntimeScalarOperator as O;
             match op {
                 O::Eq => format!("{column} = {bind}"),
@@ -1675,7 +1683,8 @@ fn render_scoped(
                     }
                     _ => {
                         let second = placeholder(backend, values.len() + 1, field.value_kind());
-                        values.push(value_bind(value).expect("validated non-null literal"));
+                        values
+                            .push(value_bind(backend, value).expect("validated non-null literal"));
                         // Starting just after the value yields the empty suffix.
                         // A negative-length start alone instead selects the whole
                         // value when the operand is empty (SQLite treats -0 as 0).
@@ -1695,7 +1704,7 @@ fn render_scoped(
             let mut binds = Vec::new();
             for value in operands {
                 binds.push(placeholder(backend, values.len() + 1, field.value_kind()));
-                values.push(value_bind(value).expect("validated non-null literal"));
+                values.push(value_bind(backend, value).expect("validated non-null literal"));
             }
             format!(
                 "{column} {} ({})",
@@ -1710,9 +1719,9 @@ fn render_scoped(
         PredicateExpr::Between { field, low, high } => {
             let column = ordered_column(backend, field);
             let low_bind = placeholder(backend, values.len() + 1, field.value_kind());
-            values.push(value_bind(low).expect("validated"));
+            values.push(value_bind(backend, low).expect("validated"));
             let high_bind = placeholder(backend, values.len() + 1, field.value_kind());
-            values.push(value_bind(high).expect("validated"));
+            values.push(value_bind(backend, high).expect("validated"));
             format!("{column} BETWEEN {low_bind} AND {high_bind}")
         }
         PredicateExpr::And(children) => format!(
@@ -1865,7 +1874,7 @@ fn cursor_equal(
         format!("{column} IS NULL")
     } else {
         let bind = placeholder(backend, values.len() + 1, term.field.value_kind());
-        values.push(value_bind(value).expect("validated cursor"));
+        values.push(value_bind(backend, value).expect("validated cursor"));
         format!("{column} = {bind}")
     }
 }
@@ -1884,7 +1893,7 @@ fn cursor_compare(
         },
         value => {
             let bind = placeholder(backend, values.len() + 1, term.field.value_kind());
-            values.push(value_bind(value).expect("validated cursor"));
+            values.push(value_bind(backend, value).expect("validated cursor"));
             let operator = if term.direction == RuntimeOrderDirection::Asc {
                 ">"
             } else {

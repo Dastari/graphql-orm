@@ -979,7 +979,7 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                                     Name::new("changeKind"),
                                     Value::Enum(Name::new("DIRECT")),
                                 );
-                                let id = match event_identity(&key, limits.scalars) {
+                                let id = match event_identity(&key) {
                                     Ok(value) => value,
                                     Err(_) => {
                                         return Some((
@@ -1001,8 +1001,7 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                                             .as_str();
                                         let value = match value {
                                             RuntimeValue::Integer(v) => Value::Number((*v).into()),
-                                            v => scalar::encode(v, limits.scalars)
-                                                .unwrap_or(Value::Null),
+                                            v => scalar::encode(v),
                                         };
                                         output.insert(Name::new(name), value);
                                     }
@@ -1396,14 +1395,11 @@ pub(super) fn decode_key_value(
     scalar::decode(kind, value, limits)
 }
 
-fn event_identity(
-    key: &RuntimeKey,
-    limits: RuntimeScalarLimits,
-) -> Result<Value, RuntimeGraphqlError> {
+fn event_identity(key: &RuntimeKey) -> Result<Value, RuntimeGraphqlError> {
     if key.fields().len() == 1 {
         return match &key.fields()[0].1 {
             RuntimeValue::Integer(v) => Ok(Value::Number((*v).into())),
-            value => scalar::encode(value, limits),
+            value => Ok(scalar::encode(value)),
         };
     }
     let values = key

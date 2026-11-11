@@ -312,7 +312,31 @@ fn date_time_canonical_form_stays_within_years_0001_to_9999() {
             "{input}"
         );
     }
-    assert!(serde_json::from_str::<RuntimeDateTime>(r#""9999-12-31T23:59:59.9999995Z""#).is_err());
+    assert!(
+        RuntimeDateTime::parse("2026-01-01T00:00:00Z")
+            .unwrap()
+            .is_portable()
+    );
+}
+
+/// Deserialization accepts a value a backend may already hold, so records and
+/// cursors that carry it round-trip; such a value is reported as not portable.
+#[test]
+fn deserialized_date_times_keep_stored_out_of_range_values() {
+    for stored in [
+        "+10000-01-01T00:00:00.000000Z",
+        "0000-12-31T23:00:00.000000Z",
+        "9999-12-31T23:59:60.000000Z",
+    ] {
+        let value: RuntimeDateTime = serde_json::from_str(&format!("\"{stored}\"")).unwrap();
+        assert_eq!(value.as_str(), stored);
+        assert!(!value.is_portable(), "{stored}");
+        let record = RuntimeValue::DateTime(value);
+        let text = serde_json::to_string(&record).unwrap();
+        assert_eq!(serde_json::from_str::<RuntimeValue>(&text).unwrap(), record);
+        assert!(RuntimeDateTime::parse(stored).is_err(), "{stored}");
+    }
+    assert!(serde_json::from_str::<RuntimeDateTime>(r#""not a date""#).is_err());
 }
 
 #[test]

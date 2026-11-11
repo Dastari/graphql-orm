@@ -11,10 +11,9 @@ supersedes: []
 # `graphql-orm`
 
 Version 0.123.0 makes runtime GraphQL reject date-time and JSON input whose
-canonical form cannot be read back: date-times that rounding or offsets move
-outside the years 0001 to 9999, and JSON whose re-serialized text exceeds the
-scalar text bound. Upgrade ORM/macros together; see the
-[root migration guide](../../MIGRATION.md#01230-runtime-date-time-and-json-values-must-be-readable).
+canonical form cannot be read back, and return every stored value the reader
+can decode without the input limits. Upgrade ORM/macros together; see the
+[root migration guide](../../MIGRATION.md#01230-runtime-date-time-and-json-input-must-be-readable).
 
 Version 0.122.0 extends operation assurance to runtime GraphQL roots,
 unregistered mutations under a default policy, Federation entity resolvers and

@@ -520,7 +520,7 @@ fn bind_relation_key(
     for ((field, column), value) in join.source().iter().zip(key) {
         let bind = placeholder(backend, values.len() + 1, field.value_kind());
         values.push(
-            value_bind(value).ok_or_else(|| {
+            value_bind(backend, value).ok_or_else(|| {
                 RuntimeRelationError::new(RuntimeRelationErrorCode::InvalidParent)
             })?,
         );
@@ -1171,7 +1171,7 @@ fn bind_key(
     let mut clauses = Vec::with_capacity(key.len());
     for (field, value) in target_fields.iter().zip(key) {
         let bind = placeholder(backend, values.len() + 1, field.value_kind());
-        let value = value_bind(value)
+        let value = value_bind(backend, value)
             .ok_or_else(|| RuntimeRelationError::new(RuntimeRelationErrorCode::InvalidParent))?;
         values.push(value);
         clauses.push(format!(

@@ -283,20 +283,29 @@ rather than silently falling back to a rounded floating-point value. JSON string
 fields can contain JSON null. Unloaded fields are errors, never SQL NULL.
 
 Input is accepted only when its canonical form, the form that is stored and
-returned, can be read back. serde_json re-serializes some numbers at greater
-length, for example `1e15` as `1000000000000000.0`, so `max_text_bytes` bounds
-the canonical JSON text as well as the input text. A date-time is rejected when
-offset normalization or microsecond rounding moves it outside the years 0001 to
-9999: `9999-12-31T23:59:59.9999995Z` rounds into year 10000, and
-`0001-01-01T00:00:00+01:00` is in year 0000 in UTC. The leap second
-`9999-12-31T23:59:60Z` is also rejected, because PostgreSQL stores it as year
-10000. These are rejected with `invalid_graphql_input` before any write;
-PostgreSQL refuses the first two forms.
-Earlier releases could store such a date-time as SQLite text, such as
-`+10000-01-01T00:00:00.000000Z`. The SQLite reader still decodes those rows,
-so they no longer fail every page that contains them. Because output must also
-be valid scalar input, the out-of-range field itself reports an error until the
-row is corrected.
+returned, can be read back on every backend. `max_text_bytes` bounds the input
+text and also the JSON text each backend returns: serde_json re-serializes
+`1e15` as `1000000000000000.0`, and PostgreSQL `jsonb` returns `1e16` as
+`10000000000000000`, which is read back as an integer and printed in full. The
+reader re-serializes JSON compactly, so `jsonb` spacing and key order do not
+count. A date-time is rejected when offset normalization or microsecond
+rounding moves it outside the years 0001 to 9999: `9999-12-31T23:59:59.9999995Z`
+rounds into year 10000, and `0001-01-01T00:00:00+01:00` is in year 0000 in UTC.
+The leap second `9999-12-31T23:59:60Z` is also rejected, because PostgreSQL
+stores it as year 10000. These are rejected with `invalid_graphql_input` before
+any write.
+
+Output renders every stored value the reader can decode, without the input
+bounds, and the scalar validators accept those forms. A row written by an
+earlier release, by host code or under a higher limit is returned as stored:
+a date-time such as `+10000-01-01T00:00:00.000000Z` or
+`0000-12-31T23:00:00.000000Z`, and JSON, bytes or strings longer than the input
+limits. `max_response_bytes` still bounds the whole response. Such a value is
+also a valid cursor position, so pages resume across it. Clients cannot send an
+out-of-range date-time back as input, and runtime mutations refuse to write one
+from host code. Every runtime input position decodes with the input bounds;
+host fields that accept a runtime scalar must apply their own bounds, because
+the scalar validator alone also accepts stored forms.
 
 TypeScript scalar mappings are strings for Int64/JSON/UUID/Bytes/DateTime. Use
 BigInt for integers, exact JSON parsing where number fidelity matters, Uint8Array

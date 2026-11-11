@@ -1236,10 +1236,7 @@ async fn execute_once<B: RuntimeMutationBackend>(
             .state(field)
             .map_err(|_| committed_error("mutation_payload_failed"))?
         {
-            RuntimeFieldState::Value(value) => {
-                super::scalar::encode(value, prepared.limits.scalars)
-                    .map_err(|_| committed_error("mutation_payload_failed"))?
-            }
+            RuntimeFieldState::Value(value) => super::scalar::encode(value),
             RuntimeFieldState::Null => Value::Null,
             RuntimeFieldState::Unloaded => return Err(committed_error("mutation_payload_failed")),
         };
