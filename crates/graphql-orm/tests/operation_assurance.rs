@@ -97,13 +97,43 @@ impl HostGuardedMutations {
     }
 }
 
-const HOST_GUARDED: [&str; 3] = ["hostGuarded", "wrongKind", "eitherGuard"];
+/// A root-level guard still applies to resolvers without their own guard, and
+/// `skip = false` exposes the resolver with its assurance guard.
+#[derive(Default)]
+struct RootGuardedMutations;
+
+#[graphql_orm_custom_operations(kind = "mutation")]
+#[graphql_orm::async_graphql::Object(guard = "HostGuard")]
+impl RootGuardedMutations {
+    /// Runs under the root's host guard.
+    async fn root_guarded(&self) -> bool {
+        true
+    }
+
+    /// Explicitly not skipped.
+    #[graphql(skip = false)]
+    async fn not_skipped(&self) -> bool {
+        true
+    }
+}
+
+const HOST_GUARDED: [&str; 5] = [
+    "hostGuarded",
+    "wrongKind",
+    "eitherGuard",
+    "rootGuarded",
+    "notSkipped",
+];
 
 schema_roots! {
     backend: "sqlite",
     entities: [AssuranceRecord],
     extra_mutation_types: [CustomAssuranceMutations],
-    described_mutation_types: [DescribedAssuranceMutations, HostGuardedMutations],
+    described_mutation_types: [
+        DescribedAssuranceMutations,
+        HostGuardedMutations,
+        RootGuardedMutations,
+    ],
 }
 
 #[derive(Clone)]
@@ -169,6 +199,8 @@ fn registry() -> OperationAssuranceRegistry {
         ("custom:host-guarded:v1", "hostGuarded"),
         ("custom:wrong-kind:v1", "wrongKind"),
         ("custom:either-guard:v1", "eitherGuard"),
+        ("custom:root-guarded:v1", "rootGuarded"),
+        ("custom:not-skipped:v1", "notSkipped"),
     ] {
         builder
             .register_custom(
@@ -329,6 +361,8 @@ async fn strict_schema_build_refuses_unregistered_mutation_roots()
         [
             "Mutation.eitherGuard",
             "Mutation.hostGuarded",
+            "Mutation.notSkipped",
+            "Mutation.rootGuarded",
             "Mutation.rotateKey",
             "Mutation.wrongKind",
         ]

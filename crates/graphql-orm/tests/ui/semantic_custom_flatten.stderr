@@ -1,0 +1,5 @@
+error: described custom roots do not support `#[graphql(flatten)]`: the flattened fields would be served without this resolver's assurance guard
+  --> tests/ui/semantic_custom_flatten.rs:19:15
+   |
+19 |     #[graphql(flatten)]
+   |               ^^^^^^^

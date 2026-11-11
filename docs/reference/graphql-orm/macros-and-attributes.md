@@ -664,8 +664,12 @@ Each described root, except `#[graphql(entity)]` resolvers, also gets
 `DeclaredAssuranceGuard::new(GraphqlOperationKind::…)` with the root's own kind,
 so it enforces an installed `AssuranceEnforcement`. A root's own `guard` is kept
 and composed after it, as `DeclaredAssuranceGuard::new(…).and(<host guard>)`.
-A described root takes a single `#[graphql(...)]` attribute; async-graphql reads
-only the first, so the macro rejects others. See
+A root-level `guard` on the `Object` or `Subscription` attribute is composed the
+same way into resolvers without their own guard. A described root takes a single
+`#[graphql(...)]` attribute; async-graphql reads only the first, so the macro
+rejects others. It also rejects `flatten` and `derived(...)` on described
+resolvers, and `rename_fields` on the root attribute, because each would serve a
+field without its guard or under an uncatalogued coordinate. See
 [operation assurance](../../architecture/operation-assurance.md).
 
 Custom scalar and enum result leaves carry an explicit project-neutral

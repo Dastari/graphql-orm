@@ -98,8 +98,13 @@ async fn rotate_credential(&self) -> bool {
 `#[graphql_orm_custom_operations]` adds this guard, with the root's own kind,
 to each described root. A host guard is composed after it as
 `DeclaredAssuranceGuard::new(…).and(HostGuard)`, so the host guard cannot
-replace, weaken or misclassify it. A described root takes a single
-`#[graphql(...)]` attribute.
+replace, weaken or misclassify it. A guard on the root's `Object` or
+`Subscription` attribute is composed the same way into resolvers without
+their own guard. A described root takes a single `#[graphql(...)]` attribute.
+It cannot use `flatten`, which serves another object's fields without the
+resolver's guard, or `derived`, which exposes the resolver under an
+uncatalogued name. The root's attribute cannot use `rename_fields`; name
+resolvers explicitly instead.
 
 Generated query, mutation, and subscription resolvers call the same enforcement
 hook automatically. Without installed enforcement the call is a no-op, which

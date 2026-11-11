@@ -36,9 +36,14 @@ Behaviour changes when an `AssuranceEnforcement` is installed:
   `DeclaredAssuranceGuard::new(GraphqlOperationKind::…)` with the root's own
   kind on every described root. An existing `guard` is kept and composed after
   it, as `DeclaredAssuranceGuard::new(…).and(<host guard>)`, so a host guard
-  cannot replace or weaken the assurance check. A described root must use a
-  single `#[graphql(...)]` attribute; async-graphql ignores any others, and the
-  macro now rejects them.
+  cannot replace or weaken the assurance check. A guard on the root's
+  `Object`/`Subscription` attribute is composed the same way into resolvers
+  without their own guard. A described root must use a single
+  `#[graphql(...)]` attribute; async-graphql ignores any others, and the macro
+  now rejects them. Described resolvers also cannot use `flatten` or
+  `derived(...)`, and the root attribute cannot use `rename_fields`. Describe
+  flattened or derived fields as resolvers of their own, and name renamed
+  resolvers with `#[graphql(name = "...")]`.
 
 To upgrade:
 
