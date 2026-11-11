@@ -377,6 +377,13 @@ async fn fixture_with_clock(clock: Arc<dyn Clock>) -> Fixture {
         .apply_migration(&plan, ApplyOptions::default())
         .await
         .expect("AI schema migration should apply to in-memory SQLite");
+    graphql_orm_ai::OrmAiRuntimeRecoveryService::new(
+        database.clone(),
+        std::sync::Arc::new(agql_auth::SystemClock),
+    )
+    .readiness_proof()
+    .await
+    .expect("a test store should record its first live epoch");
     let configuration = OrmAiConfigurationService::new(
         database.clone(),
         Arc::new(AllowConfiguration),

@@ -144,6 +144,13 @@ async fn provider_session_fixture() -> ProviderSessionFixture {
         .apply_migration(&plan, ApplyOptions::default())
         .await
         .expect("AI schema migration should apply");
+    graphql_orm_ai::OrmAiRuntimeRecoveryService::new(
+        database.clone(),
+        std::sync::Arc::new(agql_auth::SystemClock),
+    )
+    .readiness_proof()
+    .await
+    .expect("a test store should record its first live epoch");
 
     let owner = principal("provider-session-owner");
     let other = principal("provider-session-other");
@@ -404,6 +411,13 @@ async fn provider_session_schema_is_additive_and_idempotent_on_sqlite() {
         .apply_migration(&initial, ApplyOptions::default())
         .await
         .expect("provider-session schema should apply");
+    graphql_orm_ai::OrmAiRuntimeRecoveryService::new(
+        database.clone(),
+        std::sync::Arc::new(agql_auth::SystemClock),
+    )
+    .readiness_proof()
+    .await
+    .expect("a test store should record its first live epoch");
 
     let repeated = database
         .schema()

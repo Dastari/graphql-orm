@@ -2472,6 +2472,9 @@ fn map_transaction(error: TransactionError) -> AiError {
 }
 
 fn map_orm(error: OrmPublicError) -> AiError {
+    if crate::orm_runtime_recovery::is_epoch_not_live(&error) {
+        return AiError::RuntimeNotReady;
+    }
     match error.code {
         OrmErrorCode::InvalidInput
         | OrmErrorCode::CursorInvalid
@@ -2850,7 +2853,9 @@ mod tests {
     }
 
     async fn fixture_with_wait_policy(may_continue: bool) -> Fixture {
-        fixture_on(migrated_database().await, may_continue, None).await
+        let database = migrated_database().await;
+        crate::orm_runtime_recovery::open_test_epoch(&database).await;
+        fixture_on(database, may_continue, None).await
     }
 
     async fn fixture_on(
@@ -3021,6 +3026,7 @@ mod tests {
         AiRunRecord::insert(
             &fixture.database,
             CreateAiRunRecordInput {
+                recovery_epoch_id: None,
                 execution_selection: None,
                 id: run_id.0,
                 session_id: session_id.0,
@@ -3832,25 +3838,16 @@ mod tests {
         target
     }
 
-    #[tokio::test]
-    async fn restored_snapshot_cannot_reissue_a_consumed_approval() {
-        let fingerprint =
-            crate::runtime::ai_schema_module_fingerprint().expect("module fingerprint");
-        let fixture = fixture().await;
-        let recovery = crate::OrmAiRuntimeRecoveryService::new(
-            fixture.database.clone(),
-            fixture.clock.clone(),
-        );
-        let gate = crate::AiRuntimeStartGate::new(fingerprint.clone());
-        let proof = recovery
-            .readiness_proof(&gate)
-            .await
-            .expect("a new store should record its first live epoch");
-        gate.open(&proof)
-            .expect("the live epoch should open the runtime");
-
-        let (running, tool_call_id) = seed_running_tool(&fixture).await;
-        let (binding, preview) = approval_binding(&fixture, &running, tool_call_id);
+    async fn approved_wait(
+        fixture: &Fixture,
+    ) -> (
+        AiRunLease,
+        AiRequestedApproval,
+        AiApprovalBinding,
+        AiCanonicalActionPreview,
+    ) {
+        let (running, tool_call_id) = seed_running_tool(fixture).await;
+        let (binding, preview) = approval_binding(fixture, &running, tool_call_id);
         let requested = fixture
             .approval_service
             .request_approval(
@@ -3880,6 +3877,25 @@ mod tests {
             )
             .await
             .expect("approval should be granted");
+        (running, requested, binding, preview)
+    }
+
+    #[tokio::test]
+    async fn restored_snapshot_cannot_reissue_a_consumed_approval() {
+        let fingerprint =
+            crate::runtime::ai_schema_module_fingerprint().expect("module fingerprint");
+        let fixture = fixture().await;
+        let recovery = crate::OrmAiRuntimeRecoveryService::new(
+            fixture.database.clone(),
+            fixture.clock.clone(),
+        );
+        let gate = crate::AiRuntimeStartGate::new(fingerprint.clone());
+        let source_epoch = recovery
+            .open_start_gate(&gate)
+            .await
+            .expect("the source store's live epoch opens its runtime");
+
+        let (running, requested, binding, preview) = approved_wait(&fixture).await;
 
         // The snapshot is taken while the grant is approved but unconsumed.
         let (schema, rows) = export_snapshot(&fixture.database).await;
@@ -3890,6 +3906,7 @@ mod tests {
             .await
             .expect("approved wait should be claimable")
             .expect("approved wait should be handed off");
+        assert_eq!(claim.lease().recovery_epoch_id(), Some(source_epoch));
         fixture
             .approval_service
             .consume_approval(claim.lease(), requested.approval_id(), &binding, &preview)
@@ -3911,7 +3928,7 @@ mod tests {
         // The restored epoch row is not live, so the gate cannot open and no
         // worker may claim the restored grant or consume it.
         assert!(matches!(
-            restored_recovery.readiness_proof(&restored_gate).await,
+            restored_recovery.open_start_gate(&restored_gate).await,
             Err(AiError::RuntimeNotReady)
         ));
         assert!(!restored_gate.is_ready());
@@ -3934,9 +3951,8 @@ mod tests {
                 .is_err()
         );
 
-        // Applying closure expires the grant and closes the run under a new
-        // generation. The collector's audits are incomplete, so the new epoch
-        // is recorded as blocked and the runtime stays closed.
+        // Closure expires the grant and closes the run under a new
+        // generation. The restore-closure epoch is not live.
         let restored_run = AiRunRecord::find_by_id(&restored.database, &running.run_id().0)
             .await
             .expect("restored run lookup")
@@ -3950,11 +3966,14 @@ mod tests {
             )
             .await
             .expect("restore closure should apply");
-        assert!(!applied.is_live());
-        assert!(applied.readiness_proof().is_none());
+        assert!(!applied.is_repeat());
         assert!(applied.plan().plan().fatal_issue_count() > 0);
         assert_eq!(applied.closure().approvals_expired(), 1);
         assert_eq!(applied.closure().runs_recovery_required(), 1);
+        assert!(matches!(
+            restored_recovery.readiness_proof().await,
+            Err(AiError::RuntimeNotReady)
+        ));
 
         let approval = AiApprovalRecord::find_by_id(&restored.database, &requested.approval_id().0)
             .await
@@ -3973,17 +3992,27 @@ mod tests {
         );
         assert!(closed_run.lease_owner.is_none() && closed_run.lease_expires_at.is_none());
 
-        assert!(matches!(
-            restored_recovery.readiness_proof(&restored_gate).await,
-            Err(AiError::RuntimeNotReady)
-        ));
-        assert!(matches!(
+        // After review, an operator acknowledgement reopens the restored
+        // store. The expired grant and the closed run stay closed.
+        let reopened_epoch = restored_recovery
+            .acknowledge_reviewed_restore(
+                applied.epoch_id(),
+                "restore-operator",
+                "reviewed restored approvals and closed runs",
+            )
+            .await
+            .expect("the reviewed closure should be acknowledged");
+        restored_gate
+            .open(&reopened_epoch)
+            .expect("the acknowledged epoch opens the restored runtime");
+        assert!(
             restored
                 .run_service
-                .claim_next_approved("approval-after-closure")
-                .await,
-            Err(AiError::RuntimeNotReady)
-        ));
+                .claim_next_approved("approval-after-acknowledgement")
+                .await
+                .expect("an approved-wait scan should succeed")
+                .is_none()
+        );
         assert!(
             restored
                 .approval_service
@@ -3991,34 +4020,86 @@ mod tests {
                 .await
                 .is_err()
         );
+        let still_closed = AiRunRecord::find_by_id(&restored.database, &running.run_id().0)
+            .await
+            .expect("closed run lookup")
+            .expect("closed run");
+        assert_eq!(still_closed.state, "recovery_required");
 
         // The source deployment keeps its live epoch across restarts.
-        let reopened = recovery
-            .readiness_proof(&gate)
+        assert_eq!(
+            recovery
+                .readiness_proof()
+                .await
+                .expect("the source epoch stays live")
+                .epoch_id(),
+            source_epoch
+        );
+    }
+
+    #[tokio::test]
+    async fn consumption_refuses_when_the_store_epoch_is_no_longer_live() {
+        let fixture = fixture().await;
+        let (_, requested, binding, preview) = approved_wait(&fixture).await;
+        let claim = fixture
+            .run_service
+            .claim_next_approved("approval-epoch-worker")
             .await
-            .expect("the source epoch stays live");
-        assert_eq!(reopened.epoch_id(), proof.epoch_id());
+            .expect("approved wait should be claimable")
+            .expect("approved wait should be handed off");
+
+        // Close the store without touching the run, its lease, or the grant:
+        // only the in-transaction epoch check can refuse consumption.
+        crate::orm_runtime_recovery::close_test_epoch(&fixture.database).await;
+        assert!(matches!(
+            fixture
+                .approval_service
+                .consume_approval(claim.lease(), requested.approval_id(), &binding, &preview)
+                .await,
+            Err(AiError::RuntimeNotReady)
+        ));
     }
 
     #[tokio::test]
     async fn first_epoch_expires_unconsumed_approvals_and_fences_leases() {
-        let fingerprint =
-            crate::runtime::ai_schema_module_fingerprint().expect("module fingerprint");
         let fixture = fixture().await;
         let (requested, _) = request_wait(&fixture, fixture.now + Duration::minutes(30)).await;
         let (running, _) = seed_running_tool(&fixture).await;
+
+        // An empty ledger: a store upgraded to this release, or restored from
+        // a backup taken before its first epoch.
+        let epochs = AiRuntimeRecoveryRecord::query(fixture.database.pool())
+            .fetch_all()
+            .await
+            .expect("ledger rows");
+        for epoch in epochs {
+            let id = epoch.id;
+            fixture
+                .database
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        tx.delete_by_id::<AiRuntimeRecoveryRecord>(&id)
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        Ok(())
+                    })
+                })
+                .await
+                .expect("ledger row should delete");
+        }
+        assert!(matches!(
+            fixture.run_service.heartbeat(&running).await,
+            Err(AiError::RuntimeNotReady)
+        ));
 
         let recovery = crate::OrmAiRuntimeRecoveryService::new(
             fixture.database.clone(),
             fixture.clock.clone(),
         );
-        let gate = crate::AiRuntimeStartGate::new(fingerprint);
-        let proof = recovery
-            .readiness_proof(&gate)
+        recovery
+            .readiness_proof()
             .await
             .expect("an empty ledger should record the first live epoch");
-        gate.open(&proof)
-            .expect("the first epoch should open the runtime");
 
         let approval = AiApprovalRecord::find_by_id(&fixture.database, &requested.approval_id().0)
             .await

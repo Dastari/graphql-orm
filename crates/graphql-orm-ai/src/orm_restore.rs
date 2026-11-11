@@ -1739,6 +1739,9 @@ const fn audit_status(truncated: bool, invalid_count: u64) -> AiRestoreAuditStat
 }
 
 fn map_transaction(error: TransactionError) -> AiError {
+    if crate::orm_runtime_recovery::is_epoch_not_live(error.public_error()) {
+        return AiError::RuntimeNotReady;
+    }
     match error.public_error().code {
         OrmErrorCode::InvalidInput
         | OrmErrorCode::CursorInvalid
@@ -1792,6 +1795,7 @@ mod tests {
         AiRunRecord::insert(
             database,
             crate::persistence::CreateAiRunRecordInput {
+                recovery_epoch_id: None,
                 execution_selection: None,
                 id,
                 session_id: Uuid::new_v4(),

@@ -471,6 +471,7 @@ mod tests {
             .apply_migration(&plan, ApplyOptions::default())
             .await
             .unwrap();
+        crate::orm_runtime_recovery::open_test_epoch(&db).await;
         db
     }
 
@@ -543,6 +544,7 @@ mod tests {
                         .await
                         .map_err(OrmPublicError::from)?;
                         tx.insert::<AiRunRecord>(CreateAiRunRecordInput {
+                            recovery_epoch_id: None,
                             execution_selection: None,
                             id: run_id,
                             session_id: id,

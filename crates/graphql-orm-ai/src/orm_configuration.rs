@@ -2034,6 +2034,9 @@ pub(crate) fn map_transaction(error: TransactionError) -> AiError {
 }
 
 fn map_orm(error: OrmPublicError) -> AiError {
+    if crate::orm_runtime_recovery::is_epoch_not_live(&error) {
+        return AiError::RuntimeNotReady;
+    }
     match error.code {
         OrmErrorCode::InvalidInput
         | OrmErrorCode::CursorInvalid
@@ -2237,6 +2240,7 @@ mod tests {
             .apply_migration(&plan, ApplyOptions::default())
             .await
             .expect("AI schema migration should apply");
+        crate::orm_runtime_recovery::open_test_epoch(&database).await;
 
         let now = time::OffsetDateTime::from_unix_timestamp(1_800_000_000)
             .expect("fixed test timestamp should be valid");
@@ -2296,6 +2300,7 @@ mod tests {
         AiRunRecord::insert(
             &database,
             CreateAiRunRecordInput {
+                recovery_epoch_id: None,
                 execution_selection: None,
                 id: run_id.0,
                 session_id: session_id.0,

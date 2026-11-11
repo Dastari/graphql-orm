@@ -285,6 +285,7 @@ impl OrmAiSessionTitleWorkService {
         self.database
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
+                    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
                     let mut candidates = tx
                         .query::<AiSessionTitleWorkRecord>()
                         .filter(AiSessionTitleWorkRecordWhereInput {

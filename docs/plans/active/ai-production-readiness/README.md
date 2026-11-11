@@ -66,10 +66,10 @@ Current versions and dependency selectors come from the generated
 The current package and managed AI schema provide the protected runtime,
 provider adapters, exact completed-batch adoption, retention foundations,
 restore planning, and readiness observation contracts. A crate-owned recovery
-epoch ledger now gates runtime start and worker claims: a restored store stays
-closed, and the restore closure applier expires restored approvals and closes
-restored leases. Opening a restored runtime still waits on the remaining
-audits. Database-derived
+epoch ledger now gates runtime start and worker leases: a restored store stays
+closed, restore closure expires restored approvals and moves unfinished runs
+to `RecoveryRequired`, and an explicit operator acknowledgement reopens it.
+Complete restore audits are still outstanding. Database-derived
 collection covers bounded conservative run classification, approval and
 egress-consent revalidation candidates, and—when host-attested deployment
 ceilings are supplied—budget-policy and immutable pricing-catalog integrity

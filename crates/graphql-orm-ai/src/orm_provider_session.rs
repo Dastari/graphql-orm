@@ -4376,6 +4376,9 @@ mod service {
                 .apply_migration(&plan, ApplyOptions::default())
                 .await
                 .expect("AI schema should apply");
+            let test_epoch = crate::orm_runtime_recovery::open_test_epoch(&database)
+                .await
+                .epoch_id();
             let now = OffsetDateTime::now_utc();
             let clock = Arc::new(FixedClock::new(now));
             let principal = AuthPrincipal::User(AuthUser {
@@ -4462,6 +4465,7 @@ mod service {
             AiRunRecord::insert(
                 &database,
                 crate::persistence::CreateAiRunRecordInput {
+                    recovery_epoch_id: Some(test_epoch),
                     execution_selection: None,
                     id: run_id.0,
                     session_id: session_id.0,

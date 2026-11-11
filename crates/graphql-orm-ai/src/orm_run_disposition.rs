@@ -405,6 +405,7 @@ impl OrmAiRunDispositionService {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }
                         tx.insert::<AiRunRecord>(CreateAiRunRecordInput {
+                            recovery_epoch_id: None,
                             execution_selection: run.execution_selection.clone(),
                             id: retry_run_id,
                             session_id,

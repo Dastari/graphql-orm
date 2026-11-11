@@ -115,6 +115,7 @@ pub struct AiRunLease {
     state: AiRunState,
     retry_count: u32,
     latest_checkpoint_id: Option<Uuid>,
+    recovery_epoch_id: Option<Uuid>,
 }
 
 impl AiRunLease {
@@ -177,6 +178,15 @@ impl AiRunLease {
         self.latest_checkpoint_id
     }
 
+    /// Recovery epoch the lease was granted under.
+    ///
+    /// Every fenced write re-checks inside its transaction that this equals
+    /// the store's current live epoch, and gate-guarded services require it
+    /// to equal [`crate::AiRuntimeStartGate::epoch_id`].
+    pub const fn recovery_epoch_id(&self) -> Option<Uuid> {
+        self.recovery_epoch_id
+    }
+
     #[cfg(test)]
     pub(crate) fn test_running(principal_reference: PrincipalReference) -> Self {
         Self {
@@ -192,6 +202,7 @@ impl AiRunLease {
             state: AiRunState::Running,
             retry_count: 0,
             latest_checkpoint_id: None,
+            recovery_epoch_id: None,
         }
     }
 
@@ -1092,6 +1103,7 @@ impl OrmAiRunService {
         self.database
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
+                    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
                     let mut candidates = Vec::new();
                     for state in [
                         AiRunState::Leased,
@@ -3936,7 +3948,6 @@ impl OrmAiRunService {
         self.database
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
-                    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
                     let current = load_and_validate_active_lease(tx, &lease, now).await?;
                     if !matches!(
                         persisted_state(&current)?,
@@ -4344,7 +4355,7 @@ impl OrmAiRunService {
         database
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
-                    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
+                    let epoch = crate::orm_runtime_recovery::require_live_epoch(tx).await?;
                     let mut candidates = Vec::new();
                     for state in [AiRunState::Queued, AiRunState::RetryScheduled] {
                         let mut rows = tx
@@ -4403,6 +4414,7 @@ impl OrmAiRunService {
                                 state: Some(AiRunState::Leased.as_str().to_owned()),
                                 attempt_id: Some(Some(attempt.id)),
                                 lease_owner: Some(Some(worker_id)),
+                                recovery_epoch_id: Some(Some(epoch)),
                                 lease_generation: Some(generation),
                                 lease_expires_at: Some(Some(expiry.unix_timestamp())),
                                 lease_heartbeat_at: Some(Some(now.unix_timestamp())),
@@ -4445,7 +4457,7 @@ impl OrmAiRunService {
         database
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
-                    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
+                    let epoch = crate::orm_runtime_recovery::require_live_epoch(tx).await?;
                     let mut approvals = tx
                         .query::<AiApprovalRecord>()
                         .filter(AiApprovalRecordWhereInput {
@@ -4790,6 +4802,7 @@ impl OrmAiRunService {
                                     lease_generation: resumed_attempt
                                         .map(|(_, generation)| generation),
                                     lease_owner: Some(Some(worker_id.clone())),
+                                    recovery_epoch_id: Some(Some(epoch)),
                                     lease_expires_at: Some(Some(expiry.unix_timestamp())),
                                     lease_heartbeat_at: Some(Some(now.unix_timestamp())),
                                     error_code: Some(Some("approval_resume_claimed".to_owned())),
@@ -5633,6 +5646,10 @@ pub(crate) async fn load_and_validate_active_lease(
         .await
         .map_err(OrmPublicError::from)?
         .ok_or_else(OrmPublicError::not_found)?;
+    let epoch = crate::orm_runtime_recovery::require_live_epoch(tx).await?;
+    if current.recovery_epoch_id != Some(epoch) || lease.recovery_epoch_id != Some(epoch) {
+        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+    }
     let state = persisted_state(&current)?;
     let stored_reference: PrincipalReference =
         serde_json::from_value(current.principal_reference.clone())
@@ -5688,6 +5705,7 @@ pub(crate) fn lease_from_record(record: &AiRunRecord) -> Result<AiRunLease, OrmP
         retry_count: u32::try_from(record.retry_count)
             .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?,
         latest_checkpoint_id: record.latest_checkpoint_id,
+        recovery_epoch_id: record.recovery_epoch_id,
     })
 }
 
@@ -6235,6 +6253,7 @@ mod tests {
             .apply_migration(&plan, ApplyOptions::default())
             .await
             .expect("AI schema should apply");
+        crate::orm_runtime_recovery::open_test_epoch(&database).await;
 
         let now = OffsetDateTime::from_unix_timestamp(1_800_000_000)
             .expect("test timestamp should be valid");
@@ -6290,6 +6309,7 @@ mod tests {
         AiRunRecord::insert(
             &fixture.database,
             CreateAiRunRecordInput {
+                recovery_epoch_id: None,
                 execution_selection: None,
                 id: run_id.0,
                 session_id: session_id.0,

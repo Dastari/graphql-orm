@@ -188,6 +188,13 @@ async fn fixture() -> Fixture {
         .apply_migration(&plan, ApplyOptions::default())
         .await
         .expect("AI schema migration should apply");
+    graphql_orm_ai::OrmAiRuntimeRecoveryService::new(
+        database.clone(),
+        std::sync::Arc::new(agql_auth::SystemClock),
+    )
+    .readiness_proof()
+    .await
+    .expect("a test store should record its first live epoch");
 
     let owner = principal("title-owner");
     let clock = Arc::new(FixedClock::new(
@@ -333,6 +340,13 @@ async fn schema_upgrade_conservatively_fences_preexisting_titles_and_converges()
         .apply_migration(&upgrade, ApplyOptions::default())
         .await
         .expect("current AI schema should preserve the previous row");
+    graphql_orm_ai::OrmAiRuntimeRecoveryService::new(
+        database.clone(),
+        std::sync::Arc::new(agql_auth::SystemClock),
+    )
+    .readiness_proof()
+    .await
+    .expect("a test store should record its first live epoch");
     let upgraded = CurrentTitleLifecycleSession::find_by_id(&database, &session_id)
         .await
         .expect("upgraded session should load")

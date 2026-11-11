@@ -1702,6 +1702,9 @@ fn canonical_second(value: OffsetDateTime) -> OffsetDateTime {
 }
 
 fn map_transaction(error: TransactionError) -> AiError {
+    if crate::orm_runtime_recovery::is_epoch_not_live(error.public_error()) {
+        return AiError::RuntimeNotReady;
+    }
     let public = error.public_error();
     match public.code {
         OrmErrorCode::InvalidInput
@@ -1752,6 +1755,7 @@ mod tests {
             .apply_migration(&plan, ApplyOptions::default())
             .await
             .expect("AI schema migration should apply to in-memory SQLite");
+        crate::orm_runtime_recovery::open_test_epoch(&database).await;
 
         AiBudgetPolicyRecord::insert(
             &database,
@@ -1856,6 +1860,7 @@ mod tests {
         AiRunRecord::insert(
             database,
             CreateAiRunRecordInput {
+                recovery_epoch_id: None,
                 execution_selection: None,
                 id: run_id.0,
                 session_id: session_id.0,

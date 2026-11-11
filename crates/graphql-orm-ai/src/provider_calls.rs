@@ -4419,7 +4419,7 @@ impl AiProviderCallExecutor {
                 .await
                 .map_err(classify_unstarted_provider_error)?;
         }
-        if !self.runtime.start_gate().is_ready()
+        if !crate::orm_runtime_recovery::gate_admits_lease(self.runtime.start_gate(), &lease)
             || lease.state() != AiRunState::Running
             || plan.budget.session_id != lease.session_id()
             || plan.budget.run_id != lease.run_id()
@@ -6972,6 +6972,7 @@ mod tests {
             .apply_migration(&migration, ApplyOptions::default())
             .await
             .expect("AI schema should apply");
+        crate::orm_runtime_recovery::open_test_epoch(&database).await;
 
         let principal = AuthPrincipal::User(AuthUser {
             user_id: "provider-user".to_owned(),
@@ -7014,6 +7015,7 @@ mod tests {
         AiRunRecord::insert(
             &database,
             CreateAiRunRecordInput {
+                recovery_epoch_id: None,
                 execution_selection: None,
                 id: run_id.0,
                 session_id: session_id.0,
@@ -7389,9 +7391,7 @@ mod tests {
             .expect("test runtime should build");
         runtime
             .start_gate()
-            .open(&crate::AiRuntimeReadinessProof::for_test(
-                runtime.start_gate().expected_module_fingerprint(),
-            ))
+            .open(&crate::orm_runtime_recovery::open_test_epoch(&database).await)
             .expect("test runtime should open");
 
         Fixture {
@@ -10446,6 +10446,7 @@ mod tests {
             .apply_migration(&current_plan, ApplyOptions::default())
             .await
             .expect("background submission table should migrate without row rewrites");
+        crate::orm_runtime_recovery::open_test_epoch(&database).await;
     }
 
     #[cfg(feature = "provider-openai-core")]

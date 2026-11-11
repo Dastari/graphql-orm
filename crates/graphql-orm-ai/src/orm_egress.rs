@@ -197,6 +197,9 @@ const fn reason_value(value: AiEgressReason) -> &'static str {
 }
 
 fn map_transaction(error: TransactionError) -> AiError {
+    if crate::orm_runtime_recovery::is_epoch_not_live(error.public_error()) {
+        return AiError::RuntimeNotReady;
+    }
     let public = error.public_error();
     match public.code {
         OrmErrorCode::InvalidInput
@@ -247,6 +250,7 @@ mod tests {
             .apply_migration(&plan, ApplyOptions::default())
             .await
             .unwrap();
+        crate::orm_runtime_recovery::open_test_epoch(&database).await;
         (directory, OrmAiEgressDecisionAudit::new(database))
     }
 

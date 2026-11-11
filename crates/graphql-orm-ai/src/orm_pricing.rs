@@ -799,6 +799,9 @@ fn map_transaction(error: TransactionError) -> AiError {
 }
 
 fn map_orm(error: OrmPublicError) -> AiError {
+    if crate::orm_runtime_recovery::is_epoch_not_live(&error) {
+        return AiError::RuntimeNotReady;
+    }
     match error.code {
         OrmErrorCode::InvalidInput
         | OrmErrorCode::CursorInvalid
@@ -913,6 +916,7 @@ mod tests {
             .apply_migration(&plan, ApplyOptions::default())
             .await
             .expect("pricing schema should apply");
+        crate::orm_runtime_recovery::open_test_epoch(&database).await;
         OrmAiPricingService::new(
             database,
             Arc::new(AllowConfiguration),

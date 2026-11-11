@@ -218,6 +218,13 @@ async fn services_with_limits(
         .apply_migration(&plan, ApplyOptions::default())
         .await
         .expect("schema applies");
+    graphql_orm_ai::OrmAiRuntimeRecoveryService::new(
+        database.clone(),
+        std::sync::Arc::new(agql_auth::SystemClock),
+    )
+    .readiness_proof()
+    .await
+    .expect("a test store should record its first live epoch");
     let now = OffsetDateTime::from_unix_timestamp(OffsetDateTime::now_utc().unix_timestamp())
         .expect("current second is representable");
     let configuration = OrmAiConfigurationService::new(

@@ -713,6 +713,13 @@ async fn owned_postgres_upgrade_replaces_the_truncated_webhook_receipt_index_onc
         .apply_migration(&upgrade, ApplyOptions::default())
         .await
         .expect("upgrade should apply");
+    graphql_orm_ai::OrmAiRuntimeRecoveryService::new(
+        database.clone(),
+        std::sync::Arc::new(agql_auth::SystemClock),
+    )
+    .readiness_proof()
+    .await
+    .expect("a test store should record its first live epoch");
     let after = names(database.pool().clone()).await;
     assert!(after.contains(&bounded), "{after:?}");
     assert!(!after.iter().any(|name| name == truncated), "{after:?}");
@@ -831,6 +838,13 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
         .apply_migration(&prior_migration, ApplyOptions::default())
         .await
         .expect("prior generated AI schema should apply to the owned PostgreSQL database");
+    graphql_orm_ai::OrmAiRuntimeRecoveryService::new(
+        database.clone(),
+        std::sync::Arc::new(agql_auth::SystemClock),
+    )
+    .readiness_proof()
+    .await
+    .expect("a test store should record its first live epoch");
     let migration = database
         .schema()
         .plan_migration_to_entities(
@@ -845,6 +859,13 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
         .apply_migration(&migration, ApplyOptions::default())
         .await
         .expect("background reconciliation schema should migrate in owned PostgreSQL");
+    graphql_orm_ai::OrmAiRuntimeRecoveryService::new(
+        database.clone(),
+        std::sync::Arc::new(agql_auth::SystemClock),
+    )
+    .readiness_proof()
+    .await
+    .expect("a test store should record its first live epoch");
 
     let restore_attachment_session_id = Uuid::new_v4();
     let restore_attachment_id = Uuid::new_v4();

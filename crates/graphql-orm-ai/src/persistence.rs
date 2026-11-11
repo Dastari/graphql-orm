@@ -1145,6 +1145,9 @@ pub(crate) struct AiRunRecord {
     pub error_code: Option<String>,
     /// Latest exact coordinator checkpoint for recovery classification.
     pub latest_checkpoint_id: Option<graphql_orm::uuid::Uuid>,
+    /// Recovery epoch the current lease was granted under. A lease is valid
+    /// only while this equals the store's current live epoch.
+    pub recovery_epoch_id: Option<graphql_orm::uuid::Uuid>,
     /// Idempotency key that won the owner cancellation fence.
     pub cancellation_request_id: Option<graphql_orm::uuid::Uuid>,
     /// Server timestamp at which cancellation became terminal.
@@ -2467,9 +2470,10 @@ pub(crate) struct AiEgressEventRecord {
 /// Crate-owned runtime recovery epoch ledger.
 ///
 /// The latest row (by `epoch_sequence`) decides whether workers may claim
-/// runs or consume approvals. `live_at` is excluded from portable backups, so
-/// a restored row is never live and the restored store stays closed until
-/// [`crate::OrmAiRuntimeRecoveryService`] records a new epoch.
+/// runs or consume approvals. `recorded_locally_at` is excluded from portable
+/// backups, so a row restored from a portable backup is never live and the
+/// restored store stays closed until [`crate::OrmAiRuntimeRecoveryService`]
+/// records a new epoch.
 #[backend_selected_graphql_entity(
     table = "graphql_orm_ai_runtime_recovery",
     plural = "GraphqlOrmAiRuntimeRecovery",
@@ -2495,14 +2499,15 @@ pub(crate) struct AiRuntimeRecoveryRecord {
     pub module_version: String,
     /// Schema module fingerprint.
     pub module_fingerprint: String,
-    /// `live`, `blocked`, or another closed recovery state.
+    /// `live` or `restore_closed`.
     pub state: String,
     /// Whether this epoch was recorded as able to open the runtime.
     pub start_gate_open: bool,
-    /// Deployment-local liveness marker. Portable backups exclude it, so a
-    /// restored epoch is never live.
+    /// Set when this deployment recorded the row. Portable backups exclude
+    /// it, so a row restored from a portable backup is neither live nor an
+    /// acknowledgeable restore closure.
     #[backup(exclude)]
-    pub live_at: Option<i64>,
+    pub recorded_locally_at: Option<i64>,
     /// Fatal issue count.
     pub fatal_issue_count: i64,
     /// Warning count.

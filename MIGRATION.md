@@ -13,11 +13,13 @@ supersedes: []
 ## AI 0.127.0 to 0.128.0: enforced runtime closure after restore
 
 Apply AI schema module `0.77.0` before restarting all workers. No row data
-migration is needed. Open the runtime with
-`OrmAiRuntimeRecoveryService::readiness_proof` instead of a host-built
-`AiRuntimeReadinessReport`; the first open expires unconsumed approvals and
-expires active leases once. Handle `RuntimeNotReady` from worker claims. After
-any restore, run `reconcile_restore` before starting workers; see the
+migration is needed. Open each runtime with
+`OrmAiRuntimeRecoveryService::open_start_gate` on the store its workers use,
+instead of a host-built `AiRuntimeReadinessReport`. Do this before any worker
+runs: claims refuse with `RuntimeNotReady` until the first epoch exists. The
+first open expires unconsumed approvals and active leases once. After any
+restore, run `reconcile_restore`, review, then `acknowledge_reviewed_restore`;
+see the
 [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01270-to-01280-enforced-runtime-closure-after-restore).
 
 ## 0.124.0: assurance evaluators take a request check

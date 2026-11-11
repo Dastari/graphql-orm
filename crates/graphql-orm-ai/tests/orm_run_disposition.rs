@@ -145,6 +145,13 @@ async fn fixture_on_with_authorization(
             .apply_migration(&plan, ApplyOptions::default())
             .await
             .expect("AI schema migration should apply");
+        graphql_orm_ai::OrmAiRuntimeRecoveryService::new(
+            database.clone(),
+            std::sync::Arc::new(agql_auth::SystemClock),
+        )
+        .readiness_proof()
+        .await
+        .expect("a test store should record its first live epoch");
     }
     let mut owner = principal("disposition-owner");
     if extended {

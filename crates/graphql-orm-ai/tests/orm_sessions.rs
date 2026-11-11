@@ -163,6 +163,13 @@ async fn service_with_protector_and_maximum(
         .apply_migration(&plan, ApplyOptions::default())
         .await
         .expect("AI schema migration should apply to in-memory SQLite");
+    graphql_orm_ai::OrmAiRuntimeRecoveryService::new(
+        database.clone(),
+        std::sync::Arc::new(agql_auth::SystemClock),
+    )
+    .readiness_proof()
+    .await
+    .expect("a test store should record its first live epoch");
     OrmAiSessionService::new(
         database,
         Arc::new(AllowAll),

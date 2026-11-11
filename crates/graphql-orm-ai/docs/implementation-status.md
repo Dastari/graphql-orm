@@ -164,11 +164,11 @@ verification evidence belongs in the focused guides.
   bounds, it also completes the stable attachment/artifact lifecycle,
   ownership, parent, and safe unique object-reference metadata graph. Verified
   manifest plus restored-target object-byte integrity remains a separate fatal
-  incomplete audit. The recovery epoch ledger, crate-minted runtime-start
+  incomplete audit. The recovery epoch ledger, store-bound runtime-start
   proof, and restore closure applier are implemented: a restored store stays
-  closed, and closure expires restored approvals and closes restored leases.
-  The complete validator and the remaining audits stay closed, so a restored
-  runtime cannot open yet.
+  closed, closure expires restored approvals and moves unfinished runs to
+  `RecoveryRequired`, and an explicit operator acknowledgement reopens it.
+  The complete validator and the remaining audits stay closed.
 - Applied backup/restore, durable tool-policy management, generic privileged
   uncertain-effect recovery, and production MSSQL writes remain closed.
 

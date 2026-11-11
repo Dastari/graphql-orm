@@ -935,6 +935,7 @@ impl OrmAiSubscriptionWaitService {
         self.database()
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
+                    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
                     let candidates = tx
                         .query::<AiSubscriptionWaiterRecord>()
                         .filter(AiSubscriptionWaiterRecordWhereInput {
@@ -4159,6 +4160,7 @@ mod tests {
             .apply_migration(&migration, ApplyOptions::default())
             .await
             .expect("AI schema applies");
+        crate::orm_runtime_recovery::open_test_epoch(&database).await;
         let now = OffsetDateTime::from_unix_timestamp(TEST_NOW).expect("test timestamp");
         let clock = Arc::new(FixedClock::new(now));
         let principal = test_principal();
@@ -4280,9 +4282,7 @@ mod tests {
             .expect("subscription runtime builds");
         runtime
             .start_gate()
-            .open(&crate::AiRuntimeReadinessProof::for_test(
-                runtime.start_gate().expected_module_fingerprint(),
-            ))
+            .open(&crate::orm_runtime_recovery::open_test_epoch(&database).await)
             .expect("runtime opens");
         let run_service = OrmAiRunService::new(
             database.clone(),
@@ -4374,6 +4374,7 @@ mod tests {
             AiRunRecord::insert(
                 &self.database,
                 CreateAiRunRecordInput {
+                    recovery_epoch_id: None,
                     execution_selection: None,
                     id: run_id.0,
                     session_id: session_id.0,

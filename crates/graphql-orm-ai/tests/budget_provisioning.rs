@@ -149,6 +149,13 @@ async fn migrated(label: &str) -> Database<DefaultWriteBackend> {
         .apply_migration(&plan, ApplyOptions::default())
         .await
         .expect("AI schema should apply");
+    graphql_orm_ai::OrmAiRuntimeRecoveryService::new(
+        database.clone(),
+        std::sync::Arc::new(agql_auth::SystemClock),
+    )
+    .readiness_proof()
+    .await
+    .expect("a test store should record its first live epoch");
     database
 }
 
@@ -509,6 +516,13 @@ async fn existing_databases_upgrade_from_the_prior_budget_shape_and_replan_empty
         .apply_migration(&upgrade, ApplyOptions::default())
         .await
         .expect("budget-policy upgrade should apply to the existing database");
+    graphql_orm_ai::OrmAiRuntimeRecoveryService::new(
+        database.clone(),
+        std::sync::Arc::new(agql_auth::SystemClock),
+    )
+    .readiness_proof()
+    .await
+    .expect("a test store should record its first live epoch");
     let replan = database
         .schema()
         .plan_migration_to_entities_with_options(

@@ -903,7 +903,7 @@ impl OrmAiOpenAiBackgroundSubmissionService {
         plan: AiProviderCallPlan,
     ) -> Result<AiOpenAiBackgroundSubmission, AiError> {
         validate_plan(lease, &plan)?;
-        if !self.runtime.start_gate().is_ready() {
+        if !crate::orm_runtime_recovery::gate_admits_lease(self.runtime.start_gate(), lease) {
             return Err(AiError::RuntimeNotReady);
         }
 
@@ -1873,6 +1873,7 @@ impl OrmAiOpenAiBackgroundReconciliationService {
         database
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
+                    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
                     let candidates = tx
                         .query::<AiProviderBackgroundSubmissionRecord>()
                         .filter(AiProviderBackgroundSubmissionRecordWhereInput {
@@ -2521,9 +2522,8 @@ impl OrmAiOpenAiBackgroundRetrievalService {
         &self,
         claim: &AiOpenAiBackgroundReconciliationClaim,
     ) -> Result<AiOpenAiBackgroundRetrievalAttempt, AiError> {
-        if !self.runtime.start_gate().is_ready() {
-            return Err(AiError::RuntimeNotReady);
-        }
+        crate::orm_runtime_recovery::require_store_gate(&self.database, self.runtime.start_gate())
+            .await?;
         self.validate_retrieval_claim(claim).await?;
         if claim.provider_profile_id != self.route.provider_profile_id
             || claim.original_egress_destination != self.route.destination
@@ -2968,9 +2968,8 @@ impl OrmAiOpenAiBackgroundTerminalService {
         &self,
         claim: &AiOpenAiBackgroundReconciliationClaim,
     ) -> Result<crate::AiContentProtectionPolicy, AiError> {
-        if !self.runtime.start_gate().is_ready() {
-            return Err(AiError::RuntimeNotReady);
-        }
+        crate::orm_runtime_recovery::require_store_gate(&self.database, self.runtime.start_gate())
+            .await?;
         let now = self.clock.now();
         let principal = self
             .runtime
@@ -5329,6 +5328,9 @@ fn valid_provider_status(value: &str) -> bool {
 }
 
 fn map_transaction(error: TransactionError) -> AiError {
+    if crate::orm_runtime_recovery::is_epoch_not_live(error.public_error()) {
+        return AiError::RuntimeNotReady;
+    }
     let public = error.public_error();
     match public.code {
         OrmErrorCode::InvalidInput

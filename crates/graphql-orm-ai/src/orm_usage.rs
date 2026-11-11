@@ -251,6 +251,7 @@ mod tests {
             .apply_migration(&plan, ApplyOptions::default())
             .await
             .expect("AI usage schema should apply");
+        crate::orm_runtime_recovery::open_test_epoch(&database).await;
         database
     }
 

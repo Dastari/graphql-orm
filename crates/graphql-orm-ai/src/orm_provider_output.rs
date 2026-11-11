@@ -761,6 +761,9 @@ fn bounded_prefix(value: &str, maximum_bytes: usize) -> &str {
 }
 
 fn map_orm(error: OrmPublicError) -> AiError {
+    if crate::orm_runtime_recovery::is_epoch_not_live(&error) {
+        return AiError::RuntimeNotReady;
+    }
     use graphql_orm::graphql::errors::OrmErrorCode;
     match error.code {
         OrmErrorCode::InvalidInput

@@ -10,7 +10,7 @@ supersedes: []
 
 # graphql-orm-ai
 
-Version `0.128.0` enforces AI runtime closure after a snapshot restore. The runtime start gate opens only with a proof minted from a live recovery epoch; a restored store stays closed, and `OrmAiRuntimeRecoveryService::reconcile_restore` expires restored approvals and closes restored leases. Apply AI schema module `0.77.0`; see the [migration guide](MIGRATION.md#01270-to-01280-enforced-runtime-closure-after-restore).
+Version `0.128.0` enforces AI runtime closure after a snapshot restore. The runtime start gate opens only with a proof minted from a store's live recovery epoch, and leases are bound to that epoch. A restored store stays closed until an operator runs `OrmAiRuntimeRecoveryService::reconcile_restore`, which expires restored approvals and moves unfinished runs to `RecoveryRequired`, reviews the result, and acknowledges it. Apply AI schema module `0.77.0`; see the [migration guide](MIGRATION.md#01270-to-01280-enforced-runtime-closure-after-restore).
 
 Version `0.127.0` aligns private helper and test feature gates and adds PostgreSQL/MSSQL all-target compile and warnings-denied Clippy CI checks. Default SQLite test coverage and runtime behavior are unchanged; no data migration is needed.
 

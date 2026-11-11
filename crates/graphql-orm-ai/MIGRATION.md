@@ -13,62 +13,101 @@ supersedes: []
 ## 0.127.0 to 0.128.0: enforced runtime closure after restore
 
 This release changes the public Rust API, the AI schema module, and runtime
-startup and restore behaviour.
+startup, worker and restore behaviour.
 
 **Schema.** Apply the normal `AiSchemaModule` migration to version `0.77.0`
-before starting any worker. It adds `epoch_sequence` (unique) and `live_at`
-to `graphql_orm_ai_runtime_recovery`, which earlier releases never wrote. No
-row data migration is needed. All workers must upgrade together.
+before starting any worker. It adds `epoch_sequence` (unique) and
+`recorded_locally_at` to `graphql_orm_ai_runtime_recovery`, which earlier
+releases never wrote, and `recovery_epoch_id` to `graphql_orm_ai_runs`. No row
+data migration is needed. All workers must upgrade together.
 
 **Opening the runtime.** `AiRuntimeStartGate::open` now takes an
-`AiRuntimeReadinessProof`. Replace host-built `AiRuntimeReadinessReport`
-values with a proof from the recovery service:
+`AiRuntimeReadinessProof`. Mint it from the store this runtime's workers use:
 
 ```rust,ignore
 let recovery = OrmAiRuntimeRecoveryService::new(database.clone(), clock.clone());
-let proof = recovery.readiness_proof(runtime.start_gate()).await?;
-runtime.start_gate().open(&proof)?;
+recovery.open_start_gate(runtime.start_gate()).await?;
+// or: runtime.start_gate().open(&recovery.readiness_proof().await?)?;
 ```
 
+A proof is bound to its store. Each lease records the epoch it was granted
+under (`AiRunLease::recovery_epoch_id`), every fenced write requires that epoch
+to be the store's current live epoch, and gate-guarded services refuse a
+lease whose epoch is not `AiRuntimeStartGate::epoch_id`. A gate opened with a
+proof from another store therefore cannot drive this store's workers.
 `AiRuntimeReadinessReport` keeps its fields for `AiRestoreReadinessTelemetry`
-but cannot open the gate. `AiRuntimeStartGate::epoch_id` reports the epoch the
-gate was opened for.
+but cannot open the gate.
 
-**First open after upgrading.** The ledger starts empty. The first
-`readiness_proof` call records the first live epoch and, in the same
-transaction, expires every pending, approved and resume-claimed approval and
-expires every active lease, so ordinary `recover_expired_leases` reclassifies
-those runs. Users must request expired approvals again. To avoid this, stop
-workers and let open approvals resolve before upgrading. Later restarts reopen
-the same live epoch and change nothing. Open the runtime once after upgrading
-before you take a portable backup: a backup taken earlier restores with an
-empty ledger and receives only this first-epoch closure.
+**Workers before the first open.** An empty ledger is closed.
+`OrmAiRunService::claim_next`, `claim_next_approved`,
+`recover_expired_leases`, `OrmAiApprovalService::consume_approval`, every
+lease-fenced write, and the subscription-wait, OpenAI background and
+session-title claim paths return `AiError::RuntimeNotReady` until
+`readiness_proof` records the first epoch. Call it once at startup before any
+worker runs. Treat `RuntimeNotReady` as a closed runtime: stop and back off.
 
-**Workers.** `OrmAiRunService::claim_next`, `claim_next_approved` and
-`OrmAiApprovalService::consume_approval` return `AiError::RuntimeNotReady`
-while the current epoch is not live. Treat it as a closed runtime: stop
-claiming and back off. Stores whose ledger is still empty keep claiming as
-before until the runtime is first opened.
-
-**Restoring.** After a portable `graphql-orm-backup` restore, the restored
-ledger row has no liveness marker, so `readiness_proof` and the claim paths
-return `RuntimeNotReady`. With every worker and writer stopped, run:
+**First open after upgrading.** The first `readiness_proof` call records the
+first live epoch and, in the same transaction, expires every pending, approved
+and resume-claimed approval and expires every active lease, so ordinary
+`recover_expired_leases` reclassifies those runs. A leased row without an
+expiry is fenced too. Users must request expired approvals again. To avoid
+this, stop workers and let open approvals resolve before upgrading. Later
+restarts reopen the same live epoch and change nothing. The pass is bounded by
+`AiRestoreCollectorLimits` (10,000 runs and 10,000 approvals by default). If a
+bound is reached, nothing changes and `readiness_proof` returns
+`AiError::InvalidConfiguration`; raise the bound for that one open:
 
 ```rust,ignore
-let applied = recovery
-    .reconcile_restore(&collector, snapshot_module_fingerprint, Some(operator_subject))
+let limits = AiRestoreCollectorLimits::new(100_000, 100_000, 100_000)?;
+OrmAiRuntimeRecoveryService::new(database.clone(), clock.clone())
+    .with_limits(limits)
+    .readiness_proof()
     .await?;
 ```
 
-It expires reusable approvals, revokes unrevoked egress consents, requeues
-only unstarted first leases, moves every other non-terminal run to
-`RecoveryRequired` under a new lease generation, and records a new epoch. In
-this release the collector still reports several audits as not implemented,
-so the plan is fatal, the epoch is recorded as `blocked`, and the restored
-runtime stays closed, as documented in
-[recovery and restore](docs/recovery-and-restore.md). After a file-level or
-physical database restore, the liveness marker is restored with the rows, so
-run `reconcile_restore` before starting any worker.
+Open the runtime once after upgrading before you take a portable backup.
+
+**Restoring.** After any restore, the runtime stays closed until an operator
+has reconciled, reviewed and acknowledged it:
+
+1. Stop every worker and writer. After a portable `graphql-orm-backup`
+   restore the restored ledger has no deployment-local marker, so
+   `readiness_proof` and every claim path return `RuntimeNotReady`. A
+   file-level or physical database restore carries the marker with the rows
+   and cannot be detected, so run the next step after it too.
+2. Reconcile:
+
+   ```rust,ignore
+   let applied = recovery
+       .reconcile_restore(&collector, snapshot_module_fingerprint, Some(operator_subject))
+       .await?;
+   ```
+
+   One transaction expires every pending, approved and resume-claimed
+   approval, revokes every unrevoked egress consent, and moves every
+   non-terminal run (queued and unstarted ones included) to `RecoveryRequired`
+   with its lease cleared and a new lease generation. Nothing is requeued, so
+   work that ran after the backup is not repeated automatically. It records a
+   `restore_closed` epoch, which is never live. A repeat call that finds
+   nothing to change returns the same epoch (`AiAppliedRestore::is_repeat`).
+3. Review `applied.plan()`, including fatal issues for audits this release
+   does not implement, and the closed runs.
+4. Acknowledge:
+
+   ```rust,ignore
+   let proof = recovery
+       .acknowledge_reviewed_restore(applied.epoch_id(), operator_subject, reason)
+       .await?;
+   runtime.start_gate().open(&proof)?;
+   ```
+
+   It succeeds only when `applied.epoch_id()` is the store's current epoch
+   and was recorded by `reconcile_restore` on this deployment; a closure row
+   restored from a backup is refused with `AiError::Conflict`. It re-checks
+   that no reusable approval or held lease exists, records the operator
+   subject and reason in the ledger with an `ai.runtime.restore_acknowledged`
+   audit event, and records a new live epoch.
+5. Retry closed runs deliberately through the run-disposition service.
 
 **Restore planning.** `AiRestoreSnapshotFacts` now rejects missing counts and
 unknown fields, including `invalid_attachment_count`; serialize every count.

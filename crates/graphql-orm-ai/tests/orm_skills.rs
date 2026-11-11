@@ -113,6 +113,13 @@ async fn service() -> OrmAiSkillCatalogService {
         .apply_migration(&plan, ApplyOptions::default())
         .await
         .expect("skill schema should apply to in-memory SQLite");
+    graphql_orm_ai::OrmAiRuntimeRecoveryService::new(
+        database.clone(),
+        std::sync::Arc::new(agql_auth::SystemClock),
+    )
+    .readiness_proof()
+    .await
+    .expect("a test store should record its first live epoch");
     OrmAiSkillCatalogService::new(
         database,
         Arc::new(ExactScopeAccess),

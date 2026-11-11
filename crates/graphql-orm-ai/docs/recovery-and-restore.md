@@ -11,8 +11,9 @@ supersedes: []
 # Recovery, Retention, Backup, and Restore
 
 Status: Slice 4 audit complete; ordinary lifecycle closure and enforced
-runtime closure after restore are implemented, while opening a restored
-runtime and privileged uncertain-effect resolution remain blocked.
+runtime closure after restore are implemented. A restored runtime reopens only
+after operator acknowledgement; complete restore audits and privileged
+uncertain-effect resolution remain blocked.
 
 This guide classifies every current externally uncertain or content-bearing
 state against the [canonical ordering proof](ordering-history.md). It does not
@@ -32,7 +33,7 @@ uncertain budget, or reopen a restored runtime.
 | Uncertain budget without authoritative usage | Full reservation remains held |
 | Live stateless approval wait | Bounded current-policy keep/cancel/recovery classification under its active in-attempt fence |
 | Live retained approval wait | Lease-free exact parked checkpoint/outcome graph; confirm or cancel/recover, then fresh-attempt claim |
-| Restored approval/tool/provider wait | `RecoveryRequired` under a new lease generation; never live-resumed |
+| Restored run that was not terminal, including queued and unstarted runs | `RecoveryRequired` under a new lease generation; never requeued or live-resumed |
 | Restored pending/approved/resume-claimed approval | Expired by restore closure; never claimed or consumed |
 | Restored unrevoked egress consent | Revoked by restore closure; the user consents again |
 | Same-database replayable subscription wait | Reclaim only from its exact protected cursor and waiter fence |
@@ -166,19 +167,28 @@ Optional object metadata and a successful restore-sink call are insufficient.
 `OrmAiRuntimeRecoveryService` owns the recovery epoch ledger in
 `graphql_orm_ai_runtime_recovery`. The row with the highest `epoch_sequence`
 is the current epoch. It is live only when its state is `live`, its start gate
-flag is set, and its `live_at` marker is present. `live_at` is excluded from
-portable backups, so every restored epoch row is not live.
+flag is set, and its `recorded_locally_at` marker is present. The marker is
+set on every row this deployment records and is excluded from portable
+backups, so every row restored from a portable backup is neither live nor an
+acknowledgeable restore closure. An empty ledger is not live either.
 
-The ledger is enforced in two places:
+The ledger is enforced in three places:
 
 - `AiRuntimeStartGate::open` accepts only an `AiRuntimeReadinessProof`.
   `OrmAiRuntimeRecoveryService::readiness_proof` mints it from a live current
   epoch for the compiled module fingerprint. A host-built
   `AiRuntimeReadinessReport` cannot open the gate.
-- `OrmAiRunService::claim_next`, `claim_next_approved` and approval
-  consumption read the current epoch inside their own state-machine
-  transactions and refuse with `RuntimeNotReady` when it is not live. This
-  holds even for a worker that never consults the in-memory gate.
+- Run claims, approved-wait claims, expired-lease recovery, and the
+  subscription-wait, OpenAI background and session-title claim paths read the
+  current epoch inside their own state-machine transactions and refuse with
+  `RuntimeNotReady` when it is not live. A granted run lease records the
+  epoch in `recovery_epoch_id`. Every lease-fenced write, approval
+  consumption included, requires that epoch to be the store's current live
+  epoch inside its transaction.
+- Gate-guarded tool, provider and OpenAI background services require the
+  lease's epoch, or for a background reconciliation claim the store's live
+  epoch, to equal `AiRuntimeStartGate::epoch_id`. A gate opened with a proof
+  from another store cannot drive this store's work.
 
 `readiness_proof` behaves as follows:
 
@@ -186,42 +196,64 @@ The ledger is enforced in two places:
 |---|---|
 | Live, same module fingerprint | Proof for that epoch; nothing is written |
 | Live, earlier module fingerprint | Live successor epoch; no repairs |
-| None (new store or first open after upgrading) | First live epoch, after expiring reusable approvals and expiring active leases |
-| Not live (restored or blocked) | `RuntimeNotReady`; run `reconcile_restore` |
+| None (new store or first open after upgrading) | First live epoch, after expiring reusable approvals and expiring every active lease |
+| Not live (restored, or a restore closure awaiting acknowledgement) | `RuntimeNotReady` |
 
 The first-epoch closure exists because an empty ledger can also come from a
-portable backup taken before the deployment ever opened its runtime.
+portable backup taken before the deployment ever opened its runtime. It is
+bounded by `AiRestoreCollectorLimits`; reaching a bound changes nothing and
+returns `InvalidConfiguration`, and `with_limits` raises it.
 
-`OrmAiRuntimeRecoveryService::reconcile_restore` is the restore applier. It
-collects facts from its own database with the supplied collector's audit
-configuration, builds the collected plan, and then, in one generated-ORM
-state-machine transaction:
+## Reopening after a restore
 
-1. expires every pending, approved and resume-claimed approval, with an
-   `ai.approval.expired` audit event;
-2. revokes every unrevoked egress consent, with an
-   `ai.egress_consent.revoked` audit event;
-3. returns an unstarted first lease to `RetryScheduled` only when the plan and
-   the current row both classify it as effect-free, leaves pristine queued
-   runs unchanged, and moves every other non-terminal run to
-   `RecoveryRequired` with its attempt and lease cleared, its lease generation
-   incremented, and its terminal run event appended;
-4. verifies that no reusable approval, unrevoked consent or held lease
-   remains; and
-5. records a new epoch with the facts and plan digests and redacted closure
-   counts. The epoch is live only when the plan has no fatal issue.
+After any restore, stop every worker and writer, then:
 
-Exceeding a deployment bound aborts the transaction and changes nothing.
-Closure never calls a provider or application tool.
+1. **Reconcile.** `reconcile_restore` collects facts from its own database
+   with the supplied collector's audit configuration, builds the collected
+   plan, and in one generated-ORM state-machine transaction:
+   - expires every pending, approved and resume-claimed approval, with an
+     `ai.approval.expired` audit event;
+   - revokes every unrevoked egress consent, with an
+     `ai.egress_consent.revoked` audit event;
+   - moves every non-terminal run, queued and unstarted runs included, to
+     `RecoveryRequired` with its attempt and lease cleared, its lease
+     generation incremented, and its terminal run event appended. Nothing is
+     requeued, so work that ran after the backup is not repeated
+     automatically;
+   - verifies that no reusable approval, unrevoked consent or held lease
+     remains; and
+   - records a `restore_closed` epoch with the facts and plan digests and
+     redacted closure counts. It is never live.
+
+   A repeat call that finds nothing to change returns the existing closure
+   epoch instead of recording another. Exceeding a bound aborts the
+   transaction and changes nothing. Closure never calls a provider or
+   application tool.
+2. **Review** the plan, including fatal issues for the audits listed below,
+   and the runs moved to `RecoveryRequired`.
+3. **Acknowledge.** `acknowledge_reviewed_restore` takes the closure epoch,
+   the operator subject and a reason. It succeeds only when that epoch is the
+   store's current epoch and was recorded by `reconcile_restore` on this
+   deployment, so a closure row restored from a backup is refused. It
+   re-checks that no reusable approval or held lease exists, records the
+   subject and reason in the ledger with an `ai.runtime.restore_acknowledged`
+   audit event, and records a new live epoch. `readiness_proof` then works
+   again.
+4. **Retry deliberately.** Closed runs stay `RecoveryRequired`; retry them
+   through the run-disposition service only after deciding that repeating
+   them is safe.
+
+A file-level or physical database restore carries the `recorded_locally_at`
+marker with the rows, so the crate cannot detect it. Run the same steps after
+any such restore, before starting a worker.
 
 ## Remaining restore work
 
-Opening a restored runtime is still closed. The collector reports the
-encryption-key, attachment object-byte, usage/counter, rule, skill,
-checkpoint, provider, UI-intent, retention, and stream audits as not
-implemented, so every collected plan is fatal and `reconcile_restore` records
-a `blocked` epoch. The restored store keeps its closure repairs and stays
-closed. Still missing are:
+The collector reports the encryption-key, attachment object-byte,
+usage/counter, rule, skill, checkpoint, provider, UI-intent, retention, and
+stream audits as not implemented, so every collected plan is fatal. The
+acknowledgement is the operator's explicit acceptance of those unaudited
+categories. Still missing are:
 
 1. a manifest-verified backup and exact referenced-object restore through
    `graphql-orm-backup` into a test-owned empty target;
@@ -233,12 +265,8 @@ closed. Still missing are:
 workspace and one database/metadata/storage type universe. AI schema module
 0.58.0 also includes finalized local attachment and artifact object keys in
 the confidential database export while continuing to redact quarantine,
-upload-token, provider, credential, and secret references.
-
-A file-level or physical database restore carries the `live_at` marker with
-the rows, so the crate cannot detect it. Run `reconcile_restore` after any
-such restore, before starting a worker. Consumer owners must still rehearse
-their composed schema and object store separately.
+upload-token, provider, credential, and secret references. Consumer owners
+must still rehearse their composed schema and object store separately.
 
 The `graphql-orm-*` packages already share this workspace. Continue restore
 work on the integration branch, keep temporary coordination only in ignored

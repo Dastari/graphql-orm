@@ -157,6 +157,13 @@ async fn service() -> (
         .apply_migration(&plan, ApplyOptions::default())
         .await
         .expect("schema applies to in-memory SQLite");
+    graphql_orm_ai::OrmAiRuntimeRecoveryService::new(
+        database.clone(),
+        std::sync::Arc::new(agql_auth::SystemClock),
+    )
+    .readiness_proof()
+    .await
+    .expect("a test store should record its first live epoch");
     let now = OffsetDateTime::from_unix_timestamp(1_800_000_000).expect("fixed time");
     let secrets = Arc::new(MemorySecretStore::default());
     let service = OrmAiConfigurationService::new(

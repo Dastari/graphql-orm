@@ -43,9 +43,19 @@ pub struct AiRuntimeReadinessReport {
 ///
 /// Only [`crate::OrmAiRuntimeRecoveryService`] creates this value, and only
 /// after it has read or recorded a live recovery epoch for the exact compiled
-/// module fingerprint. A restored epoch row is never live. The proof does not
-/// prove that integrity audits beyond runtime closure ran; a reconciled
-/// restore stays closed while its plan reports any fatal issue.
+/// module fingerprint in one store. An epoch row restored from a portable
+/// backup is never live. A file-level or physical database restore carries
+/// the deployment-local marker with the rows, so the crate cannot detect it;
+/// run [`crate::OrmAiRuntimeRecoveryService::reconcile_restore`] after any
+/// such restore.
+///
+/// The proof is bound to its store through its epoch: leases record the
+/// epoch they were granted under, fenced writes require that epoch to be the
+/// store's current live epoch, and gate-guarded services refuse a lease whose
+/// epoch differs from the gate's. Mint the proof from the store the runtime's
+/// workers use. The proof does not prove that restore integrity audits ran;
+/// after a restore it exists only once an operator has acknowledged the
+/// reviewed closure.
 #[derive(Debug, PartialEq, Eq)]
 pub struct AiRuntimeReadinessProof {
     module_fingerprint: String,
@@ -59,13 +69,6 @@ impl AiRuntimeReadinessProof {
             module_fingerprint,
             epoch_id,
         }
-    }
-
-    /// Test-only proof for in-crate runtime tests that do not exercise the
-    /// recovery ledger.
-    #[cfg(all(test, feature = "sqlite"))]
-    pub(crate) fn for_test(module_fingerprint: impl Into<String>) -> Self {
-        Self::new(module_fingerprint.into(), uuid::Uuid::new_v4())
     }
 
     /// Compiled module fingerprint the live epoch was recorded for.
@@ -100,7 +103,9 @@ impl AiRuntimeStartGate {
     /// Opens the gate for a crate-minted proof of a live recovery epoch.
     ///
     /// Obtain the proof from
-    /// [`crate::OrmAiRuntimeRecoveryService::readiness_proof`]. A host-built
+    /// [`crate::OrmAiRuntimeRecoveryService::readiness_proof`] for the store
+    /// this runtime's workers use, or call
+    /// [`crate::OrmAiRuntimeRecoveryService::open_start_gate`]. A host-built
     /// [`AiRuntimeReadinessReport`] is not accepted.
     ///
     /// # Errors
