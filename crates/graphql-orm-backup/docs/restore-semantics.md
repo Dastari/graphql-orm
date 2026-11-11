@@ -67,7 +67,8 @@ with `LegacyManifestRefused` unless the host opts in with a
 - Authenticate every manifest in the chain and bind it to its path before
   writing.
 - Verify object checksums before final success.
-- Verify table payload checksums against the stored compressed bytes.
+- Verify table payload checksums against the stored compressed bytes, both
+  during verification and again on the exact bytes buffered for decoding.
 - Decompress table payloads only after checksum verification.
 - Refuse a manifest backend/schema hash that differs from the target before
   checking emptiness or writing.
@@ -100,6 +101,13 @@ which suits a store that holds only restored objects. It creates each object
 with an atomic conditional write and never overwrites: a key that already
 holds the same bytes is left in place, and a key that holds different bytes
 fails with `RestoreObjectConflict`. Restore into an empty staging namespace.
+
+The object stream handed to a sink fails at its end when its bytes do not
+match the manifest digest, and `restore_objects` then returns
+`ChecksumMismatch`. A bundled `BlobStore` discards such a write; buffering
+sinks never receive the bytes. A custom streaming sink must likewise discard a
+body whose stream ends in an error. A sink that returns success without
+reading the whole stream also fails with `ChecksumMismatch`.
 
 A successful database restore does not imply that external objects,
 credentials, provider continuations, application reconciliation, or runtime

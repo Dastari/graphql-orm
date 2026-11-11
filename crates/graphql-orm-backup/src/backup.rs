@@ -413,6 +413,18 @@ async fn compact_chain_inner(
     repository: &dyn BackupRepository,
     request: CompactChainRequest,
 ) -> Result<CompactChainResult, BackupError> {
+    // Checked under the repository lock, before any payload is written.
+    if repository
+        .blob_exists(&snapshot_manifest_key(request.snapshot_id))
+        .await?
+    {
+        return Err(BackupError::InvalidManifestChain {
+            reason: format!(
+                "snapshot {} already exists; compaction never overwrites a snapshot",
+                request.snapshot_id
+            ),
+        });
+    }
     let chain = load_manifest_chain(repository, request.source_snapshot_id).await?;
     for manifest in &chain {
         verify_manifest_and_objects(repository, manifest).await?;

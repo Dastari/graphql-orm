@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::{
     BackupError, BackupRepository, BackupSnapshotManifest, RepositoryLock, RepositoryLockOptions,
-    load_manifest, load_manifest_chain, snapshot_manifest_key,
+    load_manifest, load_manifest_chain, manifest::required_authenticator, snapshot_manifest_key,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -56,6 +56,8 @@ pub async fn prune(
     repository: &dyn BackupRepository,
     keep_policy: &KeepPolicy,
 ) -> Result<PruneResult, BackupError> {
+    // Refuse before the lock write: without a key no manifest can be trusted.
+    required_authenticator(repository)?;
     let lock = RepositoryLock::acquire(repository, &keep_policy.lock).await?;
     let result = prune_inner(repository, keep_policy).await;
     let release_result = lock.release().await;
@@ -158,6 +160,7 @@ pub async fn delete_snapshot(
     snapshot_id: Uuid,
     lock_options: &RepositoryLockOptions,
 ) -> Result<DeleteSnapshotResult, BackupError> {
+    required_authenticator(repository)?;
     let lock = RepositoryLock::acquire(repository, lock_options).await?;
     let result = delete_snapshot_inner(repository, snapshot_id).await;
     let release_result = lock.release().await;
@@ -325,10 +328,10 @@ fn incomplete_listing(detail: String) -> BackupError {
 fn snapshot_id_from_manifest_key(key: &str) -> Option<Uuid> {
     let rest = key.strip_prefix("snapshots/")?;
     let snapshot_id = rest.strip_suffix("/manifest.json")?;
-    if snapshot_id.contains('/') {
-        return None;
-    }
-    Uuid::parse_str(snapshot_id).ok()
+    // Accept only the canonical lowercase hyphenated form that this crate
+    // writes, so each listed key names exactly one manifest path.
+    let parsed = Uuid::parse_str(snapshot_id).ok()?;
+    (parsed.hyphenated().to_string() == snapshot_id).then_some(parsed)
 }
 
 fn collect_reachable_keys(
@@ -343,5 +346,25 @@ fn collect_reachable_keys(
     }
     for object in &manifest.objects {
         reachable_content_keys.insert(object.content_key.clone());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::snapshot_id_from_manifest_key;
+
+    #[test]
+    fn only_canonical_manifest_keys_name_a_snapshot() {
+        let id = "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb";
+        assert!(snapshot_id_from_manifest_key(&format!("snapshots/{id}/manifest.json")).is_some());
+        for key in [
+            "snapshots/BBBBBBBB-BBBB-4BBB-BBBB-BBBBBBBBBBBB/manifest.json",
+            "snapshots/bbbbbbbbbbbb4bbbbbbbbbbbbbbbbbbb/manifest.json",
+            "snapshots/{bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb}/manifest.json",
+            "snapshots/urn:uuid:bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb/manifest.json",
+            "snapshots/x/bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb/manifest.json",
+        ] {
+            assert!(snapshot_id_from_manifest_key(key).is_none(), "{key}");
+        }
     }
 }

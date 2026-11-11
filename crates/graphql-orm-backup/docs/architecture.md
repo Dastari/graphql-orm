@@ -33,6 +33,14 @@ key:
   object restore (which re-checks a caller-supplied manifest), verification,
   compaction, pruning and snapshot deletion. Payload digests are trusted only
   because a verified manifest names them.
+- A repository may serve different bytes on each read, so a digest is checked
+  against the bytes that are actually used, not only during verification.
+  Restore and compaction hash each table and change payload as it is buffered
+  for decoding and refuse a mismatch before decoding it. Object restore streams
+  through a digest check that fails at the end of the stream on a mismatch, so
+  a conditional create aborts before committing: local storage writes to a
+  temporary file, S3 drains the body before its committing request, and SMB
+  keeps delete-on-close armed until the whole body is flushed.
 - A manifest must name the snapshot id of the path it was read from, use a
   supported format version and contain no unknown fields, so a sealed
   manifest cannot be replayed under another snapshot id or extended with

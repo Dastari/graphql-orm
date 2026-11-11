@@ -15,6 +15,10 @@ use graphql_orm_backup::{
     prune, restore_objects, restore_snapshot, set_manifest_checksum, snapshot_manifest_key,
     verify_manifest_and_objects,
 };
+use graphql_orm_backup::{
+    CompactChainRequest, IncrementalBackupRequest, RepositoryLockOptions, RestoreFailurePhase,
+    compact_chain, create_incremental_backup, delete_snapshot,
+};
 use graphql_orm_storage::{BlobPutOptions, BlobStore, LocalStorageBackend, StorageByteStream};
 use serde_json::{Map, Value};
 use tempfile::TempDir;
@@ -150,7 +154,10 @@ async fn repository_without_authenticator_fails_closed_before_writing() {
     let manifest = backup_with_object(&sealed, "media/a.txt").await;
     let before = sealed.list_blobs("").await.expect("list");
 
-    let unkeyed = LocalBackupRepository::new(temp.path());
+    let unkeyed = WriteCountingRepository {
+        inner: LocalBackupRepository::new(temp.path()),
+        writes: Arc::default(),
+    };
     let error = load_manifest(&unkeyed, manifest.snapshot_id)
         .await
         .expect_err("no authenticator");
@@ -171,11 +178,78 @@ async fn repository_without_authenticator_fails_closed_before_writing() {
         .await
         .expect_err("backup refused without a key");
     assert!(matches!(error, BackupError::ManifestAuthenticationRequired));
+    let error = prune(&unkeyed, &KeepPolicy::default())
+        .await
+        .expect_err("prune refused without a key");
+    assert!(matches!(error, BackupError::ManifestAuthenticationRequired));
+    let error = delete_snapshot(
+        &unkeyed,
+        manifest.snapshot_id,
+        &RepositoryLockOptions::default(),
+    )
+    .await
+    .expect_err("delete refused without a key");
+    assert!(matches!(error, BackupError::ManifestAuthenticationRequired));
+    let error = compact_chain(&unkeyed, compact_request(manifest.snapshot_id))
+        .await
+        .expect_err("compaction refused without a key");
+    assert!(matches!(error, BackupError::ManifestAuthenticationRequired));
+    let error = verify_manifest_and_objects(&unkeyed, &manifest)
+        .await
+        .expect_err("verification refused without a key");
+    assert!(matches!(error, BackupError::ManifestAuthenticationRequired));
     assert_eq!(
         unkeyed.list_blobs("").await.expect("list"),
         before,
         "nothing written"
     );
+    assert_eq!(
+        unkeyed.writes.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no write, not even a lock blob"
+    );
+}
+
+/// Repository handle without an authenticator that counts every mutation.
+struct WriteCountingRepository {
+    inner: LocalBackupRepository,
+    writes: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl WriteCountingRepository {
+    fn wrote(&self) {
+        self.writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl BackupRepository for WriteCountingRepository {
+    async fn put_blob(&self, key: &str, body: Bytes) -> Result<(), BackupError> {
+        self.wrote();
+        self.inner.put_blob(key, body).await
+    }
+    async fn put_blob_if_absent(&self, key: &str, body: Bytes) -> Result<bool, BackupError> {
+        self.wrote();
+        self.inner.put_blob_if_absent(key, body).await
+    }
+    async fn get_blob(&self, key: &str) -> Result<Bytes, BackupError> {
+        self.inner.get_blob(key).await
+    }
+    async fn blob_exists(&self, key: &str) -> Result<bool, BackupError> {
+        self.inner.blob_exists(key).await
+    }
+    async fn list_blobs(&self, prefix: &str) -> Result<Vec<String>, BackupError> {
+        self.inner.list_blobs(prefix).await
+    }
+    async fn delete_blob_once(&self, key: &str) -> Result<(), BackupError> {
+        self.wrote();
+        self.inner.delete_blob_once(key).await
+    }
+    async fn delete_blob(&self, key: &str) -> Result<(), BackupError> {
+        self.wrote();
+        self.inner.delete_blob(key).await
+    }
 }
 
 #[tokio::test]
@@ -524,6 +598,317 @@ async fn prune_refuses_a_forged_manifest_before_deleting_anything() {
     assert_eq!(after, before, "nothing deleted");
 }
 
+#[tokio::test]
+async fn payload_swapped_after_verification_is_never_applied_or_compacted() {
+    let temp = TempDir::new().expect("temp dir");
+    let inner = repository(&temp);
+    let manifest = backup_with_object(&inner, "media/a.txt").await;
+    let table_key = manifest.database.tables[0].content_key.clone();
+    let forged = serialize_rows(&[row("users", "99", "forged")]);
+
+    // Genuine bytes on the first read (verification), forged bytes after.
+    let swapping = SwappingRepository::new(inner.clone(), &table_key, forged.clone());
+    let target = MockDatabase::default();
+    let error = restore_snapshot(
+        &swapping,
+        &target,
+        manifest.snapshot_id,
+        RestoreContext::empty_database(),
+    )
+    .await
+    .expect_err("swapped payload refused");
+    let BackupError::RestoreStageFailed { progress, source } = error else {
+        panic!("restore errors identify their stage");
+    };
+    assert_eq!(progress.phase, RestoreFailurePhase::Preparation);
+    assert!(!progress.target_may_have_changed());
+    assert!(matches!(
+        *source,
+        BackupError::ChecksumMismatch { ref key, .. } if *key == table_key
+    ));
+    assert!(target.restored().is_empty(), "forged rows never applied");
+    assert!(swapping.reads() >= 2, "verification and use both read");
+
+    let swapping = SwappingRepository::new(inner.clone(), &table_key, forged);
+    let request = compact_request(manifest.snapshot_id);
+    let new_id = request.snapshot_id;
+    let error = compact_chain(&swapping, request)
+        .await
+        .expect_err("swapped payload not compacted");
+    assert!(matches!(
+        error,
+        BackupError::ChecksumMismatch { ref key, .. } if *key == table_key
+    ));
+    assert!(
+        !inner
+            .blob_exists(&snapshot_manifest_key(new_id))
+            .await
+            .expect("exists"),
+        "no synthetic full sealed over forged rows"
+    );
+}
+
+#[tokio::test]
+async fn object_swapped_after_verification_never_reaches_the_live_store() {
+    let temp = TempDir::new().expect("temp dir");
+    let live_root = TempDir::new().expect("live store");
+    let inner = repository(&temp);
+    let manifest = backup_with_object(&inner, "media/a.txt").await;
+    let object_key = manifest.objects[0].content_key.clone();
+    let swapping = SwappingRepository::new(
+        inner.clone(),
+        &object_key,
+        Bytes::from_static(b"forged object"),
+    );
+
+    let live: Arc<dyn BlobStore> = Arc::new(LocalStorageBackend::new(live_root.path()));
+    let sink = BlobStoreRestoreObjectSink::new(
+        Arc::clone(&live),
+        RestoreKeyScope::prefixes(["media"]).expect("scope"),
+    );
+    let error = restore_objects(&swapping, &manifest, &sink)
+        .await
+        .expect_err("swapped object refused");
+    assert!(matches!(
+        error,
+        BackupError::ChecksumMismatch { ref key, .. } if *key == object_key
+    ));
+    assert!(
+        !live.blob_exists("media/a.txt").await.expect("exists"),
+        "conditional create aborted before commit"
+    );
+    assert!(
+        walk(live_root.path()).is_empty(),
+        "no temporary or partial file remains"
+    );
+
+    // A buffering sink never receives the forged bytes either.
+    let swapping = SwappingRepository::new(inner, &object_key, Bytes::from_static(b"forged"));
+    let recording = RecordingSink::default();
+    restore_objects(&swapping, &manifest, &recording)
+        .await
+        .expect_err("swapped object refused");
+    assert!(recording.restored().is_empty());
+}
+
+#[tokio::test]
+async fn forged_manifests_are_refused_by_compaction_and_deletion() {
+    let temp = TempDir::new().expect("temp dir");
+    let repository = repository(&temp);
+    let manifest = backup_with_object(&repository, "media/a.txt").await;
+    let mut forged = manifest.clone();
+    forged.app_version = "forged".to_string();
+    write_raw_manifest(&repository, &mut forged).await;
+    let before = without_locks(repository.list_blobs("").await.expect("list"));
+
+    verify_manifest_and_objects(&repository, &forged)
+        .await
+        .expect_err("verification refuses a forged manifest");
+    let request = compact_request(manifest.snapshot_id);
+    let error = compact_chain(&repository, request)
+        .await
+        .expect_err("compaction refuses a forged source");
+    assert!(matches!(
+        error,
+        BackupError::ManifestAuthenticationFailed { .. }
+    ));
+    let error = delete_snapshot(
+        &repository,
+        manifest.snapshot_id,
+        &RepositoryLockOptions::default(),
+    )
+    .await
+    .expect_err("deletion refuses a forged manifest");
+    assert!(matches!(
+        error,
+        BackupError::ManifestAuthenticationFailed { .. }
+    ));
+    assert_eq!(
+        without_locks(repository.list_blobs("").await.expect("list")),
+        before,
+        "nothing written or deleted"
+    );
+}
+
+#[tokio::test]
+async fn forged_or_unsealed_parent_breaks_an_incremental_chain() {
+    let temp = TempDir::new().expect("temp dir");
+    let repository = repository(&temp);
+    let full = backup_with_object(&repository, "media/a.txt").await;
+    let incremental_id = Uuid::new_v4();
+    create_incremental_backup(
+        &repository,
+        &MockDatabase::default(),
+        &MockObjectIndex {
+            object: full.objects.first().map(entry_ref).expect("object"),
+            bytes: Bytes::from_static(b"object bytes"),
+        },
+        IncrementalBackupRequest {
+            snapshot_id: incremental_id,
+            parent_snapshot_id: full.snapshot_id,
+            created_at: 1_775_174_500,
+            app_id: "example-app".to_string(),
+            app_version: "0.1.0".to_string(),
+        },
+    )
+    .await
+    .expect("incremental backup");
+    let restore = || {
+        let repository = repository.clone();
+        async move {
+            restore_snapshot(
+                &repository,
+                &MockDatabase::default(),
+                incremental_id,
+                RestoreContext::dry_run(),
+            )
+            .await
+            .map_err(restore_source)
+        }
+    };
+    restore().await.expect("sealed chain restores");
+
+    let mut forged = full.clone();
+    forged.created_at += 1;
+    write_raw_manifest(&repository, &mut forged).await;
+    let error = restore().await.expect_err("forged parent refused");
+    assert!(matches!(
+        error,
+        BackupError::ManifestAuthenticationFailed { ref key, .. }
+            if *key == snapshot_manifest_key(full.snapshot_id)
+    ));
+
+    let mut unsealed = legacy(&full);
+    write_raw_manifest(&repository, &mut unsealed).await;
+    let error = restore().await.expect_err("unsealed parent refused");
+    assert!(matches!(
+        error,
+        BackupError::LegacyManifestRefused { snapshot_id } if snapshot_id == full.snapshot_id
+    ));
+}
+
+#[tokio::test]
+async fn compaction_refuses_an_existing_snapshot_id() {
+    let temp = TempDir::new().expect("temp dir");
+    let repository = repository(&temp);
+    let first = backup_with_object(&repository, "media/a.txt").await;
+    let second = backup_with_object(&repository, "media/b.txt").await;
+    let manifest_key = snapshot_manifest_key(second.snapshot_id);
+    let before = repository.get_blob(&manifest_key).await.expect("manifest");
+
+    let mut request = compact_request(first.snapshot_id);
+    request.snapshot_id = second.snapshot_id;
+    let error = compact_chain(&repository, request)
+        .await
+        .expect_err("existing snapshot id refused");
+    assert!(matches!(error, BackupError::InvalidManifestChain { .. }));
+    assert_eq!(
+        repository.get_blob(&manifest_key).await.expect("manifest"),
+        before,
+        "existing snapshot unchanged"
+    );
+}
+
+fn compact_request(source_snapshot_id: Uuid) -> CompactChainRequest {
+    CompactChainRequest {
+        snapshot_id: Uuid::new_v4(),
+        source_snapshot_id,
+        created_at: 1_775_174_900,
+        app_id: "example-app".to_string(),
+        app_version: "0.1.0".to_string(),
+    }
+}
+
+fn entry_ref(entry: &graphql_orm_backup::ObjectBackupEntry) -> BackupObjectRef {
+    BackupObjectRef {
+        object_id: entry.object_id,
+        storage_key: entry.storage_key.clone(),
+        sha256_hex: entry.sha256_hex.clone(),
+        size_bytes: entry.size_bytes,
+        mime_type: entry.mime_type.clone(),
+    }
+}
+
+fn without_locks(mut keys: Vec<String>) -> Vec<String> {
+    keys.retain(|key| !key.starts_with("locks/"));
+    keys
+}
+
+fn walk(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read dir") {
+            let path = entry.expect("entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    files
+}
+
+/// Serves genuine bytes for one key on its first read and `forged` bytes on
+/// every later read, as a repository writer or endpoint could.
+#[derive(Clone)]
+struct SwappingRepository {
+    inner: LocalBackupRepository,
+    key: String,
+    forged: Bytes,
+    reads: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl SwappingRepository {
+    fn new(inner: LocalBackupRepository, key: &str, forged: Bytes) -> Self {
+        Self {
+            inner,
+            key: key.to_string(),
+            forged,
+            reads: Arc::default(),
+        }
+    }
+
+    fn reads(&self) -> usize {
+        self.reads.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl BackupRepository for SwappingRepository {
+    fn manifest_authenticator(&self) -> Option<&ManifestAuthenticator> {
+        self.inner.manifest_authenticator()
+    }
+    async fn get_blob_stream(&self, key: &str) -> Result<StorageByteStream, BackupError> {
+        if key == self.key && self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0 {
+            return Ok(StorageByteStream::from_bytes(self.forged.clone()));
+        }
+        self.inner.get_blob_stream(key).await
+    }
+    async fn get_blob(&self, key: &str) -> Result<Bytes, BackupError> {
+        collect_backup_stream(self.get_blob_stream(key).await?, BackupByteLimit::Unbounded).await
+    }
+    async fn put_blob(&self, key: &str, body: Bytes) -> Result<(), BackupError> {
+        self.inner.put_blob(key, body).await
+    }
+    async fn put_blob_if_absent(&self, key: &str, body: Bytes) -> Result<bool, BackupError> {
+        self.inner.put_blob_if_absent(key, body).await
+    }
+    async fn blob_exists(&self, key: &str) -> Result<bool, BackupError> {
+        self.inner.blob_exists(key).await
+    }
+    async fn list_blobs(&self, prefix: &str) -> Result<Vec<String>, BackupError> {
+        self.inner.list_blobs(prefix).await
+    }
+    async fn delete_blob_once(&self, key: &str) -> Result<(), BackupError> {
+        self.inner.delete_blob_once(key).await
+    }
+    async fn delete_blob(&self, key: &str) -> Result<(), BackupError> {
+        self.inner.delete_blob(key).await
+    }
+}
+
 /// Downgrades a sealed manifest to the legacy unauthenticated format.
 fn legacy(manifest: &BackupSnapshotManifest) -> BackupSnapshotManifest {
     let mut legacy = manifest.clone();
@@ -561,7 +946,7 @@ async fn backup_with_object(
 }
 
 async fn try_backup(
-    repository: &LocalBackupRepository,
+    repository: &dyn BackupRepository,
     storage_key: &str,
 ) -> Result<BackupSnapshotManifest, BackupError> {
     let bytes = Bytes::from_static(b"object bytes");

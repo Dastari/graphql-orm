@@ -585,7 +585,7 @@ async fn manifest_for_object_restore(
 }
 
 #[tokio::test]
-async fn changed_content_after_size_preflight_fails_after_sink_receives_second_version() {
+async fn changed_content_after_size_preflight_never_reaches_the_sink() {
     let temp = TempDir::new().expect("owned repository");
     let original = Bytes::from_static(b"original");
     let replacement = Bytes::from_static(b"replacement is longer");
@@ -612,12 +612,9 @@ async fn changed_content_after_size_preflight_fails_after_sink_receives_second_v
         if expected == bytes_sha256_hex(&original) && actual == bytes_sha256_hex(&replacement))
     );
     assert_eq!(repository.reads.load(Ordering::SeqCst), 2);
-    let received = sink.restored();
-    assert_eq!(received.len(), 1);
-    assert_eq!(received[0].0.size_bytes, original.len() as u64);
-    assert_eq!(received[0].1, replacement);
-    // Preflight size describes the first read. A failed second read may already
-    // have changed the sink, which must remain an unpublished staging target.
+    // The stream fails at its end on a digest mismatch, so the buffered sink
+    // never receives the second version.
+    assert!(sink.restored().is_empty());
 }
 
 #[tokio::test]

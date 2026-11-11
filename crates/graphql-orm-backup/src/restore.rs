@@ -642,39 +642,101 @@ pub async fn restore_objects(
         let mut reference = object_ref_from_entry(object);
         reference.size_bytes = observed_size;
         let source = repository.get_blob_stream(&object.content_key).await?;
-        let expected = object.sha256_hex.clone();
-        let key = object.content_key.clone();
-        let state = std::sync::Arc::new(std::sync::Mutex::new(Sha256::new()));
-        let hash_state = std::sync::Arc::clone(&state);
-        let stream = source.into_inner().map(move |chunk| {
-            let chunk = chunk?;
-            let mut hasher = match hash_state.lock() {
-                Ok(hasher) => hasher,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            hasher.update(&chunk);
-            Ok::<_, graphql_orm_storage::StorageError>(chunk)
-        });
-        sink.restore_object_stream(reference, StorageByteStream::new(Box::pin(stream)))
-            .await?;
-        let actual = format!(
-            "{:x}",
-            match state.lock() {
-                Ok(hasher) => hasher.clone(),
-                Err(poisoned) => poisoned.into_inner().clone(),
-            }
-            .finalize()
+        // The repository may serve different bytes on this second read. The
+        // stream fails at its end on a digest mismatch, so a conditional create
+        // aborts before committing and no forged object reaches the sink's store.
+        let (stream, outcome) = digest_checked_stream(
+            source,
+            object.content_key.clone(),
+            object.sha256_hex.clone(),
         );
-        if actual != expected {
-            return Err(BackupError::ChecksumMismatch {
-                key,
-                expected,
-                actual,
-            });
+        let restored = sink.restore_object_stream(reference, stream).await;
+        let outcome = match outcome.lock() {
+            Ok(outcome) => outcome.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        match (outcome, restored) {
+            (DigestOutcome::Mismatch(actual), _) => {
+                return Err(BackupError::ChecksumMismatch {
+                    key: object.content_key.clone(),
+                    expected: object.sha256_hex.clone(),
+                    actual,
+                });
+            }
+            (_, Err(error)) => return Err(error),
+            (DigestOutcome::Verified, Ok(())) => {}
+            (DigestOutcome::Pending, Ok(())) => {
+                // A sink that stops reading early never saw the digest check.
+                return Err(BackupError::ChecksumMismatch {
+                    key: object.content_key.clone(),
+                    expected: object.sha256_hex.clone(),
+                    actual: "unverified: the sink did not read the whole object".to_string(),
+                });
+            }
         }
     }
 
     Ok(())
+}
+
+#[derive(Clone, Debug)]
+enum DigestOutcome {
+    Pending,
+    Verified,
+    Mismatch(String),
+}
+
+/// Wraps a body so it yields an error instead of ending when its SHA-256 does
+/// not match `expected`. Every bundled `BlobStore` discards a write whose body
+/// fails before the end: local writes to a temporary file, S3 drains the body
+/// before its committing request, and SMB arms delete-on-close until the whole
+/// body is flushed.
+fn digest_checked_stream(
+    source: StorageByteStream,
+    key: String,
+    expected: String,
+) -> (StorageByteStream, Arc<std::sync::Mutex<DigestOutcome>>) {
+    let outcome = Arc::new(std::sync::Mutex::new(DigestOutcome::Pending));
+    let shared = Arc::clone(&outcome);
+    let stream =
+        futures::stream::unfold(Some((source.into_inner(), Sha256::new())), move |state| {
+            let shared = Arc::clone(&shared);
+            let key = key.clone();
+            let expected = expected.clone();
+            async move {
+                let (mut inner, mut hasher) = state?;
+                match inner.next().await {
+                    Some(Ok(chunk)) => {
+                        hasher.update(&chunk);
+                        Some((Ok(chunk), Some((inner, hasher))))
+                    }
+                    Some(Err(error)) => Some((Err(error), None)),
+                    None => {
+                        let actual = format!("{:x}", hasher.finalize());
+                        let matched = actual == expected;
+                        let mut outcome = match shared.lock() {
+                            Ok(outcome) => outcome,
+                            Err(poisoned) => poisoned.into_inner(),
+                        };
+                        if matched {
+                            *outcome = DigestOutcome::Verified;
+                            None
+                        } else {
+                            *outcome = DigestOutcome::Mismatch(actual);
+                            Some((
+                                Err(graphql_orm_storage::StorageError::PreconditionFailed {
+                                    key,
+                                    condition: "content does not match the manifest digest"
+                                        .to_string(),
+                                }),
+                                None,
+                            ))
+                        }
+                    }
+                }
+            }
+        });
+    (StorageByteStream::new(Box::pin(stream)), outcome)
 }
 
 pub(crate) async fn load_table_exports(
@@ -726,6 +788,16 @@ where
         limits.buffered_bytes,
     )
     .await?;
+    // Verification read this payload earlier; the repository may serve other
+    // bytes now. Check the bytes actually decoded, before decoding them.
+    let actual = crate::manifest::sha256_hex(&stored);
+    if actual != entry.sha256_hex {
+        return Err(BackupError::ChecksumMismatch {
+            key: entry.content_key.clone(),
+            expected: entry.sha256_hex.clone(),
+            actual,
+        });
+    }
     let remaining_stage = limits.stage_bytes.remaining(*stage_bytes)?;
     let decode_limit = limits.decompressed_bytes.min(remaining_stage);
     let payload = decode_payload(&stored, &manifest.database.compression, decode_limit)?;

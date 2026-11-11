@@ -61,7 +61,13 @@ current version.
    from `database_table_key`, `database_changes_key` and `object_content_key`,
    and lowercase SHA-256 digests, then seal with `write_manifest` or
    `authenticate_manifest`.
-6. **Check backup inputs.** Backups now refuse table names that are not a
+6. **Check custom sinks and compaction ids.** A custom `RestoreObjectSink`
+   must read each object stream to its end and must discard a write whose
+   stream ends in an error. `restore_objects` now reports a digest mismatch
+   that way, and a sink that stops reading early fails with
+   `ChecksumMismatch`. `compact_chain` refuses a `snapshot_id` that already
+   exists; pass a new id.
+7. **Check backup inputs.** Backups now refuse table names that are not a
    single safe key segment, non-hex digests, and object storage keys that fail
    `graphql-orm-storage` key validation, before writing anything.
 

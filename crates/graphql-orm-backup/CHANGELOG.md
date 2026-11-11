@@ -50,6 +50,21 @@ are constrained. See [MIGRATION.md](MIGRATION.md) and the
   sink writes only inside it, creates objects with an atomic conditional write,
   leaves identical existing content in place and fails with
   `RestoreObjectConflict` instead of overwriting different content.
+- Restore and compaction check each table and change payload's digest on the
+  exact bytes they decode, not only during the earlier verification read, so a
+  repository that serves different bytes on a later read cannot inject rows or
+  have them sealed into a synthetic full.
+- `restore_objects` streams each object through a digest check that fails at
+  the end of the stream on a mismatch, so the sink's conditional create aborts
+  before committing. Buffering sinks no longer receive mismatched bytes, and a
+  sink that returns success without reading the whole object fails with
+  `ChecksumMismatch`.
+- `prune` and `delete_snapshot` refuse a handle without an authenticator
+  before acquiring the repository lock, so they write nothing.
+- `compact_chain` refuses a `snapshot_id` that already has a manifest, with
+  `InvalidManifestChain`, instead of overwriting that snapshot.
+- Snapshot listings recognise only canonical lowercase hyphenated snapshot ids
+  in manifest keys.
 - New `BackupError` variants: `ManifestAuthenticationRequired`,
   `InvalidManifestKey`, `ManifestAuthenticationFailed`,
   `LegacyManifestRefused`, `UnsupportedManifestFormat`,
