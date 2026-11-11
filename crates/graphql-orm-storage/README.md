@@ -22,6 +22,15 @@ The local backend requires a trusted, exclusively managed filesystem root and
 restrictive permissions. See the [local filesystem trust boundary](docs/blob-store.md#local-filesystem-trust-boundary)
 before using local directories or OS-mounted shares.
 
+Version 0.9.1 treats only the backend's own upload temp files as temporary.
+The local backend names them `.<uuid>.uploading`, and listings and
+`sweep_temp_files` act on that exact form only, so a stored object whose name
+ends in `.uploading`, including one stored from a client filename such as
+`report.uploading`, is listed and never swept. SMB filters only its own
+dot-prefixed temporary names. `file_extension` no longer returns `uploading`.
+See the [migration guide](MIGRATION.md) for temporary files left by earlier
+local versions.
+
 Version 0.9.0 bounds what an SMB server can make the native client hold or
 repeat. Listings have depth, entry, byte, name-length and overall-time limits,
 `list_blobs` lists once, and paged listings end; listings fail instead of
@@ -62,13 +71,13 @@ resolved dependency graph.
 
 ```toml
 [dependencies]
-graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.8.1" }
+graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.9.1" }
 ```
 
 For S3-compatible storage without the default local backend:
 
 ```toml
-graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.8.1", default-features = false, features = ["s3"] }
+graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.9.1", default-features = false, features = ["s3"] }
 ```
 
 ## Five-minute local start

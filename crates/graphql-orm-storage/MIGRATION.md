@@ -10,6 +10,34 @@ supersedes: []
 
 # Migration Guide
 
+## 0.9.0 to 0.9.1: backend-owned temporary names
+
+Update the storage requirement to 0.9.1 and refresh the consumer lockfile. No
+API, configuration or object format change is required.
+
+- The local backend now names temporary upload files `.<uuid>.uploading`, and
+  only that exact form is hidden from listings and removed by
+  `sweep_temp_files`. Stored objects whose names merely end in `.uploading`
+  are now listed and are never swept.
+- Earlier local versions named temporary files `<name>.<uuid>.uploading`.
+  Such a name cannot be told apart from a stored object, so a file left by an
+  interrupted upload of an earlier version is now listed and is not swept.
+  This keeps the backend from ever deleting a stored object. To remove such
+  leftovers, stop every writer that runs an earlier version, then review and
+  delete files under the root matching `*.<uuid>.uploading` that do not begin
+  with a dot and that you did not store. Do not automate this for roots that
+  may hold stored objects with such names.
+- Stop running a sweep from an earlier version against a root a 0.9.1 writer
+  uses; the earlier sweep still removes any file ending in `.uploading`.
+  `StorageService` no longer generates such keys, but direct `BlobStore`
+  callers may.
+- On SMB, only `.<uuid>.uploading` and `.<name>.<uuid>.uploading` are
+  filtered. A key such as `report.<uuid>.uploading` is now listed.
+- Writing a key whose name has one of these temporary forms now fails with
+  `InvalidStorageKey` on local and SMB.
+- `file_extension` returns `None` for the extension `uploading`, in any case.
+  `StorageService` stores such files without an extension.
+
 ## 0.8.1 to 0.9.0: SMB resource bounds and server identity
 
 Update the storage requirement to 0.9.0 and refresh the consumer lockfile. No

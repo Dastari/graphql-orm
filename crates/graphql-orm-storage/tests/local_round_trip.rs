@@ -248,3 +248,47 @@ fn test_object(storage_key: &str) -> StoredObject {
         created_at: OffsetDateTime::UNIX_EPOCH,
     }
 }
+
+#[tokio::test]
+async fn client_file_named_dot_uploading_survives_listing_and_the_temp_sweep() {
+    use graphql_orm_storage::BlobStore;
+
+    let temp = TempDir::new().expect("temp dir");
+    let backend = Arc::new(LocalStorageBackend::new(temp.path()));
+    let service = StorageService::new(backend.clone());
+
+    let stored = service
+        .put_object(StoragePutRequest {
+            namespace: StorageNamespace::Originals,
+            file_name: Some("quarterly.UPLOADING".to_string()),
+            mime_type: None,
+            bytes: b"real object".to_vec(),
+        })
+        .await
+        .expect("put object");
+
+    assert!(
+        backend
+            .list_blobs("")
+            .await
+            .expect("list")
+            .contains(&stored.storage_key),
+        "a stored object must be listed: {}",
+        stored.storage_key
+    );
+    assert_eq!(
+        backend
+            .sweep_temp_files(std::time::Duration::ZERO)
+            .await
+            .expect("sweep"),
+        0
+    );
+    assert_eq!(
+        service
+            .get_object(&stored)
+            .await
+            .expect("still readable")
+            .bytes,
+        b"real object"
+    );
+}

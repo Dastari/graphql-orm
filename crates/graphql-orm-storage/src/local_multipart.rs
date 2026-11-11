@@ -254,7 +254,8 @@ impl MultipartBlobStore for LocalStorageBackend {
         key: &str,
         options: MultipartStartOptions,
     ) -> Result<MultipartUploadHandle, StorageError> {
-        self.path_for(key)?;
+        // Refuse a key the completed upload could not be written to.
+        temp_path_for(&self.path_for(key)?, key)?;
         let id = Uuid::new_v4().hyphenated().to_string();
         let uploads = self.uploads_dir();
         let dir = uploads.join(&id);

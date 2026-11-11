@@ -5,6 +5,7 @@ use graphql_orm_storage::{
 };
 use std::time::Duration;
 use tempfile::TempDir;
+use uuid::Uuid;
 
 #[tokio::test]
 async fn local_blob_put_get_delete_round_trip() {
@@ -308,7 +309,9 @@ async fn local_blob_rejects_invalid_keys_for_all_operations() {
 async fn local_blob_list_blobs_ignores_uploading_temp_files() {
     let temp = TempDir::new().expect("temp dir");
     let backend = LocalStorageBackend::new(temp.path());
-    let temp_path = temp.path().join("snapshots/a/manifest.json.temp.uploading");
+    let temp_path = temp
+        .path()
+        .join(format!("snapshots/a/.{}.uploading", Uuid::new_v4()));
     tokio::fs::create_dir_all(temp_path.parent().expect("temp parent"))
         .await
         .expect("create parent");
@@ -323,7 +326,9 @@ async fn local_blob_list_blobs_ignores_uploading_temp_files() {
 async fn local_blob_sweep_temp_files_removes_stale_uploads() {
     let temp = TempDir::new().expect("temp dir");
     let backend = LocalStorageBackend::new(temp.path());
-    let temp_path = temp.path().join("snapshots/a/manifest.json.temp.uploading");
+    let temp_path = temp
+        .path()
+        .join(format!("snapshots/a/.{}.uploading", Uuid::new_v4()));
     tokio::fs::create_dir_all(temp_path.parent().expect("temp parent"))
         .await
         .expect("create parent");
@@ -344,7 +349,9 @@ async fn local_blob_sweep_temp_files_removes_stale_uploads() {
 async fn local_blob_sweep_temp_files_keeps_recent_uploads() {
     let temp = TempDir::new().expect("temp dir");
     let backend = LocalStorageBackend::new(temp.path());
-    let temp_path = temp.path().join("snapshots/a/manifest.json.temp.uploading");
+    let temp_path = temp
+        .path()
+        .join(format!("snapshots/a/.{}.uploading", Uuid::new_v4()));
     tokio::fs::create_dir_all(temp_path.parent().expect("temp parent"))
         .await
         .expect("create parent");
@@ -401,18 +408,20 @@ async fn local_blob_sweep_skips_linked_files_directories_and_cycles() {
     let outside = owned.path().join("outside-storage");
     tokio::fs::create_dir_all(&root).await.expect("root");
     tokio::fs::create_dir_all(&outside).await.expect("outside");
-    let outside_upload = outside.join("preserve.uploading");
+    let outside_upload = outside.join(format!(".{}.uploading", Uuid::new_v4()));
     tokio::fs::write(&outside_upload, b"owned external fixture")
         .await
         .expect("outside upload");
-    let real_upload = root.join("remove.uploading");
+    let real_upload = root.join(format!(".{}.uploading", Uuid::new_v4()));
     tokio::fs::write(&real_upload, b"abandoned")
         .await
         .expect("real upload");
     symlink(&outside, root.join("linked-directory")).expect("directory link");
-    symlink(&outside_upload, root.join("linked-file.uploading")).expect("file link");
+    let linked_file = format!(".{}.uploading", Uuid::new_v4());
+    symlink(&outside_upload, root.join(&linked_file)).expect("file link");
     symlink(&root, root.join("cycle")).expect("cycle");
-    symlink(outside.join("missing"), root.join("broken.uploading")).expect("broken link");
+    let broken_link = format!(".{}.uploading", Uuid::new_v4());
+    symlink(outside.join("missing"), root.join(&broken_link)).expect("broken link");
 
     let backend = LocalStorageBackend::new(&root);
     let removed = tokio::time::timeout(
@@ -430,12 +439,7 @@ async fn local_blob_sweep_skips_linked_files_directories_and_cycles() {
             .expect("outside preserved"),
         b"owned external fixture"
     );
-    for name in [
-        "linked-directory",
-        "linked-file.uploading",
-        "cycle",
-        "broken.uploading",
-    ] {
+    for name in ["linked-directory", &linked_file, "cycle", &broken_link] {
         assert!(
             tokio::fs::symlink_metadata(root.join(name))
                 .await
@@ -455,4 +459,126 @@ async fn local_blob_sweep_skips_linked_files_directories_and_cycles() {
         0
     );
     assert!(outside_upload.exists());
+}
+
+#[tokio::test]
+async fn local_blob_keys_ending_in_uploading_are_objects_not_temp_files() {
+    let temp = TempDir::new().expect("temp dir");
+    let backend = LocalStorageBackend::new(temp.path());
+    let uuid = Uuid::new_v4();
+    // Only `.<uuid>.uploading` is a temporary name. Everything else that ends
+    // in `.uploading` is a caller's object, including the `<name>.<uuid>`
+    // form earlier versions used for their own temporary files.
+    let mut keys = vec![
+        "reports/quarterly.uploading".to_string(),
+        "reports/QUARTERLY.UPLOADING".to_string(),
+        "reports/.uploading".to_string(),
+        format!("reports/report.{uuid}.uploading"),
+        format!("reports/.report.{uuid}.uploading"),
+        format!("reports/{uuid}.uploading"),
+        format!(
+            "reports/.{}.uploading",
+            uuid.hyphenated().to_string().to_uppercase()
+        ),
+        format!("reports/.{}.uploading", uuid.simple()),
+        format!("reports/.{uuid}.uploading.bin"),
+    ];
+    for key in &keys {
+        backend
+            .put_blob(
+                key,
+                StorageByteStream::from_bytes(Bytes::from_static(b"stored")),
+                BlobPutOptions::default(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("put {key}: {error}"));
+    }
+    keys.sort();
+
+    assert_eq!(backend.list_blobs("").await.expect("list"), keys);
+    let page = backend
+        .list_blobs_page("reports", None, 100)
+        .await
+        .expect("page");
+    assert_eq!(page.keys, keys);
+    assert_eq!(
+        backend
+            .sweep_temp_files(Duration::ZERO)
+            .await
+            .expect("sweep"),
+        0
+    );
+    for key in &keys {
+        assert!(
+            backend.blob_exists(key).await.expect("exists"),
+            "{key} kept"
+        );
+    }
+}
+
+#[tokio::test]
+async fn local_blob_refuses_to_write_a_key_named_like_a_temp_file() {
+    let temp = TempDir::new().expect("temp dir");
+    let backend = LocalStorageBackend::new(temp.path());
+    let reserved = format!("reserved/.{}.uploading", Uuid::new_v4());
+    let body = || StorageByteStream::from_bytes(Bytes::from_static(b"x"));
+
+    assert_invalid(
+        backend
+            .put_blob(&reserved, body(), BlobPutOptions::default())
+            .await,
+    );
+    assert_invalid(
+        backend
+            .put_blob_if_not_exists(&reserved, body(), BlobPutOptions::default())
+            .await,
+    );
+    backend
+        .put_blob("source", body(), BlobPutOptions::default())
+        .await
+        .expect("source");
+    assert_invalid(backend.copy_blob("source", &reserved).await);
+    assert!(
+        !temp.path().join("reserved").exists(),
+        "a refused write creates no directory"
+    );
+}
+
+#[tokio::test]
+async fn local_blob_writes_leave_no_temp_files_and_interrupted_ones_are_swept() {
+    let temp = TempDir::new().expect("temp dir");
+    let backend = LocalStorageBackend::new(temp.path());
+    backend
+        .put_blob(
+            "nested/blob.bin",
+            StorageByteStream::from_bytes(Bytes::from_static(b"blob")),
+            BlobPutOptions::default(),
+        )
+        .await
+        .expect("put");
+    let mut names = std::fs::read_dir(temp.path().join("nested"))
+        .expect("read dir")
+        .map(|entry| entry.expect("entry").file_name())
+        .collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(names, ["blob.bin"]);
+
+    let interrupted = temp
+        .path()
+        .join(format!("nested/.{}.uploading", Uuid::new_v4()));
+    tokio::fs::write(&interrupted, b"partial")
+        .await
+        .expect("interrupted upload");
+    assert_eq!(
+        backend.list_blobs("").await.expect("list"),
+        ["nested/blob.bin"]
+    );
+    assert_eq!(
+        backend
+            .sweep_temp_files(Duration::ZERO)
+            .await
+            .expect("sweep"),
+        1
+    );
+    assert!(!interrupted.exists());
 }
