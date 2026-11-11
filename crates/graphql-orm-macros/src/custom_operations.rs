@@ -206,24 +206,18 @@ fn graphql_attribute_value(attrs: &[syn::Attribute], key: &str) -> syn::Result<O
 /// composed after it with `GuardExt::and`, so the host guard cannot replace,
 /// weaken, or misclassify the assurance check.
 fn install_assurance_guard(method: &mut syn::ImplItemFn, assurance_guard: &str) -> syn::Result<()> {
-    let mut graphql = method
+    // `single_graphql_attribute` has already rejected any later attribute.
+    let Some(attr) = method
         .attrs
         .iter_mut()
-        .filter(|attr| attr.path().is_ident("graphql"));
-    let Some(attr) = graphql.next() else {
+        .find(|attr| attr.path().is_ident("graphql"))
+    else {
         let guard = syn::LitStr::new(assurance_guard, method.sig.ident.span());
         method
             .attrs
             .push(syn::parse_quote!(#[graphql(guard = #guard)]));
         return Ok(());
     };
-    if let Some(extra) = graphql.next() {
-        return Err(syn::Error::new_spanned(
-            extra,
-            "a described custom root takes a single `#[graphql(...)]` attribute; \
-             async-graphql reads only the first",
-        ));
-    }
     let span = attr
         .path()
         .get_ident()
@@ -272,6 +266,26 @@ fn install_assurance_guard(method: &mut syn::ImplItemFn, assurance_guard: &str) 
         items.push(syn::parse_quote!(guard = #guard));
     }
     attr.meta = syn::parse_quote!(graphql(#items));
+    Ok(())
+}
+
+/// Reject a resolver with more than one `#[graphql(...)]` attribute.
+///
+/// async-graphql reads only the first, so a flag such as `skip` or `entity`, a
+/// name or a guard in a later attribute would mean one thing to this macro and
+/// another to the schema. This runs before any other attribute is read.
+fn single_graphql_attribute(attrs: &[syn::Attribute]) -> syn::Result<()> {
+    if let Some(extra) = attrs
+        .iter()
+        .filter(|attr| attr.path().is_ident("graphql"))
+        .nth(1)
+    {
+        return Err(syn::Error::new_spanned(
+            extra,
+            "a described custom root takes a single `#[graphql(...)]` attribute; \
+             async-graphql reads only the first",
+        ));
+    }
     Ok(())
 }
 
@@ -572,6 +586,9 @@ pub(crate) fn expand(args: TokenStream, input: TokenStream) -> TokenStream {
         let ImplItem::Fn(method) = impl_item else {
             continue;
         };
+        if let Err(error) = single_graphql_attribute(&method.attrs) {
+            return error.to_compile_error().into();
+        }
         match has_graphql_flag(&method.attrs, "skip") {
             Ok(true) => continue,
             Ok(false) => {}

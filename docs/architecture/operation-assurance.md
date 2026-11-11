@@ -107,8 +107,11 @@ preserves existing schemas.
 
 Enforcement keys on the exact root coordinate. A resolver that runs below
 another root passes its own coordinate to `enforce_operation_assurance`.
-Federation entity resolvers run below `_entities`: they enforce the entity's
-get-by-id query root and any classification registered for `_entities`. Generated dependent deletes use their own delete root.
+Generated Federation entity resolvers, emitted for an entity's
+`federation_key`, run below `_entities`: they enforce the entity's get-by-id
+query root and any classification registered for `_entities`. A handwritten
+`#[graphql(entity)]` resolver gets no assurance check from the ORM. Generated
+dependent deletes use their own delete root.
 
 ## Runtime GraphQL Roots
 

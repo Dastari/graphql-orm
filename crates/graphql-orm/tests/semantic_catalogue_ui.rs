@@ -14,5 +14,7 @@ fn semantic_declarations_reject_unsafe_or_malformed_metadata() {
     tests.compile_fail("tests/ui/semantic_custom_secret_exportable.rs");
     tests.compile_fail("tests/ui/semantic_custom_unbounded_scalar_list.rs");
     tests.compile_fail("tests/ui/semantic_custom_second_graphql_attribute.rs");
+    tests.compile_fail("tests/ui/semantic_custom_second_attribute_skip.rs");
+    tests.compile_fail("tests/ui/semantic_custom_second_attribute_entity.rs");
     tests.compile_fail("tests/ui/semantic_object_unbounded_list.rs");
 }

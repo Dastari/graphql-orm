@@ -1,0 +1,5 @@
+error: a described custom root takes a single `#[graphql(...)]` attribute; async-graphql reads only the first
+  --> tests/ui/semantic_custom_second_attribute_entity.rs:10:5
+   |
+10 |     #[graphql(entity)]
+   |     ^^^^^^^^^^^^^^^^^^

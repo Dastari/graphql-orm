@@ -709,9 +709,20 @@ async fn runtime_mutations_run_once_assurance_is_satisfied() {
     for (root, query) in steps {
         let response = f.run(&api, query).await;
         assert!(response.get("errors").is_none(), "{root}: {response}");
-        if root == "updatePost" {
-            assert_eq!(f.label().await.as_deref(), Some("changed"));
-        }
+        // Each admitted root has its own effect, in order.
+        let (posts, links, comments) = match root {
+            "createPost" => (2, 1, 1),
+            "updatePost" => {
+                assert_eq!(f.label().await.as_deref(), Some("changed"));
+                (2, 1, 1)
+            }
+            "updatePostTagsLinks" => (2, 2, 1),
+            "deletePost" => (1, 1, 0),
+            _ => (1, 1, 0),
+        };
+        assert_eq!(f.count("ra_post").await, posts, "{root}");
+        assert_eq!(f.count("ra_post_tags").await, links, "{root}");
+        assert_eq!(f.count("ra_comment").await, comments, "{root}");
     }
     // Post 2 was created with its tag link; post 1, its link and its cascaded
     // comment are gone; the host field ran.
