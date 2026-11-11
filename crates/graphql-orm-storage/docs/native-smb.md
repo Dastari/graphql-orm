@@ -32,9 +32,10 @@ backport: upstream smb-rs has the same ordering. See
 Storage 0.9.0 adds a second owner-local patch,
 `PATCHES/resource-bounds-and-server-identity.patch`, applied after the first. It
 bounds the client state a server can make the worker hold, closes a connection
-whose transport failed instead of retrying it in a loop, adds an optional
-server-GUID pin to `ConnectionConfig`, and wraps the password in its zeroizing
-secret before any fallible step. See [server identity](#server-identity) and
+whose transport failed instead of retrying it in a loop, refuses a directory
+reply larger than the buffer it requested, adds an optional server-GUID pin to
+`ConnectionConfig`, and wraps the password in its zeroizing secret before any
+fallible step. See [server identity](#server-identity) and
 [resource bounds](#resource-bounds).
 The protocol/authentication companions, cryptographic versions and feature
 selection remain pinned to the existing 0.10.2 family; this is not an adoption
@@ -224,6 +225,8 @@ client receives. The backend bounds the resources that input can consume:
 | Duration of one complete listing, including its retry | 15 minutes | `listing_timeout` | Non-retryable `Timeout` error |
 | Length of one listed name | 255 UTF-16 code units | Fixed (MS-FSCC component limit) | Non-retryable `Protocol` error |
 | Length of one key, written or listed | 4,096 bytes | Fixed | Write: `InvalidStorageKey`; listing: non-retryable `Protocol` error |
+| Length of one key component, written | 255 UTF-16 code units | Fixed (MS-FSCC component limit) | `InvalidStorageKey` |
+| One `QUERY_DIRECTORY` reply | The requested output buffer | Fixed in the vendored client | Non-retryable `Protocol` error |
 | Pages in one `list_blobs_page` continuation chain | 1,024 pages and `max_listing_entries` keys | Fixed; entries follow `max_listing_entries` | Non-retryable `Protocol` error |
 | Request message IDs awaiting a response | 8,192 | Fixed in the vendored client | Oldest is forgotten |
 | Responses held before a task receives them | 256 | Fixed in the vendored client | Oldest is dropped |
@@ -243,7 +246,24 @@ Without it, deep directories with long names followed by many short names in
 the deepest one would repeat the long parent path in every key within the
 entry and depth limits. Names longer than a valid component and keys longer
 than 4,096 bytes fail the listing; the backend also refuses to write such a key,
-so everything it writes can be listed back.
+or a key with a component longer than 255 UTF-16 code units, so everything it
+writes can be listed back. The limits apply to the caller's key: `put_blob`
+writes first to a temporary `.<uuid>.uploading` name beside the target, which
+may be up to 48 bytes longer than a key at the limit, and listings allow an
+interrupted upload's temporary file that extra length before filtering it out.
+The temporary name does not include the target's name, so it fits the
+255-unit component limit for every valid name, and its random v4 UUID keeps it
+unique. Temporary files left by earlier versions, named
+`.<name>.<uuid>.uploading`, are still recognised and filtered. A server may
+refuse a long path itself; Samba on Linux, for example, rejects paths near
+4,096 bytes with `STATUS_OBJECT_NAME_INVALID`.
+
+The vendored client refuses a `QUERY_DIRECTORY` reply larger than the output
+buffer it requested before decoding its entries, so one reply cannot expand
+into more entries than the budget counts. The reply's bytes are still received
+in full first, within the transport's 16 MiB frame limit. When a listing stops
+at a limit, the backend closes the open directory handle before returning the
+error.
 
 `listing_timeout` is one deadline for the whole listing. If an attempt fails
 with a retryable error, the backend reconnects and lists once more, and the
@@ -256,7 +276,8 @@ opaque, begin with `smb1:`, and carry the page and key counts of their chain:
 a chain fails after 1,024 pages or after returning more than
 `max_listing_entries` keys in total, so a server that adds names between
 pages cannot keep a paged listing going forever. A token this backend did not
-issue is rejected with `PreconditionFailed`.
+issue is rejected with `PreconditionFailed`. A malformed token, or one whose
+chain has used its 1,024 pages, is refused before the tree is listed.
 
 The worker accepts a response only for a message ID this client sent and that
 has not been answered. A response to any other ID, including one sent before

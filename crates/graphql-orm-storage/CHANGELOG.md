@@ -31,6 +31,12 @@ supersedes: []
   configurable. The deadline covers the retry after a reconnect. A listed name
   longer than 255 UTF-16 code units, or a key longer than 4,096 bytes, fails
   the listing, and the backend refuses to write a key longer than 4,096 bytes.
+  The 4,096-byte limit and a 255-unit limit on each component apply to the
+  caller's key, also through `put_blob`, whose temporary upload name is now
+  `.<uuid>.uploading` so that it fits any valid name; older temporary names
+  are still recognised. A `QUERY_DIRECTORY` reply larger than the requested
+  output buffer is refused before it is decoded, and a listing that stops at a
+  limit closes its directory handle.
   A self-nesting directory now fails the listing with a non-retryable
   `Protocol` error instead of being listed forever. A listing that reaches any
   limit fails rather than returning a partial result.
@@ -39,7 +45,8 @@ supersedes: []
   begin with `smb1:` and carry their chain's page and key counts. A chain fails
   after 1,024 pages or `max_listing_entries` keys, so a server that keeps adding
   names cannot make a paged listing run forever. Tokens from earlier versions
-  are rejected with `PreconditionFailed`.
+  are rejected with `PreconditionFailed`. A malformed or exhausted token is
+  refused before the tree is listed.
 - Connections no longer follow DFS referrals, which this backend does not
   support, and no longer enable server-to-client notifications. The vendored
   async notification handler never drained its channel, so the receive loop

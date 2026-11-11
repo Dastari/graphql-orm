@@ -38,7 +38,7 @@
     {
       "id": "resource-bounds-and-server-identity",
       "patch_file": "PATCHES/resource-bounds-and-server-identity.patch",
-      "patch_sha256": "0319b7afa56689c1c08dc228a4b0f7afff8aefdfe83def1b1cf3ff69042994ff",
+      "patch_sha256": "d400954a1d448b4bc5aa8bb28cc3c67bf1ee85e8ac4ceff2133b6a265a0114d6",
       "applies_after": "PATCHES/ghsa-439h-2cx8-xwgx.patch",
       "runtime_changed_files": [
         "src/client/smb_client.rs",
@@ -47,9 +47,10 @@
         "src/connection/worker/parallel/async_backend.rs",
         "src/connection/worker/parallel/base.rs",
         "src/error.rs",
+        "src/resource/directory.rs",
         "src/session/channel.rs"
       ],
-      "scope": "Owner-local hardening patch, not an upstream backport. The parallel worker records the message ID of each request it sends and accepts a response only for an outstanding ID; an interim STATUS_PENDING keeps the ID outstanding, any other response completes it. Unsolicited responses are discarded, at most MAX_PENDING_RESPONSES (256) responses are held before a task receives them (oldest dropped), and at most MAX_OUTSTANDING_REQUESTS (8192) IDs are tracked (oldest forgotten). A response for a task that stopped waiting is dropped without a receive error. The async receive loop closes the connection on any transport error and after 64 consecutive failed messages, instead of logging and retrying; it then marks the worker stopped and fails awaiting tasks, so later receives fail at once. ConnectionConfig gains expected_server_guid: negotiation fails with the typed Error::ServerGuidMismatch, before session setup, when the server reports another GUID. Client::share_connect and ipc_connect wrap the password in sspi's zeroizing Secret before any fallible step. Test-only: ParallelWorker::start_expecting and the ConnectionMessageHandler::with_test_transport expected-ID argument register scripted responses; the earlier patch's channel tests pass their message ID. Includes the in-crate regression tests. The multi-threaded backend, not built by storage, is unchanged.",
+      "scope": "Owner-local hardening patch, not an upstream backport. The parallel worker records the message ID of each request it sends and accepts a response only for an outstanding ID; an interim STATUS_PENDING keeps the ID outstanding, any other response completes it. Unsolicited responses are discarded, at most MAX_PENDING_RESPONSES (256) responses are held before a task receives them (oldest dropped), and at most MAX_OUTSTANDING_REQUESTS (8192) IDs are tracked (oldest forgotten). A response for a task that stopped waiting is dropped without a receive error. The async receive loop closes the connection on any transport error and after 64 consecutive failed messages, instead of logging and retrying; it then marks the worker stopped and fails awaiting tasks, so later receives fail at once. ConnectionConfig gains expected_server_guid: negotiation fails with the typed Error::ServerGuidMismatch, before session setup, when the server reports another GUID. Client::share_connect and ipc_connect wrap the password in sspi's zeroizing Secret before any fallible step. Test-only: ParallelWorker::start_expecting and the ConnectionMessageHandler::with_test_transport expected-ID argument register scripted responses; the earlier patch's channel tests pass their message ID. Directory::send_query refuses a QUERY_DIRECTORY reply whose output buffer exceeds the requested output_buffer_length (typed Error::InvalidMessage) before decoding its entries. Includes the in-crate regression tests. The multi-threaded backend, not built by storage, is unchanged.",
       "upstream": "afiffon/smb-rs main stores unsolicited responses without a bound and retries non-NotConnected transport errors; not yet reported upstream. Replace with a reviewed upstream fix when one is released."
     }
   ],
@@ -332,7 +333,7 @@
       "vendor_path": "src/resource/directory.rs",
       "upstream_sha256": "d0cfda5ac377cf8e2591255210c5a8f6b0ce35ec6761dd22309227c61154a36b",
       "bytes": 42928,
-      "allowed_change": "exact f452 directory hunks"
+      "allowed_change": "exact f452 directory hunks and resource-bounds-and-server-identity local patch hunks"
     },
     {
       "archive_path": "src/resource/file.rs",
@@ -568,7 +569,7 @@
     "src/error.rs": "acbc8cb14dfb45e947b71954cd2b0cc37e58d0fd2f0614238048d1f9ac1c74eb",
     "src/lib.rs": "083170a318d7e6c15533c0ccbefb407034b2da2c025adaa92dea3183acb86b05",
     "src/msg_handler.rs": "191595229c0a55a2e8cc389d5f4e7e97e1a59ca5578d491ccc02edf8a21f6301",
-    "src/resource/directory.rs": "b56910d3140a4bf20123ff9fc7f299dd33dc2608c4d2d01db0b6d0a243fe8d4d",
+    "src/resource/directory.rs": "85e7ee1d1aa53b516230774c365abd1cd1b9025636d497db910035b9d5a3fbc3",
     "src/resource/file.rs": "e56243cae8cdf2f4b824f499133199b9735656ba0f982e144a2a947f49e9c711",
     "src/resource/file_util.rs": "330ad0184a57f511446e630f620163d1f268df5801db3a0cab94ea47c1f3c9b2",
     "src/resource/pipe.rs": "195ef0cdd14d7463dddc48a9b85e7e97e25e81e8dc55101cdc78a9b8fe676f8a",

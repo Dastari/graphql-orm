@@ -45,6 +45,9 @@ const DEFAULT_MAX_LISTING_BYTES: usize = 256 * 1024 * 1024;
 const MAX_NAME_UTF16_UNITS: usize = 255;
 /// Longest blob key, in UTF-8 bytes, this backend writes or lists.
 const MAX_KEY_BYTES: usize = 4_096;
+/// Bytes a temporary upload key may add to a target key: `/` plus
+/// `.<uuid>.uploading` replaces at least one byte of the target name.
+const TEMP_KEY_EXTRA_BYTES: usize = 48;
 /// Bytes charged per retained name or path, beyond its text, for its
 /// allocation and container slot.
 const LISTED_PATH_OVERHEAD: usize = 64;
@@ -1421,7 +1424,9 @@ async fn walk_listing<S: ListingSource>(
             };
             // The name was charged when enumerated; charge the parent path.
             budget.charge(child.len() - name_len)?;
-            if child.len() > MAX_KEY_BYTES {
+            // An interrupted upload's temporary file may be longer than its
+            // target key; it is filtered from the result.
+            if child.len() > key_byte_limit(&child) {
                 return Err(listing_limit_exceeded(format!(
                     "listing reached a path longer than {MAX_KEY_BYTES} bytes"
                 )));
@@ -1444,15 +1449,40 @@ async fn walk_listing<S: ListingSource>(
     Ok(files)
 }
 
-/// Maps a blob key below the root prefix. A key longer than this backend
-/// lists back is rejected, so it is never written.
-fn map_key(root_prefix: Option<&str>, key: &str) -> Result<String, StorageError> {
+/// Validates a caller's key: a safe relative key no longer than
+/// [`MAX_KEY_BYTES`], whose every component fits [`MAX_NAME_UTF16_UNITS`]. A
+/// key this backend could not list back is never written.
+fn check_key(key: &str) -> Result<(), StorageError> {
+    check_key_within(key, MAX_KEY_BYTES)
+}
+
+fn check_key_within(key: &str, max_bytes: usize) -> Result<(), StorageError> {
     validate_blob_key(key)?;
-    if key.len() > MAX_KEY_BYTES {
+    if key.len() > max_bytes
+        || key
+            .split('/')
+            .any(|component| component.encode_utf16().count() > MAX_NAME_UTF16_UNITS)
+    {
         return Err(StorageError::InvalidStorageKey {
             key: key.to_string(),
         });
     }
+    Ok(())
+}
+
+/// The longest key a path may have: a temporary upload name may exceed
+/// [`MAX_KEY_BYTES`] by its fixed name, for a target key at the limit.
+fn key_byte_limit(key: &str) -> usize {
+    if is_temp_key(key) {
+        MAX_KEY_BYTES + TEMP_KEY_EXTRA_BYTES
+    } else {
+        MAX_KEY_BYTES
+    }
+}
+
+/// Maps a blob key below the root prefix, after the checks of [`check_key`].
+fn map_key(root_prefix: Option<&str>, key: &str) -> Result<String, StorageError> {
+    check_key_within(key, key_byte_limit(key))?;
     Ok(match root_prefix {
         Some(prefix) => format!("{prefix}/{key}"),
         None => key.to_string(),
@@ -1503,6 +1533,18 @@ impl ListingContinuation {
         })
     }
 
+    /// The number of the page this position continues to, failing once the
+    /// chain has used [`MAX_LISTING_PAGES`].
+    fn next_page(&self) -> Result<u64, StorageError> {
+        let pages = self.pages.saturating_add(1);
+        if pages > MAX_LISTING_PAGES {
+            return Err(listing_limit_exceeded(format!(
+                "paged listing exceeded {MAX_LISTING_PAGES} pages; use list_blobs to list once"
+            )));
+        }
+        Ok(pages)
+    }
+
     fn encode(&self) -> String {
         format!(
             "{CONTINUATION_PREFIX}{}:{}:{}",
@@ -1526,12 +1568,7 @@ fn listing_page(
         .map(ListingContinuation::parse)
         .transpose()?
         .unwrap_or_default();
-    let pages = position.pages.saturating_add(1);
-    if pages > MAX_LISTING_PAGES {
-        return Err(listing_limit_exceeded(format!(
-            "paged listing exceeded {MAX_LISTING_PAGES} pages; use list_blobs to list once"
-        )));
-    }
+    let pages = position.next_page()?;
     let mut matching = keys.into_iter().filter(|key| {
         key.starts_with(prefix)
             && (continuation.is_none() || key.as_str() > position.after.as_str())
@@ -1606,12 +1643,28 @@ impl ListingSource for SmbListingSource<'_> {
                 return Ok(None);
             }
         };
+        let listed = self.enumerate(&directory, budget).await;
+        let closed = self.backend.with_timeout("close", directory.close()).await;
+        // Close the handle whether or not enumeration reached a limit; the
+        // enumeration error takes precedence over a close error.
+        let listed = listed?;
+        closed?;
+        Ok(Some(listed))
+    }
+}
+
+impl SmbListingSource<'_> {
+    async fn enumerate(
+        &self,
+        directory: &Arc<Directory>,
+        budget: &mut ListingBudget,
+    ) -> Result<Vec<ListedEntry>, StorageError> {
         let operation_timeout = self.backend.inner.config.operation_timeout;
         let mut entries = self
             .backend
             .with_timeout(
                 "list",
-                Directory::query::<FileFullDirectoryInformation>(&directory, "*"),
+                Directory::query::<FileFullDirectoryInformation>(directory, "*"),
             )
             .await?;
         let mut listed = Vec::new();
@@ -1640,11 +1693,7 @@ impl ListingSource for SmbListingSource<'_> {
                 directory: entry.file_attributes.directory(),
             });
         }
-        drop(entries);
-        self.backend
-            .with_timeout("close", directory.close())
-            .await?;
-        Ok(Some(listed))
+        Ok(listed)
     }
 }
 
@@ -2025,7 +2074,7 @@ impl BlobStore for SmbStorageBackend {
         body: StorageByteStream,
         _options: BlobPutOptions,
     ) -> Result<BlobWriteOutcome, StorageError> {
-        validate_blob_key(key)?;
+        // Checks the caller's key, not the longer temporary key.
         let temp = temp_key(key)?;
         let result = self.write_file(&temp, body, false).await;
         let outcome = match result {
@@ -2050,7 +2099,7 @@ impl BlobStore for SmbStorageBackend {
         body: StorageByteStream,
         _options: BlobPutOptions,
     ) -> Result<Option<BlobWriteOutcome>, StorageError> {
-        validate_blob_key(key)?;
+        check_key(key)?;
         match self.write_file(key, body, true).await {
             Ok(outcome) => Ok(Some(outcome)),
             Err(error) if is_collision(&error) => Ok(None),
@@ -2249,6 +2298,11 @@ impl BlobStore for SmbStorageBackend {
                 key: prefix.to_string(),
                 condition: "list limit must be greater than zero".to_string(),
             });
+        }
+        // A malformed token or an exhausted chain fails before the tree is
+        // listed again.
+        if let Some(token) = continuation.as_deref() {
+            ListingContinuation::parse(token)?.next_page()?;
         }
         let keys = self.collect_keys().await?;
         listing_page(
@@ -2523,9 +2577,17 @@ fn invalid_config(message: &str) -> StorageError {
     )
 }
 
+/// Derives the unique temporary key `put_blob` writes before renaming.
+///
+/// The temporary name is `.<uuid>.uploading` beside the target, independent of
+/// the target's name: a random v4 UUID keeps it collision-safe, and every
+/// valid name component therefore fits the server's 255-unit limit. The
+/// caller's key is checked against [`MAX_KEY_BYTES`] first, so a key the
+/// backend accepts is never refused because of its temporary name.
 fn temp_key(key: &str) -> Result<String, StorageError> {
-    let (parent, name) = key.rsplit_once('/').unwrap_or(("", key));
-    let temp_name = format!(".{name}.{}{TEMP_SUFFIX}", Uuid::new_v4());
+    check_key(key)?;
+    let (parent, _) = key.rsplit_once('/').unwrap_or(("", key));
+    let temp_name = format!(".{}{TEMP_SUFFIX}", Uuid::new_v4());
     let temp = if parent.is_empty() {
         temp_name
     } else {
@@ -3012,23 +3074,51 @@ mod tests {
     #[tokio::test]
     async fn listing_byte_budget_bounds_long_nested_names() {
         // Deeply nested long names, then many short names in the deepest
-        // directory: every key repeats the long parent path.
+        // directory: every key repeats the long parent path. The names alone
+        // fit the budget; the repeated parent path does not.
+        const DEPTH: usize = 8;
+        const FILES: usize = 2_000;
         let source = FakeListing::new(|path| {
             let depth = path.split('/').filter(|part| !part.is_empty()).count();
-            if depth < 8 {
+            if depth < DEPTH {
                 vec![("n".repeat(200), true)]
             } else {
-                (0..100_000)
+                (0..FILES)
                     .map(|index| (format!("{index}"), false))
                     .collect()
             }
         });
+        let names: usize = DEPTH * (200 + LISTED_PATH_OVERHEAD)
+            + (0..FILES)
+                .map(|index| format!("{index}").len() + LISTED_PATH_OVERHEAD)
+                .sum::<usize>();
+        let parent_path = DEPTH * 201;
+        let budget = 1024 * 1024;
+        assert!(names < budget / 4, "the names alone must fit the budget");
+        assert!(names + FILES * parent_path > budget);
+
         let mut limits = limits(64, usize::MAX, Duration::from_secs(30));
-        limits.max_bytes = 1024 * 1024;
+        limits.max_bytes = budget;
         let error = bounded_listing(&source, String::new(), limits)
             .await
             .expect_err("a listing larger than its byte budget must fail");
         assert_partial_listing_refused(&error, "more than 1048576 bytes of names");
+
+        // The same tree with short directory names fits.
+        let short = FakeListing::new(|path| {
+            let depth = path.split('/').filter(|part| !part.is_empty()).count();
+            if depth < DEPTH {
+                vec![("d".to_string(), true)]
+            } else {
+                (0..FILES)
+                    .map(|index| (format!("{index}"), false))
+                    .collect()
+            }
+        });
+        let files = bounded_listing(&short, String::new(), limits)
+            .await
+            .expect("the short-named tree fits");
+        assert_eq!(files.len(), FILES);
     }
 
     #[tokio::test]
@@ -3217,6 +3307,24 @@ mod tests {
     }
 
     #[test]
+    fn an_exhausted_or_foreign_token_is_refused_without_listing() {
+        // `list_blobs_page` checks this before it lists the tree.
+        let last = ListingContinuation {
+            pages: MAX_LISTING_PAGES,
+            returned: 1,
+            after: "k".to_string(),
+        };
+        let error = ListingContinuation::parse(&last.encode())
+            .and_then(|position| position.next_page())
+            .expect_err("the chain is exhausted");
+        assert_partial_listing_refused(&error, "exceeded 1024 pages");
+        assert!(matches!(
+            ListingContinuation::parse("plain-key"),
+            Err(StorageError::PreconditionFailed { .. })
+        ));
+    }
+
+    #[test]
     fn continuation_tokens_round_trip_keys_with_separators() {
         let position = ListingContinuation {
             pages: 3,
@@ -3369,21 +3477,99 @@ mod tests {
         assert_eq!(map_key(None, "objects/data").expect("map"), "objects/data");
     }
 
+    /// A key of exactly `bytes` bytes made of valid components.
+    fn key_of(bytes: usize) -> String {
+        let mut key = String::new();
+        let mut remaining = bytes;
+        loop {
+            let mut take = remaining.min(MAX_NAME_UTF16_UNITS);
+            // Leave room for at least "/k" after a separator.
+            if remaining - take == 1 {
+                take -= 1;
+            }
+            key.push_str(&"k".repeat(take));
+            remaining -= take;
+            if remaining == 0 {
+                break;
+            }
+            key.push('/');
+            remaining -= 1;
+        }
+        assert_eq!(key.len(), bytes);
+        key
+    }
+
     #[test]
     fn keys_longer_than_a_listable_key_are_never_written() {
-        let longest = "k".repeat(MAX_KEY_BYTES);
+        let longest = key_of(MAX_KEY_BYTES);
+        assert!(check_key(&longest).is_ok());
         assert!(map_key(Some("root"), &longest).is_ok());
-        let longer = "k".repeat(MAX_KEY_BYTES + 1);
+        let longer = key_of(MAX_KEY_BYTES + 1);
         assert!(matches!(
-            map_key(Some("root"), &longer),
+            check_key(&longer),
             Err(StorageError::InvalidStorageKey { .. })
         ));
+        assert!(map_key(Some("root"), &longer).is_err());
+    }
+
+    #[test]
+    fn put_accepts_every_key_put_if_not_exists_accepts() {
+        // put_blob derives a longer temporary key from the caller's key; a key
+        // at the limit must still be accepted, and an error names the caller's
+        // key, never the temporary one.
+        for bytes in [MAX_KEY_BYTES - 48, MAX_KEY_BYTES - 1, MAX_KEY_BYTES] {
+            let key = key_of(bytes);
+            let temp = temp_key(&key).expect("put_blob accepts the key");
+            assert!(is_temp_key(&temp));
+            assert!(temp.len() <= MAX_KEY_BYTES + TEMP_KEY_EXTRA_BYTES);
+            map_key(Some("root"), &temp).expect("the temporary key maps");
+            check_key(&key).expect("put_blob_if_not_exists accepts the key");
+        }
+        let too_long = key_of(MAX_KEY_BYTES + 1);
+        match temp_key(&too_long) {
+            Err(StorageError::InvalidStorageKey { key }) => assert_eq!(key, too_long),
+            other => panic!("unexpected result: {other:?}"),
+        }
+        // A one-byte name produces the longest temporary key.
+        let mut short_name = key_of(MAX_KEY_BYTES - 2);
+        short_name.push_str("/k");
+        let temp = temp_key(&short_name).expect("temporary key");
+        assert!(temp.len() <= MAX_KEY_BYTES + TEMP_KEY_EXTRA_BYTES);
+        map_key(None, &temp).expect("the longest temporary key maps");
+    }
+
+    #[test]
+    fn every_valid_component_fits_its_temporary_name() {
+        let name = "n".repeat(MAX_NAME_UTF16_UNITS);
+        let temp = temp_key(&format!("dir/{name}")).expect("a 255-unit name is accepted");
+        let temp_name = temp.rsplit('/').next().unwrap();
+        assert!(temp_name.encode_utf16().count() <= MAX_NAME_UTF16_UNITS);
+        // A component longer than the server allows is refused up front.
+        let too_long = "\u{1F600}".repeat(128);
+        assert!(matches!(
+            temp_key(&format!("dir/{too_long}")),
+            Err(StorageError::InvalidStorageKey { .. })
+        ));
+        assert!(check_key(&format!("{too_long}/x")).is_err());
+    }
+
+    #[test]
+    fn interrupted_uploads_at_the_key_limit_do_not_fail_a_listing() {
+        let key = key_of(MAX_KEY_BYTES);
+        let temp = temp_key(&key).expect("temporary key");
+        assert!(temp.len() <= key_byte_limit(&temp));
+        assert_eq!(key_byte_limit(&key), MAX_KEY_BYTES);
     }
 
     #[test]
     fn temporary_names_are_filtered_strictly() {
         let temp = temp_key("nested/blob.bin").expect("safe temp key");
         assert!(is_temp_key(&temp));
+        // Temporary files left by earlier versions remain recognised.
+        assert!(is_temp_key(&format!(
+            "nested/.blob.bin.{}{TEMP_SUFFIX}",
+            Uuid::new_v4()
+        )));
         assert!(!is_temp_key("nested/report.uploading"));
         assert!(!is_temp_key("nested/blob.not-a-uuid.uploading"));
     }

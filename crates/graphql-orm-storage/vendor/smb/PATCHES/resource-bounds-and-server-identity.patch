@@ -844,6 +844,64 @@ index ced229ab..a2b671ce 100644
      #[error("IO Error: {0}")]
      IoError(#[from] std::io::Error),
      #[error("Binrw Error: {0}")]
+diff --git a/src/resource/directory.rs b/src/resource/directory.rs
+index d994ea98..e33c6c74 100644
+--- a/src/resource/directory.rs
++++ b/src/resource/directory.rs
+@@ -94,11 +94,11 @@ impl Directory {
+             }
+         };
+ 
+-        Ok(response
+-            .message
+-            .content
+-            .to_querydirectory()?
+-            .read_output()?)
++        let response = response.message.content.to_querydirectory()?;
++        // Local patch (graphql-orm-storage): refuse a reply larger than the
++        // requested output buffer before decoding its entries.
++        check_query_output_length(response.output_buffer.len(), buffer_size)?;
++        Ok(response.read_output()?)
+     }
+ 
+     const QUERY_DIRECTORY_DEFAULT_BUFFER_SIZE: u32 = 0x10000;
+@@ -1040,3 +1040,36 @@ mod iter_mtd {
+ 
+ #[cfg(feature = "multi_threaded")]
+ pub use iter_mtd::{NotifyDirectoryIteratorCancellable, NotifyDirectoryIteratorCanceller};
++
++/// Local patch (graphql-orm-storage): a QUERY_DIRECTORY reply must fit the
++/// output buffer the client requested (MS-SMB2 2.2.33, 3.3.5.18). A larger
++/// reply is refused before its entries are decoded.
++fn check_query_output_length(length: usize, requested: u32) -> crate::Result<()> {
++    if u32::try_from(length).map_or(true, |length| length > requested) {
++        return Err(Error::InvalidMessage(format!(
++            "Query directory reply of {length} bytes exceeds the requested {requested} bytes"
++        )));
++    }
++    Ok(())
++}
++
++/// Local patch (graphql-orm-storage): directory replies stay within the
++/// requested output buffer.
++#[cfg(test)]
++mod output_length_tests {
++    use super::*;
++
++    #[::core::prelude::v1::test]
++    fn a_reply_larger_than_the_requested_buffer_is_refused() {
++        assert!(check_query_output_length(65_536, 65_536).is_ok());
++        assert!(check_query_output_length(0, 65_536).is_ok());
++        assert!(matches!(
++            check_query_output_length(65_537, 65_536),
++            Err(Error::InvalidMessage(_))
++        ));
++        assert!(matches!(
++            check_query_output_length(16 * 1024 * 1024, 65_536),
++            Err(Error::InvalidMessage(_))
++        ));
++    }
++}
 diff --git a/src/session/channel.rs b/src/session/channel.rs
 index 86fd4ea3..f21eedb4 100644
 --- a/src/session/channel.rs

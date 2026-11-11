@@ -33,8 +33,12 @@ key, object format or persisted-data migration is required.
   `max_listing_bytes`. `listing_timeout` now covers the retry after a
   reconnect.
 - A listed name longer than 255 UTF-16 code units, or a key longer than 4,096
-  bytes, fails the listing, and keys longer than 4,096 bytes are rejected on
-  write with `InvalidStorageKey`.
+  bytes, fails the listing. Keys longer than 4,096 bytes, or with a component
+  longer than 255 UTF-16 code units, are rejected on write with
+  `InvalidStorageKey`.
+- `put_blob` now names its temporary upload file `.<uuid>.uploading` instead
+  of `.<name>.<uuid>.uploading`. Tools that look for interrupted uploads should
+  match both forms; the backend filters both.
 - `list_blobs_page` continuation tokens changed format. Do not persist them
   across an upgrade; restart a paged listing instead. A chain fails after
   1,024 pages or `max_listing_entries` keys, so prefer `list_blobs`, which now

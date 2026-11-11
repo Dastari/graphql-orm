@@ -160,6 +160,67 @@ async fn samba_round_trip_streaming_listing_and_atomic_create() {
         store.list_blobs("nested").await.expect("list prefix"),
         vec!["nested/small.bin".to_string()]
     );
+    // Keys are checked before put_blob derives its longer temporary key: an
+    // over-long key is refused by name, and a key at the limit passes the
+    // backend's checks. (Samba on Linux refuses a path this long itself.)
+    let key_of = |bytes: usize| {
+        let mut key = String::new();
+        while key.len() + 256 < bytes {
+            if !key.is_empty() {
+                key.push('/');
+            }
+            key.push_str(&"k".repeat(250));
+        }
+        let rest = bytes - key.len() - 1;
+        key.push('/');
+        key.push_str(&"z".repeat(rest));
+        key
+    };
+    let too_long = key_of(4_097);
+    match store
+        .put_blob(
+            &too_long,
+            StorageByteStream::from_bytes(Bytes::from_static(b"x")),
+            BlobPutOptions::default(),
+        )
+        .await
+    {
+        Err(graphql_orm_storage::StorageError::InvalidStorageKey { key }) => {
+            assert_eq!(key, too_long, "the error names the caller's key");
+        }
+        other => panic!("an over-long key must be refused: {other:?}"),
+    }
+    let at_limit = key_of(4_096);
+    assert_eq!(at_limit.len(), 4_096);
+    for result in [
+        store
+            .put_blob(
+                &at_limit,
+                StorageByteStream::from_bytes(Bytes::from_static(b"x")),
+                BlobPutOptions::default(),
+            )
+            .await
+            .map(|_| ()),
+        store
+            .put_blob_if_not_exists(
+                &at_limit,
+                StorageByteStream::from_bytes(Bytes::from_static(b"x")),
+                BlobPutOptions::default(),
+            )
+            .await
+            .map(|_| ()),
+    ] {
+        assert!(
+            !matches!(
+                result,
+                Err(graphql_orm_storage::StorageError::InvalidStorageKey { .. })
+            ),
+            "a key at the limit must reach the server: {result:?}"
+        );
+    }
+    // A server that accepts the path stores the object; remove it.
+    let _ = store.delete_blob(&at_limit).await;
+
     // Paging returns the same keys through the backend's bounded tokens.
     let first = store
         .list_blobs_page("", None, 1)
