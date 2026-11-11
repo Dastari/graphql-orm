@@ -784,14 +784,22 @@ async fn delegated_request_principal_cannot_read_an_inbox_page() {
         )
         .await
         .expect("message commits with its inbox event");
+    // Both grant kinds, and no grant kind with an actor binding.
     for grant_kind in [
-        agql_auth::AccessTokenGrantKind::SessionBoundDelegation,
-        agql_auth::AccessTokenGrantKind::Sessionless,
+        Some(agql_auth::AccessTokenGrantKind::SessionBoundDelegation),
+        Some(agql_auth::AccessTokenGrantKind::Sessionless),
+        None,
     ] {
         let AuthPrincipal::User(mut refused) = owner.clone() else {
             unreachable!("inbox fixture owner is a user session")
         };
-        refused.token_claims.grant_kind = Some(grant_kind);
+        refused.token_claims.grant_kind = grant_kind;
+        if grant_kind.is_none() {
+            refused.token_claims.actor = Some(agql_auth::ActorIdentity {
+                sub: "ai-coordinator".to_owned(),
+                amr: vec!["service".to_owned()],
+            });
+        }
         // Refused even when the window itself is invalid: the credential is
         // checked first.
         for (after, first) in [(0, 100), (-1, 0)] {

@@ -191,6 +191,12 @@ impl Default for AiAttachmentCleanupLimits {
 /// authenticated owner and ordinary session/scope policy. External bytes move
 /// from a random scope-bound quarantine key to a random final key only after
 /// an exact full-object scan and a separate host acceptance decision.
+///
+/// Listing, upload tickets, byte upload, finalization and removal refuse a
+/// sessionless or session-bound delegated credential, and one with no grant
+/// kind that carries an actor or exact operation binding, with
+/// [`AiError::ReauthorizationFailed`] before any read or write, as the session
+/// roots do. Provider resolution for a lease is unchanged.
 pub struct OrmAiAttachmentService {
     database: Database<DefaultWriteBackend>,
     access_policy: Arc<dyn AiAccessPolicy>,
@@ -1171,6 +1177,7 @@ impl AiAttachmentService for OrmAiAttachmentService {
         session_id: AiSessionId,
         page: ValidatedKeysetConnection,
     ) -> Result<AiAttachmentConnection, AiError> {
+        crate::principal_projection::refuse_delegated_request(principal)?;
         self.visible_session(principal, session_id, AiSessionAction::Read)
             .await?;
         let (kind, subject) = principal_identity(principal);
@@ -1217,6 +1224,7 @@ impl AiAttachmentService for OrmAiAttachmentService {
         principal: &AuthPrincipal,
         input: CreateAiAttachmentUploadInput,
     ) -> Result<AiAttachmentUploadTicket, AiError> {
+        crate::principal_projection::refuse_delegated_request(principal)?;
         let expected_byte_count = u64::try_from(input.expected_byte_count).map_err(|_| {
             AiError::InvalidInput("invalid attachment expected byte count".to_owned())
         })?;
@@ -1389,6 +1397,7 @@ impl AiAttachmentService for OrmAiAttachmentService {
         principal: &AuthPrincipal,
         attachment_id: Uuid,
     ) -> Result<AiAttachmentView, AiError> {
+        crate::principal_projection::refuse_delegated_request(principal)?;
         let attachment = AiAttachmentRecord::find_by_id(&self.database, &attachment_id)
             .await
             .map_err(|error| map_orm(OrmPublicError::from(error)))?
@@ -1519,6 +1528,7 @@ impl AiAttachmentService for OrmAiAttachmentService {
         principal: &AuthPrincipal,
         attachment_id: Uuid,
     ) -> Result<bool, AiError> {
+        crate::principal_projection::refuse_delegated_request(principal)?;
         let attachment = AiAttachmentRecord::find_by_id(&self.database, &attachment_id)
             .await
             .map_err(|error| map_orm(OrmPublicError::from(error)))?
@@ -1845,6 +1855,7 @@ impl AiAttachmentUploadService for OrmAiAttachmentService {
         token: SecretString,
         body: StorageByteStream,
     ) -> Result<AiAttachmentView, AiError> {
+        crate::principal_projection::refuse_delegated_request(principal)?;
         if body
             .size_hint()
             .is_some_and(|size| size == 0 || size > self.limits.maximum_attachment_bytes)

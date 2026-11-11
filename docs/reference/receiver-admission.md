@@ -3,7 +3,7 @@ title: Exact receiver-purpose admission
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-06
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -67,6 +67,9 @@ authenticates in a separate router, must not act on them before admission.
 Admission is a point-in-time proof, not an atomic revocation fence. Continue to
 apply business, row, field, sender-proof and current-authority checks as required.
 Do not infer assurance from parent liveness or from this proof.
+AI session, attachment and inbox roots, such as `aiInboxEventPage`, refuse
+session-bound delegations with `AI_REAUTHORIZATION_FAILED` (AI 0.130.0), so do
+not register them as receiver-admission targets.
 
 Version 1 accepts only exact UTF-8 registered named queries with one root and plain
 field selections. It refuses aliases, fragments, directives, duplicate fields,

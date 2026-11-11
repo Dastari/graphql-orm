@@ -53,7 +53,9 @@ The page and the subscription accept only the user's own session or an API
 token. A session-bound delegation, a sessionless grant, or a credential with no
 grant kind that carries an actor or exact operation binding is refused with
 `AI_REAUTHORIZATION_FAILED` before any inbox read. Session windows, message
-submission and session mutations refuse the same credentials.
+submission, session mutations and attachment roots refuse the same credentials.
+Receiver admission accepts only session-bound delegations, so these roots
+cannot be receiver-admission targets.
 
 Current event types are server-authored and bounded:
 

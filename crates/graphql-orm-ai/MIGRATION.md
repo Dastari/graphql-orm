@@ -33,11 +33,19 @@ The same refusal now applies, before any read or write, to:
   `aiMessages`, `aiMessageBlocks`, `aiSessionEventPage`, `createAiSession`,
   `pinAiSessionExecutionSelection`, `renameAiSession`, `archiveAiSession`,
   `restoreAiSession` and `deleteAiSession`;
-- `OrmAiInboxService::inbox_event_page` (`aiInboxEventPage`).
+- `OrmAiInboxService::inbox_event_page` (`aiInboxEventPage`);
+- `OrmAiAttachmentService` request roots: `aiAttachments`,
+  `createAiAttachmentUpload`, the token-bound byte `upload`,
+  `finalizeAiAttachmentUpload` and `removeAiAttachment`. These list a
+  session's attachments and append events to its stream. Provider attachment
+  resolution for a lease is unchanged.
 
 0.129.0 already refused these credentials on the session-event and inbox
 streams. Pages now refuse them too, so a delegated credential cannot read through
-a page what it cannot stream. A host access policy that calls
+a page what it cannot stream. Receiver admission accepts only
+`SessionBoundDelegation` credentials, so AI session, attachment and inbox roots
+cannot be receiver-admission targets: a host that registered one, such as
+`aiInboxEventPage`, now receives `AI_REAUTHORIZATION_FAILED`. A host access policy that calls
 `session_for_run` with such a principal now receives `ReauthorizationFailed`
 and should treat it as a denial.
 
@@ -48,11 +56,55 @@ roots, for example from a coordinator service, send the user's own session-bound
 access token (`AccessTokenGrantKind::UserSession` or no grant kind) instead.
 Ordinary user sessions and API-token principals are unaffected.
 
-Runs queued before the upgrade keep their persisted reference; this release
-does not rewrite them. To find runs a delegated credential queued, look for
-unfinished runs whose persisted principal reference has a `grant_kind` of
-`session_bound_delegation` or `sessionless`, or no `grant_kind` and an
-`actor_subject` or `operation`, and cancel them as the owner.
+Work queued before the upgrade keeps its persisted reference; this release does
+not rewrite it. Submission wrote a delegated credential's reference to two
+places: the run (`graphql_orm_ai_runs`) and, for a session's first message,
+title work (`graphql_orm_ai_session_title_work`). The title worker resolves
+that reference, opens the first message, sends it to the provider and renames
+the session as the full user. Cancelling the run does not touch the title-work
+row, so handle both.
+
+Each stored reference keeps the credential's own `expires_at`, and workers
+refuse to act once it passes. agql-auth's defaults cap a session-bound
+delegation at 15 minutes and a sessionless token at 24 hours, so the exposure
+ends on its own. Prioritise sessionless rows and hosts that raised those
+limits; delegated rows older than their delegation lifetime are already inert.
+
+A refused reference has a `grant_kind` of `session_bound_delegation` or
+`sessionless`, or no `grant_kind` and an `actor_subject` or `operation`. On
+SQLite:
+
+```sql
+-- Unfinished runs: cancel each one as its owner (`cancelAiRun`).
+SELECT id, session_id, state FROM graphql_orm_ai_runs
+WHERE state NOT IN ('completed', 'failed', 'cancelled')
+  AND (json_extract(principal_reference, '$.grant_kind')
+         IN ('session_bound_delegation', 'sessionless')
+       OR (json_extract(principal_reference, '$.grant_kind') IS NULL
+           AND (json_extract(principal_reference, '$.actor_subject') IS NOT NULL
+                OR json_extract(principal_reference, '$.operation') IS NOT NULL)));
+
+-- Unfinished title work: there is no request root for it, so fail it in place.
+UPDATE graphql_orm_ai_session_title_work
+SET state = 'failed', lease_owner = NULL, lease_expires_at = NULL,
+    next_attempt_at = NULL, error_code = 'principal_refused',
+    completed_at = CAST(strftime('%s', 'now') AS INTEGER),
+    row_version = row_version + 1
+WHERE state IN ('queued', 'retry_scheduled', 'leased')
+  AND (json_extract(principal_reference, '$.grant_kind')
+         IN ('session_bound_delegation', 'sessionless')
+       OR (json_extract(principal_reference, '$.grant_kind') IS NULL
+           AND (json_extract(principal_reference, '$.actor_subject') IS NOT NULL
+                OR json_extract(principal_reference, '$.operation') IS NOT NULL)));
+```
+
+On PostgreSQL, where `principal_reference` is `jsonb`, use the same statements
+with `principal_reference->>'grant_kind'`, `principal_reference ? 'actor_subject'`
+and `principal_reference ? 'operation'` for the predicates, and
+`EXTRACT(EPOCH FROM now())::bigint` for `completed_at`. Bumping `row_version`
+makes a worker that holds the lease lose its next fenced write. A failed
+title-work row leaves the default title in place; the owner can rename the
+session.
 
 No public Rust API, GraphQL SDL, persistent schema or data migration change.
 `AI_SCHEMA_MODULE_VERSION` is unchanged.

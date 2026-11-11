@@ -964,3 +964,161 @@ async fn deleting_session_retention_waits_for_confirmed_attachment_cleanup() {
     assert_eq!(deleted.deleting_session_attachments_deleted, 1);
     assert_eq!(deleted.deleting_session_attachment_cleanups_requested, 0);
 }
+
+/// Delegated, sessionless, and actor- or operation-narrowed credentials derived
+/// from the owner.
+fn refused_request_principals(owner: &AuthPrincipal) -> Vec<AuthPrincipal> {
+    let AuthPrincipal::User(user) = owner.clone() else {
+        unreachable!("attachment fixture owner is a user session")
+    };
+    let actor = || agql_auth::ActorIdentity {
+        sub: "ai-coordinator".to_owned(),
+        amr: vec!["service".to_owned()],
+    };
+    let mut delegated = user.clone();
+    delegated.token_claims.grant_kind =
+        Some(agql_auth::AccessTokenGrantKind::SessionBoundDelegation);
+    delegated.token_claims.actor = Some(actor());
+    let mut sessionless = user.clone();
+    sessionless.token_claims.grant_kind = Some(agql_auth::AccessTokenGrantKind::Sessionless);
+    let mut narrowed = user;
+    narrowed.token_claims.grant_kind = None;
+    narrowed.token_claims.actor = Some(actor());
+    narrowed.token_claims.operation = Some(agql_auth::ExactOperationBinding::new(
+        "RecordsCount",
+        "sha256:reviewed-document",
+    ));
+    vec![
+        AuthPrincipal::User(delegated),
+        AuthPrincipal::User(sessionless),
+        AuthPrincipal::User(narrowed),
+    ]
+}
+
+/// Attachment roots list a session's attachments and append events to its
+/// stream, so they refuse the same credentials as the session roots, before
+/// any read or write.
+#[tokio::test]
+async fn delegated_request_principals_are_refused_on_every_attachment_root() {
+    let fixture = fixture().await;
+    let owner = principal("owner");
+    let session = create_session(&fixture, &owner).await;
+    let bytes = b"\x89PNG\r\n\x1a\nclean-test-image".to_vec();
+    let upload_input = || CreateAiAttachmentUploadInput {
+        session_id: session.id,
+        filename: "example.png".to_owned(),
+        declared_mime: Some("image/png".to_owned()),
+        expected_byte_count: bytes.len() as i64,
+    };
+    let ready_ticket = fixture
+        .attachment_service
+        .create_upload(&owner, upload_input())
+        .await
+        .expect("owner creates a ticket");
+    let ready = fixture
+        .attachment_service
+        .upload(
+            &owner,
+            ready_ticket.attachment().id,
+            SecretString::from(ready_ticket.secret().expose_secret().to_owned()),
+            StorageByteStream::from_bytes(bytes.clone()),
+        )
+        .await
+        .expect("owner uploads clean bytes");
+    let pending = fixture
+        .attachment_service
+        .create_upload(&owner, upload_input())
+        .await
+        .expect("owner creates a second ticket");
+    let events_before = fixture
+        .session_service
+        .session_event_page(&owner, AiSessionId(session.id), 0, 100)
+        .await
+        .expect("owner reads session events")
+        .events
+        .len();
+    let blobs_before = fixture.blobs.count();
+
+    for refused in refused_request_principals(&owner) {
+        let refusals = [
+            fixture
+                .attachment_service
+                .attachments(&refused, AiSessionId(session.id), page())
+                .await
+                .err(),
+            fixture
+                .attachment_service
+                .create_upload(&refused, upload_input())
+                .await
+                .err(),
+            fixture
+                .attachment_service
+                .upload(
+                    &refused,
+                    pending.attachment().id,
+                    SecretString::from(pending.secret().expose_secret().to_owned()),
+                    StorageByteStream::from_bytes(bytes.clone()),
+                )
+                .await
+                .err(),
+            fixture
+                .attachment_service
+                .finalize_upload(&refused, ready.id)
+                .await
+                .err(),
+            fixture
+                .attachment_service
+                .remove_attachment(&refused, pending.attachment().id)
+                .await
+                .err(),
+        ];
+        for (root, refusal) in refusals.into_iter().enumerate() {
+            assert!(
+                matches!(refusal, Some(AiError::ReauthorizationFailed)),
+                "attachment root {root} must refuse a delegated credential: {refusal:?}"
+            );
+        }
+    }
+
+    // Nothing was written: no new event, ticket, bytes, release or removal.
+    assert_eq!(
+        fixture
+            .session_service
+            .session_event_page(&owner, AiSessionId(session.id), 0, 100)
+            .await
+            .expect("owner reads session events")
+            .events
+            .len(),
+        events_before
+    );
+    assert_eq!(fixture.blobs.count(), blobs_before);
+    let listed = fixture
+        .attachment_service
+        .attachments(&owner, AiSessionId(session.id), page())
+        .await
+        .expect("owner lists attachments");
+    assert_eq!(listed.edges.len(), 2);
+    let state = |id: Uuid| {
+        listed
+            .edges
+            .iter()
+            .find(|edge| edge.node.id == id)
+            .map(|edge| edge.node.quarantine_state.clone())
+            .expect("attachment is still listed")
+    };
+    assert_eq!(state(ready.id), "ready");
+    assert_eq!(
+        state(pending.attachment().id),
+        pending.attachment().quarantine_state
+    );
+    // The owner's own credential still completes the flow.
+    assert_eq!(
+        fixture
+            .attachment_service
+            .finalize_upload(&owner, ready.id)
+            .await
+            .expect("owner releases")
+            .quarantine_state,
+        "released"
+    );
+}
