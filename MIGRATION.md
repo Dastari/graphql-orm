@@ -25,10 +25,17 @@ every backend:
   `9999-12-31T23:59:60Z` is rejected too, because PostgreSQL stores it as year
   10000. `9999-12-31T23:59:59.9999994Z` and `0001-01-01T00:00:00Z` are still
   accepted.
-- A JSON document is rejected when the text a backend returns would exceed
-  `RuntimeScalarLimits::max_text_bytes`, even when its input text fits. serde_json
-  prints `1e15` back as `1000000000000000.0`, and PostgreSQL returns `1e16` as
-  `10000000000000000`. The bound applies on every backend.
+- A JSON document is rejected when the text SQLite or PostgreSQL returns would
+  exceed `RuntimeScalarLimits::max_text_bytes`, even when its input text fits.
+  serde_json prints `1e15` back as `1000000000000000.0`, and PostgreSQL returns
+  `1e16` as `10000000000000000` and `1e42` as `9.999999999999999e+41`. Both
+  backends' results are checked whichever backend is in use. A document
+  containing the largest f64 values, such as `1.7976931348623157e308`, is
+  rejected because PostgreSQL returns it in a form serde_json cannot read.
+- A `RuntimeHostField::argument` default typed with a runtime scalar, directly
+  or in a list, must now decode with the composer's scalar limits, or
+  `query_field` and `mutation_field` fail with `invalid_composition`. Request
+  values for host field arguments are bounded as before.
 - `RuntimeDateTime::parse` and `parse_exact` return
   `RuntimeRecordErrorCode::InvalidValue` for the same date-times. Runtime create
   and update requests refuse a date-time that is not `is_portable()`, so a

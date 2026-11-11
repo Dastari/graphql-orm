@@ -158,7 +158,7 @@ pub(super) fn helpers(limits: RuntimeScalarLimits) -> Vec<Type> {
         result.push(
             Scalar::new(scalar::name(kind))
                 .description(super::semantic::scalar_description(kind))
-                .validator(move |value| scalar::wire_form_valid(kind, value, limits))
+                .validator(move |value| scalar::validate(kind, value, limits))
                 .into(),
         );
     }

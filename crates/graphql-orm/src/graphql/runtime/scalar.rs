@@ -122,51 +122,107 @@ fn bounded_json_text(value: &serde_json::Value, limit: usize) -> Result<(), Runt
     serde_json::to_writer(&mut Bounded { written: 0, limit }, value).map_err(|_| invalid())
 }
 
-/// The document a PostgreSQL `jsonb` round trip reads back. `jsonb` stores
-/// numbers as `numeric` and prints them without exponents, and serde_json
-/// reads an integer token that fits `i64` or `u64` as an integer, printing
-/// every digit: `1e16` (4 bytes) returns as `10000000000000000` (17 bytes).
-/// Other numbers return as the same `f64`, and the reader re-serializes the
-/// document compactly, so `jsonb` spacing and key order do not change its
-/// length. Returns `None` when the round trip changes nothing.
-fn jsonb_read_back(value: &serde_json::Value) -> Option<serde_json::Value> {
-    use serde_json::Value as Json;
-    fn integral(number: &serde_json::Number) -> Option<serde_json::Number> {
-        let x = number.as_f64().filter(|_| number.is_f64())?;
-        // 2^64 and -2^63 are exact in f64.
-        if x.fract() != 0.0
-            || !(-9_223_372_036_854_775_808.0..18_446_744_073_709_551_616.0).contains(&x)
-        {
-            return None;
+/// Write `number`, as serde_json prints it, the way PostgreSQL `numeric`
+/// prints it: positionally, without an exponent, keeping the input's
+/// fractional digits. `1e+16` becomes `10000000000000000` and `1.5e-7`
+/// becomes `0.00000015`.
+fn positional(number: &str, out: &mut String) {
+    let (sign, unsigned) = number
+        .strip_prefix('-')
+        .map_or(("", number), |unsigned| ("-", unsigned));
+    let (mantissa, exponent) = unsigned
+        .split_once(['e', 'E'])
+        .map_or((unsigned, 0i64), |(mantissa, exponent)| {
+            (mantissa, exponent.parse().unwrap_or(0))
+        });
+    let (integer, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits = format!("{integer}{fraction}");
+    let shift = exponent.saturating_sub(fraction.len() as i64);
+    let (integer, fraction) = if shift >= 0 {
+        let zeros = usize::try_from(shift).unwrap_or(usize::MAX);
+        (format!("{digits}{}", "0".repeat(zeros)), String::new())
+    } else {
+        let scale = usize::try_from(-shift).unwrap_or(usize::MAX);
+        match digits.len().checked_sub(scale) {
+            Some(split) if split > 0 => (digits[..split].to_owned(), digits[split..].to_owned()),
+            _ => (
+                String::new(),
+                format!("{}{digits}", "0".repeat(scale - digits.len().min(scale))),
+            ),
         }
-        Some(if x < 0.0 {
-            serde_json::Number::from(x as i64)
-        } else {
-            serde_json::Number::from(x as u64)
-        })
+    };
+    let integer = integer.trim_start_matches('0');
+    out.push_str(sign);
+    out.push_str(if integer.is_empty() { "0" } else { integer });
+    if !fraction.is_empty() {
+        out.push('.');
+        out.push_str(&fraction);
     }
-    fn changed(value: &Json) -> bool {
+}
+
+/// The JSON text a PostgreSQL `jsonb` column returns for `value`, which the
+/// reader then parses with serde_json. Strings and structure are unchanged
+/// and spacing does not matter to the reader, so only numbers are rewritten.
+fn postgres_text(value: &serde_json::Value, out: &mut String) {
+    use serde_json::Value as Json;
+    match value {
+        Json::Number(number) => positional(&number.to_string(), out),
+        Json::Array(values) => {
+            out.push('[');
+            for (index, value) in values.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                postgres_text(value, out);
+            }
+            out.push(']');
+        }
+        Json::Object(values) => {
+            out.push('{');
+            for (index, (key, value)) in values.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                out.push_str(&Json::String(key.clone()).to_string());
+                out.push(':');
+                postgres_text(value, out);
+            }
+            out.push('}');
+        }
+        other => out.push_str(&other.to_string()),
+    }
+}
+
+/// Require that the document each backend returns can be read and fits
+/// `limit` once re-serialized. SQLite stores the canonical text, and
+/// PostgreSQL `jsonb` stores numbers as `numeric` and prints them without
+/// exponents. The reader parses either text with serde_json, which reads an
+/// integer token that fits `i64` or `u64` as an integer and prints every digit
+/// (`1e16` returns as `10000000000000000`), reads a longer integer back as a
+/// nearby `f64` (`1e42` returns as `9.999999999999999e+41`), and cannot read
+/// back the largest `f64` values at all. Both read-backs are computed with the
+/// same serde_json the reader uses, so they are exact rather than estimates.
+fn read_back_fits(value: &serde_json::Value, limit: usize) -> Result<(), RuntimeGraphqlError> {
+    fn has_float(value: &serde_json::Value) -> bool {
         match value {
-            Json::Number(n) => integral(n).is_some(),
-            Json::Array(values) => values.iter().any(changed),
-            Json::Object(values) => values.values().any(changed),
+            serde_json::Value::Number(number) => number.is_f64(),
+            serde_json::Value::Array(values) => values.iter().any(has_float),
+            serde_json::Value::Object(values) => values.values().any(has_float),
             _ => false,
         }
     }
-    fn convert(value: &Json) -> Json {
-        match value {
-            Json::Number(n) => integral(n).map_or_else(|| value.clone(), Json::Number),
-            Json::Array(values) => Json::Array(values.iter().map(convert).collect()),
-            Json::Object(values) => Json::Object(
-                values
-                    .iter()
-                    .map(|(key, value)| (key.clone(), convert(value)))
-                    .collect(),
-            ),
-            _ => value.clone(),
-        }
+    // Integers and non-numbers read back unchanged on both backends.
+    if !has_float(value) {
+        return Ok(());
     }
-    changed(value).then(|| convert(value))
+    let canonical = value.to_string();
+    let mut postgres = String::new();
+    postgres_text(value, &mut postgres);
+    for text in [canonical, postgres] {
+        let read_back: serde_json::Value = serde_json::from_str(&text).map_err(|_| invalid())?;
+        bounded_json_text(&read_back, limit)?;
+    }
+    Ok(())
 }
 
 pub(super) fn decode(
@@ -230,13 +286,11 @@ pub(super) fn decode(
                 json_number_bounds(v)?;
                 let json = serde_json::from_str(v).map_err(|_| invalid())?;
                 json_bounds(&json, limits)?;
-                // Bound the text every backend reads back, not only the input:
-                // serde_json re-serializes `1e15` as `1000000000000000.0`, and
-                // PostgreSQL returns `1e16` as `10000000000000000`.
+                // Bound the text SQLite and PostgreSQL read back, not only the
+                // input: serde_json re-serializes `1e15` as `1000000000000000.0`,
+                // and PostgreSQL returns `1e16` as `10000000000000000`.
                 bounded_json_text(&json, limits.max_text_bytes)?;
-                if let Some(read_back) = jsonb_read_back(&json) {
-                    bounded_json_text(&read_back, limits.max_text_bytes)?;
-                }
+                read_back_fits(&json, limits.max_text_bytes)?;
                 Ok(RuntimeValue::Json(json))
             }
             // Exact text for the field's definition; never rounded.
@@ -260,13 +314,94 @@ pub(super) fn decode(
     }
 }
 
+std::thread_local! {
+    static VALIDATING_INPUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `future` as the request's input validation step. The runtime scalar
+/// validators decode strictly, with the input bounds, while it is being
+/// polled. async-graphql runs one validator closure both when it validates
+/// argument, variable and default values, which happens synchronously inside
+/// this step, and later when it resolves output, which must accept stored
+/// values beyond the input bounds. The flag is set only for the duration of
+/// each poll, so it never leaks to another task on the same thread.
+pub(super) fn validating_input<'a, T: 'a>(
+    future: impl std::future::Future<Output = T> + Send + 'a,
+) -> impl std::future::Future<Output = T> + Send + 'a {
+    struct Scope<'a, T>(std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>);
+    impl<T> std::future::Future for Scope<'_, T> {
+        type Output = T;
+        fn poll(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<T> {
+            struct Restore(bool);
+            impl Drop for Restore {
+                fn drop(&mut self) {
+                    VALIDATING_INPUT.with(|flag| flag.set(self.0));
+                }
+            }
+            let _restore = Restore(VALIDATING_INPUT.with(|flag| flag.replace(true)));
+            self.0.as_mut().poll(cx)
+        }
+    }
+    Scope(Box::pin(future))
+}
+
+/// The runtime scalars' GraphQL validator: strict [`decode`] during input
+/// validation, [`wire_form_valid`] otherwise.
+pub(super) fn validate(kind: RuntimeValueKind, value: &Value, limits: RuntimeScalarLimits) -> bool {
+    if VALIDATING_INPUT.with(std::cell::Cell::get) {
+        decode(kind, value, limits).is_ok()
+    } else {
+        wire_form_valid(kind, value, limits)
+    }
+}
+
+/// Whether `value` is a valid default for an argument of type `ty`: any value
+/// typed as a runtime scalar, directly or in a list, must decode with the
+/// input bounds. Other named types are the host's to check.
+pub(super) fn input_default_valid(
+    ty: &async_graphql::dynamic::TypeRef,
+    value: &Value,
+    limits: RuntimeScalarLimits,
+) -> bool {
+    use async_graphql::dynamic::TypeRef;
+    match ty {
+        TypeRef::NonNull(inner) => {
+            value != &Value::Null && input_default_valid(inner, value, limits)
+        }
+        TypeRef::List(inner) => match value {
+            Value::List(items) => items
+                .iter()
+                .all(|item| input_default_valid(inner, item, limits)),
+            // GraphQL coerces a single value to a one-element list.
+            other => input_default_valid(inner, other, limits),
+        },
+        TypeRef::Named(name) => {
+            let kind = [
+                RuntimeValueKind::Integer,
+                RuntimeValueKind::Uuid,
+                RuntimeValueKind::Json,
+                RuntimeValueKind::Bytes,
+                RuntimeValueKind::DateTime,
+            ]
+            .into_iter()
+            .find(|kind| self::name(*kind) == name.as_ref());
+            match kind {
+                Some(kind) => decode(kind, value, limits).is_ok(),
+                None => true,
+            }
+        }
+    }
+}
+
 /// Whether `value` is a wire form this scalar can carry, input or output.
 ///
 /// Output must pass the scalar's validator, and renders stored values without
 /// the input bounds: date-times that earlier releases stored outside the years
 /// 0001 to 9999, and JSON or bytes longer than the input limits. This accepts
-/// those forms. Every runtime input position also decodes with [`decode`],
-/// which applies the bounds.
+/// those forms. Input validation uses [`decode`] instead; see [`validate`].
 pub(super) fn wire_form_valid(
     kind: RuntimeValueKind,
     value: &Value,
@@ -615,14 +750,48 @@ mod tests {
             ..limits
         };
         assert_round_trips(RuntimeValueKind::Json, "[1e20,-1e19,0.5]", limits);
+        // The PostgreSQL text is what `jsonb` prints, and the read back is what
+        // serde_json makes of it: a long integer becomes a nearby f64.
+        let postgres = |text: &str| {
+            let mut out = String::new();
+            postgres_text(&serde_json::from_str(text).unwrap(), &mut out);
+            out
+        };
         assert_eq!(
-            jsonb_read_back(&serde_json::json!([1e20, -1e19, 0.5, 7])),
-            None
+            postgres(r#"{"a":[1e16,-1.5e-7,0.5,7,1000000000000000.0,"1e16"]}"#),
+            r#"{"a":[10000000000000000,-0.00000015,0.5,7,1000000000000000.0,"1e16"]}"#
         );
-        assert_eq!(
-            jsonb_read_back(&serde_json::json!({"a": [1e16, -9.223372036854776e18]})),
-            Some(serde_json::json!({"a": [10_000_000_000_000_000u64, i64::MIN]}))
+        assert_eq!(postgres("[1e42]"), format!("[1{}]", "0".repeat(42)));
+        // `1e+42` (5 bytes) returns as `9.999999999999999e+41` (21 bytes).
+        let limits = RuntimeScalarLimits {
+            max_text_bytes: 46,
+            ..limits
+        };
+        assert_round_trips(RuntimeValueKind::Json, "[1e42,-1e42]", limits);
+        let limits = RuntimeScalarLimits {
+            max_text_bytes: 45,
+            ..limits
+        };
+        assert!(
+            decode(
+                RuntimeValueKind::Json,
+                &Value::String("[1e42,-1e42]".into()),
+                limits
+            )
+            .is_err()
         );
+        // The largest f64 values cannot be read back from `jsonb` at all.
+        let limits = RuntimeScalarLimits::default();
+        for text in [
+            "[1.7976931348623157e308]",
+            "{\"a\":-1.7976931348623157e308}",
+        ] {
+            assert!(
+                decode(RuntimeValueKind::Json, &Value::String(text.into()), limits).is_err(),
+                "{text}"
+            );
+        }
+        assert_round_trips(RuntimeValueKind::Json, "[1e300,5e-324,1.5e-7]", limits);
         // Under the default limits about 20 KB of input returns as about 74 KB.
         let limits = RuntimeScalarLimits::default();
         let text = format!("[{}]", vec!["1e16"; 4095].join(","));

@@ -555,6 +555,9 @@ pub struct RuntimeHostField {
     ty: TypeRef,
     resolver: HostResolver,
     arguments: Vec<(String, InputValue)>,
+    /// Argument defaults, checked against the scalar input bounds when the
+    /// field is added: async-graphql validates request values, not defaults.
+    defaults: Vec<(TypeRef, async_graphql::Value)>,
     semantic: Option<GraphqlSemanticOperationDescriptor>,
 }
 impl RuntimeHostField {
@@ -567,6 +570,7 @@ impl RuntimeHostField {
             ty,
             resolver: Arc::new(resolver),
             arguments: Vec::new(),
+            defaults: Vec::new(),
             semantic: None,
         }
     }
@@ -581,8 +585,9 @@ impl RuntimeHostField {
         if !valid_name(&name, false) || self.arguments.iter().any(|(known, _)| known == &name) {
             return Err(RuntimeGraphqlError::new("name_collision"));
         }
-        let mut input = InputValue::new(&name, ty);
+        let mut input = InputValue::new(&name, ty.clone());
         if let Some(default) = default {
+            self.defaults.push((ty, default.clone()));
             input = input.default_value(default);
         }
         self.arguments.push((name, input));
@@ -620,8 +625,17 @@ impl RuntimeHostField {
     pub(super) fn into_parts(
         self,
         kind: GraphqlOperationKind,
+        limits: RuntimeScalarLimits,
     ) -> Result<(String, Field, Option<GraphqlSemanticOperationDescriptor>), RuntimeGraphqlError>
     {
+        // A runtime scalar default is input the request never validates.
+        if !self
+            .defaults
+            .iter()
+            .all(|(ty, value)| super::scalar::input_default_valid(ty, value, limits))
+        {
+            return Err(RuntimeGraphqlError::new("invalid_composition"));
+        }
         if self.semantic.as_ref().is_some_and(|d| d.kind != kind) {
             return Err(RuntimeGraphqlError::new("invalid_semantic_catalog"));
         }
@@ -684,7 +698,7 @@ pub struct RuntimeGraphqlComposer<B: RuntimeReadBackend> {
     pub(super) names: BTreeSet<String>,
     roots: BTreeSet<String>,
     modules: Vec<RuntimeGraphqlModule>,
-    limits: RuntimeGraphqlLimits,
+    pub(super) limits: RuntimeGraphqlLimits,
     protection: Option<super::execution::Protection>,
     projected_types: BTreeMap<String, super::RuntimeProjectedObject>,
     pub(super) semantic: SemanticParts,
@@ -738,7 +752,8 @@ impl<B: RuntimeReadBackend> RuntimeGraphqlComposer<B> {
         })
     }
     pub fn query_field(mut self, spec: RuntimeHostField) -> Result<Self, RuntimeGraphqlError> {
-        let (name, field, semantic) = spec.into_parts(GraphqlOperationKind::Query)?;
+        let (name, field, semantic) =
+            spec.into_parts(GraphqlOperationKind::Query, self.limits.scalars)?;
         if !valid_name(&name, false) || !self.roots.insert(name.clone()) {
             return Err(RuntimeGraphqlError::new("name_collision"));
         }

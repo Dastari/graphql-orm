@@ -1577,6 +1577,28 @@ fn decode_cursor(
     Ok((envelope.values, envelope.score))
 }
 
+/// PostgreSQL's input spelling of canonical runtime date-time text. A year
+/// above 9999 is canonical `+10000-…`, which PostgreSQL casts without the
+/// sign. Years 0000 and below are canonical `0000-…` and `-0001-…`, which
+/// PostgreSQL spells as ` BC` years: year 0 is 1 BC.
+fn postgres_date_time(text: &str) -> String {
+    if let Some(unsigned) = text.strip_prefix('+') {
+        return unsigned.to_owned();
+    }
+    let (negative, digits) = text
+        .strip_prefix('-')
+        .map_or((false, text), |digits| (true, digits));
+    if let Some((year, rest)) = digits.split_once('-')
+        && let Ok(year) = year.parse::<i64>()
+    {
+        let year = if negative { -year } else { year };
+        if year <= 0 {
+            return format!("{:04}-{rest} BC", 1 - year);
+        }
+    }
+    text.to_owned()
+}
+
 pub(crate) fn value_bind(backend: DatabaseBackend, value: &RuntimeValue) -> Option<SqlValue> {
     match value {
         RuntimeValue::Null => None,
@@ -1587,15 +1609,13 @@ pub(crate) fn value_bind(backend: DatabaseBackend, value: &RuntimeValue) -> Opti
         RuntimeValue::Uuid(value) => Some(SqlValue::Uuid(*value)),
         RuntimeValue::Json(value) => Some(SqlValue::Json(value.clone())),
         RuntimeValue::Bytes(value) => Some(SqlValue::Bytes(value.clone())),
-        // A stored value read back with a year above 9999, for example as a
-        // cursor or comparison value, is canonical `+10000-…` text. PostgreSQL
-        // casts the unsigned spelling `10000-…`; SQLite compares the stored text.
-        RuntimeValue::DateTime(value) => {
-            Some(SqlValue::String(match value.as_str().strip_prefix('+') {
-                Some(unsigned) if backend == DatabaseBackend::Postgres => unsigned.to_owned(),
-                _ => value.as_str().to_owned(),
-            }))
-        }
+        // A stored value read back outside the years 0001 to 9999, for example
+        // as a cursor or comparison value, needs PostgreSQL's own spelling;
+        // SQLite compares the stored text.
+        RuntimeValue::DateTime(value) => Some(SqlValue::String(match backend {
+            DatabaseBackend::Postgres => postgres_date_time(value.as_str()),
+            _ => value.as_str().to_owned(),
+        })),
         // A scaled `i64` on SQLite and native `NUMERIC` on PostgreSQL.
         RuntimeValue::Decimal(value) => Some(SqlValue::Decimal(*value)),
     }
@@ -2361,7 +2381,39 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graphql::orm::{RuntimeCollection, RuntimeField, RuntimeOrderTerm, RuntimeSchema};
+    use crate::graphql::orm::{
+        RuntimeCollection, RuntimeDateTime, RuntimeField, RuntimeOrderTerm, RuntimeSchema,
+    };
+
+    #[test]
+    fn postgres_binds_stored_out_of_range_date_times_in_its_own_spelling() {
+        for (stored, postgres) in [
+            ("2026-01-01T00:00:00.000000Z", "2026-01-01T00:00:00.000000Z"),
+            ("0001-01-01T00:00:00.000000Z", "0001-01-01T00:00:00.000000Z"),
+            (
+                "+10000-01-01T00:00:00.000000Z",
+                "10000-01-01T00:00:00.000000Z",
+            ),
+            (
+                "0000-12-31T23:00:00.000000Z",
+                "0001-12-31T23:00:00.000000Z BC",
+            ),
+            (
+                "-0001-06-01T00:00:00.000000Z",
+                "0002-06-01T00:00:00.000000Z BC",
+            ),
+        ] {
+            assert_eq!(postgres_date_time(stored), postgres, "{stored}");
+            let value: RuntimeDateTime = serde_json::from_str(&format!("\"{stored}\"")).unwrap();
+            let bind = |backend| value_bind(backend, &RuntimeValue::DateTime(value.clone()));
+            assert!(
+                matches!(bind(DatabaseBackend::Postgres), Some(SqlValue::String(t)) if t == postgres)
+            );
+            assert!(
+                matches!(bind(DatabaseBackend::Sqlite), Some(SqlValue::String(t)) if t == stored)
+            );
+        }
+    }
 
     /// Unranked search cursors keep their earlier digest, so they stay valid
     /// across the scoring change; relevance-ordered ones name the scoring

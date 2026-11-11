@@ -417,7 +417,11 @@ impl<B: RuntimeReadBackend> Extension for Guard<B> {
                     .map_err(|error| vec![server(error)])?;
             }
         }
-        next.run(ctx).await.map_err(|_| vec![server(invalid())])
+        // Argument, variable and default values are validated in this step:
+        // the runtime scalars apply their input bounds only while it runs.
+        super::scalar::validating_input(next.run(ctx))
+            .await
+            .map_err(|_| vec![server(invalid())])
     }
     async fn execute(
         &self,

@@ -11,7 +11,10 @@
     )
 ))]
 use futures::future::BoxFuture;
-use graphql_orm::async_graphql::{Request, Variables, dynamic::Schema};
+use graphql_orm::async_graphql::{
+    Request, Variables,
+    dynamic::{FieldFuture, FieldValue, InputObject, InputValue, Schema, TypeRef},
+};
 use graphql_orm::{
     graphql::{orm::*, runtime::*},
     prelude::*,
@@ -111,6 +114,24 @@ fn definition() -> RuntimeSchema {
             ),
         ],
     }
+}
+
+/// A host root whose arguments are typed with runtime scalars. It answers
+/// `ok` only when every argument it received passed validation.
+fn echo_field() -> RuntimeHostField {
+    let field = RuntimeHostField::new("echo", TypeRef::named_nn("String"), |_| {
+        FieldFuture::new(async { Ok(Some(FieldValue::value("ok"))) })
+    });
+    [
+        ("document", "RuntimeJson"),
+        ("at", "RuntimeDateTime"),
+        ("bytes", "RuntimeBytes"),
+        ("input", "EchoInput"),
+    ]
+    .into_iter()
+    .fold(field, |field, (name, ty)| {
+        field.argument(name, TypeRef::named(ty), None).unwrap()
+    })
 }
 
 /// Approves every read and write of this isolated fixture.
@@ -235,6 +256,24 @@ impl Fixture {
             .unwrap()
             .install(module)
             .unwrap()
+            .register(
+                InputObject::new("EchoInput")
+                    .field(InputValue::new("document", TypeRef::named("RuntimeJson")))
+                    .into(),
+            )
+            .unwrap()
+            .query_field(echo_field())
+            .unwrap()
+            .query_field(RuntimeHostField::new(
+                "storedAt",
+                TypeRef::named_nn("RuntimeDateTime"),
+                |_| {
+                    FieldFuture::new(async {
+                        Ok(Some(FieldValue::value("+10000-01-01T00:00:00.000000Z")))
+                    })
+                },
+            ))
+            .unwrap()
             .finish()
             .unwrap();
         Self {
@@ -337,6 +376,13 @@ fn integral_document(count: usize) -> String {
     format!("[{}]", vec!["1e16"; count].join(","))
 }
 
+/// PostgreSQL returns `1e42` as 43 digits, which serde_json reads back as
+/// `9.999999999999999e+41`: 5 bytes become 21, and 22 for `-1e42`.
+fn long_integer_document(count: usize) -> String {
+    let values = (0..count).map(|i| if i % 2 == 0 { "1e42" } else { "-1e42" });
+    format!("[{}]", values.collect::<Vec<_>>().join(","))
+}
+
 #[tokio::test]
 async fn values_that_cannot_be_read_back_are_rejected_before_any_write() {
     let f = Fixture::new("scalar-readback-rejected").await;
@@ -352,6 +398,10 @@ async fn values_that_cannot_be_read_back_are_rejected_before_any_write() {
         serde_json::json!({"id": "4", "document": expanding_document(4000)}),
         // About 20 KiB of input returns from PostgreSQL as about 74 KiB.
         serde_json::json!({"id": "6", "document": integral_document(4095)}),
+        // About 24 KB of input returns from PostgreSQL as about 86 KB.
+        serde_json::json!({"id": "7", "document": long_integer_document(4000)}),
+        // PostgreSQL cannot read the largest f64 values back from `jsonb`.
+        serde_json::json!({"id": "8", "document": "[1.7976931348623157e308]"}),
     ] {
         let response = f.create(input.clone()).await;
         assert_eq!(
@@ -425,6 +475,34 @@ async fn boundary_values_are_stored_and_read_back() {
         .create(serde_json::json!({"id": "6", "document": read_back}))
         .await;
     assert_eq!(response["errors"], serde_json::json!([]), "{response}");
+    // SQLite returns `1e+42`; PostgreSQL returns `9.999999999999999e+41`.
+    let response = f
+        .create(serde_json::json!({"id": "7", "document": long_integer_document(2000)}))
+        .await;
+    assert_eq!(response["errors"], serde_json::json!([]), "{response}");
+    let page = f.list().await;
+    assert_eq!(
+        page["errors"],
+        serde_json::json!([]),
+        "{:.300}",
+        page.to_string()
+    );
+    let edges = page["data"]["samples"]["edges"].as_array().unwrap();
+    let read_back = edges.last().unwrap()["node"]["document"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    #[cfg(feature = "postgres")]
+    assert!(
+        read_back.starts_with("[9.999999999999999e+41,-9.999999999999999e+41,"),
+        "{read_back:.80}"
+    );
+    #[cfg(feature = "sqlite")]
+    assert!(read_back.starts_with("[1e+42,-1e+42,"), "{read_back:.80}");
+    let response = f
+        .create(serde_json::json!({"id": "8", "document": read_back}))
+        .await;
+    assert_eq!(response["errors"], serde_json::json!([]), "{response}");
     f.finish().await;
 }
 
@@ -459,6 +537,11 @@ async fn stored_values_beyond_input_bounds_are_returned_and_paged_as_stored() {
             "9999-12-31T23:59:60.000000Z",
             "9999-12-31T23:59:60.000000Z",
         ),
+        (
+            "5",
+            "-0001-06-01T00:00:00.000000Z",
+            "-0001-06-01T00:00:00.000000Z",
+        ),
     ];
     // PostgreSQL refuses year 0000 and stores the final leap second of 9999
     // as year 10000, which its reader returns as an extended year.
@@ -471,6 +554,17 @@ async fn stored_values_beyond_input_bounds_are_returned_and_paged_as_stored() {
             "+10000-01-01T00:00:00.000000Z",
         ),
         ("4", "9999-12-31T23:59:60Z", "+10000-01-01T00:00:00.000000Z"),
+        // ` BC` years read back as year 0000 and below.
+        (
+            "5",
+            "0001-12-31 23:00:00+00 BC",
+            "0000-12-31T23:00:00.000000Z",
+        ),
+        (
+            "6",
+            "0002-06-01 00:00:00+00 BC",
+            "-0001-06-01T00:00:00.000000Z",
+        ),
     ];
     for (id, stored, _) in &rows {
         f.sql(&format!(
@@ -580,5 +674,155 @@ fn deserialized_out_of_range_date_times_are_never_written() {
             RuntimeMutationErrorCode::InvalidInput,
             "{stored}"
         );
+    }
+}
+
+/// Host-field arguments typed with runtime scalars are validated with the
+/// input bounds, inline and as variables, including inside a host input
+/// object; output of the same scalars still accepts stored forms.
+#[tokio::test]
+async fn host_field_arguments_keep_the_scalar_input_bounds() {
+    let f = Fixture::new("scalar-readback-host").await;
+    let deep = format!("{}{}", "[".repeat(40), "]".repeat(40));
+    let long = format!("[\"{}\"]", "x".repeat(70_000));
+    let ok = serde_json::json!({"errors": [], "data": {"echo": "ok"}});
+    let accepted = f
+        .execute(
+            "query($d: RuntimeJson, $at: RuntimeDateTime, $b: RuntimeBytes) { \
+               echo(document: $d, at: $at, bytes: $b, input: {document: \"[1]\"}) }",
+            serde_json::json!({"d": "[1e16]", "at": "9999-12-31T23:59:59.9999994Z", "b": "AQI="}),
+        )
+        .await;
+    assert_eq!(accepted, ok);
+    let refused = |response: serde_json::Value| {
+        assert_eq!(response["data"], serde_json::Value::Null, "{response:.300}");
+        assert_eq!(
+            response["errors"],
+            serde_json::json!(["invalid_graphql_input"])
+        );
+    };
+    // As variables, including a document beyond the 64 KiB text bound.
+    for (argument, ty, value) in [
+        ("document", "RuntimeJson", serde_json::json!(deep)),
+        ("document", "RuntimeJson", serde_json::json!(long)),
+        (
+            "document",
+            "RuntimeJson",
+            serde_json::json!(integral_document(4095)),
+        ),
+        (
+            "at",
+            "RuntimeDateTime",
+            serde_json::json!("9999-12-31T23:59:59.9999995Z"),
+        ),
+        (
+            "at",
+            "RuntimeDateTime",
+            serde_json::json!("+10000-01-01T00:00:00.000000Z"),
+        ),
+        (
+            "bytes",
+            "RuntimeBytes",
+            serde_json::json!("A".repeat(44_000)),
+        ),
+    ] {
+        refused(
+            f.execute(
+                &format!("query($v: {ty}) {{ echo({argument}: $v) }}"),
+                serde_json::json!({ "v": value }),
+            )
+            .await,
+        );
+    }
+    refused(
+        f.execute(
+            "query($v: EchoInput) { echo(input: $v) }",
+            serde_json::json!({ "v": {"document": deep} }),
+        )
+        .await,
+    );
+    // Inline literals, in the argument and inside the host input object.
+    let quoted = |text: &str| serde_json::Value::String(text.to_owned()).to_string();
+    for query in [
+        format!("{{ echo(document: {}) }}", quoted(&deep)),
+        format!("{{ echo(document: {}) }}", quoted(&integral_document(4095))),
+        format!("{{ echo(input: {{document: {}}}) }}", quoted(&deep)),
+        "{ echo(at: \"0001-01-01T00:00:00+01:00\") }".to_owned(),
+        "{ echo(at: \"9999-12-31T23:59:60Z\") }".to_owned(),
+    ] {
+        refused(f.execute(&query, serde_json::json!({})).await);
+    }
+    // A document default is validated the same way.
+    refused(
+        f.execute(
+            &format!(
+                "query($v: RuntimeJson = {}) {{ echo(document: $v) }}",
+                quoted(&deep)
+            ),
+            serde_json::json!({}),
+        )
+        .await,
+    );
+    // Output of the same scalar renders a stored out-of-range value.
+    assert_eq!(
+        f.execute("{ storedAt }", serde_json::json!({})).await,
+        serde_json::json!({"errors": [], "data": {"storedAt": "+10000-01-01T00:00:00.000000Z"}})
+    );
+    f.finish().await;
+}
+
+/// A host argument default is input that no request validates, so it is
+/// decoded with the input bounds when the field is added.
+#[tokio::test]
+async fn host_field_argument_defaults_are_checked_when_composed() {
+    #[cfg(feature = "sqlite")]
+    let db = Database::<Backend>::connect_sqlite("sqlite::memory:")
+        .await
+        .unwrap();
+    #[cfg(feature = "postgres")]
+    let owned = owned_postgres::OwnedPostgres::start("scalar-readback-defaults").unwrap();
+    #[cfg(feature = "postgres")]
+    let db = Database::<Backend>::connect_postgres(&owned.url)
+        .await
+        .unwrap();
+    let deep = format!("{}{}", "[".repeat(40), "]".repeat(40));
+    let field = |ty: TypeRef, default: &str| {
+        RuntimeHostField::new("defaulted", TypeRef::named("String"), |_| {
+            FieldFuture::new(async { Ok(None::<FieldValue>) })
+        })
+        .argument("value", ty, Some(default.into()))
+        .unwrap()
+    };
+    let compose = |field: RuntimeHostField| {
+        RuntimeGraphqlComposer::new(db.clone(), "Query", Default::default())
+            .unwrap()
+            .query_field(field)
+            .map(|_| ())
+            .map_err(|error| error.code().to_owned())
+    };
+    assert_eq!(compose(field(TypeRef::named("RuntimeJson"), "[1]")), Ok(()));
+    assert_eq!(compose(field(TypeRef::named("String"), &deep)), Ok(()));
+    for (ty, default) in [
+        (TypeRef::named("RuntimeJson"), deep.as_str()),
+        (
+            TypeRef::named_nn("RuntimeDateTime"),
+            "9999-12-31T23:59:59.9999995Z",
+        ),
+        (
+            TypeRef::named_list("RuntimeDateTime"),
+            "0001-01-01T00:00:00+01:00",
+        ),
+    ] {
+        assert_eq!(
+            compose(field(ty, default)),
+            Err("invalid_composition".to_owned()),
+            "{default:.40}"
+        );
+    }
+    db.pool().close().await;
+    #[cfg(feature = "postgres")]
+    {
+        let mut owned = owned;
+        owned.cleanup().unwrap();
     }
 }
