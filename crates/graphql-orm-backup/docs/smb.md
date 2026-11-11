@@ -3,7 +3,7 @@ title: "Native and Mounted SMB Repositories"
 kind: reference
 status: active
 owner: graphql-orm-backup-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -16,11 +16,13 @@ code, and the snapshot layout is unchanged.
 
 ```rust,no_run
 use std::sync::Arc;
-use graphql_orm_backup::{BackupRepository, BlobStoreBackupRepository};
+use graphql_orm_backup::{BackupRepository, BlobStoreBackupRepository, ManifestAuthenticator};
 use graphql_orm_storage::{BlobStore, SmbStorageBackend, SmbStorageConfig};
 use secrecy::SecretString;
 
-# async fn example() -> Result<Arc<dyn BackupRepository>, Box<dyn std::error::Error>> {
+# async fn example(
+#     authenticator: ManifestAuthenticator,
+# ) -> Result<Arc<dyn BackupRepository>, Box<dyn std::error::Error>> {
 let config = SmbStorageConfig::new(
     "files.example.org",
     "backups",
@@ -28,7 +30,9 @@ let config = SmbStorageConfig::new(
     SecretString::from("runtime secret"),
 );
 let store: Arc<dyn BlobStore> = Arc::new(SmbStorageBackend::connect(config).await?);
-Ok(Arc::new(BlobStoreBackupRepository::new(store)))
+Ok(Arc::new(
+    BlobStoreBackupRepository::new(store).with_manifest_authenticator(authenticator),
+))
 # }
 ```
 

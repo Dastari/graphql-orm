@@ -51,7 +51,8 @@ async fn full_smb_snapshot_lifecycle_and_locking() {
             .await
             .expect("repository SMB connect"),
     );
-    let repository = BlobStoreBackupRepository::new(repository_store);
+    let repository = BlobStoreBackupRepository::new(repository_store)
+        .with_manifest_authenticator(test_manifest_authenticator());
     let restore_store: Arc<dyn BlobStore> = Arc::new(
         SmbStorageBackend::connect(config(format!("{test_root}/restored-objects")))
             .await
@@ -96,7 +97,10 @@ async fn full_smb_snapshot_lifecycle_and_locking() {
     restore_objects(
         &repository,
         &loaded,
-        &BlobStoreRestoreObjectSink::new(Arc::clone(&restore_store)),
+        &BlobStoreRestoreObjectSink::new(
+            Arc::clone(&restore_store),
+            graphql_orm_backup::RestoreKeyScope::prefixes(["originals"]).expect("restore scope"),
+        ),
     )
     .await
     .expect("restore stored object");
@@ -257,4 +261,10 @@ impl BackupObjectIndex for TestObjects {
             chunks,
         ))))
     }
+}
+
+fn test_manifest_authenticator() -> graphql_orm_backup::ManifestAuthenticator {
+    graphql_orm_backup::ManifestAuthenticator::new(
+        graphql_orm_backup::ManifestKey::from_bytes(&[7; 32]).expect("test manifest key"),
+    )
 }

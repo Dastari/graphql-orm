@@ -4,9 +4,13 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::{BackupError, BackupRepository};
+use crate::{BackupError, BackupRepository, ManifestAuthenticator};
 
-pub const BACKUP_FORMAT_VERSION: u32 = 1;
+/// Manifest format written by this crate: sealed with a host-keyed MAC.
+pub const BACKUP_FORMAT_VERSION: u32 = 2;
+/// Format of manifests written before authentication existed. They carry no
+/// seal and are read only under an explicit [`crate::LegacyManifestPolicy`].
+pub const LEGACY_BACKUP_FORMAT_VERSION: u32 = 1;
 
 /// Snapshot type stored in a manifest.
 #[non_exhaustive]
@@ -32,7 +36,11 @@ pub enum BackupCompression {
 }
 
 /// Durable manifest describing one backup snapshot.
+///
+/// Unknown fields are rejected when reading, so every accepted field is
+/// covered by the checksum and the seal.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BackupSnapshotManifest {
     /// Manifest format version.
     pub format_version: u32,
@@ -61,11 +69,40 @@ pub struct BackupSnapshotManifest {
     /// Delete tombstones included in the snapshot.
     pub tombstones: Vec<BackupTombstone>,
     /// Manifest checksum. The checksum field itself is cleared while hashing.
+    ///
+    /// This plain SHA-256 detects accidental corruption only. Anyone who can
+    /// write the repository can recompute it; [`Self::authentication`] is what
+    /// ties the manifest to the host.
     pub checksum: String,
+    /// Host-keyed seal over the same canonical bytes as the checksum. Required
+    /// for [`BACKUP_FORMAT_VERSION`]; absent from legacy manifests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authentication: Option<ManifestMac>,
+}
+
+/// MAC algorithm used to seal a manifest.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum ManifestMacAlgorithm {
+    /// HMAC-SHA256 under an HKDF-derived [`crate::ManifestKey`].
+    HmacSha256,
+}
+
+/// Seal stored in an authenticated manifest.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestMac {
+    /// MAC algorithm.
+    pub algorithm: ManifestMacAlgorithm,
+    /// Public id of the sealing key; see [`crate::ManifestKey::key_id`].
+    pub key_id: String,
+    /// Lowercase hex MAC.
+    pub mac: String,
 }
 
 /// Database payload metadata stored in a snapshot manifest.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DatabaseBackupManifest {
     /// Logical payload format, currently `jsonl`.
     pub export_format: String,
@@ -85,6 +122,7 @@ pub struct DatabaseBackupManifest {
 
 /// Metadata for a table or change payload blob.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TableBackupEntry {
     /// Table name represented by this payload.
     pub table_name: String,
@@ -98,6 +136,7 @@ pub struct TableBackupEntry {
 
 /// Metadata for a content-addressed stored object blob.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ObjectBackupEntry {
     /// Application object id.
     pub object_id: Uuid,
@@ -115,6 +154,7 @@ pub struct ObjectBackupEntry {
 
 /// Delete tombstone emitted by incremental snapshots.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BackupTombstone {
     /// Deleted table name, when the tombstone refers to a database row.
     pub table_name: Option<String>,
@@ -128,13 +168,13 @@ pub struct BackupTombstone {
 
 /// Computes the manifest checksum with the manifest's checksum field cleared.
 ///
+/// The checksum detects accidental corruption only; it is not authentication.
+///
 /// # Errors
 ///
 /// Returns [`BackupError`] if the canonical checksum view cannot be serialized.
 pub fn manifest_checksum(manifest: &BackupSnapshotManifest) -> Result<String, BackupError> {
-    let canonical = ChecksumManifestView::from(manifest);
-    let bytes = serde_json::to_vec(&canonical)?;
-    Ok(sha256_hex(&bytes))
+    Ok(sha256_hex(&canonical_manifest_bytes(manifest)?))
 }
 
 /// Sets the checksum field on a manifest.
@@ -149,6 +189,9 @@ pub fn set_manifest_checksum(manifest: &mut BackupSnapshotManifest) -> Result<()
 
 /// Verifies a manifest checksum.
 ///
+/// This checks integrity only. Use [`verify_manifest_authenticity`] to decide
+/// whether a manifest may be trusted.
+///
 /// # Errors
 ///
 /// Returns [`BackupError::ChecksumMismatch`] if the checksum does not match, or
@@ -159,23 +202,197 @@ pub fn verify_manifest_checksum(manifest: &BackupSnapshotManifest) -> Result<(),
         Ok(())
     } else {
         Err(BackupError::ChecksumMismatch {
-            key: format!("snapshots/{}/manifest.json", manifest.snapshot_id),
+            key: manifest_key(manifest.snapshot_id),
             expected: manifest.checksum.clone(),
             actual,
         })
     }
 }
 
-/// Loads and verifies a single snapshot manifest.
+/// Sets the checksum and host-keyed seal on a current-format manifest.
+///
+/// The manifest's entries are validated first, so a manifest that restore
+/// would refuse is never sealed.
 ///
 /// # Errors
 ///
-/// Returns [`BackupError`] if the manifest blob is missing, cannot be
-/// deserialized, or fails checksum verification.
+/// Returns [`BackupError::UnsupportedManifestFormat`] unless the manifest uses
+/// [`BACKUP_FORMAT_VERSION`], [`BackupError::InvalidManifestEntry`] for an entry
+/// outside its namespace, or another [`BackupError`] if serialization fails.
+pub fn authenticate_manifest(
+    authenticator: &ManifestAuthenticator,
+    manifest: &mut BackupSnapshotManifest,
+) -> Result<(), BackupError> {
+    if manifest.format_version != BACKUP_FORMAT_VERSION {
+        return Err(BackupError::UnsupportedManifestFormat {
+            key: manifest_key(manifest.snapshot_id),
+            format_version: manifest.format_version,
+        });
+    }
+    validate_manifest_entries(manifest)?;
+    let canonical = canonical_manifest_bytes(manifest)?;
+    manifest.checksum = sha256_hex(&canonical);
+    manifest.authentication = Some(authenticator.seal(&canonical));
+    Ok(())
+}
+
+/// Decides whether a manifest may be trusted, and checks its entries.
+///
+/// A current-format manifest must carry a seal that verifies under one of the
+/// authenticator's keys. A legacy manifest is accepted only as its
+/// [`crate::LegacyManifestPolicy`] allows. In both cases the checksum must
+/// match and every content key must stay inside its namespace.
+///
+/// This does not bind the manifest to a repository path; [`load_manifest`]
+/// also checks that.
+///
+/// # Errors
+///
+/// Returns [`BackupError::UnsupportedManifestFormat`],
+/// [`BackupError::ChecksumMismatch`],
+/// [`BackupError::ManifestAuthenticationFailed`],
+/// [`BackupError::LegacyManifestRefused`] or
+/// [`BackupError::InvalidManifestEntry`].
+pub fn verify_manifest_authenticity(
+    authenticator: &ManifestAuthenticator,
+    manifest: &BackupSnapshotManifest,
+) -> Result<(), BackupError> {
+    let key = manifest_key(manifest.snapshot_id);
+    match (manifest.format_version, &manifest.authentication) {
+        (BACKUP_FORMAT_VERSION, Some(seal)) => {
+            verify_manifest_checksum(manifest)?;
+            authenticator
+                .verify(seal, &canonical_manifest_bytes(manifest)?)
+                .map_err(|reason| BackupError::ManifestAuthenticationFailed { key, reason })?;
+        }
+        (BACKUP_FORMAT_VERSION, None) => {
+            return Err(BackupError::ManifestAuthenticationFailed {
+                key,
+                reason: "manifest is not sealed".to_string(),
+            });
+        }
+        (LEGACY_BACKUP_FORMAT_VERSION, None) => {
+            verify_manifest_checksum(manifest)?;
+            let trusted = match authenticator.legacy_manifest_policy() {
+                crate::LegacyManifestPolicy::Refuse => false,
+                crate::LegacyManifestPolicy::TrustPinned(pinned) => pinned
+                    .get(&manifest.snapshot_id)
+                    .is_some_and(|checksum| *checksum == manifest.checksum),
+                crate::LegacyManifestPolicy::TrustUnauthenticated => true,
+            };
+            if !trusted {
+                return Err(BackupError::LegacyManifestRefused {
+                    snapshot_id: manifest.snapshot_id,
+                });
+            }
+        }
+        (LEGACY_BACKUP_FORMAT_VERSION, Some(_)) => {
+            return Err(BackupError::ManifestAuthenticationFailed {
+                key,
+                reason: "legacy manifest format does not carry a seal".to_string(),
+            });
+        }
+        (format_version, _) => {
+            return Err(BackupError::UnsupportedManifestFormat {
+                key,
+                format_version,
+            });
+        }
+    }
+    validate_manifest_entries(manifest)
+}
+
+/// Checks that every manifest entry stays inside the namespace it owns.
+///
+/// Object content keys must be the content address of their declared digest
+/// under `objects/sha256/`. Table and change payloads must live at this
+/// snapshot's key for their table name. Digests must be lowercase SHA-256 hex,
+/// and table names must be a single safe key segment. The parent link must
+/// match the snapshot kind.
+///
+/// # Errors
+///
+/// Returns [`BackupError::InvalidManifestEntry`] naming the first violation.
+pub fn validate_manifest_entries(manifest: &BackupSnapshotManifest) -> Result<(), BackupError> {
+    let invalid = |reason: String| BackupError::InvalidManifestEntry {
+        snapshot_id: manifest.snapshot_id,
+        reason,
+    };
+    match (&manifest.backup_kind, manifest.parent_snapshot_id) {
+        (BackupKind::Full | BackupKind::SyntheticFull, None) => {
+            if !manifest.database.changes.is_empty() {
+                return Err(invalid(
+                    "a full snapshot must not carry changes".to_string(),
+                ));
+            }
+        }
+        (BackupKind::Incremental, Some(parent)) => {
+            if parent == manifest.snapshot_id {
+                return Err(invalid("snapshot is its own parent".to_string()));
+            }
+            if !manifest.database.tables.is_empty() {
+                return Err(invalid(
+                    "an incremental snapshot must not carry full tables".to_string(),
+                ));
+            }
+        }
+        (kind, parent) => {
+            return Err(invalid(format!(
+                "snapshot kind {kind:?} does not match parent {parent:?}"
+            )));
+        }
+    }
+    for (entries, expected_key) in [
+        (
+            &manifest.database.tables,
+            crate::database_table_key as fn(Uuid, &str) -> String,
+        ),
+        (&manifest.database.changes, crate::database_changes_key),
+    ] {
+        for entry in entries {
+            validate_table_name(&entry.table_name).map_err(invalid)?;
+            validate_sha256_hex(&entry.sha256_hex).map_err(invalid)?;
+            let expected = expected_key(manifest.snapshot_id, &entry.table_name);
+            if entry.content_key != expected {
+                return Err(invalid(format!(
+                    "payload key {} for table {} is not {expected}",
+                    entry.content_key, entry.table_name
+                )));
+            }
+        }
+    }
+    for object in &manifest.objects {
+        validate_sha256_hex(&object.sha256_hex).map_err(invalid)?;
+        let expected = crate::object_content_key(&object.sha256_hex);
+        if object.content_key != expected {
+            return Err(invalid(format!(
+                "object {} content key {} is not {expected}",
+                object.object_id, object.content_key
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Loads, authenticates and validates a single snapshot manifest.
+///
+/// The repository must supply a [`ManifestAuthenticator`]. The manifest must
+/// name the snapshot id of the path it was read from, use a supported format,
+/// contain no unknown fields, pass [`verify_manifest_authenticity`], and keep
+/// every entry inside its namespace.
+///
+/// # Errors
+///
+/// Returns [`BackupError::ManifestAuthenticationRequired`] without reading
+/// when no authenticator is configured,
+/// [`BackupError::ManifestSnapshotMismatch`] for a manifest stored under
+/// another snapshot's path, or another [`BackupError`] if the blob is missing,
+/// cannot be deserialized, or fails verification.
 pub async fn load_manifest(
     repository: &dyn BackupRepository,
     snapshot_id: Uuid,
 ) -> Result<BackupSnapshotManifest, BackupError> {
+    let authenticator = required_authenticator(repository)?;
     let key = manifest_key(snapshot_id);
     let bytes = crate::collect_backup_stream(
         repository.get_blob_stream(&key).await?,
@@ -183,8 +400,53 @@ pub async fn load_manifest(
     )
     .await?;
     let manifest: BackupSnapshotManifest = serde_json::from_slice(&bytes)?;
-    verify_manifest_checksum(&manifest)?;
+    if manifest.snapshot_id != snapshot_id {
+        return Err(BackupError::ManifestSnapshotMismatch {
+            key,
+            expected: snapshot_id,
+            actual: manifest.snapshot_id,
+        });
+    }
+    verify_manifest_authenticity(authenticator, &manifest)?;
     Ok(manifest)
+}
+
+pub(crate) fn required_authenticator(
+    repository: &dyn BackupRepository,
+) -> Result<&ManifestAuthenticator, BackupError> {
+    repository
+        .manifest_authenticator()
+        .ok_or(BackupError::ManifestAuthenticationRequired)
+}
+
+pub(crate) fn validate_table_name(table_name: &str) -> Result<(), String> {
+    if table_name.contains('/')
+        || graphql_orm_storage::validate_blob_key(table_name).is_err()
+        || table_name.chars().any(char::is_control)
+    {
+        return Err(format!(
+            "table name {table_name:?} is not a safe key segment"
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_sha256_hex(value: &str) -> Result<(), String> {
+    if value.len() == 64 && is_lower_hex(value) {
+        Ok(())
+    } else {
+        Err(format!("digest {value:?} is not lowercase SHA-256 hex"))
+    }
+}
+
+pub(crate) fn is_lower_hex(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn canonical_manifest_bytes(manifest: &BackupSnapshotManifest) -> Result<Vec<u8>, BackupError> {
+    Ok(serde_json::to_vec(&ChecksumManifestView::from(manifest))?)
 }
 
 /// Loads a manifest and all of its parents in restore order.

@@ -4,7 +4,10 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use graphql_orm_storage::{LocalStorageBackend, StorageByteStream};
 
-use crate::{BackupCapacityLimits, BackupError, BackupRepository, BlobStoreBackupRepository};
+use crate::{
+    BackupCapacityLimits, BackupError, BackupRepository, BlobStoreBackupRepository,
+    ManifestAuthenticator,
+};
 
 /// Local filesystem implementation of [`BackupRepository`].
 #[derive(Clone, Debug)]
@@ -25,6 +28,15 @@ impl LocalBackupRepository {
     #[must_use]
     pub fn with_capacity_limits(mut self, limits: BackupCapacityLimits) -> Self {
         self.inner = self.inner.with_capacity_limits(limits);
+        self
+    }
+
+    /// Seals and verifies manifests with a host-held key.
+    ///
+    /// Required: without it every manifest read or write fails closed.
+    #[must_use]
+    pub fn with_manifest_authenticator(mut self, authenticator: ManifestAuthenticator) -> Self {
+        self.inner = self.inner.with_manifest_authenticator(authenticator);
         self
     }
 
@@ -52,6 +64,9 @@ impl LocalBackupRepository {
 impl BackupRepository for LocalBackupRepository {
     fn capacity_limits(&self) -> BackupCapacityLimits {
         self.inner.capacity_limits()
+    }
+    fn manifest_authenticator(&self) -> Option<&ManifestAuthenticator> {
+        self.inner.manifest_authenticator()
     }
     async fn delete_blob_once(&self, key: &str) -> Result<(), BackupError> {
         self.inner.delete_blob_once(key).await

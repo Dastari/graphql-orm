@@ -16,7 +16,8 @@ use uuid::Uuid;
 #[tokio::test]
 async fn create_incremental_backup_writes_change_files_and_tombstones() {
     let temp = TempDir::new().expect("temp dir");
-    let repository = LocalBackupRepository::new(temp.path());
+    let repository = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
     let changes = sample_changes();
     let database = MockDatabase::with_incremental(changes.clone());
     let objects = MockObjectIndex;
@@ -51,7 +52,8 @@ async fn create_incremental_backup_writes_change_files_and_tombstones() {
 #[tokio::test]
 async fn restore_snapshot_applies_incremental_chain_after_full_snapshot() {
     let temp = TempDir::new().expect("temp dir");
-    let repository = LocalBackupRepository::new(temp.path());
+    let repository = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
     let objects = MockObjectIndex;
     let source = MockDatabase::with_full(vec![BackupTableExport {
         table_name: "users".to_string(),
@@ -93,7 +95,8 @@ async fn restore_snapshot_applies_incremental_chain_after_full_snapshot() {
 #[tokio::test]
 async fn compact_chain_writes_synthetic_full_snapshot() {
     let temp = TempDir::new().expect("temp dir");
-    let repository = LocalBackupRepository::new(temp.path());
+    let repository = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
     let objects = MockObjectIndex;
     let source = MockDatabase::with_full(vec![BackupTableExport {
         table_name: "users".to_string(),
@@ -157,7 +160,8 @@ async fn compact_chain_writes_synthetic_full_snapshot() {
 #[tokio::test]
 async fn compact_chain_refuses_changes_to_composite_key_tables() {
     let temp = TempDir::new().expect("temp dir");
-    let repository = LocalBackupRepository::new(temp.path());
+    let repository = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
     let objects = MockObjectIndex;
     let source = MockDatabase::with_full(vec![BackupTableExport {
         table_name: "memberships".to_string(),
@@ -444,7 +448,8 @@ async fn create_restore_fault_fixture(repository: &LocalBackupRepository) {
 #[tokio::test]
 async fn later_preparation_failure_reports_prior_stages_without_applying_failed_stage() {
     let temp = TempDir::new().expect("owned repository");
-    let repository = LocalBackupRepository::new(temp.path());
+    let repository = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
     create_restore_fault_fixture(&repository).await;
     let mut manifest = load_manifest(&repository, incremental_id())
         .await
@@ -504,7 +509,8 @@ async fn later_preparation_failure_reports_prior_stages_without_applying_failed_
 #[tokio::test]
 async fn partially_applied_stage_reports_uncertainty_and_requires_fresh_target_recovery() {
     let temp = TempDir::new().expect("owned repository");
-    let repository = LocalBackupRepository::new(temp.path());
+    let repository = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
     create_restore_fault_fixture(&repository).await;
     let mut target = MockDatabase::empty_restore_target();
     target.fail_incremental_after_one = true;
@@ -570,7 +576,8 @@ async fn partially_applied_stage_reports_uncertainty_and_requires_fresh_target_r
 async fn database_stage_capacity_fails_before_apply_and_finite_override_restores() {
     use graphql_orm_backup::{BackupByteLimit, BackupCapacityLimits};
     let temp = TempDir::new().expect("owned repository");
-    let repository = LocalBackupRepository::new(temp.path());
+    let repository = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
     create_restore_fault_fixture(&repository).await;
     // Isolate stage accounting from zstd's independently enforced window limit.
     uncompressed_stage_lengths(&repository, full_id()).await;
@@ -655,7 +662,8 @@ async fn uncompressed_stage_lengths(repository: &LocalBackupRepository, id: Uuid
 async fn stage_budget_accumulates_across_full_payloads_before_any_apply() {
     use graphql_orm_backup::{BackupByteLimit, BackupCapacityLimits};
     let temp = TempDir::new().expect("owned repository");
-    let repository = LocalBackupRepository::new(temp.path());
+    let repository = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
     let source = MockDatabase::with_full(vec![
         BackupTableExport {
             table_name: "users".to_string(),
@@ -709,7 +717,8 @@ async fn stage_budget_accumulates_across_full_payloads_before_any_apply() {
 async fn stage_budget_resets_between_manifests_and_later_capacity_failure_reports_prior_apply() {
     use graphql_orm_backup::{BackupByteLimit, BackupCapacityLimits};
     let temp = TempDir::new().expect("owned repository");
-    let repository = LocalBackupRepository::new(temp.path());
+    let repository = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
     create_restore_fault_fixture(&repository).await;
     let full_bytes: u64 = uncompressed_stage_lengths(&repository, full_id())
         .await
@@ -774,4 +783,10 @@ async fn stage_budget_resets_between_manifests_and_later_capacity_failure_report
     assert!(matches!(*source, BackupError::CapacityExceeded { .. }));
     assert!(dry.restored_full().is_empty());
     assert!(dry.restored_incremental().is_empty());
+}
+
+fn test_manifest_authenticator() -> graphql_orm_backup::ManifestAuthenticator {
+    graphql_orm_backup::ManifestAuthenticator::new(
+        graphql_orm_backup::ManifestKey::from_bytes(&[7; 32]).expect("test manifest key"),
+    )
 }

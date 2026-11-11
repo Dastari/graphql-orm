@@ -3,7 +3,7 @@ title: "Backup configuration and limits"
 kind: reference
 status: active
 owner: graphql-orm-backup-maintainers
-last_reviewed: 2026-08-12
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -31,6 +31,10 @@ configuration of its own; adapt a configured `graphql-orm-storage::BlobStore`.
 
 | Type | Use | Defaults and limits |
 | --- | --- | --- |
+| [`ManifestKey`](../src/authentication.rs) | Host-held key material for manifest seals, from `ManifestKey::from_bytes`. | At least 32 bytes (`MIN_MANIFEST_KEY_BYTES`) of random secret material; never stored in the repository. `Debug` shows only the public key id. |
+| [`ManifestAuthenticator`](../src/authentication.rs) | Seals new manifests with its current key and verifies seals from it or from keys added with `with_previous_key`. Attach with `LocalBackupRepository::with_manifest_authenticator` or `BlobStoreBackupRepository::with_manifest_authenticator`, or return it from `BackupRepository::manifest_authenticator`. | Required. Without it every manifest read or write fails with `ManifestAuthenticationRequired`. |
+| [`LegacyManifestPolicy`](../src/authentication.rs) | `Refuse`, `TrustPinned(snapshot id -> checksum)` or `TrustUnauthenticated` for format-1 manifests. | `Refuse`. Trusting legacy manifests is a migration step; see [MIGRATION.md](../MIGRATION.md). |
+| [`RestoreKeyScope`](../src/restore.rs) | Live-store key prefixes that `BlobStoreRestoreObjectSink` may write, or `entire_store()`. | No default; prefixes must be valid blob keys and match whole segments. |
 | [`BackupExecutionOptions`](../src/backup.rs) | `object_concurrency` and `lock` for full, incremental, and compaction writes. | Default concurrency 8 and default lock options. |
 | [`RepositoryLockOptions`](../src/lock.rs) | `stale_after_seconds` is a legacy ignored setting. | Existing locks never expire automatically; offline recovery requires quiescing all writers and handles. Atomic conditional create remains mandatory. |
 | [`FullBackupRequest`](../src/backup.rs) | `snapshot_id`, UTC `created_at`, stable `app_id`, and `app_version`. | No default. |
@@ -42,9 +46,11 @@ configuration of its own; adapt a configured `graphql-orm-storage::BlobStore`.
 
 ## Operational boundary
 
-The crate owns repository layout, checksums, manifest-chain validation, and
-restore order. The host owns database export/import, object discovery,
-scheduling, credentials, authorization, and a tested recovery procedure.
+The crate owns repository layout, checksums, manifest sealing and
+verification, manifest-chain validation, and restore order. The host owns the
+manifest key, database export/import, object discovery, scheduling,
+credentials, authorization, and a tested recovery procedure. See the
+[trust model](architecture.md#trust-model).
 Never retry an uncertain lock acquisition with an exists-then-write sequence;
 never treat a dry run as permission to skip an applying-restore preflight.
 

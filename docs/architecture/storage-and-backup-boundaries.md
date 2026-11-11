@@ -3,7 +3,7 @@ title: Storage, backup, and restore boundaries
 kind: architecture
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -25,9 +25,15 @@ own module-specific backup and applied-restore behavior.
    duplicate S3, SMB, Azure, or local filesystem transport.
 3. A package that owns durable records describes its schema module, backup
    metadata, restore hooks, and readiness conditions.
-4. Restore validates manifest/backend/schema compatibility before target
-   checks or writes, applies bounded work, reconciles incomplete effects, and
-   opens runtime activity only after readiness succeeds.
+4. Restore authenticates each manifest with a host-held key, then validates
+   manifest/backend/schema compatibility before target checks or writes,
+   applies bounded work, reconciles incomplete effects, and opens runtime
+   activity only after readiness succeeds.
+
+Backup repositories are untrusted storage: their contents are trusted only
+through manifests sealed with a key the host holds outside the repository,
+and object restore writes only live-store keys the host's sink permits. See
+the [backup trust model](../../crates/graphql-orm-backup/docs/architecture.md#trust-model).
 
 Repository locking requires the provider’s atomic create-if-absent primitive.
 An existence check followed by a write is not equivalent. Stream and range

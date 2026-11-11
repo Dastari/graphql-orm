@@ -4,14 +4,29 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use graphql_orm_storage::{BlobPutOptions, BlobStore, StorageByteStream, validate_blob_key};
 
-use crate::{BackupCapacityLimits, BackupError, collect_backup_stream};
+use crate::{BackupCapacityLimits, BackupError, ManifestAuthenticator, collect_backup_stream};
 
 #[async_trait]
 /// Key-addressed backup repository.
+///
+/// The repository's contents are untrusted. Anyone who can write it can
+/// replace payloads and recompute plain digests, so manifests are trusted only
+/// after [`BackupRepository::manifest_authenticator`] verifies their seal.
 pub trait BackupRepository: Send + Sync {
     /// Per-payload limits for buffered compatibility APIs and database decoding.
     fn capacity_limits(&self) -> BackupCapacityLimits {
         BackupCapacityLimits::default()
+    }
+
+    /// Host-held configuration that seals and verifies manifests.
+    ///
+    /// It belongs to this in-process handle and is never stored in the
+    /// repository. The default returns `None`, so every operation that reads
+    /// or writes a manifest fails closed with
+    /// [`BackupError::ManifestAuthenticationRequired`]. Wrapping repositories
+    /// must forward it.
+    fn manifest_authenticator(&self) -> Option<&ManifestAuthenticator> {
+        None
     }
 
     /// Writes a blob at a repository key.
@@ -137,6 +152,7 @@ pub struct BlobStoreBackupRepository {
     store: Arc<dyn BlobStore>,
     prefix: Option<String>,
     limits: BackupCapacityLimits,
+    authenticator: Option<ManifestAuthenticator>,
 }
 
 impl BlobStoreBackupRepository {
@@ -147,6 +163,7 @@ impl BlobStoreBackupRepository {
             store,
             prefix: None,
             limits: BackupCapacityLimits::default(),
+            authenticator: None,
         }
     }
 
@@ -165,6 +182,7 @@ impl BlobStoreBackupRepository {
             store,
             prefix: Some(prefix),
             limits: BackupCapacityLimits::default(),
+            authenticator: None,
         })
     }
 
@@ -172,6 +190,15 @@ impl BlobStoreBackupRepository {
     #[must_use]
     pub fn with_capacity_limits(mut self, limits: BackupCapacityLimits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Seals and verifies manifests with a host-held key.
+    ///
+    /// Required: without it every manifest read or write fails closed.
+    #[must_use]
+    pub fn with_manifest_authenticator(mut self, authenticator: ManifestAuthenticator) -> Self {
+        self.authenticator = Some(authenticator);
         self
     }
 
@@ -212,6 +239,13 @@ impl std::fmt::Debug for BlobStoreBackupRepository {
         formatter
             .debug_struct("BlobStoreBackupRepository")
             .field("prefix", &self.prefix)
+            .field(
+                "manifest_key_id",
+                &self
+                    .authenticator
+                    .as_ref()
+                    .map(ManifestAuthenticator::key_id),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -220,6 +254,9 @@ impl std::fmt::Debug for BlobStoreBackupRepository {
 impl BackupRepository for BlobStoreBackupRepository {
     fn capacity_limits(&self) -> BackupCapacityLimits {
         self.limits
+    }
+    fn manifest_authenticator(&self) -> Option<&ManifestAuthenticator> {
+        self.authenticator.as_ref()
     }
     async fn delete_blob_once(&self, key: &str) -> Result<(), BackupError> {
         self.store

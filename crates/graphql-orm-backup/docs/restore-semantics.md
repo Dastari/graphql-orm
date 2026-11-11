@@ -3,7 +3,7 @@ title: "Restore Semantics"
 kind: reference
 status: active
 owner: graphql-orm-backup-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -51,10 +51,21 @@ The ORM row importer does not use generated GraphQL/repository mutation paths.
 The flags do not authorize restore, change the connection's database role, or
 bypass database-native row-level security. Those remain host responsibilities.
 
+## Trust
+
+Restore trusts a manifest only after verifying its host-keyed seal, its
+snapshot id against its path, its format version and its entry namespaces.
+See the [trust model](architecture.md#trust-model). Without a configured
+`ManifestAuthenticator` restore fails with `ManifestAuthenticationRequired`
+before reading any manifest. Unauthenticated legacy manifests are refused
+with `LegacyManifestRefused` unless the host opts in with a
+`LegacyManifestPolicy`.
+
 ## Safety Rules
 
 - Load and validate the selected manifest chain before writing.
-- Verify manifests before writing.
+- Authenticate every manifest in the chain and bind it to its path before
+  writing.
 - Verify object checksums before final success.
 - Verify table payload checksums against the stored compressed bytes.
 - Decompress table payloads only after checksum verification.
@@ -74,6 +85,21 @@ Database restore and object restore are separate. `restore_snapshot` restores ta
 through `GraphqlOrmBackupAdapter`. `restore_objects` loads verified object blobs and passes them to
 a caller-supplied `RestoreObjectSink` so applications can choose how to rehydrate their primary
 object store.
+
+Before restoring any object, `restore_objects` authenticates the manifest it
+is given, requires every object's live-store key to be a valid
+`graphql-orm-storage` key (no empty, `.` or `..` segments, absolute paths,
+backslashes or NUL), and calls `RestoreObjectSink::check_restore_target` for
+every object. A rejected key fails with `RestoreTargetRejected` before the
+sink receives bytes.
+
+`BlobStoreRestoreObjectSink` takes a `RestoreKeyScope`. It writes only keys
+below the scope's prefixes (whole segments: `media` permits `media/a` but not
+`media-old/a`), or anywhere in the store for `RestoreKeyScope::entire_store()`,
+which suits a store that holds only restored objects. It creates each object
+with an atomic conditional write and never overwrites: a key that already
+holds the same bytes is left in place, and a key that holds different bytes
+fails with `RestoreObjectConflict`. Restore into an empty staging namespace.
 
 A successful database restore does not imply that external objects,
 credentials, provider continuations, application reconciliation, or runtime

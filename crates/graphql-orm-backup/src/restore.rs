@@ -3,7 +3,7 @@ use std::{fmt, sync::Arc};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt;
-use graphql_orm_storage::{BlobPutOptions, BlobStore, StorageByteStream};
+use graphql_orm_storage::{BlobPutOptions, BlobStore, StorageByteStream, validate_blob_key};
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -12,7 +12,7 @@ use crate::{
     BackupByteLimit, BackupChangeExport, BackupCompression, BackupError, BackupObjectRef,
     BackupRepository, BackupSnapshotManifest, BackupTableExport, GraphqlOrmBackupAdapter,
     ObjectBackupEntry, TableBackupEntry, collect_backup_stream, load_manifest_chain,
-    verify_manifest_and_objects,
+    manifest::required_authenticator, verify_manifest_and_objects, verify_manifest_authenticity,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -119,6 +119,24 @@ pub trait RestoreObjectSink: Send + Sync {
     fn buffered_byte_limit(&self) -> BackupByteLimit {
         BackupByteLimit::default()
     }
+
+    /// Checks whether this sink may write an object, before any object is
+    /// restored.
+    ///
+    /// [`restore_objects`] calls it for every object in the manifest first, so
+    /// a rejected target fails the restore before the sink receives any
+    /// bytes. Keys have already passed `graphql-orm-storage` key validation.
+    /// The default accepts every such key; sinks that write to a shared store
+    /// should restrict keys to the namespaces the restore owns.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackupError::RestoreTargetRejected`] or another
+    /// [`BackupError`] to refuse the restore.
+    fn check_restore_target(&self, _object: &BackupObjectRef) -> Result<(), BackupError> {
+        Ok(())
+    }
+
     /// Restores one object loaded from a backup repository.
     ///
     /// # Errors
@@ -148,38 +166,151 @@ pub trait RestoreObjectSink: Send + Sync {
     }
 }
 
+/// Live-store keys that a [`BlobStoreRestoreObjectSink`] may write.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RestoreKeyScope {
+    prefixes: Option<Vec<String>>,
+}
+
+impl RestoreKeyScope {
+    /// Permits keys below any of the given prefixes, such as `media` for
+    /// `media/...`. A prefix matches whole key segments only.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackupError::InvalidRepositoryKey`] if a prefix is not a valid
+    /// blob key, or [`BackupError::RestoreTargetRejected`] if no prefix is
+    /// given.
+    pub fn prefixes<I, S>(prefixes: I) -> Result<Self, BackupError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let prefixes = prefixes
+            .into_iter()
+            .map(|prefix| {
+                let prefix = prefix.into();
+                validate_blob_key(&prefix)?;
+                Ok(prefix)
+            })
+            .collect::<Result<Vec<_>, BackupError>>()?;
+        if prefixes.is_empty() {
+            return Err(BackupError::RestoreTargetRejected {
+                storage_key: String::new(),
+                reason: "a restore key scope needs at least one prefix".to_string(),
+            });
+        }
+        Ok(Self {
+            prefixes: Some(prefixes),
+        })
+    }
+
+    /// Permits any valid key in the store. Use this only for a store, or a
+    /// store prefix, that holds nothing but restored objects.
+    #[must_use]
+    pub fn entire_store() -> Self {
+        Self { prefixes: None }
+    }
+
+    /// Whether this scope permits a key.
+    #[must_use]
+    pub fn permits(&self, key: &str) -> bool {
+        validate_blob_key(key).is_ok()
+            && self.prefixes.as_ref().is_none_or(|prefixes| {
+                prefixes.iter().any(|prefix| {
+                    key.strip_prefix(prefix.as_str())
+                        .is_some_and(|rest| rest.starts_with('/'))
+                })
+            })
+    }
+}
+
 /// [`RestoreObjectSink`] that writes object bytes back to a
 /// `graphql-orm-storage` [`BlobStore`] at each object's original storage key.
+///
+/// It writes only keys inside its [`RestoreKeyScope`] and never overwrites:
+/// each object is created with [`BlobStore::put_blob_if_not_exists`]. A key
+/// that already holds the same bytes is left in place, which keeps a repeated
+/// restore idempotent; a key that holds different bytes fails with
+/// [`BackupError::RestoreObjectConflict`]. The store must support atomic
+/// conditional create.
 #[derive(Clone)]
 pub struct BlobStoreRestoreObjectSink {
     store: Arc<dyn BlobStore>,
+    scope: RestoreKeyScope,
 }
 
 impl BlobStoreRestoreObjectSink {
-    /// Creates a sink over the application's primary object blob store.
+    /// Creates a sink over the application's primary object blob store that
+    /// writes only keys inside `scope`.
     #[must_use]
-    pub fn new(store: Arc<dyn BlobStore>) -> Self {
-        Self { store }
+    pub fn new(store: Arc<dyn BlobStore>, scope: RestoreKeyScope) -> Self {
+        Self { store, scope }
+    }
+
+    async fn create_only(
+        &self,
+        object: &BackupObjectRef,
+        body: StorageByteStream,
+    ) -> Result<(), BackupError> {
+        self.check_restore_target(object)?;
+        let key = &object.storage_key;
+        if self.store.blob_exists(key).await? {
+            let existing = self.store.get_blob(key).await?.body;
+            if hash_stream(existing).await? != object.sha256_hex {
+                return Err(BackupError::RestoreObjectConflict {
+                    storage_key: key.clone(),
+                });
+            }
+            // Consume the backup stream so the caller still verifies it.
+            hash_stream(body).await?;
+            return Ok(());
+        }
+        let options = BlobPutOptions {
+            content_type: object.mime_type.clone(),
+        };
+        match self
+            .store
+            .put_blob_if_not_exists(key, body, options)
+            .await?
+        {
+            Some(_) => Ok(()),
+            None => Err(BackupError::RestoreObjectConflict {
+                storage_key: key.clone(),
+            }),
+        }
+    }
+}
+
+impl fmt::Debug for BlobStoreRestoreObjectSink {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BlobStoreRestoreObjectSink")
+            .field("scope", &self.scope)
+            .finish_non_exhaustive()
     }
 }
 
 #[async_trait]
 impl RestoreObjectSink for BlobStoreRestoreObjectSink {
+    fn check_restore_target(&self, object: &BackupObjectRef) -> Result<(), BackupError> {
+        if self.scope.permits(&object.storage_key) {
+            Ok(())
+        } else {
+            Err(BackupError::RestoreTargetRejected {
+                storage_key: object.storage_key.clone(),
+                reason: "outside the sink's restore key scope".to_string(),
+            })
+        }
+    }
+
     async fn restore_object(
         &self,
         object: BackupObjectRef,
         bytes: Bytes,
     ) -> Result<(), BackupError> {
-        self.store
-            .put_blob(
-                &object.storage_key,
-                StorageByteStream::from_bytes(bytes),
-                BlobPutOptions {
-                    content_type: object.mime_type.clone(),
-                },
-            )
-            .await?;
-        Ok(())
+        self.create_only(&object, StorageByteStream::from_bytes(bytes))
+            .await
     }
 
     async fn restore_object_stream(
@@ -187,17 +318,26 @@ impl RestoreObjectSink for BlobStoreRestoreObjectSink {
         object: BackupObjectRef,
         body: StorageByteStream,
     ) -> Result<(), BackupError> {
-        self.store
-            .put_blob(
-                &object.storage_key,
-                body,
-                BlobPutOptions {
-                    content_type: object.mime_type.clone(),
-                },
-            )
-            .await?;
-        Ok(())
+        self.create_only(&object, body).await
     }
+}
+
+async fn hash_stream(body: StorageByteStream) -> Result<String, BackupError> {
+    let mut body = body.into_inner();
+    let mut hasher = Sha256::new();
+    while let Some(chunk) = body.next().await {
+        hasher.update(&chunk?);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Applies `graphql-orm-storage` key rules to a live-store object key: no
+/// empty, `.` or `..` segments, no absolute paths, backslashes or NUL bytes.
+pub(crate) fn validate_storage_key(storage_key: &str) -> Result<(), BackupError> {
+    validate_blob_key(storage_key).map_err(|_| BackupError::RestoreTargetRejected {
+        storage_key: storage_key.to_string(),
+        reason: "not a valid storage key".to_string(),
+    })
 }
 
 impl RestoreContext {
@@ -456,6 +596,12 @@ fn restore_stage_error(
 
 /// Restores object blobs from a manifest through a caller-supplied sink.
 ///
+/// Before any object is restored, the manifest is authenticated with the
+/// repository's host key (it may come from anywhere, so it is checked again
+/// here), every live-store key must pass `graphql-orm-storage` key validation,
+/// and the sink's [`RestoreObjectSink::check_restore_target`] must accept
+/// every object.
+///
 /// Historical object sizes are advisory. A streaming checksum/count preflight
 /// supplies observed content size to the sink; restoring then reads the stream
 /// again and verifies its checksum after sink consumption. No whole-object
@@ -469,13 +615,21 @@ fn restore_stage_error(
 ///
 /// # Errors
 ///
-/// Returns [`BackupError`] if an object blob is missing, checksum verification
-/// fails, or the sink rejects an object.
+/// Returns [`BackupError::ManifestAuthenticationRequired`] or an
+/// authentication error before reading any object, or
+/// [`BackupError::RestoreTargetRejected`] before restoring any object.
+/// Otherwise returns [`BackupError`] if an object blob is missing, checksum
+/// verification fails, or the sink rejects an object.
 pub async fn restore_objects(
     repository: &dyn BackupRepository,
     manifest: &BackupSnapshotManifest,
     sink: &dyn RestoreObjectSink,
 ) -> Result<(), BackupError> {
+    verify_manifest_authenticity(required_authenticator(repository)?, manifest)?;
+    for object in &manifest.objects {
+        validate_storage_key(&object.storage_key)?;
+        sink.check_restore_target(&object_ref_from_entry(object))?;
+    }
     for object in &manifest.objects {
         // Historical size metadata was advisory. Verify/count without collection
         // before calling the sink, then retain the streamed checksum guard below.

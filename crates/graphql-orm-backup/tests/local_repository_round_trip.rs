@@ -11,7 +11,8 @@ use uuid::Uuid;
 #[tokio::test]
 async fn local_repository_put_get_list_delete_round_trip() {
     let temp = TempDir::new().expect("temp dir");
-    let repository = LocalBackupRepository::new(temp.path());
+    let repository = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
 
     repository
         .put_blob("snapshots/a/manifest.json", Bytes::from_static(b"manifest"))
@@ -57,7 +58,8 @@ async fn local_repository_put_get_list_delete_round_trip() {
 #[tokio::test]
 async fn local_repository_rejects_path_traversal_keys() {
     let temp = TempDir::new().expect("temp dir");
-    let repository = LocalBackupRepository::new(temp.path());
+    let repository = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
 
     let err = repository
         .put_blob("../escape", Bytes::from_static(b"bad"))
@@ -70,7 +72,8 @@ async fn local_repository_rejects_path_traversal_keys() {
 #[tokio::test]
 async fn local_repository_rejects_absolute_keys() {
     let temp = TempDir::new().expect("temp dir");
-    let repository = LocalBackupRepository::new(temp.path());
+    let repository = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
 
     let err = repository
         .put_blob("/tmp/escape", Bytes::from_static(b"bad"))
@@ -83,7 +86,8 @@ async fn local_repository_rejects_absolute_keys() {
 #[tokio::test]
 async fn local_repository_rejects_dot_components() {
     let temp = TempDir::new().expect("temp dir");
-    let repository = LocalBackupRepository::new(temp.path());
+    let repository = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
 
     let err = repository
         .put_blob("snapshots/./manifest.json", Bytes::from_static(b"bad"))
@@ -96,7 +100,8 @@ async fn local_repository_rejects_dot_components() {
 #[tokio::test]
 async fn local_repository_rejects_parent_components() {
     let temp = TempDir::new().expect("temp dir");
-    let repository = LocalBackupRepository::new(temp.path());
+    let repository = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
 
     let err = repository
         .put_blob("snapshots/../manifest.json", Bytes::from_static(b"bad"))
@@ -109,7 +114,8 @@ async fn local_repository_rejects_parent_components() {
 #[tokio::test]
 async fn local_repository_rejects_empty_segments() {
     let temp = TempDir::new().expect("temp dir");
-    let repository = LocalBackupRepository::new(temp.path());
+    let repository = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
 
     let err = repository
         .put_blob("snapshots//manifest.json", Bytes::from_static(b"bad"))
@@ -122,7 +128,8 @@ async fn local_repository_rejects_empty_segments() {
 #[tokio::test]
 async fn local_repository_rejects_backslashes() {
     let temp = TempDir::new().expect("temp dir");
-    let repository = LocalBackupRepository::new(temp.path());
+    let repository = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
 
     let err = repository
         .put_blob("snapshots\\manifest.json", Bytes::from_static(b"bad"))
@@ -135,7 +142,8 @@ async fn local_repository_rejects_backslashes() {
 #[tokio::test]
 async fn local_repository_rejects_nul_bytes() {
     let temp = TempDir::new().expect("temp dir");
-    let repository = LocalBackupRepository::new(temp.path());
+    let repository = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
 
     let err = repository
         .put_blob("snapshots/manifest\0.json", Bytes::from_static(b"bad"))
@@ -148,7 +156,8 @@ async fn local_repository_rejects_nul_bytes() {
 #[tokio::test]
 async fn local_repository_empty_prefix_lists_all_blobs() {
     let temp = TempDir::new().expect("temp dir");
-    let repository = LocalBackupRepository::new(temp.path());
+    let repository = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
 
     repository
         .put_blob("snapshots/a/manifest.json", Bytes::from_static(b"manifest"))
@@ -208,7 +217,8 @@ async fn local_repository_open_existing_rejects_file_path() {
 #[tokio::test]
 async fn verification_fails_when_object_blob_is_missing() {
     let temp = TempDir::new().expect("temp dir");
-    let repository = LocalBackupRepository::new(temp.path());
+    let repository = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
     let manifest = sample_manifest_with_object_hash(bytes_sha256_hex(b"object"));
 
     let err = verify_object_checksums(&repository, &manifest)
@@ -221,7 +231,8 @@ async fn verification_fails_when_object_blob_is_missing() {
 #[tokio::test]
 async fn verification_fails_when_object_checksum_mismatches() {
     let temp = TempDir::new().expect("temp dir");
-    let repository = LocalBackupRepository::new(temp.path());
+    let repository = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
     let manifest = sample_manifest_with_object_hash(bytes_sha256_hex(b"expected"));
 
     repository
@@ -262,7 +273,10 @@ fn sample_manifest_with_object_hash(object_hash: String) -> BackupSnapshotManife
             tables: vec![TableBackupEntry {
                 table_name: "storage".to_string(),
                 row_count: 0,
-                content_key: object_content_key(&table_hash),
+                content_key: graphql_orm_backup::database_table_key(
+                    Uuid::parse_str("bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb").expect("valid uuid"),
+                    "storage",
+                ),
                 sha256_hex: table_hash,
             }],
             changes: Vec::new(),
@@ -277,7 +291,14 @@ fn sample_manifest_with_object_hash(object_hash: String) -> BackupSnapshotManife
         }],
         tombstones: Vec::new(),
         checksum: String::new(),
+        authentication: None,
     };
     set_manifest_checksum(&mut manifest).expect("set checksum");
     manifest
+}
+
+fn test_manifest_authenticator() -> graphql_orm_backup::ManifestAuthenticator {
+    graphql_orm_backup::ManifestAuthenticator::new(
+        graphql_orm_backup::ManifestKey::from_bytes(&[7; 32]).expect("test manifest key"),
+    )
 }

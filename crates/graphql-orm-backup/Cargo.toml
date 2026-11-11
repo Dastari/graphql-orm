@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm-backup"
-version = "0.12.1"
+version = "0.13.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Dastari/graphql-orm"
@@ -26,12 +26,15 @@ bytes = "1"
 futures = "0.3"
 graphql-orm = { workspace = true, optional = true }
 graphql-orm-storage = { workspace = true }
+hkdf = "0.12"
+hmac = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 secrecy = { version = "0.10", optional = true }
 sha2 = "0.10"
 thiserror = "2"
 uuid = { version = "1", features = ["serde", "v4"] }
+zeroize = "1"
 zstd = "0.13"
 
 [dev-dependencies]

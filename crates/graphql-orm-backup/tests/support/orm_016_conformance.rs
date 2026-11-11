@@ -471,7 +471,8 @@ async fn private_modules_round_trip_through_graphql_orm_016(
         bytes: object_bytes.clone(),
     };
     let temp = TempDir::new()?;
-    let repository = LocalBackupRepository::new(temp.path());
+    let repository = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
     let backup = create_full_backup(
         &repository,
         &adapter,
@@ -523,4 +524,10 @@ async fn private_modules_round_trip_through_graphql_orm_016(
     ));
 
     Ok(())
+}
+
+fn test_manifest_authenticator() -> graphql_orm_backup::ManifestAuthenticator {
+    graphql_orm_backup::ManifestAuthenticator::new(
+        graphql_orm_backup::ManifestKey::from_bytes(&[7; 32]).expect("test manifest key"),
+    )
 }

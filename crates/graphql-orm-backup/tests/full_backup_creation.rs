@@ -335,6 +335,9 @@ impl RecordingRepository {
 
 #[async_trait]
 impl BackupRepository for RecordingRepository {
+    fn manifest_authenticator(&self) -> Option<&graphql_orm_backup::ManifestAuthenticator> {
+        Some(&TEST_MANIFEST_AUTHENTICATOR)
+    }
     async fn delete_blob_once(&self, key: &str) -> Result<(), BackupError> {
         self.delete_blob(key).await
     }
@@ -413,6 +416,9 @@ struct StreamingProbeRepository {
 
 #[async_trait]
 impl BackupRepository for StreamingProbeRepository {
+    fn manifest_authenticator(&self) -> Option<&graphql_orm_backup::ManifestAuthenticator> {
+        Some(&TEST_MANIFEST_AUTHENTICATOR)
+    }
     async fn delete_blob_once(&self, key: &str) -> Result<(), BackupError> {
         self.inner.delete_blob_once(key).await
     }
@@ -581,3 +587,12 @@ impl BackupObjectIndex for StreamingObjectIndex {
         Ok(StorageByteStream::new(Box::pin(stream::iter(chunks))))
     }
 }
+
+fn test_manifest_authenticator() -> graphql_orm_backup::ManifestAuthenticator {
+    graphql_orm_backup::ManifestAuthenticator::new(
+        graphql_orm_backup::ManifestKey::from_bytes(&[7; 32]).expect("test manifest key"),
+    )
+}
+
+static TEST_MANIFEST_AUTHENTICATOR: std::sync::LazyLock<graphql_orm_backup::ManifestAuthenticator> =
+    std::sync::LazyLock::new(test_manifest_authenticator);

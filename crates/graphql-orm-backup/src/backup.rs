@@ -15,8 +15,10 @@ use crate::{
     BACKUP_FORMAT_VERSION, BackupChangeAction, BackupChangeExport, BackupError, BackupKind,
     BackupObjectIndex, BackupRepository, BackupRow, BackupSnapshotManifest, BackupTableExport,
     BackupTombstone, DatabaseBackupManifest, GraphqlOrmBackupAdapter, ObjectBackupEntry,
-    RepositoryLock, RepositoryLockOptions, TableBackupEntry, load_manifest_chain,
-    manifest::sha256_hex, plan_full_backup, set_manifest_checksum, verify_manifest_and_objects,
+    RepositoryLock, RepositoryLockOptions, TableBackupEntry, authenticate_manifest,
+    load_manifest_chain,
+    manifest::{required_authenticator, sha256_hex, validate_sha256_hex, validate_table_name},
+    plan_full_backup, verify_manifest_and_objects,
 };
 
 pub const DATABASE_EXPORT_FORMAT: &str = "jsonl";
@@ -168,6 +170,8 @@ pub async fn create_full_backup_with_options(
     request: FullBackupRequest,
     options: &BackupExecutionOptions,
 ) -> Result<FullBackupResult, BackupError> {
+    // Refuse before writing payloads that no sealed manifest would reference.
+    required_authenticator(repository)?;
     let lock = RepositoryLock::acquire(repository, &options.lock).await?;
     let result = create_full_backup_inner(repository, database, objects, request, options).await;
     release_lock(lock, result).await
@@ -181,6 +185,10 @@ async fn create_full_backup_inner(
     options: &BackupExecutionOptions,
 ) -> Result<FullBackupResult, BackupError> {
     let plan = plan_full_backup(database, objects).await?;
+    for table in &plan.tables {
+        ensure_table_name(request.snapshot_id, &table.table_name)?;
+    }
+    validate_object_refs(request.snapshot_id, &plan.objects)?;
 
     let mut table_entries = Vec::with_capacity(plan.tables.len());
     let mut row_count = 0_u64;
@@ -232,6 +240,7 @@ async fn create_full_backup_inner(
         objects: object_entries,
         tombstones: Vec::new(),
         checksum: String::new(),
+        authentication: None,
     };
 
     write_manifest(repository, &mut manifest).await?;
@@ -276,6 +285,7 @@ pub async fn create_incremental_backup_with_options(
     request: IncrementalBackupRequest,
     options: &BackupExecutionOptions,
 ) -> Result<IncrementalBackupResult, BackupError> {
+    required_authenticator(repository)?;
     let lock = RepositoryLock::acquire(repository, &options.lock).await?;
     let result =
         create_incremental_backup_inner(repository, database, objects, request, options).await;
@@ -296,6 +306,17 @@ async fn create_incremental_backup_inner(
     let object_refs = objects
         .list_objects_for_incremental_backup(request.parent_snapshot_id)
         .await?;
+
+    if request.parent_snapshot_id == request.snapshot_id {
+        return Err(BackupError::InvalidManifestEntry {
+            snapshot_id: request.snapshot_id,
+            reason: "snapshot is its own parent".to_string(),
+        });
+    }
+    for change in &changes {
+        ensure_table_name(request.snapshot_id, &change.table_name)?;
+    }
+    validate_object_refs(request.snapshot_id, &object_refs)?;
 
     let mut change_entries = Vec::new();
     let mut change_count = 0_u64;
@@ -348,6 +369,7 @@ async fn create_incremental_backup_inner(
         objects: object_entries,
         tombstones,
         checksum: String::new(),
+        authentication: None,
     };
 
     write_manifest(repository, &mut manifest).await?;
@@ -381,6 +403,7 @@ pub async fn compact_chain_with_options(
     request: CompactChainRequest,
     options: &BackupExecutionOptions,
 ) -> Result<CompactChainResult, BackupError> {
+    required_authenticator(repository)?;
     let lock = RepositoryLock::acquire(repository, &options.lock).await?;
     let result = compact_chain_inner(repository, request).await;
     release_lock(lock, result).await
@@ -505,6 +528,7 @@ async fn compact_chain_inner(
         objects: object_entries,
         tombstones: Vec::new(),
         checksum: String::new(),
+        authentication: None,
     };
 
     write_manifest(repository, &mut manifest).await?;
@@ -512,17 +536,21 @@ async fn compact_chain_inner(
     Ok(CompactChainResult { manifest })
 }
 
-/// Writes a manifest as the final snapshot blob.
+/// Seals a manifest with the repository's host key and writes it as the final
+/// snapshot blob.
 ///
 /// # Errors
 ///
-/// Returns [`BackupError`] if the checksum cannot be computed, the manifest
-/// cannot be serialized, or the repository cannot write the blob.
+/// Returns [`BackupError::ManifestAuthenticationRequired`] if the repository
+/// has no authenticator, [`BackupError::UnsupportedManifestFormat`] unless the
+/// manifest uses [`crate::BACKUP_FORMAT_VERSION`],
+/// [`BackupError::InvalidManifestEntry`] for an entry outside its namespace,
+/// or another [`BackupError`] if the manifest cannot be serialized or written.
 pub async fn write_manifest(
     repository: &dyn BackupRepository,
     manifest: &mut BackupSnapshotManifest,
 ) -> Result<(), BackupError> {
-    set_manifest_checksum(manifest)?;
+    authenticate_manifest(required_authenticator(repository)?, manifest)?;
     let body = serde_json::to_vec_pretty(manifest)?;
     repository
         .put_blob(
@@ -535,6 +563,30 @@ pub async fn write_manifest(
 #[must_use]
 pub fn bytes_sha256_hex(bytes: &[u8]) -> String {
     sha256_hex(bytes)
+}
+
+fn ensure_table_name(snapshot_id: Uuid, table_name: &str) -> Result<(), BackupError> {
+    validate_table_name(table_name).map_err(|reason| BackupError::InvalidManifestEntry {
+        snapshot_id,
+        reason,
+    })
+}
+
+/// Refuses object references that restore could not accept, before any write.
+fn validate_object_refs(
+    snapshot_id: Uuid,
+    object_refs: &[crate::BackupObjectRef],
+) -> Result<(), BackupError> {
+    for object in object_refs {
+        validate_sha256_hex(&object.sha256_hex).map_err(|reason| {
+            BackupError::InvalidManifestEntry {
+                snapshot_id,
+                reason,
+            }
+        })?;
+        crate::restore::validate_storage_key(&object.storage_key)?;
+    }
+    Ok(())
 }
 
 fn serialize_table_export(table: &BackupTableExport) -> Result<Vec<u8>, BackupError> {

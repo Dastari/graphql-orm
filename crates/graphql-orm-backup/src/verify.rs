@@ -1,6 +1,6 @@
 use crate::{
     BackupError, BackupRepository, BackupSnapshotManifest, DEFAULT_OBJECT_CONCURRENCY,
-    verify_manifest_checksum,
+    manifest::required_authenticator, verify_manifest_authenticity,
 };
 use futures::{StreamExt, TryStreamExt, stream};
 use sha2::{Digest, Sha256};
@@ -20,36 +20,45 @@ impl Default for VerificationOptions {
     }
 }
 
-/// Verifies a manifest checksum and all referenced payload checksums.
+/// Authenticates a manifest with the repository's host key, then verifies all
+/// referenced payload checksums.
 ///
 /// # Errors
 ///
-/// Returns [`BackupError`] if the manifest checksum is invalid, a referenced
-/// blob is missing, or a payload checksum does not match.
+/// Returns [`BackupError::ManifestAuthenticationRequired`] if the repository
+/// has no authenticator, an error from [`verify_manifest_authenticity`], or
+/// another [`BackupError`] if a referenced blob is missing or a payload
+/// checksum does not match.
 pub async fn verify_manifest_and_objects(
     repository: &dyn BackupRepository,
     manifest: &BackupSnapshotManifest,
 ) -> Result<(), BackupError> {
-    verify_manifest_checksum(manifest)?;
-    verify_object_checksums(repository, manifest).await
+    verify_manifest_and_objects_with_options(repository, manifest, &VerificationOptions::default())
+        .await
 }
 
-/// Verifies a manifest checksum and payload checksums with explicit options.
+/// Authenticates a manifest and verifies payload checksums with explicit
+/// options.
 ///
 /// # Errors
 ///
-/// Returns [`BackupError`] if the manifest checksum is invalid, a referenced
-/// blob is missing, or a payload checksum does not match.
+/// Returns [`BackupError::ManifestAuthenticationRequired`] if the repository
+/// has no authenticator, an error from [`verify_manifest_authenticity`], or
+/// another [`BackupError`] if a referenced blob is missing or a payload
+/// checksum does not match.
 pub async fn verify_manifest_and_objects_with_options(
     repository: &dyn BackupRepository,
     manifest: &BackupSnapshotManifest,
     options: &VerificationOptions,
 ) -> Result<(), BackupError> {
-    verify_manifest_checksum(manifest)?;
+    verify_manifest_authenticity(required_authenticator(repository)?, manifest)?;
     verify_object_checksums_with_options(repository, manifest, options).await
 }
 
 /// Verifies object, table, and change payload checksums in a manifest.
+///
+/// This checks stored bytes against the manifest's digests only. It does not
+/// authenticate the manifest; use [`verify_manifest_and_objects`] for that.
 ///
 /// # Errors
 ///
@@ -74,6 +83,7 @@ pub async fn verify_object_checksums_with_options(
     manifest: &BackupSnapshotManifest,
     options: &VerificationOptions,
 ) -> Result<(), BackupError> {
+    crate::validate_manifest_entries(manifest)?;
     let concurrency = options.blob_concurrency.max(1);
 
     // Owned (key, checksum) pairs keep the streams free of higher-ranked

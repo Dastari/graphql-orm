@@ -3,12 +3,20 @@ title: "graphql-orm-backup"
 kind: reference
 status: active
 owner: graphql-orm-backup-maintainers
-last_reviewed: 2026-11-09
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # graphql-orm-backup
+
+Version 0.13.0 authenticates snapshot manifests with a host-held key and
+constrains restore targets. This is breaking: every repository handle needs a
+`ManifestAuthenticator`, manifests written by earlier versions are refused
+unless the host opts in, and `BlobStoreRestoreObjectSink` writes only inside an
+explicit key scope without overwriting. Follow the migration steps in
+[MIGRATION.md](MIGRATION.md) and read the
+[trust model](docs/architecture.md#trust-model).
 
 Version 0.12.1 makes `prune` and `delete_snapshot` refuse to delete snapshots
 or objects when the snapshot listing is incomplete ([GHSA-439h-2cx8-xwgx](https://github.com/Dastari/graphql-orm/security/advisories/GHSA-439h-2cx8-xwgx)). Use it with storage 0.8.1;
@@ -40,7 +48,7 @@ restore before replacing a production pin.
 
 ```toml
 [dependencies]
-graphql-orm-backup = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.12.1" }
+graphql-orm-backup = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.13.0" }
 ```
 
 The default `local` feature provides `LocalBackupRepository`. To supply only a
@@ -58,11 +66,13 @@ The repository is concrete; the database and object index are deliberately
 host-provided traits. A full backup requires both:
 
 ```rust,no_run
-use graphql_orm_backup::{create_full_backup, BackupObjectIndex, FullBackupRequest, GraphqlOrmBackupAdapter, LocalBackupRepository};
+use graphql_orm_backup::{create_full_backup, BackupObjectIndex, FullBackupRequest, GraphqlOrmBackupAdapter, LocalBackupRepository, ManifestAuthenticator, ManifestKey};
 use uuid::Uuid;
 
-# async fn example(database: &dyn GraphqlOrmBackupAdapter, objects: &dyn BackupObjectIndex) -> Result<(), graphql_orm_backup::BackupError> {
-let repository = LocalBackupRepository::new("./backups");
+# async fn example(database: &dyn GraphqlOrmBackupAdapter, objects: &dyn BackupObjectIndex, key_material: &[u8]) -> Result<(), graphql_orm_backup::BackupError> {
+// Host-held secret, at least 32 random bytes, never stored in the repository.
+let authenticator = ManifestAuthenticator::new(ManifestKey::from_bytes(key_material)?);
+let repository = LocalBackupRepository::new("./backups").with_manifest_authenticator(authenticator);
 let result = create_full_backup(&repository, database, objects, FullBackupRequest {
     snapshot_id: Uuid::new_v4(), created_at: 0,
     app_id: "host-application".into(), app_version: "0.1.0".into(),
@@ -93,6 +103,12 @@ cargo test -p graphql-orm-backup --test full_backup_creation
 | `smb` | No | Native SMB transport through storage; no backup-owned SMB code. |
 | `orm` | No | Lower-level host-selected ORM integration. |
 | `orm-sqlite` / `orm-postgres` | No | One explicit ready-made ORM adapter lane. |
+
+The backup repository is untrusted storage. Manifests are sealed with
+HMAC-SHA256 under the host's `ManifestKey`, bound to their snapshot path, and
+refused when the seal, format or any content key is wrong. Object restore
+writes only valid live-store keys that the sink permits. See the
+[trust model](docs/architecture.md#trust-model).
 
 All repository writes use an advisory lock backed by atomic conditional create.
 Never replace it with exists-then-write. Credentials are owned by the storage
