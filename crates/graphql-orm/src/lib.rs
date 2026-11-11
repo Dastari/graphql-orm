@@ -142,7 +142,9 @@
 //! [`graphql::assurance::enforce_resolver_assurance`] before database work;
 //! custom resolvers can use [`graphql::assurance::DeclaredAssuranceGuard`], which
 //! `#[graphql_orm_custom_operations]` installs on described roots. Runtime
-//! GraphQL roots enforce their own coordinate too. A mutation missing from the
+//! GraphQL roots enforce their own coordinate too, and runtime query and
+//! mutation roots are also checked before request preparation reads the
+//! database or calls the host. A mutation missing from the
 //! registry receives the configured interactive default. The
 //! hook is a no-op until the schema installs
 //! [`graphql::assurance::AssuranceEnforcement`]. Directive metadata and the

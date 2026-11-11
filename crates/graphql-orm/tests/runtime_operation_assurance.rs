@@ -5,6 +5,10 @@
 //! own root coordinate before any write. A registry miss applies the configured
 //! interactive mutation default, and strict classification refuses to finish a
 //! composition whose mutation roots are not all registered.
+//!
+//! A request pre-pass evaluates the same check for every executed root before
+//! request preparation, so a refused root reaches neither the database nor
+//! the host read authority.
 #![cfg(all(
     feature = "runtime-graphql",
     feature = "sqlite",
@@ -216,18 +220,24 @@ impl RuntimeWriteAuthority<Backend> for Writes {
     }
 }
 
-struct Reads;
+/// Grants every read; records the collection of every host read check.
+struct Reads(Arc<Mutex<Vec<String>>>);
 impl RuntimeReadAuthority for Reads {
     fn authorize_mutation_result<'a>(
         &'a self,
         _check: RuntimeMutationOutputCheck<'a>,
     ) -> BoxFuture<'a, Result<(), RuntimeGraphqlError>> {
+        self.0.lock().unwrap().push("mutation result".into());
         Box::pin(async { Ok(()) })
     }
     fn authorize<'a>(
         &'a self,
-        _check: RuntimeReadCheck<'a>,
+        check: RuntimeReadCheck<'a>,
     ) -> BoxFuture<'a, Result<RuntimeReadGrant, RuntimeGraphqlError>> {
+        self.0
+            .lock()
+            .unwrap()
+            .push(check.collection.id().to_string());
         Box::pin(async { Ok(RuntimeReadGrant::new(None)) })
     }
 }
@@ -242,7 +252,7 @@ struct StepUp {
 impl AssuranceRequirementEvaluator for StepUp {
     fn enforce(
         &self,
-        _ctx: &async_graphql::Context<'_>,
+        _check: &graphql_orm::graphql::assurance::AssuranceCheck<'_>,
         actor_class: AssuranceActorClass,
         policy_id: &str,
     ) -> async_graphql::Result<()> {
@@ -281,6 +291,11 @@ struct Fixture {
     intents: Arc<AtomicUsize>,
     host_calls: Arc<AtomicUsize>,
     live: Arc<LiveSource>,
+    /// Collections the host read authority was asked about.
+    reads: Arc<Mutex<Vec<String>>>,
+    /// Database connections handed out by the pool, one per statement or
+    /// transaction.
+    acquisitions: Arc<AtomicUsize>,
 }
 impl Fixture {
     async fn new() -> Self {
@@ -289,12 +304,24 @@ impl Fixture {
             graphql_orm::uuid::Uuid::new_v4().simple()
         ));
         let url = format!("sqlite://{}?mode=rwc", path.display());
-        let db = Database::<Backend>::connect_sqlite_with_options(
-            &url,
-            graphql_orm::db::ConnectionOptions::default().max_connections(2),
-        )
-        .await
-        .unwrap();
+        let acquisitions = Arc::new(AtomicUsize::new(0));
+        // A new connection runs `after_connect` and an idle one `before_acquire`,
+        // so together they count every connection the pool hands out.
+        let (opened, reused) = (acquisitions.clone(), acquisitions.clone());
+        let pool = graphql_orm::sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(2)
+            .after_connect(move |_, _| {
+                opened.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(()) })
+            })
+            .before_acquire(move |_, _| {
+                reused.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(true) })
+            })
+            .connect(&url)
+            .await
+            .unwrap();
+        let db = Database::<Backend>::new(pool);
         let schema = Arc::new(definition().validate().unwrap());
         let target = schema
             .physical_schema::<Backend>(Default::default())
@@ -339,6 +366,8 @@ impl Fixture {
                 tx: tokio::sync::broadcast::channel(4).0,
                 opened: AtomicUsize::new(0),
             }),
+            reads: Default::default(),
+            acquisitions,
         }
     }
     fn schema(&self) -> &Arc<ValidatedRuntimeSchema> {
@@ -368,7 +397,7 @@ impl Fixture {
             .data(
                 RuntimeGraphqlRequest::<Backend>::new(
                     schema.fingerprint(),
-                    Arc::new(Reads),
+                    Arc::new(Reads(self.reads.clone())),
                     None,
                     Default::default(),
                 )
@@ -405,6 +434,16 @@ impl Fixture {
     }
     async fn run(&self, api: &Schema, query: &str) -> Value {
         serde_json::to_value(api.execute(self.request(query)).await).unwrap()
+    }
+    /// Runs a request and returns its response, the collections the host read
+    /// authority checked and the database connections it acquired.
+    async fn observe(&self, api: &Schema, query: &str) -> (Value, Vec<String>, usize) {
+        self.reads.lock().unwrap().clear();
+        let before = self.acquisitions.load(Ordering::SeqCst);
+        let response = self.run(api, query).await;
+        let reads = std::mem::take(&mut *self.reads.lock().unwrap());
+        let acquired = self.acquisitions.load(Ordering::SeqCst) - before;
+        (response, reads, acquired)
     }
     async fn count(&self, table: &str) -> i64 {
         let rows = Backend::fetch_rows(
@@ -511,7 +550,11 @@ async fn unregistered_runtime_mutations_apply_the_default_policy_before_any_writ
         let response = f.run(&api, query).await;
         assert_nothing_written(&f, &response, root).await;
     }
-    assert_eq!(evaluator.policies.lock().unwrap().len(), MUTATIONS.len());
+    // The request pre-pass and the resolver each evaluate every root.
+    assert_eq!(
+        evaluator.policies.lock().unwrap().len(),
+        MUTATIONS.len() * 2
+    );
     assert!(
         evaluator
             .policies
@@ -593,7 +636,18 @@ async fn registered_runtime_roots_enforce_their_own_coordinates() {
     assert!(tags.get("errors").is_none(), "{tags}");
     assert_eq!(
         evaluator.policies.lock().unwrap().as_slice(),
-        [POLICY, POLICY, POLICY, POLICY, "read.recent-auth"]
+        [
+            POLICY,
+            POLICY,
+            POLICY,
+            POLICY,
+            POLICY,
+            POLICY,
+            POLICY,
+            POLICY,
+            "read.recent-auth",
+            "read.recent-auth"
+        ]
     );
     f.finish().await;
 }
@@ -732,7 +786,8 @@ async fn runtime_mutations_run_once_assurance_is_satisfied() {
     assert_eq!(f.count("ra_comment").await, 0);
     assert_eq!(f.host_calls.load(Ordering::SeqCst), 1);
     assert!(f.intents.load(Ordering::SeqCst) > 0);
-    assert_eq!(evaluator.policies.lock().unwrap().len(), steps.len() * 2);
+    // Refused and admitted, each in the pre-pass and in the resolver.
+    assert_eq!(evaluator.policies.lock().unwrap().len(), steps.len() * 4);
     f.finish().await;
 }
 
@@ -801,13 +856,261 @@ async fn node_and_live_subscription_roots_enforce_their_coordinates() {
     assert_eq!(f.live.opened.load(Ordering::SeqCst), 1);
     assert_eq!(
         evaluator.policies.lock().unwrap().as_slice(),
+        // `node` is checked by the request pre-pass and its resolver; a
+        // subscription only by its resolver, before registration.
         [
             "read.recent-auth",
+            "read.recent-auth",
             "live.recent-auth",
+            "read.recent-auth",
             "read.recent-auth",
             "live.recent-auth"
         ]
     );
     drop(stream);
+    f.finish().await;
+}
+
+/// The number of refused root occurrences, each with the resolver-level
+/// public error shape.
+fn step_up_errors(response: &Value) -> usize {
+    let errors = response["errors"].as_array().cloned().unwrap_or_default();
+    for error in &errors {
+        assert_eq!(
+            error["extensions"]["code"], "STEP_UP_REQUIRED",
+            "{response}"
+        );
+        assert_eq!(error["message"], "additional authentication is required");
+        assert_eq!(error["locations"].as_array().map(Vec::len), Some(1));
+    }
+    errors.len()
+}
+
+/// A query root or `node` that requires a policy the caller does not meet is
+/// refused before request preparation: no host read check, no database
+/// connection. Aliases, fragments and `@skip`/`@include` cannot hide one.
+#[tokio::test]
+async fn denied_query_roots_and_node_reach_neither_database_nor_read_authority() {
+    let f = Fixture::new().await;
+    let evaluator = StepUp::default();
+    let composer = f.composer();
+    let mut builder = OperationAssuranceRegistryBuilder::new(AssuranceSchemaConfig::legacy());
+    composer
+        .register_assurance_operations(&mut builder)
+        .unwrap();
+    builder
+        .require(GraphqlOperationKind::Query, "posts", "read.recent-auth")
+        .unwrap()
+        .require(GraphqlOperationKind::Query, "node", "read.recent-auth")
+        .unwrap();
+    let api = composer
+        .data(AssuranceEnforcement::new(
+            Arc::new(builder.build().unwrap()),
+            Arc::new(evaluator.clone()),
+        ))
+        .finish()
+        .unwrap();
+    let id = graphql_orm::graphql::federation::encode_node_id("Event", vec!["e1".into()]);
+    let id = serde_json::to_string(&id.0).unwrap();
+    const PAGE: &str = "edges { node { id label tags(first: 5) { edges { node { label } } } } }";
+    let refused = [
+        (format!("{{ posts {{ {PAGE} }} }}"), 1),
+        (
+            format!("{{ node(NodeId: {id}) {{ NodeId ... on Event {{ label }} }} }}"),
+            1,
+        ),
+        // An alias that looks like an unclassified root, and an aliased `node`.
+        (
+            format!("{{ tags: posts {{ {PAGE} }} lookup: node(NodeId: {id}) {{ NodeId }} }}"),
+            2,
+        ),
+        // Named, nested and inline fragments, and an `@include` that holds.
+        (
+            format!(
+                "query {{ ...Outer ... on Query {{ inline: posts {{ {PAGE} }} }} \
+                 ... @include(if: true) {{ included: node(NodeId: {id}) {{ NodeId }} }} }} \
+                 fragment Outer on Query {{ ...Inner }} \
+                 fragment Inner on Query {{ nested: posts {{ {PAGE} }} }}"
+            ),
+            3,
+        ),
+        // The same response key selected through a fragment and directly:
+        // execution resolves, and refuses, both occurrences.
+        (
+            format!(
+                "query {{ ...Twice twice: posts {{ edges {{ node {{ id }} }} }} }} \
+                 fragment Twice on Query {{ twice: posts {{ {PAGE} }} }}"
+            ),
+            2,
+        ),
+    ];
+    for (query, errors) in &refused {
+        let (response, reads, acquired) = f.observe(&api, query).await;
+        assert_eq!(step_up_errors(&response), *errors, "{query}: {response}");
+        assert_eq!(
+            reads,
+            Vec::<String>::new(),
+            "{query} reached the read authority"
+        );
+        assert_eq!(acquired, 0, "{query} reached the database");
+    }
+
+    // A refused root does not stop an unclassified one beside it, nor its own
+    // reads leak: only `tags` is checked by the host and read.
+    let (response, reads, acquired) = f
+        .observe(
+            &api,
+            "{ tags { edges { node { label } } } \
+               lookup: node(NodeId: \"x\") @skip(if: false) { NodeId } }",
+        )
+        .await;
+    assert_eq!(step_up_errors(&response), 1, "{response}");
+    assert_eq!(response["data"]["lookup"], Value::Null, "{response}");
+    assert_eq!(response["data"]["tags"]["edges"][0]["node"]["label"], "red");
+    assert_eq!(reads, ["tag"]);
+    assert!(acquired > 0);
+
+    // A root left out by `@skip` or `@include` is not refused.
+    let (response, reads, _) = f
+        .observe(
+            &api,
+            "query($no: Boolean = false) { posts @skip(if: true) { edges { node { id } } } \
+               node(NodeId: \"x\") @include(if: $no) { NodeId } \
+               tags { edges { node { label } } } }",
+        )
+        .await;
+    assert!(response.get("errors").is_none(), "{response}");
+    assert_eq!(reads, ["tag"]);
+
+    // Once step-up is met the same roots are prepared and read.
+    evaluator.satisfied.store(true, Ordering::SeqCst);
+    let (response, reads, acquired) = f.observe(&api, &refused[2].0).await;
+    assert!(response.get("errors").is_none(), "{response}");
+    assert_eq!(
+        response["data"]["tags"]["edges"][0]["node"]["label"],
+        "first"
+    );
+    assert_eq!(response["data"]["lookup"]["NodeId"], id.trim_matches('"'));
+    assert_eq!(reads, ["post", "tag", "event"]);
+    assert!(acquired > 0);
+    f.finish().await;
+}
+
+/// A runtime mutation refused for assurance gets no host read authorization
+/// for its payload or child layers, and opens no database connection.
+#[tokio::test]
+async fn denied_mutation_payload_layers_reach_neither_database_nor_read_authority() {
+    let f = Fixture::new().await;
+    let evaluator = StepUp::default();
+    let composer = f.composer();
+    let mut builder = OperationAssuranceRegistryBuilder::new(
+        AssuranceSchemaConfig::legacy()
+            .with_default_interactive_mutation_policy(POLICY)
+            .unwrap()
+            .with_strict_mutation_classification(true),
+    );
+    composer
+        .register_assurance_operations(&mut builder)
+        .unwrap();
+    let api = composer
+        .data(AssuranceEnforcement::new(
+            Arc::new(builder.build().unwrap()),
+            Arc::new(evaluator.clone()),
+        ))
+        .finish()
+        .unwrap();
+    const RECORD: &str = "record { id label tags(first: 5) { edges { node { label } } } }";
+    let refused = [
+        (
+            format!(
+                r#"mutation($schema: String!) {{ updatePost(expectedSchema: $schema, key: {{id: "1"}}, input: {{label: "changed"}}) {{ {RECORD} }} }}"#
+            ),
+            1,
+        ),
+        // Aliased roots inside named and inline fragments.
+        (
+            format!(
+                r#"mutation($schema: String!) {{ ...Writes ... on Mutation {{ made: createPost(expectedSchema: $schema, input: {{id: "2", label: "new"}}) {{ {RECORD} }} }} }}
+                fragment Writes on Mutation {{ changed: updatePost(expectedSchema: $schema, key: {{id: "1"}}, input: {{label: "changed"}}) {{ {RECORD} }} }}"#
+            ),
+            2,
+        ),
+    ];
+    for (query, errors) in &refused {
+        let (response, reads, acquired) = f.observe(&api, query).await;
+        assert_eq!(step_up_errors(&response), *errors, "{query}: {response}");
+        assert_eq!(
+            reads,
+            Vec::<String>::new(),
+            "{query} reached the read authority"
+        );
+        assert_eq!(acquired, 0, "{query} reached the database");
+        assert_nothing_written(&f, &response, "payload").await;
+    }
+
+    // Once step-up is met, the payload and child layers are authorized and read.
+    evaluator.satisfied.store(true, Ordering::SeqCst);
+    let (response, reads, acquired) = f.observe(&api, &refused[0].0).await;
+    assert!(response.get("errors").is_none(), "{response}");
+    assert_eq!(response["data"]["updatePost"]["record"]["label"], "changed");
+    assert!(reads.contains(&"post".to_owned()), "{reads:?}");
+    assert!(reads.contains(&"tag".to_owned()), "{reads:?}");
+    assert!(acquired > 0);
+    assert!(f.intents.load(Ordering::SeqCst) > 0);
+    f.finish().await;
+}
+
+/// Denies only its first evaluation, as an evaluator whose state changes
+/// between the request pre-pass and the resolver might.
+#[derive(Debug, Default)]
+struct DenyFirst(AtomicUsize);
+impl AssuranceRequirementEvaluator for DenyFirst {
+    fn enforce(
+        &self,
+        check: &graphql_orm::graphql::assurance::AssuranceCheck<'_>,
+        _: AssuranceActorClass,
+        _: &str,
+    ) -> async_graphql::Result<()> {
+        assert_eq!(check.kind(), GraphqlOperationKind::Query);
+        assert_eq!(check.field_name(), "posts");
+        assert!(check.data_opt::<RuntimeGraphqlRequest<Backend>>().is_some());
+        if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err(
+                async_graphql::Error::new("additional authentication is required")
+                    .extend_with(|_, extensions| extensions.set("code", "STEP_UP_REQUIRED")),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// The pre-pass decision binds: a root it refused stays refused, unread, even
+/// when the resolver-level check would now admit it.
+#[tokio::test]
+async fn a_root_refused_before_preparation_stays_refused_in_its_resolver() {
+    let f = Fixture::new().await;
+    let evaluator = Arc::new(DenyFirst::default());
+    let composer = f.composer();
+    let mut builder = OperationAssuranceRegistryBuilder::new(AssuranceSchemaConfig::legacy());
+    composer
+        .register_assurance_operations(&mut builder)
+        .unwrap();
+    builder
+        .require(GraphqlOperationKind::Query, "posts", "read.recent-auth")
+        .unwrap();
+    let api = composer
+        .data(AssuranceEnforcement::new(
+            Arc::new(builder.build().unwrap()),
+            evaluator.clone(),
+        ))
+        .finish()
+        .unwrap();
+    let (response, reads, acquired) = f.observe(&api, "{ posts { edges { node { id } } } }").await;
+    assert_eq!(step_up_errors(&response), 1, "{response}");
+    assert_eq!(response["data"], Value::Null, "{response}");
+    assert_eq!(reads, Vec::<String>::new());
+    assert_eq!(acquired, 0);
+    // The resolver-level check ran too, and admitted.
+    assert_eq!(evaluator.0.load(Ordering::SeqCst), 2);
     f.finish().await;
 }

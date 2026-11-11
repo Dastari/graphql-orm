@@ -642,7 +642,15 @@ impl RuntimeHostField {
         let resolver = self.resolver;
         let root = self.name.clone();
         let mut field = Field::new(&self.name, self.ty, move |ctx| {
-            match crate::graphql::assurance::enforce_operation_assurance(ctx.ctx, kind, &root) {
+            let field = ctx.field();
+            let key = field.alias().unwrap_or(field.name());
+            let admitted =
+                crate::graphql::assurance::enforce_operation_assurance(ctx.ctx, kind, &root)
+                    .and_then(|()| {
+                        ctx.data_opt::<super::execution::Results>()
+                            .map_or(Ok(()), |results| results.admit(key))
+                    });
+            match admitted {
                 Ok(()) => resolver(ctx),
                 Err(error) => {
                     FieldFuture::new(async move { Err::<Option<FieldValue<'static>>, _>(error) })

@@ -993,7 +993,7 @@ struct ReviewAssurance(Arc<Mutex<Vec<String>>>);
 impl graphql_orm::graphql::assurance::AssuranceRequirementEvaluator for ReviewAssurance {
     fn enforce(
         &self,
-        _: &async_graphql::Context<'_>,
+        _: &graphql_orm::graphql::assurance::AssuranceCheck<'_>,
         _: graphql_orm::graphql::assurance::AssuranceActorClass,
         policy: &str,
     ) -> async_graphql::Result<()> {

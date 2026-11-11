@@ -381,7 +381,7 @@ struct StepUpRequired(Mutex<Vec<String>>);
 impl AssuranceRequirementEvaluator for StepUpRequired {
     fn enforce(
         &self,
-        _ctx: &async_graphql::Context<'_>,
+        _check: &graphql_orm::graphql::assurance::AssuranceCheck<'_>,
         _actor_class: AssuranceActorClass,
         policy_id: &str,
     ) -> async_graphql::Result<()> {

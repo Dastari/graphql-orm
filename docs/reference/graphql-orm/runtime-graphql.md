@@ -82,10 +82,26 @@ readable existing cursors; it must not be used for confidential hidden keys.
 
 Every runtime root enforces an installed `AssuranceEnforcement` with its own
 coordinate. This covers collection roots, `node`, generated and link mutations,
-`RuntimeHostField` roots and live `…Changed` subscriptions. A mutation is
-checked before its write. A query root's read runs during request preparation,
-so for queries assurance withholds the result rather than the read. A
-host-owned `subscription_root` keeps its own guards.
+`RuntimeHostField` roots and live `…Changed` subscriptions. A host-owned
+`subscription_root` keeps its own guards.
+
+Query and mutation operations are checked before request preparation. The
+request guard expands the operation's root selection, including aliases,
+named and inline fragments and evaluated `@skip`/`@include`, and evaluates
+every root the operation will execute with the same requirement, evaluator and
+strict or default rules as the resolver. A root the evaluator refuses is not
+prepared. It gets no planning, database read, host `RuntimeReadAuthority`
+callback, payload or child-layer authorization, write authorization or host
+resolver call, and its resolver returns the refusal with the resolver-level
+error code and shape. Other roots in the same operation run as before. Each
+root's resolver then checks again, as defence in depth. A refusal from the
+pre-pass stands even if that later check would admit the root. Live
+subscriptions are checked by their resolver before registration.
+
+The evaluator therefore runs twice for a query or mutation root and must
+decide from its `AssuranceCheck` without side
+effects. The check exposes request, session and schema data. Data that another
+extension adds through `run_with_data` is not visible to it.
 
 Register the roots before building the registry, so hosts can require or
 exempt them:
@@ -114,8 +130,9 @@ returns a validated structural row predicate, or an explicit unrestricted grant.
 No provider, denial, invalid grant or stale schema fingerprint fails closed.
 
 A mandatory per-execution extension expands aliases/fragments and evaluated
-`@skip`/`@include`, resolves variables/defaults and obtains every selected runtime
-layer's grant before the first ORM statement. Row predicates are ANDed with client
+`@skip`/`@include`, resolves variables/defaults and, after the operation assurance
+pre-pass admits a root, obtains every selected runtime layer's grant before the
+first ORM statement. Row predicates are ANDed with client
 filters before reads, pagination and counts. Hidden key acquisition is internal to
 the granted operation and does not expose those keys as loaded output fields.
 Filter/order authorization remains independent of projection authorization.

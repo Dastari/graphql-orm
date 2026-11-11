@@ -10,6 +10,12 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.124.0 evaluates operation assurance for runtime GraphQL query and
+mutation roots before request preparation, so a refused root reaches neither
+the database nor host read authorization. Assurance evaluators now receive an
+`AssuranceCheck`. Upgrade ORM/macros together; see the
+[root migration guide](../../MIGRATION.md#01240-assurance-evaluators-take-a-request-check).
+
 Version 0.123.0 makes runtime GraphQL reject date-time and JSON input whose
 canonical form cannot be read back, and return every stored value the reader
 can decode without the input limits. Upgrade ORM/macros together; see the

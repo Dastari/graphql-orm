@@ -760,7 +760,7 @@ struct CurrentAssurance(Arc<AtomicBool>);
 impl AssuranceRequirementEvaluator for CurrentAssurance {
     fn enforce(
         &self,
-        _: &async_graphql::Context<'_>,
+        _: &graphql_orm::graphql::assurance::AssuranceCheck<'_>,
         _: AssuranceActorClass,
         _: &str,
     ) -> async_graphql::Result<()> {

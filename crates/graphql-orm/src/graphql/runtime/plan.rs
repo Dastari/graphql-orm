@@ -64,6 +64,14 @@ impl Plan {
     }
 }
 
+/// One root field occurrence of an operation.
+pub(super) struct RootOccurrence {
+    /// Response key: the alias, or the field name.
+    pub key: String,
+    /// Root field name, the assurance coordinate's field part.
+    pub name: String,
+}
+
 pub(super) struct Planner<'a> {
     pub document: &'a ExecutableDocument,
     pub variables: &'a Variables,
@@ -90,6 +98,100 @@ impl Planner<'_> {
             })
             .collect()
     }
+    /// Whether `@skip`/`@include` leave a selection out of execution.
+    fn skipped(
+        &self,
+        directives: &[async_graphql::Positioned<async_graphql::parser::types::Directive>],
+    ) -> Result<bool, RuntimeGraphqlError> {
+        let mut skip = false;
+        for directive in directives {
+            let name = directive.node.name.node.as_str();
+            if matches!(name, "skip" | "include") {
+                let arg = directive
+                    .node
+                    .arguments
+                    .iter()
+                    .find(|(n, _)| n.node == "if")
+                    .ok_or_else(invalid)?;
+                let value = arg
+                    .1
+                    .node
+                    .clone()
+                    .into_const_with(|n| self.variables.get(&n).cloned().ok_or_else(invalid))?;
+                let Value::Boolean(value) = value else {
+                    return Err(invalid());
+                };
+                skip |= if name == "skip" { value } else { !value };
+            }
+        }
+        Ok(skip)
+    }
+    /// Every root field occurrence an operation executes, for the assurance
+    /// pre-pass, after `@skip`/`@include` and fragment expansion.
+    ///
+    /// Unlike [`Self::selections`] it keeps every occurrence of a response key
+    /// and expands fragments whatever their type condition, so it never lists
+    /// fewer roots than execution resolves. Introspection fields are left out.
+    pub fn root_occurrences(
+        &self,
+        set: &SelectionSet,
+    ) -> Result<Vec<RootOccurrence>, RuntimeGraphqlError> {
+        let mut occurrences = Vec::new();
+        let mut visited = 0usize;
+        self.collect_roots(set, 0, &mut visited, &mut occurrences)?;
+        Ok(occurrences)
+    }
+    fn collect_roots(
+        &self,
+        set: &SelectionSet,
+        depth: usize,
+        visited: &mut usize,
+        occurrences: &mut Vec<RootOccurrence>,
+    ) -> Result<(), RuntimeGraphqlError> {
+        if depth > self.limits.max_depth {
+            return Err(RuntimeGraphqlError::new("cost_exceeded"));
+        }
+        for selection in &set.items {
+            *visited = visited.checked_add(1).ok_or_else(invalid)?;
+            if *visited > self.limits.max_selections {
+                return Err(RuntimeGraphqlError::new("cost_exceeded"));
+            }
+            if self.skipped(selection.node.directives())? {
+                continue;
+            }
+            match &selection.node {
+                Selection::Field(field) => {
+                    let name = field.node.name.node.as_str();
+                    if !name.starts_with("__") {
+                        occurrences.push(RootOccurrence {
+                            key: field.node.response_key().node.to_string(),
+                            name: name.to_owned(),
+                        });
+                    }
+                }
+                Selection::FragmentSpread(spread) => {
+                    let fragment = self
+                        .document
+                        .fragments
+                        .get(&spread.node.fragment_name.node)
+                        .ok_or_else(invalid)?;
+                    self.collect_roots(
+                        &fragment.node.selection_set.node,
+                        depth + 1,
+                        visited,
+                        occurrences,
+                    )?;
+                }
+                Selection::InlineFragment(fragment) => self.collect_roots(
+                    &fragment.node.selection_set.node,
+                    depth + 1,
+                    visited,
+                    occurrences,
+                )?,
+            }
+        }
+        Ok(())
+    }
     pub fn selections(
         &mut self,
         set: &SelectionSet,
@@ -107,27 +209,7 @@ impl Planner<'_> {
             if self.expanded > self.limits.max_selections {
                 return Err(RuntimeGraphqlError::new("cost_exceeded"));
             }
-            let mut skip = false;
-            for directive in selection.node.directives() {
-                let name = directive.node.name.node.as_str();
-                if matches!(name, "skip" | "include") {
-                    let arg = directive
-                        .node
-                        .arguments
-                        .iter()
-                        .find(|(n, _)| n.node == "if")
-                        .ok_or_else(invalid)?;
-                    let value =
-                        arg.1.node.clone().into_const_with(|n| {
-                            self.variables.get(&n).cloned().ok_or_else(invalid)
-                        })?;
-                    let Value::Boolean(value) = value else {
-                        return Err(invalid());
-                    };
-                    skip |= if name == "skip" { value } else { !value };
-                }
-            }
-            if skip {
+            if self.skipped(selection.node.directives())? {
                 continue;
             }
             let expanded = match &selection.node {

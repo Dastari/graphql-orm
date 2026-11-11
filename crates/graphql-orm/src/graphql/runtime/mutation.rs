@@ -611,12 +611,17 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
     selections: &SelectionSet,
     root: &str,
     registry: &async_graphql::registry::Registry,
+    denied: super::execution::Denials,
 ) -> Result<super::execution::Results, RuntimeGraphqlError> {
     let mut prepared = BTreeMap::new();
     let mut projection_calls = 0usize;
     let response_bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let relation_budget = Arc::new(super::execution::PayloadBudget::default());
     for field in planner.selections(selections, root, 0)? {
+        // A root refused by the assurance pre-pass gets no host read authorization.
+        if denied.contains_key(field.response_key().node.as_str()) {
+            continue;
+        }
         for module in modules {
             for c in &module.schema.schema().collections {
                 for Root { name, action, link } in roots(module, c) {
@@ -1017,7 +1022,7 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
             }
         }
     }
-    Ok(super::execution::Results(BTreeMap::new(), prepared))
+    Ok(super::execution::Results(BTreeMap::new(), prepared, denied))
 }
 
 struct AuthorityAdapter<B: RuntimeMutationBackend> {
@@ -1086,8 +1091,9 @@ async fn execute<B: RuntimeMutationBackend>(
     let context = ctx.data::<RuntimeGraphqlRequest<B>>()?;
     let selection = ctx.field();
     let key = selection.alias().unwrap_or(selection.name());
-    let prepared = ctx
-        .data::<super::execution::Results>()?
+    let results = ctx.data::<super::execution::Results>()?;
+    results.admit(key)?;
+    let prepared = results
         .1
         .get(key)
         .ok_or_else(|| wire_error("authorization_missing"))?

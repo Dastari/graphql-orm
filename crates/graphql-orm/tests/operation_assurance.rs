@@ -150,7 +150,7 @@ impl fmt::Debug for DenyingEvaluator {
 impl AssuranceRequirementEvaluator for DenyingEvaluator {
     fn enforce(
         &self,
-        _ctx: &graphql_orm::async_graphql::Context<'_>,
+        _check: &graphql_orm::graphql::assurance::AssuranceCheck<'_>,
         actor_class: AssuranceActorClass,
         policy_id: &str,
     ) -> graphql_orm::async_graphql::Result<()> {
@@ -381,7 +381,7 @@ struct AdmittingEvaluator(AtomicUsize);
 impl AssuranceRequirementEvaluator for AdmittingEvaluator {
     fn enforce(
         &self,
-        _ctx: &graphql_orm::async_graphql::Context<'_>,
+        _check: &graphql_orm::graphql::assurance::AssuranceCheck<'_>,
         _actor_class: AssuranceActorClass,
         _policy_id: &str,
     ) -> graphql_orm::async_graphql::Result<()> {

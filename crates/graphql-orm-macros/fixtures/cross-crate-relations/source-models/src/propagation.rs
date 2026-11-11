@@ -110,7 +110,7 @@ mod tests {
         revoke_leaf_at: usize,
     }
     impl AssuranceRequirementEvaluator for Assurance {
-        fn enforce(&self, _: &async_graphql::Context<'_>, _: AssuranceActorClass, policy: &str) -> async_graphql::Result<()> {
+        fn enforce(&self, _: &AssuranceCheck<'_>, _: AssuranceActorClass, policy: &str) -> async_graphql::Result<()> {
             self.calls.lock().unwrap().push(policy.to_owned());
             let bit = match policy { "up.root" => 1, "up.middle" => 2, "up.leaf" => 4, _ => return Err("unknown policy".into()) };
             if policy == "up.leaf" && self.leaf_calls.fetch_add(1, Ordering::SeqCst) + 1 >= self.revoke_leaf_at {
