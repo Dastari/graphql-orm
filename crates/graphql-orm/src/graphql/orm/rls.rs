@@ -336,22 +336,29 @@ pub fn postgres_search_delete_function_sql() -> String {
     )
 }
 
-/// Make an existing change journal readable and writable only by privileged
-/// roles.
+/// Make an existing change journal readable and writable only by its owner.
 ///
 /// RLS is enabled (not forced) with no policies, so a role subject to RLS can
 /// neither read nor write entries. The `INSERT` policy that earlier releases
-/// created is dropped, and `INSERT`, `UPDATE`, `DELETE` and `TRUNCATE` are
-/// revoked from `PUBLIC`. Entries are recorded by the database-side recorder,
+/// created is dropped, and every privilege any role other than the owner holds
+/// on the journal, including `PUBLIC`, is revoked; the statement raises if a
+/// grant survives. Entries are recorded by the database-side recorder,
 /// `graphql_orm.record_change_journal_entry()`, which runs as the journal
-/// owner. The owner and `BYPASSRLS` roles read the journal for incremental
-/// backup export.
+/// owner, so a role that could add a trigger to the journal could run code as
+/// that owner. Grant `SELECT` again to a dedicated export role after applying
+/// if one reads the journal; the owner and `BYPASSRLS` roles with `SELECT`
+/// read it for incremental backup export.
 pub fn postgres_change_log_rls_sql() -> String {
     let backend = DatabaseBackend::Postgres;
     let table = backend.quote_identifier(CHANGE_LOG_TABLE);
     let policy = backend.quote_identifier(&legacy_change_log_policy_name());
     format!(
-        "DO $graphql_orm$ BEGIN IF to_regclass({regclass}) IS NOT NULL THEN ALTER TABLE {table} ENABLE ROW LEVEL SECURITY; DROP POLICY IF EXISTS {policy} ON {table}; REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON {table} FROM PUBLIC; END IF; END $graphql_orm$",
+        "DO $graphql_orm$ DECLARE journal pg_catalog.regclass := pg_catalog.to_regclass({regclass}); grantee_name pg_catalog.text; BEGIN IF journal IS NOT NULL THEN \
+         ALTER TABLE {table} ENABLE ROW LEVEL SECURITY; DROP POLICY IF EXISTS {policy} ON {table}; \
+         FOR grantee_name IN SELECT DISTINCT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(a.grantee)) END FROM pg_catalog.pg_class c CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) a WHERE c.oid = journal AND a.grantee <> c.relowner LOOP \
+         EXECUTE pg_catalog.format('REVOKE ALL ON %s FROM %s CASCADE', journal, grantee_name); END LOOP; \
+         IF EXISTS (SELECT 1 FROM pg_catalog.pg_class c CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) a WHERE c.oid = journal AND a.grantee <> c.relowner) THEN RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'graphql-orm could not revoke every non-owner privilege on the change journal; revoke the remaining grants as their grantor'; END IF; \
+         END IF; END $graphql_orm$",
         regclass = sql_string_literal(&table),
     )
 }
@@ -428,15 +435,46 @@ pub(crate) const CHANGE_JOURNAL_FUNCTION_CONFIG: &str = SEARCH_DELETE_FUNCTION_C
 
 /// Body of `graphql_orm.record_change_journal_entry()`.
 ///
-/// Arguments: journal schema, entity name, table name, key column, key
+/// Arguments: journal schema, table schema, table name (both resolved when the
+/// trigger is created), entity name, declared table name, key column, key
 /// encoding (`text` or `bin`). The function runs as its owner, the journal
 /// owner, with a pinned `search_path` and schema-qualified names. It records
-/// only while [`CHANGE_JOURNAL_SETTING`] is `on`, refuses to run for a table
-/// its owner does not own (such as a session's temporary table), and derives
-/// each entry's key and action from the changed row and `TG_OP`. An update
-/// that changes the key records a `delete` of the old key and a `create` of
-/// the new one.
-pub(crate) const CHANGE_JOURNAL_FUNCTION_BODY: &str = " DECLARE entry_key pg_catalog.text; previous_key pg_catalog.text; key_sql pg_catalog.text; entry_sql pg_catalog.text; changed_at pg_catalog.int8; BEGIN IF TG_NARGS <> 5 OR TG_WHEN <> 'AFTER' OR TG_LEVEL <> 'ROW' THEN RAISE EXCEPTION 'graphql-orm change journal trigger is misconfigured'; END IF; IF pg_catalog.current_setting('graphql_orm.change_journal', true) IS DISTINCT FROM 'on' THEN RETURN NULL; END IF; IF TG_ARGV[0] LIKE 'pg\\_temp%' OR TG_ARGV[0] LIKE 'pg\\_toast\\_temp%' OR NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c WHERE c.oid = TG_RELID AND c.relpersistence <> 't' AND pg_catalog.pg_get_userbyid(c.relowner) = CURRENT_USER) THEN RAISE EXCEPTION 'graphql-orm change journal trigger is attached to a table its recorder does not own'; END IF; IF TG_ARGV[4] = 'bin' THEN key_sql := 'SELECT ''bin:''::pg_catalog.text || pg_catalog.encode(($1).%I, ''hex'')'; ELSIF TG_ARGV[4] = 'text' THEN key_sql := 'SELECT ($1).%I::pg_catalog.text'; ELSE RAISE EXCEPTION 'graphql-orm change journal trigger has an unknown key encoding'; END IF; IF TG_OP <> 'DELETE' THEN EXECUTE pg_catalog.format(key_sql, TG_ARGV[3]) INTO entry_key USING NEW; END IF; IF TG_OP <> 'INSERT' THEN EXECUTE pg_catalog.format(key_sql, TG_ARGV[3]) INTO previous_key USING OLD; END IF; changed_at := pg_catalog.floor(pg_catalog.date_part('epoch', pg_catalog.clock_timestamp()))::pg_catalog.int8; entry_sql := pg_catalog.format('INSERT INTO %I.%I (id, entity_name, table_name, primary_key, action, changed_at) VALUES (pg_catalog.gen_random_uuid(), $1, $2, $3, $4, $5)', TG_ARGV[0], '__graphql_orm_change_log'); IF TG_OP = 'UPDATE' AND previous_key IS NOT DISTINCT FROM entry_key THEN EXECUTE entry_sql USING TG_ARGV[1], TG_ARGV[2], entry_key, 'update'::pg_catalog.text, changed_at; ELSE IF TG_OP <> 'INSERT' THEN EXECUTE entry_sql USING TG_ARGV[1], TG_ARGV[2], previous_key, 'delete'::pg_catalog.text, changed_at; END IF; IF TG_OP <> 'DELETE' THEN EXECUTE entry_sql USING TG_ARGV[1], TG_ARGV[2], entry_key, 'create'::pg_catalog.text, changed_at; END IF; END IF; RETURN NULL; END ";
+/// only while [`CHANGE_JOURNAL_SETTING`] is `on`, and raises unless:
+///
+/// - it fires as an `AFTER` row trigger named [`CHANGE_JOURNAL_TRIGGER`];
+/// - the table it fires on is the resolved table in its arguments, is not
+///   temporary and is owned by the function owner;
+/// - the key column is the table's sole primary-key column;
+/// - the journal exists in the recorded schema, is owned by the function
+///   owner, and carries no non-internal trigger or rule. The journal is
+///   locked before that check, so no trigger can be added to it until the
+///   transaction ends.
+///
+/// Each entry's key comes from the changed row and its action from `TG_OP`.
+/// An update that changes the key records a `delete` of the old key and a
+/// `create` of the new one.
+pub(crate) const CHANGE_JOURNAL_FUNCTION_BODY: &str = concat!(
+    " DECLARE entry_key pg_catalog.text; previous_key pg_catalog.text; key_sql pg_catalog.text; entry_sql pg_catalog.text; changed_at pg_catalog.int8; journal pg_catalog.oid; BEGIN",
+    " IF TG_NARGS <> 7 OR TG_WHEN <> 'AFTER' OR TG_LEVEL <> 'ROW' OR TG_NAME <> 'graphql_orm_change_journal' THEN RAISE EXCEPTION 'graphql-orm change journal trigger is misconfigured'; END IF;",
+    " IF pg_catalog.current_setting('graphql_orm.change_journal', true) IS DISTINCT FROM 'on' THEN RETURN NULL; END IF;",
+    " IF TG_ARGV[0] LIKE 'pg\\_temp%' OR TG_ARGV[0] LIKE 'pg\\_toast\\_temp%' OR TG_TABLE_SCHEMA::pg_catalog.text IS DISTINCT FROM TG_ARGV[1] OR TG_TABLE_NAME::pg_catalog.text IS DISTINCT FROM TG_ARGV[2]",
+    " OR NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c WHERE c.oid = TG_RELID AND c.relpersistence <> 't' AND pg_catalog.pg_get_userbyid(c.relowner) = CURRENT_USER)",
+    " OR NOT EXISTS (SELECT 1 FROM pg_catalog.pg_index i JOIN pg_catalog.pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0] WHERE i.indrelid = TG_RELID AND i.indisprimary AND i.indnkeyatts = 1 AND a.attname::pg_catalog.text = TG_ARGV[5])",
+    " THEN RAISE EXCEPTION 'graphql-orm change journal trigger does not match the table it fires on'; END IF;",
+    " journal := pg_catalog.to_regclass(pg_catalog.format('%I.%I', TG_ARGV[0], '__graphql_orm_change_log'));",
+    " IF journal IS NULL OR NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class j WHERE j.oid = journal AND j.relkind = 'r' AND pg_catalog.pg_get_userbyid(j.relowner) = CURRENT_USER) THEN RAISE EXCEPTION 'graphql-orm change journal table is missing or not owned by its recorder'; END IF;",
+    " EXECUTE pg_catalog.format('LOCK TABLE %I.%I IN ROW EXCLUSIVE MODE', TG_ARGV[0], '__graphql_orm_change_log');",
+    " IF EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid = journal AND NOT t.tgisinternal) OR EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite r WHERE r.ev_class = journal) THEN RAISE EXCEPTION 'graphql-orm change journal table carries a trigger or rule; remove it before journaling'; END IF;",
+    " IF TG_ARGV[6] = 'bin' THEN key_sql := 'SELECT ''bin:''::pg_catalog.text || pg_catalog.encode(($1).%I, ''hex'')'; ELSIF TG_ARGV[6] = 'text' THEN key_sql := 'SELECT ($1).%I::pg_catalog.text'; ELSE RAISE EXCEPTION 'graphql-orm change journal trigger has an unknown key encoding'; END IF;",
+    " IF TG_OP <> 'DELETE' THEN EXECUTE pg_catalog.format(key_sql, TG_ARGV[5]) INTO entry_key USING NEW; END IF;",
+    " IF TG_OP <> 'INSERT' THEN EXECUTE pg_catalog.format(key_sql, TG_ARGV[5]) INTO previous_key USING OLD; END IF;",
+    " changed_at := pg_catalog.floor(pg_catalog.date_part('epoch', pg_catalog.clock_timestamp()))::pg_catalog.int8;",
+    " entry_sql := pg_catalog.format('INSERT INTO %I.%I (id, entity_name, table_name, primary_key, action, changed_at) VALUES (pg_catalog.gen_random_uuid(), $1, $2, $3, $4, $5)', TG_ARGV[0], '__graphql_orm_change_log');",
+    " IF TG_OP = 'UPDATE' AND previous_key IS NOT DISTINCT FROM entry_key THEN EXECUTE entry_sql USING TG_ARGV[3], TG_ARGV[4], entry_key, 'update'::pg_catalog.text, changed_at;",
+    " ELSE IF TG_OP <> 'INSERT' THEN EXECUTE entry_sql USING TG_ARGV[3], TG_ARGV[4], previous_key, 'delete'::pg_catalog.text, changed_at; END IF;",
+    " IF TG_OP <> 'DELETE' THEN EXECUTE entry_sql USING TG_ARGV[3], TG_ARGV[4], entry_key, 'create'::pg_catalog.text, changed_at; END IF; END IF;",
+    " RETURN NULL; END ",
+);
 
 /// One table whose changes the PostgreSQL change journal records.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -451,7 +489,8 @@ pub(crate) struct ChangeJournalTable {
 }
 
 impl ChangeJournalTable {
-    /// Trigger arguments after the journal schema, in order.
+    /// Trigger arguments after the journal schema and the resolved table
+    /// schema and name, in order.
     pub(crate) fn trigger_arguments(&self) -> [&str; 4] {
         [
             self.entity_name.as_str(),
@@ -506,11 +545,12 @@ pub(crate) fn change_journal_tables(schema: &super::core::SchemaModel) -> Vec<Ch
 /// The statements create and secure `__graphql_orm_change_log` (see
 /// [`postgres_change_log_rls_sql`]), create
 /// `graphql_orm.record_change_journal_entry()` as `SECURITY DEFINER` with
-/// `search_path = pg_catalog, pg_temp`, revoke its `EXECUTE` from `PUBLIC`,
-/// and (re)create an `AFTER INSERT OR UPDATE OR DELETE` row trigger named
-/// `graphql_orm_change_journal` on each table. Each trigger records the
-/// journal's schema, resolved once when it is created, so neither a session's
-/// `search_path` nor a temporary table of the same name can redirect entries.
+/// `search_path = pg_catalog, pg_temp`, revoke its `EXECUTE` from every role
+/// other than its owner, and (re)create an `AFTER INSERT OR UPDATE OR DELETE`
+/// row trigger named `graphql_orm_change_journal` on each table. Each trigger
+/// records the journal's schema and its own table's schema and name, resolved
+/// once when it is created, so neither a session's `search_path` nor a
+/// temporary table of the same name can redirect entries.
 ///
 /// Run them as the role that owns the journal and the tables. The recorder
 /// runs as that owner, so the runtime role needs no privilege on the journal.
@@ -523,12 +563,20 @@ pub(crate) fn postgres_change_journal_recorder_sql(tables: &[ChangeJournalTable]
             "CREATE OR REPLACE FUNCTION graphql_orm.{CHANGE_JOURNAL_FUNCTION}() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $graphql_orm${CHANGE_JOURNAL_FUNCTION_BODY}$graphql_orm$"
         ),
         format!("REVOKE ALL ON FUNCTION graphql_orm.{CHANGE_JOURNAL_FUNCTION}() FROM PUBLIC"),
+        format!(
+            "DO $graphql_orm$ DECLARE recorder pg_catalog.regprocedure := pg_catalog.to_regprocedure('graphql_orm.{CHANGE_JOURNAL_FUNCTION}()'); grantee_name pg_catalog.text; BEGIN \
+             FOR grantee_name IN SELECT DISTINCT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(a.grantee)) END FROM pg_catalog.pg_proc p CROSS JOIN LATERAL pg_catalog.aclexplode(p.proacl) a WHERE p.oid = recorder AND a.grantee <> p.proowner LOOP \
+             EXECUTE pg_catalog.format('REVOKE ALL ON FUNCTION %s FROM %s CASCADE', recorder, grantee_name); END LOOP; END $graphql_orm$"
+        ),
     ];
     statements.extend(tables.iter().map(render_change_journal_trigger_sql));
     statements
 }
 
 /// (Re)create one table's change journal trigger.
+///
+/// The journal and the table are resolved once, here, and recorded by schema
+/// and name in the trigger arguments.
 fn render_change_journal_trigger_sql(table: &ChangeJournalTable) -> String {
     let backend = DatabaseBackend::Postgres;
     let base = backend.quote_identifier_path(&table.table_name);
@@ -536,12 +584,14 @@ fn render_change_journal_trigger_sql(table: &ChangeJournalTable) -> String {
     let trigger = backend.quote_identifier(CHANGE_JOURNAL_TRIGGER);
     let [entity, table_name, key, encoding] = table.trigger_arguments().map(sql_string_literal);
     format!(
-        "DO $graphql_orm$ DECLARE journal pg_catalog.regclass := pg_catalog.to_regclass({journal_regclass}); journal_schema pg_catalog.text; BEGIN \
+        "DO $graphql_orm$ DECLARE journal pg_catalog.regclass := pg_catalog.to_regclass({journal_regclass}); target pg_catalog.regclass := pg_catalog.to_regclass({base_literal}); journal_schema pg_catalog.text; target_schema pg_catalog.text; target_name pg_catalog.text; BEGIN \
          IF journal IS NULL THEN RAISE EXCEPTION USING ERRCODE = '42P01', MESSAGE = 'graphql-orm change journal table does not exist'; END IF; \
+         IF target IS NULL THEN RAISE EXCEPTION USING ERRCODE = '42P01', MESSAGE = format('graphql-orm table %s does not exist', {base_literal}); END IF; \
          SELECT n.nspname INTO journal_schema FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = journal; \
-         IF journal_schema LIKE 'pg\\_temp%' OR journal_schema LIKE 'pg\\_toast\\_temp%' THEN RAISE EXCEPTION USING ERRCODE = '42P01', MESSAGE = 'graphql-orm change journal table resolves to a temporary table'; END IF; \
+         SELECT n.nspname, c.relname INTO target_schema, target_name FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = target; \
+         IF journal_schema LIKE 'pg\\_temp%' OR journal_schema LIKE 'pg\\_toast\\_temp%' OR target_schema LIKE 'pg\\_temp%' OR target_schema LIKE 'pg\\_toast\\_temp%' THEN RAISE EXCEPTION USING ERRCODE = '42P01', MESSAGE = 'graphql-orm change journal trigger resolves to a temporary table'; END IF; \
          DROP TRIGGER IF EXISTS {trigger} ON {base}; \
-         EXECUTE format('CREATE TRIGGER %I AFTER INSERT OR UPDATE OR DELETE ON %s FOR EACH ROW EXECUTE FUNCTION graphql_orm.{CHANGE_JOURNAL_FUNCTION}(%L, %L, %L, %L, %L)', {trigger_name}, {base_literal}, journal_schema, {entity}, {table_name}, {key}, {encoding}); \
+         EXECUTE format('CREATE TRIGGER %I AFTER INSERT OR UPDATE OR DELETE ON %s FOR EACH ROW EXECUTE FUNCTION graphql_orm.{CHANGE_JOURNAL_FUNCTION}(%L, %L, %L, %L, %L, %L, %L)', {trigger_name}, target, journal_schema, target_schema, target_name, {entity}, {table_name}, {key}, {encoding}); \
          END $graphql_orm$",
         trigger_name = sql_string_literal(CHANGE_JOURNAL_TRIGGER),
         base_literal = sql_string_literal(&base),
@@ -872,6 +922,17 @@ pub struct LiveRlsEnforcement {
     pub change_journal_triggers: std::collections::BTreeMap<String, LiveChangeJournalTrigger>,
     /// Live `graphql_orm.record_change_journal_entry()` definition, when present.
     pub change_journal_function: Option<LiveChangeJournalFunction>,
+    /// Triggers that call `graphql_orm.record_change_journal_entry()` under
+    /// another name, as `(table key, trigger name)`.
+    pub change_journal_other_triggers: Vec<(String, String)>,
+    /// Non-internal triggers and rules on the change journal, by name.
+    pub change_journal_table_triggers: Vec<String>,
+    /// Roles other than the journal owner (`PUBLIC` included) holding a
+    /// privilege other than `SELECT` on the change journal.
+    pub change_journal_writers: Vec<String>,
+    /// Roles other than the recorder owner (`PUBLIC` included) holding
+    /// `EXECUTE` on `graphql_orm.record_change_journal_entry()`.
+    pub change_journal_recorder_executors: Vec<String>,
 }
 
 /// A live trigger named [`CHANGE_JOURNAL_TRIGGER`].
@@ -890,6 +951,10 @@ pub struct LiveChangeJournalTrigger {
     pub function_owns_table: bool,
     /// Trigger arguments in order.
     pub arguments: Vec<String>,
+    /// Schema of the table the trigger is on.
+    pub relation_schema: String,
+    /// Name of the table the trigger is on.
+    pub relation_name: String,
     /// Whether the schema named by the first argument holds a change journal
     /// owned by the function owner.
     pub journal_owned_by_function_owner: bool,
@@ -1207,6 +1272,30 @@ pub(crate) fn validate_change_journal(
             "graphql_orm.{CHANGE_JOURNAL_FUNCTION}() is missing or differs from the definition graphql-orm installs"
         )));
     }
+    for name in &live.change_journal_table_triggers {
+        diagnostics.push(error(format!(
+            "Trigger or rule {name} on {CHANGE_LOG_TABLE} would run as the journal owner; remove it"
+        )));
+    }
+    for role in &live.change_journal_writers {
+        diagnostics.push(error(format!(
+            "Role {role} holds a privilege other than SELECT on {CHANGE_LOG_TABLE}; revoke it"
+        )));
+    }
+    for role in &live.change_journal_recorder_executors {
+        diagnostics.push(error(format!(
+            "Role {role} holds EXECUTE on graphql_orm.{CHANGE_JOURNAL_FUNCTION}() and could attach it to another trigger; revoke it"
+        )));
+    }
+    for (table, trigger) in &live.change_journal_other_triggers {
+        diagnostics.push(rls_diagnostic(
+            SchemaDiagnosticSeverity::Error,
+            table,
+            format!(
+                "Trigger {trigger} on {table} calls graphql_orm.{CHANGE_JOURNAL_FUNCTION}() under a name other than {CHANGE_JOURNAL_TRIGGER}; drop it"
+            ),
+        ));
+    }
     for table in change_journal_tables(&target.schema) {
         if let Some(message) = change_journal_trigger_problem(live, &table) {
             diagnostics.push(rls_diagnostic(
@@ -1248,9 +1337,11 @@ fn change_journal_trigger_problem(
     let expected = table.trigger_arguments();
     let arguments_match = matches!(
         trigger.arguments.as_slice(),
-        [schema, rest @ ..]
+        [schema, relation_schema, relation_name, rest @ ..]
             if !schema.starts_with("pg_temp")
                 && !schema.starts_with("pg_toast_temp")
+                && *relation_schema == trigger.relation_schema
+                && *relation_name == trigger.relation_name
                 && rest.iter().map(String::as_str).eq(expected)
     );
     if !arguments_match || !trigger.journal_owned_by_function_owner {

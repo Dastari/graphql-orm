@@ -123,6 +123,26 @@ async fn restore_does_not_journal_while_writes_do() -> Result<(), Box<dyn std::e
     apply_schema(&dest, "2026051405_backup_journal_dest").await?;
     dest.ensure_change_journal_recorder(&graphql_orm_entity_metadata())
         .await?;
+    // A role default that turns recording on for every session does not make
+    // restore journal: restore switches it off for its own transactions.
+    #[cfg(feature = "postgres")]
+    let (dest_pool, dest) = {
+        sqlx::query("ALTER ROLE CURRENT_USER SET graphql_orm.change_journal = 'on'")
+            .execute(&dest_pool)
+            .await?;
+        let fresh = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect_with(dest_pool.connect_options().as_ref().clone())
+            .await?;
+        let enabled: String =
+            sqlx::query_scalar("SELECT current_setting('graphql_orm.change_journal')")
+                .fetch_one(&fresh)
+                .await?;
+        assert_eq!(enabled, "on");
+        let database = graphql_orm::db::Database::new(fresh.clone()).with_change_journal();
+        (fresh, database)
+    };
+    let _ = &dest_pool;
     let dest_schema =
         dest.schema_snapshot("2026051404_backup_journal", &graphql_orm_entity_metadata());
     dest.restore_backup_rows(

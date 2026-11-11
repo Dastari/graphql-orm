@@ -387,6 +387,15 @@ fn full_target_rls_plan_covers_search_documents_and_the_change_log() {
             ),
             "{joined}"
         );
+        // Every non-owner grant on the journal and the recorder is revoked.
+        assert!(
+            joined.contains("REVOKE ALL ON %s FROM %s CASCADE"),
+            "{joined}"
+        );
+        assert!(
+            joined.contains("REVOKE ALL ON FUNCTION %s FROM %s CASCADE"),
+            "{joined}"
+        );
     }
     // Non-search RLS entities do not get a search policy.
     assert!(
@@ -546,10 +555,15 @@ async fn role_pool(
     ))
     .execute(owner)
     .await?;
+    // The helper functions keep their default PUBLIC EXECUTE. A runtime role
+    // needs no privilege on the change journal beyond reading it under RLS,
+    // and no EXECUTE on its recorder.
     for grant in [
         format!("GRANT USAGE ON SCHEMA public, graphql_orm TO {role}"),
         format!("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {role}"),
-        format!("GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA graphql_orm TO {role}"),
+        format!(
+            "DO $$ BEGIN IF to_regclass('{CHANGE_LOG_TABLE}') IS NOT NULL THEN REVOKE ALL ON {CHANGE_LOG_TABLE} FROM {role}; GRANT SELECT ON {CHANGE_LOG_TABLE} TO {role}; END IF; END $$"
+        ),
     ] {
         sqlx::query(&grant).execute(owner).await?;
     }
@@ -832,7 +846,7 @@ async fn runtime_role_cannot_reach_other_tenant_search_documents_or_change_log()
     .await;
     assert!(direct_insert.is_err(), "{direct_insert:?}");
 
-    // The change log is append-only for the runtime role and never readable.
+    // The runtime role can neither read nor write the change log.
     let journal_count = format!("SELECT COUNT(*)::BIGINT AS count FROM {CHANGE_LOG_TABLE}");
     assert_eq!(
         count_as(&runtime, &journal_count, Some(&tenant("tenant-a"))).await?,
@@ -843,24 +857,16 @@ async fn runtime_role_cannot_reach_other_tenant_search_documents_or_change_log()
         0
     );
     assert_eq!(count_as(&runtime, &journal_count, None).await?, 0);
-    assert_eq!(
-        execute_as(
-            &runtime,
-            &format!("DELETE FROM {CHANGE_LOG_TABLE}"),
-            &tenant_b
-        )
-        .await?,
-        0
-    );
-    assert_eq!(
-        execute_as(
-            &runtime,
-            &format!("UPDATE {CHANGE_LOG_TABLE} SET action = 'delete'"),
-            &tenant_b
-        )
-        .await?,
-        0
-    );
+    for statement in [
+        format!("DELETE FROM {CHANGE_LOG_TABLE}"),
+        format!("UPDATE {CHANGE_LOG_TABLE} SET action = 'delete'"),
+    ] {
+        let changed = execute_as(&runtime, &statement, &tenant_b).await;
+        assert!(
+            !matches!(changed, Ok(rows) if rows > 0),
+            "{statement}: {changed:?}"
+        );
+    }
     assert!(count_as(&owner, &journal_count, None).await? >= 2);
 
     // The ORM's own search is unchanged for the authorized tenant.
@@ -1387,9 +1393,8 @@ async fn journal_errors_on(
 /// The database records change journal entries; the runtime role cannot.
 ///
 /// Every entry must correspond to a row change made in the recording
-/// transaction. A runtime-role session, even one holding `INSERT` on the
-/// journal and `EXECUTE` on every `graphql_orm` function, cannot add an entry
-/// for another tenant's row, while the ORM's own writes still journal.
+/// transaction. A runtime-role session cannot add an entry for another
+/// tenant's row, while the ORM's own writes still journal.
 #[cfg(feature = "change-journal")]
 #[tokio::test]
 #[ignore = "requires test-owned PostgreSQL container"]
@@ -1438,22 +1443,6 @@ async fn runtime_role_cannot_write_change_journal_entries() -> Result<(), Box<dy
     )
     .await;
     assert!(flagged.is_err(), "{flagged:?}");
-
-    // The recorder refuses a table its owner does not own, such as a temporary
-    // table whose trigger names another entity and key.
-    let temporary = script_as(
-        &runtime,
-        &[
-            "CREATE TEMP TABLE session_rows (id text PRIMARY KEY) ON COMMIT DROP",
-            "CREATE TRIGGER graphql_orm_change_journal AFTER INSERT OR UPDATE OR DELETE ON session_rows FOR EACH ROW EXECUTE FUNCTION graphql_orm.record_change_journal_entry('public', 'RlsCovDoc', 'rls_cov_docs', 'id', 'text')",
-            "SELECT set_config('graphql_orm.change_journal', 'on', true)",
-            &format!("INSERT INTO session_rows VALUES ('{tenant_a_doc}')"),
-            &format!("DELETE FROM session_rows WHERE id = '{tenant_a_doc}'"),
-        ],
-        Some(&tenant_b),
-    )
-    .await;
-    assert!(temporary.is_err(), "{temporary:?}");
 
     // Another tenant's row is invisible, so recording a raw delete of it
     // changes nothing and journals nothing.
@@ -1713,5 +1702,373 @@ async fn dependent_deletes_journal_through_the_recorder() -> Result<(), Box<dyn 
             ),
         ]
     );
+    Ok(())
+}
+
+/// Run `statements` as `owner` in one transaction with recording on.
+#[cfg(feature = "change-journal")]
+async fn record_as(pool: &sqlx::PgPool, statements: &[&str]) -> Result<(), sqlx::Error> {
+    let mut all = vec!["SET LOCAL graphql_orm.change_journal = 'on'"];
+    all.extend_from_slice(statements);
+    script_as(pool, &all, None).await
+}
+
+/// The recorder check for `RlsCovPlain` in a fresh transaction on `database`,
+/// with `setup` statements run first.
+#[cfg(feature = "change-journal")]
+async fn recorder_check(
+    database: &graphql_orm::db::Database<PostgresBackend>,
+    setup: &[&str],
+) -> Result<Result<(), String>, Box<dyn std::error::Error>> {
+    use graphql_orm::graphql::orm::Entity;
+    let mut context = graphql_orm::graphql::orm::MutationContext::<PostgresBackend>::begin(
+        database,
+        graphql_orm::graphql::orm::TransactionMode::Default,
+    )
+    .await?;
+    for statement in setup {
+        context.execute(statement, &[]).await?;
+    }
+    let outcome = context
+        .check_change_journal_recorder(<RlsCovPlain as Entity>::metadata())
+        .await
+        .map_err(|error| error.to_string());
+    context.rollback().await?;
+    Ok(outcome)
+}
+
+/// Grants that would let a role run code as the journal owner are refused:
+/// a trigger on the journal would run as its owner whenever the recorder
+/// appends an entry.
+#[cfg(feature = "change-journal")]
+#[tokio::test]
+#[ignore = "requires test-owned PostgreSQL container"]
+async fn journal_privileges_beyond_select_are_refused() -> Result<(), Box<dyn std::error::Error>> {
+    let Provisioned { owner } = provision().await?;
+    let (role, runtime) = role_pool(&owner, "journal_grants", "NOSUPERUSER NOBYPASSRLS").await?;
+    let runtime_database = graphql_orm::db::Database::builder(runtime.clone())
+        .change_journal_enabled(true)
+        .build();
+    let owner_database = graphql_orm::db::Database::builder(owner.clone())
+        .change_journal_enabled(true)
+        .build();
+    let schema: CoverageSchema = schema_builder(runtime_database.clone())
+        .data("test-user".to_string())
+        .finish();
+    let tenant_a = tenant("tenant-a");
+    let create_plain = |label: &str| {
+        format!("mutation {{ createRlsCovPlain(input: {{ label: \"{label}\" }}) {{ success }} }}")
+    };
+    assert_eq!(recorder_check(&runtime_database, &[]).await?, Ok(()));
+
+    // INSERT on the journal: RLS still refuses the row, and journaled ORM
+    // writes fail closed while the grant exists.
+    sqlx::query(&format!("GRANT INSERT ON {CHANGE_LOG_TABLE} TO {role}"))
+        .execute(&owner)
+        .await?;
+    let direct = execute_as(
+        &runtime,
+        &format!(
+            "INSERT INTO {CHANGE_LOG_TABLE} (id, entity_name, table_name, primary_key, action, changed_at) \
+             VALUES (gen_random_uuid(), 'RlsCovDoc', 'rls_cov_docs', 'any', 'delete', 1)"
+        ),
+        &tenant_a,
+    )
+    .await;
+    assert!(direct.is_err(), "{direct:?}");
+    let refused = recorder_check(&runtime_database, &[]).await?;
+    assert!(
+        matches!(&refused, Err(message) if message.contains("privilege other than SELECT")),
+        "{refused:?}"
+    );
+    let write = schema
+        .execute(Request::new(create_plain("insert grant")).data(tenant_a.clone()))
+        .await;
+    assert!(!write.errors.is_empty(), "{:?}", write.data);
+    let writers = journal_errors_on(&owner, CHANGE_LOG_TABLE).await?;
+    assert!(
+        writers
+            .iter()
+            .any(|message| message.contains(&role) && message.contains("other than SELECT")),
+        "{writers:?}"
+    );
+    sqlx::query(&format!("REVOKE INSERT ON {CHANGE_LOG_TABLE} FROM {role}"))
+        .execute(&owner)
+        .await?;
+
+    // TRIGGER on the journal: a trigger whose function lives in the role's
+    // own temporary schema is refused before it can run as the owner.
+    sqlx::query(&format!("GRANT TRIGGER ON {CHANGE_LOG_TABLE} TO {role}"))
+        .execute(&owner)
+        .await?;
+    let mut session = runtime.acquire().await?;
+    sqlx::raw_sql(&format!(
+        "CREATE FUNCTION pg_temp.journal_probe() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$; \
+         CREATE TRIGGER journal_probe AFTER INSERT ON {CHANGE_LOG_TABLE} FOR EACH ROW EXECUTE FUNCTION pg_temp.journal_probe()"
+    ))
+    .execute(&mut *session)
+    .await?;
+    let raw = record_as(
+        &owner,
+        &["INSERT INTO rls_cov_plain (id, label) VALUES ('journal-trigger', 'raw')"],
+    )
+    .await;
+    assert!(
+        matches!(&raw, Err(error) if error.to_string().contains("carries a trigger or rule")),
+        "{raw:?}"
+    );
+    assert!(journal_entries(&owner, "journal-trigger").await?.is_empty());
+    let owner_check = recorder_check(&owner_database, &[]).await?;
+    assert!(
+        matches!(&owner_check, Err(message) if message.contains("carries a trigger or rule")),
+        "{owner_check:?}"
+    );
+    let write = schema
+        .execute(Request::new(create_plain("trigger grant")).data(tenant_a.clone()))
+        .await;
+    assert!(!write.errors.is_empty(), "{:?}", write.data);
+    let detected = journal_errors_on(&owner, CHANGE_LOG_TABLE).await?;
+    assert!(
+        detected
+            .iter()
+            .any(|message| message.contains("journal_probe")),
+        "{detected:?}"
+    );
+    assert!(
+        detected
+            .iter()
+            .any(|message| message.contains(&role) && message.contains("other than SELECT")),
+        "{detected:?}"
+    );
+    sqlx::query(&format!("DROP TRIGGER journal_probe ON {CHANGE_LOG_TABLE}"))
+        .execute(&owner)
+        .await?;
+    drop(session);
+
+    // Re-applying the target revokes every grant on the journal.
+    reapply_target(&owner, "journal-grants").await?;
+    let held: bool = sqlx::query_scalar(&format!(
+        "SELECT has_table_privilege('{role}', '{CHANGE_LOG_TABLE}', 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')"
+    ))
+    .fetch_one(&owner)
+    .await?;
+    assert!(!held);
+    let clean = journal_errors_on(&owner, CHANGE_LOG_TABLE).await?;
+    assert!(clean.is_empty(), "{clean:?}");
+    let write = schema
+        .execute(Request::new(create_plain("after revoke")).data(tenant_a.clone()))
+        .await;
+    assert!(write.errors.is_empty(), "{:?}", write.errors);
+    Ok(())
+}
+
+/// The recorder only records for its own trigger on the table it was
+/// installed on, keyed by that table's primary key.
+#[cfg(feature = "change-journal")]
+#[tokio::test]
+#[ignore = "requires test-owned PostgreSQL container"]
+async fn recorder_refuses_triggers_that_do_not_match_their_table()
+-> Result<(), Box<dyn std::error::Error>> {
+    let Provisioned { owner } = provision().await?;
+    let (role, runtime) = role_pool(&owner, "journal_trigger", "NOSUPERUSER NOBYPASSRLS").await?;
+    let runtime_database = graphql_orm::db::Database::builder(runtime.clone())
+        .change_journal_enabled(true)
+        .build();
+    let tenant_a = tenant("tenant-a");
+    let recorder = "graphql_orm.record_change_journal_entry";
+
+    // EXECUTE on the recorder is reported and fails journaled writes closed.
+    sqlx::query(&format!("GRANT EXECUTE ON FUNCTION {recorder}() TO {role}"))
+        .execute(&owner)
+        .await?;
+    let refused = recorder_check(&runtime_database, &[]).await?;
+    assert!(
+        matches!(&refused, Err(message) if message.contains("EXECUTE")),
+        "{refused:?}"
+    );
+    let executors = journal_errors_on(&owner, CHANGE_LOG_TABLE).await?;
+    assert!(
+        executors
+            .iter()
+            .any(|message| message.contains(&role) && message.contains("EXECUTE")),
+        "{executors:?}"
+    );
+
+    // With TRIGGER on an owner-owned table, the role can attach the recorder
+    // under another name with another entity's arguments. The recorder
+    // refuses it, and validation reports it.
+    sqlx::query(&format!("GRANT TRIGGER ON rls_cov_plain TO {role}"))
+        .execute(&owner)
+        .await?;
+    script_as(
+        &runtime,
+        &[&format!(
+            "CREATE TRIGGER journal_copy AFTER INSERT OR UPDATE OR DELETE ON rls_cov_plain FOR EACH ROW EXECUTE FUNCTION {recorder}('public', 'public', 'rls_cov_plain', 'RlsCovDoc', 'rls_cov_docs', 'id', 'text')"
+        )],
+        Some(&tenant_a),
+    )
+    .await?;
+    let copied = script_as(
+        &runtime,
+        &[
+            "SET LOCAL graphql_orm.change_journal = 'on'",
+            "INSERT INTO rls_cov_plain (id, label) VALUES ('copied-key', 'x')",
+            "DELETE FROM rls_cov_plain WHERE id = 'copied-key'",
+        ],
+        Some(&tenant_a),
+    )
+    .await;
+    assert!(
+        matches!(&copied, Err(error) if error.to_string().contains("misconfigured")),
+        "{copied:?}"
+    );
+    assert!(journal_entries(&owner, "copied-key").await?.is_empty());
+    let other = journal_errors_on(&owner, "rls_cov_plain").await?;
+    assert!(
+        other.iter().any(|message| message.contains("journal_copy")),
+        "{other:?}"
+    );
+    let shadowed = recorder_check(&runtime_database, &[]).await?;
+    assert!(shadowed.is_err(), "{shadowed:?}");
+
+    // A temporary table the role owns is refused even under the ORM's name.
+    let temporary = script_as(
+        &runtime,
+        &[
+            "CREATE TEMP TABLE session_rows (id text PRIMARY KEY) ON COMMIT DROP",
+            &format!(
+                "CREATE TRIGGER graphql_orm_change_journal AFTER INSERT OR UPDATE OR DELETE ON session_rows FOR EACH ROW EXECUTE FUNCTION {recorder}('public', 'pg_temp', 'session_rows', 'RlsCovDoc', 'rls_cov_docs', 'id', 'text')"
+            ),
+            "SET LOCAL graphql_orm.change_journal = 'on'",
+            "INSERT INTO session_rows VALUES ('temporary-key')",
+        ],
+        Some(&tenant_a),
+    )
+    .await;
+    assert!(temporary.is_err(), "{temporary:?}");
+    assert!(journal_entries(&owner, "temporary-key").await?.is_empty());
+
+    // Under the ORM's name, the recorded table and the key column must match
+    // the table the trigger fires on.
+    sqlx::query("DROP TRIGGER journal_copy ON rls_cov_plain")
+        .execute(&owner)
+        .await?;
+    for arguments in [
+        "'public', 'public', 'rls_cov_docs', 'RlsCovDoc', 'rls_cov_docs', 'id', 'text'",
+        "'public', 'public', 'rls_cov_plain', 'RlsCovPlain', 'rls_cov_plain', 'label', 'text'",
+    ] {
+        sqlx::raw_sql(&format!(
+            "DROP TRIGGER IF EXISTS graphql_orm_change_journal ON rls_cov_plain; \
+             CREATE TRIGGER graphql_orm_change_journal AFTER INSERT OR UPDATE OR DELETE ON rls_cov_plain FOR EACH ROW EXECUTE FUNCTION {recorder}({arguments})"
+        ))
+        .execute(&owner)
+        .await?;
+        let mismatched = record_as(
+            &owner,
+            &["INSERT INTO rls_cov_plain (id, label) VALUES ('mismatched-key', 'x')"],
+        )
+        .await;
+        assert!(
+            matches!(&mismatched, Err(error) if error.to_string().contains("does not match the table")),
+            "{arguments}: {mismatched:?}"
+        );
+        assert!(journal_entries(&owner, "mismatched-key").await?.is_empty());
+        let drift = journal_errors_on(&owner, "rls_cov_plain").await?;
+        assert!(!drift.is_empty(), "{arguments}");
+    }
+
+    // Re-applying the target restores the trigger and revokes EXECUTE.
+    reapply_target(&owner, "journal-trigger").await?;
+    for table in [CHANGE_LOG_TABLE, "rls_cov_plain"] {
+        let errors = journal_errors_on(&owner, table).await?;
+        assert!(errors.is_empty(), "{table}: {errors:?}");
+    }
+    sqlx::query(&format!("REVOKE TRIGGER ON rls_cov_plain FROM {role}"))
+        .execute(&owner)
+        .await?;
+    assert_eq!(recorder_check(&runtime_database, &[]).await?, Ok(()));
+    Ok(())
+}
+
+/// A key change journals both keys; the check names a switched-off journal
+/// and a replica session instead of reporting a missing recorder.
+#[cfg(feature = "change-journal")]
+#[tokio::test]
+#[ignore = "requires test-owned PostgreSQL container"]
+async fn key_changes_and_inactive_recording_are_reported() -> Result<(), Box<dyn std::error::Error>>
+{
+    let Provisioned { owner } = provision().await?;
+    let (_, runtime) = role_pool(&owner, "journal_keys", "NOSUPERUSER NOBYPASSRLS").await?;
+    let runtime_database = graphql_orm::db::Database::builder(runtime.clone())
+        .change_journal_enabled(true)
+        .build();
+    let mut context = graphql_orm::graphql::orm::MutationContext::<PostgresBackend>::begin(
+        &runtime_database,
+        graphql_orm::graphql::orm::TransactionMode::Default,
+    )
+    .await?;
+    context
+        .execute(
+            "INSERT INTO rls_cov_plain (id, label) VALUES ('key-old', 'moving')",
+            &[],
+        )
+        .await?;
+    context
+        .execute(
+            "UPDATE rls_cov_plain SET id = 'key-new' WHERE id = 'key-old'",
+            &[],
+        )
+        .await?;
+    context
+        .execute(
+            "UPDATE rls_cov_plain SET label = 'moved' WHERE id = 'key-new'",
+            &[],
+        )
+        .await?;
+    context.commit_and_emit().await?;
+    let plain = |action: &str| {
+        (
+            "RlsCovPlain".to_string(),
+            "rls_cov_plain".to_string(),
+            action.to_string(),
+        )
+    };
+    assert_eq!(
+        journal_entries(&owner, "key-old").await?,
+        vec![plain("create"), plain("delete")]
+    );
+    assert_eq!(
+        journal_entries(&owner, "key-new").await?,
+        vec![plain("create"), plain("update")]
+    );
+
+    // Replica sessions skip ordinary triggers, so the check refuses them.
+    let owner_database = graphql_orm::db::Database::builder(owner.clone())
+        .change_journal_enabled(true)
+        .build();
+    let replica = recorder_check(
+        &owner_database,
+        &["SET LOCAL session_replication_role = replica"],
+    )
+    .await?;
+    assert!(
+        matches!(&replica, Err(message) if message.contains("session_replication_role is replica")),
+        "{replica:?}"
+    );
+    let switched_off = recorder_check(
+        &owner_database,
+        &["SET LOCAL graphql_orm.change_journal = 'off'"],
+    )
+    .await?;
+    assert!(
+        matches!(&switched_off, Err(message) if message.contains("recording is not enabled")),
+        "{switched_off:?}"
+    );
+    let unjournaled = recorder_check(&graphql_orm::db::Database::new(owner.clone()), &[]).await?;
+    assert!(
+        matches!(&unjournaled, Err(message) if message.contains("recording is not enabled")),
+        "{unjournaled:?}"
+    );
+    assert_eq!(recorder_check(&owner_database, &[]).await?, Ok(()));
     Ok(())
 }

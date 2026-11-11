@@ -53,36 +53,48 @@ enable the `change-journal` feature. SQLite is unchanged.
 
 On PostgreSQL the database now records change-journal entries through a row
 trigger on each single-key entity table. The runtime role no longer writes
-`__graphql_orm_change_log` and needs no privilege on it. A journaled ORM write
-fails, and rolls back, until the recorder is installed on its table.
+`__graphql_orm_change_log` and needs no privilege on it.
 
-Before serving traffic with 0.125.0:
+There is no mixed-version window. Applying the 0.125.0 plan drops the journal
+`INSERT` policy and revokes the grants that 0.124.x writers use, so their
+journaled writes fail immediately. A 0.125.0 writer's journaled writes fail
+until the plan has been applied. During any overlap between the two, journaled
+writes fail. Cut over in this order:
 
-1. As the role that owns the entity tables and the journal, apply the schema
+1. Stop every 0.124.x process that writes through a journal-enabled
+   `Database`.
+2. As the role that owns the entity tables and the journal, apply the schema
    target (`plan_schema_target` and `apply_schema_target` with the
    `change-journal` feature), or call
    `database.ensure_change_journal_recorder(&graphql_orm_entity_metadata())`.
    Either one creates the journal if it is missing, drops the `INSERT` policy
-   that 0.120.0 added, creates `graphql_orm.record_change_journal_entry()`, and
-   installs the `graphql_orm_change_journal` trigger on every single-key table.
+   that 0.120.0 added, and revokes every privilege on the journal from every
+   role other than its owner. It also creates
+   `graphql_orm.record_change_journal_entry()`, revokes `EXECUTE` on it from
+   every role other than its owner, and installs the
+   `graphql_orm_change_journal` trigger on every single-key table.
    `ensure_change_journal_table` alone does not install the recorder.
-2. Revoke the runtime role's journal grants, for example
-   `REVOKE ALL ON __graphql_orm_change_log FROM application_runtime`. Do not
-   grant `EXECUTE` on `graphql_orm.record_change_journal_entry()`. A blanket
-   `GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA graphql_orm` includes it. The
-   recorder refuses tables its owner does not own, but the grant is
-   unnecessary.
-3. Run `validate_target` with the runtime pool and refuse to serve on errors.
-   It reports a remaining journal policy, a missing or modified recorder
-   function, and a missing or altered trigger.
-4. Re-apply the schema target whenever entity tables are added, so new
-   tables get the trigger.
+3. Revoke anything the plan could not: grants made by another grantor, and
+   any `TRIGGER` privilege on entity tables held by runtime roles. Grant
+   `SELECT` on the journal again only to a dedicated export role, if one reads
+   it; re-applying the plan revokes it again. Do not grant `EXECUTE` on the
+   recorder: a blanket `GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA graphql_orm`
+   includes it, and journaled writes by that role then fail.
+4. Run `validate_target` with the runtime pool and refuse to serve on errors.
+   It reports a remaining journal policy, journal privileges beyond `SELECT`,
+   `EXECUTE` on the recorder, a trigger or rule on the journal, a missing or
+   modified recorder function, and a missing, altered or differently named
+   recorder trigger.
+5. Start the 0.125.0 processes.
+
+Re-apply the schema target whenever entity tables are added, so new tables
+get the trigger.
 
 Behaviour changes:
 
 - Only rows changed in ORM write transactions on a journal-enabled `Database`
-  are recorded. Raw SQL outside those transactions, migrations and restore
-  imports are not.
+  are recorded. Raw SQL outside those transactions and migrations are not, and
+  restore imports never are, even with a role default that turns recording on.
 - `changed_at` uses the database clock in whole seconds, not the application
   clock.
 - An update that changes a primary key records a `delete` of the old key and

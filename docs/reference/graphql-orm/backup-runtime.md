@@ -147,13 +147,16 @@ journal like any other change. An update that changes a primary key journals a `
 key and a `create` of the new one. `changed_at` is whole seconds from the database clock on
 PostgreSQL and from the application clock on SQLite. Composite-key entities are refused.
 
-Restore imports do not use generated mutation paths and never turn PostgreSQL recording on, so
-restore does not pollute the journal.
+Restore imports do not use generated mutation paths and switch PostgreSQL recording off in their
+own transactions, even when a role or database default turns it on, so restore does not pollute the
+journal.
 
 On PostgreSQL only privileged roles can read or write the journal. It has RLS enabled and no
 policies, so a role subject to RLS can neither read nor write entries; the recorder runs as the
-journal owner. Create the journal, the tables and the recorder as the schema owner, and grant the
-runtime role nothing on the journal. `export_changes` runs with `SET LOCAL row_security = off`, so
+journal owner, so plans revoke every privilege other roles hold on the journal and `EXECUTE` on the
+recorder. Create the journal, the tables and the recorder as the schema owner, grant the runtime
+role nothing on the journal, and grant `SELECT` again to a dedicated export role after each plan
+application if one reads it. `export_changes` runs with `SET LOCAL row_security = off`, so
 it reads every entry as the table owner or a `BYPASSRLS` role and fails with a PostgreSQL error for
 a role subject to RLS, rather than exporting an empty journal. See
 [PostgreSQL RLS](postgres.md#change-journal-recorder).

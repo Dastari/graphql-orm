@@ -144,12 +144,13 @@ behalf of RLS entities, and `validate_target` reports drift on them:
   table is missing. Dropping or rebuilding the search index drops the trigger; re-applying the
   schema target recreates it. The runtime role needs DML on the search table, as before.
 - **Change journal.** `__graphql_orm_change_log` gets RLS enabled (not forced) with no policies,
-  and `INSERT`, `UPDATE`, `DELETE` and `TRUNCATE` revoked from `PUBLIC`. A role subject to RLS can
-  neither read nor write entries; only the table owner or a `BYPASSRLS` role can read it. The plan
-  drops the `INSERT ... WITH CHECK (true)` policy that 0.120.0 to 0.124.x created, and
-  `ensure_change_journal_table` drops it when the caller owns the journal. Create the journal with
-  the schema owner, not the runtime role, or the runtime role owns it and validation reports it as
-  not enforced. See [Change journal recorder](#change-journal-recorder).
+  and every privilege held by any role other than its owner, `PUBLIC` included, is revoked. A role
+  subject to RLS can neither read nor write entries. The plan drops the `INSERT ... WITH CHECK
+  (true)` policy that 0.120.0 to 0.124.x created, and `ensure_change_journal_table` drops it when
+  the caller owns the journal. Create the journal with the schema owner, not the runtime role, or
+  the runtime role owns it and validation reports it as not enforced. A dedicated export role
+  needs `SELECT` granted again after each application. See
+  [Change journal recorder](#change-journal-recorder).
 
 Validation reports a missing or altered policy, any additional policy on these tables (an extra
 permissive policy would widen access), any policy at all on the change journal, and a trigger that
@@ -165,33 +166,60 @@ With the `change-journal` feature, the database, not the runtime role, records j
 
 - the journal, if it is missing, secured as above;
 - `graphql_orm.record_change_journal_entry()`, a `SECURITY DEFINER` trigger function with
-  `search_path = pg_catalog, pg_temp`, schema-qualified names and types, and `EXECUTE` revoked
-  from `PUBLIC`;
+  `search_path = pg_catalog, pg_temp` and schema-qualified names and types. `EXECUTE` is revoked
+  from `PUBLIC` and from every other role except its owner;
 - an `AFTER INSERT OR UPDATE OR DELETE ... FOR EACH ROW` trigger named
-  `graphql_orm_change_journal` on every single-key table in the target, whose arguments record the
-  journal's schema (resolved when the trigger is created, never a `pg_temp` schema), the entity
-  name, the table name, the key column and the key encoding (`bin:<hex>` for `bytea` keys,
-  otherwise the key's text form).
+  `graphql_orm_change_journal` on every single-key table in the target. Its arguments record the
+  journal's schema and the table's own schema and name, all resolved when the trigger is created
+  (never a `pg_temp` schema), plus the entity name, the declared table name, the key column and the
+  key encoding (`bin:<hex>` for `bytea` keys, otherwise the key's text form).
 
-The recorder runs as its owner. It records only while the transaction-local setting
-`graphql_orm.change_journal` is `on`, which ORM write transactions on a journal-enabled `Database`
-set. The setting selects transactions only: the entry's key comes from the changed row and its
-action from `TG_OP`, so a session that sets it can at most journal its own real changes. Restore
-imports never set it. The recorder raises for a table its owner does not own, such as a session's
-temporary table, so attaching it elsewhere cannot record entries under another entity's name.
+The recorder runs as its owner, which is also the journal owner. It records only while the
+transaction-local setting `graphql_orm.change_journal` is `on`. ORM write transactions on a
+journal-enabled `Database` set it, and restore imports set it `off`, even when a role or database
+default turns it on. The setting only selects transactions: the entry's key comes from the changed
+row and its action from `TG_OP`, so a session that sets it can at most journal its own real
+changes. The recorder raises instead of recording unless all of these hold:
+
+- it fires as an `AFTER` row trigger named `graphql_orm_change_journal`;
+- the table it fires on is the schema and name baked into its arguments, is not temporary, and is
+  owned by the recorder's owner;
+- the key column is the table's sole primary-key column;
+- the journal exists in the recorded schema, is owned by the recorder's owner, and has no
+  non-internal trigger or rule. The recorder locks the journal before it checks, so no trigger can
+  be added until the transaction ends.
+
+A trigger on the journal would run as the journal owner whenever the recorder appends, which is
+why the journal must carry none and why no other role may hold `TRIGGER` on it. A role with
+`EXECUTE` on the recorder and `TRIGGER` on a table could attach the recorder to its own trigger.
+The recorder refuses such triggers, and the ORM check and validation also report the grant. Keep
+`EXECUTE` on the recorder, and every journal privilege beyond `SELECT`, away from other roles.
 Composite-key tables get no trigger; the ORM refuses to journal them.
 
-Before relying on the recorder, each ORM write transaction checks once per table that the
-setting is `on`, `session_replication_role` is not `replica`, and the table carries an enabled,
-unconditional trigger of the exact type that calls the unmodified recorder owned by the table
-owner, with arguments naming the write's entity, table and key and a journal owned by that owner.
-Otherwise the write fails and rolls back. `validate_target` reports the same conditions, plus a
-missing journal and a missing or modified recorder function. Static dependent deletes accept the
-recorder trigger only when it passes these checks; it only appends to the journal, which holds no
-foreign keys or entity rows.
+Before relying on the recorder, each ORM write transaction checks once per table that:
+
+- the setting is `on` and `session_replication_role` is not `replica`;
+- the table carries an enabled, unconditional trigger of the exact type that calls the unmodified
+  recorder owned by the table owner, and is the table's only trigger calling it;
+- the trigger's arguments name the table, the write's entity and key, and a journal owned by that
+  owner with no trigger or rule;
+- unless the current role acts as the journal owner, it holds no journal privilege beyond `SELECT`
+  and no `EXECUTE` on the recorder.
+
+Otherwise the write fails and rolls back, with an error naming the reason. `validate_target`
+reports the same conditions, plus:
+
+- a missing journal, or a missing or modified recorder function;
+- any role other than the owner holding a journal privilege beyond `SELECT`, or `EXECUTE` on the
+  recorder;
+- any trigger or rule on the journal;
+- any trigger that calls the recorder under another name.
+
+Static dependent deletes accept the recorder trigger only when it passes these checks. It only
+appends to the journal, which holds no foreign keys or entity rows.
 
 Apply the plan as the role that owns the entity tables and the journal. The runtime role needs no
-privilege on the journal and no `EXECUTE` on the recorder; revoke any it holds.
+privilege on the journal and no `EXECUTE` on the recorder.
 
 ### Search performance
 

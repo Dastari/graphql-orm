@@ -4597,9 +4597,13 @@ impl RlsIntrospectionBackend for super::PostgresBackend {
                 }
                 None => false,
             };
+            let relation_schema: String = row.try_get("schema_name")?;
+            let relation_name: String = row.try_get("table_name")?;
             live.change_journal_triggers.insert(
-                table_key(row.try_get("schema_name")?, row.try_get("table_name")?),
+                table_key(relation_schema.clone(), relation_name.clone()),
                 super::rls::LiveChangeJournalTrigger {
+                    relation_schema,
+                    relation_name,
                     enabled: row.try_get("enabled")?,
                     trigger_type: row.try_get("trigger_type")?,
                     conditional: row.try_get("conditional")?,
@@ -4610,6 +4614,58 @@ impl RlsIntrospectionBackend for super::PostgresBackend {
                 },
             );
         }
+        let other_triggers = sqlx::query(
+            "SELECT n.nspname AS schema_name, c.relname AS table_name, t.tgname::text AS trigger_name
+             FROM pg_trigger t
+             JOIN pg_class c ON c.oid = t.tgrelid
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE t.tgfoid = to_regprocedure(format('graphql_orm.%I()', $2::text))
+               AND t.tgname <> $1
+             ORDER BY 1, 2, 3",
+        )
+        .bind(super::rls::CHANGE_JOURNAL_TRIGGER)
+        .bind(super::rls::CHANGE_JOURNAL_FUNCTION)
+        .fetch_all(&mut *conn)
+        .await?;
+        for row in other_triggers {
+            live.change_journal_other_triggers.push((
+                table_key(row.try_get("schema_name")?, row.try_get("table_name")?),
+                row.try_get("trigger_name")?,
+            ));
+        }
+        // The journal is resolved as the ORM resolves it, through the
+        // connection's search_path.
+        let journal_regclass = format!("\"{}\"", super::rls::CHANGE_LOG_TABLE);
+        live.change_journal_table_triggers = sqlx::query_scalar(
+            "SELECT name FROM (
+                SELECT t.tgname::text AS name FROM pg_trigger t
+                WHERE t.tgrelid = to_regclass($1) AND NOT t.tgisinternal
+                UNION
+                SELECT r.rulename::text FROM pg_rewrite r WHERE r.ev_class = to_regclass($1)
+             ) objects ORDER BY name",
+        )
+        .bind(&journal_regclass)
+        .fetch_all(&mut *conn)
+        .await?;
+        live.change_journal_writers = sqlx::query_scalar(
+            "SELECT DISTINCT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee)::text END
+             FROM pg_class c CROSS JOIN LATERAL aclexplode(c.relacl) a
+             WHERE c.oid = to_regclass($1) AND a.grantee <> c.relowner AND a.privilege_type <> 'SELECT'
+             ORDER BY 1",
+        )
+        .bind(&journal_regclass)
+        .fetch_all(&mut *conn)
+        .await?;
+        live.change_journal_recorder_executors = sqlx::query_scalar(
+            "SELECT DISTINCT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee)::text END
+             FROM pg_proc p CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a
+             WHERE p.oid = to_regprocedure(format('graphql_orm.%I()', $1::text))
+               AND a.grantee <> p.proowner AND a.privilege_type = 'EXECUTE'
+             ORDER BY 1",
+        )
+        .bind(super::rls::CHANGE_JOURNAL_FUNCTION)
+        .fetch_all(&mut *conn)
+        .await?;
         let journal_function = sqlx::query(
             "SELECT p.prosrc AS body, p.prosecdef AS security_definer,
                     COALESCE(p.proconfig, ARRAY[]::text[]) AS config
