@@ -3,7 +3,7 @@ title: "Host-bound principal projection"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-10-24
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -68,6 +68,15 @@ write and requires the exact reference back while it is still live. Under a
 strict resolver this refuses a missing projection as well as a wrong namespace,
 and the refused send stores no message, run, title work or event.
 
+Submission admission checks only that the resolver returns the reference it was
+given; a host resolver commonly maps any live reference to the user behind it.
+Message submission therefore refuses a session-bound delegation, a sessionless
+grant, and a credential with no grant kind that carries an actor or exact
+operation binding, with `ReauthorizationFailed` before the projection,
+admission or any write, whether or not admission or run authorization is
+installed. Every other session root and the inbox page refuse the same
+credentials before any read.
+
 Without these methods every service behaves exactly as before.
 
 ## Composition with run authorization
@@ -76,6 +85,8 @@ Projection happens first. `AiRunAuthorizationIssuer` is unchanged and may return
 either the unprojected or the projected identity; the engine stores the
 projected reference with the issued deadline. Projection alone keeps the
 original deadline and needs no issuer. Neither renews existing work.
+Run authorization does not admit delegated or sessionless credentials either:
+there is no opt-in for delegated submission.
 
 ## Durable work and existing records
 

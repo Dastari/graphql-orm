@@ -10,6 +10,53 @@ supersedes: []
 
 # Migration Guide
 
+## 0.129.0 to 0.130.0: delegated and sessionless session credentials
+
+Message submission now refuses a request credential whose
+`AccessTokenGrantKind` is `SessionBoundDelegation` or `Sessionless`, and one
+with no grant kind that carries an actor or an exact operation binding. It
+returns `ReauthorizationFailed`, whose GraphQL code is
+`AI_REAUTHORIZATION_FAILED`, before any policy call, encryption or write, and
+stores no message, run, title work, event or inbox event. This applies whether
+or not `with_run_authorization` or `with_submission_admission` is installed.
+
+Previously, without run authorization, such a credential's reference was
+persisted as the new run's principal. Submission admission accepted it, because
+the host resolver returned the same reference, and workers then resolved it to
+the parent user session. Session authorization, content protection and the
+approval consumption that resumes the run therefore acted as the full user.
+
+The same refusal now applies, before any read or write, to:
+
+- every other `OrmAiSessionService` root: `aiConversationBootstrap`,
+  `aiSessions`, `aiSession`, `session_for_run`, `session_stream_head`,
+  `aiMessages`, `aiMessageBlocks`, `aiSessionEventPage`, `createAiSession`,
+  `pinAiSessionExecutionSelection`, `renameAiSession`, `archiveAiSession`,
+  `restoreAiSession` and `deleteAiSession`;
+- `OrmAiInboxService::inbox_event_page` (`aiInboxEventPage`).
+
+0.129.0 already refused these credentials on the session-event and inbox
+streams. Pages now refuse them too, so a delegated credential cannot read through
+a page what it cannot stream. A host access policy that calls
+`session_for_run` with such a principal now receives `ReauthorizationFailed`
+and should treat it as a denial.
+
+There is no opt-in for delegated submission. `AiRunAuthorization` still refuses
+delegated and sessionless grants at run issuance, so installing it does not
+admit them. If a host sent delegated or sessionless access tokens to session
+roots, for example from a coordinator service, send the user's own session-bound
+access token (`AccessTokenGrantKind::UserSession` or no grant kind) instead.
+Ordinary user sessions and API-token principals are unaffected.
+
+Runs queued before the upgrade keep their persisted reference; this release
+does not rewrite them. To find runs a delegated credential queued, look for
+unfinished runs whose persisted principal reference has a `grant_kind` of
+`session_bound_delegation` or `sessionless`, or no `grant_kind` and an
+`actor_subject` or `operation`, and cancel them as the owner.
+
+No public Rust API, GraphQL SDL, persistent schema or data migration change.
+`AI_SCHEMA_MODULE_VERSION` is unchanged.
+
 ## 0.128.0 to 0.129.0: delegated and sessionless request credentials
 
 Approval, proposal and run-control roots now refuse a request credential whose

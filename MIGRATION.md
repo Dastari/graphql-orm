@@ -10,6 +10,17 @@ supersedes: []
 
 # Migration Guide
 
+## AI 0.129.0 to 0.130.0: delegated and sessionless session credentials
+
+Message submission, every other `OrmAiSessionService` root and inbox pages refuse
+`SessionBoundDelegation` and `Sessionless` request credentials, and credentials
+with no grant kind that carry an actor or exact operation binding, with
+`AI_REAUTHORIZATION_FAILED`. This applies whether or not run authorization or
+submission admission is installed. Clients that sent such tokens to submit
+messages, manage sessions or read session, message, event or inbox pages must
+send the user's own session access token. No data migration is needed. See the
+[AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01290-to-01300-delegated-and-sessionless-session-credentials).
+
 ## AI 0.128.0 to 0.129.0: delegated and sessionless request credentials
 
 Approval, proposal and run-control roots refuse `SessionBoundDelegation` and

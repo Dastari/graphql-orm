@@ -457,7 +457,8 @@ enum PruneStreamOutcome {
 ///
 /// Opening a stream refuses a sessionless or session-bound delegated credential
 /// with [`AiError::ReauthorizationFailed`]: the stream refreshes its principal
-/// through the resolver, which would yield the full user behind it.
+/// through the resolver, which would yield the full user behind it. The page
+/// refuses the same credentials before any read, so both agree.
 pub struct OrmAiInboxService {
     database: Database<DefaultWriteBackend>,
     principal_resolver: Arc<dyn CurrentPrincipalResolver>,
@@ -748,6 +749,7 @@ impl AiInboxService for OrmAiInboxService {
         after_sequence: i64,
         first: i64,
     ) -> Result<AiInboxEventPage, AiError> {
+        crate::principal_projection::refuse_delegated_request(principal)?;
         self.event_page(principal, after_sequence, first).await
     }
 

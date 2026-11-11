@@ -1162,3 +1162,82 @@ async fn inbox_streams_reauthorize_periodically_and_close_on_revocation() {
     .expect("revocation should be observed at the next reauthorization");
     assert!(matches!(closed, Some(AiError::ReauthorizationFailed)));
 }
+
+/// The issue #597 scenario: a host installs a projection and submission
+/// admission, but no run authorization. The strict resolver maps any reference
+/// in its namespace to the authoritative user, so admission alone would accept
+/// a delegated or sessionless credential's reference and queue a run that
+/// workers resolve to the full user. Submission refuses such credentials
+/// before admission, and nothing is persisted.
+#[tokio::test]
+async fn delegated_submissions_are_refused_without_run_authorization() {
+    let fixture = fixture("ai-projection-delegated-send").await;
+    let session = fixture.session().await;
+    let head = fixture.stream_head(session.id).await;
+    let AuthPrincipal::User(user) = fixture.owner.clone() else {
+        unreachable!("projection fixture owner is a user session")
+    };
+    let mut delegated = user.clone();
+    delegated.token_claims.grant_kind = Some(AccessTokenGrantKind::SessionBoundDelegation);
+    delegated.token_claims.actor = Some(agql_auth::ActorIdentity {
+        sub: "ai-coordinator".to_owned(),
+        amr: vec!["service".to_owned()],
+    });
+    let mut sessionless = user;
+    sessionless.token_claims.grant_kind = Some(AccessTokenGrantKind::Sessionless);
+
+    let delegated = AuthPrincipal::User(delegated);
+    // Admission alone accepts the delegation's projected reference.
+    assert!(
+        fixture
+            .resolver
+            .resolve(&fixture.projection.project(&delegated).expect("projects"))
+            .await
+            .is_ok(),
+        "the resolver alone would admit the delegated reference"
+    );
+    for refused in [delegated, AuthPrincipal::User(sessionless)] {
+        assert!(matches!(
+            fixture
+                .sessions
+                .send_message(
+                    &refused,
+                    SendAiMessageInput {
+                        session_id: session.id,
+                        text: "Delete every customer record".to_owned(),
+                        attachment_ids: vec![],
+                        client_message_id: Uuid::new_v4(),
+                    },
+                )
+                .await,
+            Err(AiError::ReauthorizationFailed)
+        ));
+    }
+
+    assert_eq!(fixture.stream_head(session.id).await, head);
+    assert!(
+        fixture
+            .sessions
+            .messages(&fixture.owner, AiSessionId(session.id), first_page())
+            .await
+            .expect("owner reads messages")
+            .edges
+            .is_empty()
+    );
+    assert!(
+        fixture
+            .runs
+            .claim_next("projection-worker")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        fixture
+            .title_work
+            .claim_next("title-worker")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}

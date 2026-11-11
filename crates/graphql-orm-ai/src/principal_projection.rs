@@ -159,7 +159,10 @@ impl fmt::Debug for AiPrincipalProjection {
 /// and operation narrowing. A sessionless grant has no session to resolve.
 /// Approval, proposal, run-control, tool-result preview and stream roots
 /// rehydrate their caller this way before deciding or disclosing, so they
-/// accept neither grant, as run issuance does. A credential with no grant kind
+/// accept neither grant, as run issuance does. Message submission persists the
+/// caller's reference for workers to resolve the same way, so every session
+/// root, and the inbox page, refuses them too, whether or not run
+/// authorization or submission admission is installed. A credential with no grant kind
 /// that still carries an actor or an exact operation binding is narrowed the
 /// same way and is refused before it reaches the host resolver. A resource
 /// binding alone is not refused: ordinary user sessions carry one. The refusal
