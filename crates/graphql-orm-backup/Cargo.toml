@@ -72,3 +72,8 @@ required-features = ["local", "orm-sqlite"]
 name = "orm_016_postgres_conformance"
 path = "tests/orm_016_postgres_conformance.rs"
 required-features = ["local", "orm-postgres"]
+
+[[test]]
+name = "manifest_authentication"
+path = "tests/manifest_authentication.rs"
+required-features = ["local"]
