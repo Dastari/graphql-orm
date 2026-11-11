@@ -80,6 +80,13 @@ Credentials are set through the separate credential mutation and remain in an
 `AiSecretStore`. They never appear in the profile view or adapter debug output.
 The public view includes only whether a credential is configured.
 
+The provider kind and endpoint decide where that credential is sent. Once a
+credential is attached, an update that changes `providerKind` or `baseUrl`
+requires `ManageProviderCredentials` as well as `ManageProviderProfiles` for
+the profile's scope; otherwise it returns `AI_FORBIDDEN` and changes nothing.
+The endpoint is compared after normalization. Other edits, and endpoint changes
+on a profile with no credential, need only `ManageProviderProfiles`.
+
 ## Provider construction
 
 A trusted registry loader obtains the redacted profile and its separately

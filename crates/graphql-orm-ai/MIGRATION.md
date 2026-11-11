@@ -10,6 +10,41 @@ supersedes: []
 
 # Migration Guide
 
+## 0.131.0 to 0.132.0: credential authority for provider endpoint changes
+
+Updating a provider profile that has a credential attached now needs
+`ManageProviderCredentials` as well as `ManageProviderProfiles` when the update
+changes the profile's `provider_kind` or `base_url`. These two fields decide
+where the stored credential is sent. The comparison uses the normalized
+endpoint, so whitespace or an equivalent spelling of the same URL is not a
+change.
+
+- `OrmAiConfigurationService::upsert_provider_profile` (GraphQL
+  `upsertAiProviderProfile`) calls the host `AiConfigurationAccessPolicy` a
+  second time, with `ManageProviderCredentials` and the profile's scope, only
+  for such an update. If the policy denies it, the mutation returns
+  `Forbidden` (`AI_FORBIDDEN`), writes no row and appends no audit event.
+- The same condition is checked again against the row read inside the update
+  transaction, so an update that races a credential being attached is also
+  refused.
+- An authorized change keeps the credential and is audited as
+  `ai.provider_profile.upsert` with reason code `credentialed_endpoint_changed`
+  rather than `configuration_updated`.
+- Other updates are unchanged: renaming, enabling or disabling, editing the
+  OpenAI-compatible capability contract, and re-pointing a profile with no
+  credential need only `ManageProviderProfiles`.
+
+Host action: an operator who holds `ManageProviderProfiles` but not
+`ManageProviderCredentials` can no longer move a credentialed profile. Either
+grant both actions to that role, have a credential administrator make the
+change, or remove the credential first (`removeAiProviderCredential`), move the
+profile, and set a credential for the new endpoint. If your access policy
+grants actions by matching on `AiConfigurationAction`, check that it answers
+`ManageProviderCredentials` for the profile's scope as intended.
+
+No GraphQL SDL, public Rust API, persistent schema or data migration change.
+`AI_SCHEMA_MODULE_VERSION` is unchanged.
+
 ## 0.130.0 to 0.131.0: legacy delegated stored principal references
 
 0.130.0 stopped new submissions from persisting a delegated or sessionless

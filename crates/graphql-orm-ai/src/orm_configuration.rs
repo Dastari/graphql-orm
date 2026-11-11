@@ -411,10 +411,35 @@ impl AiConfigurationService for OrmAiConfigurationService {
         let provider_kind = input.provider_kind.as_str().to_owned();
         let expected_version = input.expected_version;
         let profile_id = input.id;
+        // The provider kind and endpoint decide where an attached credential is
+        // sent, so moving a credentialed profile also needs credential
+        // authority. The transaction re-checks the same condition against the
+        // row it updates.
+        let credentialed_move_authorized = match (profile_id, expected_version) {
+            (Some(id), Some(expected_version)) => {
+                let current = self.profile(id).await?;
+                if current.scope_key != scope_hash || current.row_version != expected_version {
+                    return Err(AiError::Conflict);
+                }
+                if moves_credentialed_endpoint(&current, &provider_kind, base_url.as_deref()) {
+                    self.require_access(
+                        principal,
+                        &scope,
+                        AiConfigurationAction::ManageProviderCredentials,
+                    )
+                    .await?;
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        };
         let profile = self
             .database
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
+                    let mut reason_code = "configuration_updated";
                     let profile = match (profile_id, expected_version) {
                         (None, None) => tx
                             .insert::<AiProviderProfileRecord>(CreateAiProviderProfileRecordInput {
@@ -445,6 +470,16 @@ impl AiConfigurationService for OrmAiConfigurationService {
                                 && current.credential_reference.is_some()
                             {
                                 return Err(OrmPublicError::new(OrmErrorCode::InvalidInput));
+                            }
+                            if moves_credentialed_endpoint(
+                                &current,
+                                &provider_kind,
+                                base_url.as_deref(),
+                            ) {
+                                if !credentialed_move_authorized {
+                                    return Err(OrmPublicError::new(OrmErrorCode::Forbidden));
+                                }
+                                reason_code = "credentialed_endpoint_changed";
                             }
                             match tx
                                 .compare_and_swap::<AiProviderProfileRecord>(
@@ -483,7 +518,7 @@ impl AiConfigurationService for OrmAiConfigurationService {
                             resource_kind: "provider_profile",
                             resource_reference: &profile.id.to_string(),
                             outcome: "allowed",
-                            reason_code: "configuration_updated",
+                            reason_code,
                             policy_version: None,
                         },
                     )
@@ -1602,6 +1637,18 @@ fn provider_data_policy(
         )),
         (_, None) => Ok(json!({})),
     }
+}
+
+/// Returns whether an update would send an attached credential somewhere
+/// else: a credential is present and the provider kind or normalized endpoint
+/// changes.
+fn moves_credentialed_endpoint(
+    current: &AiProviderProfileRecord,
+    provider_kind: &str,
+    base_url: Option<&str>,
+) -> bool {
+    current.credential_reference.is_some()
+        && (current.provider_kind != provider_kind || current.base_url.as_deref() != base_url)
 }
 
 fn provider_view(record: &AiProviderProfileRecord) -> Result<AiProviderProfileView, AiError> {
@@ -2896,3 +2943,7 @@ mod tests {
         assert_eq!(original_capacity.policies[0].committed_input_tokens, 0);
     }
 }
+
+#[cfg(all(test, feature = "sqlite"))]
+#[path = "orm_configuration_provider_profile_tests.rs"]
+mod provider_profile_tests;
