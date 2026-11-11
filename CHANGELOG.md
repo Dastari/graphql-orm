@@ -24,6 +24,12 @@ for historical context.
 
 - AI 0.128.0: **breaking:** enforce AI runtime closure after a snapshot restore. The runtime start gate opens only with a proof minted from a store's live recovery epoch (AI schema module `0.77.0`), and leases are bound to that epoch. Worker claims, lease-fenced writes and approval consumption refuse while the epoch is not live. A restored store stays closed until `OrmAiRuntimeRecoveryService::reconcile_restore` expires its approvals, revokes its egress consents and moves unfinished runs to `RecoveryRequired`, and an operator acknowledges the reviewed result. An existing deployment upgraded in place opens once the operator calls `acknowledge_in_place_upgrade`, which leaves its work unchanged. Restore facts now decode strictly. See the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01270-to-01280-enforced-runtime-closure-after-restore).
 
+## 0.126.0
+
+ORM runtime/macros **0.126.0**.
+
+- **Fix:** an entity whose create or update input would have no public member now compiles. `GraphQLOperations` previously emitted an empty `async_graphql::InputObject` for it, even under `schema_roots!` `generated_mutations: "none"`, and the build failed. It now omits that input and the roots that accept it: with no publicly writable create field there is no `Create<Entity>Input`, `create` or `upsert`; with no publicly writable update field there is no `Update<Entity>Input`, `update` or `update_many`. `delete` and `delete_many` take no input and are still generated. Reads, relations, `<entity>Changed`, the Rust repository inputs (which keep `skip_input` columns), repository and transaction writes, and hooks are unchanged. An `append_only` entity without a public create field has no public mutation. `mutation_shapes`, `operation_authorization` or `ai_mutations` naming an operation removed this way, and `dependent_deletes` on such an entity, are compile errors that say which input is empty. No entity that compiled before changes. See [read-only and zero-input entities](docs/reference/graphql-orm/macros-and-attributes.md#read-only-and-zero-input-entities) (#228).
+
 ## 0.125.0
 
 ORM runtime/macros **0.125.0**.

@@ -175,7 +175,7 @@ jobs:
             cargo check -p graphql-orm --locked --no-default-features --features "$backend" --all-targets
             cargo clippy -p graphql-orm -p graphql-orm-macros --locked --no-default-features --features "$backend" --all-targets -- -D warnings
           done
-      - run: cargo test -p graphql-orm --no-default-features --features postgres --test federation_entity_keys_postgres
+      - run: cargo test -p graphql-orm --no-default-features --features postgres --test federation_entity_keys_postgres --test zero_public_write_inputs_backends
       - name: Check composite subscription scope declarations on native backends
         run: |
           for backend in postgres mssql; do
@@ -215,7 +215,7 @@ jobs:
         run: cargo test --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --target-dir target/fixtures --locked --no-default-features --features postgres --test host_timestamps -- --ignored --test-threads=1
       - run: cargo check -p graphql-orm --no-default-features --features mssql
       - name: Execute MSSQL schema and query regressions without a database
-        run: cargo test -p graphql-orm --locked --no-default-features --features mssql --test federation_entity_keys_mssql --test runtime_records --test query_ir --test composite_primary_keys
+        run: cargo test -p graphql-orm --locked --no-default-features --features mssql --test federation_entity_keys_mssql --test runtime_records --test query_ir --test composite_primary_keys --test zero_public_write_inputs_backends
 
   orm-security-sqlite:
     name: Current authority and subscription privacy (SQLite)
