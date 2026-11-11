@@ -214,6 +214,16 @@ pub(crate) fn generate(
                         self.notifications.push(stmt.clone());
                         return false;
                     }
+                    // Payload release belongs to the root resolver; a dependent
+                    // write keeps its committed row for notifications only.
+                    if matches!(stmt, syn::Stmt::Expr(syn::Expr::Assign(_), _))
+                        && stmt
+                            .to_token_stream()
+                            .to_string()
+                            .contains("__release_graphql_mutation_output")
+                    {
+                        return false;
+                    }
                     !matches!(stmt,syn::Stmt::Expr(e,_) if commits(e))
                 });
                 syn::visit_mut::visit_block_mut(self, block);

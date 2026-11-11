@@ -3,7 +3,7 @@ title: "Strict Authorization Guide"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-01
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -48,8 +48,9 @@ When `DeclaredPoliciesRequired` is active:
 - A field declaring `read_policy` / `write_policy` requires a field policy provider.
 - A row policy key requires a row policy provider.
 - Missing providers return `AUTHORIZATION_MISCONFIGURED` with a safe public message.
-- An entity `write_policy` is also the row policy key for updates and deletes, so those need both an
-  entity provider and a row provider.
+- An entity `write_policy` is also the row write policy key for creates, updates, upserts and deletes,
+  so those need both an entity provider and a row provider. See
+  [row policy on generated writes](#row-policy-on-generated-writes).
 
 An entity that declares no policy has no such requirement: with `auth: "required"`, any authenticated
 subject can use its generated operations.
@@ -72,6 +73,63 @@ for protection; this default does not establish tenant isolation. For sensitive
 applications select `ExplicitPolicyForAllExposedOperations`. Immediate revocation
 requires the [current-authority bridge](agql-auth-bridge.md) or equivalent host
 enforcement, not merely projected roles/scopes.
+
+## Row Policy On Generated Writes
+
+`RowPolicy` decides three things for every generated write: which existing
+rows it may target, whether the row it writes is allowed, and whether the
+caller receives that row back. Row-level isolation that rests on `RowPolicy`
+instead of PostgreSQL RLS relies on all three.
+
+**The written row.** Generated creates, updates, upserts and bulk updates check
+`can_write_row` on the row as written (the post-image), inside the transaction
+and before the `After` hook. This covers GraphQL and repository writes,
+single-column and composite keys, append-only creates, `insert_many`,
+`insert_if_absent`, `upsert_many`, `update_if`, `compare_and_swap`, bounded
+updates, transaction helpers and dependent `set_null` updates. A refusal is
+`FORBIDDEN` and rolls the write back. Updates and upserts still check the
+existing row first. A client-writable owner or tenant column therefore can't
+create a row outside the caller's write scope or move one out of it.
+
+**The returned row.** Generated GraphQL create, update and upsert payloads
+contain the committed row only when the caller has entity read access and
+`can_read_row` allows the row. Otherwise the entity field is `null` and the
+payload still reports `success: true`, because the write has committed. Write
+access does not imply read access. A denied entity read or a policy error fails
+the field with `extensions.outcome = "committed"`. Field read policies still
+apply to a released row. Delete payloads never contain the row, and bulk
+payloads contain counts. Repository helpers return the written row to host
+code unchanged. Host code that passes it on to a client must check it with
+`Database::can_read_row` first.
+
+**The targeted rows.** Generated GraphQL updates, deletes, `updateMany`,
+`deleteMany` and the dependent-delete steps built on them classify each
+existing row they select:
+
+| Caller can | Single-row update or delete | `updateMany` / `deleteMany` |
+| --- | --- | --- |
+| write the row | proceeds | row is written |
+| read the row, not write it | `FORBIDDEN` | the whole write is refused (`errorCode = "FORBIDDEN"`) |
+| neither read nor write it | `success: false`, `error: "Entity not found"`, as for a missing row | row is left out: not written, counted or held against the `notify_with` 1,000-row bound |
+
+So the response never depends on rows the caller can't read or write, and a
+filter can't probe their columns. A write-only caller still writes rows it can't
+read. Reading a row means entity read access plus `can_read_row`, which runs
+only for rows `can_write_row` refuses. An upsert whose conflicting row is
+unwritable refuses with `FORBIDDEN` whether or not the caller can read it. Its
+key is unique, so the row can't be treated as absent; a plain create discloses
+the same row through its unique constraint. Repository helpers evaluate
+policies without the request (see below) and still refuse any unwritable row
+with `FORBIDDEN`.
+
+Custom resolvers can apply the same rule with `Database::authorize_write_target`,
+which returns `Ok(false)` for a GraphQL mutation target the caller can neither
+read nor write. Runtime GraphQL mutations already restrict their targets to the
+caller's read visibility, report a refused preimage as `not_found`, check the
+written row with `RuntimeWriteAuthority::authorize_result` and release payloads
+through `release_mutation_result`.
+PostgreSQL `#[graphql_rls(insert(...), update(...))]` policies remain an
+independent database-level check.
 
 ## Repository / System Access
 

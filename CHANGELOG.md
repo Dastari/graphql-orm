@@ -24,6 +24,15 @@ for historical context.
 
 - AI 0.128.0: **breaking:** enforce AI runtime closure after a snapshot restore. The runtime start gate opens only with a proof minted from a store's live recovery epoch (AI schema module `0.77.0`), and leases are bound to that epoch. Worker claims, lease-fenced writes and approval consumption refuse while the epoch is not live. A restored store stays closed until `OrmAiRuntimeRecoveryService::reconcile_restore` expires its approvals, revokes its egress consents and moves unfinished runs to `RecoveryRequired`, and an operator acknowledges the reviewed result. An existing deployment upgraded in place opens once the operator calls `acknowledge_in_place_upgrade`, which leaves its work unchanged. Restore facts now decode strictly. See the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01270-to-01280-enforced-runtime-closure-after-restore).
 
+## 0.126.0
+
+ORM runtime/macros **0.126.0**.
+
+- **Security/breaking:** generated writes enforce `RowPolicy::can_write_row` on the row they write. Creates, updates, upserts and bulk updates check the post-image inside the transaction, before the `After` hook, on every key shape and on GraphQL, repository and transaction paths, and roll back with `FORBIDDEN` on refusal. Previously GraphQL and single-key repository creates never checked the row, and updates and upserts checked only the existing row, so a client-writable owner or tenant column could create a row outside the caller's write scope or move one out of it. An entity that declares a `write_policy` now needs a row provider for creates as well.
+- **Security/breaking:** generated GraphQL update and upsert payloads release the committed row only when the caller has entity read access and `can_read_row` allows it, as creates already did. Otherwise the entity field is `null` and `success` stays `true`. Previously a caller that could write but not read a row received it in full.
+- **Security/breaking:** generated GraphQL updates, deletes, `updateMany`, `deleteMany` and dependent-delete steps treat a row the caller can neither read nor write as missing. Single-row writes answer `success: false`, `error: "Entity not found"`, and bulk writes leave the row out of the matched set, its count and the `notify_with` row bound. Previously such a row produced `FORBIDDEN`, so the response revealed whether a hidden row matched an id or filter. A readable row the caller may not write still refuses with `FORBIDDEN`, and repository helpers keep refusing every unwritable row.
+- **API:** `Database::authorize_write_target` applies the targeted-row rule in custom resolvers. Runtime GraphQL mutations are unchanged; they already enforce all three rules. See the [0.126.0 migration guide](MIGRATION.md#01260-row-policy-on-the-rows-generated-writes-target-write-and-return) and [row policy on generated writes](docs/reference/graphql-orm/strict-authorization.md#row-policy-on-generated-writes).
+
 ## 0.125.0
 
 ORM runtime/macros **0.125.0**.
