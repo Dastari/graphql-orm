@@ -741,6 +741,7 @@ impl AiSessionTitleWorkService for OrmAiSessionTitleWorkService {
                         return Ok(TitleCompletion::Applied(Box::new(session)));
                     }
                     validate_active_claim_record(&work, &claim, now)?;
+                    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
                     let session = tx
                         .find_by_id::<AiSessionRecord>(&claim.session_id.0)
                         .await
@@ -945,6 +946,7 @@ async fn load_active_claim(
         .map_err(OrmPublicError::from)?
         .ok_or_else(OrmPublicError::not_found)?;
     validate_active_claim_record(&current, claim, now)?;
+    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
     Ok(current)
 }
 

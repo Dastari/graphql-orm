@@ -100,6 +100,9 @@ impl OrmAiLiveDeltaService {
         lease: &AiRunLease,
         scope: &AiScope,
     ) -> Result<(ResolvedPrincipal, AiContentProtectionPolicy), AiError> {
+        if !crate::orm_runtime_recovery::gate_admits_lease(self.runtime.start_gate(), lease) {
+            return Err(AiError::RuntimeNotReady);
+        }
         let principal = self
             .runtime
             .resolve_current_principal(lease.principal_reference())

@@ -1789,6 +1789,7 @@ impl OrmAiSubscriptionWaitService {
         self.database()
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
+                    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
                     let waiter = tx
                         .find_by_id::<AiSubscriptionWaiterRecord>(&claim.waiter_id.0)
                         .await
@@ -1957,6 +1958,7 @@ impl OrmAiSubscriptionWaitService {
         self.database()
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
+                    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
                     let waiter = tx
                         .find_by_id::<AiSubscriptionWaiterRecord>(&claim.waiter_id.0)
                         .await

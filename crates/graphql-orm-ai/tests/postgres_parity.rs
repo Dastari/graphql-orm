@@ -1300,3 +1300,198 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
     drop(runs);
     drop(container);
 }
+
+/// The 0.127.0 shape of the run table, before `recovery_epoch_id`.
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
+)]
+#[graphql_entity(
+    table = "graphql_orm_ai_runs",
+    plural = "LegacyGraphqlOrmAiRuns",
+    default_sort = "created_at ASC"
+)]
+struct LegacyAiRunRecord {
+    pub execution_selection: Option<String>,
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[filterable(type = "uuid")]
+    pub id: graphql_orm::uuid::Uuid,
+    #[filterable(type = "uuid")]
+    pub session_id: graphql_orm::uuid::Uuid,
+    #[filterable(type = "uuid")]
+    pub input_message_id: graphql_orm::uuid::Uuid,
+    #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
+    pub principal_reference: serde_json::Value,
+    #[filterable(type = "string")]
+    pub state: String,
+    pub attempt_id: Option<graphql_orm::uuid::Uuid>,
+    pub lease_owner: Option<String>,
+    pub lease_generation: i64,
+    pub lease_expires_at: Option<i64>,
+    pub lease_heartbeat_at: Option<i64>,
+    pub retry_count: i64,
+    pub next_attempt_at: Option<i64>,
+    pub error_code: Option<String>,
+    pub latest_checkpoint_id: Option<graphql_orm::uuid::Uuid>,
+    pub cancellation_request_id: Option<graphql_orm::uuid::Uuid>,
+    pub cancellation_requested_at: Option<i64>,
+    #[sortable]
+    pub created_at: i64,
+    #[graphql_orm(version, default = "0")]
+    pub row_version: i64,
+}
+
+/// The 0.127.0 shape of the recovery table, which that release never wrote.
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
+)]
+#[graphql_entity(
+    table = "graphql_orm_ai_runtime_recovery",
+    plural = "LegacyGraphqlOrmAiRuntimeRecovery",
+    default_sort = "created_at DESC"
+)]
+struct LegacyAiRuntimeRecoveryRecord {
+    #[primary_key]
+    #[filterable(type = "uuid")]
+    pub id: graphql_orm::uuid::Uuid,
+    pub module_version: String,
+    pub module_fingerprint: String,
+    pub state: String,
+    pub start_gate_open: bool,
+    pub fatal_issue_count: i64,
+    pub warning_count: i64,
+    #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
+    pub action_counts: serde_json::Value,
+    pub operator_subject: Option<String>,
+    #[sortable]
+    pub created_at: i64,
+    pub completed_at: Option<i64>,
+    #[graphql_orm(version, default = "0")]
+    pub row_version: i64,
+}
+
+/// A 0.127.0 store with runs upgrades the recovery ledger and run epoch
+/// columns in place, re-plans empty, and opens its first epoch.
+#[tokio::test]
+async fn owned_postgres_upgrades_a_prior_store_to_the_recovery_ledger() {
+    let Some(container) = OwnedPostgres::start().expect("owned PostgreSQL should start") else {
+        return;
+    };
+    let database = Database::<PostgresBackend>::connect_postgres(container.connection_url())
+        .await
+        .expect("ORM should connect only to the owned container");
+    let module = AiSchemaModule;
+    let mut prior_entities = module
+        .entities()
+        .iter()
+        .copied()
+        .filter(|entity| {
+            !matches!(
+                entity.table_name,
+                "graphql_orm_ai_runs" | "graphql_orm_ai_runtime_recovery"
+            )
+        })
+        .collect::<Vec<_>>();
+    prior_entities.push(LegacyAiRunRecord::metadata());
+    prior_entities.push(LegacyAiRuntimeRecoveryRecord::metadata());
+    let prior = database
+        .schema()
+        .plan_migration_to_entities("ai-recovery-prior-v1", "prior AI schema", &prior_entities)
+        .await
+        .expect("prior AI schema should plan");
+    database
+        .schema()
+        .apply_migration(&prior, ApplyOptions::default())
+        .await
+        .expect("prior AI schema should apply");
+    let principal = AuthPrincipal::User(AuthUser {
+        user_id: "upgrade-user".to_owned(),
+        session_id: Uuid::new_v4(),
+        roles: vec![],
+        scopes: vec![],
+        session: SessionContext::default(),
+        token_claims: AccessTokenMetadata::default(),
+    });
+    let legacy_run = |id: Uuid, state: &str| CreateLegacyAiRunRecordInput {
+        execution_selection: None,
+        id,
+        session_id: Uuid::new_v4(),
+        input_message_id: Uuid::new_v4(),
+        principal_reference: serde_json::to_value(principal.reference())
+            .expect("principal reference should serialize"),
+        state: state.to_owned(),
+        attempt_id: None,
+        lease_owner: None,
+        lease_generation: 0,
+        lease_expires_at: None,
+        lease_heartbeat_at: None,
+        retry_count: 0,
+        next_attempt_at: None,
+        error_code: None,
+        latest_checkpoint_id: None,
+        cancellation_request_id: None,
+        cancellation_requested_at: None,
+    };
+    LegacyAiRunRecord::insert(&database, legacy_run(Uuid::new_v4(), "completed"))
+        .await
+        .expect("a prior-schema run should insert");
+
+    let current = database
+        .schema()
+        .plan_migration_to_entities(
+            "ai-recovery-current-v1",
+            "current AI schema",
+            module.entities(),
+        )
+        .await
+        .expect("current AI schema should plan");
+    database
+        .schema()
+        .apply_migration(&current, ApplyOptions::default())
+        .await
+        .expect("the recovery ledger and run epoch columns should migrate in place");
+    let repeated = database
+        .schema()
+        .plan_migration_to_entities(
+            "ai-recovery-current-v2",
+            "current AI schema",
+            module.entities(),
+        )
+        .await
+        .expect("current AI schema should replan");
+    assert!(
+        repeated.steps.is_empty() && repeated.statements.is_empty(),
+        "{:?}",
+        repeated.statements
+    );
+
+    let clock: Arc<dyn Clock> = Arc::new(FixedClock::new(OffsetDateTime::now_utc()));
+    let recovery = OrmAiRuntimeRecoveryService::new(database.clone(), clock.clone());
+    // The upgraded store already holds runs. The operator records that it
+    // was upgraded in place, so nothing is closed.
+    assert!(matches!(
+        recovery.readiness_proof().await,
+        Err(AiError::RuntimeNotReady)
+    ));
+    let proof = recovery
+        .acknowledge_in_place_upgrade("upgrade-operator", "upgraded 0.127.0 in place")
+        .await
+        .expect("an in-place upgrade should open the store");
+    let fresh = Uuid::new_v4();
+    LegacyAiRunRecord::insert(&database, legacy_run(fresh, "queued"))
+        .await
+        .expect("new work should insert");
+    let runs = OrmAiRunService::new(
+        database.clone(),
+        clock,
+        AiRunServiceLimits::new(Duration::hours(1), Duration::hours(1), 16, 2, 8)
+            .expect("run limits"),
+    );
+    let lease = runs
+        .claim_next("upgraded-worker")
+        .await
+        .expect("claim")
+        .expect("new work should lease on the upgraded store");
+    assert_eq!(lease.run_id().0, fresh);
+    assert_eq!(lease.recovery_epoch_id(), Some(proof.epoch_id()));
+}

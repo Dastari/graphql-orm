@@ -2477,7 +2477,11 @@ pub(crate) struct AiEgressEventRecord {
 #[backend_selected_graphql_entity(
     table = "graphql_orm_ai_runtime_recovery",
     plural = "GraphqlOrmAiRuntimeRecovery",
-    default_sort = "created_at DESC"
+    default_sort = "created_at DESC",
+    unique_index(
+        name = "graphql_orm_ai_runtime_recovery_epoch_sequence",
+        columns = ["epoch_sequence"]
+    )
 )]
 #[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
 #[cfg_attr(
@@ -2492,8 +2496,13 @@ pub(crate) struct AiRuntimeRecoveryRecord {
     #[filterable(type = "uuid")]
     pub id: graphql_orm::uuid::Uuid,
     /// Strictly increasing ledger position; the highest value is current.
-    #[unique]
+    ///
+    /// A constant default and a separate unique index keep the column
+    /// addable to an existing table on every backend; SQLite refuses
+    /// `ADD COLUMN ... UNIQUE`. Recorded epochs start at 1, and a row below 1
+    /// keeps the store closed.
     #[sortable]
+    #[graphql_orm(default = "0")]
     pub epoch_sequence: i64,
     /// Schema module version.
     pub module_version: String,

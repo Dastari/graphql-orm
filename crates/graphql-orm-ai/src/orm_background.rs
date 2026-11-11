@@ -2015,6 +2015,7 @@ impl OrmAiOpenAiBackgroundReconciliationService {
         database
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
+                    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
                     let current = tx
                         .find_by_id::<AiProviderBackgroundSubmissionRecord>(&claim.submission_id)
                         .await
@@ -2138,6 +2139,7 @@ impl OrmAiOpenAiBackgroundReconciliationService {
         database
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
+                    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
                     let current = tx
                         .find_by_id::<AiProviderBackgroundSubmissionRecord>(&claim.submission_id)
                         .await
@@ -2228,6 +2230,7 @@ impl OrmAiOpenAiBackgroundReconciliationService {
         database
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
+                    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
                     let claim = &observation.claim;
                     let current = tx
                         .find_by_id::<AiProviderBackgroundSubmissionRecord>(&claim.submission_id)
@@ -2332,6 +2335,7 @@ impl OrmAiOpenAiBackgroundReconciliationService {
         database
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
+                    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
                     let claim = &failure.claim;
                     let current = tx
                         .find_by_id::<AiProviderBackgroundSubmissionRecord>(&claim.submission_id)
@@ -2522,8 +2526,9 @@ impl OrmAiOpenAiBackgroundRetrievalService {
         &self,
         claim: &AiOpenAiBackgroundReconciliationClaim,
     ) -> Result<AiOpenAiBackgroundRetrievalAttempt, AiError> {
-        crate::orm_runtime_recovery::require_store_gate(&self.database, self.runtime.start_gate())
-            .await?;
+        if !self.runtime.start_gate().is_ready() {
+            return Err(AiError::RuntimeNotReady);
+        }
         self.validate_retrieval_claim(claim).await?;
         if claim.provider_profile_id != self.route.provider_profile_id
             || claim.original_egress_destination != self.route.destination
@@ -2688,9 +2693,11 @@ impl OrmAiOpenAiBackgroundRetrievalService {
         let database = self.database.clone();
         let claim = claim.clone();
         let now = canonical_second(self.clock.now());
+        let gate_epoch = self.runtime.start_gate().epoch_id();
         database
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
+                    crate::orm_runtime_recovery::require_gate_epoch(tx, gate_epoch).await?;
                     let current = tx
                         .find_by_id::<AiProviderBackgroundSubmissionRecord>(&claim.submission_id)
                         .await
@@ -2716,9 +2723,11 @@ impl OrmAiOpenAiBackgroundRetrievalService {
     ) -> Result<AiOpenAiBackgroundReconciliationClaim, AiError> {
         let database = self.database.clone();
         let now = canonical_second(self.clock.now());
+        let gate_epoch = self.runtime.start_gate().epoch_id();
         database
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
+                    crate::orm_runtime_recovery::require_gate_epoch(tx, gate_epoch).await?;
                     let current = tx
                         .find_by_id::<AiProviderBackgroundSubmissionRecord>(&claim.submission_id)
                         .await
@@ -2968,8 +2977,9 @@ impl OrmAiOpenAiBackgroundTerminalService {
         &self,
         claim: &AiOpenAiBackgroundReconciliationClaim,
     ) -> Result<crate::AiContentProtectionPolicy, AiError> {
-        crate::orm_runtime_recovery::require_store_gate(&self.database, self.runtime.start_gate())
-            .await?;
+        if !self.runtime.start_gate().is_ready() {
+            return Err(AiError::RuntimeNotReady);
+        }
         let now = self.clock.now();
         let principal = self
             .runtime
@@ -3023,9 +3033,11 @@ impl OrmAiOpenAiBackgroundTerminalService {
         now: OffsetDateTime,
     ) -> Result<AiOpenAiBackgroundTerminalOutcome, TransactionError> {
         let database = self.database.clone();
+        let gate_epoch = self.runtime.start_gate().epoch_id();
         database
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
+                    crate::orm_runtime_recovery::require_gate_epoch(tx, gate_epoch).await?;
                     let claim = &observation.claim;
                     let current = tx
                         .find_by_id::<AiProviderBackgroundSubmissionRecord>(&claim.submission_id)

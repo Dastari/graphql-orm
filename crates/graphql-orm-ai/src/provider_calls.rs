@@ -11446,6 +11446,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_gate_opened_for_another_store_cannot_dispatch_this_stores_lease() {
+        let fixture = fixture(vec![
+            ProviderEvent::ResponseStarted {
+                response_id: Some("mock-response".to_owned()),
+            },
+            ProviderEvent::ResponseCompleted {
+                response_id: Some("mock-response".to_owned()),
+            },
+        ])
+        .await;
+        // Reopen the runtime with a live proof minted from a different store.
+        let other = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
+            .await
+            .expect("in-memory SQLite should open");
+        let other_plan = other
+            .schema()
+            .plan_migration_to_entities(
+                "provider-call-other-store",
+                "other AI store",
+                AiSchemaModule.entities(),
+            )
+            .await
+            .expect("other AI schema should plan");
+        other
+            .schema()
+            .apply_migration(&other_plan, ApplyOptions::default())
+            .await
+            .expect("other AI schema should apply");
+        let other_proof = crate::orm_runtime_recovery::open_test_epoch(&other).await;
+        fixture.runtime.start_gate().close();
+        fixture
+            .runtime
+            .start_gate()
+            .open(&other_proof)
+            .expect("the other store's proof is valid for its own store");
+        assert!(fixture.runtime.start_gate().is_ready());
+        assert_ne!(
+            fixture.runtime.start_gate().epoch_id(),
+            fixture.lease.recovery_epoch_id()
+        );
+
+        let executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8_192, 64 * 1_024)
+                .expect("test provider limits should validate"),
+        );
+        assert!(
+            executor
+                .execute(&fixture.lease, plan(&fixture))
+                .await
+                .is_err()
+        );
+        assert_eq!(fixture.mock.request_count(), 0);
+    }
+
+    #[tokio::test]
     async fn successful_mock_turn_audits_egress_and_commits_authoritative_usage() {
         let fixture = fixture(vec![
             ProviderEvent::ResponseStarted {

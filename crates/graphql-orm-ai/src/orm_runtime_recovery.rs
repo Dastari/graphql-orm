@@ -53,14 +53,6 @@ const MAXIMUM_TRANSACTION_ATTEMPTS: usize = 8;
 /// Approval states that still carry reusable authority.
 const REUSABLE_APPROVAL_STATES: [&str; 3] = ["pending", "approved", "resume_claimed"];
 
-/// Run states whose lease is held by a worker.
-const LEASED_RUN_STATES: [AiRunState; 4] = [
-    AiRunState::Leased,
-    AiRunState::Running,
-    AiRunState::WaitingTool,
-    AiRunState::WaitingReauth,
-];
-
 /// Non-terminal run states a restore closes. `RecoveryRequired` is already
 /// closed and is left unchanged.
 const RESTORE_CLOSED_RUN_STATES: [AiRunState; 9] = [
@@ -80,7 +72,6 @@ const RESTORE_CLOSED_RUN_STATES: [AiRunState; 9] = [
 pub struct AiRuntimeClosureCounts {
     approvals_expired: u64,
     egress_consents_revoked: u64,
-    leases_fenced: u64,
     runs_recovery_required: u64,
 }
 
@@ -95,12 +86,6 @@ impl AiRuntimeClosureCounts {
         self.egress_consents_revoked
     }
 
-    /// Active leases expired on the first epoch so ordinary lease recovery
-    /// reclassifies them.
-    pub const fn leases_fenced(self) -> u64 {
-        self.leases_fenced
-    }
-
     /// Non-terminal runs moved to `RecoveryRequired` with a new generation.
     pub const fn runs_recovery_required(self) -> u64 {
         self.runs_recovery_required
@@ -109,7 +94,6 @@ impl AiRuntimeClosureCounts {
     const fn is_empty(self) -> bool {
         self.approvals_expired == 0
             && self.egress_consents_revoked == 0
-            && self.leases_fenced == 0
             && self.runs_recovery_required == 0
     }
 }
@@ -193,11 +177,14 @@ impl OrmAiRuntimeRecoveryService {
     ///   without writing, so ordinary restarts keep their runs and approvals.
     /// - A live epoch for an earlier module fingerprint (an in-place upgrade)
     ///   records a live successor epoch without repairs.
-    /// - An empty ledger (a new store, or the first open after upgrading to a
-    ///   release with this ledger) records the first live epoch, after it
-    ///   expires every pending, approved, or resume-claimed approval and
-    ///   expires every active lease, because an empty ledger can also come
-    ///   from a backup taken before any epoch existed.
+    /// - An empty ledger on a store with no runs, approvals or egress
+    ///   consents (a new store) records the first live epoch.
+    /// - An empty ledger on a store that already holds any of them refuses.
+    ///   It may be a store upgraded in place from a release without this
+    ///   ledger, or a backup taken before any epoch existed. The operator
+    ///   decides: [`Self::acknowledge_in_place_upgrade`] for an in-place
+    ///   upgrade, or [`Self::reconcile_restore`] and
+    ///   [`Self::acknowledge_reviewed_restore`] for a restore.
     /// - A current epoch that is not live refuses. That includes every epoch
     ///   restored from a portable backup and every restore-closure epoch; run
     ///   [`Self::reconcile_restore`] and
@@ -206,9 +193,9 @@ impl OrmAiRuntimeRecoveryService {
     /// # Errors
     ///
     /// Returns [`AiError::RuntimeNotReady`] when the current epoch is not
-    /// live, [`AiError::InvalidConfiguration`] when the first-epoch closure
-    /// reaches a bound, and [`AiError::PersistenceFailed`] or
-    /// [`AiError::Conflict`] for persistence failure.
+    /// live or an empty ledger sits on existing AI state, and
+    /// [`AiError::PersistenceFailed`] or [`AiError::Conflict`] for
+    /// persistence failure.
     pub async fn readiness_proof(&self) -> Result<AiRuntimeReadinessProof, AiError> {
         let module_fingerprint = ai_schema_module_fingerprint()?;
         let mut attempt = 0;
@@ -367,12 +354,72 @@ impl OrmAiRuntimeRecoveryService {
         }
     }
 
+    /// Records an operator's acknowledgement that this store was upgraded in
+    /// place, not restored, and records its first live epoch.
+    ///
+    /// An existing store upgraded to this release starts with an empty
+    /// ledger over existing runs, approvals or consents, which
+    /// [`Self::readiness_proof`] cannot tell apart from a backup taken before
+    /// any epoch existed. The operator tells the crate which it is. Use this
+    /// only for a store that was never restored: choosing it for a restored
+    /// store reopens approvals consumed after the backup. Use
+    /// [`Self::reconcile_restore`] and [`Self::acknowledge_reviewed_restore`]
+    /// for a restored store.
+    ///
+    /// One transaction requires an empty ledger, expires every lease that was
+    /// granted before epochs existed so its worker re-claims through ordinary
+    /// lease recovery, and records the first live epoch with the operator
+    /// subject and reason, plus an `ai.runtime.in_place_upgrade_acknowledged`
+    /// audit event. Runs, approvals and egress consents are otherwise left
+    /// unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidInput`] for an empty, oversized, or
+    /// control-character subject or reason, [`AiError::Conflict`] when the
+    /// ledger already has any row, [`AiError::InvalidConfiguration`] when the
+    /// lease pass reaches its bound, and [`AiError::PersistenceFailed`] for
+    /// persistence failure.
+    pub async fn acknowledge_in_place_upgrade(
+        &self,
+        operator_subject: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Result<AiRuntimeReadinessProof, AiError> {
+        let operator_subject = operator_subject.into();
+        let reason = reason.into();
+        if !valid_text(&operator_subject, MAXIMUM_OPERATOR_SUBJECT_BYTES)
+            || !valid_text(&reason, MAXIMUM_ACKNOWLEDGEMENT_REASON_BYTES)
+        {
+            return Err(AiError::InvalidInput(
+                "invalid in-place upgrade acknowledgement".to_owned(),
+            ));
+        }
+        let module_fingerprint = ai_schema_module_fingerprint()?;
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            match self
+                .acknowledge_upgrade_once(
+                    module_fingerprint.clone(),
+                    operator_subject.clone(),
+                    reason.clone(),
+                )
+                .await
+            {
+                Ok(result) => return result,
+                Err(error) if attempt < MAXIMUM_TRANSACTION_ATTEMPTS && retryable(&error) => {
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => return Err(map_transaction(error)),
+            }
+        }
+    }
+
     async fn readiness_once(
         &self,
         module_fingerprint: String,
     ) -> Result<Result<AiRuntimeReadinessProof, AiError>, TransactionError> {
         let now = canonical_second(self.clock.now()).unix_timestamp();
-        let limits = self.limits;
         self.database
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
@@ -395,18 +442,14 @@ impl OrmAiRuntimeRecoveryService {
                             }),
                         ),
                         None => {
-                            let mut counts = AiRuntimeClosureCounts::default();
-                            expire_reusable_approvals(tx, limits.maximum_approvals(), &mut counts)
-                                .await?;
-                            fence_active_leases(tx, limits.maximum_runs(), now, &mut counts)
-                                .await?;
-                            (
-                                1,
-                                serde_json::json!({
-                                    "transition": "first_epoch",
-                                    "closure": counts,
-                                }),
-                            )
+                            // An empty ledger with existing AI state may be a
+                            // backup taken before any epoch existed. Only a
+                            // store with no runs, approvals or consents opens
+                            // without reconcile and acknowledgement.
+                            if holds_prior_ai_state(tx).await? {
+                                return Ok(Err(AiError::RuntimeNotReady));
+                            }
+                            (1, serde_json::json!({"transition": "first_epoch"}))
                         }
                     };
                     let epoch_id = Uuid::new_v4();
@@ -504,6 +547,65 @@ impl OrmAiRuntimeRecoveryService {
                         closure: counts,
                         repeated: false,
                     }))
+                })
+            })
+            .await
+    }
+
+    async fn acknowledge_upgrade_once(
+        &self,
+        module_fingerprint: String,
+        operator_subject: String,
+        reason: String,
+    ) -> Result<Result<AiRuntimeReadinessProof, AiError>, TransactionError> {
+        let now = canonical_second(self.clock.now()).unix_timestamp();
+        let limits = self.limits;
+        self.database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    if current_epoch(tx).await?.is_some() {
+                        return Ok(Err(AiError::Conflict));
+                    }
+                    let leases_fenced =
+                        fence_epochless_leases(tx, limits.maximum_runs(), now).await?;
+                    let epoch_id = Uuid::new_v4();
+                    insert_epoch(
+                        tx,
+                        PreparedEpoch {
+                            id: epoch_id,
+                            sequence: 1,
+                            module_fingerprint: module_fingerprint.clone(),
+                            state: EPOCH_STATE_LIVE,
+                            fatal_issue_count: 0,
+                            warning_count: 0,
+                            action_counts: serde_json::json!({
+                                "transition": "in_place_upgrade_acknowledged",
+                                "leasesFenced": leases_fenced,
+                                "reason": reason,
+                            }),
+                            operator_subject: Some(operator_subject.clone()),
+                            now,
+                        },
+                    )
+                    .await?;
+                    tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
+                        actor_principal_kind: "operator".to_owned(),
+                        actor_subject: operator_subject,
+                        action: "ai.runtime.in_place_upgrade_acknowledged".to_owned(),
+                        resource_kind: "ai_runtime_recovery".to_owned(),
+                        resource_reference: epoch_id.to_string(),
+                        outcome: "allowed".to_owned(),
+                        reason_code: "in_place_upgrade_acknowledged".to_owned(),
+                        correlation_id: epoch_id.to_string(),
+                        causation_id: None,
+                        policy_version: None,
+                    })
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                    Ok(Ok(AiRuntimeReadinessProof::new(
+                        module_fingerprint,
+                        epoch_id,
+                    )))
                 })
             })
             .await
@@ -615,26 +717,6 @@ pub(crate) async fn require_gate_epoch(
     Ok(())
 }
 
-/// Requires that `gate` is open for `database`'s current live epoch, read in
-/// one state-machine transaction. Used by gate-guarded paths that hold a
-/// non-run claim rather than a run lease.
-#[cfg_attr(not(feature = "provider-openai-core"), allow(dead_code))]
-pub(crate) async fn require_store_gate(
-    database: &Database<DefaultWriteBackend>,
-    gate: &AiRuntimeStartGate,
-) -> Result<(), AiError> {
-    if !gate.is_ready() {
-        return Err(AiError::RuntimeNotReady);
-    }
-    let gate_epoch = gate.epoch_id();
-    database
-        .transaction(TransactionMode::StateMachine, move |tx| {
-            Box::pin(async move { require_gate_epoch(tx, gate_epoch).await })
-        })
-        .await
-        .map_err(map_transaction)
-}
-
 /// Whether a public error is the closed-epoch refusal.
 pub(crate) fn is_epoch_not_live(error: &OrmPublicError) -> bool {
     error.code == OrmErrorCode::ServiceUnavailable && error.message == RUNTIME_EPOCH_NOT_LIVE
@@ -656,6 +738,31 @@ fn epoch_is_local_restore_closure(epoch: &AiRuntimeRecoveryRecord) -> bool {
 
 fn valid_text(value: &str, maximum: usize) -> bool {
     !value.trim().is_empty() && value.len() <= maximum && !value.chars().any(char::is_control)
+}
+
+/// Whether the store already holds runs, approvals or egress consents.
+async fn holds_prior_ai_state(
+    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+) -> Result<bool, OrmPublicError> {
+    let runs = tx
+        .query::<AiRunRecord>()
+        .limit(1)
+        .fetch_all()
+        .await
+        .map_err(OrmPublicError::from)?;
+    let approvals = tx
+        .query::<AiApprovalRecord>()
+        .limit(1)
+        .fetch_all()
+        .await
+        .map_err(OrmPublicError::from)?;
+    let consents = tx
+        .query::<AiEgressConsentRecord>()
+        .limit(1)
+        .fetch_all()
+        .await
+        .map_err(OrmPublicError::from)?;
+    Ok(!runs.is_empty() || !approvals.is_empty() || !consents.is_empty())
 }
 
 async fn current_epoch(
@@ -827,18 +934,16 @@ async fn revoke_egress_consents(
     Ok(())
 }
 
-/// Expires every active lease at `now` so a stale in-memory fence fails its
-/// next check and ordinary lease recovery reclassifies the run. A leased row
-/// with no expiry is malformed; it is fenced at `now` as well, so recovery
-/// can classify it instead of failing on it.
-async fn fence_active_leases(
+/// Expires every lease that carries no recovery epoch, so a stale in-memory
+/// fence fails and ordinary lease recovery reclassifies the run. A lease row
+/// with no expiry is fenced at `now` too. Returns the number fenced.
+async fn fence_epochless_leases(
     tx: &mut MutationContext<'_, DefaultWriteBackend>,
     maximum: usize,
     now: i64,
-    counts: &mut AiRuntimeClosureCounts,
-) -> Result<(), OrmPublicError> {
+) -> Result<u64, OrmPublicError> {
     let mut candidates = Vec::new();
-    for state in LEASED_RUN_STATES {
+    for state in RESTORE_CLOSED_RUN_STATES {
         let mut runs = tx
             .query::<AiRunRecord>()
             .filter(exact_state(state.as_str()))
@@ -851,7 +956,13 @@ async fn fence_active_leases(
             return Err(bound_reached());
         }
     }
+    let mut fenced = 0_u64;
     for run in candidates {
+        if run.recovery_epoch_id.is_some()
+            || (run.lease_owner.is_none() && run.lease_expires_at.is_none())
+        {
+            continue;
+        }
         let expires_at = run.lease_expires_at.map_or(now, |value| value.min(now));
         let outcome = tx
             .compare_and_swap::<AiRunRecord>(
@@ -868,9 +979,9 @@ async fn fence_active_leases(
         if !matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
         }
-        counts.leases_fenced = counts.leases_fenced.saturating_add(1);
+        fenced = fenced.saturating_add(1);
     }
-    Ok(())
+    Ok(fenced)
 }
 
 /// Moves every non-terminal run to `RecoveryRequired` under a new lease
@@ -1103,7 +1214,7 @@ pub(crate) async fn close_test_epoch(database: &Database<DefaultWriteBackend>) {
 mod tests {
     use super::*;
     use agql_auth::FixedClock;
-    use graphql_orm::graphql::orm::{ApplyOptions, ColumnBackupPolicy, OrmSchemaModule};
+    use graphql_orm::graphql::orm::{ApplyOptions, ColumnBackupPolicy, Entity, OrmSchemaModule};
     use graphql_orm::prelude::SqliteBackend;
     use time::{Duration, OffsetDateTime};
 
@@ -1164,8 +1275,10 @@ mod tests {
         .reference()
     }
 
-    async fn seed_run(database: &Database<SqliteBackend>, state: &str) -> Uuid {
-        let reference = principal_reference();
+    async fn seed_session(
+        database: &Database<SqliteBackend>,
+        reference: &agql_auth::PrincipalReference,
+    ) -> Uuid {
         let session_id = Uuid::new_v4();
         crate::persistence::AiSessionRecord::insert(
             database,
@@ -1190,6 +1303,12 @@ mod tests {
         )
         .await
         .expect("session should insert");
+        session_id
+    }
+
+    async fn seed_run(database: &Database<SqliteBackend>, state: &str) -> Uuid {
+        let reference = principal_reference();
+        let session_id = seed_session(database, &reference).await;
         let id = Uuid::new_v4();
         let leased = state != "queued";
         AiRunRecord::insert(
@@ -1263,6 +1382,215 @@ mod tests {
             .expect("closure should apply")
     }
 
+    /// The 0.127.0 shape of the run table, before `recovery_epoch_id`.
+    #[derive(
+        graphql_orm::prelude::GraphQLEntity,
+        graphql_orm::prelude::GraphQLOperations,
+        serde::Serialize,
+        serde::Deserialize,
+        Clone,
+        Debug,
+        PartialEq,
+    )]
+    #[graphql_entity(
+        table = "graphql_orm_ai_runs",
+        plural = "LegacyGraphqlOrmAiRuns",
+        default_sort = "created_at ASC"
+    )]
+    struct LegacyAiRunRecord {
+        pub execution_selection: Option<String>,
+        #[primary_key]
+        #[graphql_orm(auto_generated = false)]
+        #[filterable(type = "uuid")]
+        pub id: graphql_orm::uuid::Uuid,
+        #[filterable(type = "uuid")]
+        pub session_id: graphql_orm::uuid::Uuid,
+        #[filterable(type = "uuid")]
+        pub input_message_id: graphql_orm::uuid::Uuid,
+        #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
+        pub principal_reference: serde_json::Value,
+        #[filterable(type = "string")]
+        pub state: String,
+        pub attempt_id: Option<graphql_orm::uuid::Uuid>,
+        pub lease_owner: Option<String>,
+        pub lease_generation: i64,
+        pub lease_expires_at: Option<i64>,
+        pub lease_heartbeat_at: Option<i64>,
+        pub retry_count: i64,
+        pub next_attempt_at: Option<i64>,
+        pub error_code: Option<String>,
+        pub latest_checkpoint_id: Option<graphql_orm::uuid::Uuid>,
+        pub cancellation_request_id: Option<graphql_orm::uuid::Uuid>,
+        pub cancellation_requested_at: Option<i64>,
+        #[sortable]
+        pub created_at: i64,
+        #[graphql_orm(version, default = "0")]
+        pub row_version: i64,
+    }
+
+    /// The 0.127.0 shape of the recovery table, which that release never wrote.
+    #[derive(
+        graphql_orm::prelude::GraphQLEntity,
+        graphql_orm::prelude::GraphQLOperations,
+        serde::Serialize,
+        serde::Deserialize,
+        Clone,
+        Debug,
+        PartialEq,
+    )]
+    #[graphql_entity(
+        table = "graphql_orm_ai_runtime_recovery",
+        plural = "LegacyGraphqlOrmAiRuntimeRecovery",
+        default_sort = "created_at DESC"
+    )]
+    struct LegacyAiRuntimeRecoveryRecord {
+        #[primary_key]
+        #[filterable(type = "uuid")]
+        pub id: graphql_orm::uuid::Uuid,
+        pub module_version: String,
+        pub module_fingerprint: String,
+        pub state: String,
+        pub start_gate_open: bool,
+        pub fatal_issue_count: i64,
+        pub warning_count: i64,
+        #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
+        pub action_counts: serde_json::Value,
+        pub operator_subject: Option<String>,
+        #[sortable]
+        pub created_at: i64,
+        pub completed_at: Option<i64>,
+        #[graphql_orm(version, default = "0")]
+        pub row_version: i64,
+    }
+
+    #[tokio::test]
+    async fn a_prior_schema_store_with_runs_upgrades_and_opens() {
+        let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
+            .await
+            .expect("in-memory SQLite should open");
+        let module = crate::AiSchemaModule;
+        let mut prior_entities = module
+            .entities()
+            .iter()
+            .copied()
+            .filter(|entity| {
+                !matches!(
+                    entity.table_name,
+                    "graphql_orm_ai_runs" | "graphql_orm_ai_runtime_recovery"
+                )
+            })
+            .collect::<Vec<_>>();
+        prior_entities.push(LegacyAiRunRecord::metadata());
+        prior_entities.push(LegacyAiRuntimeRecoveryRecord::metadata());
+        let prior_plan = database
+            .schema()
+            .plan_migration_to_entities("ai-recovery-prior-v1", "prior AI schema", &prior_entities)
+            .await
+            .expect("prior AI schema should plan");
+        database
+            .schema()
+            .apply_migration(&prior_plan, ApplyOptions::default())
+            .await
+            .expect("prior AI schema should apply");
+        let legacy_run = Uuid::new_v4();
+        let legacy_reference = principal_reference();
+        let legacy_session = seed_session(&database, &legacy_reference).await;
+        LegacyAiRunRecord::insert(
+            &database,
+            CreateLegacyAiRunRecordInput {
+                execution_selection: None,
+                id: legacy_run,
+                session_id: legacy_session,
+                input_message_id: Uuid::new_v4(),
+                principal_reference: serde_json::to_value(&legacy_reference)
+                    .expect("principal reference should serialize"),
+                state: "queued".to_owned(),
+                attempt_id: None,
+                lease_owner: None,
+                lease_generation: 0,
+                lease_expires_at: None,
+                lease_heartbeat_at: None,
+                retry_count: 0,
+                next_attempt_at: None,
+                error_code: None,
+                latest_checkpoint_id: None,
+                cancellation_request_id: None,
+                cancellation_requested_at: None,
+            },
+        )
+        .await
+        .expect("a prior-schema run should insert");
+
+        let current_plan = database
+            .schema()
+            .plan_migration_to_entities(
+                "ai-recovery-current-v1",
+                "current AI schema",
+                module.entities(),
+            )
+            .await
+            .expect("current AI schema should plan");
+        database
+            .schema()
+            .apply_migration(&current_plan, ApplyOptions::default())
+            .await
+            .expect("the recovery ledger and run epoch columns should migrate in place");
+        let repeated = database
+            .schema()
+            .plan_migration_to_entities(
+                "ai-recovery-current-v2",
+                "current AI schema",
+                module.entities(),
+            )
+            .await
+            .expect("current AI schema should replan");
+        assert!(repeated.steps.is_empty() && repeated.statements.is_empty());
+
+        // The upgraded store already holds runs. The operator records that it
+        // was upgraded in place, so its runs stay as they were.
+        let (recovery, runs, gate) = services(&database);
+        assert!(matches!(
+            recovery.open_start_gate(&gate).await,
+            Err(AiError::RuntimeNotReady)
+        ));
+        let proof = recovery
+            .acknowledge_in_place_upgrade("upgrade-operator", "upgraded 0.127.0 in place")
+            .await
+            .expect("an in-place upgrade should open the store");
+        gate.open(&proof).expect("the first epoch opens the gate");
+        assert_eq!(run(&database, legacy_run).await.state, "queued");
+        let lease = runs
+            .claim_next("upgraded-worker")
+            .await
+            .expect("claim")
+            .expect("the prior-schema run should lease");
+        assert_eq!(lease.run_id().0, legacy_run);
+        assert!(gate_admits_lease(&gate, &lease));
+        let duplicate = database
+            .transaction(TransactionMode::StateMachine, |tx| {
+                Box::pin(async move {
+                    let current = current_epoch(tx).await?.expect("current epoch");
+                    insert_epoch(
+                        tx,
+                        PreparedEpoch {
+                            id: Uuid::new_v4(),
+                            sequence: current.epoch_sequence,
+                            module_fingerprint: current.module_fingerprint,
+                            state: EPOCH_STATE_LIVE,
+                            fatal_issue_count: 0,
+                            warning_count: 0,
+                            action_counts: serde_json::json!({}),
+                            operator_subject: None,
+                            now: 1,
+                        },
+                    )
+                    .await
+                })
+            })
+            .await;
+        assert!(duplicate.is_err(), "epoch sequences must stay unique");
+    }
+
     #[test]
     fn portable_backups_exclude_the_deployment_local_marker() {
         let entities = crate::AiSchemaModule.entities().to_vec();
@@ -1283,7 +1611,6 @@ mod tests {
     async fn an_empty_ledger_refuses_claims_and_lease_recovery() {
         let database = database().await;
         let (recovery, runs, gate) = services(&database);
-        seed_run(&database, "queued").await;
         assert!(matches!(
             runs.claim_next("recovery-worker").await,
             Err(AiError::RuntimeNotReady)
@@ -1300,6 +1627,7 @@ mod tests {
             .open_start_gate(&gate)
             .await
             .expect("first epoch should open the gate");
+        seed_run(&database, "queued").await;
         let lease = runs
             .claim_next("recovery-worker")
             .await
@@ -1309,35 +1637,207 @@ mod tests {
         assert!(gate_admits_lease(&gate, &lease));
     }
 
+    async fn seed_approval(database: &Database<SqliteBackend>) -> Uuid {
+        let id = Uuid::new_v4();
+        AiApprovalRecord::insert(
+            database,
+            crate::persistence::CreateAiApprovalRecordInput {
+                id,
+                tool_call_id: Uuid::new_v4(),
+                session_id: Uuid::new_v4(),
+                principal_subject: "recovery-user".to_owned(),
+                principal_reference_fingerprint: "principal-fingerprint".to_owned(),
+                delegated_actor_subject: None,
+                delegation_reference: None,
+                argument_hash: "argument-hash".to_owned(),
+                tool_fingerprint: "tool-fingerprint".to_owned(),
+                binding_hash: "binding-hash".to_owned(),
+                execution_target_id: "local-application".to_owned(),
+                target_schema_fingerprint: "schema-fingerprint".to_owned(),
+                operation_name: "RecoveryTest".to_owned(),
+                operation_document_hash: "operation-hash".to_owned(),
+                result_projection_fingerprint: "projection-fingerprint".to_owned(),
+                disclosure_schema_fingerprint: "disclosure-fingerprint".to_owned(),
+                policy_version: "policy-v1".to_owned(),
+                authorization_state_digest: "authorization-digest".to_owned(),
+                protected_resource_bindings: None,
+                protected_action_preview: None,
+                payload_purged_at: None,
+                action_preview_hash: "preview-hash".to_owned(),
+                state: "approved".to_owned(),
+                recent_mfa_required: false,
+                approver_subject: Some("approver".to_owned()),
+                expires_at: 2_000_000_000,
+                decided_at: Some(1_850_000_000),
+                maximum_uses: 1,
+                consumed_uses: 0,
+                consumed_at: None,
+            },
+        )
+        .await
+        .expect("approval should insert");
+        id
+    }
+
     #[tokio::test]
-    async fn first_epoch_fences_leases_without_expiry_and_honours_bounds() {
+    async fn in_place_upgrade_opens_an_existing_store_without_closing_its_work() {
         let database = database().await;
-        let (recovery, runs, _) = services(&database);
+        let (recovery, runs, gate) = services(&database);
+        let queued = seed_run(&database, "queued").await;
+        let running = seed_run(&database, "running").await;
+        let approval = seed_approval(&database).await;
+        let consent = seed_consent(&database).await;
+        assert!(matches!(
+            recovery.readiness_proof().await,
+            Err(AiError::RuntimeNotReady)
+        ));
+        assert!(matches!(
+            recovery
+                .acknowledge_in_place_upgrade("upgrade-operator", "\u{7}")
+                .await,
+            Err(AiError::InvalidInput(_))
+        ));
+
+        let proof = recovery
+            .acknowledge_in_place_upgrade("upgrade-operator", "upgraded 0.127.0 in place")
+            .await
+            .expect("an in-place upgrade should open the store");
+        gate.open(&proof).expect("the first epoch opens the gate");
+
+        // Runs, approvals and consents are untouched; only the lease granted
+        // before epochs existed is fenced for ordinary recovery.
+        let queued_row = run(&database, queued).await;
+        assert_eq!(queued_row.state, "queued");
+        assert_eq!(queued_row.lease_expires_at, None);
+        let running_row = run(&database, running).await;
+        assert_eq!(running_row.state, "running");
+        assert_eq!(running_row.lease_expires_at, Some(now().unix_timestamp()));
+        assert_eq!(
+            AiApprovalRecord::find_by_id(&database, &approval)
+                .await
+                .expect("lookup")
+                .expect("approval")
+                .state,
+            "approved"
+        );
+        assert_eq!(
+            AiEgressConsentRecord::find_by_id(&database, &consent)
+                .await
+                .expect("lookup")
+                .expect("consent")
+                .revoked_at,
+            None
+        );
+        let epoch = AiRuntimeRecoveryRecord::find_by_id(&database, &proof.epoch_id())
+            .await
+            .expect("lookup")
+            .expect("first epoch");
+        assert!(epoch_is_live(&epoch));
+        assert_eq!(epoch.operator_subject.as_deref(), Some("upgrade-operator"));
+        assert_eq!(epoch.action_counts["reason"], "upgraded 0.127.0 in place");
+        assert_eq!(epoch.action_counts["leasesFenced"], 1);
+
+        assert_eq!(
+            recovery
+                .readiness_proof()
+                .await
+                .expect("the acknowledged epoch is live")
+                .epoch_id(),
+            proof.epoch_id()
+        );
+        assert!(matches!(
+            recovery
+                .acknowledge_in_place_upgrade("upgrade-operator", "again")
+                .await,
+            Err(AiError::Conflict)
+        ));
+        let lease = runs
+            .claim_next("upgraded-worker")
+            .await
+            .expect("claim")
+            .expect("the queued run should lease");
+        assert_eq!(lease.run_id().0, queued);
+        assert!(gate_admits_lease(&gate, &lease));
+    }
+
+    #[tokio::test]
+    async fn in_place_upgrade_is_refused_once_the_ledger_has_any_row() {
+        let fresh = database().await;
+        let (recovery, _, _) = services(&fresh);
+        recovery.readiness_proof().await.expect("a new store opens");
+        assert!(matches!(
+            recovery
+                .acknowledge_in_place_upgrade("upgrade-operator", "upgraded in place")
+                .await,
+            Err(AiError::Conflict)
+        ));
+
+        let restored = database().await;
+        let (recovery, _, _) = services(&restored);
+        seed_run(&restored, "queued").await;
+        reconcile(&recovery).await;
+        assert!(matches!(
+            recovery
+                .acknowledge_in_place_upgrade("upgrade-operator", "upgraded in place")
+                .await,
+            Err(AiError::Conflict)
+        ));
+        assert!(matches!(
+            recovery.readiness_proof().await,
+            Err(AiError::RuntimeNotReady)
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_empty_ledger_on_existing_state_requires_reconcile_and_acknowledgement() {
+        let database = database().await;
+        let (recovery, runs, gate) = services(&database);
+        // Leased rows without an expiry, as a stripped or pre-epoch snapshot
+        // could carry them.
         let first = seed_run(&database, "running").await;
         let second = seed_run(&database, "leased").await;
+        let consent = seed_consent(&database).await;
+        assert!(matches!(
+            recovery.readiness_proof().await,
+            Err(AiError::RuntimeNotReady)
+        ));
+        assert!(matches!(
+            runs.claim_next("recovery-worker").await,
+            Err(AiError::RuntimeNotReady)
+        ));
 
         let small = AiRestoreCollectorLimits::new(1, 1, 1).expect("small limits");
         assert!(matches!(
-            recovery.clone().with_limits(small).readiness_proof().await,
+            recovery
+                .clone()
+                .with_limits(small)
+                .reconcile_restore(
+                    &OrmAiRestoreFactCollector::new(recovery.database.clone()),
+                    ai_schema_module_fingerprint().expect("fingerprint"),
+                    None,
+                )
+                .await,
             Err(AiError::InvalidConfiguration(_))
         ));
-        assert_eq!(run(&database, first).await.lease_expires_at, None);
+        assert_eq!(run(&database, first).await.state, "running");
 
-        recovery
-            .readiness_proof()
-            .await
-            .expect("default bounds should cover both leases");
+        let applied = reconcile(&recovery).await;
+        assert_eq!(applied.closure().runs_recovery_required(), 2);
+        assert_eq!(applied.closure().egress_consents_revoked(), 1);
         for id in [first, second] {
-            assert_eq!(
-                run(&database, id).await.lease_expires_at,
-                Some(now().unix_timestamp())
-            );
+            assert_eq!(run(&database, id).await.state, "recovery_required");
         }
-        let report = runs
-            .recover_expired_leases()
+        let revoked = AiEgressConsentRecord::find_by_id(&database, &consent)
             .await
-            .expect("fenced leases should recover through the ordinary path");
-        assert_eq!(report.recovery_required + report.requeued, 2);
+            .expect("lookup")
+            .expect("consent");
+        assert!(revoked.revoked_at.is_some());
+        let proof = recovery
+            .acknowledge_reviewed_restore(applied.epoch_id(), "restore-operator", "reviewed")
+            .await
+            .expect("the reviewed closure should be acknowledged");
+        gate.open(&proof)
+            .expect("the acknowledged epoch opens the gate");
     }
 
     #[tokio::test]

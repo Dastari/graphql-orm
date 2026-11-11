@@ -196,13 +196,37 @@ The ledger is enforced in three places:
 |---|---|
 | Live, same module fingerprint | Proof for that epoch; nothing is written |
 | Live, earlier module fingerprint | Live successor epoch; no repairs |
-| None (new store or first open after upgrading) | First live epoch, after expiring reusable approvals and expiring every active lease |
+| None, and no runs, approvals or egress consents (a new store) | First live epoch |
+| None, over existing runs, approvals or consents | `RuntimeNotReady`; the operator chooses in-place upgrade or restore |
 | Not live (restored, or a restore closure awaiting acknowledgement) | `RuntimeNotReady` |
 
-The first-epoch closure exists because an empty ledger can also come from a
-portable backup taken before the deployment ever opened its runtime. It is
-bounded by `AiRestoreCollectorLimits`; reaching a bound changes nothing and
-returns `InvalidConfiguration`, and `with_limits` raises it.
+An empty ledger over existing state is either a deployment upgraded in place
+from 0.127.0 or earlier, or a backup taken before the deployment ever recorded
+an epoch, including a 0.127-era backup or a snapshot whose ledger was
+stripped. The crate cannot tell them apart, so the operator chooses:
+
+- **Upgraded in place:** call `acknowledge_in_place_upgrade` once. It
+  succeeds only while the ledger is empty, records the first live epoch with
+  the operator subject and reason plus an
+  `ai.runtime.in_place_upgrade_acknowledged` audit event, and expires leases
+  granted before epochs existed so their workers re-claim through ordinary
+  lease recovery. Runs, approvals and egress consents are otherwise left as
+  they are. A repeat call is refused with `Conflict`.
+- **Restored from a backup:** use reconcile + acknowledge instead, as below.
+
+Choosing the in-place path for a restored store re-opens consumed approvals,
+because approval consumptions, consent revocations and run progress made
+after the backup were rolled back with it.
+
+Two further properties are deliberate:
+
+- A module upgrade records a live successor epoch. Leases granted under the
+  previous epoch stop validating, so in-flight runs fail their next fenced
+  write and are reclassified by ordinary lease recovery once they expire.
+- The current epoch is the row with the highest `epoch_sequence`. Recorded
+  epochs start at 1 and the column is uniquely indexed. A row with a crafted
+  sequence at or below 0, or at `i64::MAX`, cannot be followed by a valid
+  successor, so the store stays closed rather than reopening.
 
 ## Reopening after a restore
 
@@ -245,7 +269,8 @@ After any restore, stop every worker and writer, then:
 
 A file-level or physical database restore carries the `recorded_locally_at`
 marker with the rows, so the crate cannot detect it. Run the same steps after
-any such restore, before starting a worker.
+any such restore, before starting a worker. Use the same steps for a store
+restored from a pre-epoch backup; never `acknowledge_in_place_upgrade`.
 
 ## Remaining restore work
 

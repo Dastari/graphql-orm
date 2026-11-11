@@ -2834,6 +2834,7 @@ mod service {
             .await
             .map_err(OrmPublicError::from)?
             .ok_or_else(OrmPublicError::not_found)?;
+        crate::orm_runs::require_current_lease_epoch(tx, &run, lease).await?;
         let stored_reference: PrincipalReference =
             serde_json::from_value(run.principal_reference.clone())
                 .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
@@ -2871,6 +2872,7 @@ mod service {
             .await
             .map_err(OrmPublicError::from)?
             .ok_or_else(OrmPublicError::not_found)?;
+        crate::orm_runs::require_current_lease_epoch(tx, &run, lease).await?;
         let stored_reference: PrincipalReference =
             serde_json::from_value(run.principal_reference.clone())
                 .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;

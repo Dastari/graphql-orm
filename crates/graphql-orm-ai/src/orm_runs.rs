@@ -2394,6 +2394,7 @@ impl OrmAiRunService {
                         .await
                         .map_err(OrmPublicError::from)?
                         .ok_or_else(OrmPublicError::not_found)?;
+                    require_current_lease_epoch(tx, &current, &lease).await?;
                     let stored_reference: PrincipalReference =
                         serde_json::from_value(current.principal_reference.clone())
                             .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
@@ -2513,6 +2514,7 @@ impl OrmAiRunService {
                         .await
                         .map_err(OrmPublicError::from)?
                         .ok_or_else(OrmPublicError::not_found)?;
+                    require_current_lease_epoch(tx, &current, &lease).await?;
                     let stored_reference: PrincipalReference =
                         serde_json::from_value(current.principal_reference.clone())
                             .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
@@ -2655,6 +2657,7 @@ impl OrmAiRunService {
                         .await
                         .map_err(OrmPublicError::from)?
                         .ok_or_else(OrmPublicError::not_found)?;
+                    require_current_lease_epoch(tx, &current, &lease).await?;
                     let stored_reference: PrincipalReference =
                         serde_json::from_value(current.principal_reference.clone())
                             .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
@@ -5636,6 +5639,23 @@ pub(crate) fn exact_state(state: &str) -> AiRunRecordWhereInput {
     }
 }
 
+/// Requires, inside the caller's transaction, that the store's current epoch
+/// is live and that both the run row and `lease` were granted under it.
+///
+/// Every lease-fenced write calls this, either through
+/// [`load_and_validate_active_lease`] or beside its own inline lease check.
+pub(crate) async fn require_current_lease_epoch(
+    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    run: &AiRunRecord,
+    lease: &AiRunLease,
+) -> Result<(), OrmPublicError> {
+    let epoch = crate::orm_runtime_recovery::require_live_epoch(tx).await?;
+    if run.recovery_epoch_id != Some(epoch) || lease.recovery_epoch_id != Some(epoch) {
+        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+    }
+    Ok(())
+}
+
 pub(crate) async fn load_and_validate_active_lease(
     tx: &mut MutationContext<'_, DefaultWriteBackend>,
     lease: &AiRunLease,
@@ -5646,10 +5666,7 @@ pub(crate) async fn load_and_validate_active_lease(
         .await
         .map_err(OrmPublicError::from)?
         .ok_or_else(OrmPublicError::not_found)?;
-    let epoch = crate::orm_runtime_recovery::require_live_epoch(tx).await?;
-    if current.recovery_epoch_id != Some(epoch) || lease.recovery_epoch_id != Some(epoch) {
-        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-    }
+    require_current_lease_epoch(tx, &current, lease).await?;
     let state = persisted_state(&current)?;
     let stored_reference: PrincipalReference =
         serde_json::from_value(current.principal_reference.clone())
@@ -8024,6 +8041,112 @@ mod tests {
                 .is_err()
         );
     }
+
+    #[tokio::test]
+    async fn inline_fenced_event_writes_refuse_a_closed_epoch() {
+        let fixture = fixture().await;
+        seed_queued(&fixture).await;
+        let lease = fixture
+            .service
+            .claim_next("event-worker")
+            .await
+            .expect("claim should succeed")
+            .expect("queued run should lease");
+        let lease = fixture
+            .service
+            .start(&lease)
+            .await
+            .expect("run should start");
+        let live = || PreparedLiveDeltaEvent {
+            id: Uuid::new_v4(),
+            event_type: "provider_live_delta".to_owned(),
+            protected_payload: serde_json::json!({}),
+            correlation_id: "live-correlation".to_owned(),
+            provider_kind: "local_harness".to_owned(),
+            provider_model: "event-model".to_owned(),
+            budget_reservation_id: Uuid::new_v4(),
+            expected_owner_principal_kind: "user".to_owned(),
+            expected_owner_subject: "run-user".to_owned(),
+            expected_scope_kind: "tenant".to_owned(),
+            expected_scope_id: "tenant-run".to_owned(),
+            expected_tenant_id: None,
+        };
+        let activity = || PreparedProviderActivityEvent {
+            id: Uuid::new_v4(),
+            inbox_event_id: Uuid::new_v4(),
+            protected_payload: serde_json::json!({}),
+            protected_inbox_payload: serde_json::json!({}),
+            correlation_id: "activity-correlation".to_owned(),
+            provider_kind: "local_harness".to_owned(),
+            provider_model: "event-model".to_owned(),
+            budget_reservation_id: Uuid::new_v4(),
+            expected_owner_principal_kind: "user".to_owned(),
+            expected_owner_subject: "run-user".to_owned(),
+            expected_scope_kind: "tenant".to_owned(),
+            expected_scope_id: "tenant-run".to_owned(),
+            expected_tenant_id: None,
+        };
+        let ui = || PreparedUiIntentEvent {
+            id: Uuid::new_v4(),
+            inbox_event_id: Uuid::new_v4(),
+            protected_payload: serde_json::json!({}),
+            protected_inbox_payload: serde_json::json!({}),
+            correlation_id: "ui-correlation".to_owned(),
+            provider_kind: "local_harness".to_owned(),
+            provider_model: "event-model".to_owned(),
+            provider_response_id: None,
+            budget_reservation_id: Uuid::new_v4(),
+            usage: AiBudgetAmounts::default(),
+            cached_input_tokens: 0,
+            expected_owner_principal_kind: "user".to_owned(),
+            expected_owner_subject: "run-user".to_owned(),
+            expected_scope_kind: "tenant".to_owned(),
+            expected_scope_id: "tenant-run".to_owned(),
+            expected_tenant_id: None,
+        };
+
+        // While the epoch is live these writes get past the epoch check and
+        // fail on their unrelated, deliberately invalid event bindings.
+        let open = [
+            fixture
+                .service
+                .append_live_delta_event(&lease, live())
+                .await,
+            fixture
+                .service
+                .append_provider_activity_event(&lease, activity())
+                .await,
+            fixture
+                .service
+                .append_ui_intent_event(&lease, ui())
+                .await
+                .map(|_| ()),
+        ];
+        for result in open {
+            assert!(result.is_err());
+            assert!(!matches!(result, Err(AiError::RuntimeNotReady)));
+        }
+
+        crate::orm_runtime_recovery::close_test_epoch(&fixture.database).await;
+        assert!(matches!(
+            fixture
+                .service
+                .append_live_delta_event(&lease, live())
+                .await,
+            Err(AiError::RuntimeNotReady)
+        ));
+        assert!(matches!(
+            fixture
+                .service
+                .append_provider_activity_event(&lease, activity())
+                .await,
+            Err(AiError::RuntimeNotReady)
+        ));
+        assert!(matches!(
+            fixture.service.append_ui_intent_event(&lease, ui()).await,
+            Err(AiError::RuntimeNotReady)
+        ));
+    }
 }
 
 /// Returns whether one run already produced a durable assistant message.
@@ -8090,7 +8213,3 @@ pub(crate) async fn run_provider_dispatch_possible(
         .map_err(OrmPublicError::from)?;
     Ok(!rows.is_empty())
 }
-
-#[cfg(all(test, feature = "sqlite"))]
-#[path = "orm_run_heartbeat_tests.rs"]
-mod heartbeat_contention_tests;

@@ -15,11 +15,12 @@ supersedes: []
 Apply AI schema module `0.77.0` before restarting all workers. No row data
 migration is needed. Open each runtime with
 `OrmAiRuntimeRecoveryService::open_start_gate` on the store its workers use,
-instead of a host-built `AiRuntimeReadinessReport`. Do this before any worker
-runs: claims refuse with `RuntimeNotReady` until the first epoch exists. The
-first open expires unconsumed approvals and active leases once. After any
-restore, run `reconcile_restore`, review, then `acknowledge_reviewed_restore`;
-see the
+instead of a host-built `AiRuntimeReadinessReport`; claims refuse with
+`RuntimeNotReady` until the store has a live epoch. After upgrading in place,
+call `acknowledge_in_place_upgrade` once. If the store was restored from a
+backup, use `reconcile_restore` + `acknowledge_reviewed_restore` instead.
+Choosing the in-place path for a restored store re-opens consumed approvals.
+See the
 [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01270-to-01280-enforced-runtime-closure-after-restore).
 
 ## 0.124.0: assurance evaluators take a request check

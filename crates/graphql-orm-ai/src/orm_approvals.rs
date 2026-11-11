@@ -4061,13 +4061,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn first_epoch_expires_unconsumed_approvals_and_fences_leases() {
+    async fn an_empty_ledger_over_existing_approvals_stays_closed_until_acknowledged() {
         let fixture = fixture().await;
         let (requested, _) = request_wait(&fixture, fixture.now + Duration::minutes(30)).await;
         let (running, _) = seed_running_tool(&fixture).await;
 
-        // An empty ledger: a store upgraded to this release, or restored from
-        // a backup taken before its first epoch.
+        // An empty ledger over existing state: a store upgraded to this
+        // release, or restored from a backup taken before its first epoch.
         let epochs = AiRuntimeRecoveryRecord::query(fixture.database.pool())
             .fetch_all()
             .await
@@ -4091,16 +4091,36 @@ mod tests {
             fixture.run_service.heartbeat(&running).await,
             Err(AiError::RuntimeNotReady)
         ));
-
         let recovery = crate::OrmAiRuntimeRecoveryService::new(
             fixture.database.clone(),
             fixture.clock.clone(),
         );
-        recovery
-            .readiness_proof()
-            .await
-            .expect("an empty ledger should record the first live epoch");
+        assert!(matches!(
+            recovery.readiness_proof().await,
+            Err(AiError::RuntimeNotReady)
+        ));
+        assert!(matches!(
+            fixture
+                .run_service
+                .claim_next_approved("pre-epoch-worker")
+                .await,
+            Err(AiError::RuntimeNotReady)
+        ));
 
+        let applied = recovery
+            .reconcile_restore(
+                &crate::OrmAiRestoreFactCollector::new(fixture.database.clone()),
+                crate::runtime::ai_schema_module_fingerprint().expect("module fingerprint"),
+                Some("restore-operator".to_owned()),
+            )
+            .await
+            .expect("restore closure should apply");
+        assert_eq!(applied.closure().approvals_expired(), 1);
+        assert_eq!(applied.closure().runs_recovery_required(), 2);
+        recovery
+            .acknowledge_reviewed_restore(applied.epoch_id(), "restore-operator", "reviewed")
+            .await
+            .expect("the reviewed closure should be acknowledged");
         let approval = AiApprovalRecord::find_by_id(&fixture.database, &requested.approval_id().0)
             .await
             .expect("approval lookup")
@@ -4110,11 +4130,5 @@ mod tests {
             fixture.run_service.heartbeat(&running).await,
             Err(AiError::Conflict)
         ));
-        let report = fixture
-            .run_service
-            .recover_expired_leases()
-            .await
-            .expect("fenced leases should recover through the ordinary path");
-        assert_eq!(report.recovery_required, 1);
     }
 }
