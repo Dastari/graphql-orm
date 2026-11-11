@@ -907,25 +907,12 @@ fn identifier_path_parts(identifier: &str) -> impl Iterator<Item = &str> {
     })
 }
 
-/// The PostgreSQL identifiers a declared table path names, in order.
-///
-/// Mirrors [`SqlDialect::quote_identifier_path`] for PostgreSQL: the path is
-/// split at unquoted dots, empty parts are dropped, a part wrapped in double
-/// quotes is unescaped (`""` becomes `"`), and any other part is the
-/// identifier literally, case preserved. `app."a.b"` names `["app", "a.b"]`
-/// and `"Users"` names `["Users"]`. The change journal recorder repeats this
-/// in PL/pgSQL; keep the two in step.
-pub(crate) fn postgres_identifier_path_names(path: &str) -> Vec<String> {
+/// Whether a declared table path has a single part, with no schema.
+pub(crate) fn identifier_path_is_bare(path: &str) -> bool {
     identifier_path_parts(path)
         .filter(|part| !part.is_empty())
-        .map(|part| {
-            if part.len() >= 2 && part.starts_with('"') && part.ends_with('"') {
-                part[1..part.len() - 1].replace("\"\"", "\"")
-            } else {
-                part.to_string()
-            }
-        })
-        .collect()
+        .count()
+        == 1
 }
 
 impl DatabaseBackend {

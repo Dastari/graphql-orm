@@ -67,7 +67,8 @@ writes fail. Cut over in this order:
    target (`plan_schema_target` and `apply_schema_target` with the
    `change-journal` feature), or call
    `database.ensure_change_journal_recorder(&graphql_orm_entity_metadata())`.
-   Either one creates the journal if it is missing, drops the `INSERT` policy
+   Either one creates the journal and the registry if they are missing,
+   binds each single-key table in the registry, drops the `INSERT` policy
    that 0.120.0 added, and revokes every table or column privilege other than
    `SELECT` that a role other than its owner holds on the journal. It also
    creates `graphql_orm.record_change_journal_entry()`, revokes `EXECUTE` on
@@ -121,11 +122,14 @@ Behaviour changes:
 - Partitioned tables are not supported for the journal: a partitioned
   journal, or a partitioned entity table, makes journaled writes fail.
 - The journal requires PostgreSQL 13 or later.
-- A bare entity table name must resolve in the journal's schema, which is
-  where both the ORM's unqualified names and the journal resolve. The plan
-  fails for a bare-named table elsewhere; qualify its table path. Quoted
-  paths such as `"Users"` or `app."a.b"` resolve with the ORM's identifier
-  rules.
+- Each journaled table is bound in the owner-maintained registry
+  `graphql_orm.change_journal_tables` to the table the ORM's writes reach:
+  the declared path is rendered as the ORM renders it, so `Users` binds to
+  `users` and `"Users"` to `"Users"`. A bare entity table name must resolve
+  in the journal's schema, which is where both the ORM's unqualified names and
+  the journal resolve; the plan fails for a bare-named table elsewhere, so
+  qualify its table path. Re-apply the target after renaming or moving an
+  entity table.
 
 ## 0.124.0: assurance evaluators take a request check
 

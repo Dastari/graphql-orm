@@ -4655,6 +4655,74 @@ impl RlsIntrospectionBackend for super::PostgresBackend {
         .bind(&journal_regclass)
         .fetch_optional(&mut *conn)
         .await?;
+        live.change_journal_registry_present = sqlx::query_scalar::<_, bool>(
+            "SELECT to_regclass('graphql_orm.change_journal_tables') IS NOT NULL",
+        )
+        .fetch_one(&mut *conn)
+        .await?;
+        if live.change_journal_registry_present {
+            live.change_journal_registry_owned_by_recorder_owner = sqlx::query_scalar(
+                "SELECT COALESCE((SELECT g.relowner = p.proowner FROM pg_class g, pg_proc p
+                                  WHERE g.oid = to_regclass('graphql_orm.change_journal_tables')
+                                    AND p.oid = to_regprocedure(format('graphql_orm.%I()', $1::text))), false)",
+            )
+            .bind(super::rls::CHANGE_JOURNAL_FUNCTION)
+            .fetch_one(&mut *conn)
+            .await?;
+            live.change_journal_registry_writers = sqlx::query_scalar(
+                "SELECT DISTINCT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee)::text END
+                 FROM pg_class c
+                 CROSS JOIN LATERAL (
+                     SELECT c.relacl AS acl
+                     UNION ALL
+                     SELECT att.attacl FROM pg_attribute att
+                     WHERE att.attrelid = c.oid AND att.attnum > 0 AND NOT att.attisdropped
+                 ) acls
+                 CROSS JOIN LATERAL aclexplode(acls.acl) a
+                 WHERE c.oid = to_regclass('graphql_orm.change_journal_tables')
+                   AND a.grantee <> c.relowner AND a.privilege_type <> 'SELECT'
+                 ORDER BY 1",
+            )
+            .fetch_all(&mut *conn)
+            .await?;
+            let rows = sqlx::query(
+                "SELECT r.journal_schema, r.declared_table, r.entity_name, r.key_column,
+                        n.nspname::text AS relation_schema, c.relname::text AS relation_name
+                 FROM graphql_orm.change_journal_tables r
+                 LEFT JOIN pg_class c ON c.oid = r.relid::oid
+                 LEFT JOIN pg_namespace n ON n.oid = c.relnamespace
+                 ORDER BY r.journal_schema, r.declared_table",
+            )
+            .fetch_all(&mut *conn)
+            .await?;
+            for row in rows {
+                let declared_table: String = row.try_get("declared_table")?;
+                let relation_schema: Option<String> = row.try_get("relation_schema")?;
+                let relation_name: Option<String> = row.try_get("relation_name")?;
+                // Resolve the declared path exactly as the ORM's writes do.
+                let orm_relation = sqlx::query(
+                    "SELECT n.nspname::text AS schema_name, c.relname::text AS table_name
+                     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                     WHERE c.oid = to_regclass($1)",
+                )
+                .bind(super::rls::change_journal_orm_path(&declared_table))
+                .fetch_optional(&mut *conn)
+                .await?
+                .map(|row| -> crate::Result<(String, String)> {
+                    Ok((row.try_get("schema_name")?, row.try_get("table_name")?))
+                })
+                .transpose()?;
+                live.change_journal_registry
+                    .push(super::rls::LiveChangeJournalBinding {
+                        journal_schema: row.try_get("journal_schema")?,
+                        declared_table,
+                        entity_name: row.try_get("entity_name")?,
+                        key_column: row.try_get("key_column")?,
+                        relation: relation_schema.zip(relation_name),
+                        orm_relation,
+                    });
+            }
+        }
         live.change_journal_owned_by_current_role = sqlx::query_scalar(
             "SELECT COALESCE((SELECT pg_has_role(current_user, c.relowner, 'MEMBER')
                               FROM pg_class c WHERE c.oid = to_regclass($1)), false)",

@@ -669,6 +669,21 @@ const RECORDER_PRIVILEGES_CLEAN: &str = "(pg_catalog.pg_has_role(CURRENT_USER, j
                     AND CASE WHEN acl.grantee = 0 THEN true
                              ELSE pg_catalog.pg_has_role(CURRENT_USER, acl.grantee, 'MEMBER') END)))";
 
+/// The registry is owned by the recorder's owner and grants no role other
+/// than its owner anything beyond `SELECT`, at table or column level.
+const REGISTRY_INTACT: &str = "EXISTS (
+              SELECT 1 FROM pg_catalog.pg_class g
+              WHERE g.oid = pg_catalog.to_regclass('graphql_orm.change_journal_tables')
+                AND g.relowner = p.proowner
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM (SELECT g.relacl AS acl
+                          UNION ALL
+                          SELECT att.attacl FROM pg_catalog.pg_attribute att
+                          WHERE att.attrelid = g.oid AND att.attnum > 0 AND NOT att.attisdropped) acls
+                    CROSS JOIN LATERAL pg_catalog.aclexplode(acls.acl) acl
+                    WHERE acl.grantee <> g.relowner AND acl.privilege_type <> 'SELECT'))";
+
 /// The recorder check for one table.
 ///
 /// It requires the recording setting, a `session_replication_role` other
@@ -713,13 +728,10 @@ where
         expected_arguments.extend_from_slice(argument.as_bytes());
         expected_arguments.push(0);
     }
-    let table = super::SqlDialect::quote_identifier_path(
-        &super::DatabaseBackend::Postgres,
-        metadata.table_name,
-    );
-    // A bare declared name binds to the table of that name in the journal's
-    // schema, as the recorder requires; a qualified path resolves exactly.
-    let qualified = super::dialect::postgres_identifier_path_names(metadata.table_name).len() == 2;
+    // The table the ORM's own writes reach: the declared path rendered as the
+    // ORM renders it. A bare name must resolve in the journal's schema.
+    let table = super::rls::change_journal_orm_path(metadata.table_name);
+    let qualified = !super::dialect::identifier_path_is_bare(metadata.table_name);
     let sql = format!(
         "SELECT 1
         FROM pg_catalog.pg_trigger tr
@@ -748,6 +760,12 @@ where
           AND args.journal_schema NOT LIKE 'pg\\_temp%'
           AND args.journal_schema NOT LIKE 'pg\\_toast\\_temp%'
           AND (? OR tn.nspname::pg_catalog.text = args.journal_schema)
+          AND EXISTS (
+              SELECT 1 FROM graphql_orm.change_journal_tables r
+              WHERE r.journal_schema = args.journal_schema AND r.declared_table = ?
+                AND r.entity_name = ? AND r.key_column = ? AND r.relid::pg_catalog.oid = tr.tgrelid
+          )
+          AND {REGISTRY_INTACT}
           AND NOT EXISTS (
               SELECT 1 FROM pg_catalog.pg_trigger other
               WHERE other.tgrelid = tr.tgrelid AND other.tgfoid = tr.tgfoid AND other.oid <> tr.oid
@@ -768,6 +786,9 @@ where
         SqlValue::String(super::rls::CHANGE_JOURNAL_FUNCTION_CONFIG.to_string()),
         SqlValue::Bytes(expected_arguments),
         SqlValue::Bool(qualified),
+        SqlValue::String(metadata.table_name.to_string()),
+        SqlValue::String(metadata.entity_name.to_string()),
+        SqlValue::String(key.to_string()),
         SqlValue::String(super::rls::CHANGE_JOURNAL_SETTING.to_string()),
     ];
     if !hook_ctx.fetch_rows(&sql, &values).await?.is_empty() {
@@ -850,8 +871,23 @@ where
             super::rls::CHANGE_JOURNAL_FUNCTION
         ));
     }
+    let registry = vec![SqlValue::String(table_name.to_string())];
+    if hook_ctx
+        .fetch_rows(
+            "SELECT 1 FROM pg_catalog.pg_class g
+             WHERE g.oid = pg_catalog.to_regclass('graphql_orm.change_journal_tables')
+               AND EXISTS (SELECT 1 FROM graphql_orm.change_journal_tables r WHERE r.declared_table = ?)",
+            &registry,
+        )
+        .await?
+        .is_empty()
+    {
+        return Ok(format!(
+            "the change journal registry has no binding for table {table_name}; apply the schema target or Database::ensure_change_journal_recorder as the schema owner"
+        ));
+    }
     Ok(format!(
-        "the change journal recorder is missing or altered on table {table_name}; apply the schema target or Database::ensure_change_journal_recorder as the schema owner"
+        "the change journal recorder, or its registry binding, is missing or altered on table {table_name}; apply the schema target or Database::ensure_change_journal_recorder as the schema owner"
     ))
 }
 

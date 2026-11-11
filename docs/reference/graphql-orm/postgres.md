@@ -167,6 +167,11 @@ With the `change-journal` feature, the database, not the runtime role, records j
 `Database::ensure_change_journal_recorder(&entities)`, creates:
 
 - the journal, if it is missing, secured as above;
+- the registry `graphql_orm.change_journal_tables`, which binds each journal schema and declared
+  table to an entity name, a key column and a table identity (`regclass`). Every privilege other
+  than `SELECT` held by any role other than its owner is revoked, and `SELECT` is granted to
+  `PUBLIC`: the ORM check and validation read it as the runtime role, and it holds nothing that
+  `pg_trigger.tgargs` does not already show. Bindings whose table no longer exists are removed;
 - `graphql_orm.record_change_journal_entry()`, a `SECURITY DEFINER` trigger function with
   `search_path = pg_catalog, pg_temp` and schema-qualified names and types. `EXECUTE` is revoked
   from `PUBLIC` and from every other role except its owner;
@@ -177,22 +182,24 @@ With the `change-journal` feature, the database, not the runtime role, records j
   key encoding (`bin:<hex>` for `bytea` keys, otherwise the key's text form).
 
 The plan also drops any trigger that calls the recorder under a name other than
-`graphql_orm_change_journal` on a table the applying role acts as owner of; graphql-orm never
-installs one, and validation reports any it cannot drop. Partition clones go with their parent,
+`graphql_orm_change_journal` on a table the applying role has the owner's privileges on;
+graphql-orm never installs one, and validation reports any it cannot drop. Partition clones go with their parent,
 which relies on `pg_trigger.tgparentid`: the journal requires PostgreSQL 13 or later.
 
 Nothing drops a correctly named recorder trigger on a table outside the target. Another schema
 target in the same database may manage that table, so validation reports it as a `Warning`, not
-an `Error`. Because the recorder binds the declared table to the table it fires on, such a trigger
-can only record that table's own changes under its own name. If no schema target manages the
+an `Error`. Because the recorder only records through a registry binding to the table it fires on,
+such a trigger can only record that table's own changes. If no schema target manages the
 table, the trigger is unexpected: an operator has to drop it.
 
-The declared table is the entity's table path as written, such as `users`, `"Users"`,
-`app."Orders"` or `app."a.b"`. When a trigger is installed, the path is resolved with the ORM's
-PostgreSQL identifier rules: split at unquoted dots, quoted parts unescaped, unquoted parts taken
-literally. A qualified path must name the table's schema and name exactly. A bare name must name a
-table in the journal's schema, which is where the ORM's unqualified names and the journal itself
-resolve; qualify entity tables that live elsewhere. Installation fails otherwise.
+The declared table is the entity's table path as written, such as `users`, `Users`, `App.users`,
+`"Users"`, `app."Orders"` or `app."a.b"`. When a binding is written, the path is rendered exactly
+as the ORM's own SQL renders it and resolved with `to_regclass`, so it names the table the ORM
+writes. Plain non-reserved identifiers stay unquoted and PostgreSQL folds them (`Users` is
+`users`, `App.users` is `app.users`); quoted parts keep their case; reserved words are quoted. A
+bare name must resolve to a table in the journal's schema, which is where the ORM's unqualified
+names and the journal itself resolve; qualify entity tables that live elsewhere. Installation fails
+otherwise. Re-apply the target after renaming or moving an entity table.
 
 The recorder runs as its owner, which is also the journal owner. It records only while the
 transaction-local setting `graphql_orm.change_journal` is `on`. ORM write transactions on a
@@ -204,9 +211,10 @@ changes. The recorder raises instead of recording unless all of these hold:
 - it fires as an `AFTER` row trigger named `graphql_orm_change_journal`;
 - the table it fires on is the schema and name baked into its arguments, is not temporary, and is
   owned by the recorder's owner;
-- the declared table it records, resolved with the same rules, names that table: a qualified path
-  its schema and name exactly, a bare name that table in the journal's schema;
 - the key column is the table's sole primary-key column;
+- the registry is owned by the recorder's owner, grants nothing beyond `SELECT` to other roles,
+  and has a row for the trigger's journal schema and declared table, with its entity name and key
+  column, whose table identity is the table the trigger fires on;
 - the journal exists in the recorded schema as an ordinary table, is owned by the recorder's
   owner, carries no non-internal trigger or rule, and grants `TRIGGER` to no other role.
 
@@ -216,8 +224,8 @@ reads the transaction's snapshot, so it can miss a trigger committed after that 
 and before the lock. The `TRIGGER` refusal narrows this to triggers added by a role that held
 `TRIGGER` at that moment and no longer does, or by the owner.
 
-The entity name in the arguments is not tied to the table by the database. Validation compares it
-with the target for every managed table, and reports recorder triggers on other tables.
+Because the registry fixes the entity name, key column and table for each declared table, a
+trigger that carries any other combination records nothing.
 
 A trigger on the journal would run as the journal owner whenever the recorder appends, which is
 why the journal must carry none and why no other role may hold `TRIGGER` on it. A role with
@@ -238,6 +246,8 @@ Before relying on the recorder, each ORM write transaction checks once per table
   recorder owned by the table owner, and is the table's only trigger calling it;
 - the trigger's arguments name the table, the write's entity and key, and a journal owned by that
   owner with no trigger or rule;
+- the registry binds the write's journal schema and declared table, entity and key to the table
+  the ORM's writes resolve the declared path to, and no role other than its owner can write it;
 - the current role, unless it acts as the journal owner, holds no table or column privilege on the
   journal beyond `SELECT` and no `EXECUTE` on the recorder. This covers grants to `PUBLIC` and to
   any role it is a member of, including `NOINHERIT` memberships.
@@ -250,6 +260,12 @@ privileges would allow. Otherwise the write fails and rolls back, with an error 
 `validate_target` reports the same conditions, plus:
 
 - a missing journal, or a missing or modified recorder function;
+- a missing registry, one not owned by the recorder's owner, or any role other than its owner
+  holding a privilege on it beyond `SELECT`;
+- for each single-key table of the target, a missing registry binding, one whose table no longer
+  exists, one bound to a different table than the ORM's writes resolve the declared path to, or one
+  with another entity or key;
+- a recorder trigger whose journal schema is not the journal the connection resolves;
 - a current role that acts as the journal owner, whether or not the target has RLS entities;
 - any role other than the owner holding a table or column privilege on the journal beyond
   `SELECT`, or `EXECUTE` on the recorder;

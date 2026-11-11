@@ -377,7 +377,8 @@ fn full_target_rls_plan_covers_search_documents_and_the_change_log() {
     let trigger = plan.statements.iter().any(|statement| {
         statement.starts_with("DO $graphql_orm$")
             && statement.contains("CREATE TRIGGER %I AFTER INSERT OR UPDATE OR DELETE ON %s")
-            && statement.contains("'\"rls_cov_plain\"'")
+            && statement.contains("to_regclass('rls_cov_plain')")
+            && statement.contains("INSERT INTO graphql_orm.change_journal_tables")
     });
     assert_eq!(trigger, cfg!(feature = "change-journal"), "{joined}");
     if cfg!(feature = "change-journal") {
