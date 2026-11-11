@@ -68,16 +68,18 @@ writes fail. Cut over in this order:
    `change-journal` feature), or call
    `database.ensure_change_journal_recorder(&graphql_orm_entity_metadata())`.
    Either one creates the journal if it is missing, drops the `INSERT` policy
-   that 0.120.0 added, and revokes every privilege on the journal from every
-   role other than its owner. It also creates
+   that 0.120.0 added, and revokes every privilege other than `SELECT` that a
+   role other than its owner holds on the journal. It also creates
    `graphql_orm.record_change_journal_entry()`, revokes `EXECUTE` on it from
    every role other than its owner, and installs the
    `graphql_orm_change_journal` trigger on every single-key table.
    `ensure_change_journal_table` alone does not install the recorder.
 3. Revoke anything the plan could not: grants made by another grantor, and
-   any `TRIGGER` privilege on entity tables held by runtime roles. Grant
-   `SELECT` on the journal again only to a dedicated export role, if one reads
-   it; re-applying the plan revokes it again. Do not grant `EXECUTE` on the
+   any `TRIGGER` privilege on entity tables held by runtime roles. `SELECT`
+   grants on the journal are kept and survive re-applying the plan; with no
+   policies they read nothing unless the role also has `BYPASSRLS`, so grant
+   `SELECT` to a dedicated `BYPASSRLS` export role if one reads the journal,
+   and revoke it from runtime roles. Do not grant `EXECUTE` on the
    recorder: a blanket `GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA graphql_orm`
    includes it, and journaled writes by that role then fail.
 4. Run `validate_target` with the runtime pool and refuse to serve on errors.

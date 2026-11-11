@@ -272,8 +272,9 @@ impl crate::db::Database {
     /// single-key entity table calls the `SECURITY DEFINER` function
     /// `graphql_orm.record_change_journal_entry()`, which runs as its owner
     /// with `search_path = pg_catalog, pg_temp`. The journal has RLS enabled
-    /// and no policies, and every privilege other roles hold on it, and on
-    /// the recorder, is revoked. Run this, or apply the schema target, as the
+    /// and no policies; every privilege beyond `SELECT` other roles hold on
+    /// it, and `EXECUTE` on the recorder, is revoked. Run this, or apply the
+    /// schema target, as the
     /// role that owns the entity tables and the journal; never as the runtime
     /// role.
     ///

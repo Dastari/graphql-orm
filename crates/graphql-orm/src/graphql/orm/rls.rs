@@ -340,24 +340,24 @@ pub fn postgres_search_delete_function_sql() -> String {
 ///
 /// RLS is enabled (not forced) with no policies, so a role subject to RLS can
 /// neither read nor write entries. The `INSERT` policy that earlier releases
-/// created is dropped, and every privilege any role other than the owner holds
-/// on the journal, including `PUBLIC`, is revoked; the statement raises if a
-/// grant survives. Entries are recorded by the database-side recorder,
-/// `graphql_orm.record_change_journal_entry()`, which runs as the journal
-/// owner, so a role that could add a trigger to the journal could run code as
-/// that owner. Grant `SELECT` again to a dedicated export role after applying
-/// if one reads the journal; the owner and `BYPASSRLS` roles with `SELECT`
-/// read it for incremental backup export.
+/// created is dropped, and every privilege other than `SELECT` that any role
+/// other than the owner holds on the journal, `PUBLIC` included, is revoked;
+/// the statement raises if one survives. Entries are recorded by the
+/// database-side recorder, `graphql_orm.record_change_journal_entry()`, which
+/// runs as the journal owner, so a role that could add a trigger to the
+/// journal could run code as that owner. `SELECT` grants are kept: they cannot
+/// write or add triggers, and with no policies they read nothing unless the
+/// role also has `BYPASSRLS`, as a dedicated backup export role does.
 pub fn postgres_change_log_rls_sql() -> String {
     let backend = DatabaseBackend::Postgres;
     let table = backend.quote_identifier(CHANGE_LOG_TABLE);
     let policy = backend.quote_identifier(&legacy_change_log_policy_name());
     format!(
-        "DO $graphql_orm$ DECLARE journal pg_catalog.regclass := pg_catalog.to_regclass({regclass}); grantee_name pg_catalog.text; BEGIN IF journal IS NOT NULL THEN \
+        "DO $graphql_orm$ DECLARE journal pg_catalog.regclass := pg_catalog.to_regclass({regclass}); grantee_name pg_catalog.text; privilege_name pg_catalog.text; BEGIN IF journal IS NOT NULL THEN \
          ALTER TABLE {table} ENABLE ROW LEVEL SECURITY; DROP POLICY IF EXISTS {policy} ON {table}; \
-         FOR grantee_name IN SELECT DISTINCT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(a.grantee)) END FROM pg_catalog.pg_class c CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) a WHERE c.oid = journal AND a.grantee <> c.relowner LOOP \
-         EXECUTE pg_catalog.format('REVOKE ALL ON %s FROM %s CASCADE', journal, grantee_name); END LOOP; \
-         IF EXISTS (SELECT 1 FROM pg_catalog.pg_class c CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) a WHERE c.oid = journal AND a.grantee <> c.relowner) THEN RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'graphql-orm could not revoke every non-owner privilege on the change journal; revoke the remaining grants as their grantor'; END IF; \
+         FOR grantee_name, privilege_name IN SELECT DISTINCT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(a.grantee)) END, a.privilege_type FROM pg_catalog.pg_class c CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) a WHERE c.oid = journal AND a.grantee <> c.relowner AND a.privilege_type <> 'SELECT' LOOP \
+         EXECUTE pg_catalog.format('REVOKE %s ON %s FROM %s CASCADE', privilege_name, journal, grantee_name); END LOOP; \
+         IF EXISTS (SELECT 1 FROM pg_catalog.pg_class c CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) a WHERE c.oid = journal AND a.grantee <> c.relowner AND a.privilege_type <> 'SELECT') THEN RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'graphql-orm could not revoke every non-owner privilege beyond SELECT on the change journal; revoke the remaining grants as their grantor'; END IF; \
          END IF; END $graphql_orm$",
         regclass = sql_string_literal(&table),
     )

@@ -144,12 +144,13 @@ behalf of RLS entities, and `validate_target` reports drift on them:
   table is missing. Dropping or rebuilding the search index drops the trigger; re-applying the
   schema target recreates it. The runtime role needs DML on the search table, as before.
 - **Change journal.** `__graphql_orm_change_log` gets RLS enabled (not forced) with no policies,
-  and every privilege held by any role other than its owner, `PUBLIC` included, is revoked. A role
-  subject to RLS can neither read nor write entries. The plan drops the `INSERT ... WITH CHECK
+  and every privilege other than `SELECT` held by any role other than its owner, `PUBLIC`
+  included, is revoked. A role subject to RLS can neither read nor write entries. The plan drops the `INSERT ... WITH CHECK
   (true)` policy that 0.120.0 to 0.124.x created, and `ensure_change_journal_table` drops it when
   the caller owns the journal. Create the journal with the schema owner, not the runtime role, or
-  the runtime role owns it and validation reports it as not enforced. A dedicated export role
-  needs `SELECT` granted again after each application. See
+  the runtime role owns it and validation reports it as not enforced. `SELECT` grants survive
+  re-application: they cannot write or add triggers, and with no policies they read nothing unless
+  the role also has `BYPASSRLS`, as a dedicated backup export role does. See
   [Change journal recorder](#change-journal-recorder).
 
 Validation reports a missing or altered policy, any additional policy on these tables (an extra

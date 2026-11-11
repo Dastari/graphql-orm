@@ -387,11 +387,13 @@ fn full_target_rls_plan_covers_search_documents_and_the_change_log() {
             ),
             "{joined}"
         );
-        // Every non-owner grant on the journal and the recorder is revoked.
+        // Every non-owner grant beyond SELECT on the journal, and on the
+        // recorder, is revoked.
         assert!(
-            joined.contains("REVOKE ALL ON %s FROM %s CASCADE"),
+            joined.contains("REVOKE %s ON %s FROM %s CASCADE"),
             "{joined}"
         );
+        assert!(joined.contains("a.privilege_type <> 'SELECT'"), "{joined}");
         assert!(
             joined.contains("REVOKE ALL ON FUNCTION %s FROM %s CASCADE"),
             "{joined}"
@@ -1845,16 +1847,31 @@ async fn journal_privileges_beyond_select_are_refused() -> Result<(), Box<dyn st
         .await?;
     drop(session);
 
-    // Re-applying the target revokes every grant on the journal.
+    // Re-applying the target revokes every journal grant beyond SELECT. The
+    // role's SELECT grant survives and is accepted: it cannot write or add
+    // triggers, and under RLS with no policies it reads nothing.
     reapply_target(&owner, "journal-grants").await?;
-    let held: bool = sqlx::query_scalar(&format!(
-        "SELECT has_table_privilege('{role}', '{CHANGE_LOG_TABLE}', 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')"
+    let privilege = |names: &'static str| {
+        format!("SELECT has_table_privilege('{role}', '{CHANGE_LOG_TABLE}', '{names}')")
+    };
+    let writes: bool = sqlx::query_scalar(&privilege(
+        "INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER",
     ))
     .fetch_one(&owner)
     .await?;
-    assert!(!held);
+    assert!(!writes);
+    let reads: bool = sqlx::query_scalar(&privilege("SELECT"))
+        .fetch_one(&owner)
+        .await?;
+    assert!(reads);
+    let journal_count = format!("SELECT COUNT(*)::BIGINT AS count FROM {CHANGE_LOG_TABLE}");
+    assert_eq!(
+        count_as(&runtime, &journal_count, Some(&tenant_a)).await?,
+        0
+    );
     let clean = journal_errors_on(&owner, CHANGE_LOG_TABLE).await?;
     assert!(clean.is_empty(), "{clean:?}");
+    assert_eq!(recorder_check(&runtime_database, &[]).await?, Ok(()));
     let write = schema
         .execute(Request::new(create_plain("after revoke")).data(tenant_a.clone()))
         .await;
