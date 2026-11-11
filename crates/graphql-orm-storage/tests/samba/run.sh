@@ -10,7 +10,9 @@ NORMAL="graphql-orm-smb-${RUN_ID}"
 ENCRYPTED="graphql-orm-smb-encrypted-${RUN_ID}"
 CONSTRAINED="graphql-orm-smb-constrained-${RUN_ID}"
 VOLUME="graphql-orm-smb-data-${RUN_ID}"
-IMAGE=${SMB_TEST_IMAGE:-dperson/samba:latest}
+# Reviewed multi-platform index digest of dperson/samba:latest (2026-11-11).
+# Override SMB_TEST_IMAGE only with another digest-pinned reference.
+IMAGE=${SMB_TEST_IMAGE:-dperson/samba@sha256:66088b78a19810dd1457a8f39340e95e663c728083efa5fe7dc0d40b2478e869}
 PULL_POLICY=${SMB_TEST_PULL_POLICY:-never}
 SMB_TEST_CARGO=${SMB_TEST_CARGO:-cargo}
 PASSWORD='BackupTest-42!'
@@ -19,6 +21,10 @@ case "$PULL_POLICY" in
   never|missing) ;;
   *) echo 'SMB_TEST_PULL_POLICY must be never or missing' >&2; exit 64 ;;
 esac
+if [[ ! $IMAGE =~ @sha256:[0-9a-f]{64}$ ]]; then
+  echo 'SMB_TEST_IMAGE must be pinned by digest (name@sha256:<64 hex digits>)' >&2
+  exit 64
+fi
 
 cleanup() {
   local status=$? id owner ids

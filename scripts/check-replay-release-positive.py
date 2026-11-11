@@ -23,6 +23,20 @@ def without_timeout(body):
 
 # The qualified single ORM job now runs as these parallel jobs (#269).
 ORM_JOBS = ["orm", "orm-runtime-graphql", "orm-backends"]
+# Full-profile lanes added after the qualified snapshot. They have no qualified
+# counterpart; the scoped verification record lists them as unexecuted (#494).
+ADDED_FULL_JOBS = ["schema-export"]
+# The qualified publisher is split into a read-only bundle job, which runs every
+# step that compiles or interprets code, and a publisher that holds the write,
+# OIDC and attestation permissions and runs only verification, attestation,
+# tagging and publication (#493). Each step moves byte-identically.
+BUNDLE_STEPS = ["Reclaim runner disk", "Generate deterministic release bundle",
+                "Build approved router artifact", "Create checksums"]
+PUBLISH_STEPS = ["Attest release assets", "Create annotated release tags",
+                 "Publish immutable workspace release"]
+SHARED_STEPS = ["Restore release tag visibility"]
+DIGEST_STEPS = ["Verify the bundle artifact identity",
+                "Verify every bundle file against the build job's checksum digest"]
 FIXTURE_MANIFEST = "--manifest-path crates/graphql-orm/tests/fixtures/"
 
 
@@ -43,6 +57,55 @@ def orm_commands(body):
                           r"\1", line)
             lines.append(line)
     return lines
+
+
+def named_steps(body):
+    found = {}
+    for match in re.finditer(r"(?m)^      - name: (.+)\n", body):
+        end = body.find("\n      - ", match.start() + 1)
+        found[match[1]] = body[match.start():end + 1 if end != -1 else len(body)].rstrip() + "\n"
+    return found
+
+
+def job_needs(body):
+    listed = re.search(r"(?m)^    needs:\n((?:      - .*\n)+)", body)
+    return [line.strip()[2:] for line in listed[1].splitlines()] if listed else []
+
+
+def check_publisher_split(bundle, publisher, bundle_name, validator, reference=None):
+    """The publisher's steps, split across a read-only bundle job."""
+    built, published = named_steps(bundle), named_steps(publisher)
+    for name in BUNDLE_STEPS:
+        require(name not in published, f"publisher runs a bundle step: {name}")
+    for name in PUBLISH_STEPS:
+        require(name in published and name not in built, f"publisher step missing or moved: {name}")
+    for name in SHARED_STEPS + ["Create checksums"]:
+        require(name in built, f"bundle step missing: {name}")
+    for name in SHARED_STEPS:
+        require(published.get(name) == built[name], f"publisher setup changed: {name}")
+    if reference is not None:
+        original = named_steps(reference)
+        for name in BUNDLE_STEPS + SHARED_STEPS:
+            require(built.get(name) == original[name], f"bundle step changed: {name}")
+        for name in PUBLISH_STEPS:
+            require(published[name] == original[name], f"publisher step changed: {name}")
+        require(reference[reference.index("    permissions:\n"):reference.index("    name:")] in publisher,
+                "publisher permissions changed")
+    for name in DIGEST_STEPS:
+        require(name in published, f"publisher does not verify the bundle by digest: {name}")
+    require(f"needs.{bundle_name}.outputs.checksums-sha256" in published[DIGEST_STEPS[1]]
+            and "sha256sum --check --strict SHA256SUMS" in published[DIGEST_STEPS[1]],
+            "publisher checksum verification changed")
+    require(job_needs(bundle) == ["guard", validator]
+            and job_needs(publisher) == ["guard", validator, bundle_name],
+            "publisher validation boundary changed")
+    require("    permissions:\n      contents: read\n" in bundle and ": write" not in bundle,
+            "bundle job must be read-only")
+    require("    permissions:\n      contents: write\n      id-token: write\n      attestations: write\n" in publisher,
+            "publisher permissions changed")
+    for forbidden in ["rust-toolchain", "rust-cache", "cargo ", "python3", "reclaim-runner-disk", "upload-artifact"]:
+        require(forbidden not in publisher, f"publisher runs build tooling: {forbidden}")
+    require("rust-cache" not in bundle, "bundle job restores a cache")
 
 
 def check_orm_split(old, new):
@@ -97,8 +160,22 @@ def main():
     # permission and full publisher step is byte-identical after selection.
     # Only the job-level timeout may differ, and the qualified ORM job is split
     # into parallel jobs that together run the same commands.
-    for name in [*(job for job in EXCLUDED_JOBS if job not in ORM_JOBS), "release"]:
+    for name in ADDED_FULL_JOBS:
+        require(name in EXCLUDED_JOBS and name not in old, f"added full lane is not recorded: {name}")
+        require(new[name].startswith(f"  {name}:\n    if: inputs.validation_profile == 'full'\n")
+                and "    needs: guard\n" in new[name], f"added full lane selection changed: {name}")
+    require("run: scripts/check-schema-export.sh" in new["schema-export"],
+            "release validation must run the macros tests and schema-export check")
+    for name in [job for job in EXCLUDED_JOBS if job not in ORM_JOBS and job not in ADDED_FULL_JOBS]:
         body = new[name].replace("    if: inputs.validation_profile == 'full'\n", "", 1)
+        if name == "workspace-integrity":
+            current = """      - name: Check workflow and test-image supply-chain pins
+        run: |
+          python3 scripts/check-workflow-supply-chain.py
+          python3 scripts/test-workflow-supply-chain.py
+"""
+            require(current in body, "workflow supply-chain gate is required")
+            body = body.replace(current, "", 1)
         if name == "orm-security-sqlite":
             current = """      - name: Require exact receiver-purpose admission
         run: bash scripts/run-security-test-targets.sh sqlite,receiver-admission receiver_admission
@@ -128,19 +205,26 @@ def main():
     require(sorted(lanes) == sorted(["guard", *EXCLUDED_JOBS]), "validation must need every full lane")
     require(validate[validate.index("    runs-on:"):].rstrip()
             == old["validate"][old["validate"].index("    runs-on:"):].rstrip(), "full profile changed: validate")
-    for name in ["replay-scoped-integrity", "replay-scoped-positive", "replay-scoped-validate", "release-scoped"]:
+    for name in ["replay-scoped-integrity", "replay-scoped-positive", "replay-scoped-validate",
+                 "release-scoped-bundle", "release-scoped"]:
         require("if: inputs.validation_profile == 'replay-scoped-positive-v1'" in new[name],
                 "scoped selection must be explicit")
         require("always()" not in new[name] and "continue-on-error" not in new[name],
                 "scoped validation must not bypass failures/skips")
     require("needs: [guard, replay-scoped-integrity, replay-scoped-positive]" in new["replay-scoped-validate"],
             "scoped mandatory dependencies changed")
-    require("      - replay-scoped-validate\n" in new["release-scoped"]
-            and "      - validate\n" in new["release"], "publisher validation boundary changed")
-    for step in ["Create checksums", "Attest release assets", "Create annotated release tags", "Publish immutable workspace release"]:
-        require(f"- name: {step}" in new["release-scoped"], "immutable publisher step missing")
-    require("--verification-evidence" in new["release-scoped"]
-            and "git push --atomic origin" in new["release-scoped"], "scoped evidence/atomic publication missing")
+    require(new["release"].startswith("  release:\n    if: inputs.validation_profile == 'full'\n")
+            and new["release-bundle"].startswith("  release-bundle:\n    if: inputs.validation_profile == 'full'\n"),
+            "full publisher selection changed")
+    require("if: inputs.validation_profile == 'replay-scoped-positive-v1'" in new["release-scoped-bundle"],
+            "scoped selection must be explicit")
+    check_publisher_split(new["release-bundle"], new["release"], "release-bundle", "validate", old["release"])
+    check_publisher_split(new["release-scoped-bundle"], new["release-scoped"],
+                          "release-scoped-bundle", "replay-scoped-validate")
+    require("--verification-evidence" in new["release-scoped-bundle"]
+            and "git push --atomic origin" in new["release-scoped"]
+            and 'test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"' in new["release-scoped"],
+            "scoped evidence/atomic publication missing")
     require("environment: release" in new["guard"] and 'test "${INCLUDE_ROUTER}" = false' in new["guard"]
             and 'test "${GITHUB_SHA}" = "${TARGET_REF}"' in new["guard"], "protected source-only entry guard changed")
     for compiler in COMPILERS:
@@ -172,7 +256,9 @@ def main():
             and contracts == sorted(contracts, key=lambda row: row["name"]), "contract order changed")
     replay = [row for row in contracts if row["name"].startswith("graphql-orm-owned-planning-replay-")]
     require(len(replay) == 3, "both explicit recipes and format must remain recorded")
-    print("Positive release conformance: 15 full jobs preserved with explicit backend coverage additions and the ORM job split; 4 explicit scoped jobs; deterministic manifest and three replay contract rows.")
+    print("Positive release conformance: 15 full jobs preserved with explicit backend coverage additions and the ORM job split; "
+          "1 added full lane; publishers split from read-only bundle jobs; 5 explicit scoped jobs; "
+          "deterministic manifest and three replay contract rows.")
 
 
 if __name__ == "__main__":

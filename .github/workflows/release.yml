@@ -139,6 +139,10 @@ jobs:
           python3 scripts/test-router-notices.py
           scripts/check-workspace-dependencies.sh
           cargo fmt --all -- --check
+      - name: Check workflow and test-image supply-chain pins
+        run: |
+          python3 scripts/check-workflow-supply-chain.py
+          python3 scripts/test-workflow-supply-chain.py
 
   neutral-packages:
     if: inputs.validation_profile == 'full'
@@ -505,6 +509,25 @@ jobs:
           cargo test -p graphql-orm-router-protocol --locked
           cargo test -p graphql-orm-router --locked
 
+  schema-export:
+    if: inputs.validation_profile == 'full'
+    name: Macros tests and schema-export equivalence
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.target_ref }}
+      - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      # The same script as CI's schema-export job: the macros crate's own
+      # tests, the schema-export-only feature and byte-identical exported SDL.
+      - name: Verify the macros crate and schema-export equivalence
+        run: scripts/check-schema-export.sh
+
   validate:
     if: inputs.validation_profile == 'full'
     name: Release validation complete
@@ -526,6 +549,7 @@ jobs:
       - alternate-features
       - router
       - router-msrv
+      - schema-export
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -642,18 +666,24 @@ jobs:
             --release-id "${RELEASE_ID}" --approval-reference "${RELEASE_APPROVAL}" \
             --output "target/validated/${RELEASE_ID}-verification.json"
 
-  release:
+  release-bundle:
     if: inputs.validation_profile == 'full'
+    # This job compiles and runs third-party code (the optional router build,
+    # cargo-cyclonedx and the manifest generator), so it holds only read
+    # permission and restores no cache. The publisher consumes its artifact
+    # by digest; scripts/check-workflow-supply-chain.py enforces the split.
     permissions:
-      contents: write
-      id-token: write
-      attestations: write
-    name: Publish immutable workspace release
+      contents: read
+    name: Build and checksum the release bundle
     needs:
       - guard
       - validate
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    outputs:
+      artifact-id: ${{ steps.bundle.outputs.artifact-id }}
+      artifact-digest: ${{ steps.bundle.outputs.artifact-digest }}
+      checksums-sha256: ${{ steps.checksums.outputs.sha256 }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -677,7 +707,6 @@ jobs:
         if: inputs.include_router_artifact
         uses: ./.github/actions/reclaim-runner-disk
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Generate deterministic release bundle
         env:
           RELEASE_ID: ${{ inputs.release_id }}
@@ -734,16 +763,98 @@ jobs:
         run: |
           cd release-dist
           sha256sum -- * > SHA256SUMS
-      - name: Attest release assets
-        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
-        with:
-          subject-path: release-dist/*
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - id: checksums
+        name: Record the checksum list digest for the publisher
+        env:
+          BUNDLE_DIR: release-dist
+        run: printf 'sha256=%s\n' "$(sha256sum "${BUNDLE_DIR}/SHA256SUMS" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
+      - id: bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ inputs.release_id }}
           path: release-dist/
           if-no-files-found: error
           retention-days: 30
+
+  release:
+    if: inputs.validation_profile == 'full'
+    # The only job with write, OIDC and attestation permissions. It runs no
+    # compiler, interpreter, cache or repository script: it verifies the
+    # read-only bundle by digest, attests it, tags and publishes.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    name: Publish immutable workspace release
+    needs:
+      - guard
+      - validate
+      - release-bundle
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.target_ref }}
+          fetch-depth: 0
+      - name: Restore release tag visibility
+        env:
+          TARGET_REF: ${{ inputs.target_ref }}
+        run: |
+          set -euo pipefail
+          # The release identity proof - current main, unused workspace tag,
+          # router approval - runs once in the guard job before any validation
+          # lane, exactly as it did before validation was split. This job only
+          # re-establishes the tag data that the manifest generator and the tag
+          # step read, and confirms this runner checked out the validated
+          # commit.
+          git fetch origin main --tags --force
+          test "$(git rev-parse HEAD)" = "${TARGET_REF}"
+      - name: Verify the bundle artifact identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          ARTIFACT_ID: ${{ needs.release-bundle.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ needs.release-bundle.outputs.artifact-digest }}
+        run: |
+          set -euo pipefail
+          # The expected identity comes from the read-only build job's outputs.
+          [[ "${ARTIFACT_ID}" =~ ^[0-9]+$ ]]
+          [[ "${ARTIFACT_DIGEST#sha256:}" =~ ^[0-9a-f]{64}$ ]]
+          artifact=$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}")
+          test "$(jq -r .name <<<"${artifact}")" = "${RELEASE_ID}"
+          test "$(jq -r .workflow_run.id <<<"${artifact}")" = "${GITHUB_RUN_ID}"
+          test "$(jq -r .expired <<<"${artifact}")" = false
+          digest=$(jq -r .digest <<<"${artifact}")
+          test "${digest#sha256:}" = "${ARTIFACT_DIGEST#sha256:}"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ needs.release-bundle.outputs.artifact-id }}
+          merge-multiple: true
+          path: release-dist
+      - name: Verify every bundle file against the build job's checksum digest
+        env:
+          BUNDLE_DIR: release-dist
+          EXPECTED_CHECKSUMS_SHA256: ${{ needs.release-bundle.outputs.checksums-sha256 }}
+        run: |
+          set -euo pipefail
+          # The download action only warns on an archive digest mismatch, so
+          # every file is checked here against the checksum list whose own
+          # digest the read-only build job reported.
+          [[ "${EXPECTED_CHECKSUMS_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          cd "${BUNDLE_DIR}"
+          test "$(sha256sum SHA256SUMS | cut -d' ' -f1)" = "${EXPECTED_CHECKSUMS_SHA256}"
+          sha256sum --check --strict SHA256SUMS
+          # Exactly the checksummed regular files: nothing added, nothing nested.
+          test -z "$(find . -mindepth 1 ! -type f -print -quit)"
+          listed=$(sed -E 's/^[0-9a-f]{64}  //' SHA256SUMS | LC_ALL=C sort)
+          present=$(find . -mindepth 1 -type f ! -name SHA256SUMS -printf '%P\n' | LC_ALL=C sort)
+          test -n "${listed}"
+          test "${listed}" = "${present}"
+      - name: Attest release assets
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: release-dist/*
       - name: Create annotated release tags
         env:
           RELEASE_ID: ${{ inputs.release_id }}
@@ -781,18 +892,22 @@ jobs:
             "${prerelease_flag[@]}" \
             release-dist/*
 
-  release-scoped:
+  release-scoped-bundle:
     if: inputs.validation_profile == 'replay-scoped-positive-v1'
+    # Read-only, cache-free bundle generation for the scoped profile; the
+    # scoped publisher consumes it by digest exactly as the full publisher does.
     permissions:
-      contents: write
-      id-token: write
-      attestations: write
-    name: Publish immutable scoped source release
+      contents: read
+    name: Build and checksum the scoped release bundle
     needs:
       - guard
       - replay-scoped-validate
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    outputs:
+      artifact-id: ${{ steps.bundle.outputs.artifact-id }}
+      artifact-digest: ${{ steps.bundle.outputs.artifact-digest }}
+      checksums-sha256: ${{ steps.checksums.outputs.sha256 }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -812,7 +927,6 @@ jobs:
           git fetch origin main --tags --force
           test "$(git rev-parse HEAD)" = "${TARGET_REF}"
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: replay-scoped-*
@@ -842,16 +956,95 @@ jobs:
         run: |
           cd target/scoped-dist
           sha256sum -- * > SHA256SUMS
-      - name: Attest release assets
-        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
-        with:
-          subject-path: target/scoped-dist/*
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - id: checksums
+        name: Record the checksum list digest for the publisher
+        env:
+          BUNDLE_DIR: target/scoped-dist
+        run: printf 'sha256=%s\n' "$(sha256sum "${BUNDLE_DIR}/SHA256SUMS" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
+      - id: bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ inputs.release_id }}
           path: target/scoped-dist/
           if-no-files-found: error
           retention-days: 30
+
+  release-scoped:
+    if: inputs.validation_profile == 'replay-scoped-positive-v1'
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    name: Publish immutable scoped source release
+    needs:
+      - guard
+      - replay-scoped-validate
+      - release-scoped-bundle
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.target_ref }}
+          fetch-depth: 0
+      - name: Restore release tag visibility
+        env:
+          TARGET_REF: ${{ inputs.target_ref }}
+        run: |
+          set -euo pipefail
+          # The release identity proof - current main, unused workspace tag,
+          # router approval - runs once in the guard job before any validation
+          # lane, exactly as it did before validation was split. This job only
+          # re-establishes the tag data that the manifest generator and the tag
+          # step read, and confirms this runner checked out the validated
+          # commit.
+          git fetch origin main --tags --force
+          test "$(git rev-parse HEAD)" = "${TARGET_REF}"
+      - name: Verify the bundle artifact identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          ARTIFACT_ID: ${{ needs.release-scoped-bundle.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ needs.release-scoped-bundle.outputs.artifact-digest }}
+        run: |
+          set -euo pipefail
+          # The expected identity comes from the read-only build job's outputs.
+          [[ "${ARTIFACT_ID}" =~ ^[0-9]+$ ]]
+          [[ "${ARTIFACT_DIGEST#sha256:}" =~ ^[0-9a-f]{64}$ ]]
+          artifact=$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}")
+          test "$(jq -r .name <<<"${artifact}")" = "${RELEASE_ID}"
+          test "$(jq -r .workflow_run.id <<<"${artifact}")" = "${GITHUB_RUN_ID}"
+          test "$(jq -r .expired <<<"${artifact}")" = false
+          digest=$(jq -r .digest <<<"${artifact}")
+          test "${digest#sha256:}" = "${ARTIFACT_DIGEST#sha256:}"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ needs.release-scoped-bundle.outputs.artifact-id }}
+          merge-multiple: true
+          path: target/scoped-dist
+      - name: Verify every bundle file against the build job's checksum digest
+        env:
+          BUNDLE_DIR: target/scoped-dist
+          EXPECTED_CHECKSUMS_SHA256: ${{ needs.release-scoped-bundle.outputs.checksums-sha256 }}
+        run: |
+          set -euo pipefail
+          # The download action only warns on an archive digest mismatch, so
+          # every file is checked here against the checksum list whose own
+          # digest the read-only build job reported.
+          [[ "${EXPECTED_CHECKSUMS_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          cd "${BUNDLE_DIR}"
+          test "$(sha256sum SHA256SUMS | cut -d' ' -f1)" = "${EXPECTED_CHECKSUMS_SHA256}"
+          sha256sum --check --strict SHA256SUMS
+          # Exactly the checksummed regular files: nothing added, nothing nested.
+          test -z "$(find . -mindepth 1 ! -type f -print -quit)"
+          listed=$(sed -E 's/^[0-9a-f]{64}  //' SHA256SUMS | LC_ALL=C sort)
+          present=$(find . -mindepth 1 -type f ! -name SHA256SUMS -printf '%P\n' | LC_ALL=C sort)
+          test -n "${listed}"
+          test "${listed}" = "${present}"
+      - name: Attest release assets
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: target/scoped-dist/*
       - name: Create annotated release tags
         env:
           RELEASE_ID: ${{ inputs.release_id }}

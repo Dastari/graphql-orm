@@ -390,6 +390,15 @@ than a shell command with arguments. The host supplies the runner's toolchain
 and resource environment; the suite retains its owned fixture lifecycle and
 cleanup.
 
+The fixture image defaults to the reviewed index digest
+`dperson/samba@sha256:66088b78a19810dd1457a8f39340e95e663c728083efa5fe7dc0d40b2478e869`.
+Local runs never pull (`SMB_TEST_PULL_POLICY=never`), so that exact reference
+must already be cached; disposable CI sets `SMB_TEST_PULL_POLICY=missing`.
+`SMB_TEST_IMAGE` may select another image only by digest
+(`name@sha256:<64 hex digits>`); a tag reference is refused with exit status
+64 before any Docker call. Changing the default digest is a reviewed test
+change recorded in the changelog.
+
 ## Manual compatibility plan
 
 For each target, create/verify/restore/delete/prune a full backup with a

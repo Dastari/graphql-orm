@@ -1,15 +1,24 @@
+# Local-test-only PostgreSQL for manual experiments on a developer machine.
+# Release and CI acceptance never use it: they run test-owned disposable
+# containers (docs/operations/runbooks/postgres-testing.md). Never point an
+# application, staging or shared database client at this service.
+#
+# The port is published on IPv4 loopback only, and there is no default
+# password: choose a throwaway value when starting it, for example
+#   GRAPHQL_ORM_TEST_POSTGRES_PASSWORD=$(openssl rand -hex 16) docker compose up -d
 services:
   postgres-test:
-    image: postgres:16-alpine
+    # Reviewed multi-platform index digest of postgres:16-alpine (2026-11-11).
+    image: postgres:16-alpine@sha256:aa6cb33cf4c19c765cefcf48d96176258800870a9a1e930ad126200f9d825139
     container_name: graphql-orm-postgres-test
     ports:
-      - "55432:5432"
+      - "127.0.0.1:55432:5432"
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: postgres
+      POSTGRES_USER: graphql_orm_test
+      POSTGRES_PASSWORD: ${GRAPHQL_ORM_TEST_POSTGRES_PASSWORD:?set GRAPHQL_ORM_TEST_POSTGRES_PASSWORD to a throwaway local-test password}
+      POSTGRES_DB: graphql_orm_test
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      test: ["CMD-SHELL", "pg_isready -U graphql_orm_test -d graphql_orm_test"]
       interval: 2s
       timeout: 2s
       retries: 20

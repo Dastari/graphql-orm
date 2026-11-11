@@ -22,6 +22,9 @@ The local backend requires a trusted, exclusively managed filesystem root and
 restrictive permissions. See the [local filesystem trust boundary](docs/blob-store.md#local-filesystem-trust-boundary)
 before using local directories or OS-mounted shares.
 
+Version 0.9.2 pins the managed Samba test fixture to a reviewed image
+digest and refuses tag-only image overrides; the library is unchanged.
+
 Version 0.9.1 treats only the backend's own upload temp files as temporary.
 The local backend names them `.<uuid>.uploading`, and listings and
 `sweep_temp_files` act on that exact form only, so a stored object whose name
@@ -71,13 +74,13 @@ resolved dependency graph.
 
 ```toml
 [dependencies]
-graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.9.1" }
+graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.9.2" }
 ```
 
 For S3-compatible storage without the default local backend:
 
 ```toml
-graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.9.1", default-features = false, features = ["s3"] }
+graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.9.2", default-features = false, features = ["s3"] }
 ```
 
 ## Five-minute local start

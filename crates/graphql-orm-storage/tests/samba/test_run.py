@@ -98,7 +98,7 @@ else:
 
 
 class FixtureOwnershipTests(unittest.TestCase):
-    def run_fixture(self, mode="", absolute_cargo=False):
+    def run_fixture(self, mode="", absolute_cargo=False, extra_environment=None):
         with tempfile.TemporaryDirectory(prefix="owned-samba-harness-") as temporary:
             root = Path(temporary)
             for name, source in [("docker", FAKE_DOCKER), ("cargo", FAKE_CARGO)]:
@@ -121,9 +121,10 @@ class FixtureOwnershipTests(unittest.TestCase):
                 environment["SMB_TEST_CARGO"] = str(cargo_runner)
                 # A fallback to PATH must fail rather than satisfy this witness.
                 (root / "cargo").write_text("#!" + sys.executable + "\nraise SystemExit(91)\n")
+            environment.update(extra_environment or {})
             result = subprocess.run(["bash", str(RUNNER)], env=environment,
                                     text=True, capture_output=True, timeout=20)
-            calls = [json.loads(line) for line in (root / "calls").read_text().splitlines()]
+            calls = [json.loads(line) for line in (root / "calls").read_text().splitlines()] if (root / "calls").exists() else []
             state = json.loads((root / "state").read_text()) if (root / "state").exists() else None
             cargo = [json.loads(line) for line in (root / "cargo-calls.jsonl").read_text().splitlines()] if (root / "cargo-calls.jsonl").exists() else []
             return result, calls, state, cargo
@@ -211,6 +212,25 @@ class FixtureOwnershipTests(unittest.TestCase):
                 self.assertEqual(result.returncode, expected, result.stderr)
                 self.assertEqual(len(cargo), 1)
                 self.assertEqual(state, {"containers": {}, "volume": None})
+
+    def test_default_image_is_digest_pinned(self):
+        result, calls, _, _ = self.run_fixture()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        runs = [args for args in calls if args[0] == "run"]
+        images = {args[args.index("-v") + 2] if "-v" in args else args[args.index("-p") + 2] for args in runs}
+        self.assertEqual(len(images), 1, images)
+        self.assertRegex(images.pop(), r"^dperson/samba@sha256:[0-9a-f]{64}$")
+
+    def test_floating_image_override_is_refused_before_docker(self):
+        for image in ["dperson/samba:latest", "dperson/samba", "dperson/samba@sha256:abc"]:
+            with self.subTest(image=image):
+                result, calls, state, cargo = self.run_fixture(
+                    extra_environment={"SMB_TEST_IMAGE": image})
+                self.assertEqual(result.returncode, 64, result.stderr)
+                self.assertIn("pinned by digest", result.stderr)
+                self.assertEqual(calls, [])
+                self.assertIsNone(state)
+                self.assertEqual(cargo, [])
 
     def test_changed_ownership_is_not_deleted(self):
         result, calls, state, cargo = self.run_fixture("ownership_mismatch")
