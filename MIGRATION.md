@@ -74,9 +74,10 @@ writes call the policy with `ctx = None` and `EntityAccessSurface::Repository`
 for the new row too, so a policy that refuses that surface now also refuses
 repository creates. Allow the rows the host writes there, or write them through
 a path the policy allows. Dependent-delete `set_null` updates check the nulled
-child row as well. Under `DeclaredPoliciesRequired`, an entity that declares a
-`write_policy` now needs a row provider for creates too, not only for updates
-and deletes; without one, creates fail with `AUTHORIZATION_MISCONFIGURED`.
+child row as well. An entity that declares a `write_policy` now needs a
+row provider for creates too, not only for updates and deletes. Without one,
+creates fail with `AUTHORIZATION_MISCONFIGURED` under `DeclaredPoliciesRequired`
+and with `FORBIDDEN` under `ExplicitPolicyForAllExposedOperations`.
 
 **Payloads need read access.** Generated GraphQL update and upsert payloads
 return `null` for the entity, with `success: true`, when the caller lacks entity

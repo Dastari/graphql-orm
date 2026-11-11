@@ -933,7 +933,11 @@ async fn subscription_event_revalidates_status_and_current_grants() {
     use std::task::Poll;
     use tokio::time::{Duration, timeout};
     for revoke in [true, false] {
-        let (schema, host, bundle) = fixture().await;
+        // Creates check the written row, and this strict database requires a row
+        // provider for the marked entity. DeletedRows lets user-1 write project-1
+        // rows and grants no deleted preimage, so only the event checks under test
+        // decide delivery.
+        let (schema, host, bundle) = fixture_config(principal(), None, false, Some(false)).await;
         let mut stream = Box::pin(schema.execute_stream(request(
             &bundle,
             "subscription { secureRecordChanged { id secureRecord { value } } }",
@@ -996,7 +1000,8 @@ async fn subscription_event_rechecks_expiry_after_async_binding() {
     use graphql_orm::futures::{StreamExt, future::poll_fn};
     use std::task::Poll;
     use tokio::time::{Duration, timeout};
-    let (schema, host, bundle) = fixture().await;
+    // A row provider admits the create's written row; see the test above.
+    let (schema, host, bundle) = fixture_config(principal(), None, false, Some(false)).await;
     let mut stream = Box::pin(schema.execute_stream(request(
         &bundle,
         "subscription { secureRecordChanged { id secureRecord { value } } }",
@@ -1121,8 +1126,33 @@ async fn deleted_preimage_opt_in_still_requires_immediate_current_authority() {
             // marked mutation. Provider absence must deny before deleting or
             // emitting; the ordinary-read-only mode above exercises a real
             // delete whose event is suppressed by the missing preimage grant.
-            assert_eq!(deleted.errors.len(), 1);
-            assert_eq!(deleted.errors[0].message, "forbidden");
+            // Without a provider the caller can neither read nor write the row,
+            // so the refusal is the missing-row answer and does not reveal it.
+            let missing = schema
+                .execute(request(
+                    &bundle,
+                    "mutation { deleteSecureRecord(id: \"record-absent\") { success error } }",
+                ))
+                .await;
+            let refused = schema
+                .execute(request(
+                    &bundle,
+                    "mutation { deleteSecureRecord(id: \"record-1\") { success error } }",
+                ))
+                .await;
+            assert!(deleted.errors.is_empty(), "{:?}", deleted.errors);
+            assert_eq!(
+                deleted.data.into_json().unwrap()["deleteSecureRecord"]["success"],
+                false
+            );
+            assert_eq!(
+                serde_json::to_value(&refused).unwrap(),
+                serde_json::to_value(&missing).unwrap()
+            );
+            assert_eq!(
+                refused.data.into_json().unwrap()["deleteSecureRecord"]["error"],
+                "Entity not found"
+            );
             let remaining: i64 =
                 sqlx::query_scalar("SELECT COUNT(*) FROM secure_records WHERE id = 'record-1'")
                     .fetch_one(schema.data::<Database>().unwrap().pool())
