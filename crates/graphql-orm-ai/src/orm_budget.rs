@@ -146,6 +146,13 @@ impl OrmAiBudgetService {
                     let Some(run) = run else {
                         return Ok(Err(AiError::Conflict));
                     };
+                    // The reservation is the last durable fence before
+                    // provider transport: the run's lease must belong to the
+                    // store's current live epoch.
+                    let live = crate::orm_runtime_recovery::require_live_epoch(tx).await?;
+                    if run.recovery_epoch_id != Some(live) {
+                        return Ok(Err(AiError::Conflict));
+                    }
                     if let Err(error) = validate_run_fence(
                         &run,
                         &principal_reference,
@@ -1857,10 +1864,14 @@ mod tests {
         )
         .await
         .expect("budget test session should seed through the generated repository");
+        // A granted lease names the store's live epoch.
+        let epoch = crate::orm_runtime_recovery::open_test_epoch(database)
+            .await
+            .epoch_id();
         AiRunRecord::insert(
             database,
             CreateAiRunRecordInput {
-                recovery_epoch_id: None,
+                recovery_epoch_id: Some(epoch),
                 execution_selection: None,
                 id: run_id.0,
                 session_id: session_id.0,
@@ -2150,6 +2161,19 @@ mod tests {
                 .reserve(&fixture.principal, stale_fence)
                 .await,
             Err(AiError::Conflict)
+        ));
+        assert_eq!(counter_count(&fixture.database).await, 0);
+    }
+
+    #[tokio::test]
+    async fn reservation_refuses_a_closed_epoch_before_any_counter_is_written() {
+        let fixture = fixture(100).await;
+        let run = seed_running_run(&fixture.database, &fixture.principal, fixture.now).await;
+        let valid = request(run.0, run.1, run.2, 20, "closed-epoch", fixture.now);
+        crate::orm_runtime_recovery::close_test_epoch(&fixture.database).await;
+        assert!(matches!(
+            fixture.service.reserve(&fixture.principal, valid).await,
+            Err(AiError::RuntimeNotReady)
         ));
         assert_eq!(counter_count(&fixture.database).await, 0);
     }

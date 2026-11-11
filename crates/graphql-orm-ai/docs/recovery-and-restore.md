@@ -184,7 +184,9 @@ The ledger is enforced in three places:
   `RuntimeNotReady` when it is not live. A granted run lease records the
   epoch in `recovery_epoch_id`. Every lease-fenced write, approval
   consumption included, requires that epoch to be the store's current live
-  epoch inside its transaction.
+  epoch inside its transaction. The budget reservation, the last durable
+  fence before provider transport, requires the run's epoch to be live, and
+  the egress decision audit refuses while the store's epoch is not live.
 - Gate-guarded tool, provider and OpenAI background services require the
   lease's epoch, or for a background reconciliation claim the store's live
   epoch, to equal `AiRuntimeStartGate::epoch_id`. A gate opened with a proof
@@ -224,9 +226,21 @@ Two further properties are deliberate:
   previous epoch stop validating, so in-flight runs fail their next fenced
   write and are reclassified by ordinary lease recovery once they expire.
 - The current epoch is the row with the highest `epoch_sequence`. Recorded
-  epochs start at 1 and the column is uniquely indexed. A row with a crafted
-  sequence at or below 0, or at `i64::MAX`, cannot be followed by a valid
-  successor, so the store stays closed rather than reopening.
+  epochs start at 1 and the column is uniquely indexed. A current row with a
+  sequence below 1 (including the column default 0) or at `i64::MAX` is never
+  treated as live or as an acknowledgeable restore closure, so it never
+  yields a readiness proof and the store stays closed.
+- A new store opens on its own only if `readiness_proof` runs before its
+  first run, approval or egress consent is created. Open the gate at host
+  startup, before serving any AI request; a store that already holds work
+  needs an operator decision instead.
+- The empty-ledger check (`holds_prior_ai_state`) counts only runs,
+  approvals and egress consents. Other AI rows, such as sessions, messages,
+  policies or attachments, do not make an empty-ledger store refuse.
+- After a successor epoch, settling a completed or cancelled run's provider
+  session fails, because the run row still names the epoch its lease was
+  granted under. Let in-flight runs finish and settle before upgrading the
+  module.
 
 ## Reopening after a restore
 

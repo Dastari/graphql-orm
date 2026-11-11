@@ -1656,3 +1656,73 @@ async fn catalogue_change_round_trip(case: &str) {
         "original durable text remains readable"
     );
 }
+
+/// Closes a test store's epoch through the public restore closure.
+async fn close_store_epoch(database: &Database<SqliteBackend>) {
+    let recovery =
+        OrmAiRuntimeRecoveryService::new(database.clone(), Arc::new(agql_auth::SystemClock));
+    recovery
+        .reconcile_restore(
+            &OrmAiRestoreFactCollector::new(database.clone()),
+            "closed-epoch-test",
+            None,
+        )
+        .await
+        .expect("restore closure should record a closed epoch");
+    assert!(matches!(
+        recovery.readiness_proof().await,
+        Err(AiError::RuntimeNotReady)
+    ));
+}
+
+#[tokio::test]
+async fn interrupted_turn_settlement_refuses_a_closed_epoch() {
+    let fixture = provider_session_fixture().await;
+    let owner = fixture.owner.clone();
+    let interrupted = active_run(&fixture, &owner, "closed-epoch-workspace").await;
+    let descriptor = AiProviderSessionDescriptor::new(
+        ProviderKind::LocalHarness,
+        "reviewed-local-profile",
+        "reviewed-model",
+        "a".repeat(64),
+        "codex-app-server/v2",
+        "b".repeat(64),
+    )
+    .expect("provider descriptor should validate");
+    fixture
+        .provider_sessions
+        .bind_for_run(
+            &interrupted,
+            AiProviderSessionBindRequest::new(
+                descriptor,
+                AiProviderSessionCursor::new("codex.thread", "closed-epoch-thread")
+                    .expect("cursor should validate"),
+                "c".repeat(64),
+                Some(fixture.clock.now() + Duration::hours(1)),
+            )
+            .expect("bind request should validate"),
+        )
+        .await
+        .expect("empty provider thread should bind to the interrupted run");
+    fixture
+        .cancellation
+        .request_cancellation(
+            &owner,
+            CancelAiRunInput {
+                session_id: interrupted.session_id().0,
+                run_id: interrupted.run_id().0,
+                client_request_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .expect("owner cancellation should become durable");
+
+    close_store_epoch(fixture.sessions.database()).await;
+    assert!(matches!(
+        fixture
+            .provider_sessions
+            .settle_interrupted_turn(&interrupted, AiRunInterruptSettlement::Settled)
+            .await,
+        Err(AiError::RuntimeNotReady)
+    ));
+}

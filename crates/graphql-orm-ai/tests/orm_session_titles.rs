@@ -673,3 +673,44 @@ async fn archive_preserves_title_commit_and_delete_never_resurrects_a_session() 
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn title_completion_refuses_a_closed_epoch() {
+    let fixture = fixture().await;
+    let session = default_session_with_message(&fixture, "Explain this incident").await;
+    let claim = fixture
+        .title_work
+        .claim_next("title-worker-closed-epoch")
+        .await
+        .expect("claim should succeed")
+        .expect("title work should exist");
+
+    let database = fixture.sessions.database().clone();
+    let recovery = OrmAiRuntimeRecoveryService::new(
+        database.clone(),
+        std::sync::Arc::new(agql_auth::SystemClock),
+    );
+    recovery
+        .reconcile_restore(
+            &OrmAiRestoreFactCollector::new(database),
+            "closed-epoch-test",
+            None,
+        )
+        .await
+        .expect("restore closure should record a closed epoch");
+
+    assert!(matches!(
+        fixture
+            .title_work
+            .complete(&claim, "Generated incident title".to_owned())
+            .await,
+        Err(AiError::RuntimeNotReady)
+    ));
+    let unchanged = fixture
+        .sessions
+        .session(&fixture.owner, AiSessionId(session.id))
+        .await
+        .expect("session read should succeed")
+        .expect("session should exist");
+    assert_ne!(unchanged.title, "Generated incident title");
+}

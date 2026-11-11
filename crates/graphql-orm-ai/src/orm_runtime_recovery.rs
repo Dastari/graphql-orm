@@ -726,12 +726,24 @@ fn epoch_not_live() -> OrmPublicError {
     OrmPublicError::with_message(OrmErrorCode::ServiceUnavailable, RUNTIME_EPOCH_NOT_LIVE)
 }
 
+/// Whether a ledger position can belong to a recorded epoch. Recorded epochs
+/// start at 1, and `i64::MAX` could never be followed by a successor, so a
+/// row outside that range (the column default 0, or a crafted value) is never
+/// live or acknowledgeable.
+const fn valid_epoch_sequence(sequence: i64) -> bool {
+    sequence >= 1 && sequence < i64::MAX
+}
+
 fn epoch_is_live(epoch: &AiRuntimeRecoveryRecord) -> bool {
-    epoch.state == EPOCH_STATE_LIVE && epoch.start_gate_open && epoch.recorded_locally_at.is_some()
+    valid_epoch_sequence(epoch.epoch_sequence)
+        && epoch.state == EPOCH_STATE_LIVE
+        && epoch.start_gate_open
+        && epoch.recorded_locally_at.is_some()
 }
 
 fn epoch_is_local_restore_closure(epoch: &AiRuntimeRecoveryRecord) -> bool {
-    epoch.state == EPOCH_STATE_RESTORE_CLOSED
+    valid_epoch_sequence(epoch.epoch_sequence)
+        && epoch.state == EPOCH_STATE_RESTORE_CLOSED
         && !epoch.start_gate_open
         && epoch.recorded_locally_at.is_some()
 }
@@ -1758,6 +1770,16 @@ mod tests {
             .expect("the queued run should lease");
         assert_eq!(lease.run_id().0, queued);
         assert!(gate_admits_lease(&gate, &lease));
+
+        // The fenced pre-epoch lease recovers through the ordinary path.
+        let report = runs
+            .recover_expired_leases()
+            .await
+            .expect("fenced leases should recover through the ordinary path");
+        assert_eq!(report.recovery_required, 1);
+        let recovered = run(&database, running).await;
+        assert_eq!(recovered.state, "recovery_required");
+        assert!(recovered.lease_owner.is_none() && recovered.lease_expires_at.is_none());
     }
 
     #[tokio::test]

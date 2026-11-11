@@ -4835,6 +4835,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlite_wait_close_refuses_a_closed_epoch() {
+        let fixture = wait_fixture().await;
+        let registered = fixture.register().await;
+        let claim = fixture
+            .service
+            .claim_next("closed-epoch-worker")
+            .await
+            .expect("claim")
+            .expect("registered wait should claim");
+        // Revoked authority routes the claim to its close transaction.
+        fixture.principal_active.store(false, Ordering::SeqCst);
+        crate::orm_runtime_recovery::close_test_epoch(&fixture.database).await;
+        assert!(matches!(
+            fixture.service.process_claim(claim).await,
+            Err(AiError::RuntimeNotReady)
+        ));
+        let run = AiRunRecord::find_by_id(&fixture.database, &registered.run_id().0)
+            .await
+            .expect("run loads")
+            .expect("run exists");
+        assert_eq!(run.state, AiRunState::WaitingSubscription.as_str());
+        assert!(matches!(
+            fixture.service.claim_next("closed-epoch-worker-2").await,
+            Err(AiError::RuntimeNotReady)
+        ));
+    }
+
+    #[tokio::test]
     async fn sqlite_reset_and_revocation_close_without_event_disclosure() {
         let reset = wait_fixture().await;
         let reset_wait = reset.register().await;

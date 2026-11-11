@@ -16,8 +16,9 @@ This release changes the public Rust API, the AI schema module, and runtime
 startup, worker and restore behaviour.
 
 **Schema.** Apply the normal `AiSchemaModule` migration to version `0.77.0`
-before starting any worker. It adds `epoch_sequence` (`INTEGER NOT NULL
-DEFAULT 0`, with the separate unique index
+before starting any worker. It adds `epoch_sequence` (a non-null integer
+column, `INTEGER` on SQLite and `BIGINT` on PostgreSQL, with `DEFAULT 0` and
+the separate unique index
 `graphql_orm_ai_runtime_recovery_epoch_sequence`) and `recorded_locally_at`
 to `graphql_orm_ai_runtime_recovery`, which earlier releases never wrote, and
 the nullable `recovery_epoch_id` to `graphql_orm_ai_runs`. Every change is an
@@ -45,7 +46,8 @@ but cannot open the gate.
 **Workers before the first open.** An empty ledger is closed.
 `OrmAiRunService::claim_next`, `claim_next_approved`,
 `recover_expired_leases`, `OrmAiApprovalService::consume_approval`, every
-lease-fenced write, and the subscription-wait, OpenAI background and
+lease-fenced write, budget reservation, the egress decision audit, and the
+subscription-wait, OpenAI background and
 session-title claim and completion paths return `AiError::RuntimeNotReady`
 until the store has a live epoch. Treat `RuntimeNotReady` as a closed runtime:
 stop and back off.

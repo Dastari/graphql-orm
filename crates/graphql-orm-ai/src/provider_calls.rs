@@ -9215,6 +9215,75 @@ mod tests {
 
     #[cfg(feature = "provider-openai-core")]
     #[tokio::test]
+    async fn background_terminal_commit_refuses_a_closed_epoch() {
+        let test = background_reconciliation_fixture_with_observation(
+            AiOpenAiBackgroundReconciliationWindows::default(),
+            AiOpenAiBackgroundReconciliationLimits::default(),
+            Arc::new(AllowAccess),
+            ProviderBackgroundObservation::new(
+                ProviderBackgroundStatus::Completed,
+                vec![ProviderEvent::TextDelta {
+                    text: "terminal background output".to_owned(),
+                }],
+                Some(ProviderBackgroundUsage::new(12, 5, 3)),
+            )
+            .expect("terminal observation should validate"),
+        )
+        .await;
+        test.clock.advance_seconds(10);
+        let claim = test
+            .service
+            .claim_next("reconciler-closed-epoch")
+            .await
+            .expect("claim should not fail")
+            .expect("submission should be eligible");
+        let retrieval = OrmAiOpenAiBackgroundRetrievalService::new(
+            test.fixture.database.clone(),
+            test.fixture.runtime.clone(),
+            test.fixture.audit.clone(),
+            Arc::new(test.clock.clone()),
+            AiOpenAiBackgroundRetrievalRoute::new("mock-profile", "local-mock", "retrieval-v1")
+                .expect("retrieval route should validate"),
+            AiOpenAiBackgroundRetrievalLimits::default(),
+        );
+        let observation = retrieval
+            .retrieve(&claim)
+            .await
+            .expect("terminal response should retrieve");
+        let terminal = OrmAiOpenAiBackgroundTerminalService::new(
+            test.fixture.database.clone(),
+            test.fixture.runtime.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(test.clock.clone()),
+            AiProviderOutputLimits::default(),
+            Duration::minutes(5),
+        )
+        .expect("terminal service limits should validate");
+
+        // The gate stays open in memory; only the store's epoch closes.
+        crate::orm_runtime_recovery::close_test_epoch(&test.fixture.database).await;
+        assert!(test.fixture.runtime.start_gate().is_ready());
+        assert!(matches!(
+            terminal.commit(&observation).await,
+            Err(AiError::RuntimeNotReady)
+        ));
+        let submission = AiProviderBackgroundSubmissionRecord::find_by_id(
+            &test.fixture.database,
+            &test.accepted.submission_id(),
+        )
+        .await
+        .expect("submission lookup should succeed")
+        .expect("submission should exist");
+        assert_ne!(submission.state, "completed");
+        assert!(submission.reconciled_at.is_none());
+        assert!(matches!(
+            test.service.heartbeat(&claim).await,
+            Err(AiError::RuntimeNotReady)
+        ));
+    }
+
+    #[cfg(feature = "provider-openai-core")]
+    #[tokio::test]
     async fn terminal_completion_commits_one_protected_exactly_once_graph() {
         let usage = ProviderBackgroundUsage::new(12, 5, 3);
         let test = background_reconciliation_fixture_with_observation(

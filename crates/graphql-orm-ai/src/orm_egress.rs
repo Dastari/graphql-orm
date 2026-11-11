@@ -51,6 +51,9 @@ impl AiEgressDecisionAudit for OrmAiEgressDecisionAudit {
                 // SQLite must acquire its write lock before reading the existing record.
                 .transaction(TransactionMode::StateMachine, move |tx| {
                     Box::pin(async move {
+                        // No egress decision is recorded, and so no data
+                        // leaves, while the store's epoch is closed.
+                        crate::orm_runtime_recovery::require_live_epoch(tx).await?;
                         if let Some(existing) = tx
                             .query::<AiEgressEventRecord>()
                             .filter(AiEgressEventRecordWhereInput {

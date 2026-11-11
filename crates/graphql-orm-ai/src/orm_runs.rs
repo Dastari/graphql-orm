@@ -8213,3 +8213,7 @@ pub(crate) async fn run_provider_dispatch_possible(
         .map_err(OrmPublicError::from)?;
     Ok(!rows.is_empty())
 }
+
+#[cfg(all(test, feature = "sqlite"))]
+#[path = "orm_run_heartbeat_tests.rs"]
+mod heartbeat_contention_tests;

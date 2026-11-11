@@ -2297,10 +2297,14 @@ mod tests {
         )
         .await
         .expect("session should seed");
+        // A granted lease names the store's live epoch.
+        let epoch = crate::orm_runtime_recovery::open_test_epoch(&database)
+            .await
+            .epoch_id();
         AiRunRecord::insert(
             &database,
             CreateAiRunRecordInput {
-                recovery_epoch_id: None,
+                recovery_epoch_id: Some(epoch),
                 execution_selection: None,
                 id: run_id.0,
                 session_id: session_id.0,
