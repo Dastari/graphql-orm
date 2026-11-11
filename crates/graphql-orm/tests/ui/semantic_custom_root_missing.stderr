@@ -1,0 +1,5 @@
+error: `#[graphql_orm_custom_operations]` must be followed by `#[async_graphql::Object]` (or `#[Object]`, `#[graphql_orm::async_graphql::Object]`); renamed imports are not recognised
+ --> tests/ui/semantic_custom_root_missing.rs:7:1
+  |
+7 | impl Mutation {
+  | ^^^^

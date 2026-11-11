@@ -239,39 +239,95 @@ fn guard_source(value: &syn::Expr) -> String {
     }
 }
 
+/// The async-graphql root attribute a path names, when it is one this macro
+/// recognises: `Object` or `Subscription`, bare or under `async_graphql::` or
+/// `graphql_orm::async_graphql::`, with or without a leading `::`.
+fn root_attribute_kind(path: &syn::Path) -> Option<&'static str> {
+    let segments = path
+        .segments
+        .iter()
+        .map(|segment| {
+            segment
+                .arguments
+                .is_none()
+                .then(|| segment.ident.to_string())
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let (last, prefix) = segments.split_last()?;
+    let kind = match last.as_str() {
+        "Object" => "Object",
+        "Subscription" => "Subscription",
+        _ => return None,
+    };
+    let prefix = prefix.iter().map(String::as_str).collect::<Vec<_>>();
+    match prefix.as_slice() {
+        [] if path.leading_colon.is_none() => Some(kind),
+        ["async_graphql"] | ["graphql_orm", "async_graphql"] => Some(kind),
+        _ => None,
+    }
+}
+
 /// Check the root's own `#[Object(...)]` or `#[Subscription(...)]` attribute
 /// and return its impl-level guard, if any.
+///
+/// The root attribute must be exactly one recognised path of the declared
+/// kind, so its guard and `rename_fields` are always seen: an alias or a
+/// missing attribute fails to compile rather than hiding them.
 ///
 /// async-graphql applies an impl-level guard only to resolvers without their
 /// own guard. Every described resolver receives a guard, so the impl-level one
 /// is composed into it explicitly. `rename_fields` would rename the exposed
 /// fields away from their catalogued coordinates, so it is rejected.
-fn root_attribute_guard(item: &ItemImpl) -> syn::Result<Option<String>> {
+fn root_attribute_guard(item: &ItemImpl, kind: &str) -> syn::Result<Option<String>> {
+    let expected = if kind == "subscription" {
+        "Subscription"
+    } else {
+        "Object"
+    };
+    let mut roots = item
+        .attrs
+        .iter()
+        .filter_map(|attr| root_attribute_kind(attr.path()).map(|found| (attr, found)));
+    let Some((attr, found)) = roots.next() else {
+        return Err(syn::Error::new(
+            item.impl_token.span,
+            format!(
+                "`#[graphql_orm_custom_operations]` must be followed by \
+                 `#[async_graphql::{expected}]` (or `#[{expected}]`, \
+                 `#[graphql_orm::async_graphql::{expected}]`); renamed imports are not \
+                 recognised"
+            ),
+        ));
+    };
+    if let Some((extra, _)) = roots.next() {
+        return Err(syn::Error::new_spanned(
+            extra,
+            "a described custom root takes a single async-graphql root attribute",
+        ));
+    }
+    if found != expected {
+        return Err(syn::Error::new_spanned(
+            attr,
+            format!("`kind = \"{kind}\"` requires `#[{expected}]`, not `#[{found}]`"),
+        ));
+    }
     let mut guard = None;
-    for attr in &item.attrs {
-        let Some(last) = attr.path().segments.last() else {
-            continue;
-        };
-        if last.ident != "Object" && last.ident != "Subscription" {
-            continue;
+    let Meta::List(list) = &attr.meta else {
+        return Ok(None);
+    };
+    for meta in list.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)? {
+        if meta.path().is_ident("rename_fields") {
+            return Err(syn::Error::new_spanned(
+                meta,
+                "described custom roots do not support `rename_fields`; name renamed \
+                 resolvers with `#[graphql(name = \"...\")]` so the catalogued and \
+                 exposed coordinates agree",
+            ));
         }
-        let Meta::List(list) = &attr.meta else {
-            continue;
-        };
-        for meta in list.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)? {
-            if meta.path().is_ident("rename_fields") {
-                return Err(syn::Error::new_spanned(
-                    meta,
-                    "described custom roots do not support `rename_fields`; name renamed \
-                     resolvers with `#[graphql(name = \"...\")]` so the catalogued and \
-                     exposed coordinates agree",
-                ));
-            }
-            if let Meta::NameValue(value) = &meta
-                && value.path.is_ident("guard")
-            {
-                guard = Some(guard_source(&value.value));
-            }
+        if let Meta::NameValue(value) = &meta
+            && value.path.is_ident("guard")
+        {
+            guard = Some(guard_source(&value.value));
         }
     }
     Ok(guard)
@@ -692,7 +748,7 @@ pub(crate) fn expand(args: TokenStream, input: TokenStream) -> TokenStream {
             .expect("custom mutation AI execution metadata must validate")
         }
     });
-    let root_guard = match root_attribute_guard(&item) {
+    let root_guard = match root_attribute_guard(&item, &args.kind) {
         Ok(guard) => guard,
         Err(error) => return error.to_compile_error().into(),
     };
