@@ -463,7 +463,11 @@ impl AiConfigurationService for OrmAiConfigurationService {
                                 .await
                                 .map_err(OrmPublicError::from)?
                                 .ok_or_else(OrmPublicError::not_found)?;
-                            if current.scope_key != scope_hash {
+                            // The authority decision above was made for exactly this
+                            // version; any other version is a race and reports Conflict.
+                            if current.scope_key != scope_hash
+                                || current.row_version != expected_version
+                            {
                                 return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                             }
                             if provider_kind == AiProviderKindInput::LocalHarness.as_str()
@@ -471,16 +475,12 @@ impl AiConfigurationService for OrmAiConfigurationService {
                             {
                                 return Err(OrmPublicError::new(OrmErrorCode::InvalidInput));
                             }
-                            if moves_credentialed_endpoint(
+                            reason_code = update_reason_code(
                                 &current,
                                 &provider_kind,
                                 base_url.as_deref(),
-                            ) {
-                                if !credentialed_move_authorized {
-                                    return Err(OrmPublicError::new(OrmErrorCode::Forbidden));
-                                }
-                                reason_code = "credentialed_endpoint_changed";
-                            }
+                                credentialed_move_authorized,
+                            )?;
                             match tx
                                 .compare_and_swap::<AiProviderProfileRecord>(
                                     &id,
@@ -1649,6 +1649,27 @@ fn moves_credentialed_endpoint(
 ) -> bool {
     current.credential_reference.is_some()
         && (current.provider_kind != provider_kind || current.base_url.as_deref() != base_url)
+}
+
+/// Decides, against the row read inside the update transaction, whether a
+/// profile update may proceed and which audit reason it records.
+///
+/// A move of a credentialed endpoint is allowed only when credential authority
+/// was checked for that move before the transaction; otherwise it is refused
+/// as forbidden.
+fn update_reason_code(
+    current: &AiProviderProfileRecord,
+    provider_kind: &str,
+    base_url: Option<&str>,
+    credential_authority_checked: bool,
+) -> Result<&'static str, OrmPublicError> {
+    if !moves_credentialed_endpoint(current, provider_kind, base_url) {
+        Ok("configuration_updated")
+    } else if credential_authority_checked {
+        Ok("credentialed_endpoint_changed")
+    } else {
+        Err(OrmPublicError::new(OrmErrorCode::Forbidden))
+    }
 }
 
 fn provider_view(record: &AiProviderProfileRecord) -> Result<AiProviderProfileView, AiError> {

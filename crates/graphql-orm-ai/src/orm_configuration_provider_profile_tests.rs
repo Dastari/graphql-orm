@@ -304,6 +304,29 @@ async fn profile_authority_alone_cannot_move_a_credentialed_endpoint() {
     );
     assert_eq!(stored(&database, profile.id).await, before);
     assert_eq!(audit_reasons(&database, profile.id).await, audits_before);
+
+    // Spellings that survive normalization as a different URL are moves too.
+    for spelling in [
+        "https://provider.example/v1/",
+        "https://provider.example/%761",
+    ] {
+        let result = service(&database, profiles_only())
+            .upsert_provider_profile(
+                &principal(),
+                input(
+                    Some(profile.id),
+                    Some(profile.row_version),
+                    AiProviderKindInput::OpenAiCompatible,
+                    Some(spelling),
+                ),
+            )
+            .await;
+        assert!(
+            matches!(result, Err(AiError::Forbidden)),
+            "{spelling}: {result:?}"
+        );
+    }
+    assert_eq!(stored(&database, profile.id).await, before);
 }
 
 #[tokio::test]
@@ -373,7 +396,7 @@ async fn profile_authority_still_edits_a_credentialed_profile_in_place() {
         Some(profile.id),
         Some(profile.row_version),
         AiProviderKindInput::OpenAiCompatible,
-        Some("  https://provider.example/v1  "),
+        Some("  HTTPS://Provider.EXAMPLE:443/v1  "),
     );
     update.display_name = "Renamed provider".to_owned();
     update.enabled = false;
@@ -488,7 +511,7 @@ async fn credential_authority_may_move_a_credentialed_endpoint() {
 }
 
 #[tokio::test]
-async fn credentialed_endpoint_check_uses_the_committed_row() {
+async fn stale_version_is_refused_before_credential_authority_is_asked() {
     let database = database().await;
     let profile = credentialed_profile(
         &database,
@@ -497,9 +520,12 @@ async fn credentialed_endpoint_check_uses_the_committed_row() {
     )
     .await;
     let before = stored(&database, profile.id).await;
+    let policy = GrantedActions::new(&[
+        AiConfigurationAction::ManageProviderProfiles,
+        AiConfigurationAction::ManageProviderCredentials,
+    ]);
 
-    // A stale version is refused before any authority decision can be reused.
-    let stale = service(&database, profiles_only())
+    let stale = service(&database, policy.clone())
         .upsert_provider_profile(
             &principal(),
             input(
@@ -510,6 +536,93 @@ async fn credentialed_endpoint_check_uses_the_committed_row() {
             ),
         )
         .await;
+
     assert!(matches!(stale, Err(AiError::Conflict)), "{stale:?}");
+    assert_eq!(
+        policy.evaluated(),
+        vec![AiConfigurationAction::ManageProviderProfiles]
+    );
+    assert_eq!(stored(&database, profile.id).await, before);
+}
+
+#[tokio::test]
+async fn in_transaction_decision_refuses_an_unchecked_credentialed_move() {
+    let database = database().await;
+    let profile = credentialed_profile(
+        &database,
+        AiProviderKindInput::OpenAiCompatible,
+        Some(ORIGINAL_ENDPOINT),
+    )
+    .await;
+    let current = stored(&database, profile.id).await;
+    let kind = AiProviderKindInput::OpenAiCompatible.as_str();
+
+    // The row seen inside the transaction carries a credential and the
+    // update moves it, but no credential authority was checked beforehand.
+    let refused = update_reason_code(&current, kind, Some(OTHER_ENDPOINT), false)
+        .expect_err("an unchecked credentialed move must be refused");
+    assert_eq!(refused.code, OrmErrorCode::Forbidden);
+    assert!(matches!(map_orm(refused), AiError::Forbidden));
+    assert!(matches!(
+        update_reason_code(&current, "chat_completions", Some(ORIGINAL_ENDPOINT), false),
+        Err(error) if error.code == OrmErrorCode::Forbidden
+    ));
+
+    assert_eq!(
+        update_reason_code(&current, kind, Some(OTHER_ENDPOINT), true)
+            .expect("a checked move is allowed"),
+        "credentialed_endpoint_changed"
+    );
+    assert_eq!(
+        update_reason_code(&current, kind, Some(ORIGINAL_ENDPOINT), false)
+            .expect("an in-place edit needs no credential authority"),
+        "configuration_updated"
+    );
+    let mut uncredentialed = current.clone();
+    uncredentialed.credential_reference = None;
+    assert_eq!(
+        update_reason_code(&uncredentialed, kind, Some(OTHER_ENDPOINT), false)
+            .expect("an uncredentialed move needs no credential authority"),
+        "configuration_updated"
+    );
+}
+
+#[tokio::test]
+async fn local_harness_conversion_of_a_credentialed_profile_is_refused() {
+    let database = database().await;
+    let profile = credentialed_profile(&database, AiProviderKindInput::OpenAi, None).await;
+    let before = stored(&database, profile.id).await;
+    let conversion = || {
+        input(
+            Some(profile.id),
+            Some(profile.row_version),
+            AiProviderKindInput::LocalHarness,
+            None,
+        )
+    };
+
+    // Without credential authority the kind change itself is refused first.
+    let without_credentials = service(&database, profiles_only())
+        .upsert_provider_profile(&principal(), conversion())
+        .await;
+    assert!(
+        matches!(without_credentials, Err(AiError::Forbidden)),
+        "{without_credentials:?}"
+    );
+
+    // With it, the existing local-harness credential refusal still applies.
+    let with_credentials = service(
+        &database,
+        GrantedActions::new(&[
+            AiConfigurationAction::ManageProviderProfiles,
+            AiConfigurationAction::ManageProviderCredentials,
+        ]),
+    )
+    .upsert_provider_profile(&principal(), conversion())
+    .await;
+    assert!(
+        matches!(with_credentials, Err(AiError::InvalidInput(_))),
+        "{with_credentials:?}"
+    );
     assert_eq!(stored(&database, profile.id).await, before);
 }
