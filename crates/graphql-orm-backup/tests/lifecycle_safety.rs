@@ -963,6 +963,109 @@ async fn write_manifest_never_overwrites_a_snapshot() {
     assert_eq!(repository.get_blob(&key).await.expect("manifest"), before);
 }
 
+#[tokio::test]
+async fn failed_release_after_cancellation_is_reported_with_the_run() {
+    let temp = TempDir::new().expect("temp dir");
+    let repository = Hooked::new(repository(&temp));
+    full(
+        &repository.inner,
+        id(1),
+        1,
+        &Database::with_rows("users", 1),
+    )
+    .await;
+    repository.fail_lock_release.store(true, Ordering::SeqCst);
+    let cancelled = BackupCancellation::new();
+    cancelled.cancel();
+
+    let error = create_full_backup_with_options(
+        &repository,
+        &Database::with_rows("users", 1),
+        &Objects::default(),
+        full_request(id(2), 2),
+        &BackupExecutionOptions {
+            cancellation: cancelled.clone(),
+            ..BackupExecutionOptions::default()
+        },
+    )
+    .await
+    .expect_err("cancelled backup");
+    let run_id = assert_lock_not_released(&repository, &error, |operation| {
+        matches!(operation, BackupError::Cancelled)
+    })
+    .await;
+    assert!(error.to_string().contains(&run_id.to_string()));
+    break_repository_lock(
+        &repository.inner,
+        &BreakRepositoryLockRequest {
+            expected_run_id: run_id,
+            min_age_seconds: 0,
+        },
+    )
+    .await
+    .expect("the reported run's lock can be broken");
+
+    let error = restore_snapshot_with_options(
+        &repository,
+        &Database::with_rows("users", 1),
+        id(1),
+        RestoreContext::dry_run(),
+        &RestoreOptions {
+            cancellation: cancelled,
+            ..RestoreOptions::default()
+        },
+    )
+    .await
+    .expect_err("cancelled restore");
+    assert_lock_not_released(&repository, &error, |operation| {
+        matches!(operation, BackupError::RestoreStageFailed { source, .. }
+            if matches!(**source, BackupError::Cancelled))
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn object_restore_cancelled_partway_keeps_earlier_objects_and_unlocks() {
+    let temp = TempDir::new().expect("temp dir");
+    let repository = repository(&temp);
+    create_full_backup(
+        &repository,
+        &Database::with_rows("users", 1),
+        &Objects::with_object(b"first restored object")
+            .and_object(b"second restored object")
+            .and_object(b"third restored object"),
+        full_request(id(1), 1),
+    )
+    .await
+    .expect("snapshot");
+    let manifest = load_manifest(&repository, id(1)).await.expect("manifest");
+    let cancellation = BackupCancellation::new();
+    let sink = CollectingSink {
+        cancel_after: Some((cancellation.clone(), 1)),
+        ..CollectingSink::default()
+    };
+
+    let error = restore_objects_with_options(
+        &repository,
+        &manifest,
+        &sink,
+        &RestoreOptions {
+            cancellation,
+            ..RestoreOptions::default()
+        },
+    )
+    .await
+    .expect_err("cancelled after the first object");
+
+    assert!(matches!(error, BackupError::Cancelled), "{error:?}");
+    assert_eq!(
+        sink.restored.lock().expect("sink").as_slice(),
+        &[object_ref(&manifest.objects[0])],
+        "only the object restored before cancellation reached the sink"
+    );
+    assert_unlocked(&repository).await;
+}
+
 // ---------------------------------------------------------------------------
 // #476 backup writes enforce restore limits
 // ---------------------------------------------------------------------------
@@ -1291,6 +1394,41 @@ fn assert_capacity(error: &BackupError, kind: BackupCapacityLimitKind, limit: u6
     );
 }
 
+/// Asserts that the operation failed with `operation` and its lock release
+/// failed, and that the reported run still holds the lock. Returns the run.
+async fn assert_lock_not_released(
+    repository: &Hooked,
+    error: &BackupError,
+    operation: impl Fn(&BackupError) -> bool,
+) -> Uuid {
+    let BackupError::LockNotReleased {
+        run_id,
+        operation: source,
+        ..
+    } = error
+    else {
+        panic!("a failed release is reported: {error:?}");
+    };
+    assert!(operation(source), "unexpected operation error: {source:?}");
+    let RepositoryLockStatus::Owned(owner) =
+        read_repository_lock(&repository.inner).await.expect("read")
+    else {
+        panic!("the lock is still held");
+    };
+    assert_eq!(owner.run_id, *run_id);
+    *run_id
+}
+
+fn object_ref(entry: &graphql_orm_backup::ObjectBackupEntry) -> BackupObjectRef {
+    BackupObjectRef {
+        object_id: entry.object_id,
+        storage_key: entry.storage_key.clone(),
+        sha256_hex: entry.sha256_hex.clone(),
+        size_bytes: entry.size_bytes,
+        mime_type: entry.mime_type.clone(),
+    }
+}
+
 fn assert_prune_was_locked_out(repository: &Hooked) {
     let outcome = repository
         .prune_outcome
@@ -1575,6 +1713,8 @@ impl BackupObjectIndex for Objects {
 #[derive(Default)]
 struct CollectingSink {
     restored: Mutex<Vec<BackupObjectRef>>,
+    /// Cancels once this many objects were restored.
+    cancel_after: Option<(BackupCancellation, usize)>,
 }
 
 #[async_trait]
@@ -1584,7 +1724,13 @@ impl RestoreObjectSink for CollectingSink {
         object: BackupObjectRef,
         _bytes: Bytes,
     ) -> Result<(), BackupError> {
-        self.restored.lock().expect("sink").push(object);
+        let mut restored = self.restored.lock().expect("sink");
+        restored.push(object);
+        if let Some((cancellation, after)) = &self.cancel_after
+            && restored.len() >= *after
+        {
+            cancellation.cancel();
+        }
         Ok(())
     }
 }

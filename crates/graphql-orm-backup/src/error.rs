@@ -155,6 +155,26 @@ pub enum BackupError {
         source: Box<BackupError>,
     },
 
+    /// The operation failed or was cancelled, and releasing its repository
+    /// lock failed too, so the repository may still be locked by `run_id`.
+    ///
+    /// `operation` is the operation's own error and `release` the release
+    /// failure. A later operation fails with [`BackupError::RepositoryLocked`]
+    /// naming this run. After confirming that the run and every other writer
+    /// have stopped, remove the lock with [`crate::break_repository_lock`] for
+    /// `run_id`.
+    #[error(
+        "operation failed and repository lock {lock_key} held by run {run_id} was not released; \
+         confirm no writer is running, then break the lock for run {run_id}"
+    )]
+    LockNotReleased {
+        lock_key: String,
+        run_id: uuid::Uuid,
+        #[source]
+        operation: Box<BackupError>,
+        release: Box<BackupError>,
+    },
+
     /// A [`crate::BackupCancellation`] was triggered. The operation stopped at
     /// a safe point, removed the payloads it had written and released the lock.
     #[error("backup operation was cancelled")]

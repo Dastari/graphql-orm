@@ -20,7 +20,8 @@ pub struct VerificationOptions {
     pub lock_mode: crate::RepositoryLockMode,
     /// Cooperative cancellation, checked before each checksum read. A
     /// cancelled verification releases the lock and fails with
-    /// [`BackupError::Cancelled`].
+    /// [`BackupError::Cancelled`], or with [`BackupError::LockNotReleased`]
+    /// wrapping it if the release fails.
     pub cancellation: crate::BackupCancellation,
 }
 

@@ -356,8 +356,10 @@ pub struct RestoreOptions {
     /// Cooperative cancellation. Restore stops before its next manifest,
     /// payload, apply call or object, releases the lock and fails with
     /// [`BackupError::Cancelled`] (inside [`BackupError::RestoreStageFailed`]
-    /// for a database restore). Use it for host-side timeouts instead of
-    /// dropping the future, which leaves the lock in place.
+    /// for a database restore), or with [`BackupError::LockNotReleased`]
+    /// wrapping that error if the release fails. Use it for host-side
+    /// timeouts instead of dropping the future, which leaves the lock in
+    /// place.
     pub cancellation: crate::BackupCancellation,
 }
 

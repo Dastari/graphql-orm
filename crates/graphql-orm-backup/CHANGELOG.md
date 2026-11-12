@@ -76,6 +76,9 @@ limits and stricter snapshot lifecycle checks. See [MIGRATION.md](MIGRATION.md).
 - A completed operation whose lock release fails now returns
   `LockReleaseFailed`, naming the run still holding the lock and, for backups
   and compaction, the committed snapshot, instead of the bare release error.
+  A failed or cancelled operation whose release also fails returns the new
+  `LockNotReleased`, which keeps both errors and names the run whose lock to
+  break; previously the release failure was dropped.
 - Write-side capacity limits (#476): backups, incremental backups and
   compaction check every payload against the repository handle's
   `BackupCapacityLimits` before writing, and fail with the new

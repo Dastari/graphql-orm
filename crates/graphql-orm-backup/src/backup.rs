@@ -57,7 +57,9 @@ impl Default for BackupExecutionOptions {
 /// the manifest is written the snapshot is committed and cancellation no
 /// longer applies. Restore stops before its next manifest, payload, apply call
 /// or object, and verification before its next checksum read; both release
-/// the lock.
+/// the lock. If releasing the lock fails, the operation instead returns
+/// [`BackupError::LockNotReleased`] with the cancellation as its `operation`
+/// and the run that still holds the lock.
 ///
 /// Dropping the operation's future instead cannot release the lock, because
 /// release is asynchronous. The lock then keeps its owner record; see

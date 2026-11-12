@@ -435,8 +435,10 @@ incremental backups and compaction, in `RestoreOptions` for restores, and in
 `VerificationOptions` for verification. A writer stops at its next safe point,
 lets object uploads already in flight finish, removes its payloads, releases
 the lock and returns `Cancelled`. Restore and verification stop before their
-next read or apply call and release the lock. Use cancellation for host-side
-timeouts: dropping the future cannot release the lock. A crashed or dropped run leaves
+next read or apply call and release the lock. If that release fails, the
+operation returns `LockNotReleased`, which keeps its own error and names the
+run whose lock remains. Use cancellation for host-side timeouts: dropping the
+future cannot release the lock. A crashed or dropped run leaves
 the lock and its owner record. Nothing expires automatically, because a slow
 holder could still be writing. To recover:
 
@@ -478,7 +480,9 @@ reported as `RepositoryLockStatus::Unidentified` and needs offline removal
 after quiescing every writer, handle and in-flight request. If an operation
 completed but its lock release failed, it returns `LockReleaseFailed` naming
 the run and, for backups and compaction, the committed snapshot; recover the
-lock the same way.
+lock the same way. A failed or cancelled operation whose release also failed
+returns `LockNotReleased` with the operation's error, the release error and
+the run id.
 
 ## Repository Layout
 

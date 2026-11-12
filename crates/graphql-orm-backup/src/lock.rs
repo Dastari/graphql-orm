@@ -353,11 +353,14 @@ impl<'a> RepositoryLock<'a> {
         self.repository.delete_blob_once(REPOSITORY_LOCK_KEY).await
     }
 
-    /// Releases the lock after `result`, keeping an operation's own error.
+    /// Releases the lock after `result`.
     ///
     /// If the operation succeeded but release failed, the result is lost but
-    /// the error says the operation completed and names the run still holding
-    /// the lock, and the snapshot it committed, if any.
+    /// [`BackupError::LockReleaseFailed`] says the operation completed and names
+    /// the run still holding the lock, and the snapshot it committed, if any.
+    /// If both failed, [`BackupError::LockNotReleased`] keeps both errors and
+    /// names the run, so a failed or cancelled operation never hides a lock it
+    /// left behind.
     pub(crate) async fn finish<T>(
         self,
         result: Result<T, BackupError>,
@@ -367,7 +370,13 @@ impl<'a> RepositoryLock<'a> {
         let released = self.release().await;
         match (result, released) {
             (Ok(value), Ok(())) => Ok(value),
-            (Err(error), _) => Err(error),
+            (Err(error), Ok(())) => Err(error),
+            (Err(operation), Err(release)) => Err(BackupError::LockNotReleased {
+                lock_key: REPOSITORY_LOCK_KEY.to_string(),
+                run_id,
+                operation: Box::new(operation),
+                release: Box::new(release),
+            }),
             (Ok(value), Err(source)) => Err(BackupError::LockReleaseFailed {
                 lock_key: REPOSITORY_LOCK_KEY.to_string(),
                 run_id,

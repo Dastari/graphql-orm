@@ -18,10 +18,10 @@ are unchanged; existing snapshots restore as before.
 1. **Construct the new fields.** `RepositoryLockOptions` gains `owner_label`,
    `BackupExecutionOptions` gains `cancellation`, `VerificationOptions` gains
    `lock`, `lock_mode` and `cancellation`, `BackupCapacityLimits` gains
-   `object_bytes` and `PruneResult` gains `deleted_orphan_blobs`. Struct literals need `..Default::default()` or the
-   new fields. `BackupError::RepositoryLocked` gains an `owner` field, so
+   `object_bytes` and `PruneResult` gains `deleted_orphan_blobs`. Struct
+   literals need `..Default::default()` or the new fields. `BackupError::RepositoryLocked` gains an `owner` field, so
    patterns must use `{ lock_key, .. }`.
-2. **Handle the new errors.** Match `SnapshotExists`,
+2. **Handle the new errors.** Match `LockNotReleased`, `SnapshotExists`,
    `InvalidRetentionPolicy`, `BackupCapacityExceeded`, `Cancelled`,
    `LockReleaseFailed`, `RepositoryLockNotHeld` and `BreakLockRefused`.
    Compaction onto a used id now reports `SnapshotExists` instead of
@@ -52,7 +52,8 @@ are unchanged; existing snapshots restore as before.
 7. **Cancel instead of dropping.** Wrap host-side timeouts around a
    `BackupCancellation` (`BackupExecutionOptions`, `RestoreOptions` or
    `VerificationOptions`) and call `cancel()`. The operation then stops at a
-   safe point and releases the lock. Dropping a backup, restore or
+   safe point and releases the lock, or returns `LockNotReleased` naming the
+   run whose lock it could not release. Dropping a backup, restore or
    verification future leaves the lock in place until it is broken.
 8. **Do not rewrite manifests.** `write_manifest` now refuses an existing
    snapshot id with `SnapshotExists`. Write a new snapshot instead; tooling
