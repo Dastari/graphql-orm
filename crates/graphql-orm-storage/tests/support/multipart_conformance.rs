@@ -75,6 +75,28 @@ pub async fn run_all(make: Make, prefix: &str, part_size: usize) {
     part_boundaries(&make, prefix, part_size).await;
     concurrent_uploads_of_one_part_leave_one(&make, prefix, part_size).await;
     completion_racing_abort_has_one_outcome(&make, prefix, part_size).await;
+    the_internal_namespace_is_reserved(&make).await;
+}
+
+async fn the_internal_namespace_is_reserved(make: &Make) {
+    let store = make();
+    for key in [".graphql-orm-storage/multipart/x", ".GRAPHQL-ORM-STORAGE/x"] {
+        assert!(
+            matches!(
+                store
+                    .start_multipart(key, MultipartStartOptions::default())
+                    .await,
+                Err(StorageError::InvalidStorageKey { .. })
+            ),
+            "{key}"
+        );
+    }
+    assert!(matches!(
+        store
+            .list_incomplete_multipart(".graphql-orm-storage", None, 10)
+            .await,
+        Err(StorageError::InvalidStorageKey { .. })
+    ));
 }
 
 async fn three_parts_complete_and_read_back(make: &Make, prefix: &str, part_size: usize) {

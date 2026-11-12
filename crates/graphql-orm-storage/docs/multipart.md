@@ -3,7 +3,7 @@ title: "Resumable multipart uploads"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-10-31
+last_reviewed: 2026-11-12
 review_by: 2027-04-30
 supersedes: []
 ---
@@ -137,7 +137,7 @@ manifest, one data file per part and one receipt per part number. Every file is
 written to a temporary name, fsynced and renamed into place, and the directory
 is fsynced, so staged parts survive a crash or restart. Starting an upload
 makes the staging directories durable up to the root, as described in
-[listing order and durability](blob-store.md#listing-order-and-durability).
+[listing order and durability](blob-store.md#listing-prefixes-order-and-durability).
 
 Receipt commits, completion and abort hold an exclusive advisory lock
 (`<upload_id>.lock`, through `std::fs::File::lock`). The operating system
@@ -162,6 +162,15 @@ crash after it leaves the complete object, plus a stale upload that
 The backend uses `CreateMultipartUpload`, `UploadPart`, `ListParts`,
 `CompleteMultipartUpload`, `AbortMultipartUpload` and `ListMultipartUploads`,
 with the existing endpoint, TLS, credentials and `key_prefix`.
+
+`put_blob` and `put_blob_if_not_exists` also stream a body larger than one
+internal part through a multipart upload of their own. When the body yields an
+error or a part fails to upload, they abort that upload before returning the
+error, so its parts are not left stored as an incomplete upload. When the write
+is cancelled, dropping it spawns the same abort on the current Tokio runtime.
+Both aborts are best effort: an upload whose abort fails, or whose creation
+response was lost, is left to `list_incomplete_multipart` and the bucket's
+lifecycle rules.
 
 - Uploads are created with the SHA-256 checksum algorithm. Each part carries
   `x-amz-checksum-sha256`, so the provider verifies it.

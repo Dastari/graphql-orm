@@ -52,6 +52,20 @@
       ],
       "scope": "Owner-local hardening patch, not an upstream backport. The parallel worker records the message ID of each request it sends and accepts a response only for an outstanding ID; an interim STATUS_PENDING keeps the ID outstanding, any other response completes it. Unsolicited responses are discarded, at most MAX_PENDING_RESPONSES (256) responses are held before a task receives them (oldest dropped), and at most MAX_OUTSTANDING_REQUESTS (8192) IDs are tracked (oldest forgotten). A response for a task that stopped waiting is dropped without a receive error. The async receive loop closes the connection on any transport error and after 64 consecutive failed messages, instead of logging and retrying; it then marks the worker stopped and fails awaiting tasks, so later receives fail at once. ConnectionConfig gains expected_server_guid: negotiation fails with the typed Error::ServerGuidMismatch, before session setup, when the server reports another GUID. Client::share_connect and ipc_connect wrap the password in sspi's zeroizing Secret before any fallible step. Test-only: ParallelWorker::start_expecting and the ConnectionMessageHandler::with_test_transport expected-ID argument register scripted responses; the earlier patch's channel tests pass their message ID. Directory::send_query refuses a QUERY_DIRECTORY reply whose output buffer exceeds the requested output_buffer_length (typed Error::InvalidMessage) before decoding its entries. Includes the in-crate regression tests. The multi-threaded backend, not built by storage, is unchanged.",
       "upstream": "afiffon/smb-rs main stores unsolicited responses without a bound and retries non-NotConnected transport errors; not yet reported upstream. Replace with a reviewed upstream fix when one is released."
+    },
+    {
+      "id": "server-response-errors",
+      "patch_file": "PATCHES/server-response-errors.patch",
+      "patch_sha256": "491df9ced427f2a64f0a36cee43a0ad84bf173782f6912db6431754a41324adb",
+      "applies_after": "PATCHES/resource-bounds-and-server-identity.patch",
+      "runtime_changed_files": [
+        "src/connection/transformer.rs",
+        "src/connection/worker/worker_trait.rs",
+        "src/resource.rs",
+        "src/session/authenticator.rs"
+      ],
+      "scope": "Owner-local hardening patch, not an upstream backport. Four server-reachable panics become typed errors: a transform nested inside a decrypted or decompressed payload is refused with Error::InvalidMessage; an async response header without an async ID is refused with Error::InvalidMessage; opening a file on a printer share is refused with Error::UnsupportedOperation, and dropping the unsupported handle closes it; a session key shorter than 16 bytes is refused with Error::InvalidState instead of being sliced. MS-SMB2 3.2.5.3.1 would right-pad a short key with zeros; this client fails closed instead. Includes the in-crate regression tests, and a test-only regression test in src/connection.rs that a server-selected dialect below ConnectionConfig::min_dialect fails negotiation with Error::NegotiationError and that NEGOTIATE was the only SMB2 message sent, so no credentials follow.",
+      "upstream": "Upstream 0.12.0 is reported to no longer slice a short session key; the other three sites are not known to be fixed upstream. Replace with a reviewed upstream fix when one is adopted."
     }
   ],
   "license": {
@@ -550,16 +564,16 @@
     "src/connection/config.rs": "3703f6591a769fd169b7b3f186477590f18656705eb9e4fcb59f68bb0d888283",
     "src/connection/connection_info.rs": "93deb79937468d30602c2abac429f5a3bf42735967086b2a0849b4067b8d0a5a",
     "src/connection/preauth_hash.rs": "6d70f1071d868abd760c36962ec05e023e460d1525ec0145ac128a6e556b8692",
-    "src/connection/transformer.rs": "a43bd31e005c1d8d54f83c04ea31478ce44ea466f03ad915ffa83411983f6014",
+    "src/connection/transformer.rs": "1bb144006b14bc1b1a743fec42265a3143eaadaf8d9968a0cd765c8e65f666f6",
     "src/connection/worker/parallel/async_backend.rs": "44449660d00dd5b623e81e4705c680f2ff4ca05b8662b30df99368713bf6e9b0",
     "src/connection/worker/parallel/backend_trait.rs": "5f4d382aa2b1c90a12c933a63cb9c95bb5291a80ab74b6040a50c06f696cfa3c",
     "src/connection/worker/parallel/base.rs": "0f9204f9b9c622b9f75d09c2d1855da17b90afdb57250ed064507725f067aadd",
     "src/connection/worker/parallel/threading_backend.rs": "e2fae4116dc3e1077442b7c0badb47f03c617094500e9bbc4d3f2b667734f8a0",
     "src/connection/worker/parallel.rs": "884120860fc59b82225d2cd05626e01e65541981de326eb6781ec1ac5444a65f",
     "src/connection/worker/single_worker.rs": "16c36362a3b4100c0290b94a99e19aefd0a0512494fdebf282b7bfc44c3a2a69",
-    "src/connection/worker/worker_trait.rs": "22fff54789cfca6280ea50f74e58c6b6c303bf9561d14a26b6dec9c87a0a7693",
+    "src/connection/worker/worker_trait.rs": "66d24bd0dab53db0b41ce7c726bbeea93ba15d3552ca48dbc11c8e4581878938",
     "src/connection/worker.rs": "e62939d506059552d112a4dd4bc982c54f80a479eb01a3c83a5a17e4752b1958",
-    "src/connection.rs": "fbb3bf38948926ca1716e5d96a70d7a9811892b2aff6388ebce02ca9003d2eba",
+    "src/connection.rs": "3f1ef621c276fd07b8f505c5aaa420154d51950f974a667db23404dc10886d0e",
     "src/crypto/encryption.rs": "6cbf79bec47a488bcfd41c2ef8911428bd2816a209034370505c75a91045ee14",
     "src/crypto/kbkdf.rs": "ddb22a78289486f828badccd2e7edfabc7390edbe069340cde74b3ad3878531d",
     "src/crypto/signing.rs": "d5452c66e11db57a201cff6db00e06c2c371ae1ffaa79f0cc0f237c9436c497b",
@@ -573,8 +587,8 @@
     "src/resource/file.rs": "e56243cae8cdf2f4b824f499133199b9735656ba0f982e144a2a947f49e9c711",
     "src/resource/file_util.rs": "330ad0184a57f511446e630f620163d1f268df5801db3a0cab94ea47c1f3c9b2",
     "src/resource/pipe.rs": "195ef0cdd14d7463dddc48a9b85e7e97e25e81e8dc55101cdc78a9b8fe676f8a",
-    "src/resource.rs": "5f88a0e9686a41a63777bc195e02e79d866fe7c3867e768304b2a6a3402e3b45",
-    "src/session/authenticator.rs": "aace47a5a09c8c9570cbecbcf86cfd16ff2ee55aa381dc811e1bf7e24f698c01",
+    "src/resource.rs": "59a7c0ac6ef101b76d213c4995dc1fd55a64a876692f334d4701ff034d563139",
+    "src/session/authenticator.rs": "90b0d8f7ac25a45a03a26afe22c0ddd75eb86154122ad0e55e159cdcef7a6644",
     "src/session/channel.rs": "56a1a9d984b30212f0ff289145dfe9506ede11f822592a17acf31e12f1a85126",
     "src/session/encryptor_decryptor.rs": "6bbe6417927d696bb5c26a8e94ddd4f2d8863c56084b41c7aa1d0a7fbe73f068",
     "src/session/setup.rs": "0767645f540b2a5ff7cd1f9c58415b2a4a54f310eda7f50365c6d0e8248d9dbd",

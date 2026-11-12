@@ -239,7 +239,16 @@ pub trait BlobStore: Send + Sync {
     /// load metadata.
     async fn head_blob(&self, key: &str) -> Result<Option<BlobMetadata>, StorageError>;
 
-    /// Lists one page of blob keys under a prefix. An empty prefix lists all blobs.
+    /// Lists one page of blob keys that start with a prefix, in byte order.
+    ///
+    /// The prefix is a plain string prefix of the key on every provider: `a`
+    /// matches `a/x`, `a-b/x` and `ab`, while `a/` matches only keys below
+    /// `a/`. An empty prefix lists all blobs. A non-empty prefix must be a
+    /// valid key (see [`validate_blob_key`]), optionally followed by one `/`.
+    ///
+    /// A listing returns only keys the provider accepts: a stored name that
+    /// is not a valid key, for example one that is not valid Unicode or lies
+    /// in the reserved internal namespace, is skipped.
     ///
     /// # Errors
     ///
@@ -252,7 +261,8 @@ pub trait BlobStore: Send + Sync {
         limit: usize,
     ) -> Result<BlobListPage, StorageError>;
 
-    /// Lists blob keys under a prefix. An empty prefix lists all blobs.
+    /// Lists all blob keys that start with a prefix, in byte order. The
+    /// prefix follows the contract of [`Self::list_blobs_page`].
     ///
     /// # Errors
     ///
@@ -398,12 +408,31 @@ fn ranged_storage_stream(body: StorageByteStream, skip: u64, length: u64) -> Sto
     }
 }
 
+/// Name of the internal namespace providers reserve at the root of a store,
+/// for example for local multipart staging and object metadata.
+pub(crate) const INTERNAL_NAMESPACE: &str = ".graphql-orm-storage";
+
+/// Whether a key's first component names the reserved internal namespace.
+/// The comparison ignores ASCII case and trailing dots and spaces, which
+/// case-insensitive filesystems and SMB servers treat as the same name.
+fn is_internal_namespace(component: &str) -> bool {
+    component
+        .trim_end_matches(['.', ' '])
+        .eq_ignore_ascii_case(INTERNAL_NAMESPACE)
+}
+
 /// Validates a provider-neutral blob key.
+///
+/// A key's first component must not name the reserved internal namespace,
+/// `.graphql-orm-storage`, in any ASCII case and with or without trailing dots
+/// or spaces. The same name further down a key, such as
+/// `data/.graphql-orm-storage`, is an ordinary component.
 ///
 /// # Errors
 ///
 /// Returns [`StorageError::InvalidStorageKey`] when the key can escape the
-/// provider namespace or cannot be represented as a safe relative path.
+/// provider namespace, cannot be represented as a safe relative path, or lies
+/// in the reserved internal namespace.
 pub fn validate_blob_key(key: &str) -> Result<(), StorageError> {
     if key.is_empty()
         || key.contains('\\')
@@ -411,6 +440,7 @@ pub fn validate_blob_key(key: &str) -> Result<(), StorageError> {
         || key
             .split('/')
             .any(|component| component.is_empty() || component == "." || component == "..")
+        || key.split('/').next().is_some_and(is_internal_namespace)
     {
         return Err(StorageError::InvalidStorageKey {
             key: key.to_string(),
@@ -435,11 +465,16 @@ pub fn validate_blob_key(key: &str) -> Result<(), StorageError> {
     Ok(())
 }
 
+/// Validates a listing prefix: empty, or a valid key optionally followed by
+/// one `/`.
 #[cfg(any(feature = "local", feature = "s3", feature = "smb"))]
 pub(crate) fn validate_blob_prefix(prefix: &str) -> Result<(), StorageError> {
     if prefix.is_empty() {
-        Ok(())
-    } else {
-        validate_blob_key(prefix)
+        return Ok(());
     }
+    validate_blob_key(prefix.strip_suffix('/').unwrap_or(prefix)).map_err(|_| {
+        StorageError::InvalidStorageKey {
+            key: prefix.to_string(),
+        }
+    })
 }

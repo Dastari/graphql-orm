@@ -245,6 +245,7 @@ impl MultipartBlobStore for LocalStorageBackend {
         options: MultipartStartOptions,
     ) -> Result<MultipartUploadHandle, StorageError> {
         // Refuse a key the completed upload could not be written to.
+        self.ensure_internal_dir();
         temp_path_for(&self.path_for(key)?, key)?;
         let id = Uuid::new_v4().hyphenated().to_string();
         let uploads = self.uploads_dir();
@@ -508,6 +509,7 @@ impl MultipartBlobStore for LocalStorageBackend {
         limit: usize,
     ) -> Result<IncompleteMultipartPage, StorageError> {
         crate::blob::validate_blob_prefix(prefix)?;
+        self.check_root_name(prefix)?;
         let after = continuation
             .map(|token| {
                 serde_json::from_str::<(String, String)>(&token).map_err(|_| {

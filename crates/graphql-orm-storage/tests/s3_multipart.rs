@@ -10,10 +10,14 @@
 //! cargo test -p graphql-orm-storage --no-default-features --features s3 --test s3_multipart -- --ignored
 //! ```
 
+#[path = "support/listing_contract.rs"]
+mod listing_contract;
 #[path = "support/multipart_conformance.rs"]
 mod multipart_conformance;
 
 use std::{process::Command, sync::Arc, time::Duration};
+
+use futures_util::StreamExt;
 
 use graphql_orm_storage::{
     BlobPutOptions, BlobStore, MultipartBlobStore, MultipartErrorKind, MultipartStartOptions,
@@ -152,6 +156,93 @@ async fn owned_s3_passes_the_multipart_conformance_suite() {
     a_retry_after_a_lost_completion_response_recognises_the_object(&make).await;
     misconfigured_storage_is_never_an_unknown_upload(&server.config).await;
     key_prefixes_sharing_a_bucket_stay_apart(&server.config).await;
+    let store = S3StorageBackend::new(server.config.clone());
+    a_failed_body_aborts_its_multipart_upload(&store).await;
+    a_cancelled_put_aborts_its_multipart_upload(&store).await;
+    listing_contract::prefixes_are_string_prefixes(&store, "listing").await;
+    listing_contract::the_internal_namespace_is_reserved(&store).await;
+}
+
+/// More than one automatic multipart part, so a part is uploaded first.
+const AUTOMATIC_PART: usize = 8 * 1024 * 1024;
+
+async fn incomplete_uploads(store: &S3StorageBackend, prefix: &str) -> Vec<String> {
+    store
+        .list_incomplete_multipart(prefix, None, 100)
+        .await
+        .expect("list uploads")
+        .uploads
+        .into_iter()
+        .map(|upload| upload.handle.key)
+        .collect()
+}
+
+async fn a_failed_body_aborts_its_multipart_upload(store: &S3StorageBackend) {
+    for if_not_exists in [false, true] {
+        let body = StorageByteStream::new(Box::pin(futures_util::stream::iter([
+            Ok(bytes::Bytes::from(vec![7_u8; AUTOMATIC_PART + 1])),
+            Err(StorageError::Provider {
+                backend: "test".into(),
+                message: "the body failed".into(),
+                retryable: false,
+            }),
+        ])));
+        let key = "aborted/failed-body.bin";
+        let result = if if_not_exists {
+            store
+                .put_blob_if_not_exists(key, body, BlobPutOptions::default())
+                .await
+                .map(drop)
+        } else {
+            store
+                .put_blob(key, body, BlobPutOptions::default())
+                .await
+                .map(drop)
+        };
+        assert!(
+            matches!(&result, Err(StorageError::Provider { message, .. }) if message == "the body failed"),
+            "{result:?}"
+        );
+        assert!(!store.blob_exists(key).await.expect("exists"));
+        assert_eq!(
+            incomplete_uploads(store, "aborted").await,
+            Vec::<String>::new(),
+            "a failed body must abort its multipart upload (if_not_exists: {if_not_exists})"
+        );
+    }
+}
+
+async fn a_cancelled_put_aborts_its_multipart_upload(store: &S3StorageBackend) {
+    let body = StorageByteStream::new(Box::pin(
+        futures_util::stream::iter([Ok(bytes::Bytes::from(vec![7_u8; AUTOMATIC_PART + 1]))])
+            .chain(futures_util::stream::pending()),
+    ));
+    let writer = store.clone();
+    let put = tokio::spawn(async move {
+        writer
+            .put_blob("cancelled/put.bin", body, BlobPutOptions::default())
+            .await
+    });
+    // Wait until the first part is uploaded, then cancel the write.
+    let mut started = false;
+    for _ in 0..200 {
+        if !incomplete_uploads(store, "cancelled").await.is_empty() {
+            started = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(started, "the multipart upload never started");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    put.abort();
+    assert!(put.await.expect_err("cancelled").is_cancelled());
+    for _ in 0..200 {
+        if incomplete_uploads(store, "cancelled").await.is_empty() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("a cancelled put left its multipart upload behind");
 }
 
 async fn a_retry_after_a_lost_completion_response_recognises_the_object(make: &Make) {

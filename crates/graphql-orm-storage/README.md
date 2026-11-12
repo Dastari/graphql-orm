@@ -3,7 +3,7 @@ title: "graphql-orm-storage"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-12
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -28,7 +28,7 @@ digest and refuses tag-only image overrides; the library is unchanged.
 Version 0.9.2 makes the local backend list keys in exact lexicographic key
 order, so paged listings no longer skip keys next to sibling names such as
 `a-b`, and makes local writes and deletions durable before they return. See
-[ordering and durability](docs/blob-store.md#listing-order-and-durability).
+[ordering and durability](docs/blob-store.md#listing-prefixes-order-and-durability).
 
 Version 0.9.1 treats only the backend's own upload temp files as temporary.
 The local backend names them `.<uuid>.uploading`, and listings and
@@ -79,13 +79,13 @@ resolved dependency graph.
 
 ```toml
 [dependencies]
-graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.9.3" }
+graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.10.0" }
 ```
 
 For S3-compatible storage without the default local backend:
 
 ```toml
-graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.9.3", default-features = false, features = ["s3"] }
+graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.10.0", default-features = false, features = ["s3"] }
 ```
 
 ## Five-minute local start
@@ -136,7 +136,9 @@ files, logs, metadata, and error reports. Azure is not a supported provider.
 The [configuration and limits reference](docs/configuration.md) lists every
 public provider and request option, including source-backed defaults. Blob keys
 are relative `/`-separated identifiers: traversal, absolute paths, backslashes,
-NULs, and platform prefixes are rejected. `StorageError::is_retryable()` is a
+NULs, platform prefixes and the reserved `.graphql-orm-storage` namespace are
+rejected. Listing prefixes are plain string prefixes on every provider; see
+[listing prefixes](docs/blob-store.md#listing-prefixes-order-and-durability). `StorageError::is_retryable()` is a
 provider signal, not permission to replay a non-idempotent stream.
 
 For backups, adapt `Arc<dyn BlobStore>` with the companion backup repository;

@@ -323,10 +323,7 @@ impl Transformer {
             (message, raw)
         };
 
-        let mut message = match message {
-            Response::Plain(message) => message,
-            _ => panic!("Unexpected message type"),
-        };
+        let mut message = plain_incoming(message)?;
 
         let iovec = IoVec::from(raw);
         // If fails, return TranformFailed, with message id.
@@ -481,4 +478,45 @@ pub enum TransformPhase {
     CompressDecompress,
     /// Encryption and decryption.
     EncryptDecrypt,
+}
+
+/// Local patch (graphql-orm-storage): the plain message inside an incoming
+/// transform. A transform nested inside a decrypted or decompressed payload
+/// is refused as an invalid message instead of panicking.
+fn plain_incoming(message: Response) -> crate::Result<PlainResponse> {
+    match message {
+        Response::Plain(message) => Ok(message),
+        Response::Encrypted(_) | Response::Compressed(_) => Err(crate::Error::InvalidMessage(
+            "a transform is nested inside a transformed message".to_string(),
+        )),
+    }
+}
+
+#[cfg(test)]
+mod nested_transform_tests {
+    use super::plain_incoming;
+    use smb_msg::Response;
+
+    /// An SMB2 TRANSFORM_HEADER followed by an opaque payload.
+    fn encrypted_transform() -> Vec<u8> {
+        let mut bytes = vec![0xfd, b'S', b'M', b'B'];
+        bytes.extend_from_slice(&[0x11; 16]); // signature
+        bytes.extend_from_slice(&[0x22; 16]); // nonce
+        bytes.extend_from_slice(&8_u32.to_le_bytes()); // original message size
+        bytes.extend_from_slice(&0_u16.to_le_bytes()); // reserved
+        bytes.extend_from_slice(&1_u16.to_le_bytes()); // flags: encrypted
+        bytes.extend_from_slice(&0x11_u64.to_le_bytes()); // session id
+        bytes.extend_from_slice(&[0x33; 8]);
+        bytes
+    }
+
+    #[test]
+    fn a_transform_nested_in_a_payload_is_an_error_not_a_panic() {
+        let nested = Response::try_from(encrypted_transform().as_slice()).unwrap();
+        assert!(matches!(nested, Response::Encrypted(_)));
+        assert!(matches!(
+            plain_incoming(nested),
+            Err(crate::Error::InvalidMessage(_))
+        ));
+    }
 }

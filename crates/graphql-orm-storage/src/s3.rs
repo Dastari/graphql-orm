@@ -142,10 +142,14 @@ impl S3StorageBackend {
 
     /// The provider prefix for listing backend keys that start with `prefix`.
     /// An empty prefix lists exactly this backend's `key_prefix/` namespace, so
-    /// `proj` never matches `project2/...`.
+    /// `proj` never matches `project2/...`. A trailing `/` is kept.
     pub(crate) fn listing_prefix(&self, prefix: &str) -> Result<String, StorageError> {
+        crate::blob::validate_blob_prefix(prefix)?;
         if !prefix.is_empty() {
-            return self.provider_key(prefix);
+            return Ok(match prefix.strip_suffix('/') {
+                Some(directory) => format!("{}/", self.provider_key(directory)?),
+                None => self.provider_key(prefix)?,
+            });
         }
         let key_prefix = self
             .config
@@ -153,11 +157,12 @@ impl S3StorageBackend {
             .as_deref()
             .map(|prefix| prefix.trim_matches('/'))
             .unwrap_or_default();
-        Ok(if key_prefix.is_empty() {
-            String::new()
-        } else {
-            format!("{key_prefix}/")
-        })
+        if key_prefix.is_empty() {
+            return Ok(String::new());
+        }
+        // Keyed operations validate the prefix through `provider_key`.
+        validate_blob_key(key_prefix)?;
+        Ok(format!("{key_prefix}/"))
     }
 
     async fn put_blob_inner(
@@ -172,28 +177,46 @@ impl S3StorageBackend {
         let mut buffer = BytesMut::new();
         let mut hasher = Sha256::new();
         let mut size_bytes = 0_u64;
-        let mut multipart = None;
+        let mut multipart: Option<(MultipartUploadState, MultipartAbortGuard)> = None;
 
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            size_bytes = size_bytes.saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
-            hasher.update(&chunk);
-            buffer.extend_from_slice(&chunk);
+        // Once an upload has started, a failure, whether the body's or a
+        // part's, aborts it rather than leaving its parts stored; the guard
+        // does the same if this write is cancelled.
+        let streamed: Result<(), StorageError> = async {
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk?;
+                size_bytes =
+                    size_bytes.saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+                hasher.update(&chunk);
+                buffer.extend_from_slice(&chunk);
 
-            while buffer.len() >= MULTIPART_PART_SIZE {
-                let state = match multipart.as_mut() {
-                    Some(state) => state,
-                    None => {
-                        multipart = Some(
-                            self.create_multipart_upload(&provider_key, &options)
-                                .await?,
-                        );
-                        multipart.as_mut().expect("multipart state exists")
+                while buffer.len() >= MULTIPART_PART_SIZE {
+                    if multipart.is_none() {
+                        let state = self
+                            .create_multipart_upload(&provider_key, &options)
+                            .await?;
+                        let guard = MultipartAbortGuard::new(self, &provider_key, &state);
+                        multipart = Some((state, guard));
                     }
-                };
-                let part = buffer.split_to(MULTIPART_PART_SIZE).freeze();
+                    let (state, _) = multipart.as_mut().expect("multipart state exists");
+                    let part = buffer.split_to(MULTIPART_PART_SIZE).freeze();
+                    self.upload_part(&provider_key, state, part).await?;
+                }
+            }
+            if let Some((state, _)) = multipart.as_mut()
+                && !buffer.is_empty()
+            {
+                let part = buffer.split().freeze();
                 self.upload_part(&provider_key, state, part).await?;
             }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = streamed {
+            if let Some((_, guard)) = multipart {
+                guard.abort().await;
+            }
+            return Err(error);
         }
 
         let outcome = BlobWriteOutcome {
@@ -202,16 +225,13 @@ impl S3StorageBackend {
         };
 
         match multipart {
-            Some(mut state) => {
-                if !buffer.is_empty() {
-                    self.upload_part(&provider_key, &mut state, buffer.freeze())
-                        .await?;
-                }
-
-                match self
+            Some((state, guard)) => {
+                // Completion aborts the upload itself when it fails.
+                let completed = self
                     .complete_multipart_upload(&provider_key, state, if_not_exists)
-                    .await
-                {
+                    .await;
+                guard.disarm();
+                match completed {
                     Ok(()) => Ok(Some(outcome)),
                     Err(err) if if_not_exists && is_precondition_error(&err) => Ok(None),
                     Err(err) => Err(err),
@@ -348,6 +368,63 @@ impl S3StorageBackend {
                     .await;
                 Err(err)
             }
+        }
+    }
+}
+
+/// Aborts a started multipart upload unless disarmed. Dropping an armed
+/// guard, as when the write is cancelled, spawns a best-effort abort on the
+/// current Tokio runtime.
+struct MultipartAbortGuard {
+    client: Client,
+    bucket: String,
+    key: String,
+    upload_id: Option<String>,
+}
+
+impl MultipartAbortGuard {
+    fn new(backend: &S3StorageBackend, provider_key: &str, state: &MultipartUploadState) -> Self {
+        Self {
+            client: backend.client.clone(),
+            bucket: backend.config.bucket.clone(),
+            key: provider_key.to_string(),
+            upload_id: Some(state.upload_id.clone()),
+        }
+    }
+
+    fn request(&self, upload_id: String) -> impl std::future::Future<Output = ()> + use<> {
+        let request = self
+            .client
+            .abort_multipart_upload()
+            .bucket(&self.bucket)
+            .key(&self.key)
+            .upload_id(upload_id);
+        async move {
+            let _ = request.send().await;
+        }
+    }
+
+    /// Aborts the upload, ignoring a failure: an upload left behind is
+    /// removed by the bucket's lifecycle rules, if any. The guard stays armed
+    /// until the request finishes, so cancelling this abort spawns another.
+    async fn abort(mut self) {
+        if let Some(upload_id) = self.upload_id.clone() {
+            self.request(upload_id).await;
+            self.upload_id = None;
+        }
+    }
+
+    fn disarm(mut self) {
+        self.upload_id = None;
+    }
+}
+
+impl Drop for MultipartAbortGuard {
+    fn drop(&mut self) {
+        if let Some(upload_id) = self.upload_id.take()
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        {
+            runtime.spawn(self.request(upload_id));
         }
     }
 }
@@ -563,12 +640,14 @@ impl BlobStore for S3StorageBackend {
             .await
             .map_err(map_s3_error)?;
 
+        // A stored key that is not a valid backend key, such as a folder
+        // marker ending in `/`, is skipped; it could not be read back.
         let keys = output
             .contents()
             .iter()
             .filter_map(|object| object.key())
             .filter_map(|key| self.strip_provider_prefix(key))
-            .filter(|key| !key.is_empty())
+            .filter(|key| validate_blob_key(key).is_ok())
             .collect();
 
         Ok(BlobListPage {

@@ -22,7 +22,10 @@ use crate::{
     validate_blob_key, validate_object_bucket,
 };
 
-pub(crate) const INTERNAL_STORAGE_DIR: &str = ".graphql-orm-storage";
+/// Internal staging and metadata directory at the root. Caller keys cannot
+/// address it: [`validate_blob_key`] reserves its name, and
+/// [`LocalStorageBackend`] refuses any other name that resolves to it.
+pub(crate) const INTERNAL_STORAGE_DIR: &str = crate::blob::INTERNAL_NAMESPACE;
 const OBJECT_METADATA_DIR: &str = "object-metadata";
 /// Most directories a backend remembers as durable before it forgets them all.
 const MAX_DURABLE_DIRS: usize = 4_096;
@@ -120,18 +123,23 @@ impl LocalStorageBackend {
 
     pub(crate) fn path_for(&self, key: &str) -> Result<PathBuf, StorageError> {
         validate_blob_key(key)?;
+        self.check_root_name(key)?;
         Ok(self.root.join(Path::new(key)))
     }
 
     fn object_path_for(&self, bucket: &str, key: &str) -> Result<PathBuf, StorageError> {
         validate_object_bucket(bucket)?;
         validate_blob_key(key)?;
+        self.check_root_name(bucket)?;
+        refuse_colon(key)?;
         Ok(self.root.join(bucket).join(Path::new(key)))
     }
 
     fn object_metadata_path_for(&self, bucket: &str, key: &str) -> Result<PathBuf, StorageError> {
         validate_object_bucket(bucket)?;
         validate_blob_key(key)?;
+        self.check_root_name(bucket)?;
+        refuse_colon(key)?;
         let path = self
             .root
             .join(INTERNAL_STORAGE_DIR)
@@ -146,6 +154,56 @@ impl LocalStorageBackend {
             })?;
         Ok(path.with_file_name(format!("{file_name}.metadata.json")))
     }
+}
+
+impl LocalStorageBackend {
+    fn internal_dir(&self) -> PathBuf {
+        self.root.join(INTERNAL_STORAGE_DIR)
+    }
+
+    /// Creates the internal directory if it is missing. Writes call this before
+    /// they check names, so a name that a case-insensitive or aliasing
+    /// filesystem resolves to the internal directory can never claim it first:
+    /// it resolves to the existing directory and [`Self::check_root_name`]
+    /// refuses it. Best effort; a write that cannot create it fails on its own.
+    pub(crate) fn ensure_internal_dir(&self) {
+        let _ = std::fs::create_dir_all(self.internal_dir());
+    }
+
+    /// Whether `path` resolves to the internal directory, whatever its
+    /// spelling: another case, a Unicode case fold, a Windows short name or a
+    /// link. A path that does not exist or cannot be opened is not an alias;
+    /// the operation on it fails or creates an ordinary entry.
+    fn aliases_internal_dir(&self, path: &Path) -> bool {
+        same_file::is_same_file(path, self.internal_dir()).unwrap_or(false)
+    }
+
+    /// Local checks for a caller's root-relative key, listing prefix or bucket,
+    /// after the shared lexical validation: on Windows no component contains
+    /// `:`, which names an alternate data stream there, and the first
+    /// component does not resolve to the internal directory.
+    pub(crate) fn check_root_name(&self, name: &str) -> Result<(), StorageError> {
+        refuse_colon(name)?;
+        let first = name.split('/').next().unwrap_or_default();
+        if !first.is_empty() && self.aliases_internal_dir(&self.root.join(first)) {
+            return Err(StorageError::InvalidStorageKey {
+                key: name.to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// On Windows, refuses a local key or prefix containing `:`, which separates
+/// an alternate data stream (`name::$INDEX_ALLOCATION` aliases a directory).
+/// Elsewhere `:` is an ordinary filename character.
+fn refuse_colon(name: &str) -> Result<(), StorageError> {
+    if cfg!(windows) && name.contains(':') {
+        return Err(StorageError::InvalidStorageKey {
+            key: name.to_string(),
+        });
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -171,6 +229,7 @@ impl BlobStore for LocalStorageBackend {
         body: StorageByteStream,
         _options: BlobPutOptions,
     ) -> Result<BlobWriteOutcome, StorageError> {
+        self.ensure_internal_dir();
         let path = self.path_for(key)?;
         let temp_path = temp_path_for(&path, key)?;
         self.create_parent_dir(&path).await?;
@@ -200,6 +259,7 @@ impl BlobStore for LocalStorageBackend {
         body: StorageByteStream,
         _options: BlobPutOptions,
     ) -> Result<Option<BlobWriteOutcome>, StorageError> {
+        self.ensure_internal_dir();
         let path = self.path_for(key)?;
         let temp_path = temp_path_for(&path, key)?;
         self.create_parent_dir(&path).await?;
@@ -351,6 +411,7 @@ impl BlobStore for LocalStorageBackend {
     }
 
     async fn copy_blob(&self, from: &str, to: &str) -> Result<(), StorageError> {
+        self.ensure_internal_dir();
         let from_path = self.path_for(from)?;
         let to_path = self.path_for(to)?;
         let temp_path = temp_path_for(&to_path, to)?;
@@ -458,6 +519,7 @@ impl StreamingObjectStore for LocalStorageBackend {
         content_type: Option<String>,
         metadata: ObjectMetadata,
     ) -> Result<BoxedMultipartWriter, StorageError> {
+        self.ensure_internal_dir();
         let object_path = self.object_path_for(bucket, key)?;
         let metadata_path = self.object_metadata_path_for(bucket, key)?;
         let temp_path = temp_path_for(&object_path, key)?;
@@ -564,15 +626,16 @@ impl StreamingObjectStore for LocalStorageBackend {
     ) -> Result<Vec<ObjectInfo>, StorageError> {
         validate_object_bucket(bucket)?;
         crate::blob::validate_blob_prefix(prefix)?;
-        let start = if prefix.is_empty() {
-            self.root.join(bucket)
-        } else {
-            self.root.join(bucket).join(prefix)
-        };
+        self.check_root_name(bucket)?;
+        refuse_colon(prefix)?;
+        let base = self.root.join(bucket);
         let mut objects = Vec::new();
-        let mut stack = vec![start];
+        let mut stack = vec![listing_start(&base, prefix)];
 
         while let Some(path) = stack.pop() {
+            let Some(key) = listed_key(&base, &path) else {
+                continue;
+            };
             let metadata = match tokio::fs::metadata(&path).await {
                 Ok(metadata) => metadata,
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
@@ -580,18 +643,15 @@ impl StreamingObjectStore for LocalStorageBackend {
             };
 
             if metadata.is_file() {
-                if is_uploading_temp_file(&path) {
-                    continue;
-                }
-                let Some(key) = self.key_for_bucket_path(bucket, &path) else {
-                    continue;
-                };
-                if !key.starts_with(prefix) {
+                if is_uploading_temp_file(&path) || !key.starts_with(prefix) {
                     continue;
                 }
                 if let Ok(info) = self.get_object_metadata(bucket, &key).await {
                     objects.push(info);
                 }
+                continue;
+            }
+            if !directory_may_match(&key, prefix) {
                 continue;
             }
 
@@ -704,23 +764,29 @@ impl LocalStorageBackend {
         limit: usize,
     ) -> Result<Vec<String>, StorageError> {
         crate::blob::validate_blob_prefix(prefix)?;
-
-        let start = if prefix.is_empty() {
-            self.root.clone()
-        } else {
-            self.root.join(prefix)
-        };
+        self.check_root_name(prefix)?;
+        let internal = same_file::Handle::from_path(self.internal_dir()).ok();
 
         let mut page = Vec::with_capacity(limit);
-        let mut stack = vec![start];
+        let mut stack = vec![listing_start(&self.root, prefix)];
 
         while let Some(path) = stack.pop() {
             if page.len() == limit {
                 break;
             }
-            if is_internal_storage_path(&self.root, &path) {
+            // A root entry that resolves to the internal directory under
+            // another name is never entered.
+            if internal.is_some()
+                && path.parent() == Some(self.root.as_path())
+                && same_file::Handle::from_path(&path).ok() == internal
+            {
                 continue;
             }
+            // Skips the reserved internal namespace and any name that is not
+            // a valid key, with everything below it.
+            let Some(key) = listed_key(&self.root, &path) else {
+                continue;
+            };
 
             let metadata = match tokio::fs::metadata(&path).await {
                 Ok(metadata) => metadata,
@@ -729,23 +795,24 @@ impl LocalStorageBackend {
             };
 
             if metadata.is_file() {
-                if is_uploading_temp_file(&path) {
+                if is_uploading_temp_file(&path)
+                    || !key.starts_with(prefix)
+                    || continuation.is_some_and(|token| key.as_str() <= token)
+                {
                     continue;
                 }
-                if let Some(key) = self.key_for_path(&path) {
-                    if continuation.is_some_and(|token| key.as_str() <= token) {
-                        continue;
-                    }
-                    page.push(key);
-                }
+                page.push(key);
+                continue;
+            }
+            if !directory_may_match(&key, prefix) {
                 continue;
             }
 
             // Every key below this directory starts with `<directory>/`. When
             // that prefix sorts before the token and does not contain it, the
             // whole subtree precedes the continuation.
-            if let (Some(token), Some(directory)) = (continuation, self.key_for_path(&path)) {
-                let directory = format!("{directory}/");
+            if let Some(token) = continuation {
+                let directory = format!("{key}/");
                 if directory.len() > 1
                     && directory.as_str() < token
                     && !token.starts_with(&directory)
@@ -760,18 +827,48 @@ impl LocalStorageBackend {
 
         Ok(page)
     }
+}
 
-    fn key_for_path(&self, path: &Path) -> Option<String> {
-        path.strip_prefix(&self.root)
-            .ok()
-            .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+/// The directory a listing for `prefix` starts from: the prefix up to its
+/// last `/`, below `base`. Every key the prefix matches lies below it.
+fn listing_start(base: &Path, prefix: &str) -> PathBuf {
+    match prefix.rfind('/') {
+        Some(index) => base.join(&prefix[..index]),
+        None => base.to_path_buf(),
     }
+}
 
-    fn key_for_bucket_path(&self, bucket: &str, path: &Path) -> Option<String> {
-        path.strip_prefix(self.root.join(bucket))
-            .ok()
-            .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+/// The key `path` has below `base`, or `None` when no valid key names it: a
+/// name that is not valid UTF-8, contains `:` on Windows, or that
+/// [`validate_blob_key`] refuses, such as the reserved internal namespace. Every key below such a directory
+/// would contain the same component, so its whole subtree is skipped. `base`
+/// itself has the empty key.
+fn listed_key(base: &Path, path: &Path) -> Option<String> {
+    let relative = path.strip_prefix(base).ok()?;
+    let mut key = String::new();
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return None;
+        };
+        if !key.is_empty() {
+            key.push('/');
+        }
+        let name = name.to_str()?;
+        if cfg!(windows) && name.contains(':') {
+            return None;
+        }
+        key.push_str(name);
     }
+    (key.is_empty() || validate_blob_key(&key).is_ok()).then_some(key)
+}
+
+/// Whether keys below the directory `key` may start with `prefix`.
+fn directory_may_match(key: &str, prefix: &str) -> bool {
+    if key.is_empty() {
+        return true;
+    }
+    let directory = format!("{key}/");
+    directory.starts_with(prefix) || prefix.starts_with(&directory)
 }
 
 impl LocalStorageBackend {
@@ -956,13 +1053,6 @@ fn is_uploading_temp_file(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(is_temp_file_name)
-}
-
-fn is_internal_storage_path(root: &Path, path: &Path) -> bool {
-    path.strip_prefix(root)
-        .ok()
-        .and_then(|relative| relative.components().next())
-        .is_some_and(|component| component.as_os_str() == INTERNAL_STORAGE_DIR)
 }
 
 fn is_older_than(metadata: &std::fs::Metadata, now: SystemTime, older_than: Duration) -> bool {

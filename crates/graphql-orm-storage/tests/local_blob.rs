@@ -7,6 +7,91 @@ use std::time::Duration;
 use tempfile::TempDir;
 use uuid::Uuid;
 
+#[path = "support/listing_contract.rs"]
+mod listing_contract;
+
+#[tokio::test]
+async fn local_listing_follows_the_provider_prefix_contract() {
+    let temp = TempDir::new().expect("temp dir");
+    let backend = LocalStorageBackend::new(temp.path());
+    // A sibling sharing the base's string prefix stays outside `base/`.
+    backend
+        .put_blob(
+            "base-sibling/a",
+            StorageByteStream::from_bytes(Bytes::from_static(b"x")),
+            BlobPutOptions::default(),
+        )
+        .await
+        .expect("put sibling");
+    listing_contract::prefixes_are_string_prefixes(&backend, "contract").await;
+    assert_eq!(
+        backend.list_blobs("base").await.expect("list"),
+        ["base-sibling/a"]
+    );
+}
+
+#[tokio::test]
+async fn local_reserves_the_internal_namespace() {
+    let temp = TempDir::new().expect("temp dir");
+    let backend = LocalStorageBackend::new(temp.path());
+    std::fs::create_dir_all(temp.path().join(".graphql-orm-storage/multipart"))
+        .expect("internal dir");
+    std::fs::write(
+        temp.path().join(".graphql-orm-storage/multipart/x"),
+        b"internal",
+    )
+    .expect("internal file");
+    listing_contract::the_internal_namespace_is_reserved(&backend).await;
+    assert_eq!(
+        std::fs::read(temp.path().join(".graphql-orm-storage/multipart/x")).expect("read"),
+        b"internal"
+    );
+    assert!(backend.list_blobs("").await.expect("list").is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn local_listing_skips_names_that_are_not_valid_keys() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let temp = TempDir::new().expect("temp dir");
+    let backend = LocalStorageBackend::new(temp.path());
+    backend
+        .put_blob(
+            "dir/kept",
+            StorageByteStream::from_bytes(Bytes::from_static(b"x")),
+            BlobPutOptions::default(),
+        )
+        .await
+        .expect("put");
+    let dir = temp.path().join("dir");
+    // Two distinct non-UTF-8 names would otherwise decode to one lossy key.
+    std::fs::write(dir.join(std::ffi::OsStr::from_bytes(b"bad-\xff")), b"x").expect("write");
+    std::fs::write(dir.join(std::ffi::OsStr::from_bytes(b"bad-\xfe")), b"x").expect("write");
+    std::fs::write(dir.join("back\\slash"), b"x").expect("write");
+    std::fs::create_dir_all(temp.path().join(".GRAPHQL-ORM-STORAGE")).expect("mkdir");
+    std::fs::write(temp.path().join(".GRAPHQL-ORM-STORAGE/x"), b"x").expect("write");
+    let undecodable = temp
+        .path()
+        .join(std::ffi::OsStr::from_bytes(b"undecodable-\xff"));
+    std::fs::create_dir_all(&undecodable).expect("mkdir");
+    std::fs::write(undecodable.join("child"), b"x").expect("write");
+
+    assert_eq!(backend.list_blobs("").await.expect("list"), ["dir/kept"]);
+    assert_eq!(
+        backend.list_blobs("dir/").await.expect("list"),
+        ["dir/kept"]
+    );
+    assert_eq!(
+        backend
+            .list_blobs_page("", None, 1)
+            .await
+            .expect("page")
+            .keys,
+        ["dir/kept"]
+    );
+}
+
 #[tokio::test]
 async fn local_blob_put_get_delete_round_trip() {
     let temp = TempDir::new().expect("temp dir");
@@ -594,7 +679,7 @@ const TRICKY_COMPONENTS: &[&str] = &[
     "a!",
     "a+",
     "a0",
-    "a:",
+    "a;",
     "a~",
     "ab",
     "a_",
@@ -703,18 +788,27 @@ async fn local_blob_paged_listing_is_in_exact_key_order_for_tricky_sibling_names
             );
         }
 
-        // Every directory prefix pages through exactly the keys beneath it.
-        let directories = keys
+        // Every prefix, whether a directory, a directory and its separator, or
+        // a partial name, pages through exactly the keys it string-prefixes.
+        let prefixes = keys
             .iter()
             .flat_map(|key| {
                 let parts = key.split('/').collect::<Vec<_>>();
-                (1..parts.len()).map(move |depth| parts[..depth].join("/"))
+                (1..parts.len())
+                    .flat_map(move |depth| {
+                        let directory = parts[..depth].join("/");
+                        // `.` alone is not a valid component, so not a prefix.
+                        let first = parts[depth].chars().next().expect("component");
+                        let partial = (first != '.').then(|| format!("{directory}/{first}"));
+                        [Some(format!("{directory}/")), partial, Some(directory)]
+                    })
+                    .flatten()
             })
             .collect::<std::collections::BTreeSet<_>>();
-        for prefix in directories {
+        for prefix in prefixes {
             let expected = keys
                 .iter()
-                .filter(|key| key.starts_with(&format!("{prefix}/")))
+                .filter(|key| key.starts_with(&prefix))
                 .cloned()
                 .collect::<Vec<_>>();
             for limit in [1, 2, 3] {
@@ -746,4 +840,237 @@ async fn local_blob_pagination_does_not_skip_a_sibling_sorting_below_a_directory
     let expected = ["a-b", "a.b/y", "a/x", "b"].map(String::from).to_vec();
     assert_eq!(backend.list_blobs("").await.expect("list all"), expected);
     assert_eq!(drain_pages(&backend, "", 1).await, expected);
+}
+
+/// Asserts that a local operation refused its key as invalid.
+fn assert_refused_key<T: std::fmt::Debug>(result: Result<T, StorageError>, what: &str) {
+    assert!(
+        matches!(result, Err(StorageError::InvalidStorageKey { .. })),
+        "{what} must be refused: {result:?}"
+    );
+}
+
+/// A name that resolves to the internal directory is refused by identity, not
+/// by spelling. A case-insensitive filesystem resolves `.GRAPHQL-ORM-ſTORAGE`
+/// (or a Windows short name) to the same directory; a symbolic link stands in
+/// for such an alias on a case-sensitive test filesystem.
+#[cfg(unix)]
+#[tokio::test]
+async fn local_refuses_any_name_that_resolves_to_the_internal_directory() {
+    use graphql_orm_storage::{
+        MultipartBlobStore, MultipartStartOptions, ObjectMetadata, StreamingObjectStore,
+    };
+
+    let temp = TempDir::new().expect("temp dir");
+    let internal = temp.path().join(".graphql-orm-storage");
+    std::fs::create_dir_all(internal.join("multipart")).expect("internal dir");
+    std::fs::write(internal.join("multipart/x"), b"internal").expect("internal file");
+    std::os::unix::fs::symlink(&internal, temp.path().join("alias")).expect("alias");
+    let backend = LocalStorageBackend::new(temp.path());
+    backend
+        .put_blob(
+            "kept/a",
+            StorageByteStream::from_bytes(Bytes::from_static(b"x")),
+            BlobPutOptions::default(),
+        )
+        .await
+        .expect("put an ordinary key");
+
+    for key in ["alias", "alias/multipart/x", "alias/new"] {
+        assert_refused_key(
+            backend
+                .put_blob(
+                    key,
+                    StorageByteStream::from_bytes(Bytes::from_static(b"overwrite")),
+                    BlobPutOptions::default(),
+                )
+                .await,
+            key,
+        );
+        assert_refused_key(
+            backend
+                .put_blob_if_not_exists(
+                    key,
+                    StorageByteStream::from_bytes(Bytes::from_static(b"x")),
+                    BlobPutOptions::default(),
+                )
+                .await,
+            key,
+        );
+        assert_refused_key(backend.get_blob(key).await, key);
+        assert_refused_key(backend.blob_exists(key).await, key);
+        assert_refused_key(backend.head_blob(key).await, key);
+        assert_refused_key(backend.delete_blob(key).await, key);
+        assert_refused_key(backend.copy_blob(key, "kept/copy").await, key);
+        assert_refused_key(backend.copy_blob("kept/a", key).await, key);
+        assert_refused_key(
+            backend
+                .start_multipart(key, MultipartStartOptions::default())
+                .await,
+            key,
+        );
+    }
+    for prefix in ["alias", "alias/", "alias/multipart"] {
+        assert_refused_key(backend.list_blobs(prefix).await, prefix);
+        assert_refused_key(
+            backend.list_incomplete_multipart(prefix, None, 10).await,
+            prefix,
+        );
+    }
+    // A partial name lists around the alias, never through it.
+    assert_eq!(backend.list_blobs("").await.expect("list"), ["kept/a"]);
+    assert!(backend.list_blobs("al").await.expect("list").is_empty());
+    assert_eq!(
+        backend
+            .list_blobs_page("", None, 1)
+            .await
+            .expect("page")
+            .keys,
+        ["kept/a"]
+    );
+
+    // A bucket is refused the same way.
+    assert_refused_key(
+        backend
+            .put_object_stream(
+                "alias",
+                "objects/x",
+                None,
+                ObjectMetadata::new(),
+                StorageByteStream::from_bytes(Bytes::from_static(b"x")),
+            )
+            .await,
+        "bucket alias",
+    );
+    assert_refused_key(backend.list_objects("alias", "").await, "bucket alias");
+    assert_refused_key(
+        backend.get_object_metadata("alias", "multipart/x").await,
+        "bucket alias",
+    );
+
+    assert_eq!(
+        std::fs::read(internal.join("multipart/x")).expect("read"),
+        b"internal"
+    );
+    assert!(!internal.join("new").exists());
+}
+
+/// A write creates the internal directory before it checks identities, so a
+/// name that would alias it on a case-insensitive filesystem can never claim
+/// that name first.
+#[tokio::test]
+async fn local_writes_create_the_internal_directory_first() {
+    let temp = TempDir::new().expect("temp dir");
+    let backend = LocalStorageBackend::new(temp.path());
+    backend
+        .put_blob(
+            "a",
+            StorageByteStream::from_bytes(Bytes::from_static(b"x")),
+            BlobPutOptions::default(),
+        )
+        .await
+        .expect("put");
+    assert!(temp.path().join(".graphql-orm-storage").is_dir());
+    assert_eq!(backend.list_blobs("").await.expect("list"), ["a"]);
+}
+
+/// On Windows `:` names an alternate data stream, as in
+/// `.graphql-orm-storage::$INDEX_ALLOCATION`, so local keys refuse it there.
+#[cfg(windows)]
+#[tokio::test]
+async fn local_refuses_colons_in_keys_buckets_and_prefixes_on_windows() {
+    use graphql_orm_storage::{ObjectMetadata, StreamingObjectStore};
+
+    let temp = TempDir::new().expect("temp dir");
+    let backend = LocalStorageBackend::new(temp.path());
+    for key in [
+        "a:b",
+        "dir/x::$INDEX_ALLOCATION",
+        ".graphql-orm-storage::$DATA",
+    ] {
+        assert_refused_key(
+            backend
+                .put_blob(
+                    key,
+                    StorageByteStream::from_bytes(Bytes::from_static(b"x")),
+                    BlobPutOptions::default(),
+                )
+                .await,
+            key,
+        );
+        assert_refused_key(backend.get_blob(key).await, key);
+        assert_refused_key(backend.list_blobs(key).await, key);
+    }
+    for (bucket, key) in [("bucket:x", "a"), ("bucket", "a:b")] {
+        assert_refused_key(
+            backend
+                .put_object_stream(
+                    bucket,
+                    key,
+                    None,
+                    ObjectMetadata::new(),
+                    StorageByteStream::from_bytes(Bytes::from_static(b"x")),
+                )
+                .await,
+            "object",
+        );
+    }
+}
+
+/// Elsewhere `:` is an ordinary filename character: keys such as ISO
+/// timestamps round-trip, and stored names with `:` stay listed in key order.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn local_keys_may_contain_colons_outside_windows() {
+    use graphql_orm_storage::{ObjectMetadata, StreamingObjectStore};
+
+    let temp = TempDir::new().expect("temp dir");
+    let backend = LocalStorageBackend::new(temp.path());
+    let stamped = "events/2026-11-12T10:00:00Z.json";
+    for key in [stamped, "order/a/x", "order/a:", "order/a;"] {
+        backend
+            .put_blob(
+                key,
+                StorageByteStream::from_bytes(Bytes::from_static(b"x")),
+                BlobPutOptions::default(),
+            )
+            .await
+            .expect("put");
+    }
+    let body = backend.get_blob(stamped).await.expect("get");
+    assert_eq!(
+        collect_storage_stream(body.body).await.expect("collect"),
+        Bytes::from_static(b"x")
+    );
+    assert_eq!(
+        backend
+            .list_blobs("events/2026-11-12T10:")
+            .await
+            .expect("list"),
+        [stamped]
+    );
+    // `:` (0x3a) sorts between `/` and `;`.
+    assert_eq!(
+        backend.list_blobs("order/").await.expect("list"),
+        ["order/a/x", "order/a:", "order/a;"]
+    );
+    // A name with `:` stored by another writer is listed and readable.
+    std::fs::create_dir_all(temp.path().join("dir")).expect("mkdir");
+    std::fs::write(temp.path().join("dir/c:d"), b"x").expect("write");
+    assert_eq!(backend.list_blobs("dir/").await.expect("list"), ["dir/c:d"]);
+    assert!(backend.blob_exists("dir/c:d").await.expect("exists"));
+
+    backend
+        .put_object_stream(
+            "bucket",
+            "a:b",
+            None,
+            ObjectMetadata::new(),
+            StorageByteStream::from_bytes(Bytes::from_static(b"x")),
+        )
+        .await
+        .expect("put object");
+    let objects = backend.list_objects("bucket", "a:").await.expect("list");
+    assert_eq!(objects.len(), 1);
+    assert_eq!(objects[0].key, "a:b");
 }

@@ -10,6 +10,20 @@ supersedes: []
 
 # Migration Guide
 
+## 0.14.0 to 0.15.0: storage 0.10.0
+
+Update the backup requirement to 0.15.0 and storage to 0.10.0 together, then
+refresh the consumer lockfile. Repository layout, manifest format and the
+public API are unchanged.
+
+- Follow the storage [0.10.0 migration](../graphql-orm-storage/MIGRATION.md):
+  SMB repositories on servers that cannot negotiate SMB 3.1.1 must set
+  `min_dialect` explicitly, and storage keys under `.graphql-orm-storage` are
+  reserved. Keep a repository prefix outside that namespace.
+- A custom `BackupRepository` should treat `list_blobs` prefixes as string
+  prefixes, as storage does. Built-in callers filter results to the exact
+  directory before deleting anything.
+
 ## 0.13.0 to 0.14.0: lock records, locked reads and write-side limits
 
 Storage stays on its current version. Repository layout and manifest format

@@ -179,14 +179,11 @@ impl Resource {
 
         // Construct specific resource and return it.
 
-        let resource = if is_dir {
-            Resource::Directory(Directory::new(handle))
-        } else {
-            match share_type {
-                ShareType::Disk => Resource::File(File::new(handle, response.endof_file)),
-                ShareType::Pipe => Resource::Pipe(Pipe::new(handle)),
-                ShareType::Print => unimplemented!("Printer resources are not yet implemented"),
-            }
+        // Dropping an unsupported handle closes it.
+        let resource = match resource_kind(is_dir, share_type)? {
+            ResourceKind::Directory => Resource::Directory(Directory::new(handle)),
+            ResourceKind::File => Resource::File(File::new(handle, response.endof_file)),
+            ResourceKind::Pipe => Resource::Pipe(Pipe::new(handle)),
         };
         Ok(resource)
     }
@@ -933,5 +930,52 @@ impl Drop for ResourceHandle {
                 }
             }
         });
+    }
+}
+
+/// Local patch (graphql-orm-storage): the resource type an opened handle
+/// becomes.
+#[derive(Debug, PartialEq, Eq)]
+enum ResourceKind {
+    Directory,
+    File,
+    Pipe,
+}
+
+/// Local patch (graphql-orm-storage): a file opened on a printer share is
+/// refused as an unsupported operation instead of panicking.
+fn resource_kind(is_dir: bool, share_type: ShareType) -> crate::Result<ResourceKind> {
+    if is_dir {
+        return Ok(ResourceKind::Directory);
+    }
+    match share_type {
+        ShareType::Disk => Ok(ResourceKind::File),
+        ShareType::Pipe => Ok(ResourceKind::Pipe),
+        ShareType::Print => Err(Error::UnsupportedOperation(
+            "printer share resources are not supported".to_string(),
+        )),
+    }
+}
+
+#[cfg(test)]
+mod resource_kind_tests {
+    use super::{ResourceKind, resource_kind};
+    use crate::Error;
+    use smb_msg::ShareType;
+
+    #[test]
+    fn a_printer_share_file_is_an_error_not_a_panic() {
+        assert_eq!(
+            resource_kind(false, ShareType::Disk).unwrap(),
+            ResourceKind::File
+        );
+        assert_eq!(
+            resource_kind(true, ShareType::Print).unwrap(),
+            ResourceKind::Directory
+        );
+        assert!(matches!(
+            resource_kind(false, ShareType::Print),
+            Err(Error::UnsupportedOperation(_))
+        ));
     }
 }

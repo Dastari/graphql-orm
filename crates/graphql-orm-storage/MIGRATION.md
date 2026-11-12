@@ -3,12 +3,73 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-12
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.9.3 to 0.10.0: SMB 3.1.1 minimum, reserved namespace, string prefixes
+
+Update the storage requirement to 0.10.0 and refresh the consumer lockfile.
+
+1. **SMB servers that cannot negotiate SMB 3.1.1.** `SmbStorageConfig::new`
+   now defaults `min_dialect` to `SmbDialect::Smb3_1_1`. Connecting to a
+   server limited to SMB 3.0 or 3.0.2 fails with a non-retryable error before
+   any credential is sent. Prefer upgrading the server. Otherwise opt in
+   explicitly, preferably with encryption required:
+
+   ```rust,ignore
+   config.min_dialect = SmbDialect::Smb3_0; // or SmbDialect::Smb3_0_2
+   config.require_encryption = true;
+   ```
+
+   Below SMB 3.1.1 the negotiation is not integrity-protected, so an on-path
+   party could select any dialect from the configured minimum up. See
+   [dialect](docs/native-smb.md#dialect). Configurations that already set
+   `min_dialect` keep their value.
+2. **Keys in the internal namespace.** Keys and buckets whose first component
+   is `.graphql-orm-storage`, in any ASCII case and with or without trailing
+   dots or spaces, are refused with `InvalidStorageKey` and no longer listed.
+   On local storage that namespace holds internal state, and callers should
+   never have used it. On S3 or SMB, move any such objects to another key
+   with the provider's own tools before upgrading; this crate can no longer
+   address them.
+
+   The same applies to configured prefixes. An S3 `key_prefix` or SMB
+   `root_prefix` whose first component is in the reserved namespace now makes
+   the configuration invalid: `SmbStorageConfig::validate`, and so `connect`
+   and `probe`, refuse it, and every S3 operation, including an empty-prefix
+   listing, fails with `InvalidStorageKey` before any request. Move such a
+   repository to another prefix.
+3. **Local aliases.** On local roots the reservation is by file identity: a
+   key, prefix or bucket whose first component resolves to
+   `<root>/.graphql-orm-storage` under another name, through case folding, a
+   Windows short name or a link, is refused. Local writes now create that
+   directory up front.
+4. **`:` where it separates streams.** `:` names an alternate data stream on
+   Windows filesystems and on SMB servers (Windows, and Samba with
+   `streams_xattr`), where `a:b` opens stream `b` of the file `a`:
+   - Local roots on Windows refuse `:` in key, prefix and bucket components
+     and no longer list stored names containing it.
+   - Local roots elsewhere are unchanged: `:` is an ordinary character, and
+     keys such as ISO timestamps keep working.
+   - SMB refuses `:` in keys, prefixes and `root_prefix` on every platform,
+     and listings skip names containing it. Rename such keys, for example to
+     use `-`, with the server's own tools before upgrading.
+   - S3 is unaffected.
+5. **Local listing prefixes.** A local `list_blobs`, `list_blobs_page` or
+   `list_objects` prefix is now a string prefix, as on S3 and SMB: `a` also
+   lists `ab` and `a-b/x`. To list one directory only, end the prefix with `/`
+   (`a/`), which every provider now accepts, or filter the result. A custom
+   `BlobStore` must accept a trailing `/` and treat prefixes the same way.
+6. **Listings skip unaddressable names.** Names that are not valid keys,
+   including SMB names that are not valid UTF-16, local names that are not
+   valid UTF-8 or contain `\`, and S3 folder markers, are no longer listed.
+   They could not be read back through their listed key.
+
+No object format or repository layout changes.
 
 ## 0.9.2 to 0.9.3: digest-pinned managed Samba fixture
 

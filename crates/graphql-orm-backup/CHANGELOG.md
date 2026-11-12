@@ -10,6 +10,20 @@ supersedes: []
 
 # Changelog
 
+## 0.15.0 (unreleased)
+
+Requires `graphql-orm-storage` 0.10.0. See [MIGRATION.md](MIGRATION.md).
+
+- Storage listing prefixes are plain string prefixes on every provider. A
+  `BlobStoreBackupRepository` with a prefix now lists only keys below
+  `<prefix>/`; listing the repository `repo` previously also returned keys of
+  a sibling prefix such as `repo-other/` unchanged, on S3 and SMB already and
+  now on local storage too.
+- `prune` and `delete_snapshot` delete only keys inside the snapshot's
+  `snapshots/{id}/` directory and the content directory `objects/sha256/`. A
+  sibling such as `snapshots/{id}-copy/` or `objects/sha256-legacy/`, which a
+  string prefix also matches, is left alone instead of being deleted.
+
 ## 0.14.0 (unreleased)
 
 Breaking: lock records, locked restore and verification, write-side capacity
