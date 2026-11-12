@@ -73,6 +73,8 @@ an unbounded value.
 | `authentication` | Required unless anonymous development is explicitly enabled. |
 | `scopeMatcher` | Omitted means exact-string matching. `kind: "hierarchical"` requires the `auth-agql` feature. |
 | `subgraphs` | At least one static source is required. |
+| `allowPlaintextHttp` | `false`. Outbound `http` URLs are accepted only for `localhost` and loopback IP literals; `true` also accepts them for other hosts. See [Outbound transport](#outbound-transport). |
+| `useEnvironmentProxy` | `false`. The schema client ignores proxy environment variables; `true` routes it through them. See [Outbound transport](#outbound-transport). |
 | `forwardedHeaders` | Empty. Sensitive, hop-by-hop, cookie, and authorization names are rejected. |
 | `schemaFetchTimeoutMs` | 10000. |
 | `maxSdlBytes` | 2097152 per SDL or protocol response. |
@@ -85,13 +87,31 @@ an unbounded value.
 | `gracefulShutdownTimeoutSeconds` | 10 whole seconds; valid range 1–60. |
 | `requestLimits` | Production-bounded defaults described below. |
 | `subscriptions` | Disabled; enabling it requires authentication. |
-| `admin` | Disabled; enabling it requires authentication and a listener port distinct from the public port. |
+| `admin` | Disabled; enabling it requires public authentication, its own `admin.authentication` with an audience public tokens do not carry, and a listener port distinct from the public port. |
 | `telemetry` | JSON/info logs; metrics exporter disabled. |
 | `nodeLookup` | Disabled. `{}` enables the router-hosted node lookup; `maxNodes` defaults to 100, valid range 1–10000. |
 | `byteRoutes` | Empty, so no byte route is served. See [Byte routes](#byte-routes). |
 
 Durations must be nonzero. Values over their hard safety ceilings fail before
 binding.
+
+## Outbound transport
+
+Static subgraph `graphqlUrl`, `sdlUrl`, and `protocolUrl`, byte route
+`upstream`, and trusted dynamic subgraph `metadataUrl`, `graphqlOrigin`, and
+`schemaOrigin` must use `https`, unless their host is `localhost` or a loopback
+IP literal. A plaintext `http` URL to any other host fails validation unless
+`allowPlaintextHttp` (programmatically `RouterConfig::allow_plaintext_http`) is
+`true`. Enable it only where the network path is protected another way, such as
+a private service mesh. The JWKS and role-scope catalogue URLs keep their own
+stricter rule described under [Authentication](#authentication).
+
+The schema client that fetches SDL and router-protocol descriptors connects
+directly and ignores `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY`.
+`useEnvironmentProxy` (programmatically `RouterConfig::use_environment_proxy`)
+routes it through those variables. The JWKS client has its own
+`authentication.useEnvironmentProxy`. Subgraph execution, byte routes, and
+dynamic registration never use a proxy.
 
 ## Node lookup
 
@@ -125,6 +145,22 @@ array. JWKS uses HTTPS. Plain HTTP is accepted only for loopback when
 `allowInsecureLoopbackJwks` is explicitly true. Optional bounds are
 `cacheTtlSeconds`, `refreshIntervalSeconds`, `requestTimeoutMs`,
 `maxJwksBytes`, and `leewaySeconds`. `acceptLegacyScopes` defaults false.
+`useEnvironmentProxy` defaults false, so the JWKS and role-scope catalogue
+client ignores proxy environment variables unless it is set.
+
+A JWKS document keeps every RS256 verification key that has a key ID. Keys of
+other types, encryption keys, keys without an ID, and entries the router cannot
+parse are skipped rather than rejecting the document. A document with no
+usable key, or with two usable keys under one ID, is refused and the previous
+key set stays in use.
+
+A bearer that names a key ID missing from the cached set is refused, and asks
+for one background JWKS refresh so a key the issuer has just rotated in works
+for the next request. `unknownKeyRefreshCooldownSeconds`, default 30 and at
+most 86400 (one day), is the minimum time between such refreshes, which bounds
+how often forged key IDs can make the router contact the issuer. The scheduled
+refresh is unaffected. Initial, scheduled, and unknown-key JWKS fetches run one
+at a time, so a slow older fetch never replaces a newer key set.
 
 `roleScopeCatalogue` is optional and requires `auth-agql`. Select exactly one
 of literal `url` or `urlFromEnv`. Request headers are loaded only through
@@ -194,7 +230,8 @@ descriptor contract.
 For programmatic setup, `JwksAuthenticationConfig::new` requires a JWKS URL,
 issuer, and non-empty audiences. It defaults to a 15-minute key cache,
 5-minute refresh interval, 5-second request timeout, 1 MiB JWKS body limit,
-zero clock leeway, rejected legacy scope arrays, and HTTPS-only verification.
+zero clock leeway, rejected legacy scope arrays, HTTPS-only verification, no
+environment proxy, and a 30-second unknown-key refresh cooldown.
 Leeway may not exceed five minutes; insecure HTTP is an explicit loopback-only
 development setting. These fields are configured by the `with_*` methods in
 the [source type](../src/jwt.rs).
@@ -284,12 +321,12 @@ hosts use `RouterConfig::with_byte_route(ByteRoute::new(prefix, upstream))`.
 "byteRoutes": [
   {
     "prefix": "/files",
-    "upstream": "http://10.10.0.12:8080/downloads",
+    "upstream": "https://10.10.0.12:8443/downloads",
     "maxResponseBytes": 134217728
   },
   {
     "prefix": "/shared-files",
-    "upstream": "http://10.10.0.12:8080/shared",
+    "upstream": "https://10.10.0.12:8443/shared",
     "public": true,
     "allowRange": true
   }
@@ -297,14 +334,14 @@ hosts use `RouterConfig::with_byte_route(ByteRoute::new(prefix, upstream))`.
 ```
 
 A request for `/files/reports/q3.csv?v=2` goes to
-`http://10.10.0.12:8080/downloads/reports/q3.csv?v=2`. Only the path below the
+`https://10.10.0.12:8443/downloads/reports/q3.csv?v=2`. Only the path below the
 prefix and the query are copied; the upstream scheme, host, and port come from
 configuration alone.
 
 | Field | Default or rule |
 | --- | --- |
 | `prefix` | Required. An absolute path of non-empty segments using only letters, digits, `-`, `.`, `_` or `~`, with no dot segments and no trailing slash. It must not overlap the GraphQL path, `/health`, `/readiness`, the reserved `/_graphql-orm-router` path, or another byte route. |
-| `upstream` | Required `http` or `https` URL with no credentials, query, fragment, dot segments, or empty or percent-encoded path segments. |
+| `upstream` | Required `https` URL, or `http` under the [outbound transport](#outbound-transport) rule, with no credentials, query, fragment, dot segments, or empty or percent-encoded path segments. |
 | `public` | `false`. When `false`, the route needs a valid bearer and the router must have an authentication provider. |
 | `allowRange` | `false`. When `false`, a `Range` request is refused with 416. |
 | `allowSetCookie` | `false`. When `false`, upstream `Set-Cookie` headers are dropped. |
@@ -467,6 +504,27 @@ each counter. Embedding hosts read the same values from
 any address. Its exact default
 scopes are `router.status`, `router.refresh`, `router.register`,
 `router.remove`, and `router.metrics`. `maxRequestBodyBytes` defaults to 16 KiB.
+
+`admin.authentication` is required and takes the same fields as the top-level
+`authentication`. It authenticates every administrative request in place of the
+public provider, so a token issued for the public API cannot administer the
+router even when it carries an administrative scope. Its `audiences` must not
+include any public audience; the issuer may be the same. Programmatic hosts use
+`AdminConfig::with_authentication_provider`. Validation refuses the public
+provider itself, and refuses overlapping audiences whenever both providers
+state them through `AuthenticationProvider::accepted_audiences`, as
+`JwksAuthenticationProvider` does. The router does not check
+`AgqlAuthenticationProvider` audiences: the pinned `agql-auth` validator does
+not expose them, so two providers built from the same or equivalent validators
+pass validation. Configure their validators with distinct audiences yourself,
+as you must for any custom provider that cannot state its audiences. A token
+whose `aud` lists both a public and an administrative audience is accepted by
+both providers, so issuers must never mint a token with both audiences.
+
+`DELETE /_router/subgraphs/{name}` removes only a dynamic registration. A static
+subgraph belongs to router configuration and the endpoint refuses it with 409
+`REMOVAL_REJECTED`. An embedding host can still remove one in-process with
+`RouterHandle::remove_subgraph`.
 
 `trustedSubgraphs` binds one authenticated `serviceSubject` to an exact
 `subgraphId`, name, metadata URL, GraphQL origin, schema origin, and optional

@@ -187,6 +187,8 @@ impl RouterHandle {
     ///
     /// Failure preserves the exact active graph. Successful removal is
     /// process-local; static configuration restores the subgraph on restart.
+    /// This in-process handle may remove static subgraphs. The administrative
+    /// `DELETE /_router/subgraphs/{name}` endpoint removes only dynamic ones.
     pub async fn remove_subgraph(&self, name: &str) -> Result<ActiveGraphIdentity, RouterError> {
         self.lifecycle.remove_subgraph(name).await
     }
@@ -254,6 +256,9 @@ impl FetchedSubgraph {
 
 #[derive(Clone)]
 struct SourceRecord {
+    /// Changes whenever the record is replaced, so a refresh round that
+    /// fetched an older record never publishes over its replacement.
+    generation: u64,
     config: StaticSubgraph,
     fetched: FetchedSubgraph,
     observed: Option<FetchedSubgraph>,
@@ -276,14 +281,28 @@ struct AdmissionAttempt {
 
 struct LifecycleState {
     sources: BTreeMap<String, SourceRecord>,
+    next_generation: u64,
     admission_attempts: BTreeMap<String, AdmissionAttempt>,
     last_successful_composition: SystemTime,
     last_composition_error: Option<String>,
 }
 
+/// Admitted endpoint and network policy of one dynamic source.
+#[derive(Clone)]
+struct ExecutionTarget {
+    endpoint: String,
+    policy: NetworkPolicy,
+}
+
 pub(crate) struct GraphLifecycle {
     active: ArcSwap<ActiveRouterGraph>,
+    /// Held only for short, I/O-free critical sections.
     state: Mutex<LifecycleState>,
+    /// Serializes refresh rounds, including their network I/O.
+    refresh_round: Mutex<()>,
+    /// Every known source, read by subgraph execution without the lifecycle
+    /// mutex. `None` marks a static source.
+    execution_targets: ArcSwap<BTreeMap<String, Option<ExecutionTarget>>>,
     client: Client,
     max_sdl_bytes: usize,
     refresh_attempts: usize,
@@ -339,10 +358,12 @@ impl GraphLifecycle {
             .iter()
             .cloned()
             .zip(fetched)
-            .map(|(config, fetched)| {
+            .zip(0..)
+            .map(|((config, fetched), generation)| {
                 (
                     config.name.clone(),
                     SourceRecord {
+                        generation,
                         config,
                         fetched,
                         observed: None,
@@ -357,15 +378,19 @@ impl GraphLifecycle {
                     },
                 )
             })
-            .collect();
+            .collect::<BTreeMap<_, _>>();
+        let execution_targets = ArcSwap::from_pointee(execution_targets(&sources));
         Ok(Arc::new(Self {
             active: ArcSwap::from(graph),
             state: Mutex::new(LifecycleState {
+                next_generation: sources.len() as u64,
                 sources,
                 admission_attempts: BTreeMap::new(),
                 last_successful_composition: now,
                 last_composition_error: None,
             }),
+            refresh_round: Mutex::new(()),
+            execution_targets,
             client,
             max_sdl_bytes,
             refresh_attempts,
@@ -393,47 +418,67 @@ impl GraphLifecycle {
 
     pub(crate) async fn refresh(&self) -> Result<SchemaRefreshOutcome, RouterError> {
         self.metrics.schema_refresh();
-        let mut state = self.state.lock().await;
-        let enabled = state
-            .sources
-            .iter()
-            .filter(|(_, source)| source.active)
-            .map(|(name, source)| {
-                (
-                    name.clone(),
-                    source.config.clone(),
-                    source.observed.as_ref().unwrap_or(&source.fetched).clone(),
-                    source.client.clone(),
-                )
-            })
-            .collect::<Vec<_>>();
+        // Rounds stay serialized, but the lifecycle state is released while
+        // they fetch, so status, removal, registration, and subgraph execution
+        // never wait for a slow schema endpoint.
+        let _round = self.refresh_round.lock().await;
+        let enabled = {
+            let state = self.state.lock().await;
+            state
+                .sources
+                .iter()
+                .filter(|(_, source)| source.active)
+                .map(|(name, source)| {
+                    (
+                        name.clone(),
+                        source.generation,
+                        source.config.clone(),
+                        source.observed.as_ref().unwrap_or(&source.fetched).clone(),
+                        source.client.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
         let mut successful = BTreeMap::new();
         let mut failures = BTreeMap::new();
-        for (name, config, previous, client) in enabled {
+        for (name, generation, config, previous, client) in enabled {
             match self
                 .fetch_with_retries(client.as_ref().unwrap_or(&self.client), &config, &previous)
                 .await
             {
                 Ok(fetched) => {
-                    successful.insert(name, fetched);
+                    successful.insert(name, (generation, fetched));
                 }
                 Err(error) => {
-                    failures.insert(name, error.to_string());
+                    failures.insert(name, (generation, error.to_string()));
                 }
             }
         }
 
+        let mut state = self.state.lock().await;
+        // A source removed or replaced while this round fetched keeps the
+        // newer decision; its stale result is discarded.
+        fn fetched_source<'a>(
+            state: &'a mut LifecycleState,
+            name: &str,
+            generation: u64,
+        ) -> Option<&'a mut SourceRecord> {
+            state
+                .sources
+                .get_mut(name)
+                .filter(|source| source.active && source.generation == generation)
+        }
         let now = SystemTime::now();
-        for (name, error) in failures {
-            if let Some(source) = state.sources.get_mut(&name) {
+        for (name, (generation, error)) in failures {
+            if let Some(source) = fetched_source(&mut state, &name, generation) {
                 source.state = SubgraphRuntimeState::Unhealthy;
                 source.last_error = Some(error);
             }
         }
 
         let mut changed = BTreeMap::new();
-        for (name, fetched) in successful {
-            let Some(source) = state.sources.get_mut(&name) else {
+        for (name, (generation, fetched)) in successful {
+            let Some(source) = fetched_source(&mut state, &name, generation) else {
                 continue;
             };
             if fetched.fingerprint == source.fetched.fingerprint {
@@ -522,6 +567,24 @@ impl GraphLifecycle {
         &self,
         name: &str,
     ) -> Result<ActiveGraphIdentity, RouterError> {
+        self.remove(name, true).await
+    }
+
+    /// Removes only a process-local dynamic registration. Static sources
+    /// belong to router configuration, which the administrative surface
+    /// cannot change.
+    pub(crate) async fn remove_dynamic_subgraph(
+        &self,
+        name: &str,
+    ) -> Result<ActiveGraphIdentity, RouterError> {
+        self.remove(name, false).await
+    }
+
+    async fn remove(
+        &self,
+        name: &str,
+        static_allowed: bool,
+    ) -> Result<ActiveGraphIdentity, RouterError> {
         let mut state = self.state.lock().await;
         let Some(source) = state.sources.get(name) else {
             return Err(RouterError::new(
@@ -529,6 +592,12 @@ impl GraphLifecycle {
                 format!("unknown subgraph `{name}`"),
             ));
         };
+        if !static_allowed && source.source_kind == SubgraphSourceKind::Static {
+            return Err(RouterError::new(
+                RouterErrorKind::InvalidConfiguration,
+                format!("static subgraph `{name}` can be removed only by the hosting process"),
+            ));
+        }
         if !source.active {
             return Err(RouterError::new(
                 RouterErrorKind::InvalidConfiguration,
@@ -626,7 +695,10 @@ impl GraphLifecycle {
         );
         let name = fetched.candidate.name.clone();
         let fingerprint = fetched.fingerprint.clone();
+        let generation = state.next_generation;
+        state.next_generation += 1;
         let record = |state, active, observed_fingerprint, last_error| SourceRecord {
+            generation,
             config,
             fetched,
             observed: None,
@@ -652,6 +724,8 @@ impl GraphLifecycle {
                         Some(details.clone()),
                     ),
                 );
+                self.execution_targets
+                    .store(Arc::new(execution_targets(&state.sources)));
                 state.last_composition_error = Some(details);
                 self.metrics.composition_failure();
                 return Err(error);
@@ -660,6 +734,8 @@ impl GraphLifecycle {
         state
             .sources
             .insert(name, record(SubgraphRuntimeState::Active, true, None, None));
+        self.execution_targets
+            .store(Arc::new(execution_targets(&state.sources)));
         let identity = ActiveGraphIdentity::from(candidate.graph.as_ref());
         self.metrics.graph_activated(candidate.graph.version);
         self.active.store(candidate);
@@ -737,23 +813,23 @@ impl GraphLifecycle {
         endpoint: &str,
     ) -> Result<(), RouterError> {
         let policy = {
-            let state = self.state.lock().await;
-            let Some(source) = state.sources.get(name) else {
+            let targets = self.execution_targets.load();
+            let Some(target) = targets.get(name) else {
                 return Err(RouterError::new(
                     RouterErrorKind::NetworkPolicy,
                     "subgraph execution target is not registered",
                 ));
             };
-            let Some(policy) = &source.execution_policy else {
+            let Some(target) = target else {
                 return Ok(());
             };
-            if source.config.graphql_url != endpoint {
+            if target.endpoint != endpoint {
                 return Err(RouterError::new(
                     RouterErrorKind::NetworkPolicy,
                     "dynamic GraphQL endpoint changed after admission",
                 ));
             }
-            policy.clone()
+            target.policy.clone()
         };
         policy
             .resolve_url(endpoint, "dynamic GraphQL endpoint")
@@ -827,6 +903,24 @@ impl GraphLifecycle {
         }
         Err(last_error.expect("at least one refresh attempt is configured"))
     }
+}
+
+fn execution_targets(
+    sources: &BTreeMap<String, SourceRecord>,
+) -> BTreeMap<String, Option<ExecutionTarget>> {
+    sources
+        .iter()
+        .map(|(name, source)| {
+            let target = source
+                .execution_policy
+                .as_ref()
+                .map(|policy| ExecutionTarget {
+                    endpoint: source.config.graphql_url.clone(),
+                    policy: policy.clone(),
+                });
+            (name.clone(), target)
+        })
+        .collect()
 }
 
 pub(crate) async fn fetch_initial(
@@ -1469,6 +1563,38 @@ mod tests {
     }
 
     #[ntex::test]
+    async fn dynamic_only_removal_refuses_static_subgraphs_and_preserves_the_graph() {
+        let products = MutableEndpoint::new(PRODUCT, "products-v1");
+        let reviews = MutableEndpoint::new(REVIEWS, "reviews-v1");
+        let configs = [
+            StaticSubgraph::new("products", "http://products.test/graphql", products.url()),
+            StaticSubgraph::new("reviews", "http://reviews.test/graphql", reviews.url()),
+        ];
+        let lifecycle = lifecycle(&configs, 1).await;
+        let initial = lifecycle.status().await.active_graph().clone();
+
+        let error = lifecycle
+            .remove_dynamic_subgraph("reviews")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("static subgraph"), "{error}");
+        let status = lifecycle.status().await;
+        assert_eq!(status.active_graph(), &initial);
+        assert!(status.subgraphs().iter().all(SubgraphStatus::is_active));
+        assert!(lifecycle.remove_dynamic_subgraph("missing").await.is_err());
+
+        // The hosting process keeps its in-process removal of static sources.
+        assert_eq!(
+            lifecycle
+                .remove_subgraph("reviews")
+                .await
+                .unwrap()
+                .version(),
+            2
+        );
+    }
+
+    #[ntex::test]
     async fn bounded_repeated_reload_campaign_retains_health_and_monotonic_identity() {
         const RELOADS: u64 = 24;
         let endpoint = MutableEndpoint::new("type Query { value: String! }", "generation-1");
@@ -1555,6 +1681,64 @@ mod tests {
         assert_eq!(active.graph.version, 3);
         assert!(active.graph.supergraph_sdl.contains("three"));
         assert!(!active.graph.supergraph_sdl.contains("two"));
+    }
+
+    #[ntex::test]
+    async fn slow_schema_refresh_does_not_block_status_execution_or_removal() {
+        let products = MutableEndpoint::new(PRODUCT, "products-v1");
+        let reviews = MutableEndpoint::new(REVIEWS, "reviews-v1");
+        let configs = [
+            StaticSubgraph::new("products", "http://products.test/graphql", products.url()),
+            StaticSubgraph::new("reviews", "http://reviews.test/graphql", reviews.url()),
+        ];
+        let lifecycle = lifecycle(&configs, 1).await;
+        let handle = RouterHandle::new(lifecycle.clone());
+
+        // A changed but slow SDL endpoint keeps one refresh round in flight.
+        reviews.set(
+            &REVIEWS.replace("body: String!", "body: String!, stars: Int"),
+            "reviews-v2",
+            200,
+        );
+        reviews.set_delay(Duration::from_millis(700));
+        let request_target = reviews.requests() + 1;
+        let (tx, rx) = futures::channel::oneshot::channel();
+        let refreshing = handle.clone();
+        hive_router::ntex::rt::spawn(async move {
+            let _ = tx.send(refreshing.refresh().await);
+        });
+        reviews.wait_for_requests(request_target).await;
+
+        let quick = Duration::from_millis(200);
+        hive_router::tokio::time::timeout(quick, handle.status())
+            .await
+            .expect("status must not wait for schema-refresh network I/O");
+        hive_router::tokio::time::timeout(
+            quick,
+            lifecycle.validate_execution_target("products", "http://products.test/graphql"),
+        )
+        .await
+        .expect("subgraph execution must not wait for schema-refresh network I/O")
+        .unwrap();
+        let removed = hive_router::tokio::time::timeout(quick, handle.remove_subgraph("reviews"))
+            .await
+            .expect("removal must not wait for schema-refresh network I/O")
+            .unwrap();
+        assert_eq!(removed.version(), 2);
+
+        // The in-flight round observed `reviews` before its removal and must
+        // not resurrect it or publish over the removal.
+        assert_eq!(rx.await.unwrap().unwrap(), SchemaRefreshOutcome::Unchanged);
+        let status = handle.status().await;
+        assert_eq!(status.active_graph(), &removed);
+        let review_status = status
+            .subgraphs()
+            .iter()
+            .find(|status| status.name() == "reviews")
+            .unwrap();
+        assert_eq!(review_status.state(), SubgraphRuntimeState::Disabled);
+        assert!(!review_status.is_active());
+        assert!(!lifecycle.load().graph.supergraph_sdl.contains("stars"));
     }
 
     async fn lifecycle(configs: &[StaticSubgraph], attempts: usize) -> Arc<GraphLifecycle> {

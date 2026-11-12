@@ -41,6 +41,16 @@ and RLS remain authoritative after router preflight.
   validated DNS, verify peers, bound resolution and responses, and deny special
   address ranges unless explicitly allowed. Execution origins are IP literals
   to close the private engine's second-resolution rebinding window.
+- Static outbound URLs use HTTPS unless their host is loopback or the operator
+  explicitly allows plaintext HTTP. The schema and JWKS clients ignore proxy
+  environment variables unless explicitly opted in, so ambient process
+  configuration cannot redirect schema or key retrieval.
+- Administrative requests authenticate through a separate provider whose
+  audience public tokens do not carry, and the admin surface cannot remove a
+  static subgraph.
+- JWKS documents keep their usable RS256 keys when other key types are
+  present. An unknown key ID requests at most one background key refresh per
+  cooldown, so forged key IDs cannot drive unbounded issuer traffic.
 - Complete immutable graph and policy candidates are constructed before one
   atomic publication. Failure retains the exact last-known-good runtime.
 - Public/admin bodies, headers, parsing, graph complexity, downstream time,

@@ -239,16 +239,30 @@ impl PreparedRouter {
                 )
             })?;
         }
-        let client = Client::builder()
-            .redirect(Policy::none())
-            .timeout(config.schema_fetch_timeout)
-            .build()
-            .map_err(|error| {
+        if let Some(provider) = config
+            .admin
+            .as_ref()
+            .and_then(|admin| admin.authentication.as_ref())
+        {
+            provider.initialize().await.map_err(|error| {
                 RouterError::new(
-                    RouterErrorKind::InvalidConfiguration,
-                    format!("failed to construct the schema client: {error}"),
+                    RouterErrorKind::Runtime,
+                    format!("administrative authentication provider failed to initialize: {error}"),
                 )
             })?;
+        }
+        let mut client = Client::builder()
+            .redirect(Policy::none())
+            .timeout(config.schema_fetch_timeout);
+        if !config.use_environment_proxy {
+            client = client.no_proxy();
+        }
+        let client = client.build().map_err(|error| {
+            RouterError::new(
+                RouterErrorKind::InvalidConfiguration,
+                format!("failed to construct the schema client: {error}"),
+            )
+        })?;
         let fetched = try_join_all(
             config
                 .subgraphs
@@ -347,6 +361,11 @@ impl PreparedRouter {
         let runtime = PluginRuntime {
             lifecycle: self.lifecycle.clone(),
             authentication: self.config.authentication.clone(),
+            admin_authentication: self
+                .config
+                .admin
+                .as_ref()
+                .and_then(|admin| admin.authentication.clone()),
             scope_matcher: self.config.scope_matcher.clone(),
             internal_subscription: internal_subscription.clone(),
             request_limits: self.config.request_limits.clone(),
@@ -432,10 +451,10 @@ impl PreparedRouter {
         let admin_runtime = self.config.admin.clone().map(|admin| {
             AdminRuntime::new(
                 self.lifecycle.clone(),
-                self.config
+                admin
                     .authentication
                     .clone()
-                    .expect("validated administrative configuration requires authentication"),
+                    .expect("validated administrative configuration has its own authentication"),
                 self.config.scope_matcher.clone(),
                 admin,
                 self.config.schema_fetch_timeout,
@@ -561,6 +580,7 @@ struct TrustedInternalSubscription;
 struct PluginRuntime {
     lifecycle: Arc<GraphLifecycle>,
     authentication: Option<Arc<dyn AuthenticationProvider>>,
+    admin_authentication: Option<Arc<dyn AuthenticationProvider>>,
     scope_matcher: Arc<dyn ScopeMatcher>,
     internal_subscription: Option<InternalSubscriptionEndpoint>,
     request_limits: crate::RequestLimits,
@@ -600,13 +620,25 @@ impl RouterPlugin for StaticGraphPlugin {
         {
             return OnPluginInitPayload::<Self>::error(error);
         }
-        if let Some(provider) = &runtime.authentication
-            && let Some(interval) = provider.refresh_interval()
-        {
-            payload.register_background_task(AuthenticationRefreshTask {
-                provider: provider.clone(),
-                interval,
-            });
+        for (id, provider) in [
+            (
+                "graphql-orm-router-authentication-refresh",
+                &runtime.authentication,
+            ),
+            (
+                "graphql-orm-router-admin-authentication-refresh",
+                &runtime.admin_authentication,
+            ),
+        ] {
+            if let Some(provider) = provider
+                && let Some(interval) = provider.refresh_interval()
+            {
+                payload.register_background_task(AuthenticationRefreshTask {
+                    id,
+                    provider: provider.clone(),
+                    interval,
+                });
+            }
         }
         payload.register_background_task(SchemaRefreshTask {
             lifecycle: runtime.lifecycle.clone(),
@@ -969,6 +1001,7 @@ impl RouterPlugin for StaticGraphPlugin {
 }
 
 struct AuthenticationRefreshTask {
+    id: &'static str,
     provider: Arc<dyn AuthenticationProvider>,
     interval: std::time::Duration,
 }
@@ -1004,7 +1037,7 @@ impl background_tasks::BackgroundTask for SchemaRefreshTask {
 #[hive_router::async_trait]
 impl background_tasks::BackgroundTask for AuthenticationRefreshTask {
     fn id(&self) -> &str {
-        "graphql-orm-router-authentication-refresh"
+        self.id
     }
 
     async fn run(&self, token: background_tasks::CancellationToken) {
@@ -1299,6 +1332,7 @@ mod tests {
     #[test]
     fn private_hive_configuration_contains_only_approved_header_rules() {
         let config = RouterConfig::new("127.0.0.1:4000".parse().unwrap())
+            .allow_plaintext_http(true)
             .allow_anonymous_development(true)
             .with_subgraph(StaticSubgraph::new(
                 "status",
@@ -1348,6 +1382,7 @@ mod tests {
     fn private_hive_introspection_is_off_unless_enabled_and_always_depth_bounded() {
         let base = || {
             RouterConfig::new("127.0.0.1:4000".parse().unwrap())
+                .allow_plaintext_http(true)
                 .allow_anonymous_development(true)
                 .with_subgraph(StaticSubgraph::new(
                     "status",
@@ -1416,6 +1451,7 @@ mod tests {
     #[test]
     fn private_hive_telemetry_translation_enables_only_explicit_export() {
         let config = RouterConfig::new("127.0.0.1:4000".parse().unwrap())
+            .allow_plaintext_http(true)
             .allow_anonymous_development(true)
             .with_subgraph(StaticSubgraph::new(
                 "status",
@@ -1446,6 +1482,7 @@ mod tests {
     #[test]
     fn private_hive_subscription_transport_is_bounded_and_never_refreshes_credentials() {
         let config = RouterConfig::new("127.0.0.1:4000".parse().unwrap())
+            .allow_plaintext_http(true)
             .with_authentication_provider(Arc::new(RejectingProvider))
             .with_subscriptions(
                 crate::SubscriptionConfig::new()

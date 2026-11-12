@@ -20,9 +20,9 @@
   "subgraphs": [
     {
       "name": "products",
-      "graphqlUrl": "http://10.10.0.12:8080/graphql",
-      "sdlUrl": "http://10.10.0.12:8080/schema.graphql",
-      "protocolUrl": "http://10.10.0.12:8080/.well-known/graphql-router",
+      "graphqlUrl": "https://10.10.0.12:8443/graphql",
+      "sdlUrl": "https://10.10.0.12:8443/schema.graphql",
+      "protocolUrl": "https://10.10.0.12:8443/.well-known/graphql-router",
       "subscriptionWebsocketPath": "/graphql",
       "schemaHeadersFromEnv": {
         "authorization": "PRODUCTS_SCHEMA_AUTHORIZATION"
