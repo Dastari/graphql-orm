@@ -113,6 +113,22 @@ versions before 0.9.1, named `<name>.<uuid>.uploading`, are indistinguishable
 from stored objects and are neither hidden nor swept; see the
 [migration guide](../MIGRATION.md).
 
+## Listing order and durability
+
+Listings return keys in ascending lexicographic order of their UTF-8 bytes,
+and a continuation resumes after the last key returned in that order. Every
+provider meets this contract: S3 lists in key order, SMB sorts its full
+listing, and the local backend walks each directory with subdirectories
+ordered as `<name>/`, so `a-b` and `a.b` list before `a/x`. Custom providers
+must use the same order, or paging through a listing skips or repeats keys.
+
+A successful local write is durable. The local backend fsyncs the temporary
+file before renaming or linking it into place, then fsyncs the parent
+directory, and it fsyncs the parent of each directory it creates. Successful
+deletions fsync the parent directory too. Directory syncs run on Unix only;
+other platforms rely on the file system to persist directory entries. Network
+file systems mounted under a local root may not honour these syncs.
+
 ## Key Safety
 
 Blob keys are `/`-separated relative keys. `validate_blob_key` rejects:

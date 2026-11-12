@@ -10,6 +10,23 @@ supersedes: []
 
 # Migration Guide
 
+## 0.9.1 to 0.9.2: ordered and durable local storage
+
+Update the storage requirement to 0.9.2 and refresh the consumer lockfile. No
+API, configuration or object format change is required.
+
+- Local `list_blobs` and `list_blobs_page` now return keys in exact
+  lexicographic key order. Code that relied on the earlier directory-walk order
+  must sort keys itself or accept the new order. Paged listings no longer skip
+  keys next to sibling names such as `a-b` or `a.b`. A paged listing that
+  spans the upgrade can still have skipped such keys, so restart it after
+  upgrading.
+- Local writes and deletions now fsync file data and the affected directories
+  before they return. Expect lower write throughput, most of all on file
+  systems with slow syncs. Data written by earlier versions has not been
+  synced. Run any verification you depend on, such as a backup verify, after
+  an unclean shutdown that happened before the upgrade.
+
 ## 0.9.0 to 0.9.1: backend-owned temporary names
 
 Update the storage requirement to 0.9.1 and refresh the consumer lockfile. No

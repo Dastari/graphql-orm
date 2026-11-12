@@ -10,7 +10,30 @@ supersedes: []
 
 # Changelog
 
-## 0.9.1 (unreleased)
+## 0.9.2
+
+- Local listings return keys in exact lexicographic key order. The local
+  backend walked each directory in path order, so a sibling whose name sorts
+  below `/`, such as `a-b` or `a.b` beside the directory `a`, was listed after
+  the keys under `a/`. Unpaged `list_blobs` returned keys out of order, and a
+  paged listing could skip keys, because each continuation token resumes after
+  the last key in key order. Directories now sort as `<name>/`, matching S3 and
+  SMB. Paged listings also skip directories whose keys all precede the
+  continuation. ([#472](https://github.com/Dastari/graphql-orm/issues/472))
+- Local writes are durable once they return. `put_blob`,
+  `put_blob_if_not_exists`, `copy_blob`, `put_object_stream` and multipart
+  object writers fsync the temporary file before renaming or linking it into
+  place, then fsync the parent directory. New directories, and the removals made
+  by `delete_blob`, `delete_blob_once` and `StreamingObjectStore::delete_object`,
+  are synced as well. Before this, a crash could leave a truncated or missing
+  object behind a successful write, such as a truncated backup manifest or
+  content blob. Directory syncs run on Unix only.
+  ([#473](https://github.com/Dastari/graphql-orm/issues/473))
+- Writes are slower on the local backend, because each one now waits for the
+  file system to reach stable storage.
+- No public API, configuration or object format change.
+
+## 0.9.1
 
 - Only treat the backend's own upload temp files as temporary. The local
   backend treated every file whose name ended in `.uploading` as an
