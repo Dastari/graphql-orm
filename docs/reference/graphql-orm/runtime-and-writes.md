@@ -332,6 +332,20 @@ A generated write runs in this order, after its entity and row policy checks:
 8. For generated GraphQL mutations, the entity's `notify_with` handler. Single-row writes call it once;
    bulk updates and deletes call it once per row, after the whole bulk transaction commits.
 
+A hook error reaches a repository or `Database::transaction` caller as an
+`OrmPublicError`. It keeps its code and message only when it is a deliberate
+public refusal: an error whose `code` extension is an ORM public code, such as
+`OrmPublicError::with_message(OrmErrorCode::Conflict, "...").into_graphql_error()`,
+or an `OrmPublicError` returned with `?`. Any other hook error, including one
+with an application-defined code, reads as `INTERNAL_ERROR` with the default
+message, and its text stays a server-side diagnostic. GraphQL clients of
+generated mutations see a deliberate public refusal with the same code and
+message. They still see an application-defined refusal as the hook wrote it,
+as does `into_graphql_error()` on the repository error. `INTERNAL_ERROR`
+always has the default message, on every surface. Entity and row policy refusals
+on repository paths keep their public code in the same way, so an entity write
+denial reads as `FORBIDDEN`.
+
 | Write path | Hooks | GraphQL context in the hook | `Changed` |
 | --- | --- | --- | --- |
 | Generated GraphQL mutation, including bulk | Per row | Yes | Yes |

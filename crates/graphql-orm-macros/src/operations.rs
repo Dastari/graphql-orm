@@ -3995,7 +3995,7 @@ fn generate_graphql_operations_unfiltered(
                 <Self as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
                 ::graphql_orm::graphql::orm::EntityAccessKind::Read,
                 ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
-            ).await.map_err(|e| ::graphql_orm::sqlx::Error::Protocol(format!("{e:?}")))?;
+            ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
 
             let entity = ::graphql_orm::graphql::orm::EntityQuery::<Self, #backend_marker>::new()
                 .where_values(&Self::__gom_key_where_clause(), Self::__gom_key_values(key))
@@ -4009,7 +4009,7 @@ fn generate_graphql_operations_unfiltered(
                     <Self as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
                     ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
                     loaded as &(dyn ::std::any::Any + Send + Sync),
-                ).await.map_err(|e| ::graphql_orm::sqlx::Error::Protocol(format!("{e:?}")))? {
+                ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)? {
                     return Ok(None);
                 }
                 for field in <Self as ::graphql_orm::graphql::orm::Entity>::repository_field_policies() {

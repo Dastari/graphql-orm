@@ -246,10 +246,9 @@ async fn projections_are_typed_bounded_transaction_visible_and_authorized()
         .fetch_first()
         .await
         .expect_err("declared-policy-required projection must require its provider");
-    assert!(
-        misconfigured
-            .to_string()
-            .contains("authorization is misconfigured")
+    assert_eq!(
+        graphql_orm::graphql::errors::OrmPublicError::from(misconfigured).code,
+        graphql_orm::graphql::errors::OrmErrorCode::AuthorizationMisconfigured
     );
 
     let projected = PublicCertificateProjection::find_by_id(&database, &first.id)

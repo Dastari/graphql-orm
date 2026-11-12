@@ -10,6 +10,14 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.127.0 keeps a hook's deliberate public refusal (an ORM public `code`
+extension, or an `OrmPublicError` returned with `?`) on repository writes,
+retention purge, `Database::transaction` and generated GraphQL mutations, and
+reports every other hook error to repository callers as a sanitized
+`INTERNAL_ERROR`. The text of a carried refusal no longer contains the
+internal transport token. Upgrade ORM/macros together; see the
+[root migration guide](../../MIGRATION.md#01260-to-01270-repository-callers-keep-public-hook-refusal-codes).
+
 Version 0.126.0 contains the following changes. Upgrade ORM/macros together;
 see the [root migration guide](../../MIGRATION.md#01250-to-01260).
 

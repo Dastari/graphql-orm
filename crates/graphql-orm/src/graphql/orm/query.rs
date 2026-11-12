@@ -3419,7 +3419,7 @@ where
         super::core::EntityAccessSurface::Repository,
     )
     .await
-    .map_err(|error| sqlx::Error::Protocol(format!("{error:?}")))?;
+    .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
     for selected in P::FIELD_NAMES {
         let Some(field) = <P::Entity as Entity>::repository_field_policies()
             .iter()

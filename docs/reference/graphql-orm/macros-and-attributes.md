@@ -3,7 +3,7 @@ title: GraphQL ORM macro and attribute reference
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-12
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -1191,8 +1191,10 @@ Bulk responses in both modes retain `success: true` and the committed
 `notificationErrors` contains every failed call's safe message and nullable
 code; null means no failures. These failures also reach the post-commit
 error handler. Clients must not retry a committed write. Error text follows
-the same authored-message/code rule as bulk refusals; source-bearing
-`?` conversions without an authored code are masked.
+the same authored-message/code rule as bulk refusals: source-bearing
+`?` conversions without an authored code are masked, except a typed
+`OrmPublicError`, which keeps its code and message (`INTERNAL_ERROR` keeps
+only the default message).
 
 GraphQL bulk writes on entities with notifications reject more than 1,000
 matched rows before writing. Split larger work into explicit requests.
