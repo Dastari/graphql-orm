@@ -10,62 +10,54 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.126.0 keeps macros aligned with ORM 0.126.0, which selects published
-Auth `v0.26.0`. Generated code is unchanged. Upgrade ORM/macros together; see
-the [root migration guide](../../MIGRATION.md#01250-to-01260-agql-auth-0260).
+Version 0.126.0 contains the following changes. Upgrade ORM/macros together;
+see the [root migration guide](../../MIGRATION.md#01250-to-01260).
 
-Version 0.126.0 enforces row policy on the rows generated writes target,
-write and return. The written row must satisfy `can_write_row`, update and
-upsert payloads release the row only to callers who may read it, and GraphQL
-writes treat rows the caller can neither read nor write as missing. Upgrade
-ORM/macros together; see the
-[root migration guide](../../MIGRATION.md#01260-row-policy-on-the-rows-generated-writes-target-write-and-return).
-
-Version 0.126.0 makes PostgreSQL RLS drift validation compare policies as
-PostgreSQL parses them, so a freshly applied target validates clean, and
-reports undeclared, `FOR ALL`, restrictive and role-limited policies and
-altered helper functions as errors. `#[graphql_rls]` `tenant` and `owner` must
-name a stored column. Upgrade ORM/macros together; see the
-[root migration guide](../../MIGRATION.md#01260-rls-drift-validation-compares-postgresqls-rendering).
-
-Version 0.126.0 makes generated MSSQL writes, including compare-and-swap,
-work on tables with enabled triggers, and MSSQL `rows_affected` reports the
-statement's own count. Upgrade ORM/macros together; see the
-[root migration guide](../../MIGRATION.md#01260-mssql-writes-on-tables-with-triggers).
-
-Version 0.126.0 orders an entity without `default_sort` by its primary-key
-columns instead of a literal `id`, and reads combined `#[graphql(...)]` and
-`#[serde(...)]` options in any order. `#[backup]`, `#[transform]` and
-`#[filterable]` reject unknown options. Upgrade ORM/macros together; see the
-[root migration guide](../../MIGRATION.md#01260-primary-key-default-ordering-and-strict-attribute-options).
-
-Version 0.126.0 generates entities whose create or update input has no
-public member: it omits the empty input and the roots that need it instead of
-failing to compile. No compiling entity changes; see
-[read-only and zero-input entities](../../docs/reference/graphql-orm/macros-and-attributes.md#read-only-and-zero-input-entities).
-
-Version 0.126.0 adds `RowPolicy::read_visibility_capability`. Generated schema
-builders refuse an exposed Keyset root when the row policy explicitly declares
-its entity `ResidualOnly`, and the new `try_schema_builder` returns that error.
-The default, `Unknown`, keeps existing roots; `Database::keyset_read_policy_diagnostics`
-reports them. Refused GraphQL Keyset requests carry a distinct `reason`.
-Upgrade ORM/macros together; see the
-[root migration guide](../../MIGRATION.md#01260-keyset-read-visibility-declarations-and-diagnostics).
-
-Version 0.126.0 derives each generated operation-catalogue argument from the
-resolver signature that produces the SDL, so a generated router descriptor
-binds unchanged. Managed-version update and delete descriptors gain
-`expectedVersion`. The hidden mutation field of an entity without generated
-writes is now `gom{Entity}WritesUnavailable` and is described with an
-unsatisfiable requirement. The SDL and catalogue fingerprints change. Upgrade
-ORM/macros together; see the
-[root migration guide](../../MIGRATION.md#01260-generated-catalogue-arguments-follow-the-sdl).
-
-Version 0.126.0 serves the generated `NodeId` and `RecordVersion` on a
-`#[graphql(complex)]` entity with typed computed fields and no relations,
-through `compose_complex_object` and `#[graphql_complex_object]`. A handwritten
-composed resolver that would shadow either field is now a compile error; see the
-[root migration guide](../../MIGRATION.md#01250-to-01260-nodeid-on-complex-objects-with-computed-fields).
+- Macros stay aligned with ORM 0.126.0, which selects published Auth
+  `v0.26.0`. Generated code is unchanged by the Auth update
+  ([details](../../MIGRATION.md#agql-auth-0260)).
+- Row policy applies to the rows generated writes target, write and return.
+  The written row must satisfy `can_write_row`, update and upsert payloads
+  release the row only to callers who may read it, and GraphQL writes treat
+  rows the caller can neither read nor write as missing
+  ([details](../../MIGRATION.md#row-policy-on-the-rows-generated-writes-target-write-and-return)).
+- PostgreSQL RLS drift validation compares policies as PostgreSQL parses them,
+  so a freshly applied target validates clean, and reports undeclared,
+  `FOR ALL`, restrictive and role-limited policies and altered helper functions
+  as errors. `#[graphql_rls]` `tenant` and `owner` must name a stored column
+  ([details](../../MIGRATION.md#rls-drift-validation-compares-postgresqls-rendering)).
+- Generated MSSQL writes, including compare-and-swap, work on tables with
+  enabled triggers, and MSSQL `rows_affected` reports the statement's own count
+  ([details](../../MIGRATION.md#mssql-writes-on-tables-with-triggers)).
+- An entity without `default_sort` orders by its primary-key columns instead of
+  a literal `id`, and combined `#[graphql(...)]` and `#[serde(...)]` options are
+  read in any order. `#[backup]`, `#[transform]` and `#[filterable]` reject
+  unknown options
+  ([details](../../MIGRATION.md#primary-key-default-ordering-and-strict-attribute-options)).
+- Entities whose create or update input has no public member compile: the
+  empty input and the roots that need it are omitted. No compiling entity
+  changes; see
+  [read-only and zero-input entities](../../docs/reference/graphql-orm/macros-and-attributes.md#read-only-and-zero-input-entities).
+- `RowPolicy::read_visibility_capability` is new. Generated schema builders
+  refuse an exposed Keyset root when the row policy explicitly declares its
+  entity `ResidualOnly`, and the new `try_schema_builder` returns that error.
+  The default, `Unknown`, keeps existing roots;
+  `Database::keyset_read_policy_diagnostics` reports them. Refused GraphQL
+  Keyset requests carry a distinct `reason`
+  ([details](../../MIGRATION.md#keyset-read-visibility-declarations-and-diagnostics)).
+- Each generated operation-catalogue argument is derived from the resolver
+  signature that produces the SDL, so a generated router descriptor binds
+  unchanged. Managed-version update and delete descriptors gain
+  `expectedVersion`. The hidden mutation field of an entity without generated
+  writes is now `gom{Entity}WritesUnavailable` and is described with an
+  unsatisfiable requirement. The SDL and catalogue fingerprints change
+  ([details](../../MIGRATION.md#generated-catalogue-arguments-follow-the-sdl)).
+- The generated `NodeId` and `RecordVersion` are served on a
+  `#[graphql(complex)]` entity with typed computed fields and no relations,
+  through `compose_complex_object` and `#[graphql_complex_object]`. A
+  handwritten composed resolver that would shadow either field is now a
+  compile error
+  ([details](../../MIGRATION.md#nodeid-on-complex-objects-with-computed-fields)).
 
 Version 0.125.0 records PostgreSQL change-journal entries in the database
 instead of the runtime role, and journaled writes require the recorder

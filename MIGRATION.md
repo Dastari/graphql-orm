@@ -10,9 +10,17 @@ supersedes: []
 
 # Migration Guide
 
-## 0.125.0 to 0.126.0: agql-auth 0.26.0
+## 0.125.0 to 0.126.0
 
-ORM/macros 0.126.0, AI 0.132.0 and router 0.11.0 select published Auth
+ORM runtime/macros 0.126.0 and operation catalogue 0.7.3 ship together with AI
+0.133.0, tool profiles 0.22.0 and router 0.11.0. Upgrade ORM and macros
+together. Each subsection below names whether a schema or data migration is
+needed; the AI, tool-profile and router changes have their own migration
+guides under `crates/`.
+
+### agql-auth 0.26.0
+
+ORM/macros 0.126.0, AI 0.133.0 and router 0.11.0 select published Auth
 `v0.26.0` instead of `v0.24.0`. The annotated tag
 `04c514280d685a8975d63a8a6b9a1e0db11f503f` peels to commit
 `7d016f6a6bc3e697382e2e05865f596862189240`. Every direct Auth host must select:
@@ -29,7 +37,8 @@ commit above. Upgrade ORM/macros, AI and router together.
 
 Auth 0.25.0 and 0.26.0 only add opt-in APIs: the fixed-audience delegation
 facade and the refresh-reuse grace window, which is off by default. The ORM,
-AI and router do not use either, and their behavior is unchanged. A host that
+AI and router do not use either, so the Auth update itself changes none of
+their behavior. A host that
 wants them opts in on its own `AuthService`. Auth's own dependencies are
 unchanged, so no other locked package moves. No data, schema or wire migration
 is needed.
@@ -42,97 +51,7 @@ SHA-256 is `c62b84823b125183db6824cbd69866b5f97c9b7c5273efd3bdb1a200f87af7d2`,
 matching the release's `SHA256SUMS`. The workspace release manifest retains
 the tag and full locked commit together.
 
-## 0.126.0: generated catalogue arguments follow the SDL
-
-Upgrade runtime, macros and graphql-orm-operation-catalog 0.7.3 together. No
-database or schema migration is needed.
-
-- Each generated catalogue descriptor now lists exactly the arguments its
-  resolver declares. On an entity with a managed `version`, the update and
-  delete descriptors gain the optional `expectedVersion` argument. Remove any
-  host code that copied argument metadata from the SDL into the catalogue or
-  router descriptor, or recomputed descriptor fingerprints after doing so.
-- Argument descriptions now equal the SDL descriptions. Subscription `key` and
-  `keys` arguments carry the resolver text, and the scan root's `where` and
-  `page` arguments now have descriptions in the SDL too.
-- An entity that serves no generated writes, such as a composite-key or
-  entity-level read-only entity in a writable schema, still contributes one
-  hidden mutation field. It was `gomCompositeKeyWritesUnavailable`, shared by
-  every such entity and absent from the catalogue. It is now
-  `gom{Entity}WritesUnavailable`, one per entity, and it is a catalogue
-  operation of the new category `GeneratedGraphqlOperationCategory::Unavailable`.
-  It has no leading underscore, because routers that drop underscore root
-  fields from their binding contract would refuse its descriptor.
-  Its authorization requirement is
-  `GraphqlAuthorizationRequirement::unsatisfiable()`, which no caller can hold,
-  its AI mutation policy is `Prohibited`, and its resolver refuses every
-  request with `FORBIDDEN`. Routers accept the generated descriptor whether
-  or not they exempt underscore root fields, so a composite-key entity no
-  longer needs to be
-  excluded from generated mutations. `OperationAssuranceRegistry::builder`
-  records it as exempt, so strict classification needs no host entry, and
-  `ensure_schema_sdl` now covers it. `GraphqlOperationCatalog::operations()`
-  lists it even where the schema root omits mutations, unexposed like the
-  root's other mutations; use `exposed_operations()` to read what is served.
-  Update any SDL snapshot that includes the old name, and any exhaustive
-  handling of catalogue categories.
-- The finished SDL changes, through the scan descriptions and the
-  placeholder, and so do the generated catalogue, authorization and
-  router-export fingerprints for every entity. After upgrading:
-  1. regenerate and republish router descriptors from the new build;
-  2. regenerate AI capability manifests and tool profiles from the new SDL;
-  3. re-approve pending AI approvals. An approval records the target schema
-     fingerprint, so one created before the upgrade is refused after it. This
-     fails closed.
-
-## AI 0.130.0 to 0.131.0: legacy delegated stored principal references
-
-Runs and session-title work queued before 0.130.0 with a delegated or
-sessionless principal reference now fail closed automatically. Workers refuse
-to resolve such a reference, and the claim paths close these rows with
-`principal_reference_delegated` before any provider, tool, approval or host
-callback. The 0.130.0 manual cleanup remains valid but is no longer required.
-Hosts that match error codes should add `principal_reference_delegated`. No
-data migration is needed. See the
-[AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01300-to-01310-legacy-delegated-stored-principal-references).
-
-## AI 0.129.0 to 0.130.0: delegated and sessionless session credentials
-
-Message submission, every other `OrmAiSessionService` root, attachment roots and inbox pages refuse
-`SessionBoundDelegation` and `Sessionless` request credentials, and credentials
-with no grant kind that carry an actor or exact operation binding, with
-`AI_REAUTHORIZATION_FAILED`. This applies whether or not run authorization or
-submission admission is installed, and these roots cannot be receiver-admission
-targets. Clients that sent such tokens to submit messages, manage sessions or
-attachments, or read session, message, event or inbox pages must send the
-user's own session access token. Review title work queued before the upgrade
-as well as runs. No data migration is needed. See the
-[AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01290-to-01300-delegated-and-sessionless-session-credentials).
-
-## AI 0.128.0 to 0.129.0: delegated and sessionless request credentials
-
-Approval, proposal and run-control roots refuse `SessionBoundDelegation` and
-`Sessionless` request credentials, and credentials with no grant kind that
-carry an actor or exact operation binding, with `AI_REAUTHORIZATION_FAILED`. Clients
-that sent such tokens to approve, review, cancel, retry, read previews or open
-session and inbox streams must send the user's own session access token. No
-data migration is needed. See the
-[AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01280-to-01290-delegated-and-sessionless-request-credentials).
-
-## AI 0.127.0 to 0.128.0: enforced runtime closure after restore
-
-Apply AI schema module `0.77.0` before restarting all workers. No row data
-migration is needed. Open each runtime with
-`OrmAiRuntimeRecoveryService::open_start_gate` on the store its workers use,
-instead of a host-built `AiRuntimeReadinessReport`; claims refuse with
-`RuntimeNotReady` until the store has a live epoch. After upgrading in place,
-call `acknowledge_in_place_upgrade` once. If the store was restored from a
-backup, use `reconcile_restore` + `acknowledge_reviewed_restore` instead.
-Choosing the in-place path for a restored store re-opens consumed approvals.
-See the
-[AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01270-to-01280-enforced-runtime-closure-after-restore).
-
-## 0.126.0: row policy on the rows generated writes target, write and return
+### Row policy on the rows generated writes target, write and return
 
 Upgrade runtime and macros together. No schema or data migration is required.
 Review hosts that install a `RowPolicy`; nothing changes without one, or with a
@@ -202,7 +121,7 @@ makes the whole delete refuse with `Dependent delete refused`.
 
 See [row policy on generated writes](docs/reference/graphql-orm/strict-authorization.md#row-policy-on-generated-writes).
 
-## 0.126.0: RLS drift validation compares PostgreSQL's rendering
+### RLS drift validation compares PostgreSQL's rendering
 
 `validate_target` now compares RLS policy expressions as PostgreSQL parses them,
 so a freshly applied target validates clean. It is stricter elsewhere:
@@ -235,7 +154,7 @@ validation to pass.
 Clients that matched `INTERNAL_ERROR` for row-level security `WITH CHECK`
 refusals now receive `FORBIDDEN`.
 
-## 0.126.0: MSSQL writes on tables with triggers
+### MSSQL writes on tables with triggers
 
 Upgrade runtime and macros together. SQLite and PostgreSQL are unchanged.
 
@@ -246,7 +165,7 @@ instead of the sum of every statement's count. Run one statement per `execute`
 when each count matters. Counts from statements inside triggers are no longer
 included.
 
-## 0.126.0: primary-key default ordering and strict attribute options
+### Primary-key default ordering and strict attribute options
 
 Upgrade ORM/macros together.
 
@@ -267,7 +186,7 @@ Upgrade ORM/macros together.
 
 No data migration is needed.
 
-## 0.125.0 to 0.126.0: entities without public write fields
+### Entities without public write fields
 
 Upgrade runtime and macros together. No change is required: every entity that
 compiled with 0.125.0 generates the same schema.
@@ -282,7 +201,7 @@ transaction writes are generated as for any entity. If you worked around the
 failure with a placeholder writable column or argument, you can remove it.
 See [read-only and zero-input entities](docs/reference/graphql-orm/macros-and-attributes.md#read-only-and-zero-input-entities).
 
-## 0.126.0: Keyset read-visibility declarations and diagnostics
+### Keyset read-visibility declarations and diagnostics
 
 Upgrade ORM/macros together, with operation catalog 0.7.3. No data migration is
 needed, and existing schemas build unchanged unless a row policy opts in to the
@@ -320,7 +239,50 @@ new declaration.
 
 See [Keyset roots and residual-only read policies](docs/reference/graphql-orm/macros-and-attributes.md#keyset-roots-and-residual-only-read-policies).
 
-## 0.125.0 to 0.126.0: NodeId on complex objects with computed fields
+### Generated catalogue arguments follow the SDL
+
+Upgrade runtime, macros and graphql-orm-operation-catalog 0.7.3 together. No
+database or schema migration is needed.
+
+- Each generated catalogue descriptor now lists exactly the arguments its
+  resolver declares. On an entity with a managed `version`, the update and
+  delete descriptors gain the optional `expectedVersion` argument. Remove any
+  host code that copied argument metadata from the SDL into the catalogue or
+  router descriptor, or recomputed descriptor fingerprints after doing so.
+- Argument descriptions now equal the SDL descriptions. Subscription `key` and
+  `keys` arguments carry the resolver text, and the scan root's `where` and
+  `page` arguments now have descriptions in the SDL too.
+- An entity that serves no generated writes, such as a composite-key or
+  entity-level read-only entity in a writable schema, still contributes one
+  hidden mutation field. It was `gomCompositeKeyWritesUnavailable`, shared by
+  every such entity and absent from the catalogue. It is now
+  `gom{Entity}WritesUnavailable`, one per entity, and it is a catalogue
+  operation of the new category `GeneratedGraphqlOperationCategory::Unavailable`.
+  It has no leading underscore, because routers that drop underscore root
+  fields from their binding contract would refuse its descriptor.
+  Its authorization requirement is
+  `GraphqlAuthorizationRequirement::unsatisfiable()`, which no caller can hold,
+  its AI mutation policy is `Prohibited`, and its resolver refuses every
+  request with `FORBIDDEN`. Routers accept the generated descriptor whether
+  or not they exempt underscore root fields, so a composite-key entity no
+  longer needs to be
+  excluded from generated mutations. `OperationAssuranceRegistry::builder`
+  records it as exempt, so strict classification needs no host entry, and
+  `ensure_schema_sdl` now covers it. `GraphqlOperationCatalog::operations()`
+  lists it even where the schema root omits mutations, unexposed like the
+  root's other mutations; use `exposed_operations()` to read what is served.
+  Update any SDL snapshot that includes the old name, and any exhaustive
+  handling of catalogue categories.
+- The finished SDL changes, through the scan descriptions and the
+  placeholder, and so do the generated catalogue, authorization and
+  router-export fingerprints for every entity. After upgrading:
+  1. regenerate and republish router descriptors from the new build;
+  2. regenerate AI capability manifests and tool profiles from the new SDL;
+  3. re-approve pending AI approvals. An approval records the target schema
+     fingerprint, so one created before the upgrade is refused after it. This
+     fails closed.
+
+### NodeId on complex objects with computed fields
 
 Upgrade runtime and macros together. No data conversion is required.
 
@@ -386,6 +348,53 @@ Two declarations that compiled before now fail to compile:
 
 A `GraphQLRelations` derive kept only to mount these fields on an entity with no
 relation fields may be removed; keeping it adds nothing.
+
+## AI 0.130.0 to 0.131.0: legacy delegated stored principal references
+
+Runs and session-title work queued before 0.130.0 with a delegated or
+sessionless principal reference now fail closed automatically. Workers refuse
+to resolve such a reference, and the claim paths close these rows with
+`principal_reference_delegated` before any provider, tool, approval or host
+callback. The 0.130.0 manual cleanup remains valid but is no longer required.
+Hosts that match error codes should add `principal_reference_delegated`. No
+data migration is needed. See the
+[AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01300-to-01310-legacy-delegated-stored-principal-references).
+
+## AI 0.129.0 to 0.130.0: delegated and sessionless session credentials
+
+Message submission, every other `OrmAiSessionService` root, attachment roots and inbox pages refuse
+`SessionBoundDelegation` and `Sessionless` request credentials, and credentials
+with no grant kind that carry an actor or exact operation binding, with
+`AI_REAUTHORIZATION_FAILED`. This applies whether or not run authorization or
+submission admission is installed, and these roots cannot be receiver-admission
+targets. Clients that sent such tokens to submit messages, manage sessions or
+attachments, or read session, message, event or inbox pages must send the
+user's own session access token. Review title work queued before the upgrade
+as well as runs. No data migration is needed. See the
+[AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01290-to-01300-delegated-and-sessionless-session-credentials).
+
+## AI 0.128.0 to 0.129.0: delegated and sessionless request credentials
+
+Approval, proposal and run-control roots refuse `SessionBoundDelegation` and
+`Sessionless` request credentials, and credentials with no grant kind that
+carry an actor or exact operation binding, with `AI_REAUTHORIZATION_FAILED`. Clients
+that sent such tokens to approve, review, cancel, retry, read previews or open
+session and inbox streams must send the user's own session access token. No
+data migration is needed. See the
+[AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01280-to-01290-delegated-and-sessionless-request-credentials).
+
+## AI 0.127.0 to 0.128.0: enforced runtime closure after restore
+
+Apply AI schema module `0.77.0` before restarting all workers. No row data
+migration is needed. Open each runtime with
+`OrmAiRuntimeRecoveryService::open_start_gate` on the store its workers use,
+instead of a host-built `AiRuntimeReadinessReport`; claims refuse with
+`RuntimeNotReady` until the store has a live epoch. After upgrading in place,
+call `acknowledge_in_place_upgrade` once. If the store was restored from a
+backup, use `reconcile_restore` + `acknowledge_reviewed_restore` instead.
+Choosing the in-place path for a restored store re-opens consumed approvals.
+See the
+[AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01270-to-01280-enforced-runtime-closure-after-restore).
 
 ## 0.125.0: PostgreSQL records change-journal entries in the database
 

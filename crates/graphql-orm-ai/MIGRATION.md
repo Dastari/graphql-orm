@@ -10,9 +10,11 @@ supersedes: []
 
 # Migration Guide
 
-## 0.131.0 to 0.132.0: agql-auth 0.26.0
+## 0.132.0 to 0.133.0
 
-AI 0.132.0 depends on published Auth `v0.26.0`, locked to commit
+### agql-auth 0.26.0
+
+AI 0.133.0 depends on published Auth `v0.26.0`, locked to commit
 `7d016f6a6bc3e697382e2e05865f596862189240`, and ORM 0.126.0. Replace a host's
 `v0.24.0` selector with:
 
@@ -24,9 +26,9 @@ Refresh the host lockfile and check that `cargo tree -i agql-auth` shows one
 `0.26.0` source. Auth types from the old tag do not match the types AI accepts.
 AI behavior, GraphQL SDL and persistent schema are unchanged, and no data
 migration is needed. See the
-[workspace migration](../../MIGRATION.md#01250-to-01260-agql-auth-0260).
+[workspace migration](../../MIGRATION.md#agql-auth-0260).
 
-## 0.131.0 to 0.132.0: capability discovery applies policy before its result ceiling
+### Capability discovery applies policy before its result ceiling
 
 No data migration is needed, and no GraphQL SDL or persistent schema changes.
 

@@ -14,19 +14,17 @@ The current workspace selects published Auth `v0.26.0`, peeled to
 `7d016f6a6bc3e697382e2e05865f596862189240`. Direct Auth consumers must select
 that same tag and refresh their locks to one source; matching the commit alone
 does not unify revision and tag selectors. See the
-[Auth 0.26.0 migration](../../MIGRATION.md#01250-to-01260-agql-auth-0260).
+[Auth 0.26.0 migration](../../MIGRATION.md#agql-auth-0260).
 
 Version 0.11.0 builds the optional `auth-agql` feature on published Auth
-`v0.26.0`. Hosts passing Auth types to `AgqlAuthenticationProvider::new` or
-`AgqlScopeMatcher::new` must select the same tag. Router behavior is unchanged;
-see [MIGRATION.md](MIGRATION.md#0100-to-0110-agql-auth-0260).
-
-Version 0.11.0 turns introspection off by default. Opt in with
-`"introspection": true`. On an authenticated router, enabled introspection
-needs a valid bearer. Preflight now refuses undescribed root fields.
-Scope-template values must be one plain segment. WebSocket admission keeps
-sockets that have not authenticated in a separate `maxPendingConnections`
-budget, sized by default from the attempt rate and a 3-second init deadline. See [MIGRATION.md](MIGRATION.md).
+`v0.26.0`; hosts passing Auth types to `AgqlAuthenticationProvider::new` or
+`AgqlScopeMatcher::new` must select the same tag. It also turns introspection
+off by default. Opt in with `"introspection": true`. On an authenticated
+router, enabled introspection needs a valid bearer. Preflight now refuses
+undescribed root fields. Scope-template values must be one plain segment.
+WebSocket admission keeps sockets that have not authenticated in a separate
+`maxPendingConnections` budget, sized by default from the attempt rate and a
+3-second init deadline. See [MIGRATION.md](MIGRATION.md#0100-to-0110).
 
 Version 0.10.0 serves subscriptions only through the public
 `graphql-transport-ws` gateway. HTTP SSE and multipart subscription requests

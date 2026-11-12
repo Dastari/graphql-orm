@@ -899,7 +899,7 @@ Install finite scan bounds for that root. If the policy returns `Complete` or
 declaration never grants access or bypasses runtime checks: a request that
 still gets residual visibility is refused as above. Standalone repository Keyset
 helpers, which run without a request, keep their residual checks. See the
-[0.126.0 migration guide](../../../MIGRATION.md#01260-keyset-read-visibility-declarations-and-diagnostics).
+[0.126.0 migration guide](../../../MIGRATION.md#keyset-read-visibility-declarations-and-diagnostics).
 
 ## Generated mutation shapes
 

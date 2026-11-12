@@ -10,16 +10,13 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.132.0
+## Unreleased - 0.133.0
 
 - **Breaking (public Auth dependency types):** select published Auth `v0.26.0`
   (commit `7d016f6a6bc3e697382e2e05865f596862189240`) instead of `v0.24.0`, and
   ORM 0.126.0. Hosts that pass Auth types, principals or services into AI must
   select the same tag. AI does not use Auth 0.25's fixed-audience delegation or
   0.26's refresh-reuse grace window, and no other locked dependency changes.
-  No GraphQL SDL, persistent schema or data migration change;
-  `AI_SCHEMA_MODULE_VERSION` is unchanged. See the migration guide.
-
 - **Fixed:** capability discovery now applies current host policy before the result ceiling. `AiCapabilityDiscoveryBroker::search`, and so the fixed broker's `graphql.capabilities.discover` and client-deferred discovery, took the top `maximumResults` candidates of the authority-neutral ranking and only then dropped the ones the principal may not use. A restricted principal could get few or no candidates while permitted matches existed further down. Search now ranks every match, applies policy to all of them, and returns the highest-ranked permitted candidates up to the ceiling, in the same order. Refs #551.
 - **Security:** when every policy call succeeds, the amount of policy work in one search depends only on the query and the catalogue, not on which candidates the principal may use, so discovery latency does not reveal how many unpermitted entries rank above permitted ones. A policy `Err` still fails the whole search, so a host must report a denial as `Ok` with `allowed: false` and keep `Err` for infrastructure failure. The response still carries no score, count or continuation.
 - **Added:** `AiCapabilityAuthorityPolicy::authorize_discovery`, a provided method that receives every ranked match of one search and returns one `AiCapabilityDiscoveryDecision` per match. Each decision names the capability it decides, and decision `i` must name ranked match `i`; build it with `AiCapabilityDiscoveryDecision::for_match`. The broker refuses a missing, extra, duplicated or reordered decision with `Forbidden` and returns no candidates. The default runs `authorize` per match with up to `AI_CAPABILITY_DISCOVERY_AUTHORIZATION_CONCURRENCY` (16) calls in flight on the calling task, keeping rank order. Hosts with a costly per-entry check can override it to decide the batch from one current lookup.
@@ -28,6 +25,8 @@ supersedes: []
 - Adopt tool profiles 0.22.0.
 
 No GraphQL SDL, persistent schema or data migration change; `AI_SCHEMA_MODULE_VERSION` is unchanged. See the migration guide.
+
+## Unreleased - 0.132.0
 
 - **Breaking (security):** changing where a provider profile's credential is sent now requires credential authority. `OrmAiConfigurationService::upsert_provider_profile` (the `upsertAiProviderProfile` mutation) kept the stored credential reference when an update changed the profile's `provider_kind` or `base_url`, so `ManageProviderProfiles` alone could point a credentialed profile at a different endpoint. When a credential is attached and the update changes either field, the host `AiConfigurationAccessPolicy` is now also asked for `ManageProviderCredentials` on the profile's scope. Without it the update returns `Forbidden` (`AI_FORBIDDEN`) and changes nothing. The endpoint is compared after URL normalization (whitespace, scheme and host case, IDNA, default port, dot segments, empty path); any other difference, such as a trailing slash or a percent-encoded spelling, counts as a change. Inside the update transaction a version mismatch returns `Conflict`, and the credential condition is checked again against the row.
 - Converting a credentialed profile to `LocalHarness` now returns `Forbidden` without `ManageProviderCredentials`; with it, the existing refusal still returns `InvalidInput`.

@@ -13,12 +13,9 @@ supersedes: []
 ## Unreleased - 0.22.0
 
 - **Added:** `AiCapabilityIndexSet::ranked_matches` returns every entry that matches a validated query, in the deterministic search order and without the result ceiling, as `AiCapabilityRankedMatch` values that carry the exact owning index. Callers that apply host policy filter this ranking before truncating. `AiCapabilityIndexSet::search` is unchanged and is now the ceiling-limited prefix of the same ranking. Refs #551.
+- **Tests:** add a public-API regression proving query-plan disclosure follows each field's own coordinate. An exportable `Subscription.ownerId` filter, ordering and selection stay available beside a `NeverExport` relation `Subscription.owner` and a private `Subscription.ownerEmail`, and the provider-facing `where`/`orderBy` inputs list exactly the public scalars. `ownerEmail`, lookalike names, the private relation and `owner.id` stay closed. For selections through an exportable relation, `plan.code` is admitted and the private `plan.codeKey` is refused. Relation filters such as `where.plan` are dropped entirely, so they are asserted only as dropped. Fixes #236.
 
 No profile fingerprint, ranking or data migration change.
-
-## 0.21.2 (unreleased)
-
-Fixes #236: add a public-API regression proving query-plan disclosure follows each field's own coordinate. An exportable `Subscription.ownerId` filter, ordering and selection stay available beside a `NeverExport` relation `Subscription.owner` and a private `Subscription.ownerEmail`, and the provider-facing `where`/`orderBy` inputs list exactly the public scalars. `ownerEmail`, lookalike names, the private relation and `owner.id` stay closed. For selections through an exportable relation, `plan.code` is admitted and the private `plan.codeKey` is refused. Relation filters such as `where.plan` are dropped entirely, so they are asserted only as dropped. Behaviour, profiles, capabilities and fingerprints are unchanged from 0.21.1.
 
 ## Unreleased - 0.21.1
 

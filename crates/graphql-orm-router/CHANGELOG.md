@@ -18,8 +18,8 @@ supersedes: []
   passed to `AgqlAuthenticationProvider::new` and `AgqlScopeMatcher::new` must
   come from that tag source. The router does not use Auth 0.25's fixed-audience
   delegation or 0.26's refresh-reuse grace window, and no other locked
-  dependency changes. Router behavior is unchanged. No data migration is
-  required. See [MIGRATION.md](MIGRATION.md).
+  dependency changes. The Auth update itself changes no router behavior. No
+  data migration is required. See [MIGRATION.md](MIGRATION.md#agql-auth-0260).
 
 - **Breaking:** introspection (`__schema`, `__type`) is off by default. Turn it
   on with `"introspection": true` or `RouterConfig::with_introspection(true)`.
