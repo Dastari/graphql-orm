@@ -10,6 +10,15 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.23.0
+
+- **Breaking (security):** handwritten input objects are now closed by default. Every input object that is neither a generated entity input (`Where`, `OrderBy`, keyset, runtime order, key, create, update or aggregate metric input) nor a shared generated helper (filter operator or page input) is handwritten, wherever it is reached: custom roots, generated roots and relationship arguments alike. A name of a generated input kind counts as generated only when a generated root of that entity, or a relationship argument targeting it, actually reaches it; a host-written input with such a name is handwritten. Such an input now discloses only the fields the host declares with the new `AiCustomInputDisclosure`, either an exact `AiCustomInputFieldCoordinate` or an `AiCustomOperationCoordinate` that declares every handwritten input its arguments reach. Ownership no longer comes from an entity-name prefix. Undeclared optional fields are neither described nor accepted. Compilation now fails for an undeclared required field, a declaration that names no handwritten input field, a declared operation absent from the catalogue, and a declared operation that reaches no handwritten input.
+- **Breaking:** `AiGraphqlQueryCapabilityOptions` carries the declaration (`with_custom_input_disclosure`, `custom_input_disclosure`, optional `customInputDisclosure` wire member), so it is no longer `Copy`, and `maximum_relationship_argument_depth` now takes `&self`. `AiGraphqlMutationCapabilityCatalog::compile_with_options` and `AiGraphqlSubscriptionCapabilityCatalog::compile_with_options` are added; their `compile` methods use default options.
+- **Changed (security):** aggregate grouping and metric fields, and aggregate field enum values, now match the exact public field name on both admission and lookup. Aggregate plans and result shapes that repeat a key under the same normalised spelling are now refused.
+- **Breaking:** remove the hidden `contains_forbidden_graphql_name` helper. `graphql-orm-ai` now derives the AI control-plane root set from its own GraphQL roots.
+
+Capability fingerprints change only where a provider argument schema changes. No data migration is needed. See the migration guide.
+
 ## Unreleased - 0.22.0
 
 - **Added:** `AiCapabilityIndexSet::ranked_matches` returns every entry that matches a validated query, in the deterministic search order and without the result ceiling, as `AiCapabilityRankedMatch` values that carry the exact owning index. Callers that apply host policy filter this ranking before truncating. `AiCapabilityIndexSet::search` is unchanged and is now the ceiling-limited prefix of the same ranking. Refs #551.

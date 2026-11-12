@@ -10,6 +10,31 @@ supersedes: []
 
 # Migration Guide
 
+## 0.135.0 to 0.136.0: exact tool registration and derived control-plane roots
+
+No data migration is needed, and no GraphQL SDL or persistent schema changes.
+
+- Static tool documents must contain exactly one named operation. Its name must
+  equal the contract's `operation_name`, and its type must equal the
+  descriptor's `operation_kind`. Anonymous documents, documents with several
+  operations, and kind mismatches are refused with `InvalidConfiguration`.
+  Name the operation and declare its actual kind. A mutation document is
+  registered as a mutation tool and runs on the mutation path.
+- Documents that do not parse are refused. So are documents that spread an
+  undefined fragment or select, at any depth, an AI control-plane field name,
+  an introspection field other than `__typename`, or the federation fields
+  `_service` and `_entities`. Remote delegated requests apply the same check.
+  Use `ai_control_plane_root_fields()` to see the derived roots, and do not
+  nest an AI root under an application field.
+- An internal tool registered with a non-empty document must now parse as
+  GraphQL and pass the same check. Internal tools without a document are
+  unchanged.
+- Generated capability sets containing a control-plane root are refused as a
+  whole. Do not expose AI roots through the semantic catalogue of an
+  application target.
+- Handwritten operation inputs now need explicit disclosure declarations. See
+  the [tool-profiles 0.23.0 migration](../graphql-orm-ai-tool-profiles/MIGRATION.md#0220-to-0230-explicit-handwritten-input-disclosure).
+
 ## 0.134.0 to 0.135.0
 
 No GraphQL SDL, persistent schema or data migration change, and

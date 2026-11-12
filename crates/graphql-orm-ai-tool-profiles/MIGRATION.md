@@ -10,6 +10,60 @@ supersedes: []
 
 # Migration Guide
 
+## 0.22.0 to 0.23.0: explicit handwritten input disclosure
+
+No data migration is needed. Rebuild capability catalogues and refresh any
+retained capability bindings whose provider argument schema changes.
+
+Handwritten input objects now disclose nothing unless declared. An input object
+is handwritten when it is neither a generated entity input (`Where`, `OrderBy`,
+keyset, runtime order, key, create, update or aggregate metric input) nor a
+shared generated helper (filter operator or page input), wherever it is reached:
+custom roots, generated roots and relationship arguments alike. Generated entity
+inputs, filter operators and page arguments are unchanged.
+
+A name of a generated input kind (for example `Create{Entity}Input` or
+`{Entity}AggregateMetricInput`) counts as generated only when a generated root
+of that entity, or a relationship argument targeting it, reaches it. A
+host-written input with such a name, for example one used by a custom root while
+the entity's generated create root is disabled, is handwritten and needs
+declarations like any other.
+Declare each field the model may describe and send, or declare a custom
+operation to disclose every handwritten input its arguments reach:
+
+```rust
+let disclosure = AiCustomInputDisclosure::new()
+    .with_exportable_field("LookupInput", "name")?
+    .with_declared_operation(GraphqlOperationKind::Mutation, "ImportRecords")?;
+let options = AiGraphqlQueryCapabilityOptions::default()
+    .with_custom_input_disclosure(disclosure);
+let queries = AiGraphqlQueryCapabilityCatalog::compile_with_options(
+    subgraph, target.clone(), &sdl, &semantics, limits, options.clone(),
+)?;
+let mutations = AiGraphqlMutationCapabilityCatalog::compile_with_options(
+    subgraph, target, &sdl, &semantics, limits, options,
+)?;
+```
+
+- An input whose name starts with an entity name is no longer filtered by that
+  entity's field metadata. Declare its fields explicitly.
+- Compilation fails when a required handwritten field is undeclared, when a
+  declared coordinate is not a field of a handwritten input, when a declared
+  operation is not a custom operation in the catalogue, or when a declared
+  operation reaches no handwritten input.
+- A declaration is model-facing disclosure only. The resolver must still
+  authorize every value it receives.
+- `AiGraphqlQueryCapabilityOptions` is no longer `Copy`; clone it to reuse it,
+  and call `maximum_relationship_argument_depth` through a reference.
+- Serialized options gain an optional `customInputDisclosure` member that is
+  omitted when empty, so existing encodings still decode and re-encode
+  unchanged.
+
+Aggregate plans must name grouping and metric fields by their exact public
+field name, and aggregate field enums offer only values that equal an
+exportable field name. Plans that relied on a differently cased or punctuated
+spelling must use the exact name.
+
 ## 0.21.1 to 0.22.0: complete capability ranking
 
 No data migration is needed and existing calls are unchanged. Code that filters

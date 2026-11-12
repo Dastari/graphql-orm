@@ -6660,13 +6660,18 @@ mod tests {
             [operation],
         )
         .expect("test mutation catalogue should validate");
-        let catalog = AiGraphqlMutationCapabilityCatalog::compile(
+        let catalog = AiGraphqlMutationCapabilityCatalog::compile_with_options(
             "generated",
             GraphqlExecutionTargetId::parse("generated-application")
                 .expect("generated target should validate"),
             GENERATED_MUTATION_SDL,
             &semantics,
             AiGraphqlQueryCapabilityLimits::default(),
+            crate::AiGraphqlQueryCapabilityOptions::default().with_custom_input_disclosure(
+                crate::AiCustomInputDisclosure::new()
+                    .with_exportable_field("RecordInput", "subject")
+                    .expect("handwritten input field should be declared"),
+            ),
         )
         .expect("automatic mutation capabilities should compile");
         (semantics, catalog)

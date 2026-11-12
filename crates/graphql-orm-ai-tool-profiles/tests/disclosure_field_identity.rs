@@ -19,7 +19,7 @@ use graphql_orm_ai_tool_profiles::{
     GraphqlExecutionTargetId,
 };
 use graphql_orm_operation_catalog::{
-    GraphqlEntitySemanticMetadata, GraphqlOperationCatalog, GraphqlOperationKind,
+    GeneratedGraphqlOperationCategory, GraphqlEntitySemanticMetadata, GraphqlOperationKind,
     GraphqlSemanticArgumentDescriptor, GraphqlSemanticCatalog, GraphqlSemanticClassification,
     GraphqlSemanticExport, GraphqlSemanticFieldMetadata, GraphqlSemanticFilterInputMetadata,
     GraphqlSemanticFilterInputOperator, GraphqlSemanticFilterOperator,
@@ -168,8 +168,12 @@ fn capability_catalog() -> AiGraphqlQueryCapabilityCatalog {
         description: format!("Typed {name} argument."),
         type_ref,
     };
-    let operation = GraphqlSemanticOperationDescriptor::custom(
+    // A generated list root: generated-kind inputs follow entity metadata
+    // only when that entity's generated roots reach them.
+    let operation = GraphqlSemanticOperationDescriptor::generated(
         GraphqlOperationKind::Query,
+        GeneratedGraphqlOperationCategory::List,
+        "Subscription",
         "Subscriptions",
         "Read one bounded subscription page.",
         vec![
@@ -184,7 +188,7 @@ fn capability_catalog() -> AiGraphqlQueryCapabilityCatalog {
         true,
     )
     .expect("subscription list semantics");
-    let semantics = GraphqlSemanticCatalog::compose_with_custom(
+    let semantics = GraphqlSemanticCatalog::compose_descriptors(
         [
             entity(
                 "Subscription",
@@ -208,7 +212,6 @@ fn capability_catalog() -> AiGraphqlQueryCapabilityCatalog {
                 ],
             ),
         ],
-        &GraphqlOperationCatalog::compose(std::iter::empty()),
         [operation],
     )
     .expect("subscription semantics");

@@ -626,7 +626,7 @@ impl AiRemoteGraphqlDelegationRequest {
             || request.contract.schema_fingerprint != target.schema_fingerprint
             || request.contract.document_hash != stable_text_hash(&request.document)
             || request.operation_name != request.contract.operation_name
-            || crate::contains_forbidden_graphql_name(&request.document)
+            || crate::control_plane::document_invokes_control_plane(&request.document)
             || request.invocation.scope.kind.trim().is_empty()
             || request.invocation.scope.id.trim().is_empty()
             || !valid_reference(&request.invocation.correlation_id)
@@ -2378,26 +2378,35 @@ mod tests {
         ));
 
         let binding = static_binding(&descriptor, &request);
-        let recursive_document = "query InspectAi { __schema { queryType { name } } }";
-        request.document = recursive_document.to_owned();
-        request.contract = GraphqlOperationContract::new(
-            target.id.clone(),
-            target.schema_fingerprint.clone(),
-            "InspectAi",
-            recursive_document,
-            "projection-v1",
-            "disclosure-v1",
-        )
-        .expect("contract should validate");
-        request.operation_name = "InspectAi".to_owned();
         let current = ResolvedPrincipal::new(principal.reference(), principal, clock.now())
             .expect("principal should resolve");
-        assert!(matches!(
-            adapter
-                .build_registered(&current, &target, &binding, &request,)
-                .await,
-            Err(ToolExecutionError::InvalidTarget)
-        ));
+        for recursive_document in [
+            "query InspectAi { __schema { queryType { name } } }",
+            "query InspectAi { ai { aiSessions { id } } }",
+            "query InspectAi { _service { sdl } }",
+            "query InspectAi { _entities(representations: []) { __typename } }",
+        ] {
+            request.document = recursive_document.to_owned();
+            request.contract = GraphqlOperationContract::new(
+                target.id.clone(),
+                target.schema_fingerprint.clone(),
+                "InspectAi",
+                recursive_document,
+                "projection-v1",
+                "disclosure-v1",
+            )
+            .expect("contract should validate");
+            request.operation_name = "InspectAi".to_owned();
+            assert!(
+                matches!(
+                    adapter
+                        .build_registered(&current, &target, &binding, &request)
+                        .await,
+                    Err(ToolExecutionError::InvalidTarget)
+                ),
+                "{recursive_document}"
+            );
+        }
         assert_eq!(issuer.calls.load(Ordering::SeqCst), 0);
     }
 

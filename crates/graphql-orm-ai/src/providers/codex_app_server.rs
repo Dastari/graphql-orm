@@ -9967,13 +9967,18 @@ pub(crate) mod tests {
             [mutation],
         )
         .expect("mutation semantic catalogue should validate");
-        let compiled = AiGraphqlMutationCapabilityCatalog::compile(
+        let compiled = AiGraphqlMutationCapabilityCatalog::compile_with_options(
             "inventory",
             GraphqlExecutionTargetId::parse("inventory.graphql")
                 .expect("mutation target should validate"),
             SDL,
             &semantics,
             AiGraphqlQueryCapabilityLimits::default(),
+            crate::AiGraphqlQueryCapabilityOptions::default().with_custom_input_disclosure(
+                crate::AiCustomInputDisclosure::new()
+                    .with_exportable_field("ParentMutationInput", "name")
+                    .expect("handwritten input field should be declared"),
+            ),
         )
         .expect("automatic mutation capabilities should compile");
         let mut catalog = AiToolCatalog::new();

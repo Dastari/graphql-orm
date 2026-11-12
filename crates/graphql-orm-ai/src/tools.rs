@@ -11,6 +11,9 @@ use graphql_orm::graphql::orm::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::control_plane::{
+    document_has_exact_operation, document_invokes_control_plane, is_ai_control_plane_root_field,
+};
 use crate::{AiApprovalRule, AiToolRisk, ModelToolDefinition};
 use crate::{
     AiCompiledGraphqlMutation, AiCompiledGraphqlQuery, AiCompiledGraphqlSubscription,
@@ -19,7 +22,7 @@ use crate::{
     AiGraphqlSubscriptionCapability, AiGraphqlSubscriptionCapabilityCatalog,
     AiGraphqlToolManifestCatalog, AiScope, AiToolDescriptor, AiToolId, AiToolOperationDomain,
     AiToolOperationKind, DataClassification, GraphqlExecutionTargetId, ToolGraphqlRequest,
-    ToolMaturity, contains_forbidden_graphql_name,
+    ToolMaturity,
 };
 
 const JSON_SCHEMA_2020_12: &str = "https://json-schema.org/draft/2020-12/schema";
@@ -324,6 +327,20 @@ impl AiGeneratedGraphqlAuthorizationPolicy {
     }
 }
 
+/// Refuses a generated capability set that contains any AI control-plane root.
+///
+/// Registration is all-or-nothing, so one control-plane root refuses the set.
+fn reject_control_plane_capabilities<'a>(
+    mut field_names: impl Iterator<Item = &'a str>,
+) -> Result<(), AiError> {
+    if field_names.any(is_ai_control_plane_root_field) {
+        return Err(AiError::InvalidConfiguration(
+            "AI control-plane operations cannot be generated capabilities".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 impl AiToolCatalog {
     /// Creates an empty catalog.
     pub fn new() -> Self {
@@ -358,6 +375,11 @@ impl AiToolCatalog {
         &mut self,
         catalog: &AiGraphqlQueryCapabilityCatalog,
     ) -> Result<(), AiError> {
+        reject_control_plane_capabilities(
+            catalog
+                .capabilities()
+                .map(|capability| capability.field_name()),
+        )?;
         for capability in catalog.capabilities() {
             if self.tools.contains_key(capability.id())
                 || self.query_capabilities.contains_key(capability.id())
@@ -389,6 +411,11 @@ impl AiToolCatalog {
         &mut self,
         catalog: &AiGraphqlMutationCapabilityCatalog,
     ) -> Result<(), AiError> {
+        reject_control_plane_capabilities(
+            catalog
+                .capabilities()
+                .map(|capability| capability.field_name()),
+        )?;
         for capability in catalog.capabilities() {
             if self.tools.contains_key(capability.id())
                 || self.query_capabilities.contains_key(capability.id())
@@ -419,6 +446,11 @@ impl AiToolCatalog {
         &mut self,
         catalog: &AiGraphqlSubscriptionCapabilityCatalog,
     ) -> Result<(), AiError> {
+        reject_control_plane_capabilities(
+            catalog
+                .capabilities()
+                .map(|capability| capability.field_name()),
+        )?;
         for capability in catalog.capabilities() {
             if self.tools.contains_key(capability.id())
                 || self.query_capabilities.contains_key(capability.id())
@@ -442,7 +474,9 @@ impl AiToolCatalog {
     /// # Errors
     ///
     /// Returns a safe error for duplicate IDs, forbidden operation domains,
-    /// introspection/AI-control-plane documents, or stale contract bindings.
+    /// introspection/AI-control-plane documents, a document that does not
+    /// contain exactly one operation of the declared kind and contract name,
+    /// or stale contract bindings.
     pub fn register_with_disclosure(
         &mut self,
         descriptor: AiToolDescriptor,
@@ -530,6 +564,16 @@ impl AiToolCatalog {
                 "application tools require an exact GraphQL operation contract".to_owned(),
             )
         })?;
+        if !document_has_exact_operation(
+            &descriptor.document,
+            descriptor.operation_kind,
+            &contract.operation_name,
+        ) {
+            return Err(AiError::InvalidConfiguration(
+                "tool document must contain exactly one operation of the declared kind and name"
+                    .to_owned(),
+            ));
+        }
         if contract.disclosure_schema_fingerprint != disclosure_schema.fingerprint
             || contract.operation_name.trim().is_empty()
             || descriptor.result_projection.trim().is_empty()
@@ -582,10 +626,14 @@ impl AiToolCatalog {
                 "tool arguments must use a valid JSON Schema 2020-12 contract".to_owned(),
             ));
         }
+        // An internal tool may omit its document; every present document must
+        // parse and stay outside the AI control plane and introspection.
+        let document_present = descriptor.operation_kind != AiToolOperationKind::Internal
+            || !descriptor.document.trim().is_empty();
         if matches!(
             descriptor.operation_domain,
             AiToolOperationDomain::AiControlPlane | AiToolOperationDomain::SchemaIntrospection
-        ) || contains_forbidden_graphql_name(&descriptor.document)
+        ) || (document_present && document_invokes_control_plane(&descriptor.document))
         {
             return Err(AiError::InvalidConfiguration(
                 "AI control-plane and introspection operations cannot be tools".to_owned(),
