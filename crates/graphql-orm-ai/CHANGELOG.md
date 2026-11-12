@@ -10,6 +10,16 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.132.0
+
+- **Fixed:** capability discovery now applies current host policy before the result ceiling. `AiCapabilityDiscoveryBroker::search`, and so the fixed broker's `graphql.capabilities.discover` and client-deferred discovery, took the top `maximumResults` candidates of the authority-neutral ranking and only then dropped the ones the principal may not use. A restricted principal could get few or no candidates while permitted matches existed further down. Search now ranks every match, applies policy to all of them, and returns the highest-ranked permitted candidates up to the ceiling, in the same order. Refs #551.
+- **Security:** the amount of policy work in one search depends only on the query and the catalogue, not on which candidates the principal may use, so discovery latency does not reveal how many unpermitted entries rank above permitted ones. The response still carries no score, count or continuation.
+- **Added:** `AiCapabilityAuthorityPolicy::authorize_discovery`, a provided method that receives every ranked match of one search and returns one decision per match. The default calls `authorize` once per match; hosts with a costly per-entry check can override it to decide the batch from one current lookup. A result of the wrong length fails the search closed with `Forbidden`.
+- **Behaviour change:** a search now evaluates host policy once per matching entry instead of once per returned candidate. Hosts whose `authorize` is expensive should override `authorize_discovery`.
+- Adopt tool profiles 0.22.0.
+
+No GraphQL SDL, persistent schema or data migration change; `AI_SCHEMA_MODULE_VERSION` is unchanged. See the migration guide.
+
 ## Unreleased - 0.131.0
 
 - **Security:** fail closed on work queued before 0.130.0 with a delegated or sessionless stored principal reference. Such a reference has a grant kind of `SessionBoundDelegation` or `Sessionless`, or no grant kind and an actor subject or exact operation binding. Workers resolved it to the parent user session and acted with the full user's authority until the reference expired. Every resolution of a principal reference now goes through one shared check that refuses this shape before the host `CurrentPrincipalResolver` is called, with the same `ReauthorizationFailed` an expired or revoked reference produces. This covers run execution, provider egress, tools, rules, checkpoints, context compaction, provider output and sessions, UI intents, proposals, approvals, capability delivery, OpenAI background reconciliation, subscription waits and title work.

@@ -10,6 +10,12 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.22.0
+
+- **Added:** `AiCapabilityIndexSet::ranked_matches` returns every entry that matches a validated query, in the deterministic search order and without the result ceiling, as `AiCapabilityRankedMatch` values that carry the exact owning index. Callers that apply host policy filter this ranking before truncating. `AiCapabilityIndexSet::search` is unchanged and is now the ceiling-limited prefix of the same ranking. Refs #551.
+
+No profile fingerprint, ranking or data migration change.
+
 ## Unreleased - 0.21.1
 
 Re-export receiver-purpose bindings and use the shared exact document hash without changing existing signed encodings or profile fingerprints. No data migration is needed. Fixes #352.

@@ -13,9 +13,9 @@ use uuid::Uuid;
 
 use crate::{
     AiCapabilityIndex, AiCapabilityIndexEntry, AiCapabilityIndexSet,
-    AiCapabilityIndexSetSearchResult, AiCapabilityKind, AiCapabilitySearchQuery, AiError, AiRunId,
-    AiSessionId, AiToolId, ModelReasoningEffort, ModelToolDefinition, ProviderCapabilities,
-    ProviderKind,
+    AiCapabilityIndexSetSearchResult, AiCapabilityKind, AiCapabilityRankedMatch,
+    AiCapabilitySearchQuery, AiError, AiRunId, AiSessionId, AiToolId, ModelReasoningEffort,
+    ModelToolDefinition, ProviderCapabilities, ProviderKind,
 };
 
 /// Frozen broker tool identifier for bounded capability discovery.
@@ -699,6 +699,41 @@ pub trait AiCapabilityAuthorityPolicy: Send + Sync {
         entry: &AiCapabilityIndexEntry,
         run: &AiCapabilityRunBinding,
     ) -> Result<AiCapabilityAuthorityDecision, AiError>;
+
+    /// Applies current policy to every ranked discovery match of one search.
+    ///
+    /// The broker passes every entry that matches the query, in rank order and
+    /// before the query's result ceiling, and truncates only after this
+    /// returns. A restricted principal therefore receives its permitted
+    /// candidates even when unpermitted entries rank above them, and the
+    /// amount of policy work depends on the query and catalogue, never on
+    /// which candidates the principal may use.
+    ///
+    /// The default calls [`Self::authorize`] once per match. Override it to
+    /// evaluate the batch from one current lookup. An override must apply the
+    /// same current decision [`Self::authorize`] would and must not cache an
+    /// authority decision across searches.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first policy failure. The broker fails the search closed on
+    /// any error and on a result that does not hold exactly one decision per
+    /// match.
+    async fn authorize_discovery(
+        &self,
+        principal: &ResolvedPrincipal,
+        matches: &[AiCapabilityRankedMatch<'_>],
+        run: &AiCapabilityRunBinding,
+    ) -> Result<Vec<AiCapabilityAuthorityDecision>, AiError> {
+        let mut decisions = Vec::with_capacity(matches.len());
+        for candidate in matches {
+            decisions.push(
+                self.authorize(principal, candidate.index(), candidate.entry(), run)
+                    .await?,
+            );
+        }
+        Ok(decisions)
+    }
 }
 
 /// Supplies the current exact index. Implementations may cache immutable
@@ -930,6 +965,12 @@ impl AiCapabilityDiscoveryBroker {
     /// Searches current model-safe metadata after rehydrating the principal
     /// and applying current host policy to every candidate.
     ///
+    /// Policy runs over the complete ranking through
+    /// [`AiCapabilityAuthorityPolicy::authorize_discovery`] and the result
+    /// ceiling is applied afterwards, so the result holds the highest-ranked
+    /// candidates the principal may use. The result carries no score, count
+    /// or continuation that could reveal unpermitted entries.
+    ///
     /// # Errors
     ///
     /// Fails closed on rehydration, index, or policy failure. Search grants no
@@ -942,20 +983,25 @@ impl AiCapabilityDiscoveryBroker {
     ) -> Result<AiCapabilityIndexSetSearchResult, AiError> {
         let principal = self.rehydrate(principal_reference).await?;
         let indexes = self.current_indexes.current_index_set(run)?;
-        let mut result = indexes.search(query)?;
-        let mut permitted = Vec::new();
-        for candidate in result.candidates {
-            let (index, entry) = indexes.entry(&candidate.id).ok_or(AiError::Forbidden)?;
-            let decision = self
-                .authority
-                .authorize(&principal, index, entry, run)
-                .await?;
-            if decision.allowed {
-                permitted.push(candidate);
-            }
+        let ranked = indexes.ranked_matches(query)?;
+        let decisions = self
+            .authority
+            .authorize_discovery(&principal, &ranked, run)
+            .await?;
+        if decisions.len() != ranked.len() {
+            return Err(AiError::Forbidden);
         }
-        result.candidates = permitted;
-        Ok(result)
+        let candidates = ranked
+            .iter()
+            .zip(decisions)
+            .filter(|(_, decision)| decision.allowed)
+            .take(usize::from(query.maximum_results))
+            .map(|(candidate, _)| candidate.candidate())
+            .collect();
+        Ok(AiCapabilityIndexSetSearchResult {
+            index_set_fingerprint: indexes.fingerprint().to_owned(),
+            candidates,
+        })
     }
 
     /// Loads one exact candidate after fresh principal, current-index, target,
@@ -3058,6 +3104,259 @@ mod tests {
             )
             .fingerprint()
         );
+    }
+
+    fn large_static_index(entry_count: usize) -> Arc<AiCapabilityIndex> {
+        let operation_catalogue = GraphqlOperationCatalog::compose(Vec::<(
+            &'static [GeneratedGraphqlOperationDescriptor],
+            bool,
+            bool,
+        )>::new());
+        let semantics = GraphqlSemanticCatalog::compose(Vec::new(), &operation_catalogue)
+            .expect("semantic catalogue");
+        let descriptors = (0..entry_count).map(|position| {
+            crate::AiToolDescriptor::new(
+                format!("catalogue.record_{position:04}"),
+                "Read one reviewed catalogue record.",
+                crate::AiToolOperationKind::Query,
+                "query ReviewedRecord { record }",
+                json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": false
+                }),
+            )
+            .expect("descriptor")
+            .with_maximum_classification(crate::DataClassification::Public)
+        });
+        Arc::new(
+            AiCapabilityIndex::compile(
+                crate::GraphqlExecutionTargetId::parse("catalogue-application").expect("target"),
+                "schema-v1",
+                &semantics,
+                None,
+                None,
+                None,
+                descriptors,
+                "target-policy-v1",
+                crate::AiCapabilityIndexLimits::default(),
+            )
+            .expect("large capability index"),
+        )
+    }
+
+    struct PermittedSet {
+        permitted: BTreeSet<String>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl PermittedSet {
+        fn new<'a>(permitted: impl IntoIterator<Item = &'a str>) -> Self {
+            Self {
+                permitted: permitted.into_iter().map(str::to_owned).collect(),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl AiCapabilityAuthorityPolicy for PermittedSet {
+        async fn authorize(
+            &self,
+            _principal: &ResolvedPrincipal,
+            _owning_index: &AiCapabilityIndex,
+            entry: &AiCapabilityIndexEntry,
+            _run: &AiCapabilityRunBinding,
+        ) -> Result<AiCapabilityAuthorityDecision, AiError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(AiCapabilityAuthorityDecision {
+                allowed: self.permitted.contains(entry.id.as_str()),
+                policy_fingerprint: "current-policy-v1".to_owned(),
+            })
+        }
+    }
+
+    async fn search_with(
+        index: &Arc<AiCapabilityIndex>,
+        authority: Arc<PermittedSet>,
+        maximum_results: u16,
+    ) -> (Vec<String>, usize) {
+        let principal = principal();
+        let principal_reference = principal.reference();
+        let broker = AiCapabilityDiscoveryBroker::new(
+            Arc::new(Resolver(principal)),
+            Arc::new(CurrentIndex(RwLock::new(Arc::clone(index)))),
+            authority.clone(),
+            Arc::new(FixedClock::new(OffsetDateTime::UNIX_EPOCH)),
+            Duration::seconds(30),
+        )
+        .expect("broker");
+        let result = broker
+            .search(
+                &principal_reference,
+                &run_binding(),
+                &AiCapabilitySearchQuery {
+                    text: "reviewed catalogue record".to_owned(),
+                    namespace: None,
+                    kind: Some(AiCapabilityKind::ReviewedStatic),
+                    entity_or_operation: None,
+                    maximum_results,
+                },
+            )
+            .await
+            .expect("authorized search");
+        (
+            result
+                .candidates
+                .iter()
+                .map(|candidate| candidate.id.as_str().to_owned())
+                .collect(),
+            authority.calls.load(Ordering::SeqCst),
+        )
+    }
+
+    #[tokio::test]
+    async fn restricted_search_fills_from_permitted_low_ranked_candidates() {
+        const ENTRIES: usize = 1_500;
+        let index = large_static_index(ENTRIES);
+        let low_ranked = [
+            "catalogue.record_1497",
+            "catalogue.record_1498",
+            "catalogue.record_1499",
+        ];
+
+        let (restricted, restricted_calls) =
+            search_with(&index, Arc::new(PermittedSet::new(low_ranked)), 8).await;
+        assert_eq!(
+            restricted, low_ranked,
+            "permitted matches below the unfiltered top-k must still be returned in rank order"
+        );
+
+        let sparse = (0..ENTRIES)
+            .step_by(100)
+            .map(|position| format!("catalogue.record_{position:04}"))
+            .collect::<Vec<_>>();
+        let (sparse_result, sparse_calls) = search_with(
+            &index,
+            Arc::new(PermittedSet::new(sparse.iter().map(String::as_str))),
+            8,
+        )
+        .await;
+        assert_eq!(sparse_result, sparse[..8]);
+
+        let everything = (0..ENTRIES)
+            .map(|position| format!("catalogue.record_{position:04}"))
+            .collect::<Vec<_>>();
+        let (unrestricted, unrestricted_calls) = search_with(
+            &index,
+            Arc::new(PermittedSet::new(everything.iter().map(String::as_str))),
+            8,
+        )
+        .await;
+        assert_eq!(unrestricted, everything[..8]);
+
+        let (denied, denied_calls) = search_with(&index, Arc::new(PermittedSet::new([])), 8).await;
+        assert!(denied.is_empty());
+
+        // Policy work depends on the query and catalogue only, never on which
+        // candidates the caller may use, so latency cannot reveal hidden ones.
+        assert_eq!(restricted_calls, ENTRIES);
+        assert_eq!(sparse_calls, ENTRIES);
+        assert_eq!(unrestricted_calls, ENTRIES);
+        assert_eq!(denied_calls, ENTRIES);
+    }
+
+    struct BatchAuthority {
+        truncate: bool,
+        batches: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl AiCapabilityAuthorityPolicy for BatchAuthority {
+        async fn authorize(
+            &self,
+            _principal: &ResolvedPrincipal,
+            _owning_index: &AiCapabilityIndex,
+            _entry: &AiCapabilityIndexEntry,
+            _run: &AiCapabilityRunBinding,
+        ) -> Result<AiCapabilityAuthorityDecision, AiError> {
+            panic!("search must use the batch decision");
+        }
+
+        async fn authorize_discovery(
+            &self,
+            _principal: &ResolvedPrincipal,
+            matches: &[AiCapabilityRankedMatch<'_>],
+            _run: &AiCapabilityRunBinding,
+        ) -> Result<Vec<AiCapabilityAuthorityDecision>, AiError> {
+            self.batches.fetch_add(1, Ordering::SeqCst);
+            let count = if self.truncate {
+                matches.len().saturating_sub(1)
+            } else {
+                matches.len()
+            };
+            Ok(matches
+                .iter()
+                .take(count)
+                .map(|candidate| AiCapabilityAuthorityDecision {
+                    allowed: candidate.entry().id.as_str().ends_with('7'),
+                    policy_fingerprint: "current-policy-v1".to_owned(),
+                })
+                .collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_discovery_policy_is_used_once_and_fails_closed_on_a_short_result() {
+        let index = large_static_index(200);
+        for truncate in [false, true] {
+            let principal = principal();
+            let principal_reference = principal.reference();
+            let authority = Arc::new(BatchAuthority {
+                truncate,
+                batches: std::sync::atomic::AtomicUsize::new(0),
+            });
+            let broker = AiCapabilityDiscoveryBroker::new(
+                Arc::new(Resolver(principal)),
+                Arc::new(CurrentIndex(RwLock::new(Arc::clone(&index)))),
+                authority.clone(),
+                Arc::new(FixedClock::new(OffsetDateTime::UNIX_EPOCH)),
+                Duration::seconds(30),
+            )
+            .expect("broker");
+            let result = broker
+                .search(
+                    &principal_reference,
+                    &run_binding(),
+                    &AiCapabilitySearchQuery {
+                        text: "reviewed catalogue record".to_owned(),
+                        namespace: None,
+                        kind: Some(AiCapabilityKind::ReviewedStatic),
+                        entity_or_operation: None,
+                        maximum_results: 3,
+                    },
+                )
+                .await;
+            assert_eq!(authority.batches.load(Ordering::SeqCst), 1);
+            if truncate {
+                assert!(matches!(result, Err(AiError::Forbidden)));
+            } else {
+                assert_eq!(
+                    result
+                        .expect("batch search")
+                        .candidates
+                        .iter()
+                        .map(|candidate| candidate.id.as_str())
+                        .collect::<Vec<_>>(),
+                    [
+                        "catalogue.record_0007",
+                        "catalogue.record_0017",
+                        "catalogue.record_0027"
+                    ]
+                );
+            }
+        }
     }
 
     #[tokio::test]

@@ -10,6 +10,27 @@ supersedes: []
 
 # Migration Guide
 
+## 0.131.0 to 0.132.0: capability discovery applies policy before its result ceiling
+
+No data migration is needed, and no GraphQL SDL or persistent schema changes.
+
+- `AiCapabilityDiscoveryBroker::search` (and the fixed-broker and
+  client-deferred discover calls built on it) now applies
+  `AiCapabilityAuthorityPolicy` to every entry that matches the query, then
+  returns the highest-ranked permitted candidates up to `maximumResults`.
+  Before, it truncated first, so a restricted principal could receive fewer
+  candidates than it may use. Unrestricted principals see the same results as
+  before.
+- Policy now runs once per matching entry rather than once per returned
+  candidate. `AiCapabilityAuthorityPolicy` gains a provided method,
+  `authorize_discovery`, which receives the complete ranked batch and calls
+  `authorize` per match by default. No implementation has to change. A host
+  whose per-entry check is expensive should override it to decide the batch
+  from one current lookup. It must return exactly one decision per match, in
+  order, apply the same decision `authorize` would, and not cache decisions
+  across searches; a wrong-length result fails the search with `Forbidden`.
+- Load and execution still call `authorize` for the exact candidate, as before.
+
 ## 0.130.0 to 0.131.0: legacy delegated stored principal references
 
 0.130.0 stopped new submissions from persisting a delegated or sessionless
