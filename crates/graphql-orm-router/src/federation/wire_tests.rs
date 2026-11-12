@@ -1448,6 +1448,30 @@ fn authenticated_static_router_denies_before_downstream_and_expands_templates() 
     }
     assert_eq!(products.opens() + reviews.opens(), opens_before_segments);
 
+    // Federation's planner-owned root fields are not client fields. Hive's
+    // client API omits them, so validation refuses them before preflight or
+    // any downstream work, for anonymous and authorized callers. Preflight
+    // would also refuse them; see the catalogue unit test.
+    let opens_before_planner_fields = products.opens() + reviews.opens();
+    for headers in [&[][..], &[("authorization", "Bearer product-admin")][..]] {
+        for query in [
+            "{ _entities(representations: [{__typename: \"Product\", id: \"p1\"}]) { __typename } }",
+            "{ _service { sdl } }",
+        ] {
+            let (_, refused) =
+                router.graphql_response_at("/api/graphql", json!({"query": query}), headers);
+            assert!(refused["data"].is_null(), "{query}: {refused}");
+            assert_eq!(
+                refused["errors"][0]["extensions"]["code"], "FieldsOnCorrectType",
+                "{query}: {refused}"
+            );
+        }
+    }
+    assert_eq!(
+        products.opens() + reviews.opens(),
+        opens_before_planner_fields
+    );
+
     // Introspection is off unless the router configuration enables it.
     for headers in [&[][..], &[("authorization", "Bearer product-admin")][..]] {
         for query in [

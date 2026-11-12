@@ -93,6 +93,7 @@ pub(crate) struct SubscriptionGateway {
     /// Upgraded connections that have not authenticated yet. This budget is
     /// separate, so unauthenticated sockets never hold authenticated capacity.
     pending_connections: AtomicUsize,
+    max_pending_connections: usize,
     active_operations: AtomicUsize,
     connection_attempts: ConnectionAttemptLimiter,
     metrics: Arc<RouterMetrics>,
@@ -110,6 +111,7 @@ impl SubscriptionGateway {
         let internal_url = format!("ws://localhost:{}{}", connect_address.port(), internal.path);
         let connection_attempts =
             ConnectionAttemptLimiter::new(config.max_connection_attempts_per_second);
+        let max_pending_connections = config.pending_connection_limit();
         Arc::new(Self {
             config,
             authentication,
@@ -118,6 +120,7 @@ impl SubscriptionGateway {
             internal_url,
             active_connections: AtomicUsize::new(0),
             pending_connections: AtomicUsize::new(0),
+            max_pending_connections,
             active_operations: AtomicUsize::new(0),
             connection_attempts,
             metrics,
@@ -156,7 +159,10 @@ impl SubscriptionGateway {
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
-                    self.metrics.websocket_connected();
+                    match admission {
+                        Admission::Pending => self.metrics.websocket_pending(),
+                        Admission::Authenticated => self.metrics.websocket_connected(),
+                    }
                     return Some(ConnectionPermit {
                         gateway: self.clone(),
                         admission,
@@ -169,10 +175,7 @@ impl SubscriptionGateway {
 
     fn admission_budget(&self, admission: Admission) -> (&AtomicUsize, usize) {
         match admission {
-            Admission::Pending => (
-                &self.pending_connections,
-                self.config.max_pending_connections,
-            ),
+            Admission::Pending => (&self.pending_connections, self.max_pending_connections),
             Admission::Authenticated => (&self.active_connections, self.config.max_connections),
         }
     }
@@ -265,7 +268,10 @@ impl Drop for ConnectionPermit {
             .admission_budget(self.admission)
             .0
             .fetch_sub(1, Ordering::AcqRel);
-        self.gateway.metrics.websocket_disconnected();
+        match self.admission {
+            Admission::Pending => self.gateway.metrics.websocket_pending_ended(),
+            Admission::Authenticated => self.gateway.metrics.websocket_disconnected(),
+        }
     }
 }
 
@@ -1557,6 +1563,29 @@ mod tests {
         let debug = format!("{first:?}");
         assert!(!debug.contains(&first.secret));
         assert!(!debug.contains(&first.path));
+    }
+
+    #[test]
+    fn promotion_moves_one_connection_between_gauges_without_double_counting() {
+        let gateway = test_gateway();
+        let snapshot = || gateway.metrics.snapshot();
+        let pending = gateway.try_reserve_pending_connection().unwrap();
+        assert_eq!(snapshot().pending_websocket_connections(), 1);
+        assert_eq!(snapshot().active_websocket_connections(), 0);
+        let mut slot = Some(pending);
+        let authenticated = gateway.try_reserve_connection().unwrap();
+        assert_eq!(
+            snapshot().active_websocket_connections(),
+            1,
+            "authenticated sockets are counted only in the active gauge"
+        );
+        assert_eq!(snapshot().pending_websocket_connections(), 1);
+        slot.replace(authenticated);
+        assert_eq!(snapshot().pending_websocket_connections(), 0);
+        assert_eq!(snapshot().active_websocket_connections(), 1);
+        drop(slot);
+        assert_eq!(snapshot().pending_websocket_connections(), 0);
+        assert_eq!(snapshot().active_websocket_connections(), 0);
     }
 
     #[test]

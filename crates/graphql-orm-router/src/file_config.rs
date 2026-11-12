@@ -464,7 +464,7 @@ fn build_hierarchical_scope_matcher(
             "scopeMatcher hierarchical options are invalid: {error}"
         ))
     })?;
-    Ok(config.with_scope_matcher(Arc::new(AgqlScopeMatcher::new(Arc::new(matcher)))))
+    Ok(config.with_scope_matcher(Arc::new(AgqlScopeMatcher::hierarchical(matcher)?)))
 }
 
 #[cfg(not(feature = "auth-agql"))]
@@ -493,16 +493,7 @@ fn validate_scope_syntax(separator: char, wildcard: &str) -> Result<(), RouterEr
     // Scope-template values are limited to letters, digits, `-` and `_`. The
     // separator and wildcard must stay outside that set, so no substituted
     // value can introduce either one.
-    if crate::auth::is_plain_scope_character(separator) {
-        return Err(invalid(
-            "scopeMatcher separator must not be a letter, digit, `-` or `_`",
-        ));
-    }
-    if wildcard.chars().all(crate::auth::is_plain_scope_character) {
-        return Err(invalid(
-            "scopeMatcher wildcard must contain a character other than a letter, digit, `-` or `_`",
-        ));
-    }
+    crate::agql::validate_hierarchical_syntax(separator, wildcard)?;
     if wildcard.is_empty()
         || wildcard.contains(separator)
         || wildcard
@@ -900,7 +891,7 @@ mod tests {
                 .subscriptions
                 .as_ref()
                 .unwrap()
-                .max_pending_connections,
+                .pending_connection_limit(),
             7
         );
         assert!(config.introspection);

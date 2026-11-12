@@ -190,6 +190,12 @@ pub trait AuthenticationProvider: Send + Sync + fmt::Debug + 'static {
 }
 
 /// Matching boundary shared by router preflight and subgraph policy adapters.
+///
+/// The router substitutes only values made of ASCII letters, digits, `-` and
+/// `_` into scope templates. An implementation that gives any of those
+/// characters structural meaning, such as a `-` separator or an alphanumeric
+/// wildcard, lets a substituted value change the requirement's shape. Keep
+/// separators and wildcards outside that set.
 pub trait ScopeMatcher: Send + Sync + fmt::Debug + 'static {
     /// Returns whether one granted scope satisfies one required scope.
     fn matches(&self, granted: &str, required: &str) -> bool;
@@ -1057,6 +1063,42 @@ mod tests {
                 .is_empty(),
                 "the root __typename meta field and public fields remain available"
             );
+        }
+    }
+
+    #[test]
+    fn planner_owned_fields_are_refused_if_they_ever_reach_preflight() {
+        // Hive's client API omits `_entities` and `_service`, so validation
+        // normally refuses them first. Preflight must still refuse them,
+        // because the descriptor contract never describes them.
+        let catalog = entity_catalog(vec![
+            zone_operation(AuthorizationRequirement::Public),
+            diagnostics_operation(),
+        ]);
+        let principal = AuthenticatedPrincipal::new("subject", ["zones.read"], None).unwrap();
+        for name in ["_entities", "_service"] {
+            let mut operation = normalized(&entity_graph(), "{ zone(id: \"z1\") { id } }");
+            let Some(SelectionItem::Field(field)) = operation.selection_set.items.first_mut()
+            else {
+                panic!("normalized root field");
+            };
+            field.name = name.to_owned();
+            for resolution in [VariableResolution::Preflight, VariableResolution::Complete] {
+                assert_eq!(
+                    catalog.authorize_operation(
+                        &operation,
+                        &std::collections::HashMap::new(),
+                        Some(&principal),
+                        &ExactScopeMatcher,
+                        resolution,
+                    ),
+                    vec![AuthorizationDenial {
+                        code: "FORBIDDEN",
+                        message: "operation is not described by authorization metadata",
+                    }],
+                    "{name} under {resolution:?}"
+                );
+            }
         }
     }
 

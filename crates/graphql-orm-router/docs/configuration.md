@@ -228,10 +228,10 @@ parser tokens, depth 20, 50 aliases, 100 directives, and normalized field cost
 must remain within the crate's hard safety ceiling.
 
 The default `subscriptions` limits are 1024 process-wide authenticated
-connections, 64 process-wide connections waiting for `connection_init`, 128
+connections, 384 process-wide connections waiting for `connection_init`, 128
 connection attempts per second with one second of burst capacity, 32
 operations per connection, downstream broadcast capacity 32, upstream buffer
-capacity 1024, 64 KiB client messages, and a 5000 ms `connection_init`
+capacity 1024, 64 KiB client messages, and a 3000 ms `connection_init`
 deadline. Configure the attempt budget with
 `maxConnectionAttemptsPerSecond`. Excess attempts return HTTP 429 with
 `Retry-After: 1`. All queues are bounded. Delivery is ephemeral and
@@ -243,10 +243,27 @@ socket closes, or the init deadline passes. Only a validated connection is
 charged against `maxConnections`; if that budget is full at that moment the
 socket closes with `1013`. Upgrades are refused with HTTP 503 when either
 budget is full. Sockets that never authenticate therefore cannot occupy
-authenticated capacity, although a flood can still delay new handshakes until
-the init deadline frees pending slots. The attempt rate and the pending budget
+authenticated capacity, although many idle upgrades can still delay new
+handshakes until the init deadline frees pending slots. The attempt rate and the pending budget
 are shared before any credential is known, so apply per-client connection
 limits at the proxy or load balancer that sees client addresses.
+
+The three pre-authentication settings work together. Unless
+`maxPendingConnections` is set, it defaults to the number of upgrades the
+attempt rate admits within one init deadline, rounded up and capped at
+`maxConnections`: `min(ceil(maxConnectionAttemptsPerSecond ×
+connectionInitTimeoutMs / 1000), maxConnections)`. The defaults give
+`min(128 × 3, 1024) = 384`. With that sizing, a stream of upgrades that never
+send `connection_init` reaches the attempt rate (HTTP 429) before it can fill
+the pending budget. The exception is when `maxConnections` is the smaller
+value. Changing the rate or the deadline resizes the default. An explicit
+`maxPendingConnections` below that product lets fewer idle upgrades than the
+rate admits fill the budget. A shorter deadline frees idle slots sooner.
+
+The administrative metrics report `router_websocket_connections` for
+authenticated connections and `router_pending_websocket_connections` for
+sockets still waiting for `connection_init`. A socket is counted in exactly one
+of them.
 
 The message limit applies to the complete serialized
 `graphql-transport-ws` message, including variables and base64 expansion. Bulk

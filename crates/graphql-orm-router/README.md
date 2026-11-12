@@ -21,7 +21,7 @@ Version 0.11.0 turns introspection off by default. Opt in with
 needs a valid bearer. Preflight now refuses undescribed root fields.
 Scope-template values must be one plain segment. WebSocket admission keeps
 sockets that have not authenticated in a separate `maxPendingConnections`
-budget. See [MIGRATION.md](MIGRATION.md).
+budget, sized by default from the attempt rate and a 3-second init deadline. See [MIGRATION.md](MIGRATION.md).
 
 Version 0.10.0 serves subscriptions only through the public
 `graphql-transport-ws` gateway. HTTP SSE and multipart subscription requests

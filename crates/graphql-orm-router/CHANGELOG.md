@@ -33,10 +33,22 @@ supersedes: []
   `maxConnections` now counts only authenticated connections. A connection is
   charged against it after its `connection_init` bearer validates. If the
   limit is reached at that point, the connection closes with code `1013`. A new
-  `maxPendingConnections` (default 64) limits upgraded sockets that have not
-  authenticated yet. Sockets that never authenticate can no longer take
+  `maxPendingConnections` limits upgraded sockets that have not authenticated
+  yet. By default it is `min(ceil(attempt rate × init timeout), maxConnections)`,
+  which is 384 with the defaults, so the attempt rate is reached before the
+  pending budget fills. Sockets that never authenticate can no longer take
   authenticated capacity. The attempt-rate limit is unchanged, and it is a
-  shared flood guard. Per-client limits belong at the proxy.
+  shared upgrade-rate limit. Per-client limits belong at the proxy.
+- The default `connection_init` timeout is now 3 seconds (was 5).
+- `router_websocket_connections` now counts authenticated connections only.
+  A new `router_pending_websocket_connections` gauge, also available as
+  `RouterMetricsSnapshot::pending_websocket_connections`, counts sockets that
+  have not authenticated yet. Each socket is counted in exactly one of them.
+- Add `AgqlScopeMatcher::hierarchical`. It refuses an `agql-auth`
+  hierarchical matcher whose separator is a letter, digit, `-` or `_`, or
+  whose wildcard is made only of those characters. The file loader uses it.
+  `AgqlScopeMatcher::new` still accepts any matcher, and its documentation now
+  warns about this.
 - The internal subscription endpoint's path is drawn independently of its
   secret, and the secret is checked in constant time.
 - The administrative listener must use a different port from the public

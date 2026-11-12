@@ -38,11 +38,26 @@ made of a letter, a digit, `-` or `_` is refused, and so is a `wildcard` made
 only of those characters.
 
 **WebSocket budgets are split.** `maxConnections` now counts authenticated
-connections only. The new `subscriptions.maxPendingConnections` (default 64)
-limits sockets waiting for `connection_init`. Size it for the number of clients
-expected to connect within one `connectionInitTimeoutMs`. A client that
-authenticates while `maxConnections` is full now closes with `1013`. Before,
-its upgrade was refused with 503. Reconnect with backoff as for 503.
+connections only. The new `subscriptions.maxPendingConnections` limits sockets
+waiting for `connection_init`. By default it is
+`min(ceil(maxConnectionAttemptsPerSecond × connectionInitTimeoutMs / 1000),
+maxConnections)`, which is 384 with the defaults. Most deployments need not set
+it. A client that authenticates while `maxConnections` is full now closes with
+`1013`. Before, its upgrade was refused with 503. Reconnect with backoff as for
+503.
+
+**Init timeout.** The default `connectionInitTimeoutMs` is now 3000 (was 5000).
+Clients must send `connection_init` within 3 seconds, or set the old value
+explicitly.
+
+**WebSocket metrics.** `router_websocket_connections` now counts authenticated
+connections only. Add `router_pending_websocket_connections` to dashboards that
+tracked every open socket.
+
+**Programmatic hierarchical matchers.** Prefer
+`AgqlScopeMatcher::hierarchical(matcher)?` to
+`AgqlScopeMatcher::new(Arc::new(matcher))`. It refuses a separator or wildcard
+that a scope-template value could contain.
 
 **Administrative listener port.** `admin.listener` must use a different port
 from the public listener, even on a different address.

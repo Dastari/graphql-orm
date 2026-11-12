@@ -3,7 +3,7 @@ title: graphql-orm-router operations runbook
 kind: runbook
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-11-09
+last_reviewed: 2026-11-12
 review_by: 2027-02-07
 supersedes: []
 ---
@@ -46,12 +46,13 @@ than merely raising defaults.
 | Connections per downstream host | 100 | subgraph latency and saturation |
 | SDL or descriptor body | 2 MiB | unhealthy/rejected source status |
 | Refresh attempts | 2 | refresh and composition totals |
-| WebSocket connections | 1024 | `router_websocket_connections` |
+| Authenticated WebSocket connections | 1024 | `router_websocket_connections`; close code 1013 when full at `connection_init` |
+| Pending (unauthenticated) WebSocket connections | attempts/s × init deadline, capped at the connection limit (384) | `router_pending_websocket_connections`; HTTP 503 |
 | WebSocket attempts | 128/s, one-second burst | HTTP 429 and `router_websocket_rejections_total` |
 | Operations per WebSocket | 32 | operation limit errors |
 | Subscription fan-out / upstream buffers | 32 / 1024 | Hive lagged/dropped counters |
 | Client WebSocket message | 64 KiB | close code 4400 below the hard codec ceiling; transport disconnect at the ceiling |
-| Connection-init deadline | 5 s | close code 4408 |
+| Connection-init deadline | 3 s | close code 4408 |
 | Graceful drain | 10 s | shutdown duration and listener release |
 
 The authenticated router snapshot exposes request/error, cumulative downstream

@@ -206,6 +206,11 @@ impl RouterConfig {
     }
 
     /// Installs the scope matcher shared with router preflight policy.
+    ///
+    /// Scope-template values may contain ASCII letters, digits, `-` and `_`.
+    /// A matcher must not treat any of those characters as a separator or
+    /// wildcard, or a substituted value could split or widen a rendered
+    /// requirement. See [`ScopeMatcher`].
     #[must_use]
     pub fn with_scope_matcher(mut self, matcher: Arc<dyn ScopeMatcher>) -> Self {
         self.scope_matcher = matcher;
@@ -596,7 +601,7 @@ impl fmt::Debug for StaticSubgraph {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SubscriptionConfig {
     pub(crate) max_connections: usize,
-    pub(crate) max_pending_connections: usize,
+    pub(crate) max_pending_connections: Option<usize>,
     pub(crate) max_connection_attempts_per_second: usize,
     pub(crate) max_operations_per_connection: usize,
     pub(crate) broadcast_capacity: usize,
@@ -634,10 +639,33 @@ impl SubscriptionConfig {
     /// [`with_max_connections`](Self::with_max_connections), so sockets that
     /// never authenticate cannot take authenticated capacity. Upgrades beyond
     /// the limit are refused with `503`.
+    ///
+    /// When unset, the limit is the number of upgrades the attempt rate admits
+    /// within one connection-init timeout, rounded up and capped at
+    /// `max_connections`:
+    /// `min(ceil(max_connection_attempts_per_second × timeout), max_connections)`.
+    /// The attempt rate is then the first limit that idle upgrades reach,
+    /// unless `max_connections` is the smaller value. An explicit value below
+    /// that product lets fewer idle upgrades than the rate admits fill the
+    /// budget.
     #[must_use]
     pub fn with_max_pending_connections(mut self, value: usize) -> Self {
-        self.max_pending_connections = value;
+        self.max_pending_connections = Some(value);
         self
+    }
+
+    /// The effective pending-connection limit: the configured value, or the
+    /// default derived from the attempt rate, init timeout and connection
+    /// limit.
+    pub(crate) fn pending_connection_limit(&self) -> usize {
+        self.max_pending_connections.unwrap_or_else(|| {
+            let admitted = (self.max_connection_attempts_per_second as u128)
+                .saturating_mul(self.connection_init_timeout.as_millis())
+                .div_ceil(1_000);
+            usize::try_from(admitted)
+                .unwrap_or(usize::MAX)
+                .clamp(1, self.max_connections.max(1))
+        })
     }
 
     /// Sets the process-wide public WebSocket upgrade-attempt rate.
@@ -645,9 +673,11 @@ impl SubscriptionConfig {
     /// The limiter uses a token bucket with one second of burst capacity. It
     /// contains reconnect storms before they can repeatedly create private
     /// subscription transports. It is charged before any credential is
-    /// presented, so it is a shared flood guard rather than a per-caller
+    /// presented, so it is a shared upgrade-rate limit rather than a per-caller
     /// quota; apply per-client connection limits at the proxy or load balancer
-    /// that sees client addresses.
+    /// that sees client addresses. Unless
+    /// [`with_max_pending_connections`](Self::with_max_pending_connections) is
+    /// set, this rate also sizes the pending-connection budget.
     #[must_use]
     pub fn with_max_connection_attempts_per_second(mut self, value: usize) -> Self {
         self.max_connection_attempts_per_second = value;
@@ -686,6 +716,10 @@ impl SubscriptionConfig {
     }
 
     /// Sets how long a client may wait before sending `connection_init`.
+    ///
+    /// Defaults to 3 seconds and must be between zero and 60 seconds. Unless
+    /// [`with_max_pending_connections`](Self::with_max_pending_connections) is
+    /// set, it also sizes the pending-connection budget.
     #[must_use]
     pub fn with_connection_init_timeout(mut self, value: Duration) -> Self {
         self.connection_init_timeout = value;
@@ -697,7 +731,7 @@ impl SubscriptionConfig {
             ("maximum WebSocket connections", self.max_connections),
             (
                 "maximum pending WebSocket connections",
-                self.max_pending_connections,
+                self.max_pending_connections.unwrap_or(1),
             ),
             (
                 "maximum WebSocket connection attempts per second",
@@ -743,13 +777,13 @@ impl Default for SubscriptionConfig {
     fn default() -> Self {
         Self {
             max_connections: 1_024,
-            max_pending_connections: 64,
+            max_pending_connections: None,
             max_connection_attempts_per_second: 128,
             max_operations_per_connection: 32,
             broadcast_capacity: 32,
             subgraph_buffer_capacity: 1_024,
             max_client_message_bytes: MAX_WEBSOCKET_MESSAGE_BYTES,
-            connection_init_timeout: Duration::from_secs(5),
+            connection_init_timeout: Duration::from_secs(3),
         }
     }
 }
@@ -1618,8 +1652,41 @@ mod tests {
     #[test]
     fn pending_websocket_budget_is_bounded_and_separate() {
         let defaults = SubscriptionConfig::new();
-        assert_eq!(defaults.max_pending_connections, 64);
+        assert_eq!(defaults.connection_init_timeout, Duration::from_secs(3));
         assert_eq!(defaults.max_connections, 1_024);
+        // The attempt rate is the first limit a stream of idle upgrades hits:
+        // by default the pending budget holds a full init timeout of attempts.
+        for config in [
+            defaults.clone(),
+            SubscriptionConfig::new().with_max_connection_attempts_per_second(10),
+            SubscriptionConfig::new().with_connection_init_timeout(Duration::from_millis(2_500)),
+            SubscriptionConfig::new()
+                .with_max_connection_attempts_per_second(1_000)
+                .with_connection_init_timeout(Duration::from_secs(60)),
+            SubscriptionConfig::new()
+                .with_max_connection_attempts_per_second(3)
+                .with_connection_init_timeout(Duration::from_millis(1)),
+        ] {
+            let held = (config.max_connection_attempts_per_second as u128
+                * config.connection_init_timeout.as_millis())
+            .div_ceil(1_000) as usize;
+            assert_eq!(
+                config.pending_connection_limit(),
+                held.clamp(1, config.max_connections),
+                "{config:?}"
+            );
+            assert!(
+                config.pending_connection_limit() >= held.min(config.max_connections),
+                "{config:?}"
+            );
+        }
+        assert_eq!(defaults.pending_connection_limit(), 384);
+        assert_eq!(
+            SubscriptionConfig::new()
+                .with_max_pending_connections(5)
+                .pending_connection_limit(),
+            5
+        );
         assert!(
             SubscriptionConfig::new()
                 .with_max_pending_connections(0)
