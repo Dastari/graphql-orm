@@ -51,9 +51,11 @@ let database = graphql_orm::db::Database::<graphql_orm::MssqlBackend>::builder(p
     .build();
 ```
 
-`insecure_allow_login_only_encryption()` admits `Encrypt=false`. For the
-notification connection, use
-`MssqlQueryNotificationConnection::connect_ado_with_transport`.
+`insecure_allow_login_only_encryption()` admits `Encrypt=false`. With a
+caller-built `tiberius::Config` it keeps that `Config`'s level, which can be
+plaintext. For the notification connection, use
+`MssqlQueryNotificationConnection::connect_ado_with_transport(connection_string,
+queue, policy, connect_timeout)`. `connect_ado` now gives up after 15 seconds.
 
 Pools built with `MssqlPool::new` and the other `tiberius::Config`
 constructors now raise the configuration's encryption level to `Required`. A
@@ -74,7 +76,12 @@ Each pooled connection now starts at `READ COMMITTED` with `NOCOUNT OFF` and
 `IMPLICIT_TRANSACTIONS OFF`, and is reset the same way after every transaction.
 Reads that ran after a state-machine transaction on the same connection were
 previously `SERIALIZABLE`. Raw SQL that relied on a server default of
-`NOCOUNT ON` now receives row counts.
+`NOCOUNT ON` now receives row counts. Raw SQL that leaves a transaction open
+fails (SQL Server error 266) and its work is rolled back when the pool resets
+the session; an ORM transaction never nests inside a leftover transaction and
+never reports a commit that left `@@TRANCOUNT` above zero. The reset does not clear temporary tables,
+`SESSION_CONTEXT`, `USE` or other session state it does not list; set
+`SESSION_CONTEXT` for row-level security in every transaction.
 
 See the [SQL Server reference](docs/reference/graphql-orm/mssql.md#connections).
 

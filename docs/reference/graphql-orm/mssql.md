@@ -184,7 +184,14 @@ a production connection error.
 `MssqlPool::new`, `with_max_connections`, `with_options` and their
 external-writable forms take a caller-built `tiberius::Config`. The pool raises
 its encryption level to `Required` unless login-only encryption is allowed, in
-which case it keeps the level the caller set. The driver cannot report whether
+which case it keeps the level the caller set. That level can be
+`EncryptionLevel::NotSupported`, which means no TLS at all, so even the login
+credentials cross the network in clear. The driver cannot report a `Config`'s
+level, so the ORM cannot refuse it, and it cannot raise the level to at least
+login-only without downgrading a caller who set `Required`. Only combine
+`insecure_allow_login_only_encryption()` with a caller-built `Config` whose
+level you set yourself. A connection string cannot ask for plaintext. The
+driver also cannot report whether
 a `Config` trusts every certificate, so a caller that calls `Config::trust_cert`
 has chosen that in code. Build pools from connection strings to have
 certificate settings checked.
@@ -198,25 +205,70 @@ certificate settings checked.
 | `max_connections` | 5 | Open connections, at least 1. |
 | `acquire_timeout` | 30 s | Waiting for a connection, including opening one. Exceeding it returns `sqlx::Error::PoolTimedOut`. |
 | `connect_timeout` | 15 s | Opening one connection: TCP, TLS, login and session setup. Also bounds the idle health check. |
-| `query_timeout` | none | Each statement. A statement that exceeds it fails with an `io::ErrorKind::TimedOut` error. The driver cannot cancel a running statement, so the connection is closed and SQL Server rolls back its open transaction. |
+| `query_timeout` | none | Each statement. A statement that exceeds it fails with an `io::ErrorKind::TimedOut` error. The driver cannot cancel a running statement, so the connection is closed and SQL Server rolls back its open transaction. See the caveats below. |
 | `idle_timeout` | 10 min | Idle connections older than this are closed. |
 | `max_lifetime` | 30 min | Connections older than this are closed when next released or acquired. |
 | `health_check_after_idle` | 30 s | A connection idle this long is reset and checked before reuse. |
 | `transport` | `verified()` | See above. |
 
+A statement timeout has two caveats. First, the outcome of a timed-out
+autocommit write is indeterminate: the server can still finish and commit the
+statement after the client has received `TimedOut`, so check before retrying
+a write that is not idempotent. A timed-out statement inside a transaction is
+rolled back, because the transaction never commits. Second, the timed-out
+connection's permit is released as soon as the client gives up, while SQL
+Server may keep the old session until it notices the closed socket and
+finishes or rolls back its work. For that time the number of live server
+sessions can briefly exceed `max_connections`.
+
 The pool resets a connection's session when it opens it, in the same batch
-that commits or rolls back each transaction, and before reusing a connection
-that has been idle past `health_check_after_idle`. The reset rolls back any
-open transaction and sets `READ COMMITTED` isolation, `NOCOUNT OFF` and
-`IMPLICIT_TRANSACTIONS OFF`. So a `SERIALIZABLE` state-machine transaction no
+that commits or rolls back each transaction, before returning a connection
+after a non-fatal server error, and before reusing a connection that has been
+idle past `health_check_after_idle`. The reset rolls back any open transaction
+and sets `READ COMMITTED` isolation, `NOCOUNT OFF` and
+`IMPLICIT_TRANSACTIONS OFF`. If the reset fails, the connection is closed.
+
+Pooled statements run through `sp_executesql`, so SQL Server refuses one that
+leaves its transaction count changed (error 266). For example,
+`BEGIN TRANSACTION` without a `COMMIT` in the same call, or a `BEGIN
+TRANSACTION` issued inside an ORM transaction, fails, and the pool then resets
+the session. The work of a batch that fails while its own transaction is open
+is rolled back by that reset, never committed. As a further guard, every ORM
+transaction begins by rolling back any transaction still open on the session,
+so it never nests inside one. If a `COMMIT` leaves `@@TRANCOUNT` above zero,
+the commit fails with an error and everything is rolled back; it is never
+reported as committed. So a `SERIALIZABLE` state-machine transaction no
 longer leaves later autocommit reads on that connection serializable. A server,
 database or login default of `NOCOUNT ON` (for example `user options` bit 512)
 no longer makes every affected-row count 0. Raw SQL run through
 `MssqlPool::fetch_rows` that changes session options affects that connection
 until its next reset, so restore them in the same batch.
 
-An error that SQL Server reports, such as a constraint violation, returns the
-connection to the pool. A transport, TLS or protocol error, a timeout, or a
+The reset is not a full `sp_reset_connection`. It does **not** clear:
+
+- local temporary tables (`#name`) and table variables still in scope;
+- session-owned application locks from `sp_getapplock` with
+  `@LockOwner = 'Session'`;
+- `CONTEXT_INFO` and `SESSION_CONTEXT` values;
+- the current database after `USE`;
+- an impersonation from `EXECUTE AS` that was not reverted;
+- `SET ROWCOUNT`, `SET XACT_ABORT`, `SET LOCK_TIMEOUT`, `SET IDENTITY_INSERT`
+  and other `SET` options it does not list.
+
+Raw SQL that changes any of these must undo it in the same call. Full
+`sp_reset_connection` semantics need the driver to send the TDS reset flag,
+which the pinned fork does not; that is part of the fork decision in
+[#516](https://github.com/Dastari/graphql-orm/issues/516).
+
+> **Warning:** do not rely on `SESSION_CONTEXT` or `CONTEXT_INFO` that persists
+> on a pooled connection, for example for SQL Server row-level security
+> predicates. A value set by one borrower is still visible to the next. Set it
+> at the start of every transaction that depends on it, with
+> `sp_set_session_context ... @read_only = 0`, and clear it before the
+> transaction ends.
+
+An error that SQL Server reports, such as a constraint violation, resets the
+connection and returns it to the pool. A transport, TLS or protocol error, a timeout, or a
 dropped future closes it. Inside a transaction any error closes the connection.
 
 ### Database handles

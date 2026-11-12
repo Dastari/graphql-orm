@@ -4,6 +4,7 @@
 //! enables business DML. SQL permissions remain the authoritative boundary.
 use super::{MssqlClient, MssqlRow, MssqlTransportPolicy, map_tiberius_error};
 use quick_xml::{Reader, events::Event};
+use std::time::Duration;
 use tiberius::QueryNotification;
 use tokio::net::TcpStream;
 use tokio_util::compat::TokioAsyncWriteCompatExt;
@@ -77,33 +78,57 @@ impl MssqlQueryNotificationConnection {
     /// permission to end its conversations.
     ///
     /// The connection string must meet [`MssqlTransportPolicy::verified`].
+    /// Connecting, including TLS, login and session setup, is bounded by
+    /// [`DEFAULT_CONNECT_TIMEOUT`](Self::DEFAULT_CONNECT_TIMEOUT).
     pub async fn connect_ado(
         connection_string: &str,
         queue: MssqlBrokerQueue,
     ) -> crate::Result<Self> {
-        Self::connect_ado_with_transport(connection_string, queue, MssqlTransportPolicy::verified())
-            .await
+        Self::connect_ado_with_transport(
+            connection_string,
+            queue,
+            MssqlTransportPolicy::verified(),
+            Self::DEFAULT_CONNECT_TIMEOUT,
+        )
+        .await
     }
 
-    /// Connect under an explicit transport policy.
+    /// Bound on opening a notification connection, matching the pool default.
+    pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
+    /// Connect under an explicit transport policy. `connect_timeout` bounds
+    /// TCP, TLS, login and session setup; exceeding it returns an
+    /// `io::ErrorKind::TimedOut` error.
     pub async fn connect_ado_with_transport(
         connection_string: &str,
         queue: MssqlBrokerQueue,
         transport: MssqlTransportPolicy,
+        connect_timeout: Duration,
     ) -> crate::Result<Self> {
         let config = super::transport::config_from_ado(connection_string, transport)?;
-        let tcp = TcpStream::connect(config.get_addr()).await?;
-        tcp.set_nodelay(true)?;
-        let mut client = MssqlClient::connect(config, tcp.compat_write())
+        let connect = async move {
+            let tcp = TcpStream::connect(config.get_addr()).await?;
+            tcp.set_nodelay(true)?;
+            let mut client = MssqlClient::connect(config, tcp.compat_write())
+                .await
+                .map_err(map_tiberius_error)?;
+            let rows = client.simple_query("SET ANSI_NULLS ON; SET ANSI_PADDING ON; SET ANSI_WARNINGS ON; SET CONCAT_NULL_YIELDS_NULL ON; SET QUOTED_IDENTIFIER ON; SET NUMERIC_ROUNDABORT OFF; SET ARITHABORT ON; SET TRANSACTION ISOLATION LEVEL READ COMMITTED; SELECT DB_NAME() AS db;")
+                .await.map_err(map_tiberius_error)?.into_first_result().await.map_err(map_tiberius_error)?;
+            let database = rows
+                .first()
+                .and_then(|r| r.get::<&str, _>("db"))
+                .ok_or_else(|| protocol("missing notification database"))?
+                .to_owned();
+            Ok::<_, sqlx::Error>((client, database))
+        };
+        let (client, database) = tokio::time::timeout(connect_timeout, connect)
             .await
-            .map_err(map_tiberius_error)?;
-        let rows = client.simple_query("SET ANSI_NULLS ON; SET ANSI_PADDING ON; SET ANSI_WARNINGS ON; SET CONCAT_NULL_YIELDS_NULL ON; SET QUOTED_IDENTIFIER ON; SET NUMERIC_ROUNDABORT OFF; SET ARITHABORT ON; SET TRANSACTION ISOLATION LEVEL READ COMMITTED; SELECT DB_NAME() AS db;")
-            .await.map_err(map_tiberius_error)?.into_first_result().await.map_err(map_tiberius_error)?;
-        let database = rows
-            .first()
-            .and_then(|r| r.get::<&str, _>("db"))
-            .ok_or_else(|| protocol("missing notification database"))?
-            .to_owned();
+            .map_err(|_| {
+                sqlx::Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "SQL Server notification connection exceeded its connect timeout",
+                ))
+            })??;
         Ok(Self {
             client,
             queue,

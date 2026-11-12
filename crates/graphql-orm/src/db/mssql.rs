@@ -41,8 +41,10 @@ impl MssqlWriteResult {
 /// Session state every pooled connection is returned to.
 ///
 /// It runs when a connection is opened, in the same batch that ends each
-/// transaction, and before an idle connection is reused after
-/// [`MssqlPoolOptions::health_check_after_idle`]. Isolation level persists on a
+/// transaction, before a connection is returned after a non-fatal server
+/// error, and before an idle connection is reused after
+/// [`MssqlPoolOptions::health_check_after_idle`]. Each transaction's begin
+/// batch also rolls back any transaction left open first. Isolation level persists on a
 /// SQL Server session until changed, so a `SERIALIZABLE` transaction would
 /// otherwise leak onto every later read. A server, database or login default
 /// of `NOCOUNT ON` or `IMPLICIT_TRANSACTIONS ON` would make every affected-row
@@ -51,6 +53,16 @@ const SESSION_RESET: &str = "IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION; \
     SET TRANSACTION ISOLATION LEVEL READ COMMITTED; \
     SET NOCOUNT OFF; \
     SET IMPLICIT_TRANSACTIONS OFF;";
+
+/// Ends an ORM transaction. A `COMMIT` that leaves `@@TRANCOUNT` above zero
+/// only decremented a nested transaction; nothing is durable yet. Roll back
+/// and raise rather than let the reset's rollback discard work that would
+/// otherwise be reported as committed.
+const COMMIT_TRANSACTION: &str = "COMMIT TRANSACTION; \
+    IF @@TRANCOUNT > 0 BEGIN \
+        ROLLBACK TRANSACTION; \
+        THROW 50000, N'SQL Server transaction was nested; its commit was not durable and was rolled back', 1; \
+    END;";
 
 /// Connection bounds and transport policy for a SQL Server pool.
 ///
@@ -395,7 +407,7 @@ impl MssqlPool {
         let result = self
             .bounded(fetch_rows_with_client(&mut lease.client, sql, values))
             .await;
-        self.finish(lease, result)
+        self.finish(lease, result).await
     }
 
     pub(crate) async fn execute(
@@ -408,7 +420,7 @@ impl MssqlPool {
         let result = self
             .bounded(execute_with_client(&mut lease.client, sql, values))
             .await;
-        self.finish(lease, result)
+        self.finish(lease, result).await
     }
 
     pub(crate) async fn begin_transaction(
@@ -421,7 +433,12 @@ impl MssqlPool {
             crate::graphql::orm::TransactionMode::Default => "READ COMMITTED",
             crate::graphql::orm::TransactionMode::StateMachine => "SERIALIZABLE",
         };
-        let begin = format!("SET TRANSACTION ISOLATION LEVEL {isolation}; BEGIN TRANSACTION;");
+        // Never nest inside a transaction raw SQL left open on this session:
+        // its COMMIT would only decrement the count and nothing would be durable.
+        let begin = format!(
+            "IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION; \
+             SET TRANSACTION ISOLATION LEVEL {isolation}; BEGIN TRANSACTION;"
+        );
         // A failed begin may have changed the isolation level; never reuse it.
         self.bounded(execute_control_statement(&mut lease.client, &begin))
             .await
@@ -465,12 +482,7 @@ impl MssqlPool {
                 released,
             } = idle;
             let checked = match self.inner.options.health_check_after_idle {
-                Some(after) if released.elapsed() >= after => tokio::time::timeout(
-                    self.inner.options.connect_timeout,
-                    execute_control_statement(&mut client, SESSION_RESET),
-                )
-                .await
-                .is_ok_and(|result| result.is_ok()),
+                Some(after) if released.elapsed() >= after => self.reset(&mut client).await,
                 _ => true,
             };
             if checked {
@@ -551,19 +563,37 @@ impl MssqlPool {
     }
 
     /// Return an autocommit connection to the pool unless its state is unknown.
-    fn finish<T>(&self, lease: Lease, result: Result<T, StatementFailure>) -> crate::Result<T> {
+    ///
+    /// After a non-fatal server error the batch may have left a transaction
+    /// open (`XACT_ABORT` is off), so the session is reset before it is
+    /// released, and closed if the reset fails.
+    async fn finish<T>(
+        &self,
+        mut lease: Lease,
+        result: Result<T, StatementFailure>,
+    ) -> crate::Result<T> {
         match result {
             Ok(value) => {
                 self.release(lease);
                 Ok(value)
             }
             Err(failure) => {
-                if failure.reusable {
+                if failure.reusable && self.reset(&mut lease.client).await {
                     self.release(lease);
                 }
                 Err(failure.error)
             }
         }
+    }
+
+    /// Reset a session within the connect timeout; `false` means close it.
+    async fn reset(&self, client: &mut MssqlClient) -> bool {
+        tokio::time::timeout(
+            self.inner.options.connect_timeout,
+            execute_control_statement(client, SESSION_RESET),
+        )
+        .await
+        .is_ok_and(|result| result.is_ok())
     }
 
     fn release(&self, lease: Lease) {
@@ -621,7 +651,7 @@ impl MssqlTransaction {
     }
 
     pub(crate) async fn commit(self) -> crate::Result<()> {
-        self.finish("COMMIT TRANSACTION;").await
+        self.finish(COMMIT_TRANSACTION).await
     }
 
     pub(crate) async fn rollback(self) -> crate::Result<()> {

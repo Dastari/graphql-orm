@@ -50,6 +50,13 @@ impl MssqlTransportPolicy {
     /// With login-only encryption TLS protects only the login packet. Every
     /// later SQL statement, parameter and result crosses the network in clear
     /// unless the server forces encryption.
+    ///
+    /// For a pool built from a caller's [`Config`], this opt-in keeps
+    /// whatever level that `Config` holds, which may be
+    /// [`EncryptionLevel::NotSupported`]: no TLS at all, so the login
+    /// credentials are sent in clear too. The driver cannot report a
+    /// `Config`'s level, so the ORM cannot refuse that. Connection strings
+    /// never reach it, because `Encrypt=DANGER_PLAINTEXT` is always refused.
     pub const fn insecure_allow_login_only_encryption(mut self) -> Self {
         self.login_only_encryption = true;
         self
@@ -68,10 +75,15 @@ impl MssqlTransportPolicy {
     /// Apply this policy to a caller-built driver configuration.
     ///
     /// Unless login-only encryption is allowed, the configuration's
-    /// encryption level is raised to `Required`. The driver exposes no way to
-    /// read back certificate trust from a [`Config`], so a caller that calls
-    /// [`Config::trust_cert`] itself has chosen an unverified certificate in
-    /// code; build pools from connection strings to have it validated.
+    /// encryption level is raised to `Required`. When it is allowed, the
+    /// level is left exactly as the caller set it, including
+    /// [`EncryptionLevel::NotSupported`] (plaintext, credentials included):
+    /// the driver exposes no getter, so the ORM can neither read the level nor
+    /// raise it to "at least login-only" without downgrading a caller who set
+    /// `Required`. Likewise the driver cannot report certificate trust, so a
+    /// caller that calls [`Config::trust_cert`] itself has chosen an
+    /// unverified certificate in code. Build pools from connection strings to
+    /// have both validated.
     pub(crate) fn apply(self, config: &mut Config) {
         if !self.login_only_encryption {
             config.encryption(EncryptionLevel::Required);

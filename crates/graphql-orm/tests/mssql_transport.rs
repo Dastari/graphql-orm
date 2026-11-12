@@ -56,12 +56,15 @@ struct Session {
     isolation: i64,
     /// `@@OPTIONS & 512`: non-zero when `NOCOUNT` is on.
     nocount: i64,
+    /// `@@TRANCOUNT`: open transactions on the session.
+    trancount: i64,
 }
 
 const SESSION_SQL: &str = "SELECT CAST(c.connection_id AS NVARCHAR(36)) AS connection, \
     CAST(c.encrypt_option AS NVARCHAR(40)) AS encrypt_option, \
     CAST(s.transaction_isolation_level AS BIGINT) AS isolation, \
-    CAST(@@OPTIONS & 512 AS BIGINT) AS nocount \
+    CAST(@@OPTIONS & 512 AS BIGINT) AS nocount, \
+    CAST(@@TRANCOUNT AS BIGINT) AS trancount \
     FROM sys.dm_exec_connections AS c \
     JOIN sys.dm_exec_sessions AS s ON s.session_id = c.session_id \
     WHERE c.session_id = @@SPID";
@@ -72,6 +75,7 @@ fn session_from(row: &MssqlRow) -> graphql_orm::Result<Session> {
         encrypt_option: row.try_get("encrypt_option")?,
         isolation: row.try_get("isolation")?,
         nocount: row.try_get("nocount")?,
+        trancount: row.try_get("trancount")?,
     })
 }
 
@@ -275,7 +279,9 @@ async fn pooled_sessions_are_reset_between_checkouts() -> Result<(), Box<dyn std
             .await
             .is_err()
     );
-    assert_eq!(session(&pool).await?.connection, first.connection);
+    let after_error = session(&pool).await?;
+    assert_eq!(after_error.connection, first.connection);
+    assert_eq!(after_error.trancount, 0, "{after_error:?}");
 
     server.cleanup()?;
     Ok(())
@@ -499,6 +505,32 @@ async fn connect_and_acquire_timeouts_bound_an_unresponsive_server()
         started.elapsed()
     );
 
+    // The notification connection bounds TLS and login the same way.
+    let queue = graphql_orm::db::mssql::MssqlBrokerQueue::new("dbo", "OwnedQueue")?;
+    let started = Instant::now();
+    let error =
+        graphql_orm::db::mssql::MssqlQueryNotificationConnection::connect_ado_with_transport(
+            &format!(
+                "server=tcp:127.0.0.1,{};user id=owned;password=owned",
+                address.port()
+            ),
+            queue,
+            MssqlTransportPolicy::verified(),
+            Duration::from_millis(300),
+        )
+        .await
+        .err()
+        .expect("connecting must time out");
+    assert!(
+        matches!(&error, graphql_orm::sqlx::Error::Io(io) if io.kind() == std::io::ErrorKind::TimedOut),
+        "{error}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+
     let defaults = MssqlPoolOptions::default();
     assert_eq!(defaults.get_acquire_timeout(), Duration::from_secs(30));
     assert_eq!(defaults.get_connect_timeout(), Duration::from_secs(15));
@@ -510,5 +542,147 @@ async fn connect_and_acquire_timeouts_bound_an_unresponsive_server()
         1
     );
     listener.abort();
+    Ok(())
+}
+
+/// Rows with `id` that a separate session can see, so only committed ones.
+async fn committed_rows(
+    connection_string: &str,
+    id: &str,
+) -> Result<i64, Box<dyn std::error::Error>> {
+    let observer = MssqlPool::connect_ado(connection_string).await?;
+    let rows = observer
+        .fetch_rows(
+            "SELECT CAST(COUNT_BIG(*) AS BIGINT) AS total FROM dbo.GraphqlOrmCountedRecords WHERE id = @P1",
+            &[SqlValue::String(id.to_owned())],
+        )
+        .await?;
+    Ok(rows[0].try_get("total")?)
+}
+
+async fn insert_in_transaction(
+    database: &Database<MssqlBackend>,
+    id: &'static str,
+    nested_begin: bool,
+) -> Result<(), String> {
+    database
+        .transaction(TransactionMode::Default, move |tx| {
+            Box::pin(async move {
+                let internal = |_| {
+                    graphql_orm::graphql::errors::OrmPublicError::new(
+                        graphql_orm::graphql::errors::OrmErrorCode::InternalError,
+                    )
+                };
+                if nested_begin {
+                    tx.execute("BEGIN TRANSACTION", &[])
+                        .await
+                        .map_err(internal)?;
+                }
+                tx.execute(
+                    "INSERT INTO dbo.GraphqlOrmCountedRecords (id, value) VALUES (@P1, 1)",
+                    &[SqlValue::String(id.to_owned())],
+                )
+                .await
+                .map_err(internal)?;
+                Ok(())
+            })
+        })
+        .await
+        .map_err(|error| format!("{error:?}"))
+}
+
+/// A transaction left open on a pooled connection must never let a later
+/// borrower's commit be reported as successful and then rolled back.
+#[tokio::test]
+#[ignore = "requires cached SQL Server Docker image and OpenSSL; owns its loopback server"]
+async fn an_open_transaction_never_silently_rolls_back_a_later_commit()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut server = OwnedSqlServer::start().await?;
+    execute_batch(
+        &server.connection_string,
+        "CREATE TABLE dbo.GraphqlOrmCountedRecords (\
+             id NVARCHAR(64) NOT NULL PRIMARY KEY, value BIGINT NOT NULL)",
+    )
+    .await?;
+    let config = graphql_orm::tiberius::Config::from_ado_string(&server.connection_string)?;
+    let pool = MssqlPool::with_max_connections_external_writable(config, 1);
+    let database = writable_database(pool.clone());
+    let first = session(&pool).await?;
+
+    // A raw batch opens a transaction and then fails with a non-fatal error
+    // (8134, severity 16). With XACT_ABORT OFF the transaction stays open.
+    assert!(
+        pool.fetch_rows(
+            "BEGIN TRANSACTION; \
+             INSERT INTO dbo.GraphqlOrmCountedRecords (id, value) VALUES ('leaked', 1); \
+             SELECT 1 / 0 AS failed",
+            &[],
+        )
+        .await
+        .is_err()
+    );
+    let after_error = session(&pool).await?;
+    assert_eq!(
+        after_error.connection, first.connection,
+        "the connection is kept"
+    );
+    assert_eq!(
+        after_error.trancount, 0,
+        "it is reset before reuse: {after_error:?}"
+    );
+    assert_eq!(
+        committed_rows(&server.connection_string, "leaked").await?,
+        0
+    );
+
+    // The next borrower's commit is durable.
+    insert_in_transaction(&database, "after-error", false).await?;
+    assert_eq!(
+        committed_rows(&server.connection_string, "after-error").await?,
+        1
+    );
+    assert_eq!(session(&pool).await?.trancount, 0);
+
+    // Pooled statements run through sp_executesql, so SQL Server itself refuses
+    // a batch that leaves its transaction open (error 266, severity 16). The
+    // refusal takes the same reset path, so nothing leaks onto the next borrower.
+    let error = pool
+        .fetch_rows("BEGIN TRANSACTION; SELECT 1 AS opened", &[])
+        .await
+        .err()
+        .expect("a batch that leaves a transaction open is refused");
+    assert!(error.to_string().contains("266"), "{error}");
+    let after_leak = session(&pool).await?;
+    assert_eq!(
+        after_leak.connection, first.connection,
+        "the connection is kept"
+    );
+    assert_eq!(after_leak.trancount, 0, "{after_leak:?}");
+    insert_in_transaction(&database, "after-leak", false).await?;
+    assert_eq!(
+        committed_rows(&server.connection_string, "after-leak").await?,
+        1
+    );
+
+    // A transaction nested inside an ORM transaction is refused, never
+    // reported as committed, and nothing from it is committed.
+    let nested = insert_in_transaction(&database, "nested", true).await;
+    assert!(
+        nested.is_err(),
+        "a nested transaction must not report a commit"
+    );
+    assert_eq!(
+        committed_rows(&server.connection_string, "nested").await?,
+        0
+    );
+    let after_nested = session(&pool).await?;
+    assert_eq!(after_nested.trancount, 0, "{after_nested:?}");
+    insert_in_transaction(&database, "after-nested", false).await?;
+    assert_eq!(
+        committed_rows(&server.connection_string, "after-nested").await?,
+        1
+    );
+
+    server.cleanup()?;
     Ok(())
 }
