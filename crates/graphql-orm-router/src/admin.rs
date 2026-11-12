@@ -356,7 +356,7 @@ async fn metrics_handler(
             )
         })
         .collect::<BTreeMap<_, _>>();
-    hive_router::ntex::web::HttpResponse::Ok().json(&json!({
+    let mut body = json!({
         "router_graphql_requests_total": metrics.graphql_requests_total(),
         "router_graphql_errors_total": metrics.graphql_errors_total(),
         "router_subgraph_requests_total": metrics.subgraph_requests_total(),
@@ -373,7 +373,66 @@ async fn metrics_handler(
         "router_rejected_subgraphs_total": metrics.rejected_subgraphs_total(),
         "router_authorization_denied_total": metrics.authorization_denied_total(),
         "router_subgraph_health": health,
-    }))
+    });
+    if let Some(body) = body.as_object_mut() {
+        body.extend(byte_route_metrics(
+            &runtime.lifecycle.metrics().byte_route_snapshots(),
+        ));
+    }
+    hive_router::ntex::web::HttpResponse::Ok().json(&body)
+}
+
+/// Per-route byte route metrics, keyed by prefix. Absent, rather than empty,
+/// when no byte route is configured, so routers without byte routes report
+/// exactly the keys they reported before byte routes existed.
+fn byte_route_metrics(
+    routes: &[crate::ByteRouteMetricsSnapshot],
+) -> serde_json::Map<String, serde_json::Value> {
+    if routes.is_empty() {
+        return serde_json::Map::new();
+    }
+    let by_route = |value: fn(&crate::ByteRouteMetricsSnapshot) -> u64| {
+        serde_json::Value::from(
+            routes
+                .iter()
+                .map(|route| {
+                    (
+                        route.prefix().to_owned(),
+                        serde_json::Value::from(value(route)),
+                    )
+                })
+                .collect::<serde_json::Map<_, _>>(),
+        )
+    };
+    [
+        (
+            "router_byte_route_requests_total",
+            by_route(|route| route.requests_total()),
+        ),
+        (
+            "router_byte_route_rejected_total",
+            by_route(|route| route.rejected_total()),
+        ),
+        (
+            "router_byte_route_upstream_errors_total",
+            by_route(|route| route.upstream_errors_total()),
+        ),
+        (
+            "router_byte_route_aborted_total",
+            by_route(|route| route.aborted_total()),
+        ),
+        (
+            "router_byte_route_bytes_total",
+            by_route(|route| route.bytes_total()),
+        ),
+        (
+            "router_byte_route_active_requests",
+            by_route(|route| u64::try_from(route.active_requests()).unwrap_or(u64::MAX)),
+        ),
+    ]
+    .into_iter()
+    .map(|(name, value)| (name.to_owned(), value))
+    .collect()
 }
 
 async fn registration_handler(
@@ -632,4 +691,25 @@ async fn validate_websocket(
         .await?;
     require_origin(&target.url, &trusted.graphql_origin, "WebSocket endpoint")?;
     Ok(target.url.path().to_owned())
+}
+
+#[cfg(test)]
+mod byte_route_metric_tests {
+    use super::byte_route_metrics;
+    use crate::metrics::RouterMetrics;
+
+    #[test]
+    fn byte_route_keys_are_absent_without_routes_and_keyed_by_prefix_with_them() {
+        assert!(byte_route_metrics(&[]).is_empty());
+        let metrics = RouterMetrics::default();
+        let routes = metrics.install_byte_routes(&["/files".to_owned(), "/exports".to_owned()]);
+        routes[0].request();
+        routes[1].bytes(7);
+        let keys = byte_route_metrics(&metrics.byte_route_snapshots());
+        assert_eq!(keys.len(), 6);
+        assert_eq!(keys["router_byte_route_requests_total"]["/files"], 1);
+        assert_eq!(keys["router_byte_route_requests_total"]["/exports"], 0);
+        assert_eq!(keys["router_byte_route_bytes_total"]["/exports"], 7);
+        assert_eq!(keys["router_byte_route_active_requests"]["/files"], 0);
+    }
 }

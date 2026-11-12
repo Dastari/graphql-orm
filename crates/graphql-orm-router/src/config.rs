@@ -11,8 +11,8 @@ use reqwest::header::{HeaderName, HeaderValue};
 use url::Url;
 
 use crate::{
-    AuthenticationProvider, ExactScopeMatcher, NetworkPolicy, RouterError, RouterErrorKind,
-    ScopeMatcher,
+    AuthenticationProvider, ByteRoute, ExactScopeMatcher, NetworkPolicy, RouterError,
+    RouterErrorKind, ScopeMatcher,
     node_lookup::{NODE_SUBGRAPH_NAME, NodeLookupConfig},
 };
 
@@ -72,6 +72,7 @@ pub struct RouterConfig {
     pub(crate) subgraph_request_timeout: Duration,
     pub(crate) max_subgraph_connections_per_host: usize,
     pub(crate) node_lookup: Option<NodeLookupConfig>,
+    pub(crate) byte_routes: Vec<ByteRoute>,
 }
 
 /// Fluent engine-neutral router builder.
@@ -107,6 +108,7 @@ impl RouterConfig {
             public_request_timeout: DEFAULT_PUBLIC_REQUEST_TIMEOUT,
             subgraph_request_timeout: DEFAULT_SUBGRAPH_REQUEST_TIMEOUT,
             max_subgraph_connections_per_host: 100,
+            byte_routes: Vec::new(),
         }
     }
 
@@ -279,6 +281,16 @@ impl RouterConfig {
         self
     }
 
+    /// Adds one statically configured byte route on the public listener.
+    ///
+    /// Byte routes are off by default; only listed prefixes are served. See
+    /// [`ByteRoute`] for the authentication, header, and limit rules.
+    #[must_use]
+    pub fn with_byte_route(mut self, route: ByteRoute) -> Self {
+        self.byte_routes.push(route);
+        self
+    }
+
     /// Sets the connection-pool bound applied to each downstream host.
     #[must_use]
     pub fn with_max_subgraph_connections_per_host(mut self, maximum: usize) -> Self {
@@ -357,6 +369,13 @@ impl RouterConfig {
             ));
         }
         validate_graphql_path(&self.graphql_path)?;
+        crate::byte_route::validate_byte_routes(
+            &mut self.byte_routes,
+            &crate::byte_route::ReservedPaths {
+                graphql_path: &self.graphql_path,
+                authentication_configured: self.authentication.is_some(),
+            },
+        )?;
         if let Some(node_lookup) = &self.node_lookup
             && !(1..=10_000).contains(&node_lookup.max_nodes)
         {
@@ -517,6 +536,7 @@ impl fmt::Debug for RouterConfig {
                 "max_subgraph_connections_per_host",
                 &self.max_subgraph_connections_per_host,
             )
+            .field("byte_routes", &self.byte_routes)
             .finish()
     }
 }

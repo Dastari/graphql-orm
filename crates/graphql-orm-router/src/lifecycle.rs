@@ -201,6 +201,12 @@ impl RouterHandle {
         self.lifecycle.metrics().snapshot()
     }
 
+    /// Returns point-in-time counters for each configured byte route, in
+    /// configuration order. Empty when no byte route is configured.
+    pub fn byte_route_metrics(&self) -> Vec<crate::ByteRouteMetricsSnapshot> {
+        self.lifecycle.metrics().byte_route_snapshots()
+    }
+
     /// Returns whether this process currently owns a complete active graph.
     pub fn is_ready(&self) -> bool {
         true

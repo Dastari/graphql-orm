@@ -1,4 +1,7 @@
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{
+    Arc, OnceLock,
+    atomic::{AtomicU64, AtomicUsize, Ordering},
+};
 
 /// Process-local router metric values suitable for an authenticated status
 /// surface or an embedding application's metrics adapter.
@@ -140,9 +143,29 @@ pub(crate) struct RouterMetrics {
     composition_failure_total: AtomicU64,
     rejected_subgraphs_total: AtomicU64,
     authorization_denied_total: AtomicU64,
+    byte_routes: OnceLock<Vec<Arc<ByteRouteCounters>>>,
 }
 
 impl RouterMetrics {
+    /// Installs one counter set per configured byte route, in route order.
+    pub(crate) fn install_byte_routes(&self, prefixes: &[String]) -> Vec<Arc<ByteRouteCounters>> {
+        self.byte_routes
+            .get_or_init(|| {
+                prefixes
+                    .iter()
+                    .map(|prefix| Arc::new(ByteRouteCounters::new(prefix.clone())))
+                    .collect()
+            })
+            .clone()
+    }
+
+    pub(crate) fn byte_route_snapshots(&self) -> Vec<ByteRouteMetricsSnapshot> {
+        self.byte_routes
+            .get()
+            .map(|routes| routes.iter().map(|route| route.snapshot()).collect())
+            .unwrap_or_default()
+    }
+
     pub(crate) fn snapshot(&self) -> RouterMetricsSnapshot {
         RouterMetricsSnapshot {
             graphql_requests_total: self.graphql_requests_total.load(Ordering::Relaxed),
@@ -251,6 +274,143 @@ impl RouterMetrics {
     }
 }
 
+/// Process-local counters for one byte route, labelled by its prefix.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ByteRouteMetricsSnapshot {
+    prefix: String,
+    requests_total: u64,
+    rejected_total: u64,
+    upstream_errors_total: u64,
+    aborted_total: u64,
+    bytes_total: u64,
+    active_requests: usize,
+}
+
+impl ByteRouteMetricsSnapshot {
+    /// The route's configured path prefix, used as its metric label.
+    pub fn prefix(&self) -> &str {
+        &self.prefix
+    }
+
+    snapshot_getter!(
+        requests_total,
+        requests_total,
+        u64,
+        "Total requests claimed by the route, including refused ones."
+    );
+    snapshot_getter!(
+        rejected_total,
+        rejected_total,
+        u64,
+        "Total requests the router refused before contacting the upstream."
+    );
+    snapshot_getter!(
+        upstream_errors_total,
+        upstream_errors_total,
+        u64,
+        "Total requests answered with a router error after contacting the upstream: unreachable, timed out, or a declared size over the limit."
+    );
+    snapshot_getter!(
+        aborted_total,
+        aborted_total,
+        u64,
+        "Total responses whose body stream ended before completion."
+    );
+    snapshot_getter!(
+        bytes_total,
+        bytes_total,
+        u64,
+        "Total upstream response body bytes handed to clients."
+    );
+    snapshot_getter!(
+        active_requests,
+        active_requests,
+        usize,
+        "Current requests holding one of the route's concurrency slots."
+    );
+}
+
+#[derive(Debug)]
+pub(crate) struct ByteRouteCounters {
+    prefix: String,
+    requests_total: AtomicU64,
+    rejected_total: AtomicU64,
+    upstream_errors_total: AtomicU64,
+    aborted_total: AtomicU64,
+    bytes_total: AtomicU64,
+    pub(crate) active_requests: AtomicUsize,
+}
+
+impl ByteRouteCounters {
+    fn new(prefix: String) -> Self {
+        Self {
+            prefix,
+            requests_total: AtomicU64::new(0),
+            rejected_total: AtomicU64::new(0),
+            upstream_errors_total: AtomicU64::new(0),
+            aborted_total: AtomicU64::new(0),
+            bytes_total: AtomicU64::new(0),
+            active_requests: AtomicUsize::new(0),
+        }
+    }
+
+    fn snapshot(&self) -> ByteRouteMetricsSnapshot {
+        ByteRouteMetricsSnapshot {
+            prefix: self.prefix.clone(),
+            requests_total: self.requests_total.load(Ordering::Relaxed),
+            rejected_total: self.rejected_total.load(Ordering::Relaxed),
+            upstream_errors_total: self.upstream_errors_total.load(Ordering::Relaxed),
+            aborted_total: self.aborted_total.load(Ordering::Relaxed),
+            bytes_total: self.bytes_total.load(Ordering::Relaxed),
+            active_requests: self.active_requests.load(Ordering::Relaxed),
+        }
+    }
+
+    pub(crate) fn request(&self) {
+        self.requests_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn rejected(&self) {
+        self.rejected_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn upstream_error(&self) {
+        self.upstream_errors_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn aborted(&self) {
+        self.aborted_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn bytes(&self, count: usize) {
+        self.bytes_total
+            .fetch_add(u64::try_from(count).unwrap_or(u64::MAX), Ordering::Relaxed);
+    }
+
+    /// Takes one concurrency slot, or returns false when all are in use.
+    pub(crate) fn try_acquire(&self, maximum: usize) -> bool {
+        let mut current = self.active_requests.load(Ordering::Acquire);
+        loop {
+            if current >= maximum {
+                return false;
+            }
+            match self.active_requests.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    pub(crate) fn release(&self) {
+        decrement(&self.active_requests, 1);
+    }
+}
+
 fn decrement(counter: &AtomicUsize, count: usize) {
     // Keep the atomic saturating update compatible with the Rust 1.90 MSRV;
     // current Rust deprecates fetch_update in favor of the newer try_update.
@@ -310,6 +470,33 @@ mod tests {
         let snapshot = metrics.snapshot();
         assert_eq!(snapshot.pending_websocket_connections(), 0);
         assert_eq!(snapshot.active_websocket_connections(), 0);
+    }
+
+    #[test]
+    fn byte_route_counters_are_labelled_and_bounded() {
+        let metrics = RouterMetrics::default();
+        assert!(metrics.byte_route_snapshots().is_empty());
+        let routes = metrics.install_byte_routes(&["/files".to_owned(), "/exports".to_owned()]);
+        routes[0].request();
+        routes[0].request();
+        routes[0].rejected();
+        routes[0].bytes(10);
+        routes[1].upstream_error();
+        routes[1].aborted();
+        assert!(routes[1].try_acquire(1));
+        assert!(!routes[1].try_acquire(1));
+        let snapshots = metrics.byte_route_snapshots();
+        assert_eq!(snapshots[0].prefix(), "/files");
+        assert_eq!(snapshots[0].requests_total(), 2);
+        assert_eq!(snapshots[0].rejected_total(), 1);
+        assert_eq!(snapshots[0].bytes_total(), 10);
+        assert_eq!(snapshots[1].prefix(), "/exports");
+        assert_eq!(snapshots[1].upstream_errors_total(), 1);
+        assert_eq!(snapshots[1].aborted_total(), 1);
+        assert_eq!(snapshots[1].active_requests(), 1);
+        routes[1].release();
+        routes[1].release();
+        assert_eq!(metrics.byte_route_snapshots()[1].active_requests(), 0);
     }
 
     #[test]

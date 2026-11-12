@@ -55,6 +55,8 @@ use crate::{
 
 use super::{CandidateSubgraph, GraphStore};
 
+mod byte_routes;
+
 const CHILD_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_CHILD";
 const PRODUCTS_ENDPOINT_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_PRODUCTS_ENDPOINT";
 const REVIEWS_ENDPOINT_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_REVIEWS_ENDPOINT";
@@ -105,6 +107,10 @@ fn router_child_entrypoint() {
         .name("graphql-orm-router-wire-child")
         .build(ntex::rt::DefaultRuntime)
         .block_on(async move {
+            if mode == "byte-routes" {
+                byte_routes::run_child().await;
+                return;
+            }
             if mode == "admin" {
                 let public_address = child_listener_address();
                 let admin_address = child_listener_address();
@@ -970,6 +976,14 @@ fn authenticated_admin_registration_binds_identity_destinations_and_restart_stat
     assert!(metrics["router_graphql_requests_total"].as_u64().unwrap() >= 2);
     assert!(metrics["router_subgraph_requests_total"].as_u64().unwrap() >= 2);
     assert_eq!(metrics["router_websocket_rejections_total"], 0);
+    // A router without byte routes reports none of their keys.
+    assert!(
+        metrics
+            .as_object()
+            .unwrap()
+            .keys()
+            .all(|key| !key.starts_with("router_byte_route_"))
+    );
     assert!(
         metrics["router_composition_success_total"]
             .as_u64()

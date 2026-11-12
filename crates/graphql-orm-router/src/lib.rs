@@ -11,6 +11,7 @@ mod admin;
 #[cfg(feature = "auth-agql")]
 mod agql;
 mod auth;
+mod byte_route;
 mod config;
 mod federation;
 mod file_config;
@@ -23,6 +24,7 @@ mod server;
 mod subscription_continuity;
 mod subscriptions;
 
+pub use byte_route::ByteRoute;
 pub use config::{
     AdminConfig, RequestLimits, RouterBuilder, RouterConfig, RouterLogLevel, RouterTelemetryConfig,
     StaticSubgraph, SubscriptionConfig, TrustedSubgraph,
@@ -89,6 +91,6 @@ pub use lifecycle::{
     RouterHandle, RouterStatus, SchemaRefreshOutcome, SubgraphRuntimeState, SubgraphSourceKind,
     SubgraphStatus,
 };
-pub use metrics::RouterMetricsSnapshot;
+pub use metrics::{ByteRouteMetricsSnapshot, RouterMetricsSnapshot};
 pub use network::{HostResolver, NetworkCidr, NetworkPolicy, SystemHostResolver};
 pub use node_lookup::{DEFAULT_MAX_NODES, NODE_SUBGRAPH_NAME, NodeLookupConfig};

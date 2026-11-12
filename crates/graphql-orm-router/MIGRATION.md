@@ -10,6 +10,26 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.11.0 to 0.12.0: opt-in byte routes
+
+No change is needed. Byte routes are off until `byteRoutes` or
+`RouterConfig::with_byte_route` lists one, and a configuration without them
+serves exactly the same paths as before. Validation rejects a byte route that
+overlaps the GraphQL path, `/health`, `/readiness`, or another byte route, and
+an authenticated byte route on a router without an authentication provider.
+When byte routes are configured, the admin `GET /_router/metrics` response gains
+six `router_byte_route_*` keys, each an object keyed by route prefix. They are
+absent when no byte route is configured, so that response is unchanged for
+existing deployments. Metrics consumers that reject unknown keys must accept
+them before enabling a byte route.
+
+To move a download that currently bypasses the router, list its path prefix
+and upstream base URL, keep the route authenticated unless the link is meant to
+work without sign-in, and set `maxResponseBytes` above the largest expected
+file. The upstream still receives the verified `Authorization` header and must
+make its own authorization decision. See the
+[byte route reference](docs/configuration.md#byte-routes).
+
 ## 0.10.0 to 0.11.0
 
 ### agql-auth 0.26.0

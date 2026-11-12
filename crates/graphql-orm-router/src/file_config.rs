@@ -11,10 +11,10 @@ use agql_auth::{HierarchicalScopeMatch, HierarchicalScopeOptions};
 #[cfg(feature = "auth-agql")]
 use crate::AgqlScopeMatcher;
 use crate::{
-    AdminConfig, ExactScopeMatcher, JwksAuthenticationConfig, JwksAuthenticationProvider,
-    LegacyScopeClaims, NetworkCidr, NetworkPolicy, NodeLookupConfig, RequestLimits,
-    RoleScopeCatalogueConfig, RouterConfig, RouterError, RouterErrorKind, RouterLogLevel,
-    RouterTelemetryConfig, StaticSubgraph, SubscriptionConfig, TrustedSubgraph,
+    AdminConfig, ByteRoute, ExactScopeMatcher, JwksAuthenticationConfig,
+    JwksAuthenticationProvider, LegacyScopeClaims, NetworkCidr, NetworkPolicy, NodeLookupConfig,
+    RequestLimits, RoleScopeCatalogueConfig, RouterConfig, RouterError, RouterErrorKind,
+    RouterLogLevel, RouterTelemetryConfig, StaticSubgraph, SubscriptionConfig, TrustedSubgraph,
 };
 
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
@@ -54,6 +54,8 @@ pub struct RouterFileConfig {
     subgraph_request_timeout_ms: Option<u64>,
     max_subgraph_connections_per_host: Option<usize>,
     node_lookup: Option<FileNodeLookup>,
+    #[serde(default)]
+    byte_routes: Vec<FileByteRoute>,
 }
 
 impl RouterFileConfig {
@@ -244,6 +246,9 @@ impl RouterFileConfig {
         }
         if let Some(maximum) = self.max_subgraph_connections_per_host {
             config = config.with_max_subgraph_connections_per_host(maximum);
+        }
+        for route in self.byte_routes {
+            config = config.with_byte_route(route.build());
         }
         if let Some(admin) = self.admin {
             let listener = environment(ADMIN_LISTENER_ENV)?
@@ -535,6 +540,63 @@ struct FileSubgraph {
 }
 
 /// Opt-in router-hosted `node(NodeId)` lookup.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FileByteRoute {
+    prefix: String,
+    upstream: String,
+    #[serde(default)]
+    public: bool,
+    #[serde(default)]
+    allow_range: bool,
+    #[serde(default)]
+    allow_set_cookie: bool,
+    #[serde(default)]
+    forward_request_headers: Vec<String>,
+    #[serde(default)]
+    pass_response_headers: Vec<String>,
+    max_response_bytes: Option<u64>,
+    max_concurrent_requests: Option<usize>,
+    max_requests_per_second: Option<usize>,
+    connect_timeout_ms: Option<u64>,
+    idle_timeout_ms: Option<u64>,
+    max_duration_ms: Option<u64>,
+}
+
+impl FileByteRoute {
+    fn build(self) -> ByteRoute {
+        let mut route = ByteRoute::new(self.prefix, self.upstream)
+            .public(self.public)
+            .allow_range(self.allow_range)
+            .allow_set_cookie(self.allow_set_cookie);
+        for name in self.forward_request_headers {
+            route = route.forward_request_header(name);
+        }
+        for name in self.pass_response_headers {
+            route = route.pass_response_header(name);
+        }
+        if let Some(bytes) = self.max_response_bytes {
+            route = route.with_max_response_bytes(bytes);
+        }
+        if let Some(maximum) = self.max_concurrent_requests {
+            route = route.with_max_concurrent_requests(maximum);
+        }
+        if let Some(maximum) = self.max_requests_per_second {
+            route = route.with_max_requests_per_second(maximum);
+        }
+        if let Some(milliseconds) = self.connect_timeout_ms {
+            route = route.with_connect_timeout(Duration::from_millis(milliseconds));
+        }
+        if let Some(milliseconds) = self.idle_timeout_ms {
+            route = route.with_idle_timeout(Duration::from_millis(milliseconds));
+        }
+        if let Some(milliseconds) = self.max_duration_ms {
+            route = route.with_max_duration(Duration::from_millis(milliseconds));
+        }
+        route
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct FileNodeLookup {
@@ -926,6 +988,74 @@ mod tests {
             RouterFileConfig::from_json(FILE)
                 .unwrap()
                 .into_router_config_with(|_| Ok(None))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn byte_routes_are_off_by_default_and_strictly_parsed() {
+        let environment = |name: &str| {
+            Ok((name == "PRODUCTS_SCHEMA_TOKEN").then(|| "Bearer schema-secret".to_owned()))
+        };
+        let config = RouterFileConfig::from_json(FILE)
+            .unwrap()
+            .into_router_config_with(environment)
+            .unwrap();
+        assert!(config.byte_routes.is_empty());
+
+        let json = FILE.replacen(
+            "\"publicRequestTimeoutMs\"",
+            r#""byteRoutes": [
+                {"prefix": "/files", "upstream": "http://127.0.0.1:4100/downloads"},
+                {
+                    "prefix": "/shared",
+                    "upstream": "http://127.0.0.1:4100/shared",
+                    "public": true,
+                    "allowRange": true,
+                    "allowSetCookie": true,
+                    "forwardRequestHeaders": ["x-request-id"],
+                    "passResponseHeaders": ["x-checksum"],
+                    "maxResponseBytes": 1024,
+                    "maxConcurrentRequests": 2,
+                    "maxRequestsPerSecond": 3,
+                    "connectTimeoutMs": 400,
+                    "idleTimeoutMs": 500,
+                    "maxDurationMs": 600
+                }
+            ],
+            "publicRequestTimeoutMs""#,
+            1,
+        );
+        let config = RouterFileConfig::from_json(&json)
+            .unwrap()
+            .into_router_config_with(environment)
+            .unwrap()
+            .validate()
+            .unwrap();
+        let [files, shared] = config.byte_routes.as_slice() else {
+            panic!("two byte routes");
+        };
+        assert!(!files.public && !files.allow_range && !files.allow_set_cookie);
+        assert_eq!(files.max_response_bytes, 64 * 1024 * 1024);
+        assert!(shared.public && shared.allow_range && shared.allow_set_cookie);
+        assert!(shared.forward_request_headers.contains("x-request-id"));
+        assert!(shared.pass_response_headers.contains("x-checksum"));
+        assert_eq!(shared.max_response_bytes, 1024);
+        assert_eq!(shared.max_concurrent_requests, 2);
+        assert_eq!(shared.max_requests_per_second, 3);
+        assert_eq!(shared.connect_timeout, Duration::from_millis(400));
+        assert_eq!(shared.idle_timeout, Duration::from_millis(500));
+        assert_eq!(shared.max_duration, Duration::from_millis(600));
+
+        let unknown = json.replacen("\"public\": true", "\"public\": true, \"hosts\": []", 1);
+        assert!(RouterFileConfig::from_json(&unknown).is_err());
+        let traversal = json.replacen("\"/files\"", "\"/files/..\"", 1);
+        assert!(
+            RouterFileConfig::from_json(&traversal)
+                .unwrap()
+                .into_router_config_with(environment)
+                .unwrap()
+                .validate()
                 .is_err()
         );
     }
