@@ -388,7 +388,11 @@ pub struct Zone {
 The entity gains a read-only `NodeId: ID!` field, which has no column and no
 input, and a resolvable `@key(fields: "NodeId")` next to any `federation_key`.
 Complex `SimpleObject` entities deriving `GraphQLRelations` also receive these
-fields, including the `compose_complex_object` layout. Generated `Changed`
+fields, including the `compose_complex_object` layout, which also serves an
+entity with typed computed fields and no relations. A plain `#[ComplexObject]`
+cannot carry the generated field, so `node_id` there is a compile error. The
+`SimpleObject` scalar fields of these entities, the encoded key fields included,
+need `graphql_policy_object` for their column read policies. Generated `Changed`
 snapshots may select `NodeId`; admission and release check every encoded
 primary-key field rather than treating the identity as authority.
 

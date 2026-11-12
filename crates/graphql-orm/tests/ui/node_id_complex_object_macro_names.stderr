@@ -1,0 +1,21 @@
+error[E0080]: evaluation panicked: `handwritten` declares the GraphQL field `RecordVersion`, which the composed object already generates with its declared policy; remove this handwritten field
+  --> tests/ui/node_id_complex_object_macro_names.rs:31:22
+   |
+31 |             async fn handwritten(&self) -> i64 {
+   |                      ^^^^^^^^^^^ evaluation of `_` failed here
+...
+50 | named!("RecordVersion");
+   | ----------------------- in this macro invocation
+   |
+   = note: this error originates in the macro `$crate::panic::panic_2021` which comes from the expansion of the macro `named` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0080]: evaluation panicked: `NODeId` declares the GraphQL field `NodeId`, which the composed object already generates with its declared policy; remove this handwritten field
+  --> tests/ui/node_id_complex_object_macro_names.rs:43:22
+   |
+43 |             async fn NODeId(&self) -> String {
+   |                      ^^^^^^ evaluation of `_` failed here
+...
+51 | renamed!("PascalCase");
+   | ---------------------- in this macro invocation
+   |
+   = note: this error originates in the macro `$crate::panic::panic_2021` which comes from the expansion of the macro `renamed` (in Nightly builds, run with -Z macro-backtrace for more info)

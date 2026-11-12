@@ -112,6 +112,7 @@ run_postgres_legacy() {
     --test portable_primitives_postgres \
     --test postgres_compat \
     --test postgres_rls \
+    --test postgres_rls_drift \
     --test propagated_subscriptions \
     --test read_predicate \
     --test read_projections \
@@ -119,6 +120,7 @@ run_postgres_legacy() {
     --test relation_delete_policy \
     --test renamed_columns \
     --test row_policy_and_input_transform \
+    --test row_write_tracker \
     --test schema_only_entity \
     --test schema_stages \
     --test spatial_fields \
@@ -139,7 +141,7 @@ run_mssql() {
     --test migration_composite_uniques -- --include-ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features mssql --test dependent_delete_ui
   cargo test -p graphql-orm --no-default-features --features mssql \
-    --test mssql_writes --test mssql_integration --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial --test implicit_timestamp_defaults --test read_predicate --locked -- --ignored --test-threads=1
+    --test mssql_writes --test mssql_trigger_writes --test mssql_integration --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial --test implicit_timestamp_defaults --test read_predicate --locked -- --ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features sqlite \
     --test federation_end_to_end_fixture -- --ignored node_lookup_through_the_router_on_owned_mssql
 }

@@ -907,6 +907,61 @@ pub struct MutationContext<'tx, B: WriteBackend = DefaultWriteBackend> {
     pub(crate) change_journal_verified_tables: Vec<&'static str>,
 }
 
+/// Whether a statement run through [`MutationContext::execute`] changed rows.
+///
+/// Savepoint and session statements change no rows. A data-modifying
+/// statement changed rows when its affected-row count is nonzero, which every
+/// backend reports exactly for its own `INSERT`, `UPDATE`, `DELETE` and
+/// `MERGE`. SQLite reports a stale count for any other statement, so those
+/// (for example a SQL Server `SELECT ... INTO` batch, or host SQL) count as
+/// writes.
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+fn statement_changed_rows(sql: &str, rows_affected: u64) -> bool {
+    let keyword = sql
+        .trim_start()
+        .split(|c: char| c.is_whitespace())
+        .next()
+        .unwrap_or("");
+    let is = |keywords: &[&str]| {
+        keywords
+            .iter()
+            .any(|candidate| keyword.eq_ignore_ascii_case(candidate))
+    };
+    if is(&[
+        "SAVEPOINT",
+        "RELEASE",
+        "ROLLBACK",
+        "SAVE",
+        "BEGIN",
+        "COMMIT",
+        "SET",
+    ]) {
+        false
+    } else if is(&["INSERT", "UPDATE", "DELETE", "MERGE", "REPLACE"]) {
+        rows_affected > 0
+    } else {
+        true
+    }
+}
+
+/// Tracks one generated write operation on a [`MutationContext`].
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+#[doc(hidden)]
+pub struct WriteTracker {
+    state: std::sync::Arc<super::runtime_transaction::RuntimeTransactionState>,
+    start: usize,
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+impl WriteTracker {
+    /// Poison the transaction when the operation failed after changing rows.
+    pub fn finish<T, E>(self, result: &Result<T, E>) {
+        if result.is_err() && self.state.writes() != self.start {
+            self.state.poison();
+        }
+    }
+}
+
 /// Narrow transaction-bound capability for regulated retention maintenance.
 ///
 /// Values of this type can only be created by
@@ -1437,7 +1492,29 @@ where
         sql: &str,
         values: &[SqlValue],
     ) -> crate::Result<B::WriteResult> {
-        B::execute_in_transaction(&mut self.tx, sql, values).await
+        let result = B::execute_in_transaction(&mut self.tx, sql, values).await?;
+        if statement_changed_rows(sql, B::rows_affected(&result)) {
+            self.runtime_state.note_write();
+        }
+        Ok(result)
+    }
+
+    /// Record a write that changed rows through [`Self::fetch_rows`], such as
+    /// `UPDATE ... RETURNING`.
+    #[doc(hidden)]
+    pub fn __note_write(&self) {
+        self.runtime_state.note_write();
+    }
+
+    /// Start tracking one generated write operation. If it then fails after
+    /// changing rows, [`WriteTracker::finish`] makes this transaction
+    /// uncommittable, so a caller cannot commit its partial effects.
+    #[doc(hidden)]
+    pub fn __track_writes(&self) -> WriteTracker {
+        WriteTracker {
+            state: self.runtime_state.clone(),
+            start: self.runtime_state.writes(),
+        }
     }
 
     /// Exact affected-row count for a backend write result.
@@ -1517,11 +1594,44 @@ where
         }
     }
 
+    /// Whether a row this transaction wrote failed the row write policy.
+    pub(crate) fn write_refused(&self) -> bool {
+        self.runtime_state.write_refused()
+    }
+
     pub(crate) fn runtime_cannot_commit(&self) -> bool {
         self.runtime_state.cannot_commit()
     }
 
+    /// Check a row this transaction has just written against the row write
+    /// policy. A refusal also blocks [`Self::commit_and_emit`], so a caller that
+    /// ignores the error cannot commit the refused row.
+    #[doc(hidden)]
+    pub async fn __ensure_written_row(
+        &mut self,
+        ctx: Option<&async_graphql::Context<'_>>,
+        entity_name: &'static str,
+        write_policy: Option<&'static str>,
+        surface: EntityAccessSurface,
+        row: &(dyn std::any::Any + Send + Sync),
+    ) -> async_graphql::Result<()> {
+        let result = self
+            .db
+            .ensure_writable_row(ctx, entity_name, write_policy, surface, row)
+            .await;
+        if result.is_err() {
+            self.runtime_state.refuse_write();
+        }
+        result
+    }
+
     pub async fn commit_and_emit(self) -> crate::Result<()> {
+        if self.runtime_state.write_refused() {
+            self.rollback().await?;
+            return Err(crate::graphql::errors::sqlx_error_from_public(
+                crate::graphql::errors::OrmPublicError::forbidden(),
+            ));
+        }
         if self.runtime_cannot_commit() {
             self.rollback().await?;
             return Err(crate::graphql::errors::sqlx_error_from_public(
@@ -1958,6 +2068,10 @@ where
         self.mutation.rollback().await
     }
 
+    pub(crate) fn write_refused(&self) -> bool {
+        self.mutation.write_refused()
+    }
+
     /// Append a row through the entity's normal generated insert path.
     ///
     /// This enables a host schema to record a separate redacted purge fact in
@@ -2045,6 +2159,11 @@ where
             )
             .await
             .map_err(|error| sqlx::Error::Protocol(format!("{error:?}")))?;
+        // A declared write policy needs its row provider here too, before selection.
+        self.mutation
+            .db
+            .ensure_row_write_provider(metadata.entity_name, metadata.write_policy)
+            .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
         if filter.is_empty() {
             return Err(sqlx::Error::Protocol(
                 "retention purge requires a non-empty typed filter".to_string(),
@@ -2702,6 +2821,26 @@ pub trait FieldPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
 }
 
 pub trait RowPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
+    /// Declare what `read_visibility` can return for this entity and policy key.
+    ///
+    /// Keyset pagination serves a GraphQL request only with `Complete` or
+    /// `Unrestricted` visibility. Generated schema builders refuse an exposed
+    /// Keyset root for an entity declared
+    /// [`super::ReadVisibilityCapability::ResidualOnly`], a contradiction the
+    /// host wrote. The default, `Unknown`, keeps the root registered;
+    /// `Database::keyset_read_policy_diagnostics` reports it. Return `Complete`
+    /// when `read_visibility` returns `Complete` or `Unrestricted` for this
+    /// entity on at least some GraphQL requests. The declaration never grants
+    /// access or bypasses runtime checks: a GraphQL Keyset request that still
+    /// gets residual visibility is refused with `AUTHORIZATION_MISCONFIGURED`.
+    fn read_visibility_capability(
+        &self,
+        _entity_name: &'static str,
+        _policy_key: Option<&'static str>,
+    ) -> super::ReadVisibilityCapability {
+        super::ReadVisibilityCapability::Unknown
+    }
+
     /// Describe read visibility for this request, entity, and access surface.
     /// The default preserves callback-only authorization. A complete predicate
     /// (or `Unrestricted`) replaces row callbacks only on read paths that
@@ -5123,5 +5262,46 @@ mod mssql_money_domain_tests {
             money
         );
         assert!(serde_json::from_str::<DecimalDef>(r#"{"precision":19,"scale":4}"#).is_err());
+    }
+}
+
+#[cfg(all(test, any(feature = "sqlite", feature = "postgres", feature = "mssql")))]
+mod statement_changed_rows_tests {
+    use super::statement_changed_rows;
+
+    #[test]
+    fn control_statements_never_count() {
+        for sql in [
+            "SAVEPOINT graphql_orm_cas",
+            "release savepoint graphql_orm_cas",
+            "ROLLBACK TO SAVEPOINT graphql_orm_cas",
+            "SAVE TRANSACTION graphql_orm_cas",
+            "SET LOCAL row_security = off",
+        ] {
+            assert!(!statement_changed_rows(sql, 1), "{sql}");
+        }
+    }
+
+    #[test]
+    fn data_statements_count_only_changed_rows() {
+        for sql in [
+            "INSERT INTO t (a) VALUES (?) ON CONFLICT (a) DO NOTHING",
+            "  update t SET a = ?",
+            "DELETE FROM t",
+            "MERGE INTO t USING s ON (t.a = s.a)",
+        ] {
+            assert!(!statement_changed_rows(sql, 0), "{sql}");
+            assert!(statement_changed_rows(sql, 2), "{sql}");
+        }
+    }
+
+    #[test]
+    fn other_statements_count_whatever_they_report() {
+        // SQLite reports the previous statement's change count for these.
+        assert!(statement_changed_rows(
+            "SELECT 1 INTO #source; MERGE INTO t USING #source",
+            0
+        ));
+        assert!(statement_changed_rows("EXEC write_rows", 0));
     }
 }

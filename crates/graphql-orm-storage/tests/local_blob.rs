@@ -582,3 +582,168 @@ async fn local_blob_writes_leave_no_temp_files_and_interrupted_ones_are_swept() 
     );
     assert!(!interrupted.exists());
 }
+
+/// Name components chosen to sort around `/` (0x2F) and across UTF-8 widths,
+/// so a sibling file or directory can fall between a directory and its
+/// children in key order.
+const TRICKY_COMPONENTS: &[&str] = &[
+    "a",
+    "a-b",
+    "a.b",
+    "a b",
+    "a!",
+    "a+",
+    "a0",
+    "a:",
+    "a~",
+    "ab",
+    "a_",
+    "-",
+    ".a",
+    "a.",
+    "-a",
+    "A",
+    "z",
+    "é",
+    "e",
+    "ä",
+    "日本",
+    "a\u{7f}",
+    "a\u{e9}",
+    "a\u{10000}",
+];
+
+/// Deterministic xorshift generator, so failures reproduce from the seed.
+struct KeyRng(u64);
+
+impl KeyRng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+
+    fn below(&mut self, bound: usize) -> usize {
+        usize::try_from(self.next() % bound as u64).expect("index fits")
+    }
+}
+
+/// Generates a key set in which no key is also a directory of another key.
+fn tricky_key_set(rng: &mut KeyRng) -> Vec<String> {
+    let mut keys = std::collections::BTreeSet::new();
+    for _ in 0..(4 + rng.below(20)) {
+        let depth = 1 + rng.below(3);
+        let key = (0..depth)
+            .map(|_| TRICKY_COMPONENTS[rng.below(TRICKY_COMPONENTS.len())])
+            .collect::<Vec<_>>()
+            .join("/");
+        let conflicts = keys.iter().any(|existing: &String| {
+            existing.starts_with(&format!("{key}/")) || key.starts_with(&format!("{existing}/"))
+        });
+        if !conflicts {
+            keys.insert(key);
+        }
+    }
+    keys.into_iter().collect()
+}
+
+async fn drain_pages(backend: &LocalStorageBackend, prefix: &str, limit: usize) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::new();
+    let mut continuation = None;
+    loop {
+        let page = backend
+            .list_blobs_page(prefix, continuation.clone(), limit)
+            .await
+            .expect("list page");
+        assert!(page.keys.len() <= limit, "page exceeds its limit");
+        if let Some(token) = &continuation {
+            assert!(
+                page.keys.iter().all(|key| key > token),
+                "page {:?} repeats keys at or before {token:?}",
+                page.keys
+            );
+        }
+        keys.extend(page.keys);
+        continuation = page.next_continuation;
+        if continuation.is_none() {
+            return keys;
+        }
+    }
+}
+
+#[tokio::test]
+async fn local_blob_paged_listing_is_in_exact_key_order_for_tricky_sibling_names() {
+    for seed in 1..=40_u64 {
+        let mut rng = KeyRng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+        let keys = tricky_key_set(&mut rng);
+        let temp = TempDir::new().expect("temp dir");
+        let backend = LocalStorageBackend::new(temp.path());
+        for key in &keys {
+            backend
+                .put_blob(
+                    key,
+                    StorageByteStream::from_bytes(Bytes::from_static(b"x")),
+                    BlobPutOptions::default(),
+                )
+                .await
+                .expect("put blob");
+        }
+
+        assert_eq!(
+            backend.list_blobs("").await.expect("list all"),
+            keys,
+            "seed {seed}: full listing order"
+        );
+        for limit in 1..=keys.len() + 1 {
+            assert_eq!(
+                drain_pages(&backend, "", limit).await,
+                keys,
+                "seed {seed}: pages of {limit}"
+            );
+        }
+
+        // Every directory prefix pages through exactly the keys beneath it.
+        let directories = keys
+            .iter()
+            .flat_map(|key| {
+                let parts = key.split('/').collect::<Vec<_>>();
+                (1..parts.len()).map(move |depth| parts[..depth].join("/"))
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        for prefix in directories {
+            let expected = keys
+                .iter()
+                .filter(|key| key.starts_with(&format!("{prefix}/")))
+                .cloned()
+                .collect::<Vec<_>>();
+            for limit in [1, 2, 3] {
+                assert_eq!(
+                    drain_pages(&backend, &prefix, limit).await,
+                    expected,
+                    "seed {seed}: prefix {prefix:?}, pages of {limit}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn local_blob_pagination_does_not_skip_a_sibling_sorting_below_a_directory() {
+    let temp = TempDir::new().expect("temp dir");
+    let backend = LocalStorageBackend::new(temp.path());
+    for key in ["a/x", "a-b", "a.b/y", "b"] {
+        backend
+            .put_blob(
+                key,
+                StorageByteStream::from_bytes(Bytes::from_static(b"x")),
+                BlobPutOptions::default(),
+            )
+            .await
+            .expect("put blob");
+    }
+
+    let expected = ["a-b", "a.b/y", "a/x", "b"].map(String::from).to_vec();
+    assert_eq!(backend.list_blobs("").await.expect("list all"), expected);
+    assert_eq!(drain_pages(&backend, "", 1).await, expected);
+}

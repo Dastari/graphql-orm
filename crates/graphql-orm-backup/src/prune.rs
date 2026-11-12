@@ -10,7 +10,9 @@ use crate::{
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// Retention policy for repository pruning.
 pub struct KeepPolicy {
-    /// Number of newest manifest chains to retain.
+    /// Number of newest manifest chains to retain. Must be at least one:
+    /// [`prune`] refuses `0`, which would delete every snapshot. Remove a
+    /// repository's last snapshot explicitly with [`delete_snapshot`].
     pub keep_last: usize,
     /// Advisory repository lock settings.
     pub lock: RepositoryLockOptions,
@@ -32,8 +34,11 @@ pub struct PruneResult {
     pub retained_snapshots: usize,
     /// Number of expired snapshot manifests.
     pub deleted_snapshots: usize,
-    /// Number of blobs deleted.
+    /// Number of blobs deleted, including orphaned payloads.
     pub deleted_blobs: usize,
+    /// Number of deleted snapshot payloads that no manifest owned, such as
+    /// those left by a crashed backup.
+    pub deleted_orphan_blobs: usize,
 }
 
 /// Prunes expired snapshots and unreferenced object blobs.
@@ -48,24 +53,34 @@ pub struct PruneResult {
 /// truncated the same way every time cannot be detected here; providers must
 /// fail such listings themselves.
 ///
+/// It also removes orphaned snapshot payloads: blobs below a
+/// `snapshots/{snapshot_id}/` directory that has no manifest, such as those a
+/// crashed backup left. Before removing a directory it checks that no
+/// manifest is stored there, and aborts without deleting it if one is, since
+/// the listing then omitted a snapshot. Keys outside canonical snapshot
+/// directories are left alone. Because every writer holds the repository
+/// lock, no running backup's payloads can be mistaken for orphans.
+///
 /// # Errors
 ///
-/// Returns [`BackupError`] if repository listing, manifest loading, locking, or
-/// blob deletion fails, or if the snapshot listing is incomplete.
+/// Returns [`BackupError::InvalidRetentionPolicy`] for `keep_last: 0` without
+/// touching the repository, or another [`BackupError`] if repository listing,
+/// manifest loading, locking, or blob deletion fails, or if the snapshot
+/// listing is incomplete.
 pub async fn prune(
     repository: &dyn BackupRepository,
     keep_policy: &KeepPolicy,
 ) -> Result<PruneResult, BackupError> {
+    if keep_policy.keep_last == 0 {
+        return Err(BackupError::InvalidRetentionPolicy {
+            reason: "keep_last must be at least 1; 0 would delete every snapshot".to_string(),
+        });
+    }
     // Refuse before the lock write: without a key no manifest can be trusted.
     required_authenticator(repository)?;
-    let lock = RepositoryLock::acquire(repository, &keep_policy.lock).await?;
+    let lock = RepositoryLock::acquire_for(repository, &keep_policy.lock, "prune").await?;
     let result = prune_inner(repository, keep_policy).await;
-    let release_result = lock.release().await;
-    match (result, release_result) {
-        (Ok(result), Ok(())) => Ok(result),
-        (Err(err), _) => Err(err),
-        (Ok(_), Err(err)) => Err(err),
-    }
+    lock.finish(result, |_| None).await
 }
 
 async fn prune_inner(
@@ -118,6 +133,8 @@ async fn prune_inner(
     }
 
     ensure_stable_listing(repository, &retained_ids).await?;
+    let deleted_orphan_blobs = delete_orphaned_payloads(repository, &retained_ids).await?;
+    deleted_blobs += deleted_orphan_blobs;
     for key in repository.list_blobs("objects/sha256").await? {
         if !reachable_content_keys.contains(&key) {
             repository.delete_blob(&key).await?;
@@ -129,7 +146,40 @@ async fn prune_inner(
         retained_snapshots: retained_ids.len(),
         deleted_snapshots: expired_ids.len(),
         deleted_blobs,
+        deleted_orphan_blobs,
     })
+}
+
+/// Deletes blobs in snapshot directories that hold no manifest.
+///
+/// A directory whose manifest is stored but was not listed aborts the sweep
+/// before anything in it is deleted.
+async fn delete_orphaned_payloads(
+    repository: &dyn BackupRepository,
+    retained_ids: &HashSet<Uuid>,
+) -> Result<usize, BackupError> {
+    let mut checked = HashSet::new();
+    let mut deleted = 0_usize;
+    for key in repository.list_blobs("snapshots").await? {
+        let Some(snapshot_id) = snapshot_id_from_payload_key(&key) else {
+            continue;
+        };
+        if retained_ids.contains(&snapshot_id) {
+            continue;
+        }
+        if checked.insert(snapshot_id)
+            && repository
+                .blob_exists(&snapshot_manifest_key(snapshot_id))
+                .await?
+        {
+            return Err(incomplete_listing(format!(
+                "snapshot {snapshot_id} has a stored manifest that was not listed"
+            )));
+        }
+        repository.delete_blob(&key).await?;
+        deleted += 1;
+    }
+    Ok(deleted)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -161,14 +211,9 @@ pub async fn delete_snapshot(
     lock_options: &RepositoryLockOptions,
 ) -> Result<DeleteSnapshotResult, BackupError> {
     required_authenticator(repository)?;
-    let lock = RepositoryLock::acquire(repository, lock_options).await?;
+    let lock = RepositoryLock::acquire_for(repository, lock_options, "delete_snapshot").await?;
     let result = delete_snapshot_inner(repository, snapshot_id).await;
-    let release_result = lock.release().await;
-    match (result, release_result) {
-        (Ok(result), Ok(())) => Ok(result),
-        (Err(err), _) => Err(err),
-        (Ok(_), Err(err)) => Err(err),
-    }
+    lock.finish(result, |_| None).await
 }
 
 async fn delete_snapshot_inner(
@@ -330,6 +375,14 @@ fn snapshot_id_from_manifest_key(key: &str) -> Option<Uuid> {
     let snapshot_id = rest.strip_suffix("/manifest.json")?;
     // Accept only the canonical lowercase hyphenated form that this crate
     // writes, so each listed key names exactly one manifest path.
+    let parsed = Uuid::parse_str(snapshot_id).ok()?;
+    (parsed.hyphenated().to_string() == snapshot_id).then_some(parsed)
+}
+
+/// Snapshot id of a key inside a canonical `snapshots/{snapshot_id}/` directory.
+fn snapshot_id_from_payload_key(key: &str) -> Option<Uuid> {
+    let rest = key.strip_prefix("snapshots/")?;
+    let (snapshot_id, _) = rest.split_once('/')?;
     let parsed = Uuid::parse_str(snapshot_id).ok()?;
     (parsed.hyphenated().to_string() == snapshot_id).then_some(parsed)
 }

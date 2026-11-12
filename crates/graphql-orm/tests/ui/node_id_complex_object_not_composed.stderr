@@ -1,0 +1,18 @@
+error[E0277]: `Record` declares `node_id` and `compose_complex_object`, but no `#[graphql_complex_object]` impl mounts the generated `NodeId`
+  --> tests/ui/node_id_complex_object_not_composed.rs:10:8
+   |
+10 | struct Record {
+   |        ^^^^^^ `NodeId` is not mounted on this complex object
+   |
+help: the trait `graphql_orm::prelude::GeneratedComplexObjectMounted` is not implemented for `Record`
+  --> tests/ui/node_id_complex_object_not_composed.rs:10:1
+   |
+10 | struct Record {
+   | ^^^^^^^^^^^^^
+   = note: replace `#[ComplexObject]` with `#[graphql_orm::graphql_complex_object]` on the entity's handwritten impl
+note: required by a bound in `assert_mounted`
+  --> tests/ui/node_id_complex_object_not_composed.rs:6:10
+   |
+ 6 | #[derive(GraphQLEntity, GraphQLOperations, SimpleObject, Clone, Debug, serde::Serialize, serde::Deserialize)]
+   |          ^^^^^^^^^^^^^ required by this bound in `assert_mounted`
+   = note: this error originates in the derive macro `GraphQLEntity` (in Nightly builds, run with -Z macro-backtrace for more info)

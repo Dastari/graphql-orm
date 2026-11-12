@@ -16,5 +16,6 @@ fn rls_backend_and_attribute_validation() {
         t.pass("tests/ui/rls_postgres_backend.rs");
         t.pass("tests/ui/rls_empty_postgres.rs");
         t.compile_fail("tests/ui/rls_mixed_predicate.rs");
+        t.compile_fail("tests/ui/rls_unknown_column.rs");
     }
 }

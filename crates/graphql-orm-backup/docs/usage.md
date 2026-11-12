@@ -3,7 +3,7 @@ title: "Usage Guide"
 kind: reference
 status: active
 owner: graphql-orm-backup-maintainers
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-12
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -290,7 +290,15 @@ async fn restore_object_store(
 
 Compatibility buffering defaults to 64 MiB per body. Database restore accepts at
 most 256 MiB of decoded bytes per payload and 512 MiB per manifest stage by
-default. Configure reviewed larger finite limits with `BackupCapacityLimits` on
+default. Objects are unbounded by default; set `object_bytes` to cap each one.
+
+Backups, incremental backups and compaction enforce the same limits from the
+same repository handle before writing: decoded payload and stage sizes and
+declared object sizes before any write, the compressed size while encoding,
+streamed object sizes while writing, and the manifest size before sealing it.
+They fail with `BackupError::BackupCapacityExceeded`, which names the payload
+and the `BackupCapacityLimitKind`, so a backup never produces a snapshot that
+restore with the same configuration refuses. Configure reviewed larger finite limits with `BackupCapacityLimits` on
 the repository; custom indexes/sinks expose `buffered_byte_limit` for their
 compatibility defaults. `BackupByteLimit::Unbounded` explicitly accepts memory
 risk. Capacity errors are permanent for the same input and configuration.
@@ -360,7 +368,17 @@ async fn compact(
 ```
 
 `prune` retains the newest manifest chains selected by `KeepPolicy` and deletes
-expired snapshot blobs plus unreferenced content-addressed object blobs.
+expired snapshot blobs, orphaned snapshot payloads that no manifest owns, and
+unreferenced content-addressed object blobs. `keep_last` must be at least one;
+`keep_last: 0` fails with `InvalidRetentionPolicy` before touching the
+repository. Delete a last snapshot explicitly with `delete_snapshot`.
+
+Snapshot ids are never reused: a full or incremental backup, or compaction,
+fails with `SnapshotExists` before writing if the id has a manifest or any
+payload. Incremental backups validate the parent chain first. A run that fails
+or is cancelled before writing its manifest removes the payloads it wrote; if
+the manifest write itself failed, its outcome is unknown and the payloads stay
+for `prune` to remove when no manifest landed.
 
 Retention, dependency checks and reachability come from the snapshot listing,
 so `prune` and `delete_snapshot` fail closed when that listing is incomplete.
@@ -389,6 +407,82 @@ async fn delete(
     Ok(())
 }
 ```
+
+## Locking and recovery
+
+The orchestration functions take one exclusive repository lock,
+`locks/repository.lock`: backups, compaction, `prune`, `delete_snapshot`,
+`restore_snapshot`, `restore_objects` and verification. A concurrent one
+fails with `BackupError::RepositoryLocked`, which carries the holder's
+`RepositoryLockOwner` record: run id, host, process id, operation, optional
+label and acquisition time. Retry after the holder ends.
+
+The low-level `load_manifest`, `load_manifest_chain` and `write_manifest`
+take no lock; callers coordinate them. `write_manifest` never overwrites: an
+existing snapshot id fails with `SnapshotExists`.
+
+Taking the lock needs write access. For read-only credentials, replicas or
+mounts, pass `RepositoryLockMode::AssumeNoConcurrentWriters` in
+`RestoreOptions` (`restore_snapshot_with_options`,
+`restore_objects_with_options`) or `VerificationOptions`. This asserts that no
+prune, snapshot deletion or compaction runs meanwhile; nothing checks it. If
+one does, it can delete blobs mid-read: digests still stop substituted data,
+but the operation fails part-way, after a database restore may have applied
+earlier stages or an object restore may have written earlier objects.
+
+Cancel with a `BackupCancellation`: in `BackupExecutionOptions` for backups,
+incremental backups and compaction, in `RestoreOptions` for restores, and in
+`VerificationOptions` for verification. A writer stops at its next safe point,
+lets object uploads already in flight finish, removes its payloads, releases
+the lock and returns `Cancelled`. Restore and verification stop before their
+next read or apply call and release the lock. If that release fails, the
+operation returns `LockNotReleased`, which keeps its own error and names the
+run whose lock remains. Use cancellation for host-side timeouts: dropping the
+future cannot release the lock. A crashed or dropped run leaves
+the lock and its owner record. Nothing expires automatically, because a slow
+holder could still be writing. To recover:
+
+1. Read the lock with `read_repository_lock`, or take the owner from the
+   `RepositoryLocked` error.
+2. Confirm that the run has stopped (its process on that host is gone) and
+   that no other backup, restore, verification, compaction or prune is running
+   against the repository.
+3. Call `break_repository_lock` with the owner's `run_id` and a minimum age.
+   It refuses a lock that names another run, is younger than the minimum age,
+   or has no owner record.
+
+```rust
+use graphql_orm_backup::{
+    BackupRepository, BreakRepositoryLockRequest, RepositoryLockStatus,
+    break_repository_lock, read_repository_lock,
+};
+
+async fn recover(
+    repository: &dyn BackupRepository,
+) -> Result<(), graphql_orm_backup::BackupError> {
+    if let RepositoryLockStatus::Owned(owner) = read_repository_lock(repository).await? {
+        // Only after confirming that `owner` and every other writer have stopped.
+        break_repository_lock(
+            repository,
+            &BreakRepositoryLockRequest {
+                expected_run_id: owner.run_id,
+                min_age_seconds: 3_600,
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+```
+
+A lock without an owner record, such as one written by 0.13.0 or earlier, is
+reported as `RepositoryLockStatus::Unidentified` and needs offline removal
+after quiescing every writer, handle and in-flight request. If an operation
+completed but its lock release failed, it returns `LockReleaseFailed` naming
+the run and, for backups and compaction, the committed snapshot; recover the
+lock the same way. A failed or cancelled operation whose release also failed
+returns `LockNotReleased` with the operation's error, the release error and
+the run id.
 
 ## Repository Layout
 

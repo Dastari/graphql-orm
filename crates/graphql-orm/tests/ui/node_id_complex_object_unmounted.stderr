@@ -1,0 +1,19 @@
+error[E0277]: `Record` declares `node_id` on a `#[graphql(complex)]` SimpleObject entity, but nothing adds the `NodeId` field to its complex object
+ --> tests/ui/node_id_complex_object_unmounted.rs:9:8
+  |
+9 | struct Record {
+  |        ^^^^^^ `NodeId` is not mounted on this complex object
+  |
+help: the trait `graphql_orm::prelude::GeneratedComplexIdentityFields` is not implemented for `Record`
+ --> tests/ui/node_id_complex_object_unmounted.rs:9:1
+  |
+9 | struct Record {
+  | ^^^^^^^^^^^^^
+  = note: add `#[graphql_orm(compose_complex_object)]` to the entity and replace `#[ComplexObject]` with `#[graphql_orm::graphql_complex_object]` on its handwritten impl; the generated `NodeId` and `RecordVersion` are then composed with the handwritten fields
+  = note: an entity with no handwritten complex fields can instead derive `GraphQLRelations`, which adds them to the complex object it generates
+note: required by a bound in `assert_mounted`
+ --> tests/ui/node_id_complex_object_unmounted.rs:6:10
+  |
+6 | #[derive(GraphQLEntity, GraphQLOperations, SimpleObject, Clone, Debug, serde::Serialize, serde::Deserialize)]
+  |          ^^^^^^^^^^^^^ required by this bound in `assert_mounted`
+  = note: this error originates in the derive macro `GraphQLEntity` (in Nightly builds, run with -Z macro-backtrace for more info)

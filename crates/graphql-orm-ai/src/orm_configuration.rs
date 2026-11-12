@@ -411,10 +411,35 @@ impl AiConfigurationService for OrmAiConfigurationService {
         let provider_kind = input.provider_kind.as_str().to_owned();
         let expected_version = input.expected_version;
         let profile_id = input.id;
+        // The provider kind and endpoint decide where an attached credential is
+        // sent, so moving a credentialed profile also needs credential
+        // authority. The transaction re-checks the same condition against the
+        // row it updates.
+        let credentialed_move_authorized = match (profile_id, expected_version) {
+            (Some(id), Some(expected_version)) => {
+                let current = self.profile(id).await?;
+                if current.scope_key != scope_hash || current.row_version != expected_version {
+                    return Err(AiError::Conflict);
+                }
+                if moves_credentialed_endpoint(&current, &provider_kind, base_url.as_deref()) {
+                    self.require_access(
+                        principal,
+                        &scope,
+                        AiConfigurationAction::ManageProviderCredentials,
+                    )
+                    .await?;
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        };
         let profile = self
             .database
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
+                    let mut reason_code = "configuration_updated";
                     let profile = match (profile_id, expected_version) {
                         (None, None) => tx
                             .insert::<AiProviderProfileRecord>(CreateAiProviderProfileRecordInput {
@@ -438,7 +463,11 @@ impl AiConfigurationService for OrmAiConfigurationService {
                                 .await
                                 .map_err(OrmPublicError::from)?
                                 .ok_or_else(OrmPublicError::not_found)?;
-                            if current.scope_key != scope_hash {
+                            // The authority decision above was made for exactly this
+                            // version; any other version is a race and reports Conflict.
+                            if current.scope_key != scope_hash
+                                || current.row_version != expected_version
+                            {
                                 return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                             }
                             if provider_kind == AiProviderKindInput::LocalHarness.as_str()
@@ -446,6 +475,12 @@ impl AiConfigurationService for OrmAiConfigurationService {
                             {
                                 return Err(OrmPublicError::new(OrmErrorCode::InvalidInput));
                             }
+                            reason_code = update_reason_code(
+                                &current,
+                                &provider_kind,
+                                base_url.as_deref(),
+                                credentialed_move_authorized,
+                            )?;
                             match tx
                                 .compare_and_swap::<AiProviderProfileRecord>(
                                     &id,
@@ -483,7 +518,7 @@ impl AiConfigurationService for OrmAiConfigurationService {
                             resource_kind: "provider_profile",
                             resource_reference: &profile.id.to_string(),
                             outcome: "allowed",
-                            reason_code: "configuration_updated",
+                            reason_code,
                             policy_version: None,
                         },
                     )
@@ -1601,6 +1636,39 @@ fn provider_data_policy(
             "OpenAI-compatible configuration is invalid for this provider kind".to_owned(),
         )),
         (_, None) => Ok(json!({})),
+    }
+}
+
+/// Returns whether an update would send an attached credential somewhere
+/// else: a credential is present and the provider kind or normalized endpoint
+/// changes.
+fn moves_credentialed_endpoint(
+    current: &AiProviderProfileRecord,
+    provider_kind: &str,
+    base_url: Option<&str>,
+) -> bool {
+    current.credential_reference.is_some()
+        && (current.provider_kind != provider_kind || current.base_url.as_deref() != base_url)
+}
+
+/// Decides, against the row read inside the update transaction, whether a
+/// profile update may proceed and which audit reason it records.
+///
+/// A move of a credentialed endpoint is allowed only when credential authority
+/// was checked for that move before the transaction; otherwise it is refused
+/// as forbidden.
+fn update_reason_code(
+    current: &AiProviderProfileRecord,
+    provider_kind: &str,
+    base_url: Option<&str>,
+    credential_authority_checked: bool,
+) -> Result<&'static str, OrmPublicError> {
+    if !moves_credentialed_endpoint(current, provider_kind, base_url) {
+        Ok("configuration_updated")
+    } else if credential_authority_checked {
+        Ok("credentialed_endpoint_changed")
+    } else {
+        Err(OrmPublicError::new(OrmErrorCode::Forbidden))
     }
 }
 
@@ -2896,3 +2964,7 @@ mod tests {
         assert_eq!(original_capacity.policies[0].committed_input_tokens, 0);
     }
 }
+
+#[cfg(all(test, feature = "sqlite"))]
+#[path = "orm_configuration_provider_profile_tests.rs"]
+mod provider_profile_tests;

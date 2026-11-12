@@ -11,8 +11,9 @@ use uuid::Uuid;
 use crate::{
     BackupByteLimit, BackupChangeExport, BackupCompression, BackupError, BackupObjectRef,
     BackupRepository, BackupSnapshotManifest, BackupTableExport, GraphqlOrmBackupAdapter,
-    ObjectBackupEntry, TableBackupEntry, collect_backup_stream, load_manifest_chain,
-    manifest::required_authenticator, verify_manifest_and_objects, verify_manifest_authenticity,
+    ObjectBackupEntry, RepositoryLock, RepositoryLockOptions, TableBackupEntry,
+    collect_backup_stream, load_manifest_chain, manifest::required_authenticator,
+    verify_manifest_authenticity,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -340,6 +341,28 @@ pub(crate) fn validate_storage_key(storage_key: &str) -> Result<(), BackupError>
     })
 }
 
+/// Repository-side options for [`restore_snapshot_with_options`] and
+/// [`restore_objects_with_options`].
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RestoreOptions {
+    /// Whether restore takes the repository lock. The default,
+    /// [`crate::RepositoryLockMode::Exclusive`], needs write access to the
+    /// repository. Use
+    /// [`crate::RepositoryLockMode::AssumeNoConcurrentWriters`] for read-only
+    /// credentials, replicas or mounts, and read its risk first.
+    pub lock_mode: crate::RepositoryLockMode,
+    /// Repository lock settings used in exclusive mode.
+    pub lock: RepositoryLockOptions,
+    /// Cooperative cancellation. Restore stops before its next manifest,
+    /// payload, apply call or object, releases the lock and fails with
+    /// [`BackupError::Cancelled`] (inside [`BackupError::RestoreStageFailed`]
+    /// for a database restore), or with [`BackupError::LockNotReleased`]
+    /// wrapping that error if the release fails. Use it for host-side
+    /// timeouts instead of dropping the future, which leaves the lock in
+    /// place.
+    pub cancellation: crate::BackupCancellation,
+}
+
 impl RestoreContext {
     /// Builds the default empty-database restore context.
     #[must_use]
@@ -418,10 +441,21 @@ async fn verify_restore_schema(
 /// dropping this future cannot return progress or roll back an active adapter
 /// call; treat cancellation during apply as an unknown target outcome.
 ///
+/// Restore holds the repository lock for its whole run, so a concurrent prune,
+/// snapshot deletion or compaction cannot remove the payloads it reads. Taking
+/// the lock needs write access. While another operation holds the lock it
+/// fails in the validation phase with [`BackupError::RepositoryLocked`] as the
+/// source. Use [`restore_snapshot_with_options`] to read a read-only
+/// repository without the lock, or to cancel cooperatively. Dropping the
+/// future leaves the lock in place with its owner record; see
+/// [`crate::break_repository_lock`].
+///
 /// # Errors
 ///
 /// Returns [`BackupError::RestoreStageFailed`] with phase/progress metadata and
-/// the original cause when validation, payload preparation or adapter apply fails.
+/// the original cause when locking, validation, payload preparation or adapter
+/// apply fails, and [`BackupError::LockReleaseFailed`] if the restore completed
+/// but the lock was not released.
 /// Validation and preparation never apply their failing stage. Earlier completed
 /// stages may remain after later preparation failure; failed apply may be partial.
 /// The primary display does not interpolate adapter/provider error details.
@@ -431,6 +465,72 @@ pub async fn restore_snapshot(
     snapshot_id: Uuid,
     context: RestoreContext,
 ) -> Result<RestoreResult, BackupError> {
+    restore_snapshot_with_options(
+        repository,
+        database,
+        snapshot_id,
+        context,
+        &RestoreOptions::default(),
+    )
+    .await
+}
+
+/// Restores a database snapshot chain with explicit lock and cancellation
+/// options; [`restore_snapshot`] uses [`RestoreOptions::default`].
+///
+/// # Errors
+///
+/// As [`restore_snapshot`]. A cancelled restore fails with
+/// [`BackupError::RestoreStageFailed`] whose source is
+/// [`BackupError::Cancelled`] and whose progress lists the stages already
+/// applied.
+pub async fn restore_snapshot_with_options(
+    repository: &dyn BackupRepository,
+    database: &dyn GraphqlOrmBackupAdapter,
+    snapshot_id: Uuid,
+    context: RestoreContext,
+    options: &RestoreOptions,
+) -> Result<RestoreResult, BackupError> {
+    let validation_error = |source| {
+        restore_stage_error(
+            snapshot_id,
+            None,
+            RestoreFailurePhase::Validation,
+            &[],
+            source,
+        )
+    };
+    // Refuse before the lock write: without a key no manifest can be trusted.
+    required_authenticator(repository).map_err(validation_error)?;
+    if options.lock_mode == crate::RepositoryLockMode::AssumeNoConcurrentWriters {
+        return restore_snapshot_locked(repository, database, snapshot_id, context, options).await;
+    }
+    let lock = RepositoryLock::acquire_for(repository, &options.lock, "restore")
+        .await
+        .map_err(validation_error)?;
+    let result = restore_snapshot_locked(repository, database, snapshot_id, context, options).await;
+    lock.finish(result, |_| None).await
+}
+
+/// The restore itself; the caller holds the lock or opted out of it.
+async fn restore_snapshot_locked(
+    repository: &dyn BackupRepository,
+    database: &dyn GraphqlOrmBackupAdapter,
+    snapshot_id: Uuid,
+    context: RestoreContext,
+    options: &RestoreOptions,
+) -> Result<RestoreResult, BackupError> {
+    let cancelled = |manifest: Option<Uuid>, phase, completed: &[Uuid]| {
+        options
+            .cancellation
+            .check()
+            .map_err(|source| restore_stage_error(snapshot_id, manifest, phase, completed, source))
+    };
+    let verification = crate::VerificationOptions {
+        cancellation: options.cancellation.clone(),
+        ..crate::VerificationOptions::default()
+    };
+    cancelled(None, RestoreFailurePhase::Validation, &[])?;
     let chain = load_manifest_chain(repository, snapshot_id)
         .await
         .map_err(|source| {
@@ -443,7 +543,7 @@ pub async fn restore_snapshot(
             )
         })?;
     for manifest in &chain {
-        verify_manifest_and_objects(repository, manifest)
+        crate::verify::verify_manifest_and_objects_unlocked(repository, manifest, &verification)
             .await
             .map_err(|source| {
                 restore_stage_error(
@@ -504,6 +604,7 @@ pub async fn restore_snapshot(
         )
     })?;
 
+    cancelled(Some(full_id), RestoreFailurePhase::Preparation, &[])?;
     let full_export = load_table_exports(repository, full_manifest)
         .await
         .map_err(|source| {
@@ -522,6 +623,7 @@ pub async fn restore_snapshot(
         .sum::<u64>();
     let mut completed = Vec::new();
     if !matches!(context.mode, RestoreMode::DryRun) {
+        cancelled(Some(full_id), RestoreFailurePhase::Preparation, &completed)?;
         database
             .restore_full(backup_schema, full_export, context.clone())
             .await
@@ -539,6 +641,11 @@ pub async fn restore_snapshot(
 
     let mut incremental_change_count = 0_u64;
     for manifest in chain.iter().skip(1) {
+        cancelled(
+            Some(manifest.snapshot_id),
+            RestoreFailurePhase::Preparation,
+            &completed,
+        )?;
         let changes = load_change_exports(repository, manifest)
             .await
             .map_err(|source| {
@@ -552,6 +659,11 @@ pub async fn restore_snapshot(
             })?;
         incremental_change_count += changes.len() as u64;
         if !matches!(context.mode, RestoreMode::DryRun) {
+            cancelled(
+                Some(manifest.snapshot_id),
+                RestoreFailurePhase::Preparation,
+                &completed,
+            )?;
             database
                 .restore_incremental(changes, context.clone())
                 .await
@@ -613,11 +725,19 @@ fn restore_stage_error(
 /// staging object namespace and publish only after all required verification and
 /// database/object work succeeds; no cross-store rollback is provided.
 ///
+/// Object restore holds the repository lock while it reads, like
+/// [`restore_snapshot`]; the two calls take it separately. Use
+/// [`restore_objects_with_options`] for read-only repositories or cooperative
+/// cancellation. Objects larger than
+/// [`crate::BackupCapacityLimits::object_bytes`] are refused, on both reads,
+/// before the sink receives more than the limit.
+///
 /// # Errors
 ///
 /// Returns [`BackupError::ManifestAuthenticationRequired`] or an
-/// authentication error before reading any object, or
-/// [`BackupError::RestoreTargetRejected`] before restoring any object.
+/// authentication error before reading any object,
+/// [`BackupError::RepositoryLocked`] while another operation holds the lock,
+/// or [`BackupError::RestoreTargetRejected`] before restoring any object.
 /// Otherwise returns [`BackupError`] if an object blob is missing, checksum
 /// verification fails, or the sink rejects an object.
 pub async fn restore_objects(
@@ -625,18 +745,51 @@ pub async fn restore_objects(
     manifest: &BackupSnapshotManifest,
     sink: &dyn RestoreObjectSink,
 ) -> Result<(), BackupError> {
+    restore_objects_with_options(repository, manifest, sink, &RestoreOptions::default()).await
+}
+
+/// Restores object blobs with explicit lock and cancellation options;
+/// [`restore_objects`] uses [`RestoreOptions::default`].
+///
+/// # Errors
+///
+/// As [`restore_objects`], and [`BackupError::Cancelled`] once cancelled.
+pub async fn restore_objects_with_options(
+    repository: &dyn BackupRepository,
+    manifest: &BackupSnapshotManifest,
+    sink: &dyn RestoreObjectSink,
+    options: &RestoreOptions,
+) -> Result<(), BackupError> {
     verify_manifest_authenticity(required_authenticator(repository)?, manifest)?;
     for object in &manifest.objects {
         validate_storage_key(&object.storage_key)?;
         sink.check_restore_target(&object_ref_from_entry(object))?;
     }
+    if options.lock_mode == crate::RepositoryLockMode::AssumeNoConcurrentWriters {
+        return restore_objects_locked(repository, manifest, sink, options).await;
+    }
+    let lock = RepositoryLock::acquire_for(repository, &options.lock, "restore_objects").await?;
+    let result = restore_objects_locked(repository, manifest, sink, options).await;
+    lock.finish(result, |()| None).await
+}
+
+/// The object restore itself; the caller holds the lock or opted out of it.
+async fn restore_objects_locked(
+    repository: &dyn BackupRepository,
+    manifest: &BackupSnapshotManifest,
+    sink: &dyn RestoreObjectSink,
+    options: &RestoreOptions,
+) -> Result<(), BackupError> {
+    let object_limit = repository.capacity_limits().object_bytes;
     for object in &manifest.objects {
+        options.cancellation.check()?;
         // Historical size metadata was advisory. Verify/count without collection
         // before calling the sink, then retain the streamed checksum guard below.
         let observed_size = crate::verify::verify_blob_checksum(
             repository,
             object.content_key.clone(),
             object.sha256_hex.clone(),
+            object_limit,
         )
         .await?;
         let mut reference = object_ref_from_entry(object);
@@ -645,10 +798,13 @@ pub async fn restore_objects(
         // The repository may serve different bytes on this second read. The
         // stream fails at its end on a digest mismatch, so a conditional create
         // aborts before committing and no forged object reaches the sink's store.
+        // It is also capped at the object limit, so oversized bytes never
+        // reach the sink.
         let (stream, outcome) = digest_checked_stream(
             source,
             object.content_key.clone(),
             object.sha256_hex.clone(),
+            object_limit,
         );
         let restored = sink.restore_object_stream(reference, stream).await;
         let outcome = match outcome.lock() {
@@ -656,6 +812,9 @@ pub async fn restore_objects(
             Err(poisoned) => poisoned.into_inner().clone(),
         };
         match (outcome, restored) {
+            (DigestOutcome::TooLarge(limit_bytes), _) => {
+                return Err(BackupError::CapacityExceeded { limit_bytes });
+            }
             (DigestOutcome::Mismatch(actual), _) => {
                 return Err(BackupError::ChecksumMismatch {
                     key: object.content_key.clone(),
@@ -684,31 +843,54 @@ enum DigestOutcome {
     Pending,
     Verified,
     Mismatch(String),
+    /// The stream passed this object limit and was cut off.
+    TooLarge(u64),
 }
 
 /// Wraps a body so it yields an error instead of ending when its SHA-256 does
 /// not match `expected`. Every bundled `BlobStore` discards a write whose body
 /// fails before the end: local writes to a temporary file, S3 drains the body
 /// before its committing request, and SMB arms delete-on-close until the whole
-/// body is flushed.
+/// body is flushed. It also fails, before yielding the chunk, once the body
+/// passes `limit`.
 fn digest_checked_stream(
     source: StorageByteStream,
     key: String,
     expected: String,
+    limit: BackupByteLimit,
 ) -> (StorageByteStream, Arc<std::sync::Mutex<DigestOutcome>>) {
     let outcome = Arc::new(std::sync::Mutex::new(DigestOutcome::Pending));
     let shared = Arc::clone(&outcome);
-    let stream =
-        futures::stream::unfold(Some((source.into_inner(), Sha256::new())), move |state| {
+    let stream = futures::stream::unfold(
+        Some((source.into_inner(), Sha256::new(), 0_u64)),
+        move |state| {
             let shared = Arc::clone(&shared);
             let key = key.clone();
             let expected = expected.clone();
             async move {
-                let (mut inner, mut hasher) = state?;
+                let (mut inner, mut hasher, seen) = state?;
                 match inner.next().await {
                     Some(Ok(chunk)) => {
+                        let seen = seen.saturating_add(chunk.len() as u64);
+                        if let BackupByteLimit::Bytes(limit_bytes) = limit
+                            && seen > limit_bytes
+                        {
+                            let mut outcome = match shared.lock() {
+                                Ok(outcome) => outcome,
+                                Err(poisoned) => poisoned.into_inner(),
+                            };
+                            *outcome = DigestOutcome::TooLarge(limit_bytes);
+                            return Some((
+                                Err(graphql_orm_storage::StorageError::PreconditionFailed {
+                                    key,
+                                    condition: "object exceeds the configured object limit"
+                                        .to_string(),
+                                }),
+                                None,
+                            ));
+                        }
                         hasher.update(&chunk);
-                        Some((Ok(chunk), Some((inner, hasher))))
+                        Some((Ok(chunk), Some((inner, hasher, seen))))
                     }
                     Some(Err(error)) => Some((Err(error), None)),
                     None => {
@@ -735,7 +917,8 @@ fn digest_checked_stream(
                     }
                 }
             }
-        });
+        },
+    );
     (StorageByteStream::new(Box::pin(stream)), outcome)
 }
 

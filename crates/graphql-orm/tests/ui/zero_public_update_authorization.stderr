@@ -1,0 +1,5 @@
+error: operation authorization category `update_many` requires the entity to generate that GraphQL operation, but the entity has no publicly writable update field (each non-key column is a managed timestamp, skip_input or write = false), so no UpdateInput or update/update_many mutation is generated
+ --> tests/ui/zero_public_update_authorization.rs:9:8
+  |
+9 | struct Badge {
+  |        ^^^^^

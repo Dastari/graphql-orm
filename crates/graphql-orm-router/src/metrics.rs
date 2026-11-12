@@ -11,6 +11,7 @@ pub struct RouterMetricsSnapshot {
     subgraph_latency_microseconds_total: u64,
     active_graph_version: u64,
     active_websocket_connections: usize,
+    pending_websocket_connections: usize,
     active_subscriptions: usize,
     websocket_rejections_total: u64,
     schema_refresh_total: u64,
@@ -70,7 +71,13 @@ impl RouterMetricsSnapshot {
         active_websocket_connections,
         active_websocket_connections,
         usize,
-        "Current public GraphQL WebSocket connections."
+        "Current authenticated public GraphQL WebSocket connections. A socket is counted here only after its `connection_init` credential validates."
+    );
+    snapshot_getter!(
+        pending_websocket_connections,
+        pending_websocket_connections,
+        usize,
+        "Current public GraphQL WebSocket connections that have not authenticated yet."
     );
     snapshot_getter!(
         active_subscriptions,
@@ -125,6 +132,7 @@ pub(crate) struct RouterMetrics {
     subgraph_latency_microseconds_total: AtomicU64,
     active_graph_version: AtomicU64,
     active_websocket_connections: AtomicUsize,
+    pending_websocket_connections: AtomicUsize,
     active_subscriptions: AtomicUsize,
     websocket_rejections_total: AtomicU64,
     schema_refresh_total: AtomicU64,
@@ -146,6 +154,9 @@ impl RouterMetrics {
                 .load(Ordering::Relaxed),
             active_graph_version: self.active_graph_version.load(Ordering::Relaxed),
             active_websocket_connections: self.active_websocket_connections.load(Ordering::Relaxed),
+            pending_websocket_connections: self
+                .pending_websocket_connections
+                .load(Ordering::Relaxed),
             active_subscriptions: self.active_subscriptions.load(Ordering::Relaxed),
             websocket_rejections_total: self.websocket_rejections_total.load(Ordering::Relaxed),
             schema_refresh_total: self.schema_refresh_total.load(Ordering::Relaxed),
@@ -183,6 +194,15 @@ impl RouterMetrics {
 
     pub(crate) fn websocket_disconnected(&self) {
         decrement(&self.active_websocket_connections, 1);
+    }
+
+    pub(crate) fn websocket_pending(&self) {
+        self.pending_websocket_connections
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn websocket_pending_ended(&self) {
+        decrement(&self.pending_websocket_connections, 1);
     }
 
     pub(crate) fn websocket_rejected(&self) {
@@ -270,6 +290,26 @@ mod tests {
         let snapshot = metrics.snapshot();
         assert_eq!(snapshot.active_websocket_connections(), 0);
         assert_eq!(snapshot.active_subscriptions(), 0);
+    }
+
+    #[test]
+    fn pending_and_authenticated_websocket_gauges_are_separate() {
+        let metrics = RouterMetrics::default();
+        metrics.websocket_pending();
+        metrics.websocket_pending();
+        assert_eq!(metrics.snapshot().pending_websocket_connections(), 2);
+        assert_eq!(metrics.snapshot().active_websocket_connections(), 0);
+        metrics.websocket_connected();
+        metrics.websocket_pending_ended();
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.pending_websocket_connections(), 1);
+        assert_eq!(snapshot.active_websocket_connections(), 1);
+        metrics.websocket_pending_ended();
+        metrics.websocket_pending_ended();
+        metrics.websocket_disconnected();
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.pending_websocket_connections(), 0);
+        assert_eq!(snapshot.active_websocket_connections(), 0);
     }
 
     #[test]

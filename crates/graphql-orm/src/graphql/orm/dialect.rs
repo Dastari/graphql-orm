@@ -907,6 +907,50 @@ fn identifier_path_parts(identifier: &str) -> impl Iterator<Item = &str> {
     })
 }
 
+/// The names PostgreSQL resolves each part of a declared path to when the
+/// ORM's SQL renders it with [`DatabaseBackend::render_identifier_path`]:
+/// a delimited part keeps its case, a part rendered bare folds to lower case,
+/// and a part that rendering quotes keeps its case.
+pub(crate) fn postgres_resolved_identifier_parts(path: &str) -> Vec<String> {
+    identifier_path_parts(path)
+        .filter(|part| !part.is_empty())
+        .map(postgres_resolved_identifier)
+        .collect()
+}
+
+/// The name PostgreSQL resolves one identifier to when the ORM's SQL renders
+/// it with [`DatabaseBackend::render_identifier`].
+///
+/// Text that starts with `"` but is not exactly one well-formed quoted
+/// identifier names itself in full, as policy SQL quotes it.
+pub(crate) fn postgres_resolved_identifier(identifier: &str) -> String {
+    if let Some(name) = postgres_delimited_identifier(identifier) {
+        name
+    } else if identifier.starts_with('"')
+        || DatabaseBackend::Postgres.identifier_needs_quoting(identifier)
+    {
+        identifier.to_string()
+    } else {
+        identifier.to_ascii_lowercase()
+    }
+}
+
+/// The name inside `identifier` when it is exactly one well-formed quoted
+/// PostgreSQL identifier: it starts and ends with `"`, is not empty inside,
+/// and every inner `"` is doubled.
+pub(crate) fn postgres_delimited_identifier(identifier: &str) -> Option<String> {
+    let inner = identifier.strip_prefix('"')?.strip_suffix('"')?;
+    let mut name = String::with_capacity(inner.len());
+    let mut characters = inner.chars();
+    while let Some(character) = characters.next() {
+        if character == '"' && characters.next() != Some('"') {
+            return None;
+        }
+        name.push(character);
+    }
+    (!name.is_empty()).then_some(name)
+}
+
 /// Whether a declared table path has a single part, with no schema.
 pub(crate) fn identifier_path_is_bare(path: &str) -> bool {
     identifier_path_parts(path)

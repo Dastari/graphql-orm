@@ -10,7 +10,7 @@ supersedes: []
 
 # Changelog
 
-## 0.9.2 (unreleased)
+## 0.9.3 (unreleased)
 
 - The managed Samba test runner (`tests/samba/run.sh`) now defaults to the
   reviewed multi-platform index digest of `dperson/samba:latest`
@@ -20,6 +20,42 @@ supersedes: []
   anything.
 - Test harness only: no library, public API, configuration or object format
   change.
+
+## 0.9.2
+
+- Local listings return keys in exact lexicographic key order. The local
+  backend walked each directory in path order, so a sibling whose name sorts
+  below `/`, such as `a-b` or `a.b` beside the directory `a`, was listed after
+  the keys under `a/`. Unpaged `list_blobs` returned keys out of order, and a
+  paged listing could skip keys, because each continuation token resumes after
+  the last key in key order. Directories now sort as `<name>/`, matching S3 and
+  SMB. Paged listings also skip directories whose keys all precede the
+  continuation. ([#472](https://github.com/Dastari/graphql-orm/issues/472))
+- Local writes are durable once they return. `put_blob`,
+  `put_blob_if_not_exists`, `copy_blob`, `put_object_stream` and multipart
+  object writers fsync the temporary file before renaming or linking it into
+  place, then fsync the parent directory. Before publishing, each write,
+  multipart staging and multipart completion fsyncs the target's directory
+  chain up to the root or to a directory already made durable, including
+  directories that another writer created. Each backend instance remembers the
+  directories it made durable, assuming nothing outside it removes directories
+  under its root while it runs. The removals made by `delete_blob`,
+  `delete_blob_once` and `StreamingObjectStore::delete_object` are synced as
+  well. Before this, a crash could leave a truncated or missing object behind
+  a successful write, such as a truncated backup manifest or content blob.
+  ([#473](https://github.com/Dastari/graphql-orm/issues/473))
+- If `put_blob_if_not_exists` creates the key but the directory sync after it
+  fails, it returns non-retryable `StorageError::SingleAttemptFailed`, because
+  a retry would find the key taken. When it finds the key already present, it
+  syncs the directory before returning `Ok(None)`.
+- Directory syncs run on Unix only. A directory fsync that fails with `EINVAL`
+  or `EBADF` from a file system without directory sync is accepted, as
+  PostgreSQL does, on Linux, Android, Apple platforms, the BSDs, illumos,
+  Solaris and AIX; other Unix targets accept no directory sync error. File fsync errors always fail the operation. The multipart
+  staging directory syncs follow the same rule.
+- Writes are slower on the local backend, because each one now waits for the
+  file system to reach stable storage.
+- No public API, configuration or object format change.
 
 ## 0.9.1
 

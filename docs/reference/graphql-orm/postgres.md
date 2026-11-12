@@ -42,19 +42,38 @@ without `FORCE ROW LEVEL SECURITY`.
 
 Supported operations are `select`, `insert`, `update`, and `delete`. If an operation has
 `predicate`, that predicate is used exactly. Otherwise the generated predicate combines configured
-conditions in deterministic order with `AND`:
+conditions in deterministic order, each in parentheses, with `AND`:
 
-- scope: `graphql_orm.has_scope('<scope>')`
-- tenant: `<tenant_column> = graphql_orm.current_tenant_id()`
-- owner: `<owner_column> = graphql_orm.current_user_id()`
+- scope: `(graphql_orm.has_scope('<scope>'))`
+- tenant: `(<tenant_column> = graphql_orm.current_tenant_id())`
+- owner: `(<owner_column> = graphql_orm.current_user_id())`
 
-If an operation has no predicate, scope, tenant, or owner, no policy is generated for that operation.
+`tenant` and `owner` must name a stored column of the entity exactly as declared (its field name,
+or its `db_column`, quotes included); anything else is a compile error. The column is written as
+the ORM's DDL writes it: a plain name bare, so PostgreSQL folds it to the same column, and exactly
+one well-formed quoted identifier unchanged. Any other value is quoted in full as one identifier.
+
+Entity, search document and trigger SQL render table paths as the ORM's own DDL and writes do:
+plain non-reserved names stay unquoted and fold, so `table = "Docs"` secures `docs` and
+`__graphql_orm_search_docs`, the tables the ORM writes.
+
+If an operation has no predicate, scope, tenant, or owner, no policy is generated for that
+operation, and the plan drops the policy graphql-orm generated for it earlier. Removing an
+operation from `#[graphql_rls]` therefore removes its policy when the target is re-applied.
 Empty `#[graphql_rls]` is valid: it enables and optionally forces RLS but creates no permissive
 operation policies, so PostgreSQL denies rows by default. Mixing `predicate` with generated fields
 on the same operation is a compile error.
 
 Tenant and owner values are database column names. For non-text columns or advanced semantics, use a
-custom predicate with explicit casts. Scope checks are exact string matches unless a custom predicate
+custom predicate with explicit casts.
+
+The helpers return `NULL` when the request carries no value, so a generated comparison is `NULL`
+and the row is hidden. Custom predicates must keep that property. A shape that turns a missing
+value into `true` opens the table to a request without a tenant or user, for example
+`COALESCE(tenant_id = graphql_orm.current_tenant_id(), true)`,
+`graphql_orm.current_tenant_id() IS NULL OR ...`, or a negative test such as
+`owner_id IS DISTINCT FROM graphql_orm.current_user_id()`, which is true for every row when no user
+is set. Compare with `=` and let `NULL` deny. Scope checks are exact string matches unless a custom predicate
 implements different behavior. `graphql-orm` does not add a hardcoded admin or global bypass; model
 that with custom predicates or broad application scopes.
 
@@ -123,6 +142,52 @@ if diagnostics
 returns nothing for targets without RLS entities. Validating with a superuser migration pool now
 reports these errors; validate the schema owner's work with the runtime role instead.
 
+## Drift Validation
+
+For each RLS entity table and search document table, `validate_target` reads the table the plan's
+SQL resolves its path to, so `audit.logs` and `public.audit_logs` are separate tables, and reports
+an `Error` for:
+
+- a table that does not resolve, RLS not enabled, or `FORCE` missing when the entity forces RLS;
+- a declared policy that is missing, has another command (including `FOR ALL`), is
+  `RESTRICTIVE`, or applies to roles other than `PUBLIC`;
+- a `USING` or `WITH CHECK` expression that differs from the declared predicate;
+- any other policy on the table, of any command. PostgreSQL ORs permissive policies together, so an
+  extra one widens access. A graphql-orm policy for an operation that is no longer declared is
+  dropped by re-applying the target;
+- a missing RLS helper function in `graphql_orm`, or one whose body, result type, language,
+  volatility, `SECURITY DEFINER`, `STRICT` or `SET` options differ from what the plan installs.
+
+PostgreSQL stores policy expressions in its own form: it drops identifier quotes and adds casts and
+parentheses, so `"tenant_id" = graphql_orm.current_tenant_id()` reads back as
+`(tenant_id = graphql_orm.current_tenant_id())` and `status IN ('a', 'b')` as
+`(status = ANY (ARRAY['a'::text, 'b'::text]))`. Validation therefore never compares the declared
+text with `pg_policies`. It resolves each table by the path the plan's SQL uses, under the
+validating session's `search_path`, as the runtime's own reads and writes resolve it. It then pins
+`search_path` to `pg_catalog, pg_temp` for the rest of the transaction, has PostgreSQL parse both
+the declared predicate and the live expression against the table as the `WHERE` clause of a
+temporary view, and compares the two view definitions PostgreSQL renders. With only the catalog on
+the path, every table, function, operator and type outside `pg_catalog` renders schema-qualified,
+so the renderings agree only when both name the same objects and have the same structure as far as
+PostgreSQL's deparser shows it. Neither the session's `search_path` nor a lookalike function or
+operator in a writable schema can make them agree. Any other change, including regrouped `AND`
+and `OR`, another literal or another cast, is reported. The views are created inside a
+transaction that is always rolled back, and creating them executes nothing. They are still DDL:
+DDL event triggers fire, and `log_statement = 'ddl'` logs them, during validation.
+
+Custom predicates must therefore schema-qualify every function, operator, table and type outside
+`pg_catalog`, for example `app.is_member(tenant_id)`, not `is_member(tenant_id)`. An unqualified
+one cannot be parsed under the pinned path, and validation reports its policy as "could not be
+compared". The generated predicates and helpers already qualify `graphql_orm.*`.
+
+Rendering needs the `TEMP` privilege on the database, which PostgreSQL grants to `PUBLIC` by
+default, and a primary rather than a read-only standby. When PostgreSQL cannot render an expression,
+validation reports the policy as an `Error` ("could not be compared") instead of treating it as
+matching.
+
+A generated `WITH CHECK` refusal (SQLSTATE `42501`) reaches GraphQL clients as `FORBIDDEN`, not
+`INTERNAL_ERROR`. A missing table privilege has the same SQLSTATE and is reported the same way.
+
 ## ORM-Managed Tables
 
 `build_schema_target_rls_plan` (used by `plan_schema_target`) secures the tables the ORM writes on
@@ -154,7 +219,8 @@ behalf of RLS entities, and `validate_target` reports drift on them:
   the role also has `BYPASSRLS`, as a dedicated backup export role does. See
   [Change journal recorder](#change-journal-recorder).
 
-Validation reports a missing or altered policy, any additional policy on these tables (an extra
+Validation reports a missing or altered policy, compared as described under
+[Drift Validation](#drift-validation), any additional policy on these tables (an extra
 permissive policy would widen access), any policy at all on the change journal, and a trigger that
 is missing, does not fire in ordinary sessions (for example `ENABLE REPLICA`), has the wrong type
 or arguments, targets another table, or calls a modified `graphql_orm.delete_search_document()`.
@@ -355,8 +421,9 @@ Request settings use these keys:
 - `app.claims`
 
 Policy names are deterministic and quoted. Schema-qualified table paths are quoted in generated
-entity metadata and used as the `ON <table>` target. Policies are rendered with
-`DROP POLICY IF EXISTS ... ON ...` followed by `CREATE POLICY ...` for create-or-replace behavior.
+entity metadata and used as the `ON <table>` target. Each of the four generated policy names is
+rendered as `DROP POLICY IF EXISTS ... ON ...`, followed by `CREATE POLICY ...` when the operation
+is declared, for create-or-replace behavior.
 
 Operation SQL:
 

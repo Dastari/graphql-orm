@@ -113,6 +113,61 @@ versions before 0.9.1, named `<name>.<uuid>.uploading`, are indistinguishable
 from stored objects and are neither hidden nor swept; see the
 [migration guide](../MIGRATION.md).
 
+## Listing order and durability
+
+Listings return keys in ascending lexicographic order of their UTF-8 bytes,
+and a continuation resumes after the last key returned in that order. Every
+provider meets this contract: S3 lists in key order, SMB sorts its full
+listing, and the local backend walks each directory with subdirectories
+ordered as `<name>/`, so `a-b` and `a.b` list before `a/x`. Custom providers
+must use the same order, or paging through a listing skips or repeats keys.
+
+A successful local write is durable once it returns:
+
+- `put_blob`, `put_blob_if_not_exists`, `copy_blob`, `put_object_stream`,
+  multipart object writers and multipart completion fsync the temporary file
+  before renaming or linking it into place, then fsync the parent directory.
+  Object metadata written by `put_object_stream` is synced the same way.
+- Before publishing, a write makes the target's directory chain durable. It
+  fsyncs each directory from the target's parent upward, making that
+  directory's entry durable, until it reaches the root or a directory the
+  backend has already made durable. A directory that already existed is
+  included, because another writer may have created it and not synced it yet.
+  The root's own entry is synced only when the write created the root.
+  Multipart staging makes its upload directories durable the same way.
+- Each backend instance remembers up to 4,096 directories it has made durable,
+  shared by its clones. It records a directory only after the whole chain has
+  synced, so a failed sync is repeated by the next write. When a write finds a
+  remembered directory missing, it forgets that directory before recreating
+  it, then syncs the entry itself, so no concurrent write trusts the
+  recreated directory before its entry is durable.
+- This memory assumes that nothing outside the backend removes directories
+  under its root while the backend runs, as the
+  [trust boundary](#local-filesystem-trust-boundary) requires. A remembered
+  directory that another process removes and recreates, while this backend's
+  writes still find it present, stays trusted until the backend instance is
+  recreated, and a crash can then lose its entry.
+- `delete_blob`, `delete_blob_once` and `StreamingObjectStore::delete_object`
+  fsync the parent directory after removing the file. A deletion of a key that
+  is already missing still syncs its directory when the directory exists.
+- When `put_blob_if_not_exists` finds the key already present, it syncs the
+  directory and returns `Ok(None)`. When it created the key but the following
+  directory sync failed, it returns non-retryable
+  `StorageError::SingleAttemptFailed`: the key may exist, so a retry would find
+  it taken. Ordinary writes report a failed sync as a retryable
+  `StorageError::Io`, and repeating them is safe.
+
+File fsync errors always fail the operation. Directory syncs run on Unix only;
+other platforms rely on the file system to persist directory entries. On
+Linux, Android, Apple platforms, FreeBSD, NetBSD, OpenBSD, DragonFly BSD,
+illumos, Solaris and AIX, a directory fsync that fails with `EINVAL` or
+`EBADF`, which file systems without directory sync report (some CIFS mounts
+and VM shared folders, for example), is accepted without syncing, as
+PostgreSQL does. Other Unix targets accept no directory sync error. Any other
+directory sync error, including failing to open the directory, fails the
+operation.
+Network file systems mounted under a local root may not honour these syncs.
+
 ## Key Safety
 
 Blob keys are `/`-separated relative keys. `validate_blob_key` rejects:

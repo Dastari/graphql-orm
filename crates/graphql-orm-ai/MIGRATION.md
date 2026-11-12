@@ -10,6 +10,110 @@ supersedes: []
 
 # Migration Guide
 
+## 0.132.0 to 0.133.0
+
+### agql-auth 0.26.0
+
+AI 0.133.0 depends on published Auth `v0.26.0`, locked to commit
+`7d016f6a6bc3e697382e2e05865f596862189240`, and ORM 0.126.0. Replace a host's
+`v0.24.0` selector with:
+
+```toml
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", tag = "v0.26.0", version = "0.26.0" }
+```
+
+Refresh the host lockfile and check that `cargo tree -i agql-auth` shows one
+`0.26.0` source. Auth types from the old tag do not match the types AI accepts.
+AI behavior, GraphQL SDL and persistent schema are unchanged, and no data
+migration is needed. See the
+[workspace migration](../../MIGRATION.md#agql-auth-0260).
+
+### Capability discovery applies policy before its result ceiling
+
+No data migration is needed, and no GraphQL SDL or persistent schema changes.
+
+- `AiCapabilityDiscoveryBroker::search` (and the fixed-broker and
+  client-deferred discover calls built on it) now applies
+  `AiCapabilityAuthorityPolicy` to every entry that matches the query, then
+  returns the highest-ranked permitted candidates up to `maximumResults`.
+  Before, it truncated first, so a restricted principal could receive fewer
+  candidates than it may use. Unrestricted principals see the same results as
+  before.
+- Policy now runs once per matching entry rather than once per returned
+  candidate. A broad query can match every entry, so the worst case is the
+  index set's `maximum_entries` policy calls per search (16,384 by default;
+  at most 128 before).
+- `AiCapabilityAuthorityPolicy` gains a provided method,
+  `authorize_discovery`, which receives the complete ranked batch. By default
+  it calls `authorize` per match with up to 16
+  (`AI_CAPABILITY_DISCOVERY_AUTHORIZATION_CONCURRENCY`) calls in flight on the
+  calling task, in rank order. No implementation has to change.
+- A host whose per-entry check is expensive should override it to decide the
+  batch from one current lookup. It must return one
+  `AiCapabilityDiscoveryDecision` per match, in order, each naming the
+  capability of the match at its position (use
+  `AiCapabilityDiscoveryDecision::for_match`). It must apply the same decision
+  `authorize` would and must not cache decisions across searches. A missing,
+  extra, duplicated or reordered decision fails the search with `Forbidden`.
+- Report a denial from `authorize` or `authorize_discovery` as `Ok` with
+  `allowed: false`. Use `Err` only when policy cannot be evaluated. Any `Err`
+  fails the whole search, so returning `Err(Forbidden)` for an entry the
+  principal may not see would tell the model that a hidden entry matched.
+- Optionally call
+  `AiCapabilityDiscoveryBroker::with_maximum_discovery_authorizations(n)` to
+  refuse queries that match more than `n` entries before any policy call. The
+  refusal is `InvalidInput` with the stable message
+  `AI_CAPABILITY_DISCOVERY_TOO_BROAD`; the model should narrow its query. It
+  depends only on the total match count, permitted or not. The cap is unset by
+  default.
+- Load and execution still call `authorize` for the exact candidate, as before.
+
+## 0.131.0 to 0.132.0: credential authority for provider endpoint changes
+
+Updating a provider profile that has a credential attached now needs
+`ManageProviderCredentials` as well as `ManageProviderProfiles` when the update
+changes the profile's `provider_kind` or `base_url`. These two fields decide
+where the stored credential is sent. The endpoint is compared after the
+library's URL normalization: surrounding whitespace is trimmed, the scheme and
+host are lowercased, an internationalized host is IDNA-encoded, a default port
+is dropped, `.` and `..` path segments are resolved, and an empty path becomes
+`/`. Any other difference counts as a
+change, including a trailing slash on a non-empty path, a different path, and a
+percent-encoded spelling.
+
+- `OrmAiConfigurationService::upsert_provider_profile` (GraphQL
+  `upsertAiProviderProfile`) calls the host `AiConfigurationAccessPolicy` a
+  second time, with `ManageProviderCredentials` and the profile's scope, only
+  for such an update. If the policy denies it, the mutation returns
+  `Forbidden` (`AI_FORBIDDEN`), writes no row and appends no audit event.
+- Inside the update transaction the row must still have the expected
+  version, so a concurrent change, such as a credential being attached,
+  returns `Conflict`. The credential condition is then checked again against
+  that row.
+- Converting a credentialed profile to `LocalHarness` is a provider-kind
+  change. Without `ManageProviderCredentials` it now returns `Forbidden`; with
+  it, the existing refusal still returns `InvalidInput` until the credential is
+  removed.
+- An authorized change keeps the credential and is audited as
+  `ai.provider_profile.upsert` with reason code `credentialed_endpoint_changed`
+  rather than `configuration_updated`.
+- Other updates are unchanged: renaming, enabling or disabling, editing the
+  OpenAI-compatible capability contract, and re-pointing a profile with no
+  credential need only `ManageProviderProfiles`.
+
+Host action: an operator who holds `ManageProviderProfiles` but not
+`ManageProviderCredentials` can no longer move a credentialed profile. Either
+grant both actions to that role, have a credential administrator make the
+change, or remove the credential first (`removeAiProviderCredential`), move the
+profile, and set a credential for the new endpoint. If your access policy
+grants actions by matching on `AiConfigurationAction`, check that it answers
+`ManageProviderCredentials` for the profile's scope as intended. Credential
+administrators should check a profile's current provider kind and endpoint
+before setting a credential on it, because that is where the credential is sent.
+
+No GraphQL SDL, public Rust API, persistent schema or data migration change.
+`AI_SCHEMA_MODULE_VERSION` is unchanged.
+
 ## 0.130.0 to 0.131.0: legacy delegated stored principal references
 
 0.130.0 stopped new submissions from persisting a delegated or sessionless

@@ -10,6 +10,15 @@ supersedes: []
 
 # Migration Guide
 
+## 0.21.1 to 0.22.0: complete capability ranking
+
+No data migration is needed and existing calls are unchanged. Code that filters
+`AiCapabilityIndexSet::search` results through host policy should rank with
+`AiCapabilityIndexSet::ranked_matches`, filter, and then apply its own result
+ceiling, so permitted entries below the unfiltered top-k are not lost.
+
+The field-identity disclosure regression tests added in 0.22.0 need no host change.
+
 ## 0.21.0 to 0.21.1: exact receiver-purpose admission (opt in)
 
 No data migration is needed. Existing callers and signed operation formats are unchanged.

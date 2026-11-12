@@ -26,7 +26,10 @@ use time::OffsetDateTime;
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
-use crate::local::{INTERNAL_STORAGE_DIR, LocalStorageBackend, temp_path_for};
+use crate::local::{
+    DurabilityStep, INTERNAL_STORAGE_DIR, LocalStorageBackend, sync_dir_blocking as sync_dir,
+    temp_path_for, trace, trace_published,
+};
 use crate::multipart::{check_handle, check_part_number, multipart_error, verify_receipts};
 use crate::{
     BlobWriteOutcome, IncompleteMultipartPage, IncompleteMultipartUpload, MultipartBlobStore,
@@ -92,10 +95,10 @@ fn io(path: &Path) -> impl FnOnce(std::io::Error) -> StorageError + '_ {
     move |source| StorageError::io(path, source)
 }
 
-fn join_error(error: tokio::task::JoinError) -> StorageError {
+pub(crate) fn join_error(error: tokio::task::JoinError) -> StorageError {
     StorageError::Provider {
         backend: StorageBackend::Local.as_str().to_string(),
-        message: format!("local multipart task failed: {error}"),
+        message: format!("local storage task failed: {error}"),
         retryable: false,
     }
 }
@@ -109,19 +112,6 @@ fn json_error(path: &Path, error: serde_json::Error) -> StorageError {
         ),
         retryable: false,
     }
-}
-
-/// Make a rename or creation inside `dir` durable.
-fn sync_dir(dir: &Path) -> Result<(), StorageError> {
-    #[cfg(unix)]
-    {
-        File::open(dir)
-            .and_then(|dir| dir.sync_all())
-            .map_err(io(dir))?;
-    }
-    #[cfg(not(unix))]
-    let _ = dir;
-    Ok(())
 }
 
 /// Write `bytes` to `path` through a fsynced temporary file and an atomic rename.
@@ -267,8 +257,9 @@ impl MultipartBlobStore for LocalStorageBackend {
             started_at_unix: OffsetDateTime::now_utc().unix_timestamp(),
         };
         let bytes = serde_json::to_vec(&manifest).map_err(|error| json_error(&dir, error))?;
+        let backend = self.clone();
         tokio::task::spawn_blocking(move || {
-            std::fs::create_dir_all(&uploads).map_err(io(&uploads))?;
+            backend.create_dir_durably(&uploads)?;
             std::fs::create_dir(&dir).map_err(io(&dir))?;
             sync_dir(&uploads)?;
             write_durably(&dir.join(MANIFEST), &bytes)
@@ -387,6 +378,7 @@ impl MultipartBlobStore for LocalStorageBackend {
         let limits = self.multipart_limits();
         let handle_condition = handle.if_not_exists;
         let lock_path = lock.clone();
+        let backend = self.clone();
         let outcome = locked(lock, move || {
             let manifest = read_manifest(&dir)?
                 .filter(|manifest| manifest.key == key)
@@ -401,7 +393,7 @@ impl MultipartBlobStore for LocalStorageBackend {
             let parent = target.parent().ok_or_else(|| StorageError::MissingParent {
                 path: target.clone(),
             })?;
-            std::fs::create_dir_all(parent).map_err(io(parent))?;
+            backend.create_dir_durably(parent)?;
             let assembled = (|| {
                 let mut output = File::create(&temp).map_err(io(&temp))?;
                 let mut hasher = Sha256::new();
@@ -431,6 +423,7 @@ impl MultipartBlobStore for LocalStorageBackend {
                     size_bytes += part_size;
                 }
                 output.sync_all().map_err(io(&temp))?;
+                trace(DurabilityStep::FileSynced, &temp);
                 Ok(BlobWriteOutcome {
                     size_bytes,
                     sha256_hex: format!("{:x}", hasher.finalize()),
@@ -468,6 +461,7 @@ impl MultipartBlobStore for LocalStorageBackend {
             };
             let _ = std::fs::remove_file(&temp);
             published?;
+            trace_published(Some(&temp), &target);
             sync_dir(parent)?;
 
             // The object is published; the staged parts are no longer needed.

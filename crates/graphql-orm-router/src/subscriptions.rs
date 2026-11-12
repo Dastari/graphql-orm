@@ -38,26 +38,37 @@ pub(crate) struct InternalSubscriptionEndpoint {
 
 impl InternalSubscriptionEndpoint {
     pub(crate) fn generate() -> Result<Self, RouterError> {
-        let mut random = [0_u8; 32];
-        getrandom::fill(&mut random).map_err(|_| {
-            RouterError::new(
-                RouterErrorKind::Runtime,
-                "failed to initialize the private subscription transport",
-            )
-        })?;
-        let secret = random
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
+        // The path and the secret come from separate random draws, so the
+        // path, which reaches routing and logs, says nothing about the secret.
+        let mut path = [0_u8; 16];
+        let mut secret = [0_u8; 32];
+        getrandom::fill(&mut path)
+            .and_then(|()| getrandom::fill(&mut secret))
+            .map_err(|_| {
+                RouterError::new(
+                    RouterErrorKind::Runtime,
+                    "failed to initialize the private subscription transport",
+                )
+            })?;
+        let hex = |bytes: &[u8]| {
+            bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
         Ok(Self {
-            path: format!("/_graphql-orm-router/{}/websocket", &secret[..32]),
-            secret,
+            path: format!("/_graphql-orm-router/{}/websocket", hex(&path)),
+            secret: hex(&secret),
             continuity: Default::default(),
         })
     }
 
     pub(crate) fn authorizes(&self, path: &str, supplied: Option<&str>) -> bool {
-        path != self.path || supplied.is_some_and(|supplied| supplied == self.secret)
+        use subtle::ConstantTimeEq as _;
+        path != self.path
+            || supplied.is_some_and(|supplied| {
+                bool::from(supplied.as_bytes().ct_eq(self.secret.as_bytes()))
+            })
     }
 }
 
@@ -77,7 +88,12 @@ pub(crate) struct SubscriptionGateway {
     internal: InternalSubscriptionEndpoint,
     connect_address: SocketAddr,
     internal_url: String,
+    /// Connections whose `connection_init` credential has validated.
     active_connections: AtomicUsize,
+    /// Upgraded connections that have not authenticated yet. This budget is
+    /// separate, so unauthenticated sockets never hold authenticated capacity.
+    pending_connections: AtomicUsize,
+    max_pending_connections: usize,
     active_operations: AtomicUsize,
     connection_attempts: ConnectionAttemptLimiter,
     metrics: Arc<RouterMetrics>,
@@ -95,6 +111,7 @@ impl SubscriptionGateway {
         let internal_url = format!("ws://localhost:{}{}", connect_address.port(), internal.path);
         let connection_attempts =
             ConnectionAttemptLimiter::new(config.max_connection_attempts_per_second);
+        let max_pending_connections = config.pending_connection_limit();
         Arc::new(Self {
             config,
             authentication,
@@ -102,6 +119,8 @@ impl SubscriptionGateway {
             connect_address,
             internal_url,
             active_connections: AtomicUsize::new(0),
+            pending_connections: AtomicUsize::new(0),
+            max_pending_connections,
             active_operations: AtomicUsize::new(0),
             connection_attempts,
             metrics,
@@ -112,26 +131,52 @@ impl SubscriptionGateway {
         self.connection_attempts.try_acquire()
     }
 
+    fn authenticated_capacity_reached(&self) -> bool {
+        self.active_connections.load(Ordering::Acquire) >= self.config.max_connections
+    }
+
+    /// Charges the authenticated budget. Call only after the credential
+    /// validates.
     fn try_reserve_connection(self: &Arc<Self>) -> Option<ConnectionPermit> {
-        let mut current = self.active_connections.load(Ordering::Acquire);
+        self.try_reserve(Admission::Authenticated)
+    }
+
+    fn try_reserve_pending_connection(self: &Arc<Self>) -> Option<ConnectionPermit> {
+        self.try_reserve(Admission::Pending)
+    }
+
+    fn try_reserve(self: &Arc<Self>, admission: Admission) -> Option<ConnectionPermit> {
+        let (counter, maximum) = self.admission_budget(admission);
+        let mut current = counter.load(Ordering::Acquire);
         loop {
-            if current >= self.config.max_connections {
+            if current >= maximum {
                 return None;
             }
-            match self.active_connections.compare_exchange_weak(
+            match counter.compare_exchange_weak(
                 current,
                 current + 1,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
-                    self.metrics.websocket_connected();
+                    match admission {
+                        Admission::Pending => self.metrics.websocket_pending(),
+                        Admission::Authenticated => self.metrics.websocket_connected(),
+                    }
                     return Some(ConnectionPermit {
                         gateway: self.clone(),
+                        admission,
                     });
                 }
                 Err(observed) => current = observed,
             }
+        }
+    }
+
+    fn admission_budget(&self, admission: Admission) -> (&AtomicUsize, usize) {
+        match admission {
+            Admission::Pending => (&self.pending_connections, self.max_pending_connections),
+            Admission::Authenticated => (&self.active_connections, self.config.max_connections),
         }
     }
 
@@ -206,16 +251,27 @@ fn loopback_connect_address(bound: SocketAddr) -> SocketAddr {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Admission {
+    Pending,
+    Authenticated,
+}
+
 struct ConnectionPermit {
     gateway: Arc<SubscriptionGateway>,
+    admission: Admission,
 }
 
 impl Drop for ConnectionPermit {
     fn drop(&mut self) {
         self.gateway
-            .active_connections
+            .admission_budget(self.admission)
+            .0
             .fetch_sub(1, Ordering::AcqRel);
-        self.gateway.metrics.websocket_disconnected();
+        match self.admission {
+            Admission::Pending => self.gateway.metrics.websocket_pending_ended(),
+            Admission::Authenticated => self.gateway.metrics.websocket_disconnected(),
+        }
     }
 }
 
@@ -332,7 +388,13 @@ pub(crate) async fn websocket_index(
             .set_header("retry-after", "1")
             .finish());
     }
-    let Some(permit) = gateway.try_reserve_connection() else {
+    // Refuse early when authenticated capacity is already full; checking it
+    // uses no budget. The upgrade itself holds only a pre-authentication slot.
+    if gateway.authenticated_capacity_reached() {
+        gateway.metrics.websocket_rejected();
+        return Ok(HttpResponse::ServiceUnavailable().finish());
+    }
+    let Some(permit) = gateway.try_reserve_pending_connection() else {
         gateway.metrics.websocket_rejected();
         return Ok(HttpResponse::ServiceUnavailable().finish());
     };
@@ -580,7 +642,19 @@ async fn initialize_connection(
             .borrow_mut()
             .terminate_with_public_close(4401, "Bearer credential expired");
     }
-    state.borrow_mut().phase = ConnectionPhase::Connecting;
+    // Only now is the connection charged against the authenticated budget.
+    // Replacing the permit releases its pre-authentication slot.
+    let Some(permit) = gateway.try_reserve_connection() else {
+        gateway.metrics.websocket_rejected();
+        return state
+            .borrow_mut()
+            .terminate_with_public_close(1013, "Too many connections");
+    };
+    {
+        let mut state = state.borrow_mut();
+        state.permit = Some(permit);
+        state.phase = ConnectionPhase::Connecting;
+    }
     spawn_expiry(
         Rc::downgrade(&state),
         external_sink.clone(),
@@ -1489,6 +1563,55 @@ mod tests {
         let debug = format!("{first:?}");
         assert!(!debug.contains(&first.secret));
         assert!(!debug.contains(&first.path));
+    }
+
+    #[test]
+    fn promotion_moves_one_connection_between_gauges_without_double_counting() {
+        let gateway = test_gateway();
+        let snapshot = || gateway.metrics.snapshot();
+        let pending = gateway.try_reserve_pending_connection().unwrap();
+        assert_eq!(snapshot().pending_websocket_connections(), 1);
+        assert_eq!(snapshot().active_websocket_connections(), 0);
+        let mut slot = Some(pending);
+        let authenticated = gateway.try_reserve_connection().unwrap();
+        assert_eq!(
+            snapshot().active_websocket_connections(),
+            1,
+            "authenticated sockets are counted only in the active gauge"
+        );
+        assert_eq!(snapshot().pending_websocket_connections(), 1);
+        slot.replace(authenticated);
+        assert_eq!(snapshot().pending_websocket_connections(), 0);
+        assert_eq!(snapshot().active_websocket_connections(), 1);
+        drop(slot);
+        assert_eq!(snapshot().pending_websocket_connections(), 0);
+        assert_eq!(snapshot().active_websocket_connections(), 0);
+    }
+
+    #[test]
+    fn internal_endpoint_path_reveals_nothing_about_its_secret() {
+        let endpoint = InternalSubscriptionEndpoint::generate().unwrap();
+        let segment = endpoint
+            .path
+            .strip_prefix("/_graphql-orm-router/")
+            .and_then(|rest| rest.strip_suffix("/websocket"))
+            .unwrap();
+        assert_eq!(segment.len(), 32);
+        for window in 12..=segment.len() {
+            for start in 0..=segment.len() - window {
+                assert!(
+                    !endpoint.secret.contains(&segment[start..start + window]),
+                    "the private path must be independent of the secret"
+                );
+            }
+        }
+        let wrong_length = &endpoint.secret[..endpoint.secret.len() - 1];
+        assert!(!endpoint.authorizes(&endpoint.path, Some(wrong_length)));
+        let mut flipped = endpoint.secret.clone().into_bytes();
+        flipped[0] = if flipped[0] == b'0' { b'1' } else { b'0' };
+        assert!(!endpoint.authorizes(&endpoint.path, Some(std::str::from_utf8(&flipped).unwrap())));
+        assert!(!endpoint.authorizes(&endpoint.path, Some(segment)));
+        assert!(endpoint.authorizes(&endpoint.path, Some(&endpoint.secret)));
     }
 
     #[test]

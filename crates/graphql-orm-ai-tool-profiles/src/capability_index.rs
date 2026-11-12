@@ -502,12 +502,14 @@ impl AiCapabilityIndex {
     ) -> Result<AiCapabilitySearchResult, AiError> {
         query.validate(self.limits.maximum_search_results)?;
         let candidates = rank_entries(
-            self.entries.values().map(|entry| (&self.target_id, entry)),
+            self.entries
+                .values()
+                .map(|entry| ((), &self.target_id, entry)),
             query,
         )
         .into_iter()
         .take(usize::from(query.maximum_results))
-        .map(|(_, entry)| search_candidate(entry))
+        .map(|((), entry)| search_candidate(entry))
         .collect();
         Ok(AiCapabilitySearchResult {
             index_fingerprint: self.fingerprint.clone(),
@@ -692,28 +694,87 @@ impl AiCapabilityIndexSet {
     ///
     /// Returns an error for an invalid query or result ceiling. Search emits
     /// model-safe metadata only and grants no authority.
+    ///
+    /// The result ceiling is applied to the authority-neutral ranking. A caller
+    /// that filters candidates through current host policy must rank with
+    /// [`Self::ranked_matches`] and apply the ceiling after its policy, or a
+    /// restricted principal can receive fewer candidates than it may use.
     pub fn search(
         &self,
         query: &AiCapabilitySearchQuery,
     ) -> Result<AiCapabilityIndexSetSearchResult, AiError> {
-        query.validate(self.maximum_search_results)?;
-        let candidates = rank_entries(
-            self.indexes.values().flat_map(|index| {
-                index
-                    .entries
-                    .values()
-                    .map(|entry| (&index.target_id, entry))
-            }),
-            query,
-        )
-        .into_iter()
-        .take(usize::from(query.maximum_results))
-        .map(|(_, entry)| search_candidate(entry))
-        .collect();
+        let candidates = self
+            .ranked_matches(query)?
+            .into_iter()
+            .take(usize::from(query.maximum_results))
+            .map(|candidate| candidate.candidate())
+            .collect();
         Ok(AiCapabilityIndexSetSearchResult {
             index_set_fingerprint: self.fingerprint.clone(),
             candidates,
         })
+    }
+
+    /// Ranks every entry that matches one validated query, without applying
+    /// the query's result ceiling.
+    ///
+    /// Matches are in the same deterministic order [`Self::search`] uses.
+    /// Each rank depends only on the query and that entry's own metadata, so
+    /// removing other entries from the result cannot change the relative
+    /// order of the entries that remain. Callers that apply host policy
+    /// filter this complete ranking first and truncate afterwards.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid query or result ceiling. Ranking emits
+    /// model-safe metadata only and grants no authority.
+    pub fn ranked_matches(
+        &self,
+        query: &AiCapabilitySearchQuery,
+    ) -> Result<Vec<AiCapabilityRankedMatch<'_>>, AiError> {
+        query.validate(self.maximum_search_results)?;
+        Ok(rank_entries(
+            self.indexes.values().flat_map(|index| {
+                index
+                    .entries
+                    .values()
+                    .map(move |entry| (index, &index.target_id, entry))
+            }),
+            query,
+        )
+        .into_iter()
+        .map(|(index, entry)| AiCapabilityRankedMatch {
+            index: index.as_ref(),
+            entry,
+        })
+        .collect())
+    }
+}
+
+/// One ranked query match and its exact owning index.
+///
+/// A match is authority-neutral discovery metadata. It proves only that the
+/// entry belongs to the index set it was ranked from.
+#[derive(Clone, Copy, Debug)]
+pub struct AiCapabilityRankedMatch<'a> {
+    index: &'a AiCapabilityIndex,
+    entry: &'a AiCapabilityIndexEntry,
+}
+
+impl<'a> AiCapabilityRankedMatch<'a> {
+    /// Exact owning index of the matched entry.
+    pub const fn index(&self) -> &'a AiCapabilityIndex {
+        self.index
+    }
+
+    /// Exact matched entry.
+    pub const fn entry(&self) -> &'a AiCapabilityIndexEntry {
+        self.entry
+    }
+
+    /// Compact model-safe search candidate for the matched entry.
+    pub fn candidate(&self) -> AiCapabilitySearchCandidate {
+        search_candidate(self.entry)
     }
 }
 
@@ -843,28 +904,31 @@ impl SearchRank {
     }
 }
 
-fn rank_entries<'a>(
-    entries: impl IntoIterator<Item = (&'a GraphqlExecutionTargetId, &'a AiCapabilityIndexEntry)>,
+fn rank_entries<'a, K>(
+    entries: impl IntoIterator<Item = (K, &'a GraphqlExecutionTargetId, &'a AiCapabilityIndexEntry)>,
     query: &AiCapabilitySearchQuery,
-) -> Vec<(SearchRank, &'a AiCapabilityIndexEntry)> {
+) -> Vec<(K, &'a AiCapabilityIndexEntry)> {
     let tokens = search_tokens(&query.text);
     let terms = tokens.iter().cloned().collect::<BTreeSet<_>>();
     let shape_intent = search_shape_intent(&tokens);
     let mut ranked = entries
         .into_iter()
-        .filter(|(_, entry)| entry_matches_query(entry, query))
-        .filter_map(|(target_id, entry)| {
+        .filter(|(_, _, entry)| entry_matches_query(entry, query))
+        .filter_map(|(key, target_id, entry)| {
             let rank = search_rank(target_id, entry, &terms, shape_intent);
-            rank.has_semantic_match().then_some((rank, entry))
+            rank.has_semantic_match().then_some((rank, key, entry))
         })
         .collect::<Vec<_>>();
     ranked.sort_by(|left, right| {
         right
             .0
             .cmp(&left.0)
-            .then_with(|| left.1.id.cmp(&right.1.id))
+            .then_with(|| left.2.id.cmp(&right.2.id))
     });
     ranked
+        .into_iter()
+        .map(|(_, key, entry)| (key, entry))
+        .collect()
 }
 
 fn search_candidate(entry: &AiCapabilityIndexEntry) -> AiCapabilitySearchCandidate {
@@ -2087,6 +2151,45 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn index_set_ranked_matches_are_complete_and_search_is_their_prefix() {
+        let index = Arc::new(synthetic_shape_index(101));
+        let set = AiCapabilityIndexSet::compile([index]).expect("set");
+        let query = AiCapabilitySearchQuery {
+            text: "list records".to_owned(),
+            namespace: None,
+            kind: Some(AiCapabilityKind::GeneratedQuery),
+            entity_or_operation: None,
+            maximum_results: 7,
+        };
+        let ranked = set.ranked_matches(&query).expect("ranked matches");
+        assert_eq!(
+            ranked.len(),
+            505,
+            "the result ceiling must not truncate the ranking"
+        );
+        assert!(ranked.iter().all(|candidate| {
+            set.owning_index(&candidate.entry().id)
+                .is_some_and(|index| index.fingerprint() == candidate.index().fingerprint())
+        }));
+        let search = set.search(&query).expect("bounded search");
+        assert_eq!(
+            search.candidates,
+            ranked
+                .iter()
+                .take(7)
+                .map(AiCapabilityRankedMatch::candidate)
+                .collect::<Vec<_>>()
+        );
+        assert!(matches!(
+            set.ranked_matches(&AiCapabilitySearchQuery {
+                maximum_results: 0,
+                ..query
+            }),
+            Err(AiError::InvalidInput(_))
+        ));
     }
 
     #[test]

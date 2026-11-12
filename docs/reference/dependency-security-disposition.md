@@ -35,7 +35,7 @@ API; no compatible fixed release exists in the current owning dependency ranges.
 Patched crypto-bigint releases exist on the incompatible 0.7 line; this
 disposition does not describe those releases as unavailable.
 
-The retained path is `agql-auth 0.24.0 → jsonwebtoken 10.4.0 → p256/p384 0.13
+The retained path is `agql-auth 0.26.0 → jsonwebtoken 10.4.0 → p256/p384 0.13
 → elliptic-curve 0.13.8 → crypto-bigint 0.5.5`. The workspace's direct
 jsonwebtoken 11.0.0 verification dependency also reaches that RustCrypto line.
 Search of workspace source, examples, fixtures and tests found no EC

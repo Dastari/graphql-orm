@@ -10,9 +10,9 @@ supersedes: []
 
 # Migration Guide
 
-## 0.9.1 to 0.9.2: digest-pinned managed Samba fixture
+## 0.9.2 to 0.9.3: digest-pinned managed Samba fixture
 
-Update the storage requirement to 0.9.2 and refresh the consumer lockfile. No
+Update the storage requirement to 0.9.3 and refresh the consumer lockfile. No
 API, configuration or object format change is required.
 
 The managed Samba runner now uses the image
@@ -21,6 +21,33 @@ by default. Local runs keep the never-pull default, so pull that exact
 reference once before running `tests/samba/run.sh` if only the `latest` tag
 is cached. An `SMB_TEST_IMAGE` override must be a digest reference
 (`name@sha256:<64 hex digits>`); a tag-only override exits with status 64.
+
+## 0.9.1 to 0.9.2: ordered and durable local storage
+
+Update the storage requirement to 0.9.2 and refresh the consumer lockfile. No
+API, configuration or object format change is required.
+
+- Local `list_blobs` and `list_blobs_page` now return keys in exact
+  lexicographic key order. Code that relied on the earlier directory-walk order
+  must sort keys itself or accept the new order. Paged listings no longer skip
+  keys next to sibling names such as `a-b` or `a.b`. A paged listing that
+  spans the upgrade can still have skipped such keys, so restart it after
+  upgrading.
+- Local writes and deletions now fsync file data and the affected directories
+  before they return. Expect lower write throughput, most of all on file
+  systems with slow syncs. Data written by earlier versions has not been
+  synced. Run any verification you depend on, such as a backup verify, after
+  an unclean shutdown that happened before the upgrade.
+- A file system that cannot sync directories keeps working: on Linux,
+  Android, Apple platforms, the BSDs, illumos, Solaris and AIX, `EINVAL` and
+  `EBADF` from a directory fsync are accepted. A file system that rejects
+  file fsync now fails local writes. Use a root on a file system that supports
+  it.
+- `put_blob_if_not_exists` can now return non-retryable
+  `StorageError::SingleAttemptFailed` when the key was created but its
+  directory sync failed. Treat it as outcome unknown: the key may exist. For a
+  backup repository lock, do not retry the acquisition. Recover offline, after
+  quiescing all writers and handles, as for any lock of unknown state.
 
 ## 0.9.0 to 0.9.1: backend-owned temporary names
 

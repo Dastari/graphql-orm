@@ -3,7 +3,7 @@ title: graphql-orm-router threat model
 kind: architecture
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-11-09
+last_reviewed: 2026-11-12
 review_by: 2027-02-07
 supersedes: []
 ---
@@ -30,6 +30,10 @@ and RLS remain authoritative after router preflight.
   issuance, session refresh, or private-key decryption.
 - Router authorization binds canonical metadata to the exact active graph and
   may deny before downstream work. It cannot grant around a subgraph guard.
+  An undescribed root field is refused, and scope-template values are limited
+  to one plain segment so client arguments cannot add separators or wildcards.
+- Introspection is off unless configured; when enabled on an authenticated
+  router it requires a validated bearer and stays depth-bounded.
 - Bearers propagate only after validation and only to configured GraphQL
   destinations. Schema credentials are source-specific and separate.
 - Dynamic registration binds authenticated identity to exact advertised
@@ -44,7 +48,9 @@ and RLS remain authoritative after router preflight.
   are bounded.
 - Subscriptions run only through the public `graphql-transport-ws` gateway,
   which requires a bearer, ends the connection at credential expiry, limits
-  connection attempts and signals continuity loss. The public HTTP path refuses
+  connection attempts and signals continuity loss. Authenticated connection
+  capacity is charged only after the bearer validates; unauthenticated sockets
+  use a separate pending budget. The public HTTP path refuses
   every subscription before validation, so Hive-native SSE or multipart
   streams cannot bypass those controls.
 - Default logs exclude variables/tokens and use structured info events. Safe
@@ -55,6 +61,9 @@ and RLS remain authoritative after router preflight.
 
 - Terminate public and administrative TLS with a trusted proxy or service mesh;
   restrict the admin and optional Prometheus listeners by network policy.
+- Apply per-client WebSocket connection limits at that proxy. The router's
+  attempt rate and pending-connection budget are process-wide and charged
+  before any credential is known.
 - Protect static endpoint DNS/routing and schema environment variables. The
   dynamic SSRF policy does not turn a malicious statically configured endpoint
   into a trusted service.
