@@ -10,11 +10,11 @@ supersedes: []
 
 # Changelog
 
-## 0.22.0 (unreleased)
+## 0.21.2 (unreleased)
 
-Fixes #236: add a public-API regression proving query-plan disclosure follows each field's own coordinate. An exportable `Subscription.ownerId` filter, ordering and selection stay available beside a `NeverExport` relation `Subscription.owner` and a private `Subscription.ownerEmail`; the private relation, its nested `owner.id`, a nested private `plan.codeKey`, and lookalike names stay closed in plans and provider-facing schemas. Behaviour, profiles, capabilities and fingerprints are unchanged from 0.21.1.
+Fixes #236: add a public-API regression proving query-plan disclosure follows each field's own coordinate. An exportable `Subscription.ownerId` filter, ordering and selection stay available beside a `NeverExport` relation `Subscription.owner` and a private `Subscription.ownerEmail`, and the provider-facing `where`/`orderBy` inputs list exactly the public scalars. `ownerEmail`, lookalike names, the private relation and `owner.id` stay closed. For selections through an exportable relation, `plan.code` is admitted and the private `plan.codeKey` is refused. Relation filters such as `where.plan` are dropped entirely, so they are asserted only as dropped. Behaviour, profiles, capabilities and fingerprints are unchanged from 0.21.1.
 
-## Unreleased - 0.21.1
+## [0.21.1] - 2026-11-07
 
 Re-export receiver-purpose bindings and use the shared exact document hash without changing existing signed encodings or profile fingerprints. No data migration is needed. Fixes #352.
 

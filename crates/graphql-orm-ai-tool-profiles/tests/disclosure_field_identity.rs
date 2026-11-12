@@ -4,10 +4,13 @@
 //! `Subscription.ownerId` is an exportable filterable scalar beside a separate
 //! `NeverExport` relation `Subscription.owner` and a private scalar
 //! `Subscription.ownerEmail`. The public scalar must stay available for
-//! filters, ordering, selections and the provider-facing schema, while every
-//! private field, including fields nested under the private relation, stays
-//! closed. The exportable relation `Subscription.plan` checks the nested
-//! direction: `Plan.code` stays beside a private `Plan.codeKey`.
+//! filters, ordering, selections and the provider-facing `where`/`orderBy`
+//! input schemas, while the private scalar, the private relation and fields
+//! selected through it stay closed. The exportable relation
+//! `Subscription.plan` checks nested selections: `plan.code` stays beside a
+//! private `plan.codeKey`. Relation filters (`where.plan`, `where.owner`) are
+//! dropped entirely, whatever the target field's disclosure, so they prove
+//! nothing about nested field privacy and are asserted only as dropped.
 
 use std::collections::BTreeSet;
 
@@ -245,6 +248,35 @@ fn nested(compact: &Value) -> Value {
     })
 }
 
+/// Exact property names of the `where` and `orderBy` input objects, which are
+/// identical in the compact and nested plan contracts.
+fn input_properties(schema: &Value) -> (BTreeSet<&str>, BTreeSet<&str>) {
+    let keys = |pointer: &str| {
+        schema
+            .pointer(pointer)
+            .and_then(Value::as_object)
+            .unwrap_or_else(|| panic!("input properties at {pointer}"))
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>()
+    };
+    (
+        keys("/properties/arguments/properties/where/anyOf/0/properties"),
+        keys("/properties/arguments/properties/orderBy/anyOf/0/items/properties"),
+    )
+}
+
+fn nested_selection(relationship: &str, field: &str) -> Value {
+    json!({
+        "arguments": {},
+        "fields": { "id": true },
+        "relationships": {
+            (relationship): { "arguments": {}, "fields": { (field): true }, "relationships": {} }
+        },
+        "maximumItems": 1
+    })
+}
+
 fn property_names(value: &Value, names: &mut BTreeSet<String>) {
     match value {
         Value::Object(map) => {
@@ -289,15 +321,19 @@ fn exportable_scalar_filter_survives_private_relation_name_prefix() {
     capability
         .compile_compact(related)
         .expect("public field nested under an exportable relation");
+    capability
+        .compile(nested_selection("plan", "code"))
+        .expect("public field nested under an exportable relation (nested contract)");
 
-    // The provider-facing description must advertise the public scalar.
+    // The provider-facing input schemas describe exactly the public filter
+    // and ordering scalars: ownerId is present, and nothing else survives.
     for schema in [
         capability.compact_argument_schema(),
         capability.argument_schema(),
     ] {
-        let mut names = BTreeSet::new();
-        property_names(schema, &mut names);
-        assert!(names.contains("ownerId"), "described ownerId input");
+        let (filters, ordering) = input_properties(schema);
+        assert_eq!(filters, BTreeSet::from(["id", "ownerId"]), "where inputs");
+        assert_eq!(ordering, BTreeSet::from(["ownerId"]), "orderBy inputs");
     }
     let selections = capability
         .compact_argument_schema()
@@ -319,7 +355,6 @@ fn private_relation_and_lookalike_fields_stay_closed() {
         ("owner", json!({ "id": { "eq": "owner-1" } })),
         ("ownerSome", json!({ "id": { "eq": "owner-1" } })),
         ("ownerIsNull", json!(true)),
-        ("plan", json!({ "codeKey": { "eq": "private-value" } })),
         ("ownerIdExtra", json!({ "eq": "owner-1" })),
         ("owner_id", json!({ "eq": "owner-1" })),
         ("OWNERID", json!({ "eq": "owner-1" })),
@@ -335,6 +370,19 @@ fn private_relation_and_lookalike_fields_stay_closed() {
             capability.compile(nested(&invalid)).is_err(),
             "nested filter {name}"
         );
+    }
+
+    // Relation filters are dropped entirely, so even a filter on the public
+    // Plan.code is refused. This is not evidence that Plan.codeKey is private;
+    // nested privacy is proven by the selection cases below.
+    for value in [
+        json!({ "code": { "eq": "public-value" } }),
+        json!({ "codeKey": { "eq": "private-value" } }),
+    ] {
+        let mut invalid = plan();
+        invalid["arguments"]["where"] = json!({ "plan": value });
+        assert!(capability.compile_compact(invalid.clone()).is_err());
+        assert!(capability.compile(nested(&invalid)).is_err());
     }
 
     for name in ["ownerEmail", "ownerCount"] {
@@ -354,11 +402,14 @@ fn private_relation_and_lookalike_fields_stay_closed() {
             "selection {path}"
         );
     }
-    let mut invalid = plan();
-    invalid["fields"] = json!({ "id": true });
-    invalid["relationships"] = json!({ "owner": { "fields": { "id": true } } });
-    invalid.as_object_mut().unwrap().remove("selections");
-    assert!(capability.compile(invalid).is_err(), "nested owner.id");
+    for (relationship, field) in [("owner", "id"), ("plan", "codeKey")] {
+        assert!(
+            capability
+                .compile(nested_selection(relationship, field))
+                .is_err(),
+            "nested selection {relationship}.{field}"
+        );
+    }
 
     // Nothing private is described to the provider, even by a shared prefix.
     for schema in [

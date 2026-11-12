@@ -10,9 +10,9 @@ supersedes: []
 
 # Migration Guide
 
-## 0.21.1 to 0.22.0: field-identity disclosure regression
+## 0.21.1 to 0.21.2: no migration
 
-No code, configuration or data migration is needed. This release adds regression coverage only; query capabilities and fingerprints are unchanged.
+Nothing to change. This release adds regression tests only.
 
 ## 0.21.0 to 0.21.1: exact receiver-purpose admission (opt in)
 
