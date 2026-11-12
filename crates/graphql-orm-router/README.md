@@ -3,7 +3,7 @@ title: graphql-orm-router
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-11-09
+last_reviewed: 2026-11-12
 review_by: 2027-02-07
 supersedes: []
 ---
@@ -15,6 +15,13 @@ The current workspace selects published Auth `v0.24.0`, peeled to
 that same tag and refresh their locks to one source; matching the commit alone
 does not unify revision and tag selectors. See the
 [published Auth selection](../../MIGRATION.md#published-agql-auth-0240-selection).
+
+Version 0.11.0 turns introspection off by default. Opt in with
+`"introspection": true`. On an authenticated router, enabled introspection
+needs a valid bearer. Preflight now refuses undescribed root fields.
+Scope-template values must be one plain segment. WebSocket admission keeps
+sockets that have not authenticated in a separate `maxPendingConnections`
+budget. See [MIGRATION.md](MIGRATION.md).
 
 Version 0.10.0 serves subscriptions only through the public
 `graphql-transport-ws` gateway. HTTP SSE and multipart subscription requests

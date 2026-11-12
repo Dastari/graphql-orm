@@ -3,7 +3,7 @@ title: graphql-orm-router configuration reference
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-10-30
+last_reviewed: 2026-11-12
 review_by: 2027-02-07
 supersedes: []
 ---
@@ -68,6 +68,7 @@ an unbounded value.
 | `listener` | Required socket address; production commonly uses `0.0.0.0:4000` behind a TLS proxy. |
 | `graphqlPath` | `/graphql`; absolute, non-root, without query or fragment. |
 | `anonymousDevelopment` | `false`; mutually exclusive with authentication and unsuitable for production. |
+| `introspection` | `false`. `true` enables `__schema` and `__type`; with authentication configured they also need a valid bearer. The depth limit applies either way. |
 | `authentication` | Required unless anonymous development is explicitly enabled. |
 | `scopeMatcher` | Omitted means exact-string matching. `kind: "hierarchical"` requires the `auth-agql` feature. |
 | `subgraphs` | At least one static source is required. |
@@ -83,7 +84,7 @@ an unbounded value.
 | `gracefulShutdownTimeoutSeconds` | 10 whole seconds; valid range 1–60. |
 | `requestLimits` | Production-bounded defaults described below. |
 | `subscriptions` | Disabled; enabling it requires authentication. |
-| `admin` | Disabled; enabling it requires authentication and a distinct listener. |
+| `admin` | Disabled; enabling it requires authentication and a listener port distinct from the public port. |
 | `telemetry` | JSON/info logs; metrics exporter disabled. |
 | `nodeLookup` | Disabled. `{}` enables the router-hosted node lookup; `maxNodes` defaults to 100, valid range 1–10000. |
 
@@ -163,8 +164,8 @@ Scope matching is a separate resource-server policy. Omission or
 
 | Field | Default or rule |
 | --- | --- |
-| `separator` | `.`; one visible character. |
-| `wildcard` | `*`; one non-empty segment without whitespace. |
+| `separator` | `.`; one visible character other than an ASCII letter, digit, `-` or `_`. |
+| `wildcard` | `*`; one non-empty segment without whitespace, containing a character other than an ASCII letter, digit, `-` or `_`. |
 | `wildcardMatchesMultiSegment` | `true`; a trailing wildcard matches the remaining hierarchy. |
 | `allowUniversalWildcard` | `false`; a bare wildcard has no implicit authority. |
 | `superScopes` | Empty; each listed grant satisfies ordinary requirements. |
@@ -178,6 +179,15 @@ become valid only when `allowSuperScopesForExactOnly` is explicitly enabled;
 membership in `superScopes` is exact and case-sensitive. Lists are normalized
 and deduplicated at startup. The router applies this one matcher to fixed and
 rendered operation requirements; resolver guards remain authoritative.
+
+A rendered requirement substitutes each `{argument}` with that argument's
+value only when the value is one plain segment: 1–256 ASCII letters, digits,
+`-` or `_`. Any other value fails the template, so a separator or wildcard in a
+client argument never reaches the matcher. Use a fixed scope or `SubgraphOnly`
+authorization for an argument that can carry other characters. Preflight
+refuses any client root field the active descriptors do not describe; only
+Federation's planner-owned `_entities` and `_service` are outside the
+descriptor contract.
 
 For programmatic setup, `JwksAuthenticationConfig::new` requires a JWKS URL,
 issuer, and non-empty audiences. It defaults to a 15-minute key cache,
@@ -217,14 +227,26 @@ parser tokens, depth 20, 50 aliases, 100 directives, and normalized field cost
 500. Every value is configurable with its matching `max...` JSON field and
 must remain within the crate's hard safety ceiling.
 
-The default `subscriptions` limits are 1024 process-wide public connections,
-128 connection attempts per second with one second of burst capacity, 32
+The default `subscriptions` limits are 1024 process-wide authenticated
+connections, 64 process-wide connections waiting for `connection_init`, 128
+connection attempts per second with one second of burst capacity, 32
 operations per connection, downstream broadcast capacity 32, upstream buffer
 capacity 1024, 64 KiB client messages, and a 5000 ms `connection_init`
 deadline. Configure the attempt budget with
 `maxConnectionAttemptsPerSecond`. Excess attempts return HTTP 429 with
-`Retry-After: 1`; active-connection saturation returns HTTP 503. All queues
-are bounded. Delivery is ephemeral and unreplayed.
+`Retry-After: 1`. All queues are bounded. Delivery is ephemeral and
+unreplayed.
+
+Admission uses two separate budgets. An upgrade holds a pending slot
+(`maxPendingConnections`) until its `connection_init` bearer validates, the
+socket closes, or the init deadline passes. Only a validated connection is
+charged against `maxConnections`; if that budget is full at that moment the
+socket closes with `1013`. Upgrades are refused with HTTP 503 when either
+budget is full. Sockets that never authenticate therefore cannot occupy
+authenticated capacity, although a flood can still delay new handshakes until
+the init deadline frees pending slots. The attempt rate and the pending budget
+are shared before any credential is known, so apply per-client connection
+limits at the proxy or load balancer that sees client addresses.
 
 The message limit applies to the complete serialized
 `graphql-transport-ws` message, including variables and base64 expansion. Bulk
@@ -233,7 +255,8 @@ not in one WebSocket operation.
 
 ## Administration and dynamic destinations
 
-`admin.listener` must be distinct from the public listener. Its exact default
+`admin.listener` must use a port distinct from the public listener's port, on
+any address. Its exact default
 scopes are `router.status`, `router.refresh`, `router.register`,
 `router.remove`, and `router.metrics`. `maxRequestBodyBytes` defaults to 16 KiB.
 

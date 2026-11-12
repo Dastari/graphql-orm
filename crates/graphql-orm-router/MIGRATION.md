@@ -3,12 +3,51 @@ title: graphql-orm-router migration guide
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-11-09
+last_reviewed: 2026-11-12
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # graphql-orm-router migration guide
+
+## 0.10.0 to 0.11.0: introspection, catalogue and admission settings
+
+**Introspection is off by default.** To keep it, opt in with one line:
+
+```json
+"introspection": true
+```
+
+or `RouterConfig::with_introspection(true)`. On an authenticated router,
+enabled introspection needs a valid bearer: tools that introspect anonymously
+must send one, or they receive HTTP 401 `UNAUTHENTICATED`. With introspection
+off, `__schema` and `__type` return HTTP 403 `INTROSPECTION_DISABLED`. Root
+`__typename` keeps working either way.
+
+**Every client root field needs authorization metadata.** Descriptors must now
+describe underscore-prefixed root fields as well. Only Federation's
+`_entities` and `_service` are left out. Preflight refuses an undescribed root
+field with `FORBIDDEN` instead of skipping it.
+
+**Scope-template values are one plain segment.** A value substituted into a
+scope template must be 1–256 ASCII letters, digits, `-` or `_`. If an argument
+used in a template can carry other characters, such as `.`, `:`, `/`, `=`,
+`+` or `*`, change the template to a fixed scope, or use `SubgraphOnly`
+authorization for that field. With the `auth-agql` file matcher, a `separator`
+made of a letter, a digit, `-` or `_` is refused, and so is a `wildcard` made
+only of those characters.
+
+**WebSocket budgets are split.** `maxConnections` now counts authenticated
+connections only. The new `subscriptions.maxPendingConnections` (default 64)
+limits sockets waiting for `connection_init`. Size it for the number of clients
+expected to connect within one `connectionInitTimeoutMs`. A client that
+authenticates while `maxConnections` is full now closes with `1013`. Before,
+its upgrade was refused with 503. Reconnect with backoff as for 503.
+
+**Administrative listener port.** `admin.listener` must use a different port
+from the public listener, even on a different address.
+
+No data migration is needed.
 
 ## 0.9.1 to 0.10.0: subscriptions are WebSocket-only
 

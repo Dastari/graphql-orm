@@ -354,7 +354,20 @@ impl AuthorizationCatalog {
         fields
             .into_iter()
             .filter_map(|field| {
-                let operation = self.operations.get(&(root_type, field.name.clone()))?;
+                // `__typename` is the only root field answered without a
+                // subgraph. Hive answers `__schema` and `__type` separately
+                // under the introspection setting and removes them before
+                // this check. Every other root field must be described; one
+                // that is not is refused rather than skipped.
+                if field.name == "__typename" {
+                    return None;
+                }
+                let Some(operation) = self.operations.get(&(root_type, field.name.clone())) else {
+                    return Some(AuthorizationDenial {
+                        code: "FORBIDDEN",
+                        message: "operation is not described by authorization metadata",
+                    });
+                };
                 match authorize_field(
                     operation,
                     field,
@@ -496,7 +509,11 @@ fn render_template(
             .iter()
             .find(|argument| argument.name == name)?;
         let value = field.arguments.as_ref()?.get_argument(name)?;
-        rendered.push_str(&canonical_scalar(value, descriptor, variables)?);
+        let value = canonical_scalar(value, descriptor, variables)?;
+        if !is_plain_scope_segment(&value) {
+            return None;
+        }
+        rendered.push_str(&value);
         remaining = &after[end + 1..];
     }
     if remaining.contains('}') {
@@ -504,6 +521,24 @@ fn render_template(
     }
     rendered.push_str(remaining);
     Some(rendered)
+}
+
+/// Longest argument value substituted into a scope template.
+const MAX_SCOPE_SEGMENT_BYTES: usize = 256;
+
+/// Whether `character` may appear in an argument value substituted into a
+/// scope template: an ASCII letter or digit, `-` or `_`.
+pub(crate) fn is_plain_scope_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || character == '-' || character == '_'
+}
+
+/// A substituted value is one non-empty, bounded segment of plain characters,
+/// so it can never add a separator, a wildcard, or another placeholder to the
+/// required scope. Any other value fails the template.
+fn is_plain_scope_segment(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_SCOPE_SEGMENT_BYTES
+        && value.chars().all(is_plain_scope_character)
 }
 
 fn canonical_scalar(
@@ -677,7 +712,7 @@ fn graph_root_contract(graph: &ActiveGraph) -> Result<GraphRootContract, RouterE
             object
                 .fields
                 .iter()
-                .filter(|(name, _)| !name.starts_with('_'))
+                .filter(|(name, _)| !is_planner_owned_root_field(name))
                 .map(|(name, field)| {
                     (
                         (root_type, name.clone()),
@@ -691,6 +726,13 @@ fn graph_root_contract(graph: &ActiveGraph) -> Result<GraphRootContract, RouterE
         );
     }
     Ok(fields)
+}
+
+/// Federation fields the query planner uses to reach entity-owning subgraphs.
+/// They are not client root fields, so the descriptor contract omits them and
+/// preflight refuses them like any undescribed field.
+fn is_planner_owned_root_field(name: &str) -> bool {
+    matches!(name, "_entities" | "_service")
 }
 
 fn collect_included_root_fields<'a>(
@@ -864,36 +906,18 @@ mod tests {
         type Query { zone(id: ID!): Zone, _diagnostics: String! }
     "#;
 
-    #[test]
-    fn the_root_contract_excludes_underscore_prefixed_fields() {
-        // `_entities` and `_service` appear on an entity-owning subgraph the
-        // moment it declares a resolvable key, and they are reached by the
-        // query planner rather than by a client root field. The root contract
-        // is exact-match, so a descriptor that correctly omits them must still
-        // validate, and the planner-owned fields must never be demanded.
-        let graph =
-            crate::federation::GraphStore::new(&[crate::federation::CandidateSubgraph::new(
-                "catalog",
-                "http://catalog.test/graphql",
-                ENTITY_SDL,
-            )])
-            .unwrap()
-            .load();
-        let expected = graph_root_contract(&graph).unwrap();
-        let named = expected
-            .keys()
-            .map(|(_, field)| field.as_str())
-            .collect::<Vec<_>>();
-        assert!(
-            !named.iter().any(|field| field.starts_with('_')),
-            "the contract skips planner-owned fields: {named:?}"
-        );
-        assert!(
-            named.contains(&"zone"),
-            "ordinary root fields remain: {named:?}"
-        );
+    fn entity_graph() -> Arc<ActiveGraph> {
+        crate::federation::GraphStore::new(&[crate::federation::CandidateSubgraph::new(
+            "catalog",
+            "http://catalog.test/graphql",
+            ENTITY_SDL,
+        )])
+        .unwrap()
+        .load()
+    }
 
-        let mut descriptor = descriptor(vec![OperationDescriptor {
+    fn zone_operation(authorization: AuthorizationRequirement) -> OperationDescriptor {
+        OperationDescriptor {
             root_type: RootOperationType::Query,
             field_name: "zone".to_owned(),
             arguments: vec![ArgumentDescriptor {
@@ -901,13 +925,214 @@ mod tests {
                 graphql_type: "ID!".to_owned(),
                 required: true,
             }],
+            authorization,
+        }
+    }
+
+    fn diagnostics_operation() -> OperationDescriptor {
+        OperationDescriptor {
+            root_type: RootOperationType::Query,
+            field_name: "_diagnostics".to_owned(),
+            arguments: Vec::new(),
             authorization: AuthorizationRequirement::Authenticated,
-        }]);
+        }
+    }
+
+    fn entity_catalog(operations: Vec<OperationDescriptor>) -> AuthorizationCatalog {
+        let mut descriptor = descriptor(operations);
         descriptor.fingerprints.schema = Fingerprint::sha256(ENTITY_SDL);
         descriptor.fingerprints.combined = descriptor.combined_fingerprint();
+        AuthorizationCatalog::build(&entity_graph(), &[descriptor]).unwrap()
+    }
+
+    fn normalized(graph: &ActiveGraph, query: &str) -> OperationDefinition {
+        let document = hive_router::query_planner::utils::parsing::parse_operation(query);
+        hive_router::query_planner::ast::normalization::normalize_operation(
+            &graph.hive.snapshot().planner.supergraph,
+            &document,
+            None,
+        )
+        .unwrap()
+        .operation
+    }
+
+    fn denials(
+        catalog: &AuthorizationCatalog,
+        query: &str,
+        variables: &[(&str, &str)],
+        principal: Option<&AuthenticatedPrincipal>,
+        resolution: VariableResolution,
+    ) -> Vec<AuthorizationDenial> {
+        let operation = normalized(&entity_graph(), query);
+        let variables = variables
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), JsonValue::from(*value)))
+            .collect();
+        catalog.authorize_operation(
+            &operation,
+            &variables,
+            principal,
+            &ExactScopeMatcher,
+            resolution,
+        )
+    }
+
+    #[test]
+    fn the_root_contract_exempts_only_planner_owned_federation_fields() {
+        // `_entities` and `_service` appear on an entity-owning subgraph the
+        // moment it declares a resolvable key, and they are reached by the
+        // query planner rather than by a client root field. Any other root
+        // field, underscore-prefixed or not, needs authorization metadata.
+        let graph = entity_graph();
+        let expected = graph_root_contract(&graph).unwrap();
+        let named = expected
+            .keys()
+            .map(|(_, field)| field.as_str())
+            .collect::<Vec<_>>();
         assert!(
-            AuthorizationCatalog::build(&graph, &[descriptor]).is_ok(),
-            "an entity-owning subgraph needs no descriptor for _entities or _service"
+            !named.contains(&"_entities") && !named.contains(&"_service"),
+            "the contract skips planner-owned fields: {named:?}"
+        );
+        assert!(
+            named.contains(&"zone") && named.contains(&"_diagnostics"),
+            "ordinary and underscore-prefixed application fields remain: {named:?}"
+        );
+
+        let mut undescribed = descriptor(vec![zone_operation(
+            AuthorizationRequirement::Authenticated,
+        )]);
+        undescribed.fingerprints.schema = Fingerprint::sha256(ENTITY_SDL);
+        undescribed.fingerprints.combined = undescribed.combined_fingerprint();
+        assert_eq!(
+            AuthorizationCatalog::build(&graph, &[undescribed])
+                .unwrap_err()
+                .kind(),
+            RouterErrorKind::AuthorizationMetadata,
+            "an underscore-prefixed application root field is not silently exempt"
+        );
+
+        // The complete descriptor needs no entry for `_entities` or `_service`.
+        entity_catalog(vec![
+            zone_operation(AuthorizationRequirement::Authenticated),
+            diagnostics_operation(),
+        ]);
+    }
+
+    #[test]
+    fn preflight_refuses_root_fields_absent_from_the_catalog() {
+        let mut catalog = entity_catalog(vec![
+            zone_operation(AuthorizationRequirement::Public),
+            diagnostics_operation(),
+        ]);
+        // A root field the graph serves but the catalogue does not describe.
+        catalog
+            .operations
+            .remove(&(RootOperationType::Query, "_diagnostics".to_owned()))
+            .unwrap();
+        let principal = AuthenticatedPrincipal::new("subject", ["zones.read"], None).unwrap();
+        for resolution in [VariableResolution::Preflight, VariableResolution::Complete] {
+            for query in [
+                "{ _diagnostics }",
+                "{ zone(id: \"z1\") { id } _diagnostics }",
+                "{ ... on Query { _diagnostics } }",
+            ] {
+                let denied = denials(&catalog, query, &[], Some(&principal), resolution);
+                assert_eq!(
+                    denied,
+                    vec![AuthorizationDenial {
+                        code: "FORBIDDEN",
+                        message: "operation is not described by authorization metadata",
+                    }],
+                    "{query} under {resolution:?}"
+                );
+            }
+            assert!(
+                denials(
+                    &catalog,
+                    "{ __typename zone(id: \"z1\") { id } }",
+                    &[],
+                    None,
+                    resolution,
+                )
+                .is_empty(),
+                "the root __typename meta field and public fields remain available"
+            );
+        }
+    }
+
+    #[test]
+    fn scope_template_values_are_restricted_to_a_single_plain_segment() {
+        let catalog = entity_catalog(vec![
+            zone_operation(AuthorizationRequirement::AllScopes {
+                scopes: vec![ScopeTemplate::parse("zones.{id}.read").unwrap()],
+            }),
+            diagnostics_operation(),
+        ]);
+        let query = "query Read($id: ID!) { zone(id: $id) { id } }";
+        let allowed = AuthenticatedPrincipal::new("subject", ["zones.z-1_A.read"], None).unwrap();
+        assert!(
+            denials(
+                &catalog,
+                query,
+                &[("id", "z-1_A")],
+                Some(&allowed),
+                VariableResolution::Complete,
+            )
+            .is_empty()
+        );
+        for value in ["a.b", "a*", "*", "", "a b", "a:b", "a/b", "{id}", "a\u{0}"] {
+            let rendered = format!("zones.{value}.read");
+            let principal =
+                AuthenticatedPrincipal::new("subject", [rendered.as_str(), "zones.*.read"], None)
+                    .or_else(|_| AuthenticatedPrincipal::new("subject", ["zones.*.read"], None))
+                    .unwrap();
+            let variables = [("id", value)];
+            assert_eq!(
+                denials(
+                    &catalog,
+                    query,
+                    &variables,
+                    Some(&principal),
+                    VariableResolution::Complete,
+                )
+                .len(),
+                1,
+                "{value:?} must not be substituted into a scope"
+            );
+            if value.chars().any(char::is_control) {
+                continue;
+            }
+            let literal = format!(
+                "{{ zone(id: {}) {{ id }} }}",
+                serde_json::Value::String(value.to_owned())
+            );
+            assert_eq!(
+                denials(
+                    &catalog,
+                    &literal,
+                    &[],
+                    Some(&principal),
+                    VariableResolution::Preflight,
+                )
+                .len(),
+                1,
+                "literal {value:?} must not be substituted into a scope"
+            );
+        }
+        let too_long = "z".repeat(257);
+        let principal =
+            AuthenticatedPrincipal::new("subject", [format!("zones.{too_long}.read")], None)
+                .unwrap();
+        assert_eq!(
+            denials(
+                &catalog,
+                query,
+                &[("id", too_long.as_str())],
+                Some(&principal),
+                VariableResolution::Complete,
+            )
+            .len(),
+            1
         );
     }
 

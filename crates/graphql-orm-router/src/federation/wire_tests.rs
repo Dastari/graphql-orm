@@ -252,6 +252,7 @@ fn router_child_entrypoint() {
                     config = config.with_subscriptions(
                         SubscriptionConfig::new()
                             .with_max_connections(2)
+                            .with_max_pending_connections(2)
                             .with_max_operations_per_connection(2)
                             .with_broadcast_capacity(2)
                             .with_subgraph_buffer_capacity(2)
@@ -395,6 +396,7 @@ impl AuthenticationProvider for TestAuthenticationProvider {
             "product-admin" => ("test-subject", vec!["products.admin"]),
             "product-writer" => ("test-subject", vec!["products.write"]),
             "product-prefix" => ("test-subject", vec!["products.*"]),
+            "product-nested" => ("test-subject", vec!["products.p1.x.read"]),
             "product-events" | "product-events-refreshed" | "short-lived" => (
                 "test-subject",
                 vec!["products.p1.events", "products.failure.events"],
@@ -1424,6 +1426,49 @@ fn authenticated_static_router_denies_before_downstream_and_expands_templates() 
     );
     assert_eq!(mutation["data"]["renameProduct"]["name"], "renamed");
 
+    // A template argument is one plain segment. Separators and wildcards are
+    // refused rather than spliced into the required scope.
+    let opens_before_segments = products.opens() + reviews.opens();
+    for (query, variables) in [
+        ("query { product(id: \"p1.x\") { id } }", json!({})),
+        (
+            "query Read($id: ID!) { product(id: $id) { id } }",
+            json!({"id": "p1.x"}),
+        ),
+    ] {
+        let spliced = router.graphql_at(
+            "/api/graphql",
+            json!({"query": query, "variables": variables}),
+            &[("authorization", "Bearer product-nested")],
+        );
+        assert_eq!(
+            spliced["errors"][0]["extensions"]["code"], "FORBIDDEN",
+            "{spliced}"
+        );
+    }
+    assert_eq!(products.opens() + reviews.opens(), opens_before_segments);
+
+    // Introspection is off unless the router configuration enables it.
+    for headers in [&[][..], &[("authorization", "Bearer product-admin")][..]] {
+        for query in [
+            "{ __schema { queryType { name } } }",
+            "query { ...Root } fragment Root on Query { __type(name: \"Query\") { name } }",
+        ] {
+            let (_, introspection) =
+                router.graphql_response_at("/api/graphql", json!({"query": query}), headers);
+            assert!(
+                introspection["data"].is_null(),
+                "introspection answered: {introspection}"
+            );
+            assert_eq!(
+                introspection["errors"][0]["extensions"]["code"], "INTROSPECTION_DISABLED",
+                "{introspection}"
+            );
+        }
+    }
+    let typename = router.graphql_at("/api/graphql", json!({"query": "{ __typename }"}), &[]);
+    assert_eq!(typename["data"]["__typename"], "Query", "{typename}");
+
     router.stop();
 }
 
@@ -1602,8 +1647,20 @@ fn authenticated_public_websocket_enforces_lifecycle_and_routes_upstream_websock
     );
     assert!(products.saw_bearer_header());
 
+    // An unauthenticated socket holds only the pre-authentication budget, so
+    // it cannot take the authenticated capacity the second caller needs.
+    let mut pending = TestWebSocket::connect_at(router.address, "/api/graphql");
     let mut second = TestWebSocket::connect_at(router.address, "/api/graphql");
     second.connection_init_bearer("product-events");
+    pending.send_json(&json!({
+        "type": "connection_init",
+        "payload": {"authorization": "Bearer product-events"}
+    }));
+    assert_eq!(
+        pending.wait_for_close(),
+        1013,
+        "authenticated capacity is charged only after the credential validates"
+    );
     second.subscribe(
         "second",
         "subscription { productChanged(id: \"p1\") { id } }",
@@ -1648,6 +1705,17 @@ fn authenticated_public_websocket_enforces_lifecycle_and_routes_upstream_websock
         "fresh"
     );
     reconnected.close();
+    thread::sleep(Duration::from_millis(50));
+
+    let mut idle_first = TestWebSocket::connect_at(router.address, "/api/graphql");
+    let mut idle_second = TestWebSocket::connect_at(router.address, "/api/graphql");
+    assert_eq!(
+        websocket_upgrade_status(router.address, "/api/graphql"),
+        503,
+        "unauthenticated sockets are bounded by their own pre-authentication budget"
+    );
+    idle_first.close();
+    idle_second.close();
     thread::sleep(Duration::from_millis(50));
 
     for index in 0..8 {
