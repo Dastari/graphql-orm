@@ -10,6 +10,10 @@ supersedes: []
 
 # Migration Guide
 
+## 0.21.1 to 0.21.2: no migration
+
+Nothing to change. This release adds regression tests only.
+
 ## 0.21.0 to 0.21.1: exact receiver-purpose admission (opt in)
 
 No data migration is needed. Existing callers and signed operation formats are unchanged.
