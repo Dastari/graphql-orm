@@ -156,9 +156,11 @@ key set stays in use.
 
 A bearer that names a key ID missing from the cached set is refused, and asks
 for one background JWKS refresh so a key the issuer has just rotated in works
-for the next request. `unknownKeyRefreshCooldownSeconds`, default 30, is the
-minimum time between such refreshes, which bounds how often forged key IDs can
-make the router contact the issuer. The scheduled refresh is unaffected.
+for the next request. `unknownKeyRefreshCooldownSeconds`, default 30 and at
+most 86400 (one day), is the minimum time between such refreshes, which bounds
+how often forged key IDs can make the router contact the issuer. The scheduled
+refresh is unaffected. Initial, scheduled, and unknown-key JWKS fetches run one
+at a time, so a slow older fetch never replaces a newer key set.
 
 `roleScopeCatalogue` is optional and requires `auth-agql`. Select exactly one
 of literal `url` or `urlFromEnv`. Request headers are loaded only through
@@ -511,8 +513,13 @@ include any public audience; the issuer may be the same. Programmatic hosts use
 `AdminConfig::with_authentication_provider`. Validation refuses the public
 provider itself, and refuses overlapping audiences whenever both providers
 state them through `AuthenticationProvider::accepted_audiences`, as
-`JwksAuthenticationProvider` does. A custom provider that cannot state its
-audiences must be kept distinct by the operator.
+`JwksAuthenticationProvider` does. The router does not check
+`AgqlAuthenticationProvider` audiences: the pinned `agql-auth` validator does
+not expose them, so two providers built from the same or equivalent validators
+pass validation. Configure their validators with distinct audiences yourself,
+as you must for any custom provider that cannot state its audiences. A token
+whose `aud` lists both a public and an administrative audience is accepted by
+both providers, so issuers must never mint a token with both audiences.
 
 `DELETE /_router/subgraphs/{name}` removes only a dynamic registration. A static
 subgraph belongs to router configuration and the endpoint refuses it with 409

@@ -61,7 +61,11 @@ public provider's. Operators and dynamic services that registered with public
 tokens must request tokens for the admin audience. A custom
 `AuthenticationProvider` may implement the new `accepted_audiences` method so
 validation can compare audiences; the default `None` leaves that to the
-operator.
+operator. The router does not check `AgqlAuthenticationProvider` audiences,
+because the pinned `agql-auth` validator does not expose them: build the admin
+validator with an audience the public validator does not accept. Never issue a
+token whose `aud` lists both a public and an administrative audience; both
+providers accept it.
 
 ### Static subgraph removal
 
@@ -73,7 +77,7 @@ call `RouterHandle::remove_subgraph` from the embedding host.
 
 No change is needed. JWKS documents that mix RS256 signing keys with other
 keys now load instead of failing, and an unknown key ID requests one
-background refresh per 30-second cooldown. Tune it with
+background refresh per 30-second cooldown, at most one day. Tune it with
 `unknownKeyRefreshCooldownSeconds` or
 `JwksAuthenticationConfig::with_unknown_key_refresh_cooldown`.
 

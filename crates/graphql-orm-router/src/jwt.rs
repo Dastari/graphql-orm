@@ -49,6 +49,7 @@ const DEFAULT_ROLE_SCOPE_RETRY_BACKOFF: Duration = Duration::from_secs(1);
 const DEFAULT_ROLE_SCOPE_MAXIMUM_RETRY_BACKOFF: Duration = Duration::from_secs(60);
 const MAX_JWKS_KEYS: usize = 128;
 const MAX_LEEWAY: Duration = Duration::from_secs(5 * 60);
+const MAX_UNKNOWN_KEY_REFRESH_COOLDOWN: Duration = Duration::from_secs(24 * 60 * 60);
 #[cfg(feature = "auth-agql")]
 const MAX_ACCESS_TOKEN_AUTHORIZATION_ROLES: usize = 256;
 #[cfg(feature = "auth-agql")]
@@ -337,7 +338,8 @@ impl JwksAuthenticationConfig {
     }
 
     /// Sets the minimum time between JWKS refreshes requested by bearers that
-    /// name an unknown key ID. The default is 30 seconds.
+    /// name an unknown key ID. The default is 30 seconds; the maximum is one
+    /// day.
     ///
     /// A bearer naming an unknown key is still refused, but it asks for one
     /// background refresh so a key the issuer has just rotated in becomes
@@ -401,9 +403,11 @@ impl JwksAuthenticationConfig {
                 "authentication clock leeway must not exceed 300 seconds",
             ));
         }
-        if self.unknown_key_refresh_cooldown.is_zero() {
+        if self.unknown_key_refresh_cooldown.is_zero()
+            || self.unknown_key_refresh_cooldown > MAX_UNKNOWN_KEY_REFRESH_COOLDOWN
+        {
             return Err(invalid_configuration(
-                "authentication unknown-key refresh cooldown must be greater than zero",
+                "authentication unknown-key refresh cooldown must be greater than zero and at most one day",
             ));
         }
         validate_public_resource_url(
@@ -459,6 +463,9 @@ pub struct JwksAuthenticationProvider {
     client: Client,
     cache: Arc<RwLock<Option<JwksCache>>>,
     key_refresh_in_flight: Arc<AtomicBool>,
+    /// Serializes JWKS fetch-and-commit so a slow older fetch can never
+    /// replace a newer key set.
+    key_refresh_round: Arc<futures::lock::Mutex<()>>,
     last_unknown_key_refresh: Arc<RwLock<Option<SystemTime>>>,
     #[cfg(feature = "auth-agql")]
     role_scope_cache: Arc<RwLock<Option<Arc<RoleScopeCache>>>>,
@@ -491,6 +498,7 @@ impl JwksAuthenticationProvider {
             client,
             cache: Arc::new(RwLock::new(None)),
             key_refresh_in_flight: Arc::new(AtomicBool::new(false)),
+            key_refresh_round: Arc::new(futures::lock::Mutex::new(())),
             last_unknown_key_refresh: Arc::new(RwLock::new(None)),
             #[cfg(feature = "auth-agql")]
             role_scope_cache: Arc::new(RwLock::new(None)),
@@ -506,6 +514,9 @@ impl JwksAuthenticationProvider {
     }
 
     async fn refresh_keys(&self) -> Result<(), AuthenticationError> {
+        // Scheduled, initial, and unknown-key refreshes run one at a time, so
+        // the key set committed last is always the one fetched last.
+        let _round = self.key_refresh_round.lock().await;
         let body = self
             .fetch_bounded(
                 self.config.jwks_url.clone(),
@@ -688,7 +699,9 @@ impl JwksAuthenticationProvider {
             return;
         };
         let provider = self.clone();
+        let in_flight = ClearOnDrop(self.role_scope_refresh_in_flight.clone());
         handle.spawn(async move {
+            let _in_flight = in_flight;
             if let Err(error) = provider.refresh_role_scope_catalogue().await {
                 let failure_count = provider
                     .role_scope_refresh_failures
@@ -718,9 +731,6 @@ impl JwksAuthenticationProvider {
                     "role-scope catalogue refresh failed; preserving the last verified snapshot"
                 );
             }
-            provider
-                .role_scope_refresh_in_flight
-                .store(false, Ordering::Release);
         });
     }
 
@@ -777,7 +787,7 @@ impl JwksAuthenticationProvider {
                 let due = last.is_none_or(|previous| {
                     previous
                         .checked_add(self.config.unknown_key_refresh_cooldown)
-                        .is_none_or(|next| now >= next)
+                        .is_some_and(|next| now >= next)
                 });
                 if due {
                     *last = Some(now);
@@ -790,16 +800,17 @@ impl JwksAuthenticationProvider {
             return;
         };
         let provider = self.clone();
+        // Moved into the task, so a panic, a cancelled task, or a runtime that
+        // drops it unpolled still clears the flag.
+        let in_flight = ClearOnDrop(self.key_refresh_in_flight.clone());
         handle.spawn(async move {
+            let _in_flight = in_flight;
             if let Err(error) = provider.refresh_keys().await {
                 tracing::warn!(
                     error = %error,
                     "unknown-key JWKS refresh failed; preserving last-known-good verification keys"
                 );
             }
-            provider
-                .key_refresh_in_flight
-                .store(false, Ordering::Release);
         });
     }
 
@@ -942,6 +953,15 @@ impl AuthenticationProvider for JwksAuthenticationProvider {
             }
             result
         })
+    }
+}
+
+/// Clears an in-flight refresh flag when the refresh task ends in any way.
+struct ClearOnDrop(Arc<AtomicBool>);
+
+impl Drop for ClearOnDrop {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }
 

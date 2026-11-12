@@ -34,6 +34,9 @@ supersedes: []
   refuses the public provider itself and overlapping audiences. The new
   `AuthenticationProvider::accepted_audiences` method, `None` by default and
   implemented by `JwksAuthenticationProvider`, lets the router compare them.
+  `AgqlAuthenticationProvider` audiences are not checked, because the pinned
+  `agql-auth` validator does not expose them, so operators must configure
+  distinct audiences for those validators.
 - **Breaking:** `DELETE /_router/subgraphs/{name}` refuses a static subgraph
   with 409 `REMOVAL_REJECTED` (#491). It used to disable one until restart.
   Dynamic removal is unchanged, and `RouterHandle::remove_subgraph` can still
@@ -50,8 +53,10 @@ supersedes: []
 - A bearer naming an unknown key ID asks for one background JWKS refresh, at
   most once per `unknownKeyRefreshCooldownSeconds`
   (`JwksAuthenticationConfig::with_unknown_key_refresh_cooldown`, default 30
-  seconds), so a key the issuer has just rotated in works without waiting for
-  the scheduled refresh (#486). That bearer is still refused.
+  seconds, at most one day), so a key the issuer has just rotated in works
+  without waiting for the scheduled refresh (#486). That bearer is still
+  refused. Initial, scheduled, and unknown-key JWKS fetches are serialized, so
+  a slow older fetch cannot replace a newer key set.
 
 ## 0.12.0 (unreleased)
 

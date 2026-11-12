@@ -1105,7 +1105,11 @@ impl AdminConfig {
     /// router even when it holds an administrative scope. Validation refuses
     /// the public provider itself, and refuses overlapping audiences when
     /// both providers state them through
-    /// [`AuthenticationProvider::accepted_audiences`].
+    /// [`AuthenticationProvider::accepted_audiences`]. Providers that cannot
+    /// state them, including the `auth-agql` adapter, are not compared, so
+    /// their validators must be configured with distinct audiences. A token
+    /// whose `aud` lists both audiences is accepted by both providers, so
+    /// issuers must never mint one.
     #[must_use]
     pub fn with_authentication_provider(
         mut self,
