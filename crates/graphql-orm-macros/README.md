@@ -10,6 +10,15 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.126.0 derives each generated operation-catalogue argument from the
+resolver signature that produces the SDL, so a generated router descriptor
+binds unchanged. Managed-version update and delete descriptors gain
+`expectedVersion`. The hidden mutation field of an entity without generated
+writes is now `gom{Entity}WritesUnavailable` and is described with an
+unsatisfiable requirement. The SDL and catalogue fingerprints change. Upgrade
+ORM/macros together; see the
+[root migration guide](../../MIGRATION.md#01260-generated-catalogue-arguments-follow-the-sdl).
+
 Version 0.125.0 records PostgreSQL change-journal entries in the database
 instead of the runtime role, and journaled writes require the recorder
 trigger. Upgrade ORM/macros together; see the

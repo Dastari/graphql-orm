@@ -329,10 +329,11 @@ async fn generated_catalogue_matches_readonly_subscription_sdl_without_mutations
             .iter()
             .any(|op| op.field_name() == "readonlyEventProjectionChanged")
     );
+    // The composite entity's write placeholder is described but, like every
+    // mutation of this root, not exposed.
     assert!(
         !catalog
-            .operations()
-            .iter()
+            .exposed_operations()
             .any(|op| op.kind() == GraphqlOperationKind::Mutation)
     );
     let mut invalid = Box::pin(schema.execute_stream(Request::new(
@@ -402,8 +403,7 @@ mod readonly_root {
         );
         assert!(
             !graphql_orm_operation_catalog()
-                .operations()
-                .iter()
+                .exposed_operations()
                 .any(|operation| operation.kind() == GraphqlOperationKind::Mutation)
         );
     }

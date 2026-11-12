@@ -595,13 +595,18 @@ fn read_only_composite_and_append_only_profiles_report_only_actual_resolvers() {
     use read_only_surface::ReadOnlyMetadataRecord;
     use root_read_only_surface::RootReadOnlyMetadataRecord;
 
-    let read_only = ReadOnlyMetadataRecord::generated_graphql_operations();
-    assert_eq!(read_only.len(), 3);
-    assert!(
-        read_only
+    // An entity without generated writes describes only its hidden write
+    // placeholder as a mutation.
+    let only_placeholder_mutation = |operations: &[GeneratedGraphqlOperationDescriptor]| {
+        operations
             .iter()
-            .all(|operation| operation.kind() != GraphqlOperationKind::Mutation)
-    );
+            .filter(|operation| operation.kind() == GraphqlOperationKind::Mutation)
+            .map(GeneratedGraphqlOperationDescriptor::category)
+            .eq([GeneratedGraphqlOperationCategory::Unavailable])
+    };
+    let read_only = ReadOnlyMetadataRecord::generated_graphql_operations();
+    assert_eq!(read_only.len(), 4);
+    assert!(only_placeholder_mutation(read_only));
     assert_eq!(
         read_only_surface::graphql_orm_operation_catalog()
             .exposed_operations()
@@ -622,7 +627,8 @@ fn read_only_composite_and_append_only_profiles_report_only_actual_resolvers() {
     }));
 
     let composite = CompositeMetadataRecord::generated_graphql_operations();
-    assert_eq!(composite.len(), 3);
+    assert_eq!(composite.len(), 4);
+    assert!(only_placeholder_mutation(composite));
     let single = operation(composite, GeneratedGraphqlOperationCategory::SingleRead);
     assert_eq!(
         single

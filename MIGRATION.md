@@ -10,6 +10,49 @@ supersedes: []
 
 # Migration Guide
 
+## 0.126.0: generated catalogue arguments follow the SDL
+
+Upgrade runtime, macros and graphql-orm-operation-catalog 0.7.3 together. No
+database or schema migration is needed.
+
+- Each generated catalogue descriptor now lists exactly the arguments its
+  resolver declares. On an entity with a managed `version`, the update and
+  delete descriptors gain the optional `expectedVersion` argument. Remove any
+  host code that copied argument metadata from the SDL into the catalogue or
+  router descriptor, or recomputed descriptor fingerprints after doing so.
+- Argument descriptions now equal the SDL descriptions. Subscription `key` and
+  `keys` arguments carry the resolver text, and the scan root's `where` and
+  `page` arguments now have descriptions in the SDL too.
+- An entity that serves no generated writes, such as a composite-key or
+  entity-level read-only entity in a writable schema, still contributes one
+  hidden mutation field. It was `gomCompositeKeyWritesUnavailable`, shared by
+  every such entity and absent from the catalogue. It is now
+  `gom{Entity}WritesUnavailable`, one per entity, and it is a catalogue
+  operation of the new category `GeneratedGraphqlOperationCategory::Unavailable`.
+  It has no leading underscore, because routers that drop underscore root
+  fields from their binding contract would refuse its descriptor.
+  Its authorization requirement is
+  `GraphqlAuthorizationRequirement::unsatisfiable()`, which no caller can hold,
+  its AI mutation policy is `Prohibited`, and its resolver refuses every
+  request with `FORBIDDEN`. Routers accept the generated descriptor whether
+  or not they exempt underscore root fields, so a composite-key entity no
+  longer needs to be
+  excluded from generated mutations. `OperationAssuranceRegistry::builder`
+  records it as exempt, so strict classification needs no host entry, and
+  `ensure_schema_sdl` now covers it. `GraphqlOperationCatalog::operations()`
+  lists it even where the schema root omits mutations, unexposed like the
+  root's other mutations; use `exposed_operations()` to read what is served.
+  Update any SDL snapshot that includes the old name, and any exhaustive
+  handling of catalogue categories.
+- The finished SDL changes, through the scan descriptions and the
+  placeholder, and so do the generated catalogue, authorization and
+  router-export fingerprints for every entity. After upgrading:
+  1. regenerate and republish router descriptors from the new build;
+  2. regenerate AI capability manifests and tool profiles from the new SDL;
+  3. re-approve pending AI approvals. An approval records the target schema
+     fingerprint, so one created before the upgrade is refused after it. This
+     fails closed.
+
 ## AI 0.130.0 to 0.131.0: legacy delegated stored principal references
 
 Runs and session-title work queued before 0.130.0 with a delegated or

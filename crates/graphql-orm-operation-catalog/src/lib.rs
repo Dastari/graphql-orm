@@ -110,6 +110,11 @@ pub enum GeneratedGraphqlOperationCategory {
     DeleteMany,
     /// Subscribe to generated entity change events.
     Subscription,
+    /// A hidden placeholder that keeps a generated root object non-empty when
+    /// the entity serves no generated writes. It is not an operation: the
+    /// resolver refuses every request, and its authorization requirement is
+    /// one no caller can satisfy.
+    Unavailable,
 }
 
 impl GeneratedGraphqlOperationCategory {
@@ -128,6 +133,7 @@ impl GeneratedGraphqlOperationCategory {
             Self::Delete => "delete",
             Self::DeleteMany => "delete_many",
             Self::Subscription => "subscription",
+            Self::Unavailable => "unavailable",
         }
     }
 }
@@ -149,6 +155,7 @@ fn default_operation_description(
         GeneratedGraphqlOperationCategory::Delete => "Delete one",
         GeneratedGraphqlOperationCategory::DeleteMany => "Delete matching",
         GeneratedGraphqlOperationCategory::Subscription => "Observe changes to",
+        GeneratedGraphqlOperationCategory::Unavailable => "No generated operation for",
     };
     format!("{action} {entity_name} records")
 }
@@ -276,7 +283,27 @@ impl Default for GraphqlAuthorizationRequirement {
     }
 }
 
+/// The one scope of [`GraphqlAuthorizationRequirement::unsatisfiable`].
+///
+/// It contains a space. Bearer scope sets are space-delimited, and routers
+/// refuse a granted scope containing whitespace, so no caller can hold it.
+/// Only a scope matcher that grants every requirement to some token, such as
+/// an opted-in bare wildcard, could match it, and the generated resolvers that
+/// carry this requirement refuse every request themselves.
+pub const GRAPHQL_UNSATISFIABLE_SCOPE: &str = "graphql-orm unavailable";
+
 impl GraphqlAuthorizationRequirement {
+    /// Returns a requirement that no caller can satisfy.
+    ///
+    /// Generated placeholder roots, which exist only to keep a root object
+    /// non-empty, carry it so a router that binds every root field refuses
+    /// them before they reach the subgraph.
+    pub fn unsatisfiable() -> Self {
+        Self::AllScopes {
+            scopes: vec![GRAPHQL_UNSATISFIABLE_SCOPE.to_owned()],
+        }
+    }
+
     fn canonicalized(&self) -> Self {
         match self {
             Self::AllScopes { scopes } => {
