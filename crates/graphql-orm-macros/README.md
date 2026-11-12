@@ -16,6 +16,12 @@ with `PAGE_LIMIT_EXCEEDED` instead of returning a truncated set. Generated code
 is unchanged. Upgrade ORM/macros together; see the
 [root migration guide](../../MIGRATION.md#01270-to-01280-repository-limits-are-exact-or-refused).
 
+Version 0.128.0 also makes SQL Server connections use full-session TLS with a
+validated certificate by default, refuses weaker connection-string settings
+unless they are opted into in code, resets pooled sessions after each
+transaction, and adds pool timeouts. Upgrade ORM/macros together; see the
+[root migration guide](../../MIGRATION.md#01270-to-01280-sql-server-encryption-and-pool-defaults).
+
 Version 0.127.0 keeps a hook's deliberate public refusal (an ORM public `code`
 extension, or an `OrmPublicError` returned with `?`) on repository writes,
 retention purge, `Database::transaction` and generated GraphQL mutations, and

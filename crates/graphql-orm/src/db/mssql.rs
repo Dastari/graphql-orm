@@ -1,15 +1,18 @@
 mod notifications;
+mod transport;
 pub use notifications::{
     MssqlBrokerQueue, MssqlQueryNotificationConnection, MssqlQueryNotificationKind,
     MssqlQueryNotificationMessage,
 };
+pub use transport::MssqlTransportPolicy;
 
 use crate::graphql::orm::SqlValue;
 use std::borrow::Cow;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tiberius::{ColumnData, Config, Query};
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
 pub type MssqlClient = tiberius::Client<Compat<TcpStream>>;
@@ -35,14 +38,174 @@ impl MssqlWriteResult {
     }
 }
 
+/// Session state every pooled connection is returned to.
+///
+/// It runs when a connection is opened, in the same batch that ends each
+/// transaction, before a connection is returned after a non-fatal server
+/// error, and before an idle connection is reused after
+/// [`MssqlPoolOptions::health_check_after_idle`]. Each transaction's begin
+/// batch also rolls back any transaction left open first. Isolation level persists on a
+/// SQL Server session until changed, so a `SERIALIZABLE` transaction would
+/// otherwise leak onto every later read. A server, database or login default
+/// of `NOCOUNT ON` or `IMPLICIT_TRANSACTIONS ON` would make every affected-row
+/// count 0 or leave autocommit writes uncommitted.
+const SESSION_RESET: &str = "IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION; \
+    SET TRANSACTION ISOLATION LEVEL READ COMMITTED; \
+    SET NOCOUNT OFF; \
+    SET IMPLICIT_TRANSACTIONS OFF;";
+
+/// Ends an ORM transaction. A `COMMIT` that leaves `@@TRANCOUNT` above zero
+/// only decremented a nested transaction; nothing is durable yet. Roll back
+/// and raise rather than let the reset's rollback discard work that would
+/// otherwise be reported as committed.
+const COMMIT_TRANSACTION: &str = "COMMIT TRANSACTION; \
+    IF @@TRANCOUNT > 0 BEGIN \
+        ROLLBACK TRANSACTION; \
+        THROW 50000, N'SQL Server transaction was nested; its commit was not durable and was rolled back', 1; \
+    END;";
+
+/// Connection bounds and transport policy for a SQL Server pool.
+///
+/// The driver cannot cancel a running statement, so a statement that exceeds
+/// [`query_timeout`](Self::query_timeout) closes its connection; SQL Server then
+/// rolls back any open transaction on that session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MssqlPoolOptions {
+    max_connections: usize,
+    acquire_timeout: Duration,
+    connect_timeout: Duration,
+    query_timeout: Option<Duration>,
+    idle_timeout: Option<Duration>,
+    max_lifetime: Option<Duration>,
+    health_check_after_idle: Option<Duration>,
+    transport: MssqlTransportPolicy,
+}
+
+impl Default for MssqlPoolOptions {
+    fn default() -> Self {
+        Self {
+            max_connections: 5,
+            acquire_timeout: Duration::from_secs(30),
+            connect_timeout: Duration::from_secs(15),
+            query_timeout: None,
+            idle_timeout: Some(Duration::from_secs(10 * 60)),
+            max_lifetime: Some(Duration::from_secs(30 * 60)),
+            health_check_after_idle: Some(Duration::from_secs(30)),
+            transport: MssqlTransportPolicy::verified(),
+        }
+    }
+}
+
+impl MssqlPoolOptions {
+    /// Default bounds: 5 connections, a 30 s acquire timeout, a 15 s connect
+    /// timeout, no statement timeout, a 10 min idle timeout, a 30 min maximum
+    /// lifetime, a health check after 30 s idle, and verified transport.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Maximum open connections, at least 1.
+    pub fn max_connections(mut self, max_connections: usize) -> Self {
+        self.max_connections = max_connections.max(1);
+        self
+    }
+
+    /// Bound on waiting for a connection, including opening a new one.
+    /// Exceeding it returns [`sqlx::Error::PoolTimedOut`].
+    pub fn acquire_timeout(mut self, timeout: Duration) -> Self {
+        self.acquire_timeout = timeout;
+        self
+    }
+
+    /// Bound on opening one connection: TCP, TLS, login and session setup,
+    /// and on the health check of an idle connection.
+    pub fn connect_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_timeout = timeout;
+        self
+    }
+
+    /// Bound on each statement, or `None` for no bound. A statement that
+    /// exceeds it fails and its connection is closed.
+    pub fn query_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.query_timeout = timeout;
+        self
+    }
+
+    /// Close connections idle for longer than this, or `None` to keep them.
+    pub fn idle_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.idle_timeout = timeout;
+        self
+    }
+
+    /// Close connections older than this when they are next released or
+    /// acquired, or `None` for no limit.
+    pub fn max_lifetime(mut self, lifetime: Option<Duration>) -> Self {
+        self.max_lifetime = lifetime;
+        self
+    }
+
+    /// Reset and validate a connection that has been idle at least this long
+    /// before reusing it, or `None` to reuse idle connections unchecked.
+    pub fn health_check_after_idle(mut self, idle: Option<Duration>) -> Self {
+        self.health_check_after_idle = idle;
+        self
+    }
+
+    /// Transport security every connection must meet.
+    pub fn transport(mut self, policy: MssqlTransportPolicy) -> Self {
+        self.transport = policy;
+        self
+    }
+
+    /// Configured maximum open connections.
+    pub fn get_max_connections(&self) -> usize {
+        self.max_connections
+    }
+
+    /// Configured acquire timeout.
+    pub fn get_acquire_timeout(&self) -> Duration {
+        self.acquire_timeout
+    }
+
+    /// Configured connect timeout.
+    pub fn get_connect_timeout(&self) -> Duration {
+        self.connect_timeout
+    }
+
+    /// Configured statement timeout.
+    pub fn get_query_timeout(&self) -> Option<Duration> {
+        self.query_timeout
+    }
+
+    /// Configured idle timeout.
+    pub fn get_idle_timeout(&self) -> Option<Duration> {
+        self.idle_timeout
+    }
+
+    /// Configured maximum connection lifetime.
+    pub fn get_max_lifetime(&self) -> Option<Duration> {
+        self.max_lifetime
+    }
+
+    /// Configured idle period after which a connection is checked before reuse.
+    pub fn get_health_check_after_idle(&self) -> Option<Duration> {
+        self.health_check_after_idle
+    }
+
+    /// Configured transport policy.
+    pub fn get_transport(&self) -> MssqlTransportPolicy {
+        self.transport
+    }
+}
+
 /// One connection-pinned SQL Server transaction.
 ///
 /// The client is returned to the pool only after a successful explicit commit
-/// or rollback. Cancellation, protocol errors, and drop discard the socket.
+/// or rollback, which also resets its session. Cancellation, protocol errors,
+/// timeouts and drop discard the socket.
 pub struct MssqlTransaction {
     pool: MssqlPool,
-    client: Option<MssqlClient>,
-    permit: Option<OwnedSemaphorePermit>,
+    lease: Option<Lease>,
 }
 
 #[derive(Clone)]
@@ -53,8 +216,37 @@ pub struct MssqlPool {
 struct MssqlPoolInner {
     config: Config,
     access_mode: MssqlAccessMode,
-    idle: Mutex<Vec<MssqlClient>>,
+    options: MssqlPoolOptions,
+    idle: Mutex<Vec<IdleClient>>,
     permits: Arc<Semaphore>,
+}
+
+struct IdleClient {
+    client: MssqlClient,
+    created: Instant,
+    released: Instant,
+}
+
+/// A checked-out connection and the pool permit it holds.
+struct Lease {
+    client: MssqlClient,
+    created: Instant,
+    permit: OwnedSemaphorePermit,
+}
+
+/// A failed statement, and whether its connection is still in a known state.
+struct StatementFailure {
+    error: sqlx::Error,
+    reusable: bool,
+}
+
+impl From<sqlx::Error> for StatementFailure {
+    fn from(error: sqlx::Error) -> Self {
+        Self {
+            error,
+            reusable: false,
+        }
+    }
 }
 
 pub struct MssqlRow {
@@ -99,49 +291,103 @@ pub trait MssqlDecode: Sized {
 }
 
 impl MssqlPool {
+    /// Open a read-only pool from an ADO connection string with default options.
+    ///
+    /// The connection string must meet [`MssqlTransportPolicy::verified`]:
+    /// full-session TLS and a validated server certificate. An omitted
+    /// `Encrypt` key means `Encrypt=true`.
     pub async fn connect_ado(connection_string: &str) -> crate::Result<Self> {
-        let mut config = Config::from_ado_string(connection_string).map_err(map_tiberius_error)?;
-        config.readonly(true);
-        Ok(Self::new(config))
+        Self::connect_ado_with(connection_string, MssqlPoolOptions::default()).await
+    }
+
+    /// Open a read-only pool from an ADO connection string.
+    pub async fn connect_ado_with(
+        connection_string: &str,
+        options: MssqlPoolOptions,
+    ) -> crate::Result<Self> {
+        let config = transport::config_from_ado(connection_string, options.transport)?;
+        Ok(Self::with_access_mode(
+            config,
+            options,
+            MssqlAccessMode::ReadOnly,
+        ))
     }
 
     /// Open a pool that deliberately permits DML against an externally managed schema.
     pub async fn connect_ado_external_writable(connection_string: &str) -> crate::Result<Self> {
-        let mut config = Config::from_ado_string(connection_string).map_err(map_tiberius_error)?;
-        config.readonly(false);
-        Ok(Self::new_external_writable(config))
+        Self::connect_ado_external_writable_with(connection_string, MssqlPoolOptions::default())
+            .await
     }
 
+    /// Open a deliberately writable pool from an ADO connection string.
+    pub async fn connect_ado_external_writable_with(
+        connection_string: &str,
+        options: MssqlPoolOptions,
+    ) -> crate::Result<Self> {
+        let config = transport::config_from_ado(connection_string, options.transport)?;
+        Ok(Self::with_access_mode(
+            config,
+            options,
+            MssqlAccessMode::ExternalWritable,
+        ))
+    }
+
+    /// Construct a read-only pool from a caller-built driver configuration.
+    ///
+    /// Its encryption level is raised to `Required` unless the default
+    /// transport policy is replaced; see [`MssqlTransportPolicy`].
     pub fn new(config: Config) -> Self {
-        Self::with_max_connections(config, 5)
+        Self::with_options(config, MssqlPoolOptions::default())
     }
 
     pub fn with_max_connections(config: Config, max_connections: usize) -> Self {
-        Self::with_access_mode(config, max_connections, MssqlAccessMode::ReadOnly)
+        Self::with_options(
+            config,
+            MssqlPoolOptions::default().max_connections(max_connections),
+        )
+    }
+
+    /// Construct a read-only pool from a caller-built driver configuration.
+    pub fn with_options(config: Config, options: MssqlPoolOptions) -> Self {
+        Self::with_access_mode(config, options, MssqlAccessMode::ReadOnly)
     }
 
     /// Construct a deliberately writable pool for an externally managed schema.
     pub fn new_external_writable(config: Config) -> Self {
-        Self::with_max_connections_external_writable(config, 5)
+        Self::with_options_external_writable(config, MssqlPoolOptions::default())
     }
 
     /// Construct a deliberately writable pool with a bounded connection count.
     pub fn with_max_connections_external_writable(config: Config, max_connections: usize) -> Self {
-        Self::with_access_mode(config, max_connections, MssqlAccessMode::ExternalWritable)
+        Self::with_options_external_writable(
+            config,
+            MssqlPoolOptions::default().max_connections(max_connections),
+        )
+    }
+
+    /// Construct a deliberately writable pool from a caller-built driver configuration.
+    pub fn with_options_external_writable(config: Config, options: MssqlPoolOptions) -> Self {
+        Self::with_access_mode(config, options, MssqlAccessMode::ExternalWritable)
     }
 
     fn with_access_mode(
         mut config: Config,
-        max_connections: usize,
+        options: MssqlPoolOptions,
         access_mode: MssqlAccessMode,
     ) -> Self {
         config.readonly(matches!(access_mode, MssqlAccessMode::ReadOnly));
+        options.transport.apply(&mut config);
+        let options = MssqlPoolOptions {
+            max_connections: options.max_connections.max(1),
+            ..options
+        };
         Self {
             inner: Arc::new(MssqlPoolInner {
                 config,
                 access_mode,
+                permits: Arc::new(Semaphore::new(options.max_connections)),
+                options,
                 idle: Mutex::new(Vec::new()),
-                permits: Arc::new(Semaphore::new(max_connections.max(1))),
             }),
         }
     }
@@ -151,14 +397,17 @@ impl MssqlPool {
         self.inner.access_mode
     }
 
+    /// Report the pool's bounds and transport policy.
+    pub fn options(&self) -> &MssqlPoolOptions {
+        &self.inner.options
+    }
+
     pub async fn fetch_rows(&self, sql: &str, values: &[SqlValue]) -> crate::Result<Vec<MssqlRow>> {
-        let (mut client, permit) = self.acquire_client().await?;
-        let result = fetch_rows_with_client(&mut client, sql, values).await;
-        if result.is_ok() {
-            self.release_client(client).await;
-        }
-        drop(permit);
-        result
+        let mut lease = self.acquire().await?;
+        let result = self
+            .bounded(fetch_rows_with_client(&mut lease.client, sql, values))
+            .await;
+        self.finish(lease, result).await
     }
 
     pub(crate) async fn execute(
@@ -167,13 +416,11 @@ impl MssqlPool {
         values: &[SqlValue],
     ) -> crate::Result<MssqlWriteResult> {
         self.require_external_writable()?;
-        let (mut client, permit) = self.acquire_client().await?;
-        let result = execute_with_client(&mut client, sql, values).await;
-        if result.is_ok() {
-            self.release_client(client).await;
-        }
-        drop(permit);
-        result
+        let mut lease = self.acquire().await?;
+        let result = self
+            .bounded(execute_with_client(&mut lease.client, sql, values))
+            .await;
+        self.finish(lease, result).await
     }
 
     pub(crate) async fn begin_transaction(
@@ -181,20 +428,24 @@ impl MssqlPool {
         mode: crate::graphql::orm::TransactionMode,
     ) -> crate::Result<MssqlTransaction> {
         self.require_external_writable()?;
-        let (mut client, permit) = self.acquire_client().await?;
+        let mut lease = self.acquire().await?;
         let isolation = match mode {
             crate::graphql::orm::TransactionMode::Default => "READ COMMITTED",
             crate::graphql::orm::TransactionMode::StateMachine => "SERIALIZABLE",
         };
-        execute_control_statement(
-            &mut client,
-            &format!("SET TRANSACTION ISOLATION LEVEL {isolation}; BEGIN TRANSACTION;"),
-        )
-        .await?;
+        // Never nest inside a transaction raw SQL left open on this session:
+        // its COMMIT would only decrement the count and nothing would be durable.
+        let begin = format!(
+            "IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION; \
+             SET TRANSACTION ISOLATION LEVEL {isolation}; BEGIN TRANSACTION;"
+        );
+        // A failed begin may have changed the isolation level; never reuse it.
+        self.bounded(execute_control_statement(&mut lease.client, &begin))
+            .await
+            .map_err(|failure| failure.error)?;
         Ok(MssqlTransaction {
             pool: self.clone(),
-            client: Some(client),
-            permit: Some(permit),
+            lease: Some(lease),
         })
     }
 
@@ -209,7 +460,14 @@ impl MssqlPool {
         }
     }
 
-    async fn acquire_client(&self) -> crate::Result<(MssqlClient, OwnedSemaphorePermit)> {
+    /// Check out a connection within the acquire timeout.
+    async fn acquire(&self) -> crate::Result<Lease> {
+        tokio::time::timeout(self.inner.options.acquire_timeout, self.acquire_unbounded())
+            .await
+            .map_err(|_| sqlx::Error::PoolTimedOut)?
+    }
+
+    async fn acquire_unbounded(&self) -> crate::Result<Lease> {
         let permit = self
             .inner
             .permits
@@ -217,23 +475,151 @@ impl MssqlPool {
             .acquire_owned()
             .await
             .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
-
-        if let Some(client) = self.inner.idle.lock().await.pop() {
-            return Ok((client, permit));
+        while let Some(idle) = self.take_idle() {
+            let IdleClient {
+                mut client,
+                created,
+                released,
+            } = idle;
+            let checked = match self.inner.options.health_check_after_idle {
+                Some(after) if released.elapsed() >= after => self.reset(&mut client).await,
+                _ => true,
+            };
+            if checked {
+                return Ok(Lease {
+                    client,
+                    created,
+                    permit,
+                });
+            }
         }
-
-        let tcp = TcpStream::connect(self.inner.config.get_addr())
-            .await
-            .map_err(sqlx::Error::Io)?;
-        tcp.set_nodelay(true).map_err(sqlx::Error::Io)?;
-        let client = tiberius::Client::connect(self.inner.config.clone(), tcp.compat_write())
-            .await
-            .map_err(map_tiberius_error)?;
-        Ok((client, permit))
+        let client = self.connect().await?;
+        Ok(Lease {
+            client,
+            created: Instant::now(),
+            permit,
+        })
     }
 
-    async fn release_client(&self, client: MssqlClient) {
-        self.inner.idle.lock().await.push(client);
+    /// Take the most recently released live connection, closing expired ones.
+    fn take_idle(&self) -> Option<IdleClient> {
+        let options = &self.inner.options;
+        let mut idle = self
+            .inner
+            .idle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        idle.retain(|client| {
+            !options
+                .idle_timeout
+                .is_some_and(|timeout| client.released.elapsed() >= timeout)
+                && !options
+                    .max_lifetime
+                    .is_some_and(|lifetime| client.created.elapsed() >= lifetime)
+        });
+        idle.pop()
+    }
+
+    /// Open one connection and reset its session within the connect timeout.
+    async fn connect(&self) -> crate::Result<MssqlClient> {
+        let config = self.inner.config.clone();
+        let connect = async move {
+            let tcp = TcpStream::connect(config.get_addr())
+                .await
+                .map_err(sqlx::Error::Io)?;
+            tcp.set_nodelay(true).map_err(sqlx::Error::Io)?;
+            let mut client = tiberius::Client::connect(config, tcp.compat_write())
+                .await
+                .map_err(map_tiberius_error)?;
+            execute_control_statement(&mut client, SESSION_RESET)
+                .await
+                .map_err(|failure| failure.error)?;
+            Ok(client)
+        };
+        tokio::time::timeout(self.inner.options.connect_timeout, connect)
+            .await
+            .map_err(|_| {
+                timed_out("SQL Server connection exceeded the configured connect timeout")
+            })?
+    }
+
+    /// Bound one statement by the query timeout. A timed-out statement cannot
+    /// be cancelled on the wire, so its connection is not reusable.
+    async fn bounded<T>(
+        &self,
+        statement: impl std::future::Future<Output = Result<T, StatementFailure>>,
+    ) -> Result<T, StatementFailure> {
+        match self.inner.options.query_timeout {
+            None => statement.await,
+            Some(timeout) => tokio::time::timeout(timeout, statement)
+                .await
+                .unwrap_or_else(|_| {
+                    Err(
+                        timed_out("SQL Server statement exceeded the configured query timeout")
+                            .into(),
+                    )
+                }),
+        }
+    }
+
+    /// Return an autocommit connection to the pool unless its state is unknown.
+    ///
+    /// After a non-fatal server error the batch may have left a transaction
+    /// open (`XACT_ABORT` is off), so the session is reset before it is
+    /// released, and closed if the reset fails.
+    async fn finish<T>(
+        &self,
+        mut lease: Lease,
+        result: Result<T, StatementFailure>,
+    ) -> crate::Result<T> {
+        match result {
+            Ok(value) => {
+                self.release(lease);
+                Ok(value)
+            }
+            Err(failure) => {
+                if failure.reusable && self.reset(&mut lease.client).await {
+                    self.release(lease);
+                }
+                Err(failure.error)
+            }
+        }
+    }
+
+    /// Reset a session within the connect timeout; `false` means close it.
+    async fn reset(&self, client: &mut MssqlClient) -> bool {
+        tokio::time::timeout(
+            self.inner.options.connect_timeout,
+            execute_control_statement(client, SESSION_RESET),
+        )
+        .await
+        .is_ok_and(|result| result.is_ok())
+    }
+
+    fn release(&self, lease: Lease) {
+        let Lease {
+            client,
+            created,
+            permit,
+        } = lease;
+        let expired = self
+            .inner
+            .options
+            .max_lifetime
+            .is_some_and(|lifetime| created.elapsed() >= lifetime);
+        if !expired {
+            self.inner
+                .idle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(IdleClient {
+                    client,
+                    created,
+                    released: Instant::now(),
+                });
+        }
+        // Release the permit only once the connection is back in the idle list.
+        drop(permit);
     }
 }
 
@@ -243,14 +629,12 @@ impl MssqlTransaction {
         sql: &str,
         values: &[SqlValue],
     ) -> crate::Result<Vec<MssqlRow>> {
-        let client = self.client.as_mut().ok_or_else(|| {
-            sqlx::Error::Protocol("SQL Server transaction is no longer active".to_string())
-        })?;
-        let result = fetch_rows_with_client(client, sql, values).await;
-        if result.is_err() {
-            self.poison();
-        }
-        result
+        let lease = self.lease.as_mut().ok_or_else(inactive_transaction)?;
+        let result = self
+            .pool
+            .bounded(fetch_rows_with_client(&mut lease.client, sql, values))
+            .await;
+        result.map_err(|failure| self.poison(failure))
     }
 
     pub(crate) async fn execute(
@@ -258,40 +642,47 @@ impl MssqlTransaction {
         sql: &str,
         values: &[SqlValue],
     ) -> crate::Result<MssqlWriteResult> {
-        let client = self.client.as_mut().ok_or_else(|| {
-            sqlx::Error::Protocol("SQL Server transaction is no longer active".to_string())
-        })?;
-        let result = execute_with_client(client, sql, values).await;
-        if result.is_err() {
-            self.poison();
-        }
-        result
+        let lease = self.lease.as_mut().ok_or_else(inactive_transaction)?;
+        let result = self
+            .pool
+            .bounded(execute_with_client(&mut lease.client, sql, values))
+            .await;
+        result.map_err(|failure| self.poison(failure))
     }
 
-    pub(crate) async fn commit(mut self) -> crate::Result<()> {
-        let mut client = self.client.take().ok_or_else(|| {
-            sqlx::Error::Protocol("SQL Server transaction is no longer active".to_string())
-        })?;
-        execute_control_statement(&mut client, "COMMIT TRANSACTION;").await?;
-        self.pool.release_client(client).await;
-        self.permit.take();
+    pub(crate) async fn commit(self) -> crate::Result<()> {
+        self.finish(COMMIT_TRANSACTION).await
+    }
+
+    pub(crate) async fn rollback(self) -> crate::Result<()> {
+        self.finish("ROLLBACK TRANSACTION;").await
+    }
+
+    /// End the transaction and reset the session in one batch, then return
+    /// the connection to the pool. On any failure the connection is closed.
+    async fn finish(mut self, end: &str) -> crate::Result<()> {
+        let mut lease = self.lease.take().ok_or_else(inactive_transaction)?;
+        let batch = format!("{end} {SESSION_RESET}");
+        self.pool
+            .bounded(execute_control_statement(&mut lease.client, &batch))
+            .await
+            .map_err(|failure| failure.error)?;
+        self.pool.release(lease);
         Ok(())
     }
 
-    pub(crate) async fn rollback(mut self) -> crate::Result<()> {
-        let mut client = self.client.take().ok_or_else(|| {
-            sqlx::Error::Protocol("SQL Server transaction is no longer active".to_string())
-        })?;
-        execute_control_statement(&mut client, "ROLLBACK TRANSACTION;").await?;
-        self.pool.release_client(client).await;
-        self.permit.take();
-        Ok(())
+    fn poison(&mut self, failure: StatementFailure) -> sqlx::Error {
+        self.lease.take();
+        failure.error
     }
+}
 
-    fn poison(&mut self) {
-        self.client.take();
-        self.permit.take();
-    }
+fn inactive_transaction() -> sqlx::Error {
+    sqlx::Error::Protocol("SQL Server transaction is no longer active".to_string())
+}
+
+fn timed_out(message: &'static str) -> sqlx::Error {
+    sqlx::Error::Io(std::io::Error::new(std::io::ErrorKind::TimedOut, message))
 }
 
 impl std::fmt::Debug for MssqlPool {
@@ -595,16 +986,16 @@ async fn fetch_rows_with_client(
     client: &mut MssqlClient,
     sql: &str,
     values: &[SqlValue],
-) -> crate::Result<Vec<MssqlRow>> {
+) -> Result<Vec<MssqlRow>, StatementFailure> {
     let mut query = Query::new(sql.to_string());
     for value in values.iter().map(MssqlParamValue::from) {
         query.bind(value);
     }
-    let stream = query.query(client).await.map_err(map_tiberius_error)?;
+    let stream = query.query(client).await.map_err(statement_failure)?;
     let rows = stream
         .into_first_result()
         .await
-        .map_err(map_tiberius_error)?;
+        .map_err(statement_failure)?;
     Ok(rows.into_iter().map(MssqlRow::new).collect())
 }
 
@@ -612,12 +1003,12 @@ async fn execute_with_client(
     client: &mut MssqlClient,
     sql: &str,
     values: &[SqlValue],
-) -> crate::Result<MssqlWriteResult> {
+) -> Result<MssqlWriteResult, StatementFailure> {
     let mut query = Query::new(sql.to_string());
     for value in values.iter().map(MssqlParamValue::from) {
         query.bind(value);
     }
-    let result = query.execute(client).await.map_err(map_tiberius_error)?;
+    let result = query.execute(client).await.map_err(statement_failure)?;
     Ok(MssqlWriteResult {
         rows_affected: statement_rows_affected(result.rows_affected()),
     })
@@ -636,15 +1027,31 @@ fn statement_rows_affected(counts: &[u64]) -> u64 {
     counts.last().copied().unwrap_or(0)
 }
 
-async fn execute_control_statement(client: &mut MssqlClient, sql: &str) -> crate::Result<()> {
+async fn execute_control_statement(
+    client: &mut MssqlClient,
+    sql: &str,
+) -> Result<(), StatementFailure> {
     client
         .simple_query(sql)
         .await
-        .map_err(map_tiberius_error)?
+        .map_err(statement_failure)?
         .into_results()
         .await
-        .map_err(map_tiberius_error)?;
+        .map_err(statement_failure)?;
     Ok(())
+}
+
+/// Classify a driver error. Only a non-fatal error the server reported leaves
+/// the connection in a known state: the driver drains the rest of the response
+/// before its next request. SQL Server closes the session after an error of
+/// severity 20 or higher, and transport, TLS and protocol errors leave the
+/// stream in an unknown state.
+fn statement_failure(error: tiberius::error::Error) -> StatementFailure {
+    let reusable = matches!(&error, tiberius::error::Error::Server(token) if token.class() < 20);
+    StatementFailure {
+        error: map_tiberius_error(error),
+        reusable,
+    }
 }
 
 impl From<&SqlValue> for MssqlParamValue {

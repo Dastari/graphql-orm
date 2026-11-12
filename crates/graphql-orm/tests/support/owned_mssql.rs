@@ -92,11 +92,125 @@ fn storage_size() -> Result<Option<String>, String> {
     }
 }
 
+/// A private root and a server certificate for `127.0.0.1`, generated per
+/// server and removed with it. Connections trust the root through
+/// `TrustServerCertificateCA`, so the owned tests run with full-session TLS
+/// and certificate chain and hostname validation, the ORM's default policy.
+pub(crate) struct OwnedTlsMaterial {
+    directory: std::path::PathBuf,
+}
+
+impl Drop for OwnedTlsMaterial {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
+
+impl OwnedTlsMaterial {
+    fn generate() -> Result<Self, Box<dyn std::error::Error>> {
+        let directory = std::env::temp_dir().join(format!(
+            "graphql-orm-mssql-tls-{}",
+            graphql_orm::uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir(&directory)?;
+        let owned = Self { directory };
+        owned.openssl(&[
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-days",
+            "2",
+            "-subj",
+            "/CN=graphql-orm-owned-sqlserver-root",
+            "-addext",
+            "basicConstraints=critical,CA:TRUE",
+            "-out",
+            "ca.pem",
+            "-keyout",
+            "ca.key",
+        ])?;
+        owned.openssl(&[
+            "req",
+            "-new",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-subj",
+            "/CN=127.0.0.1",
+            "-keyout",
+            "server.key",
+            "-out",
+            "server.csr",
+        ])?;
+        std::fs::write(
+            owned.directory.join("server.ext"),
+            "subjectAltName=IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\n\
+             keyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n",
+        )?;
+        owned.openssl(&[
+            "x509",
+            "-req",
+            "-in",
+            "server.csr",
+            "-CA",
+            "ca.pem",
+            "-CAkey",
+            "ca.key",
+            "-CAcreateserial",
+            "-days",
+            "2",
+            "-extfile",
+            "server.ext",
+            "-out",
+            "server.pem",
+        ])?;
+        // Copied into the container as root; SQL Server runs as another user.
+        // The key is synthetic and lives only as long as this disposable server.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(
+                owned.directory.join("server.key"),
+                std::fs::Permissions::from_mode(0o644),
+            )?;
+        }
+        std::fs::write(
+            owned.directory.join("mssql.conf"),
+            "[network]\ntlscert = /var/opt/mssql/owned-server.pem\n\
+             tlskey = /var/opt/mssql/owned-server.key\ntlsprotocols = 1.2\n\
+             forceencryption = 0\n",
+        )?;
+        Ok(owned)
+    }
+
+    fn openssl(&self, args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
+        let status = Command::new("openssl")
+            .current_dir(&self.directory)
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|error| format!("OpenSSL is required for owned SQL Server TLS: {error}"))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err("OpenSSL could not generate owned SQL Server TLS material".into())
+        }
+    }
+
+    pub(crate) fn certificate_authority(&self) -> std::path::PathBuf {
+        self.directory.join("ca.pem")
+    }
+}
+
 pub(crate) struct OwnedSqlServer {
     name: String,
     container_id: String,
     owner_token: String,
     pub(crate) connection_string: String,
+    tls: OwnedTlsMaterial,
     cleaned: bool,
 }
 
@@ -130,9 +244,9 @@ impl OwnedSqlServer {
         let password = format!("Gom_{token}A9!");
         let label = format!("graphql-orm.test-owner={token}");
         let sa_password = format!("MSSQL_SA_PASSWORD={password}");
+        let tls = OwnedTlsMaterial::generate()?;
         let mut arguments: Vec<&str> = vec![
-            "run",
-            "--detach",
+            "create",
             "--rm",
             "--pull",
             pull,
@@ -189,10 +303,39 @@ impl OwnedSqlServer {
             container_id,
             owner_token: token,
             connection_string: String::new(),
+            tls,
             cleaned: false,
         };
         // On failure, `owned` drops here and removes the exact container.
         record_owned_container(&owned.container_id, &owned.name, run.as_deref())?;
+        for (source, destination) in [
+            ("server.pem", "/var/opt/mssql/owned-server.pem"),
+            ("server.key", "/var/opt/mssql/owned-server.key"),
+            ("mssql.conf", "/var/opt/mssql/mssql.conf"),
+        ] {
+            let copied = Command::new("docker")
+                .arg("cp")
+                .arg(owned.tls.directory.join(source))
+                .arg(format!("{}:{destination}", owned.container_id))
+                .output()?;
+            if !copied.status.success() {
+                return Err("could not install owned SQL Server TLS material".into());
+            }
+        }
+        let started = Command::new("docker")
+            .args(["start", &owned.container_id])
+            .output()?;
+        if !started.status.success() {
+            return Err(format!(
+                "failed to start owned SQL Server: {}",
+                String::from_utf8_lossy(&started.stderr)
+            )
+            .into());
+        }
+        let tls_settings = format!(
+            "Encrypt=true;TrustServerCertificateCA={}",
+            owned.tls.certificate_authority().display()
+        );
         let port = Command::new("docker")
             .args(["port", &owned.name, "1433/tcp"])
             .output()?;
@@ -202,7 +345,7 @@ impl OwnedSqlServer {
             .find_map(|line| line.strip_prefix("127.0.0.1:"))
             .ok_or("owned SQL Server was not loopback-published")?;
         let master_connection = format!(
-            "server=tcp:127.0.0.1,{port};database=master;user id=sa;password={password};TrustServerCertificate=true"
+            "server=tcp:127.0.0.1,{port};database=master;user id=sa;password={password};{tls_settings}"
         );
         for _ in 0..180 {
             if let Ok(pool) =
@@ -216,7 +359,7 @@ impl OwnedSqlServer {
                 )
                 .await?;
                 owned.connection_string = format!(
-                    "server=tcp:127.0.0.1,{port};database={database_name};user id=sa;password={password};TrustServerCertificate=true"
+                    "server=tcp:127.0.0.1,{port};database={database_name};user id=sa;password={password};{tls_settings}"
                 );
                 return Ok(owned);
             }
@@ -243,120 +386,10 @@ impl OwnedSqlServer {
             })
     }
 
-    /// Install synthetic certificates on this exact disposable server only.
+    /// The private root that signs this server's certificate.
     #[allow(dead_code)]
-    pub(crate) async fn configure_tls(
-        &mut self,
-        certificate: &std::path::Path,
-        private_key: &std::path::Path,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        if !self.has_exact_owned_identity() {
-            return Err("refusing TLS configuration without exact owned identity".into());
-        }
-        // Open both inputs before changing the container. Keep file contents on
-        // stdin and use fixed destinations rather than interpolating shell data.
-        for (source, script) in [
-            (
-                std::fs::File::open(certificate)?,
-                "umask 077; cat > /var/opt/mssql/audit-server.pem",
-            ),
-            (
-                std::fs::File::open(private_key)?,
-                "umask 077; cat > /var/opt/mssql/audit-server.key",
-            ),
-        ] {
-            if !self.has_exact_owned_identity() {
-                return Err("refusing TLS configuration without exact owned identity".into());
-            }
-            let output = Command::new("docker")
-                .args(["exec", "--user", "0", "-i", &self.container_id])
-                .args(["sh", "-c", script])
-                .stdin(Stdio::from(source))
-                .output()?;
-            if !output.status.success() {
-                return Err("could not install owned TLS fixture".into());
-            }
-        }
-        let commands: &[&[&str]] = &[
-            &[
-                "chown",
-                "10001:0",
-                "/var/opt/mssql/audit-server.pem",
-                "/var/opt/mssql/audit-server.key",
-            ],
-            &[
-                "chmod",
-                "600",
-                "/var/opt/mssql/audit-server.pem",
-                "/var/opt/mssql/audit-server.key",
-            ],
-            &[
-                "/opt/mssql/bin/mssql-conf",
-                "set",
-                "network.tlscert",
-                "/var/opt/mssql/audit-server.pem",
-            ],
-            &[
-                "/opt/mssql/bin/mssql-conf",
-                "set",
-                "network.tlskey",
-                "/var/opt/mssql/audit-server.key",
-            ],
-            &[
-                "/opt/mssql/bin/mssql-conf",
-                "set",
-                "network.forceencryption",
-                "1",
-            ],
-        ];
-        for args in commands {
-            let output = Command::new("docker")
-                .args(["exec", "--user", "0", &self.container_id])
-                .args(*args)
-                .output()?;
-            if !output.status.success() {
-                return Err("owned SQL Server TLS configuration failed".into());
-            }
-        }
-        if !Command::new("docker")
-            .args(["restart", &self.container_id])
-            .output()?
-            .status
-            .success()
-        {
-            return Err("owned SQL Server TLS restart failed".into());
-        }
-        // Docker may assign a different ephemeral host port after restart. No
-        // pool is retained across TLS setup; resolve this same immutable server
-        // again before constructing the certificate-validation connections.
-        let published = Command::new("docker")
-            .args(["port", &self.container_id, "1433/tcp"])
-            .output()?;
-        if !published.status.success() {
-            return Err("cannot resolve restarted owned SQL Server port".into());
-        }
-        let published = String::from_utf8(published.stdout)?;
-        let port = published
-            .lines()
-            .find_map(|line| line.strip_prefix("127.0.0.1:"))
-            .ok_or("restarted owned SQL Server was not loopback-published")?;
-        let port: u16 = port.parse()?;
-        let (_, settings) = self
-            .connection_string
-            .split_once(';')
-            .ok_or("invalid owned connection settings")?;
-        self.connection_string = format!("server=tcp:127.0.0.1,{port};{settings}");
-        let mut last_error = String::new();
-        for _ in 0..180 {
-            let pool =
-                graphql_orm::db::mssql::MssqlPool::connect_ado(&self.connection_string).await?;
-            match pool.fetch_rows("SELECT 1 AS ready", &[]).await {
-                Ok(_) => return Ok(()),
-                Err(error) => last_error = error.to_string(),
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        }
-        Err(format!("owned SQL Server TLS listener did not become ready: {last_error}").into())
+    pub(crate) fn certificate_authority(&self) -> std::path::PathBuf {
+        self.tls.certificate_authority()
     }
 
     pub(crate) fn cleanup(&mut self) -> Result<(), Box<dyn std::error::Error>> {
