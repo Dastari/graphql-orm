@@ -67,8 +67,12 @@ async fn create_full_backup_writes_tables_objects_and_manifest_last() {
     assert_eq!(row["table_name"], "users");
     assert_eq!(row["primary_key"], "1");
 
+    // Verification holds the repository lock too; only snapshot writes count.
     assert_eq!(
-        repository.write_order().last(),
+        repository
+            .write_order()
+            .iter()
+            .rfind(|key| key.as_str() != graphql_orm_backup::REPOSITORY_LOCK_KEY),
         Some(&snapshot_manifest_key(snapshot_id()))
     );
 }

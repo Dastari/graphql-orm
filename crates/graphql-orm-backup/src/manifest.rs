@@ -381,6 +381,9 @@ pub fn validate_manifest_entries(manifest: &BackupSnapshotManifest) -> Result<()
 /// contain no unknown fields, pass [`verify_manifest_authenticity`], and keep
 /// every entry inside its namespace.
 ///
+/// This is a low-level read that takes no repository lock; callers that need
+/// a consistent view coordinate with other operations themselves.
+///
 /// # Errors
 ///
 /// Returns [`BackupError::ManifestAuthenticationRequired`] without reading
@@ -409,6 +412,12 @@ pub async fn load_manifest(
     }
     verify_manifest_authenticity(authenticator, &manifest)?;
     Ok(manifest)
+}
+
+/// Largest zstd window log that decoding accepts under a decoded-size limit.
+/// Backups encode within it so they never write a frame restore refuses.
+pub(crate) fn decode_window_log(limit_bytes: u64) -> u32 {
+    (63 - limit_bytes.max(1).leading_zeros()).clamp(10, 30)
 }
 
 pub(crate) fn required_authenticator(
@@ -450,6 +459,10 @@ fn canonical_manifest_bytes(manifest: &BackupSnapshotManifest) -> Result<Vec<u8>
 }
 
 /// Loads a manifest and all of its parents in restore order.
+///
+/// Like [`load_manifest`], this is a low-level read that takes no repository
+/// lock; a concurrent prune or deletion can remove a manifest between reads.
+/// Use [`crate::restore_snapshot`] or verification for locked reads.
 ///
 /// # Errors
 ///
@@ -650,9 +663,8 @@ pub fn decompress_payload_with_limit(
     let mut decoder =
         zstd::stream::read::Decoder::with_buffer(bytes).map_err(BackupError::compression)?;
     if let crate::BackupByteLimit::Bytes(limit_bytes) = limit {
-        let window_log = (63 - limit_bytes.max(1).leading_zeros()).clamp(10, 30);
         decoder
-            .window_log_max(window_log)
+            .window_log_max(decode_window_log(limit_bytes))
             .map_err(BackupError::compression)?;
     }
     let mut result = Vec::new();

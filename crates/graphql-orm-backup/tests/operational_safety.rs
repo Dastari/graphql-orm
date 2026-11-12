@@ -295,13 +295,17 @@ async fn expired_holder_cannot_be_taken_over_or_release_a_new_owner() {
         .with_manifest_authenticator(test_manifest_authenticator());
     let options = RepositoryLockOptions {
         stale_after_seconds: -1,
+        ..RepositoryLockOptions::default()
     };
     let first = RepositoryLock::acquire(&repository, &options)
         .await
         .expect("first");
     // Deterministically simulate a writer running beyond its former TTL.
+    let mut aged_owner = first.owner().clone();
+    aged_owner.acquired_at = 0;
+    let aged = Bytes::from(serde_json::to_vec(&aged_owner).expect("owner record"));
     repository
-        .put_blob("locks/repository.lock", Bytes::from_static(b"0"))
+        .put_blob("locks/repository.lock", aged.clone())
         .await
         .expect("age lock");
     let (second, third) = tokio::join!(
@@ -315,7 +319,7 @@ async fn expired_holder_cannot_be_taken_over_or_release_a_new_owner() {
             .get_blob("locks/repository.lock")
             .await
             .expect("lock intact"),
-        "0"
+        aged
     );
     first.release().await.expect("owner releases");
     let next = RepositoryLock::acquire(&repository, &options)

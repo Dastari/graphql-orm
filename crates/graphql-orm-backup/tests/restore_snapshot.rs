@@ -480,6 +480,13 @@ async fn object_sizes_are_observed_for_new_deduplicated_and_historical_restores(
     // Historical valid-content manifests remain readable without rewriting them.
     let mut historical = first.manifest;
     historical.objects[0].size_bytes = u64::MAX;
+    // write_manifest never overwrites; replace the fixture's manifest explicitly.
+    repository
+        .delete_blob(&graphql_orm_backup::snapshot_manifest_key(
+            historical.snapshot_id,
+        ))
+        .await
+        .expect("remove fixture manifest");
     write_manifest(&repository, &mut historical)
         .await
         .expect("historical advisory size fixture");
@@ -522,6 +529,8 @@ struct VersionedObjectRepository {
     preflight_bytes: Bytes,
     restore_bytes: Bytes,
     reads: AtomicUsize,
+    /// Object restore holds the repository lock.
+    lock: std::sync::Mutex<Option<Bytes>>,
 }
 
 #[async_trait]
@@ -533,6 +542,14 @@ impl BackupRepository for VersionedObjectRepository {
         &self,
         key: &str,
     ) -> Result<graphql_orm_storage::StorageByteStream, BackupError> {
+        if key == graphql_orm_backup::REPOSITORY_LOCK_KEY {
+            let lock = self.lock.lock().expect("lock").clone();
+            return lock
+                .map(graphql_orm_storage::StorageByteStream::from_bytes)
+                .ok_or_else(|| BackupError::MissingBlob {
+                    key: key.to_string(),
+                });
+        }
         assert_eq!(key, self.key);
         let bytes = if self.reads.fetch_add(1, Ordering::SeqCst) == 0 {
             self.preflight_bytes.clone()
@@ -547,6 +564,16 @@ impl BackupRepository for VersionedObjectRepository {
     }
     async fn put_blob(&self, _: &str, _: Bytes) -> Result<(), BackupError> {
         panic!("read-only fixture")
+    }
+    async fn put_blob_if_absent(&self, key: &str, body: Bytes) -> Result<bool, BackupError> {
+        assert_eq!(key, graphql_orm_backup::REPOSITORY_LOCK_KEY);
+        let mut lock = self.lock.lock().expect("lock");
+        Ok(lock.is_none() && lock.replace(body).is_none())
+    }
+    async fn delete_blob_once(&self, key: &str) -> Result<(), BackupError> {
+        assert_eq!(key, graphql_orm_backup::REPOSITORY_LOCK_KEY);
+        self.lock.lock().expect("lock").take();
+        Ok(())
     }
     async fn blob_exists(&self, _: &str) -> Result<bool, BackupError> {
         panic!("read-only fixture")
@@ -600,6 +627,7 @@ async fn changed_content_after_size_preflight_never_reaches_the_sink() {
         preflight_bytes: original.clone(),
         restore_bytes: replacement.clone(),
         reads: AtomicUsize::new(0),
+        lock: std::sync::Mutex::default(),
     };
     let sink = RecordingObjectSink::default();
 
@@ -633,6 +661,7 @@ async fn corrupt_object_preflight_rejects_before_invoking_sink() {
         preflight_bytes: corrupt.clone(),
         restore_bytes: original.clone(),
         reads: AtomicUsize::new(0),
+        lock: std::sync::Mutex::default(),
     };
     let sink = RecordingObjectSink::default();
 

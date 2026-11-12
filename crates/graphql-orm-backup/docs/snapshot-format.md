@@ -3,7 +3,7 @@ title: "Snapshot Format"
 kind: reference
 status: active
 owner: graphql-orm-backup-maintainers
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-12
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -142,12 +142,21 @@ synthetic full has no parent snapshot id.
 
 ## Repository Lock
 
-Writer operations use an advisory lock blob:
+Backups, compaction, pruning, snapshot deletion, restore and verification use
+one exclusive advisory lock blob:
 
 ```text
 locks/repository.lock
 ```
 
 The lock is created with repository conditional-write semantics and is removed
-when the writer completes. Stale lock handling is controlled by
-`RepositoryLockOptions`.
+with single-attempt deletion when the operation completes, after checking that
+it still names the run. Its body is a JSON `RepositoryLockOwner` record:
+
+```json
+{"run_id":"…","host":"…","process_id":4242,"operation":"full_backup","label":null,"acquired_at":1775174400}
+```
+
+Locks never expire. Earlier releases wrote the acquisition time as a bare
+integer; such locks have no owner record. See
+[locking and recovery](usage.md#locking-and-recovery).
