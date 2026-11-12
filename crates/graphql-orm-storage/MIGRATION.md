@@ -26,6 +26,15 @@ API, configuration or object format change is required.
   systems with slow syncs. Data written by earlier versions has not been
   synced. Run any verification you depend on, such as a backup verify, after
   an unclean shutdown that happened before the upgrade.
+- A file system that cannot sync directories keeps working: on Unix, `EINVAL`
+  and `EBADF` from a directory fsync are accepted. A file system that rejects
+  file fsync now fails local writes. Use a root on a file system that supports
+  it.
+- `put_blob_if_not_exists` can now return non-retryable
+  `StorageError::SingleAttemptFailed` when the key was created but its
+  directory sync failed. Treat it as outcome unknown: the key may exist. For a
+  backup repository lock, do not retry the acquisition. Recover offline, after
+  quiescing all writers and handles, as for any lock of unknown state.
 
 ## 0.9.0 to 0.9.1: backend-owned temporary names
 

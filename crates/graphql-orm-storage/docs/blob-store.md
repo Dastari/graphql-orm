@@ -122,12 +122,40 @@ listing, and the local backend walks each directory with subdirectories
 ordered as `<name>/`, so `a-b` and `a.b` list before `a/x`. Custom providers
 must use the same order, or paging through a listing skips or repeats keys.
 
-A successful local write is durable. The local backend fsyncs the temporary
-file before renaming or linking it into place, then fsyncs the parent
-directory, and it fsyncs the parent of each directory it creates. Successful
-deletions fsync the parent directory too. Directory syncs run on Unix only;
-other platforms rely on the file system to persist directory entries. Network
-file systems mounted under a local root may not honour these syncs.
+A successful local write is durable once it returns:
+
+- `put_blob`, `put_blob_if_not_exists`, `copy_blob`, `put_object_stream`,
+  multipart object writers and multipart completion fsync the temporary file
+  before renaming or linking it into place, then fsync the parent directory.
+  Object metadata written by `put_object_stream` is synced the same way.
+- Before publishing, a write makes the target's directory chain durable. It
+  fsyncs each directory from the target's parent upward, making that
+  directory's entry durable, until it reaches the root or a directory the
+  backend has already made durable. A directory that already existed is
+  included, because another writer may have created it and not synced it yet.
+  A directory that was missing when the call started is always synced, even
+  if the backend had made it durable earlier. The root's own entry is synced
+  only when the write created the root. Each backend instance remembers up to
+  4,096 durable directories, shared by its clones, and records them only after
+  the whole chain has synced, so a failed sync is repeated by the next write.
+  Multipart staging makes its upload directories durable the same way.
+- `delete_blob`, `delete_blob_once` and `StreamingObjectStore::delete_object`
+  fsync the parent directory after removing the file. A deletion of a key that
+  is already missing still syncs its directory when the directory exists.
+- When `put_blob_if_not_exists` finds the key already present, it syncs the
+  directory and returns `Ok(None)`. When it created the key but the following
+  directory sync failed, it returns non-retryable
+  `StorageError::SingleAttemptFailed`: the key may exist, so a retry would find
+  it taken. Ordinary writes report a failed sync as a retryable
+  `StorageError::Io`, and repeating them is safe.
+
+File fsync errors always fail the operation. Directory syncs run on Unix only;
+other platforms rely on the file system to persist directory entries. On Unix,
+a directory fsync that fails with `EINVAL` or `EBADF`, which file systems
+without directory sync report (some CIFS mounts and VM shared folders, for
+example), is accepted without syncing, as PostgreSQL does. Any other directory
+sync error, including failing to open the directory, fails the operation.
+Network file systems mounted under a local root may not honour these syncs.
 
 ## Key Safety
 

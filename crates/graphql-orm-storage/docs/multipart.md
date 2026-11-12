@@ -135,7 +135,9 @@ Parts are staged under `<root>/.graphql-orm-storage/multipart/<upload_id>/`,
 outside the visible key space: listing never returns them. The directory holds a
 manifest, one data file per part and one receipt per part number. Every file is
 written to a temporary name, fsynced and renamed into place, and the directory
-is fsynced, so staged parts survive a crash or restart.
+is fsynced, so staged parts survive a crash or restart. Starting an upload
+makes the staging directories durable up to the root, as described in
+[listing order and durability](blob-store.md#listing-order-and-durability).
 
 Receipt commits, completion and abort hold an exclusive advisory lock
 (`<upload_id>.lock`, through `std::fs::File::lock`). The operating system
@@ -143,7 +145,8 @@ releases it when the process exits, so a crash never leaves an upload locked.
 Run uploads against one host's local filesystem; advisory locks are not reliable
 on every network filesystem.
 
-Completion concatenates the parts into a temporary file beside the target,
+Completion makes the target's directory chain durable, then concatenates the
+parts into a temporary file beside the target,
 re-checking each part's size and SHA-256, fsyncs it, then renames it into place,
 or hard-links it under `if_not_exists`. This is a full synchronous copy that
 holds the upload's lock, so it takes about the object size divided by the disk's

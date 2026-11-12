@@ -1,5 +1,7 @@
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
 
@@ -22,6 +24,8 @@ use crate::{
 
 pub(crate) const INTERNAL_STORAGE_DIR: &str = ".graphql-orm-storage";
 const OBJECT_METADATA_DIR: &str = "object-metadata";
+/// Most directories a backend remembers as durable before it forgets them all.
+const MAX_DURABLE_DIRS: usize = 4_096;
 
 /// Local filesystem object storage backend.
 ///
@@ -34,6 +38,9 @@ const OBJECT_METADATA_DIR: &str = "object-metadata";
 pub struct LocalStorageBackend {
     root: PathBuf,
     multipart_max_part_size: u64,
+    /// Directories below the root whose entries, and every ancestor's entry up
+    /// to the root, this backend (or a clone) has synced.
+    durable_dirs: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
 impl LocalStorageBackend {
@@ -47,6 +54,7 @@ impl LocalStorageBackend {
         Self {
             root: root.into(),
             multipart_max_part_size: crate::local_multipart::DEFAULT_MAX_PART_SIZE,
+            durable_dirs: Arc::default(),
         }
     }
 
@@ -165,7 +173,7 @@ impl BlobStore for LocalStorageBackend {
     ) -> Result<BlobWriteOutcome, StorageError> {
         let path = self.path_for(key)?;
         let temp_path = temp_path_for(&path, key)?;
-        create_parent_dir(&path).await?;
+        self.create_parent_dir(&path).await?;
 
         let write_result = write_stream_to_temp(&temp_path, body).await;
         let outcome = match write_result {
@@ -180,7 +188,7 @@ impl BlobStore for LocalStorageBackend {
             let _ = tokio::fs::remove_file(&temp_path).await;
             return Err(StorageError::io(&path, source));
         }
-        trace_published(&path);
+        trace_published(Some(&temp_path), &path);
         sync_entry(&path).await?;
 
         Ok(outcome)
@@ -194,7 +202,7 @@ impl BlobStore for LocalStorageBackend {
     ) -> Result<Option<BlobWriteOutcome>, StorageError> {
         let path = self.path_for(key)?;
         let temp_path = temp_path_for(&path, key)?;
-        create_parent_dir(&path).await?;
+        self.create_parent_dir(&path).await?;
 
         let outcome = match write_stream_to_temp(&temp_path, body).await {
             Ok(outcome) => outcome,
@@ -206,14 +214,20 @@ impl BlobStore for LocalStorageBackend {
 
         match tokio::fs::hard_link(&temp_path, &path).await {
             Ok(()) => {
-                trace_published(&path);
+                trace_published(Some(&temp_path), &path);
                 let _ = tokio::fs::remove_file(&temp_path).await;
                 // One directory sync covers the new link and the temp removal.
-                sync_entry(&path).await?;
+                // The key now exists, so a retry would find it taken: a failed
+                // sync reports a non-retryable, outcome-unknown error.
+                sync_entry(&path)
+                    .await
+                    .map_err(StorageError::single_attempt)?;
                 Ok(Some(outcome))
             }
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
                 let _ = tokio::fs::remove_file(&temp_path).await;
+                // Make the existing entry this call observed durable too.
+                sync_entry(&path).await?;
                 Ok(None)
             }
             Err(source) => {
@@ -340,7 +354,7 @@ impl BlobStore for LocalStorageBackend {
         let from_path = self.path_for(from)?;
         let to_path = self.path_for(to)?;
         let temp_path = temp_path_for(&to_path, to)?;
-        create_parent_dir(&to_path).await?;
+        self.create_parent_dir(&to_path).await?;
 
         match tokio::fs::copy(&from_path, &temp_path).await {
             Ok(_) => {}
@@ -364,7 +378,7 @@ impl BlobStore for LocalStorageBackend {
             let _ = tokio::fs::remove_file(&temp_path).await;
             return Err(StorageError::io(&to_path, source));
         }
-        trace_published(&to_path);
+        trace_published(Some(&temp_path), &to_path);
         sync_entry(&to_path).await
     }
 
@@ -448,8 +462,8 @@ impl StreamingObjectStore for LocalStorageBackend {
         let metadata_path = self.object_metadata_path_for(bucket, key)?;
         let temp_path = temp_path_for(&object_path, key)?;
         let metadata_temp_path = temp_path_for(&metadata_path, key)?;
-        create_parent_dir(&object_path).await?;
-        create_parent_dir(&metadata_path).await?;
+        self.create_parent_dir(&object_path).await?;
+        self.create_parent_dir(&metadata_path).await?;
         let file = tokio::fs::File::create(&temp_path)
             .await
             .map_err(|source| StorageError::io(&temp_path, source))?;
@@ -651,13 +665,13 @@ impl MultipartWriter for LocalMultipartWriter {
             let _ = tokio::fs::remove_file(&self.metadata_temp_path).await;
             return Err(StorageError::io(&self.object_path, source));
         }
-        trace_published(&self.object_path);
+        trace_published(Some(&self.temp_path), &self.object_path);
         if let Err(source) = tokio::fs::rename(&self.metadata_temp_path, &self.metadata_path).await
         {
             let _ = tokio::fs::remove_file(&self.metadata_temp_path).await;
             return Err(StorageError::io(&self.metadata_path, source));
         }
-        trace_published(&self.metadata_path);
+        trace_published(Some(&self.metadata_temp_path), &self.metadata_path);
         sync_entry(&self.object_path).await?;
         sync_entry(&self.metadata_path).await?;
 
@@ -760,36 +774,94 @@ impl LocalStorageBackend {
     }
 }
 
-/// Creates the directory that will hold `path`, and makes the entry of every
-/// directory it creates durable.
-pub(crate) async fn create_parent_dir(path: &Path) -> Result<(), StorageError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| StorageError::MissingParent { path: path.into() })?;
+impl LocalStorageBackend {
+    /// Creates the directory that will hold `path` and makes it durable; see
+    /// [`Self::create_dir_durably`].
+    async fn create_parent_dir(&self, path: &Path) -> Result<(), StorageError> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| StorageError::MissingParent { path: path.into() })?
+            .to_path_buf();
+        let backend = self.clone();
+        tokio::task::spawn_blocking(move || backend.create_dir_durably(&parent))
+            .await
+            .map_err(crate::local_multipart::join_error)?
+    }
 
-    let mut missing = Vec::new();
-    let mut ancestor = parent;
-    while !ancestor.as_os_str().is_empty() {
-        match tokio::fs::metadata(ancestor).await {
-            Ok(_) => break,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                missing.push(ancestor);
-                match ancestor.parent() {
-                    Some(next) => ancestor = next,
-                    None => break,
+    /// Creates `dir` and makes its entry, and each ancestor's entry up to the
+    /// root, durable before returning.
+    ///
+    /// Each directory from `dir` upward has its entry synced in its parent
+    /// until the walk reaches the root or a directory this backend already
+    /// made durable. A directory that existed is synced too, because another
+    /// writer may have created it and not synced it yet. A directory that was
+    /// missing at the start of the call is always synced, even if remembered,
+    /// because it was removed and recreated. The root's own entry is synced
+    /// only when this call created the root. Directories are remembered only
+    /// after their whole chain synced, so a failed sync is retried by the next
+    /// write.
+    pub(crate) fn create_dir_durably(&self, dir: &Path) -> Result<(), StorageError> {
+        let mut missing = Vec::new();
+        let mut ancestor = dir;
+        loop {
+            match std::fs::metadata(ancestor) {
+                Ok(_) => break,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    missing.push(ancestor.to_path_buf());
+                    match ancestor.parent() {
+                        Some(next) if ancestor != self.root && !next.as_os_str().is_empty() => {
+                            ancestor = next;
+                        }
+                        _ => break,
+                    }
                 }
+                Err(source) => return Err(StorageError::io(ancestor, source)),
             }
-            Err(source) => return Err(StorageError::io(ancestor, source)),
         }
+        if missing.is_empty() && (dir == self.root || self.is_durable_dir(dir)) {
+            return Ok(());
+        }
+
+        std::fs::create_dir_all(dir).map_err(|source| StorageError::io(dir, source))?;
+
+        let mut synced = Vec::new();
+        let mut current = dir;
+        loop {
+            let created = missing.iter().any(|path| path == current);
+            if current == self.root || !current.starts_with(&self.root) {
+                if created {
+                    sync_dir_blocking(entry_dir(current)?)?;
+                }
+                break;
+            }
+            if !created && self.is_durable_dir(current) {
+                break;
+            }
+            sync_dir_blocking(entry_dir(current)?)?;
+            synced.push(current.to_path_buf());
+            match current.parent() {
+                Some(parent) => current = parent,
+                None => break,
+            }
+        }
+
+        let mut durable = self
+            .durable_dirs
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if durable.len().saturating_add(synced.len()) > MAX_DURABLE_DIRS {
+            durable.clear();
+        }
+        durable.extend(synced);
+        Ok(())
     }
 
-    tokio::fs::create_dir_all(parent)
-        .await
-        .map_err(|source| StorageError::io(parent, source))?;
-    for created in missing.into_iter().rev() {
-        sync_entry(created).await?;
+    fn is_durable_dir(&self, dir: &Path) -> bool {
+        self.durable_dirs
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .contains(dir)
     }
-    Ok(())
 }
 
 /// Derives the unique temporary path a write fills before renaming it over
@@ -940,23 +1012,48 @@ async fn sync_file(file: &tokio::fs::File, path: &Path) -> Result<(), StorageErr
 }
 
 /// Makes a creation, rename, link or removal of an entry in `dir` durable.
-///
-/// Directory entries are synced on Unix. Other platforms do not expose a
-/// directory sync through the standard library, and rely on the file system
-/// to persist the entry.
 async fn sync_dir(dir: &Path) -> Result<(), StorageError> {
+    let dir = dir.to_path_buf();
+    tokio::task::spawn_blocking(move || sync_dir_blocking(&dir))
+        .await
+        .map_err(crate::local_multipart::join_error)?
+}
+
+/// Makes a creation, rename, link or removal of an entry in `dir` durable.
+///
+/// Directory entries are synced on Unix only. Other platforms do not expose a
+/// directory sync through the standard library and rely on the file system to
+/// persist the entry. A file system that cannot sync directories, and reports
+/// `EINVAL` or `EBADF` from the directory fsync, is accepted as is, the way
+/// PostgreSQL treats it; any other error, including failing to open the
+/// directory, fails the operation.
+pub(crate) fn sync_dir_blocking(dir: &Path) -> Result<(), StorageError> {
     #[cfg(unix)]
     {
-        let handle = tokio::fs::File::open(dir)
-            .await
-            .map_err(|source| StorageError::io(dir, source))?;
-        handle
-            .sync_all()
-            .await
-            .map_err(|source| StorageError::io(dir, source))?;
+        #[cfg(test)]
+        if durability_log::take_injected_failure(dir) {
+            return Err(StorageError::io(dir, std::io::Error::from_raw_os_error(5)));
+        }
+        let handle = std::fs::File::open(dir).map_err(|source| StorageError::io(dir, source))?;
+        match handle.sync_all() {
+            Ok(()) => trace(DurabilityStep::DirSynced, dir),
+            Err(err) if directory_sync_unsupported(&err) => {}
+            Err(source) => return Err(StorageError::io(dir, source)),
+        }
     }
-    trace(DurabilityStep::DirSynced, dir);
+    #[cfg(not(unix))]
+    let _ = dir;
     Ok(())
+}
+
+/// Whether a directory fsync failed because the file system does not support
+/// syncing directories. `EBADF` (9) and `EINVAL` (22) have these values on
+/// every Unix platform Rust supports.
+#[cfg(unix)]
+fn directory_sync_unsupported(err: &std::io::Error) -> bool {
+    const EBADF: i32 = 9;
+    const EINVAL: i32 = 22;
+    matches!(err.raw_os_error(), Some(EBADF | EINVAL))
 }
 
 /// Opens a file that was written by another call, such as a copy, and syncs it.
@@ -974,7 +1071,7 @@ async fn sync_written_file(path: &Path) -> Result<(), StorageError> {
 /// whose sync failed completes it.
 async fn remove_durably(path: &Path) -> Result<(), StorageError> {
     match tokio::fs::remove_file(path).await {
-        Ok(()) => trace_published(path),
+        Ok(()) => trace_published(None, path),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
         Err(source) => return Err(StorageError::io(path, source)),
     }
@@ -1008,18 +1105,24 @@ async fn sync_entry_if_present(path: &Path) -> Result<(), StorageError> {
 
 /// A durability step of a local write, recorded by tests.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DurabilityStep {
+pub(crate) enum DurabilityStep {
     FileSynced,
     DirSynced,
+    /// The file that the next `Published` step renamed or linked into place.
+    PublishedFrom,
     Published,
 }
 
-/// Records that `path` was renamed, linked or removed into its final state.
-fn trace_published(path: &Path) {
+/// Records that `path` was renamed or linked from `from`, or removed when
+/// `from` is `None`, into its final state.
+pub(crate) fn trace_published(from: Option<&Path>, path: &Path) {
+    if let Some(from) = from {
+        trace(DurabilityStep::PublishedFrom, from);
+    }
     trace(DurabilityStep::Published, path);
 }
 
-fn trace(step: DurabilityStep, path: &Path) {
+pub(crate) fn trace(step: DurabilityStep, path: &Path) {
     #[cfg(test)]
     durability_log::record(step, path);
     #[cfg(not(test))]
@@ -1037,6 +1140,26 @@ mod durability_log {
     use super::DurabilityStep;
 
     static EVENTS: Mutex<Vec<(DurabilityStep, PathBuf)>> = Mutex::new(Vec::new());
+    static FAILING_DIR_SYNCS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+    /// Makes the next sync of the directory `dir` fail with `EIO`.
+    pub(super) fn fail_next_dir_sync(dir: &Path) {
+        FAILING_DIR_SYNCS
+            .lock()
+            .expect("injected failures")
+            .push(dir.to_path_buf());
+    }
+
+    pub(super) fn take_injected_failure(dir: &Path) -> bool {
+        let mut failing = FAILING_DIR_SYNCS.lock().expect("injected failures");
+        match failing.iter().position(|path| path == dir) {
+            Some(index) => {
+                failing.remove(index);
+                true
+            }
+            None => false,
+        }
+    }
 
     pub(super) fn record(step: DurabilityStep, path: &Path) {
         EVENTS
@@ -1056,16 +1179,20 @@ mod durability_log {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod durability_tests {
     use std::path::{Path, PathBuf};
 
     use bytes::Bytes;
     use tempfile::TempDir;
 
-    use super::{DurabilityStep, LocalStorageBackend, durability_log, is_uploading_temp_file};
+    use super::{
+        DurabilityStep, LocalStorageBackend, directory_sync_unsupported, durability_log,
+        is_uploading_temp_file,
+    };
     use crate::{
-        BlobPutOptions, BlobStore, ObjectMetadata, StorageByteStream, StreamingObjectStore,
+        BlobPutOptions, BlobStore, MultipartBlobStore, MultipartStartOptions, ObjectMetadata,
+        StorageByteStream, StorageError, StreamingObjectStore,
     };
 
     type Steps = Vec<(DurabilityStep, PathBuf)>;
@@ -1084,19 +1211,23 @@ mod durability_tests {
             .position(|(recorded, recorded_path)| *recorded == step && recorded_path == path)
     }
 
-    /// `target` was published from a temporary file that was synced first,
-    /// and its directory entry was synced afterwards.
+    /// `target` was published from a temporary file beside it, that same
+    /// file was synced first, and the directory entry was synced afterwards.
     fn assert_durably_published(steps: &Steps, target: &Path) {
         let published = position(steps, DurabilityStep::Published, target)
             .unwrap_or_else(|| panic!("{target:?} was never published: {steps:?}"));
         let parent = target.parent().expect("parent");
+        let source = match published.checked_sub(1).map(|index| &steps[index]) {
+            Some((DurabilityStep::PublishedFrom, source)) => source,
+            _ => panic!("{target:?} was not published from a file: {steps:?}"),
+        };
         assert!(
-            steps[..published].iter().any(|(step, path)| {
-                *step == DurabilityStep::FileSynced
-                    && path.parent() == Some(parent)
-                    && is_uploading_temp_file(path)
-            }),
-            "{target:?} was published before its data was synced: {steps:?}"
+            source.parent() == Some(parent) && is_uploading_temp_file(source),
+            "{target:?} was published from {source:?}, not a temporary file beside it"
+        );
+        assert!(
+            position(&steps[..published - 1], DurabilityStep::FileSynced, source).is_some(),
+            "{target:?} was published before {source:?} was synced: {steps:?}"
         );
         assert!(
             steps[published + 1..]
@@ -1254,6 +1385,181 @@ mod durability_tests {
                 }),
                 "directory of {path:?} not synced after removal: {steps:?}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn multipart_completion_makes_new_directories_durable() {
+        let temp = TempDir::new().expect("temp dir");
+        let backend = LocalStorageBackend::new(temp.path());
+        let handle = backend
+            .start_multipart("archives/2026/object.bin", MultipartStartOptions::default())
+            .await
+            .expect("start");
+        let steps = durability_log::take_under(temp.path());
+        // Staging creates `.graphql-orm-storage/multipart`: both entries are synced.
+        let internal = temp.path().join(super::INTERNAL_STORAGE_DIR);
+        for directory in [temp.path(), internal.as_path()] {
+            assert!(
+                position(&steps, DurabilityStep::DirSynced, directory).is_some(),
+                "staging directory entry in {directory:?} not synced: {steps:?}"
+            );
+        }
+
+        let receipt = backend
+            .upload_part(&handle, 1, body())
+            .await
+            .expect("upload part");
+        let _ = durability_log::take_under(temp.path());
+        backend
+            .complete_multipart(&handle, &[receipt])
+            .await
+            .expect("complete");
+
+        let target = temp.path().join("archives/2026/object.bin");
+        let steps = durability_log::take_under(temp.path());
+        assert_durably_published(&steps, &target);
+        assert_new_directories_durable(&steps, temp.path(), &target);
+    }
+
+    #[tokio::test]
+    async fn a_directory_created_by_another_writer_is_made_durable() {
+        let temp = TempDir::new().expect("temp dir");
+        // Another writer created `shared` and has not synced the root yet.
+        std::fs::create_dir(temp.path().join("shared")).expect("create directory");
+        let backend = LocalStorageBackend::new(temp.path());
+
+        backend
+            .put_blob("shared/one", body(), BlobPutOptions::default())
+            .await
+            .expect("put blob");
+        let steps = durability_log::take_under(temp.path());
+        let target = temp.path().join("shared/one");
+        let published = position(&steps, DurabilityStep::Published, &target).expect("published");
+        assert!(
+            position(&steps[..published], DurabilityStep::DirSynced, temp.path()).is_some(),
+            "entry for the existing directory was not synced: {steps:?}"
+        );
+
+        // A known-durable directory is not synced again, by this backend or a
+        // clone of it.
+        backend
+            .clone()
+            .put_blob("shared/two", body(), BlobPutOptions::default())
+            .await
+            .expect("put blob");
+        let steps = durability_log::take_under(temp.path());
+        assert!(
+            position(&steps, DurabilityStep::DirSynced, temp.path()).is_none(),
+            "known-durable directory synced again: {steps:?}"
+        );
+
+        // A separate backend does not know the directory is durable.
+        LocalStorageBackend::new(temp.path())
+            .put_blob("shared/three", body(), BlobPutOptions::default())
+            .await
+            .expect("put blob");
+        let steps = durability_log::take_under(temp.path());
+        assert!(position(&steps, DurabilityStep::DirSynced, temp.path()).is_some());
+
+        // A remembered directory that was removed and recreated is synced again.
+        std::fs::remove_dir_all(temp.path().join("shared")).expect("remove directory");
+        backend
+            .put_blob("shared/four", body(), BlobPutOptions::default())
+            .await
+            .expect("put blob");
+        let steps = durability_log::take_under(temp.path());
+        assert!(
+            position(&steps, DurabilityStep::DirSynced, temp.path()).is_some(),
+            "recreated directory was not synced: {steps:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn conditional_put_syncs_an_existing_entry_and_never_invites_a_retry() {
+        let temp = TempDir::new().expect("temp dir");
+        let backend = LocalStorageBackend::new(temp.path());
+        backend
+            .put_blob_if_not_exists("locks/one", body(), BlobPutOptions::default())
+            .await
+            .expect("create");
+        let _ = durability_log::take_under(temp.path());
+
+        let existing = backend
+            .put_blob_if_not_exists("locks/one", body(), BlobPutOptions::default())
+            .await
+            .expect("existing");
+        assert!(existing.is_none());
+        let steps = durability_log::take_under(temp.path());
+        assert!(
+            position(
+                &steps,
+                DurabilityStep::DirSynced,
+                &temp.path().join("locks")
+            )
+            .is_some(),
+            "observed entry was not synced: {steps:?}"
+        );
+
+        // A failed sync after the link reports a non-retryable error whose
+        // outcome is unknown: the key exists, so a retry would find it taken.
+        durability_log::fail_next_dir_sync(&temp.path().join("locks"));
+        let error = backend
+            .put_blob_if_not_exists("locks/two", body(), BlobPutOptions::default())
+            .await
+            .expect_err("sync failure");
+        assert!(matches!(error, StorageError::SingleAttemptFailed { .. }));
+        assert!(!error.is_retryable());
+        assert!(
+            backend
+                .put_blob_if_not_exists("locks/two", body(), BlobPutOptions::default())
+                .await
+                .expect("retry")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_directory_sync_is_retried_by_the_next_write() {
+        let temp = TempDir::new().expect("temp dir");
+        let backend = LocalStorageBackend::new(temp.path());
+        durability_log::fail_next_dir_sync(temp.path());
+        let error = backend
+            .put_blob("fresh/one", body(), BlobPutOptions::default())
+            .await
+            .expect_err("sync failure");
+        assert!(matches!(error, StorageError::Io { .. }));
+        let _ = durability_log::take_under(temp.path());
+
+        // `fresh` now exists, but its entry was never synced.
+        backend
+            .put_blob("fresh/one", body(), BlobPutOptions::default())
+            .await
+            .expect("retry");
+        let steps = durability_log::take_under(temp.path());
+        assert!(
+            position(&steps, DurabilityStep::DirSynced, temp.path()).is_some(),
+            "entry left unsynced by the failed write was not synced: {steps:?}"
+        );
+    }
+
+    #[test]
+    fn only_unsupported_directory_sync_errors_are_tolerated() {
+        assert!(directory_sync_unsupported(
+            &std::io::Error::from_raw_os_error(22)
+        ));
+        assert!(directory_sync_unsupported(
+            &std::io::Error::from_raw_os_error(9)
+        ));
+        assert_eq!(
+            std::io::Error::from_raw_os_error(22).kind(),
+            std::io::ErrorKind::InvalidInput,
+            "EINVAL has the expected value"
+        );
+        for code in [1, 5, 13, 28, 30] {
+            assert!(!directory_sync_unsupported(
+                &std::io::Error::from_raw_os_error(code)
+            ));
         }
     }
 }
