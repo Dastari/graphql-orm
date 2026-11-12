@@ -320,6 +320,73 @@ new declaration.
 
 See [Keyset roots and residual-only read policies](docs/reference/graphql-orm/macros-and-attributes.md#keyset-roots-and-residual-only-read-policies).
 
+## 0.125.0 to 0.126.0: NodeId on complex objects with computed fields
+
+Upgrade runtime and macros together. No data conversion is required.
+
+A `#[graphql(complex)]` `SimpleObject` entity with handwritten computed fields
+can now declare `node_id` and a managed version without `GraphQLRelations`.
+Mark the entity `#[graphql_orm(compose_complex_object)]` and replace
+`#[ComplexObject]` on the handwritten impl with `#[graphql_complex_object]`:
+
+```rust,ignore
+#[graphql_orm::graphql_policy_object]
+#[derive(GraphQLEntity, GraphQLOperations, SimpleObject, Clone)]
+#[graphql(complex)]
+#[graphql_orm(compose_complex_object)]
+#[graphql_entity(table = "records", plural = "Records", node_id)]
+struct Record {
+    #[primary_key]
+    id: String,
+    scope_json: String,
+}
+
+#[graphql_complex_object]
+impl Record {
+    async fn scope(&self) -> async_graphql::Result<TypedScope> {
+        Ok(serde_json::from_str(&self.scope_json)?)
+    }
+}
+```
+
+The `SimpleObject` scalar fields apply column read policies only with
+`#[graphql_orm::graphql_policy_object]` before the derives, as on any complex
+`SimpleObject` entity; keep or add it when a column declares `read_policy` or the
+database has a field policy.
+
+Two declarations that compiled before now fail to compile:
+
+- A `#[graphql_complex_object]` resolver whose GraphQL name is `NodeId`, or
+  `RecordVersion` on an entity with a managed version. The composed object
+  generates these fields, and the handwritten resolver would be served in place of
+  the policy-checked generated one. The handwritten resolver must be removed. A
+  struct field or derived struct field published under one of these names is
+  refused too, because `SimpleObject` resolves struct fields first.
+
+  The published name follows async-graphql. An explicit
+  `#[graphql(name = "…")]` is used as written, and also names every
+  `derived(...)` copy of that field or method. Otherwise the identifier (the
+  method or field name, or a derived copy's `derived(name = "…")`) is renamed by
+  `rename_fields`: the impl's for complex-object methods, the struct's for struct
+  fields, camelCase by default either way. The `field-case-*` features do not
+  apply. Derived copies of a struct field are published even when the field
+  itself is skipped; a skipped method has no published copies.
+
+  `name`, `derived(name)` and `rename_fields` values must be string literals,
+  also when passed through `macro_rules!`, and every `#[graphql(...)]` on these
+  fields and methods must parse.
+
+  The generated fields now also resolve ahead of any handwritten composed field,
+  including fields of a handwritten `#[graphql(flatten)]` object, and are the
+  advertised definitions.
+- `compose_complex_object` with `node_id` and relation fields whose handwritten
+  impl uses `#[ComplexObject]` rather than `#[graphql_complex_object]`. The
+  composed object was never mounted, so `NodeId` was declared as a key without a
+  field. Switch the impl to `#[graphql_complex_object]`.
+
+A `GraphQLRelations` derive kept only to mount these fields on an entity with no
+relation fields may be removed; keeping it adds nothing.
+
 ## 0.125.0: PostgreSQL records change-journal entries in the database
 
 Upgrade runtime and macros together. This affects PostgreSQL deployments that

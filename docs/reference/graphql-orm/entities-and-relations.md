@@ -269,7 +269,9 @@ If the entity also defines handwritten `ComplexObject` fields, add
 handwritten impl's `#[ComplexObject]` attribute with
 `#[graphql_complex_object]`. The wrapper flattens the generated relation object
 into the same complex field surface, preserving generated batching and
-filter/order/page arguments without a second conflicting trait impl.
+filter/order/page arguments without a second conflicting trait impl. An entity
+with handwritten computed fields and no relations uses the same two attributes
+without `GraphQLRelations` to receive `NodeId` and `RecordVersion`.
 
 Single-column relation syntax remains:
 

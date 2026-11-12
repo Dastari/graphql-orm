@@ -1,0 +1,5 @@
+error: this field is published as `NodeId`, which this entity serves as a generated identity field; rename this field
+  --> tests/ui/node_id_complex_object_field_named.rs:26:5
+   |
+26 |     node_id: String,
+   |     ^^^^^^^^^^^^^^^

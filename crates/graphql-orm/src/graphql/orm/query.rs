@@ -368,8 +368,59 @@ pub trait GeneratedRelationsObject {
     where
         Self: 'a;
 
+    /// GraphQL names of the generated identity fields (`NodeId`, `RecordVersion`)
+    /// that the composed object serves.
+    const GENERATED_IDENTITY_FIELDS: &'static [&'static str];
+
     fn generated_relations_object(&self) -> Self::Object<'_>;
 }
+
+/// Whether `names` contains `name`, usable in constant evaluation.
+#[doc(hidden)]
+pub const fn generated_field_names_contain(names: &[&str], name: &str) -> bool {
+    let mut index = 0;
+    while index < names.len() {
+        let candidate = names[index].as_bytes();
+        let wanted = name.as_bytes();
+        if candidate.len() == wanted.len() {
+            let mut byte = 0;
+            while byte < wanted.len() && candidate[byte] == wanted[byte] {
+                byte += 1;
+            }
+            if byte == wanted.len() {
+                return true;
+            }
+        }
+        index += 1;
+    }
+    false
+}
+
+/// Internal proof that `GraphQLRelations` mounted the generated identity fields.
+///
+/// `GraphQLEntity` requires it for a `#[graphql(complex)]` entity with `node_id`
+/// whose complex object it does not own, so a resolvable `NodeId` key is never
+/// declared without its field.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` declares `node_id` on a `#[graphql(complex)]` SimpleObject entity, but nothing adds the `NodeId` field to its complex object",
+    label = "`NodeId` is not mounted on this complex object",
+    note = "add `#[graphql_orm(compose_complex_object)]` to the entity and replace `#[ComplexObject]` with `#[graphql_orm::graphql_complex_object]` on its handwritten impl; the generated `NodeId` and `RecordVersion` are then composed with the handwritten fields",
+    note = "an entity with no handwritten complex fields can instead derive `GraphQLRelations`, which adds them to the complex object it generates"
+)]
+pub trait GeneratedComplexIdentityFields {}
+
+/// Internal proof that `#[graphql_complex_object]` mounted the composed object.
+///
+/// `GraphQLEntity` requires it when it owns the composed object of a `node_id`
+/// entity, so a plain `#[ComplexObject]` cannot leave the key without its field.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` declares `node_id` and `compose_complex_object`, but no `#[graphql_complex_object]` impl mounts the generated `NodeId`",
+    label = "`NodeId` is not mounted on this complex object",
+    note = "replace `#[ComplexObject]` with `#[graphql_orm::graphql_complex_object]` on the entity's handwritten impl"
+)]
+pub trait GeneratedComplexObjectMounted {}
 
 /// Backend-neutral, policy-aware query builder for macro-generated repository entities.
 ///
