@@ -3,7 +3,7 @@ title: "Native SMB2/SMB3 Blob Storage"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-12
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -37,6 +37,15 @@ reply larger than the buffer it requested, adds an optional server-GUID pin to
 `ConnectionConfig`, and wraps the password in its zeroizing secret before any
 fallible step. See [server identity](#server-identity) and
 [resource bounds](#resource-bounds).
+
+Storage 0.10.0 adds a third owner-local patch,
+`PATCHES/server-response-errors.patch`. Four server-reachable panics become
+typed errors: a transform nested inside a decrypted or decompressed payload
+(`InvalidMessage`), an async response header without an async ID
+(`InvalidMessage`), a file opened on a printer share (`UnsupportedOperation`;
+dropping the handle closes it), and a session key shorter than 16 bytes
+(`InvalidState`). MS-SMB2 would right-pad a short session key with zeros; the
+client fails closed instead of deriving signing and encryption keys from it.
 The protocol/authentication companions, cryptographic versions and feature
 selection remain pinned to the existing 0.10.2 family; this is not an adoption
 of the newer SDK's crypto graph.
@@ -101,7 +110,9 @@ let mut config = SmbStorageConfig::new(
 );
 config.domain = Some("EXAMPLE".to_string());
 config.root_prefix = Some("repositories/production".to_string());
-config.min_dialect = SmbDialect::Smb3_0;
+// SMB 3.1.1 is the default minimum. Lower it only for a server that cannot
+// negotiate SMB 3.1.1; see "Dialect" below.
+config.min_dialect = SmbDialect::Smb3_1_1;
 config.require_encryption = true;
 config.connect_timeout = Duration::from_secs(10);
 config.operation_timeout = Duration::from_secs(60);
@@ -110,8 +121,8 @@ let store = SmbStorageBackend::connect(config).await?;
 # }
 ```
 
-Port 445, SMB 3.0 minimum, and required signing are defaults. Encryption may be
-required. Guest fallback is refused. Server/share fields are names, not local
+Port 445, SMB 3.1.1 minimum, and required signing are defaults. Encryption may
+be required. Guest fallback is refused. Server/share fields are names, not local
 paths, UNC paths, or SMB URLs.
 
 `root_prefix` and blob keys are `/`-separated relative keys. Empty segments,
@@ -121,6 +132,25 @@ or probe results. The backend moves the password straight into the SMB
 client's zeroizing secret, and no plain copy outlives the connection call.
 Hosts own encrypted persistence, rotation, authorization, and audit; this crate
 does not serialize credentials.
+
+### Dialect
+
+The client offers only the dialects from `min_dialect` up, and a connection
+whose server selects a lower dialect fails with a non-retryable
+`SecurityNegotiation` error before session setup. A server that supports none
+of the offered dialects refuses the negotiation itself, which the backend
+reports as a non-retryable `Protocol` error. Either way, no credentials are
+sent.
+
+The default minimum is SMB 3.1.1, the only dialect whose negotiation is bound
+to the session by pre-authentication integrity. The vendored client does not
+send `FSCTL_VALIDATE_NEGOTIATE_INFO`, so with a lower minimum an on-path party
+could make a server that supports SMB 3.1.1 negotiate an earlier offered
+dialect undetected. Signing stays mandatory and required encryption is still
+enforced at any dialect, but SMB 3.0 and 3.0.2 offer only AES-CCM encryption
+and no opportunistic encryption. Set `min_dialect` to `SmbDialect::Smb3_0` or
+`Smb3_0_2` only for a server that cannot negotiate SMB 3.1.1, and prefer
+`require_encryption` there.
 
 ## Authentication
 
@@ -231,6 +261,16 @@ client receives. The backend bounds the resources that input can consume:
 | Request message IDs awaiting a response | 8,192 | Fixed in the vendored client | Oldest is forgotten |
 | Responses held before a task receives them | 256 | Fixed in the vendored client | Oldest is dropped |
 | Probe file read | 16 bytes | Fixed | Non-retryable `Protocol` error |
+
+Listings decode each name strictly. A name that is not valid UTF-16, or that
+`validate_blob_key` refuses, such as the reserved `.graphql-orm-storage`
+namespace at the root, cannot be a key: it is counted against the limits and
+skipped, and the listing does not enter such a directory. Every key below it
+would contain the same component. Decoding such names lossily would let two
+distinct names merge into one key that opens neither file. This is not a
+partial listing: every name a key can address is still listed, and a
+directory that enumeration reported but that fails to open still fails the
+listing.
 
 A listing that reaches a limit fails instead of returning a partial listing,
 because callers such as backup pruning treat a listing as complete. The depth
@@ -346,6 +386,15 @@ Stream writes are not replayed. An exclusive `FILE_CREATE` is not replayed after
 an ambiguous response because the server may already have created that exact
 target. Callers retry failed uploads with a fresh stream.
 
+Opening an existing key whose file another handle is deleting returns
+`STATUS_DELETE_PENDING`. For `get_blob`, `blob_exists`, `head_blob` and
+deletion the backend reports that key as missing: the file disappears once its
+last handle closes, so it is already gone for readers, and deleting it again
+succeeds as it would once the delete completes. This happens, for example,
+right after a cancelled `put_blob_if_not_exists` cleans up through
+delete-on-close. Creating such a key keeps reporting the status as a
+non-retryable `Protocol` error, never as a conditional-create conflict.
+
 If a response is lost after conditional CREATE, the server may hold a partial
 or complete target. Cleanup is best effort, so completed snapshots must still
 be verified. Backup manifests are written last and do not advertise incomplete
@@ -377,7 +426,7 @@ runtime configuration or credentials in support bundles.
 
 Run `crates/graphql-orm-storage/tests/samba/run.sh` from the workspace root for
 the owned Samba protocol and complete backup lifecycle suite. It uses `cargo`
-by default. Set `SMB_TEST_CARGO` to an executable path to run all eleven
+by default. Set `SMB_TEST_CARGO` to an executable path to run all thirteen
 Cargo/test invocations through a host's resource-controlled Cargo runner:
 
 ```sh
@@ -389,6 +438,12 @@ The setting accepts one executable, including a path containing spaces, rather
 than a shell command with arguments. The host supplies the runner's toolchain
 and resource environment; the suite retains its owned fixture lifecycle and
 cleanup.
+
+The constrained-write server also caps its dialect at SMB 3.0
+(`server max protocol = SMB3_00`), so the suite checks that the default
+minimum refuses it and that an explicit `SmbDialect::Smb3_0` opt-in connects.
+The suite also runs the provider listing contract shared with the local and
+S3 tests.
 
 The fixture image defaults to the reviewed index digest
 `dperson/samba@sha256:66088b78a19810dd1457a8f39340e95e663c728083efa5fe7dc0d40b2478e869`.

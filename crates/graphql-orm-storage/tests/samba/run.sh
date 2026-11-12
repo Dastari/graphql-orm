@@ -99,7 +99,8 @@ CONSTRAINED_ID=$(docker run -d --name "$CONSTRAINED" --label "$LABEL=$RUN_ID" --
   -p "127.0.0.1:$CONSTRAINED_PORT:445" "$IMAGE" \
   -p -w WORKGROUP -u "backup;$PASSWORD" \
   -s 'backups;/share;yes;no;no;backup' \
-  -g 'server signing = mandatory' -g 'smb2 max write = 65536')
+  -g 'server signing = mandatory' -g 'smb2 max write = 65536' \
+  -g 'server max protocol = SMB3_00')
 port_for() {
   docker port "$1" 445/tcp | python3 -c 'import sys; print(sys.stdin.read().strip().rsplit(":", 1)[1])'
 }
@@ -218,3 +219,15 @@ SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP
 SMB_TEST_ALTERNATE_PORT="$CONSTRAINED_PORT" \
   run_test samba_reconnect_refuses_a_server_with_another_identity "$SMB_TEST_CARGO" test --locked --features smb --test smb_integration \
   samba_reconnect_refuses_a_server_with_another_identity -- --ignored --exact --nocapture
+
+# Listing prefix contract on the default (SMB 3.1.1) dialect.
+SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
+SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
+  run_test samba_listing_follows_the_provider_prefix_contract "$SMB_TEST_CARGO" test --locked --features smb --test smb_integration \
+  samba_listing_follows_the_provider_prefix_contract -- --ignored --exact --nocapture
+
+# The constrained server offers at most SMB 3.0, below the default minimum.
+SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$CONSTRAINED_PORT" SMB_TEST_SHARE=backups \
+SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
+  run_test samba_refuses_a_dialect_below_the_minimum "$SMB_TEST_CARGO" test --locked --features smb --test smb_integration \
+  samba_refuses_a_dialect_below_the_minimum -- --ignored --exact --nocapture

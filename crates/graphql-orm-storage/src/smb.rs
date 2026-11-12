@@ -69,6 +69,11 @@ const SMB2_CREDIT_UNIT: usize = 64 * 1024;
 const WRITE_PROGRESS_INTERVAL: u64 = 64 * 1024 * 1024;
 
 /// Lowest SMB2/SMB3 dialect accepted by a native SMB backend.
+///
+/// The default is SMB 3.1.1, the only dialect whose negotiation is protected
+/// by pre-authentication integrity. A lower minimum is an explicit opt-in for
+/// servers that cannot negotiate SMB 3.1.1: the client does not validate an
+/// earlier negotiation, so an on-path party could select any offered dialect.
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 #[non_exhaustive]
 pub enum SmbDialect {
@@ -77,11 +82,11 @@ pub enum SmbDialect {
     /// SMB 2.1.
     Smb2_1,
     /// SMB 3.0.
-    #[default]
     Smb3_0,
     /// SMB 3.0.2.
     Smb3_0_2,
-    /// SMB 3.1.1.
+    /// SMB 3.1.1, the default.
+    #[default]
     Smb3_1_1,
 }
 
@@ -127,7 +132,10 @@ pub struct SmbStorageConfig {
     pub password: SecretString,
     /// Optional NTLM domain or workgroup.
     pub domain: Option<String>,
-    /// Lowest accepted dialect. SMB1 is never offered.
+    /// Lowest accepted dialect; SMB 3.1.1 by default. The client offers only
+    /// dialects from this one up, and a connection whose server selects a
+    /// lower dialect fails. SMB1 is never offered. See [`SmbDialect`] before
+    /// lowering it.
     pub min_dialect: SmbDialect,
     /// Require signed authenticated SMB messages.
     pub require_signing: bool,
@@ -1425,6 +1433,12 @@ async fn walk_listing<S: ListingSource>(
             };
             // The name was charged when enumerated; charge the parent path.
             budget.charge(child.len() - name_len)?;
+            // A name no key can address, such as the reserved internal
+            // namespace at the root, is skipped. Every key below such a
+            // directory contains the same component, so it is not entered.
+            if validate_blob_key(&child).is_err() {
+                continue;
+            }
             // An interrupted upload's temporary file may be longer than its
             // target key; it is filtered from the result.
             if child.len() > key_byte_limit(&child) {
@@ -1691,15 +1705,17 @@ impl SmbListingSource<'_> {
                 break;
             };
             let entry = entry.map_err(|error| map_smb_error("list", error))?;
-            let name = entry.file_name.to_string();
+            let directory = entry.file_attributes.directory();
+            let Some(name) = decode_listed_name(entry.file_name.clone()) else {
+                // Counted against the limits, but never listed.
+                budget.record_entry(&entry.file_name.to_string())?;
+                continue;
+            };
             if name == "." || name == ".." {
                 continue;
             }
             budget.record_entry(&name)?;
-            listed.push(ListedEntry {
-                name,
-                directory: entry.file_attributes.directory(),
-            });
+            listed.push(ListedEntry { name, directory });
         }
         Ok(listed)
     }
@@ -2479,6 +2495,9 @@ async fn connect_client(
         return Err(map_smb_error("connect", smb::Error::ServerGuidMismatch));
     }
     let negotiated_dialect = SmbDialect::from_protocol(info.negotiation.dialect_rev);
+    // The client offers no lower dialect and refuses a server that selects
+    // one; fail closed here too.
+    check_negotiated_dialect(config.min_dialect, negotiated_dialect)?;
     let max_read_size = info.negotiation.max_read_size;
     let max_write_size = info.negotiation.max_write_size;
     let max_transact_size = info.negotiation.max_transact_size;
@@ -2624,6 +2643,35 @@ fn is_legacy_temp_name(name: &str) -> bool {
         .is_some_and(|(target, uuid)| !target.is_empty() && is_canonical_uuid(uuid))
 }
 
+/// `STATUS_DELETE_PENDING`: the file has a pending delete and closes for good
+/// once its last handle closes.
+const STATUS_DELETE_PENDING: u32 = 0xC000_0056;
+
+/// Fails a connection whose server selected a dialect below `minimum`.
+fn check_negotiated_dialect(
+    minimum: SmbDialect,
+    negotiated: SmbDialect,
+) -> Result<(), StorageError> {
+    if negotiated < minimum {
+        return Err(remote_error(
+            StorageProviderErrorKind::SecurityNegotiation,
+            "connect",
+            format!(
+                "server negotiated {negotiated:?}, below the configured minimum dialect {minimum:?}"
+            ),
+            false,
+        ));
+    }
+    Ok(())
+}
+
+/// A listed name, or `None` when it is not valid UTF-16. Such a name cannot
+/// be a key, and decoding it lossily could merge distinct names into one key
+/// that opens neither file.
+fn decode_listed_name(name: SizedWideString) -> Option<String> {
+    String::try_from(name).ok()
+}
+
 fn map_io_error(operation: &'static str, error: std::io::Error) -> StorageError {
     let kind = match error.kind() {
         std::io::ErrorKind::TimedOut => StorageProviderErrorKind::Timeout,
@@ -2668,6 +2716,12 @@ fn map_smb_error(operation: &'static str, error: smb::Error) -> StorageError {
             if value == Status::ObjectNameNotFound as u32
                 || value == Status::ObjectPathNotFound as u32 =>
         {
+            StorageProviderErrorKind::RemotePathNotFound
+        }
+        // Opening an existing key whose file another handle is deleting: the
+        // key is already gone for readers, and for deletion, which succeeds
+        // as it would once the delete completes. A create keeps this status.
+        Some(STATUS_DELETE_PENDING) if operation == "open" => {
             StorageProviderErrorKind::RemotePathNotFound
         }
         Some(value) if value == Status::ObjectNameCollision as u32 => {
@@ -2923,7 +2977,11 @@ mod tests {
     fn configuration_defaults_are_secure() {
         let config = config();
         assert_eq!(config.port, 445);
-        assert_eq!(config.min_dialect, SmbDialect::Smb3_0);
+        assert_eq!(config.min_dialect, SmbDialect::Smb3_1_1);
+        assert_eq!(
+            client_config(&config, None).connection.min_dialect,
+            Some(Dialect::Smb0311)
+        );
         assert!(config.require_signing);
         assert!(!config.require_encryption);
         assert!(config.validate().is_ok());
@@ -3889,5 +3947,105 @@ mod tests {
         assert!(original_closed.load(Ordering::SeqCst));
         assert_eq!(path_deletes.load(Ordering::SeqCst), 0);
         assert!(replacement_alive.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_negotiated_dialect_below_the_minimum_fails_the_connection() {
+        for (minimum, negotiated) in [
+            (SmbDialect::Smb3_1_1, SmbDialect::Smb3_0_2),
+            (SmbDialect::Smb3_1_1, SmbDialect::Smb3_0),
+            (SmbDialect::Smb3_0, SmbDialect::Smb2_1),
+        ] {
+            let error = check_negotiated_dialect(minimum, negotiated)
+                .expect_err("a dialect below the minimum");
+            assert!(!error.is_retryable());
+            assert_eq!(
+                provider_error_kind(&error),
+                Some(StorageProviderErrorKind::SecurityNegotiation)
+            );
+        }
+        for (minimum, negotiated) in [
+            (SmbDialect::Smb3_1_1, SmbDialect::Smb3_1_1),
+            (SmbDialect::Smb3_0, SmbDialect::Smb3_0_2),
+            (SmbDialect::Smb3_0, SmbDialect::Smb3_1_1),
+        ] {
+            assert!(check_negotiated_dialect(minimum, negotiated).is_ok());
+        }
+        // The vendored client refuses such a server too.
+        let error = map_smb_error(
+            "connect",
+            smb::Error::NegotiationError("Server selected an unsupported dialect.".into()),
+        );
+        assert!(!error.is_retryable());
+        assert_eq!(
+            provider_error_kind(&error),
+            Some(StorageProviderErrorKind::SecurityNegotiation)
+        );
+    }
+
+    #[test]
+    fn a_pending_delete_reads_as_not_found_when_opening_an_existing_key() {
+        for error in [
+            smb::Error::UnexpectedMessageStatus(STATUS_DELETE_PENDING),
+            smb::Error::ReceivedErrorMessage(
+                STATUS_DELETE_PENDING,
+                smb_msg::ErrorResponse { error_data: vec![] },
+            ),
+        ] {
+            let error = map_smb_error("open", error);
+            assert!(is_not_found(&error), "{error:?}");
+            assert!(!error.is_retryable());
+        }
+        // Creating a key whose previous file is still being deleted is not
+        // reported as a missing path.
+        let error = map_smb_error(
+            "create",
+            smb::Error::UnexpectedMessageStatus(STATUS_DELETE_PENDING),
+        );
+        assert!(!is_not_found(&error));
+        assert!(!is_collision(&error));
+    }
+
+    #[test]
+    fn listed_names_must_be_valid_utf16() {
+        let name = |units: &[u16]| units.iter().copied().collect::<SizedWideString>();
+        assert_eq!(
+            decode_listed_name(name(&"caf\u{e9}.bin".encode_utf16().collect::<Vec<_>>())),
+            Some("caf\u{e9}.bin".to_string())
+        );
+        // Unpaired surrogates would otherwise both decode to U+FFFD.
+        assert_eq!(decode_listed_name(name(&[0x61, 0xd800])), None);
+        assert_eq!(decode_listed_name(name(&[0x61, 0xdc00])), None);
+    }
+
+    #[tokio::test]
+    async fn listing_skips_names_that_are_not_valid_keys() {
+        let source = FakeListing::new(|path| match path {
+            "" => vec![
+                (".graphql-orm-storage".to_string(), true),
+                (".GRAPHQL-ORM-STORAGE.".to_string(), false),
+                ("a".to_string(), true),
+                ("top.bin".to_string(), false),
+            ],
+            "a" => vec![
+                (".graphql-orm-storage".to_string(), true),
+                ("back\\slash".to_string(), false),
+                ("one.bin".to_string(), false),
+            ],
+            "a/.graphql-orm-storage" => vec![("nested.bin".to_string(), false)],
+            other => panic!("unexpected directory {other}"),
+        });
+        let mut files = bounded_listing(
+            &source,
+            String::new(),
+            limits(8, 100, Duration::from_secs(30)),
+        )
+        .await
+        .expect("listing");
+        files.sort();
+        assert_eq!(
+            files,
+            ["a/.graphql-orm-storage/nested.bin", "a/one.bin", "top.bin"]
+        );
     }
 }

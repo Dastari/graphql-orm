@@ -9,6 +9,9 @@ use graphql_orm_storage::{
 use secrecy::SecretString;
 use uuid::Uuid;
 
+#[path = "support/listing_contract.rs"]
+mod listing_contract;
+
 fn test_config(root_prefix: String) -> SmbStorageConfig {
     let mut config = SmbStorageConfig::new(
         env::var("SMB_TEST_SERVER").unwrap_or_else(|_| "127.0.0.1".to_string()),
@@ -948,4 +951,67 @@ fn restart_guard_denies_missing_failed_and_mismatched_ownership_without_mutation
     })
     .expect("verified restart callback");
     assert_eq!(mutations.get(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the managed Samba container harness"]
+async fn samba_listing_follows_the_provider_prefix_contract() {
+    let root = format!("graphql-orm-storage-tests/{}", Uuid::new_v4());
+    let mut config = test_config(root);
+    // The default minimum dialect, SMB 3.1.1, is what this server negotiates.
+    config.min_dialect = SmbDialect::default();
+    assert_eq!(config.min_dialect, SmbDialect::Smb3_1_1);
+    let probe = SmbStorageBackend::probe(
+        config.clone(),
+        SmbProbeOptions {
+            create_prefix: true,
+        },
+    )
+    .await
+    .expect("probe");
+    assert_eq!(probe.negotiated_dialect, SmbDialect::Smb3_1_1);
+    let store = SmbStorageBackend::connect(config).await.expect("connect");
+    listing_contract::prefixes_are_string_prefixes(&store, "contract").await;
+    listing_contract::the_internal_namespace_is_reserved(&store).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires a managed Samba server limited to SMB 3.0"]
+async fn samba_refuses_a_dialect_below_the_minimum() {
+    let root = format!("graphql-orm-storage-tests/{}", Uuid::new_v4());
+    let mut config = test_config(root);
+    config.min_dialect = SmbDialect::default();
+    // Offered only SMB 3.1.1, this server refuses the negotiation itself; a
+    // server that selected SMB 3.0 anyway would be refused by the client.
+    let error = SmbStorageBackend::connect(config.clone())
+        .await
+        .expect_err("SMB 3.0 is below the default minimum");
+    match &error {
+        graphql_orm_storage::StorageError::RemoteProvider {
+            kind, retryable, ..
+        } => {
+            assert!(
+                matches!(
+                    kind,
+                    StorageProviderErrorKind::Protocol
+                        | StorageProviderErrorKind::SecurityNegotiation
+                ),
+                "{error}"
+            );
+            assert!(!retryable, "{error}");
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+
+    // SMB 3.0 is an explicit opt-in.
+    config.min_dialect = SmbDialect::Smb3_0;
+    let probe = SmbStorageBackend::probe(
+        config,
+        SmbProbeOptions {
+            create_prefix: true,
+        },
+    )
+    .await
+    .expect("probe with SMB 3.0 allowed");
+    assert_eq!(probe.negotiated_dialect, SmbDialect::Smb3_0);
 }

@@ -3,12 +3,61 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-12
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Changelog
+
+## 0.10.0 (unreleased)
+
+Breaking: the SMB default minimum dialect, the reserved internal key
+namespace and local listing prefixes. See [MIGRATION.md](MIGRATION.md).
+
+- SMB: the default `min_dialect` is SMB 3.1.1, the only dialect whose
+  negotiation is protected by pre-authentication integrity; it was SMB 3.0.
+  SMB 3.0 and 3.0.2 remain available as an explicit opt-in. A connection whose
+  server negotiates a dialect below the configured minimum fails with a
+  non-retryable `SecurityNegotiation` error.
+- Keys and streaming-object buckets whose first component is the internal
+  `.graphql-orm-storage` namespace, in any ASCII case and with or without
+  trailing dots or spaces, are refused with `InvalidStorageKey` by
+  `validate_blob_key` and every provider. The local backend keeps multipart
+  staging and object metadata there, which callers could previously read,
+  overwrite or delete.
+- Listing prefixes are plain string prefixes on every provider, as S3 and SMB
+  already treated them: on local storage, `a` now also lists `ab` and
+  `a-b/x`, not only `a` and keys under `a/`. A prefix may now end in one `/`
+  to list a single directory. `BlobStore::list_blobs_page` documents the
+  contract, and a shared provider test runs it against local, S3 and SMB.
+  The local `list_objects` follows the same contract.
+  ([#614](https://github.com/Dastari/graphql-orm/issues/614))
+- Listings return only keys the provider accepts. SMB decodes listed names
+  strictly, so two names that are not valid UTF-16 no longer merge into one
+  lossy key, and the local backend skips names that are not valid UTF-8.
+  Names `validate_blob_key` refuses, such as the reserved namespace or a local
+  file name containing `\`, and S3 keys such as folder markers ending in `/`,
+  are skipped. ([#588](https://github.com/Dastari/graphql-orm/issues/588))
+- S3: `put_blob` and `put_blob_if_not_exists` abort the multipart upload they
+  started when the body or a part upload fails, and, best effort, when the
+  write is cancelled, instead of leaving its parts stored as an incomplete
+  upload. ([#611](https://github.com/Dastari/graphql-orm/issues/611))
+- SMB: opening an existing key whose file has a pending delete
+  (`STATUS_DELETE_PENDING`) reports the key as missing for `get_blob`,
+  `blob_exists`, `head_blob` and deletion, instead of a non-retryable
+  `Protocol` error. ([#594](https://github.com/Dastari/graphql-orm/issues/594))
+- Vendored SMB client: a new owner-local patch,
+  `PATCHES/server-response-errors.patch`, turns four panics a server could
+  trigger into typed errors: a transform nested in a decrypted or
+  decompressed payload, an async header without an async ID, a file on a
+  printer share, and a short session key.
+  ([#515](https://github.com/Dastari/graphql-orm/issues/515))
+- The `local_storage` example requires the `local` feature, so test builds
+  without it compile. CI checks the S3-only and SMB-only feature selections
+  with `--all-targets`. ([#586](https://github.com/Dastari/graphql-orm/issues/586))
+- The managed Samba suite caps the constrained-write server at SMB 3.0 and
+  adds the listing contract and dialect-minimum cases.
 
 ## 0.9.3 (unreleased)
 

@@ -138,12 +138,7 @@ pub trait Worker: Sized + std::fmt::Debug {
                 msg.message.header.status
             );
 
-            let async_id = match msg.message.header.async_id {
-                Some(async_id) => async_id,
-                None => {
-                    panic!("Async ID is None, but async command is set. This should not happen.")
-                }
-            };
+            let async_id = interim_async_id(&msg.message.header)?;
 
             // The most recent interim names the async ID used for cancellation.
             // A later interim or final response may carry another async ID: an
@@ -201,5 +196,44 @@ pub trait Worker: Sized + std::fmt::Debug {
     #[maybe_async]
     async fn session_ended(&self, info: &Arc<RwLock<SessionAndChannel>>) -> crate::Result<()> {
         self.transformer().session_ended(info).await
+    }
+}
+
+/// Local patch (graphql-orm-storage): the async ID of an interim response.
+/// An async header without an async ID is refused as an invalid message
+/// instead of panicking.
+fn interim_async_id(header: &smb_msg::Header) -> crate::Result<u64> {
+    header.async_id.ok_or_else(|| {
+        Error::InvalidMessage("an async response header has no async ID".to_string())
+    })
+}
+
+#[cfg(test)]
+mod interim_async_id_tests {
+    use super::interim_async_id;
+    use crate::Error;
+    use smb_msg::{Command, Header, HeaderFlags, Status};
+
+    #[test]
+    fn an_async_header_without_an_async_id_is_an_error_not_a_panic() {
+        let header = Header {
+            credit_charge: 1,
+            status: Status::Pending as u32,
+            command: Command::Create,
+            credit_request: 1,
+            flags: HeaderFlags::new()
+                .with_server_to_redir(true)
+                .with_async_command(true),
+            next_command: 0,
+            message_id: 7,
+            tree_id: None,
+            async_id: None,
+            session_id: 0x11,
+            signature: 0,
+        };
+        assert!(matches!(
+            interim_async_id(&header),
+            Err(Error::InvalidMessage(_))
+        ));
     }
 }

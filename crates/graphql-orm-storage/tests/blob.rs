@@ -1,6 +1,7 @@
 use bytes::Bytes;
 use graphql_orm_storage::{
     StorageByteStream, StorageError, collect_storage_stream, validate_blob_key,
+    validate_object_bucket,
 };
 
 #[test]
@@ -24,6 +25,33 @@ fn validate_blob_key_rejects_unsafe_keys() {
     ] {
         let err = validate_blob_key(key).expect_err("unsafe key should be rejected");
         assert!(matches!(err, StorageError::InvalidStorageKey { .. }));
+    }
+}
+
+#[test]
+fn validate_blob_key_reserves_the_internal_namespace() {
+    for key in [
+        ".graphql-orm-storage",
+        ".graphql-orm-storage/multipart/upload",
+        ".GRAPHQL-ORM-STORAGE/objects",
+        ".graphql-orm-storage./x",
+        ".graphql-orm-storage /x",
+    ] {
+        let err = validate_blob_key(key).expect_err("reserved key should be rejected");
+        assert!(
+            matches!(err, StorageError::InvalidStorageKey { .. }),
+            "{key}"
+        );
+        assert!(validate_object_bucket(key.split('/').next().unwrap()).is_err());
+    }
+    // Only the first component is reserved; similar names stay available.
+    for key in [
+        "data/.graphql-orm-storage",
+        "data/.graphql-orm-storage/x",
+        ".graphql-orm-storage-old/x",
+        "graphql-orm-storage/x",
+    ] {
+        assert!(validate_blob_key(key).is_ok(), "{key}");
     }
 }
 

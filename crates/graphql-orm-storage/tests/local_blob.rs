@@ -7,6 +7,91 @@ use std::time::Duration;
 use tempfile::TempDir;
 use uuid::Uuid;
 
+#[path = "support/listing_contract.rs"]
+mod listing_contract;
+
+#[tokio::test]
+async fn local_listing_follows_the_provider_prefix_contract() {
+    let temp = TempDir::new().expect("temp dir");
+    let backend = LocalStorageBackend::new(temp.path());
+    // A sibling sharing the base's string prefix stays outside `base/`.
+    backend
+        .put_blob(
+            "base-sibling/a",
+            StorageByteStream::from_bytes(Bytes::from_static(b"x")),
+            BlobPutOptions::default(),
+        )
+        .await
+        .expect("put sibling");
+    listing_contract::prefixes_are_string_prefixes(&backend, "contract").await;
+    assert_eq!(
+        backend.list_blobs("base").await.expect("list"),
+        ["base-sibling/a"]
+    );
+}
+
+#[tokio::test]
+async fn local_reserves_the_internal_namespace() {
+    let temp = TempDir::new().expect("temp dir");
+    let backend = LocalStorageBackend::new(temp.path());
+    std::fs::create_dir_all(temp.path().join(".graphql-orm-storage/multipart"))
+        .expect("internal dir");
+    std::fs::write(
+        temp.path().join(".graphql-orm-storage/multipart/x"),
+        b"internal",
+    )
+    .expect("internal file");
+    listing_contract::the_internal_namespace_is_reserved(&backend).await;
+    assert_eq!(
+        std::fs::read(temp.path().join(".graphql-orm-storage/multipart/x")).expect("read"),
+        b"internal"
+    );
+    assert!(backend.list_blobs("").await.expect("list").is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn local_listing_skips_names_that_are_not_valid_keys() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let temp = TempDir::new().expect("temp dir");
+    let backend = LocalStorageBackend::new(temp.path());
+    backend
+        .put_blob(
+            "dir/kept",
+            StorageByteStream::from_bytes(Bytes::from_static(b"x")),
+            BlobPutOptions::default(),
+        )
+        .await
+        .expect("put");
+    let dir = temp.path().join("dir");
+    // Two distinct non-UTF-8 names would otherwise decode to one lossy key.
+    std::fs::write(dir.join(std::ffi::OsStr::from_bytes(b"bad-\xff")), b"x").expect("write");
+    std::fs::write(dir.join(std::ffi::OsStr::from_bytes(b"bad-\xfe")), b"x").expect("write");
+    std::fs::write(dir.join("back\\slash"), b"x").expect("write");
+    std::fs::create_dir_all(temp.path().join(".GRAPHQL-ORM-STORAGE")).expect("mkdir");
+    std::fs::write(temp.path().join(".GRAPHQL-ORM-STORAGE/x"), b"x").expect("write");
+    let undecodable = temp
+        .path()
+        .join(std::ffi::OsStr::from_bytes(b"undecodable-\xff"));
+    std::fs::create_dir_all(&undecodable).expect("mkdir");
+    std::fs::write(undecodable.join("child"), b"x").expect("write");
+
+    assert_eq!(backend.list_blobs("").await.expect("list"), ["dir/kept"]);
+    assert_eq!(
+        backend.list_blobs("dir/").await.expect("list"),
+        ["dir/kept"]
+    );
+    assert_eq!(
+        backend
+            .list_blobs_page("", None, 1)
+            .await
+            .expect("page")
+            .keys,
+        ["dir/kept"]
+    );
+}
+
 #[tokio::test]
 async fn local_blob_put_get_delete_round_trip() {
     let temp = TempDir::new().expect("temp dir");
@@ -703,18 +788,27 @@ async fn local_blob_paged_listing_is_in_exact_key_order_for_tricky_sibling_names
             );
         }
 
-        // Every directory prefix pages through exactly the keys beneath it.
-        let directories = keys
+        // Every prefix, whether a directory, a directory and its separator, or
+        // a partial name, pages through exactly the keys it string-prefixes.
+        let prefixes = keys
             .iter()
             .flat_map(|key| {
                 let parts = key.split('/').collect::<Vec<_>>();
-                (1..parts.len()).map(move |depth| parts[..depth].join("/"))
+                (1..parts.len())
+                    .flat_map(move |depth| {
+                        let directory = parts[..depth].join("/");
+                        // `.` alone is not a valid component, so not a prefix.
+                        let first = parts[depth].chars().next().expect("component");
+                        let partial = (first != '.').then(|| format!("{directory}/{first}"));
+                        [Some(format!("{directory}/")), partial, Some(directory)]
+                    })
+                    .flatten()
             })
             .collect::<std::collections::BTreeSet<_>>();
-        for prefix in directories {
+        for prefix in prefixes {
             let expected = keys
                 .iter()
-                .filter(|key| key.starts_with(&format!("{prefix}/")))
+                .filter(|key| key.starts_with(&prefix))
                 .cloned()
                 .collect::<Vec<_>>();
             for limit in [1, 2, 3] {

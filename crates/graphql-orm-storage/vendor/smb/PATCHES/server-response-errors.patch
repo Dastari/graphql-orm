@@ -1,0 +1,242 @@
+diff --git a/src/connection/transformer.rs b/src/connection/transformer.rs
+index d5b09e4a..3d5cc62c 100644
+--- a/src/connection/transformer.rs
++++ b/src/connection/transformer.rs
+@@ -323,10 +323,7 @@ impl Transformer {
+             (message, raw)
+         };
+ 
+-        let mut message = match message {
+-            Response::Plain(message) => message,
+-            _ => panic!("Unexpected message type"),
+-        };
++        let mut message = plain_incoming(message)?;
+ 
+         let iovec = IoVec::from(raw);
+         // If fails, return TranformFailed, with message id.
+@@ -482,3 +479,44 @@ pub enum TransformPhase {
+     /// Encryption and decryption.
+     EncryptDecrypt,
+ }
++
++/// Local patch (graphql-orm-storage): the plain message inside an incoming
++/// transform. A transform nested inside a decrypted or decompressed payload
++/// is refused as an invalid message instead of panicking.
++fn plain_incoming(message: Response) -> crate::Result<PlainResponse> {
++    match message {
++        Response::Plain(message) => Ok(message),
++        Response::Encrypted(_) | Response::Compressed(_) => Err(crate::Error::InvalidMessage(
++            "a transform is nested inside a transformed message".to_string(),
++        )),
++    }
++}
++
++#[cfg(test)]
++mod nested_transform_tests {
++    use super::plain_incoming;
++    use smb_msg::Response;
++
++    /// An SMB2 TRANSFORM_HEADER followed by an opaque payload.
++    fn encrypted_transform() -> Vec<u8> {
++        let mut bytes = vec![0xfd, b'S', b'M', b'B'];
++        bytes.extend_from_slice(&[0x11; 16]); // signature
++        bytes.extend_from_slice(&[0x22; 16]); // nonce
++        bytes.extend_from_slice(&8_u32.to_le_bytes()); // original message size
++        bytes.extend_from_slice(&0_u16.to_le_bytes()); // reserved
++        bytes.extend_from_slice(&1_u16.to_le_bytes()); // flags: encrypted
++        bytes.extend_from_slice(&0x11_u64.to_le_bytes()); // session id
++        bytes.extend_from_slice(&[0x33; 8]);
++        bytes
++    }
++
++    #[test]
++    fn a_transform_nested_in_a_payload_is_an_error_not_a_panic() {
++        let nested = Response::try_from(encrypted_transform().as_slice()).unwrap();
++        assert!(matches!(nested, Response::Encrypted(_)));
++        assert!(matches!(
++            plain_incoming(nested),
++            Err(crate::Error::InvalidMessage(_))
++        ));
++    }
++}
+diff --git a/src/connection/worker/worker_trait.rs b/src/connection/worker/worker_trait.rs
+index 4a579cea..162f1de2 100644
+--- a/src/connection/worker/worker_trait.rs
++++ b/src/connection/worker/worker_trait.rs
+@@ -138,12 +138,7 @@ pub trait Worker: Sized + std::fmt::Debug {
+                 msg.message.header.status
+             );
+ 
+-            let async_id = match msg.message.header.async_id {
+-                Some(async_id) => async_id,
+-                None => {
+-                    panic!("Async ID is None, but async command is set. This should not happen.")
+-                }
+-            };
++            let async_id = interim_async_id(&msg.message.header)?;
+ 
+             // The most recent interim names the async ID used for cancellation.
+             // A later interim or final response may carry another async ID: an
+@@ -203,3 +198,42 @@ pub trait Worker: Sized + std::fmt::Debug {
+         self.transformer().session_ended(info).await
+     }
+ }
++
++/// Local patch (graphql-orm-storage): the async ID of an interim response.
++/// An async header without an async ID is refused as an invalid message
++/// instead of panicking.
++fn interim_async_id(header: &smb_msg::Header) -> crate::Result<u64> {
++    header.async_id.ok_or_else(|| {
++        Error::InvalidMessage("an async response header has no async ID".to_string())
++    })
++}
++
++#[cfg(test)]
++mod interim_async_id_tests {
++    use super::interim_async_id;
++    use crate::Error;
++    use smb_msg::{Command, Header, HeaderFlags, Status};
++
++    #[test]
++    fn an_async_header_without_an_async_id_is_an_error_not_a_panic() {
++        let header = Header {
++            credit_charge: 1,
++            status: Status::Pending as u32,
++            command: Command::Create,
++            credit_request: 1,
++            flags: HeaderFlags::new()
++                .with_server_to_redir(true)
++                .with_async_command(true),
++            next_command: 0,
++            message_id: 7,
++            tree_id: None,
++            async_id: None,
++            session_id: 0x11,
++            signature: 0,
++        };
++        assert!(matches!(
++            interim_async_id(&header),
++            Err(Error::InvalidMessage(_))
++        ));
++    }
++}
+diff --git a/src/resource.rs b/src/resource.rs
+index 2785e251..d2339fc8 100644
+--- a/src/resource.rs
++++ b/src/resource.rs
+@@ -179,14 +179,11 @@ impl Resource {
+ 
+         // Construct specific resource and return it.
+ 
+-        let resource = if is_dir {
+-            Resource::Directory(Directory::new(handle))
+-        } else {
+-            match share_type {
+-                ShareType::Disk => Resource::File(File::new(handle, response.endof_file)),
+-                ShareType::Pipe => Resource::Pipe(Pipe::new(handle)),
+-                ShareType::Print => unimplemented!("Printer resources are not yet implemented"),
+-            }
++        // Dropping an unsupported handle closes it.
++        let resource = match resource_kind(is_dir, share_type)? {
++            ResourceKind::Directory => Resource::Directory(Directory::new(handle)),
++            ResourceKind::File => Resource::File(File::new(handle, response.endof_file)),
++            ResourceKind::Pipe => Resource::Pipe(Pipe::new(handle)),
+         };
+         Ok(resource)
+     }
+@@ -935,3 +932,50 @@ impl Drop for ResourceHandle {
+         });
+     }
+ }
++
++/// Local patch (graphql-orm-storage): the resource type an opened handle
++/// becomes.
++#[derive(Debug, PartialEq, Eq)]
++enum ResourceKind {
++    Directory,
++    File,
++    Pipe,
++}
++
++/// Local patch (graphql-orm-storage): a file opened on a printer share is
++/// refused as an unsupported operation instead of panicking.
++fn resource_kind(is_dir: bool, share_type: ShareType) -> crate::Result<ResourceKind> {
++    if is_dir {
++        return Ok(ResourceKind::Directory);
++    }
++    match share_type {
++        ShareType::Disk => Ok(ResourceKind::File),
++        ShareType::Pipe => Ok(ResourceKind::Pipe),
++        ShareType::Print => Err(Error::UnsupportedOperation(
++            "printer share resources are not supported".to_string(),
++        )),
++    }
++}
++
++#[cfg(test)]
++mod resource_kind_tests {
++    use super::{ResourceKind, resource_kind};
++    use crate::Error;
++    use smb_msg::ShareType;
++
++    #[test]
++    fn a_printer_share_file_is_an_error_not_a_panic() {
++        assert_eq!(
++            resource_kind(false, ShareType::Disk).unwrap(),
++            ResourceKind::File
++        );
++        assert_eq!(
++            resource_kind(true, ShareType::Print).unwrap(),
++            ResourceKind::Directory
++        );
++        assert!(matches!(
++            resource_kind(false, ShareType::Print),
++            Err(Error::UnsupportedOperation(_))
++        ));
++    }
++}
+diff --git a/src/session/authenticator.rs b/src/session/authenticator.rs
+index 543f03a6..e01872a2 100644
+--- a/src/session/authenticator.rs
++++ b/src/session/authenticator.rs
+@@ -68,8 +68,7 @@ impl Authenticator {
+     pub fn session_key(&self) -> crate::Result<[u8; 16]> {
+         // Use the first 16 bytes of the session key.
+         let key_info = self.ssp.query_context_session_key()?;
+-        let k = &key_info.session_key.as_ref()[..16];
+-        Ok(k.try_into().unwrap())
++        session_key_prefix(key_info.session_key.as_ref())
+     }
+ 
+     fn make_sspi_target_name(server_fqdn: &str) -> String {
+@@ -165,3 +164,30 @@ impl Authenticator {
+         format!("{ntlm_config},{krb_pku2u_config}")
+     }
+ }
++
++/// Local patch (graphql-orm-storage): the first 16 bytes of a session key.
++/// A shorter key is refused instead of panicking. MS-SMB2 3.2.5.3.1 would
++/// right-pad it with zeros; this client fails closed rather than derive
++/// signing and encryption keys from a short key.
++fn session_key_prefix(key: &[u8]) -> crate::Result<[u8; 16]> {
++    key.get(..16)
++        .and_then(|prefix| prefix.try_into().ok())
++        .ok_or_else(|| Error::InvalidState("the session key is shorter than 16 bytes".to_string()))
++}
++
++#[cfg(test)]
++mod session_key_tests {
++    use super::session_key_prefix;
++    use crate::Error;
++
++    #[test]
++    fn a_short_session_key_is_an_error_not_a_panic() {
++        let key: Vec<u8> = (0..32).collect();
++        assert_eq!(session_key_prefix(&key).unwrap().as_slice(), &key[..16]);
++        assert!(session_key_prefix(&key[..16]).is_ok());
++        assert!(matches!(
++            session_key_prefix(&key[..8]),
++            Err(Error::InvalidState(_))
++        ));
++    }
++}

@@ -22,7 +22,9 @@ use crate::{
     validate_blob_key, validate_object_bucket,
 };
 
-pub(crate) const INTERNAL_STORAGE_DIR: &str = ".graphql-orm-storage";
+/// Internal staging and metadata directory at the root. Caller keys cannot
+/// address it: [`validate_blob_key`] reserves its name.
+pub(crate) const INTERNAL_STORAGE_DIR: &str = crate::blob::INTERNAL_NAMESPACE;
 const OBJECT_METADATA_DIR: &str = "object-metadata";
 /// Most directories a backend remembers as durable before it forgets them all.
 const MAX_DURABLE_DIRS: usize = 4_096;
@@ -564,15 +566,14 @@ impl StreamingObjectStore for LocalStorageBackend {
     ) -> Result<Vec<ObjectInfo>, StorageError> {
         validate_object_bucket(bucket)?;
         crate::blob::validate_blob_prefix(prefix)?;
-        let start = if prefix.is_empty() {
-            self.root.join(bucket)
-        } else {
-            self.root.join(bucket).join(prefix)
-        };
+        let base = self.root.join(bucket);
         let mut objects = Vec::new();
-        let mut stack = vec![start];
+        let mut stack = vec![listing_start(&base, prefix)];
 
         while let Some(path) = stack.pop() {
+            let Some(key) = listed_key(&base, &path) else {
+                continue;
+            };
             let metadata = match tokio::fs::metadata(&path).await {
                 Ok(metadata) => metadata,
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
@@ -580,18 +581,15 @@ impl StreamingObjectStore for LocalStorageBackend {
             };
 
             if metadata.is_file() {
-                if is_uploading_temp_file(&path) {
-                    continue;
-                }
-                let Some(key) = self.key_for_bucket_path(bucket, &path) else {
-                    continue;
-                };
-                if !key.starts_with(prefix) {
+                if is_uploading_temp_file(&path) || !key.starts_with(prefix) {
                     continue;
                 }
                 if let Ok(info) = self.get_object_metadata(bucket, &key).await {
                     objects.push(info);
                 }
+                continue;
+            }
+            if !directory_may_match(&key, prefix) {
                 continue;
             }
 
@@ -705,22 +703,18 @@ impl LocalStorageBackend {
     ) -> Result<Vec<String>, StorageError> {
         crate::blob::validate_blob_prefix(prefix)?;
 
-        let start = if prefix.is_empty() {
-            self.root.clone()
-        } else {
-            self.root.join(prefix)
-        };
-
         let mut page = Vec::with_capacity(limit);
-        let mut stack = vec![start];
+        let mut stack = vec![listing_start(&self.root, prefix)];
 
         while let Some(path) = stack.pop() {
             if page.len() == limit {
                 break;
             }
-            if is_internal_storage_path(&self.root, &path) {
+            // Skips the reserved internal namespace and any name that is not
+            // a valid key, with everything below it.
+            let Some(key) = listed_key(&self.root, &path) else {
                 continue;
-            }
+            };
 
             let metadata = match tokio::fs::metadata(&path).await {
                 Ok(metadata) => metadata,
@@ -729,23 +723,24 @@ impl LocalStorageBackend {
             };
 
             if metadata.is_file() {
-                if is_uploading_temp_file(&path) {
+                if is_uploading_temp_file(&path)
+                    || !key.starts_with(prefix)
+                    || continuation.is_some_and(|token| key.as_str() <= token)
+                {
                     continue;
                 }
-                if let Some(key) = self.key_for_path(&path) {
-                    if continuation.is_some_and(|token| key.as_str() <= token) {
-                        continue;
-                    }
-                    page.push(key);
-                }
+                page.push(key);
+                continue;
+            }
+            if !directory_may_match(&key, prefix) {
                 continue;
             }
 
             // Every key below this directory starts with `<directory>/`. When
             // that prefix sorts before the token and does not contain it, the
             // whole subtree precedes the continuation.
-            if let (Some(token), Some(directory)) = (continuation, self.key_for_path(&path)) {
-                let directory = format!("{directory}/");
+            if let Some(token) = continuation {
+                let directory = format!("{key}/");
                 if directory.len() > 1
                     && directory.as_str() < token
                     && !token.starts_with(&directory)
@@ -760,18 +755,44 @@ impl LocalStorageBackend {
 
         Ok(page)
     }
+}
 
-    fn key_for_path(&self, path: &Path) -> Option<String> {
-        path.strip_prefix(&self.root)
-            .ok()
-            .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+/// The directory a listing for `prefix` starts from: the prefix up to its
+/// last `/`, below `base`. Every key the prefix matches lies below it.
+fn listing_start(base: &Path, prefix: &str) -> PathBuf {
+    match prefix.rfind('/') {
+        Some(index) => base.join(&prefix[..index]),
+        None => base.to_path_buf(),
     }
+}
 
-    fn key_for_bucket_path(&self, bucket: &str, path: &Path) -> Option<String> {
-        path.strip_prefix(self.root.join(bucket))
-            .ok()
-            .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+/// The key `path` has below `base`, or `None` when no valid key names it: a
+/// name that is not valid UTF-8 or that [`validate_blob_key`] refuses, such
+/// as the reserved internal namespace. Every key below such a directory
+/// would contain the same component, so its whole subtree is skipped. `base`
+/// itself has the empty key.
+fn listed_key(base: &Path, path: &Path) -> Option<String> {
+    let relative = path.strip_prefix(base).ok()?;
+    let mut key = String::new();
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return None;
+        };
+        if !key.is_empty() {
+            key.push('/');
+        }
+        key.push_str(name.to_str()?);
     }
+    (key.is_empty() || validate_blob_key(&key).is_ok()).then_some(key)
+}
+
+/// Whether keys below the directory `key` may start with `prefix`.
+fn directory_may_match(key: &str, prefix: &str) -> bool {
+    if key.is_empty() {
+        return true;
+    }
+    let directory = format!("{key}/");
+    directory.starts_with(prefix) || prefix.starts_with(&directory)
 }
 
 impl LocalStorageBackend {
@@ -956,13 +977,6 @@ fn is_uploading_temp_file(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(is_temp_file_name)
-}
-
-fn is_internal_storage_path(root: &Path, path: &Path) -> bool {
-    path.strip_prefix(root)
-        .ok()
-        .and_then(|relative| relative.components().next())
-        .is_some_and(|component| component.as_os_str() == INTERNAL_STORAGE_DIR)
 }
 
 fn is_older_than(metadata: &std::fs::Metadata, now: SystemTime, older_than: Duration) -> bool {

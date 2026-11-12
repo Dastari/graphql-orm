@@ -3,7 +3,7 @@ title: "graphql-orm-storage Agent Guide"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-08-10
+last_reviewed: 2026-11-12
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -78,6 +78,18 @@ This crate is a reusable storage companion for applications that use `graphql-or
   limits rather than returning a partial result. Never adopt a changed server
   GUID on reconnect; the pin is checked during negotiation, before session
   setup sends credentials.
+
+- Keep one listing contract on every provider: a prefix is a plain string
+  prefix, optionally ending in `/`, and a listing returns only keys
+  `validate_blob_key` accepts. Skipping an unaddressable name (not valid
+  UTF-8/UTF-16, or refused by `validate_blob_key`) is not a partial listing;
+  a directory that enumeration reported but cannot be opened still fails it.
+  Run `tests/support/listing_contract.rs` against every provider.
+- `validate_blob_key` reserves the internal `.graphql-orm-storage` namespace
+  as a key's first component and as a bucket. Internal code addresses it by
+  path, never through a caller key.
+- The SMB default minimum dialect is SMB 3.1.1. Never lower the default; a
+  lower dialect is an explicit host opt-in.
 
 - Lock release requires explicit single-attempt deletion through
   `delete_blob_once`; never fall back to retrying ordinary deletion after a

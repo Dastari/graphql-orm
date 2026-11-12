@@ -1371,7 +1371,7 @@ async fn all_blobs(repository: &dyn BackupRepository) -> Vec<(String, Bytes)> {
 
 async fn snapshot_blobs(repository: &dyn BackupRepository, snapshot_id: Uuid) -> Vec<String> {
     repository
-        .list_blobs(&format!("snapshots/{snapshot_id}"))
+        .list_blobs(&format!("snapshots/{snapshot_id}/"))
         .await
         .expect("list")
 }
@@ -1910,4 +1910,75 @@ impl BackupRepository for ReadOnly {
     async fn delete_blob(&self, _key: &str) -> Result<(), BackupError> {
         Err(read_only_error())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Listing prefixes are string prefixes: deletion stays inside its directory
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn prune_deletes_only_inside_the_expired_snapshot_and_content_directories() {
+    let temp = TempDir::new().expect("temp dir");
+    let repository = repository(&temp);
+    full(&repository, id(1), 1, &Database::with_rows("users", 1)).await;
+    full(&repository, id(2), 2, &Database::with_rows("users", 1)).await;
+    // Siblings that share the expired snapshot's and the content
+    // directory's string prefix, but lie outside those directories.
+    let foreign = [
+        format!("snapshots/{}-copy/notes.txt", id(1)),
+        "objects/sha256-legacy/notes.txt".to_string(),
+    ];
+    for key in &foreign {
+        repository
+            .put_blob(key, Bytes::from_static(b"foreign"))
+            .await
+            .expect("foreign blob");
+    }
+
+    let result = prune(
+        &repository,
+        &KeepPolicy {
+            keep_last: 1,
+            ..KeepPolicy::default()
+        },
+    )
+    .await
+    .expect("prune");
+
+    assert_eq!(result.deleted_snapshots, 1);
+    assert!(snapshot_blobs(&repository, id(1)).await.is_empty());
+    for key in &foreign {
+        assert!(
+            repository.blob_exists(key).await.expect("exists"),
+            "{key} lies outside every pruned directory"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_prefixed_repository_lists_only_keys_below_its_prefix() {
+    use graphql_orm_backup::BlobStoreBackupRepository;
+    use graphql_orm_storage::{BlobPutOptions, BlobStore, LocalStorageBackend};
+
+    let temp = TempDir::new().expect("temp dir");
+    let store = Arc::new(LocalStorageBackend::new(temp.path()));
+    for key in ["repo/snapshots/a", "repo-other/snapshots/b", "repository/c"] {
+        store
+            .put_blob(
+                key,
+                StorageByteStream::from_bytes(Bytes::from_static(b"x")),
+                BlobPutOptions::default(),
+            )
+            .await
+            .expect("put");
+    }
+    let repository = BlobStoreBackupRepository::with_prefix(store, "repo").expect("prefix");
+    assert_eq!(
+        repository.list_blobs("").await.expect("list"),
+        ["snapshots/a"]
+    );
+    assert_eq!(
+        repository.list_blobs("snapshots").await.expect("list"),
+        ["snapshots/a"]
+    );
 }

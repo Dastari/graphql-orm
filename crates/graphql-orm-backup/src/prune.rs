@@ -4,7 +4,8 @@ use uuid::Uuid;
 
 use crate::{
     BackupError, BackupRepository, BackupSnapshotManifest, RepositoryLock, RepositoryLockOptions,
-    load_manifest, load_manifest_chain, manifest::required_authenticator, snapshot_manifest_key,
+    backup::snapshot_blob_keys, load_manifest, load_manifest_chain,
+    manifest::required_authenticator, snapshot_manifest_key,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -123,10 +124,7 @@ async fn prune_inner(
 
     let mut deleted_blobs = 0_usize;
     for snapshot_id in &expired_ids {
-        for key in repository
-            .list_blobs(&format!("snapshots/{snapshot_id}"))
-            .await?
-        {
+        for key in snapshot_blob_keys(repository, *snapshot_id).await? {
             repository.delete_blob(&key).await?;
             deleted_blobs += 1;
         }
@@ -135,7 +133,7 @@ async fn prune_inner(
     ensure_stable_listing(repository, &retained_ids).await?;
     let deleted_orphan_blobs = delete_orphaned_payloads(repository, &retained_ids).await?;
     deleted_blobs += deleted_orphan_blobs;
-    for key in repository.list_blobs("objects/sha256").await? {
+    for key in content_blob_keys(repository).await? {
         if !reachable_content_keys.contains(&key) {
             repository.delete_blob(&key).await?;
             deleted_blobs += 1;
@@ -245,10 +243,7 @@ async fn delete_snapshot_inner(
     }
 
     let mut deleted_blobs = 0_usize;
-    for key in repository
-        .list_blobs(&format!("snapshots/{snapshot_id}"))
-        .await?
-    {
+    for key in snapshot_blob_keys(repository, snapshot_id).await? {
         repository.delete_blob(&key).await?;
         deleted_blobs += 1;
     }
@@ -266,7 +261,7 @@ async fn delete_snapshot_inner(
         .filter(|id| *id != snapshot_id)
         .collect::<HashSet<_>>();
     ensure_stable_listing(repository, &remaining_ids).await?;
-    for key in repository.list_blobs("objects/sha256").await? {
+    for key in content_blob_keys(repository).await? {
         if !reachable_content_keys.contains(&key) {
             repository.delete_blob(&key).await?;
             deleted_blobs += 1;
@@ -368,6 +363,15 @@ fn incomplete_listing(detail: String) -> BackupError {
             "snapshot listing is incomplete; refusing to delete snapshots or objects: {detail}"
         ),
     }
+}
+
+/// Every stored blob below the content directory, `objects/sha256/`. A
+/// listing prefix is a string prefix, so siblings such as
+/// `objects/sha256-legacy/` are filtered out before anything is deleted.
+async fn content_blob_keys(repository: &dyn BackupRepository) -> Result<Vec<String>, BackupError> {
+    let mut keys = repository.list_blobs("objects/sha256").await?;
+    keys.retain(|key| key.starts_with("objects/sha256/"));
+    Ok(keys)
 }
 
 fn snapshot_id_from_manifest_key(key: &str) -> Option<Uuid> {

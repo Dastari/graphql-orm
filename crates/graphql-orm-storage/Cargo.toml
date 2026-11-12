@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm-storage"
-version = "0.9.3"
+version = "0.10.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Dastari/graphql-orm"
@@ -58,6 +58,10 @@ uuid = { version = "1", features = ["serde", "v4"] }
 serde_json = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread"] }
+
+[[example]]
+name = "local_storage"
+required-features = ["local"]
 
 [[test]]
 name = "local_round_trip"

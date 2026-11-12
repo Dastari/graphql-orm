@@ -262,3 +262,73 @@ async fn local_streaming_object_keys_ending_in_uploading_are_listed() {
         Err(StorageError::InvalidStorageKey { .. })
     ));
 }
+
+#[tokio::test]
+async fn local_streaming_object_reserves_the_internal_namespace_as_a_bucket() {
+    let temp = TempDir::new().expect("temp dir");
+    let backend = LocalStorageBackend::new(temp.path());
+    for bucket in [".graphql-orm-storage", ".Graphql-Orm-Storage"] {
+        let err = backend
+            .put_object_stream(
+                bucket,
+                "objects/recordings/x.metadata.json",
+                None,
+                ObjectMetadata::new(),
+                StorageByteStream::from_bytes(Bytes::from_static(b"{}")),
+            )
+            .await
+            .expect_err("reserved bucket");
+        assert!(matches!(err, StorageError::InvalidStorageKey { .. }));
+        assert!(matches!(
+            backend.list_objects(bucket, "").await,
+            Err(StorageError::InvalidStorageKey { .. })
+        ));
+    }
+    assert!(!temp.path().join(".graphql-orm-storage/objects").exists());
+}
+
+#[tokio::test]
+async fn local_streaming_object_listing_prefixes_are_string_prefixes() {
+    let temp = TempDir::new().expect("temp dir");
+    let backend = LocalStorageBackend::new(temp.path());
+    for key in [
+        "sessions/gamma/a",
+        "sessions/gamut",
+        "sessions/g/b",
+        "other/x",
+    ] {
+        backend
+            .put_object_stream(
+                "recordings",
+                key,
+                None,
+                ObjectMetadata::new(),
+                StorageByteStream::from_bytes(Bytes::from_static(b"x")),
+            )
+            .await
+            .expect("put");
+    }
+    let keys = |prefix: &'static str| {
+        let backend = &backend;
+        async move {
+            backend
+                .list_objects("recordings", prefix)
+                .await
+                .expect("list")
+                .into_iter()
+                .map(|object| object.key)
+                .collect::<Vec<_>>()
+        }
+    };
+    assert_eq!(
+        keys("sessions/g").await,
+        ["sessions/g/b", "sessions/gamma/a", "sessions/gamut"]
+    );
+    assert_eq!(keys("sessions/g/").await, ["sessions/g/b"]);
+    assert_eq!(
+        keys("sessions/gam").await,
+        ["sessions/gamma/a", "sessions/gamut"]
+    );
+    assert_eq!(keys("sessions/gamut").await, ["sessions/gamut"]);
+    assert!(keys("sessions/gamut/").await.is_empty());
+}

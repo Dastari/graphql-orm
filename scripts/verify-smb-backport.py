@@ -17,6 +17,8 @@ LOCAL_PATCHES = (
      '43e3a9ad68936fe5b0a675caf890edfaf7099904604d4c91cfbc7ca3a881a0e6'),
     ('resource-bounds-and-server-identity', 'PATCHES/resource-bounds-and-server-identity.patch',
      'd400954a1d448b4bc5aa8bb28cc3c67bf1ee85e8ac4ceff2133b6a265a0114d6'),
+    ('server-response-errors', 'PATCHES/server-response-errors.patch',
+     'b9af0849e6bce3afde4e26309218bf25324cb522cd314464caa9df87b34a46a1'),
 )
 LICENSE = '59889992272e339d6af995962dca57cb4565c364255f9a453b0f6f20b0365816'
 ROOT = Path(__file__).resolve().parents[1]

@@ -3,7 +3,7 @@ title: "BlobStore"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-10-31
+last_reviewed: 2026-11-12
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -113,7 +113,29 @@ versions before 0.9.1, named `<name>.<uuid>.uploading`, are indistinguishable
 from stored objects and are neither hidden nor swept; see the
 [migration guide](../MIGRATION.md).
 
-## Listing order and durability
+## Listing prefixes, order and durability
+
+A listing prefix is a plain string prefix of the key on every provider:
+
+| Prefix | Lists | Does not list |
+| --- | --- | --- |
+| `a` | `a/x`, `a-b/x`, `a.b`, `ab` | `b/a` |
+| `a/` | `a/x`, `a/y/z` | `a-b/x`, `ab` |
+| `a/y` | `a/y/z` | `a/x` |
+
+An empty prefix lists every key. A non-empty prefix must be a valid key,
+optionally followed by one `/`; use the trailing `/` to list one directory and
+nothing beside it. Local listings start at the deepest directory the prefix
+names, so a prefix costs no more than walking that directory. The shared
+provider test in `tests/support/listing_contract.rs` runs the same prefix
+cases against the local, S3 and SMB backends.
+
+Listings return only keys the provider accepts: a stored name that is not a
+valid key is skipped, with everything below it. That covers names that are not
+valid UTF-8 (local) or UTF-16 (SMB), names `validate_blob_key` refuses, such
+as a local file whose name contains `\`, S3 folder markers ending in `/`, and
+the reserved internal namespace. A listed key therefore always opens the
+object it names.
 
 Listings return keys in ascending lexicographic order of their UTF-8 bytes,
 and a continuation resumes after the last key returned in that order. Every
@@ -180,6 +202,16 @@ Blob keys are `/`-separated relative keys. `validate_blob_key` rejects:
 - backslashes
 - NUL bytes
 - platform prefix components
+- a first component naming the reserved internal namespace,
+  `.graphql-orm-storage`, in any ASCII case and with or without trailing dots
+  or spaces
+
+The local backend keeps multipart staging and object metadata under
+`<root>/.graphql-orm-storage/`. Reserving the name on every provider keeps
+callers from reading, overwriting or listing that state, and keeps keys
+portable between providers. The name is reserved only as a key's first
+component and as a streaming-object bucket: `data/.graphql-orm-storage/x`
+is an ordinary key.
 
 `list_blobs("")` is allowed and lists all blobs.
 

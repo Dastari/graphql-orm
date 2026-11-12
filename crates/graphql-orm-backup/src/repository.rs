@@ -223,14 +223,16 @@ impl BlobStoreBackupRepository {
         }
     }
 
-    fn strip_prefix(&self, key: String) -> String {
+    /// The repository-relative key, or `None` for a key outside the
+    /// repository prefix: a listing prefix is a string prefix, so listing
+    /// `repo` also finds `repo-other/...`.
+    fn strip_prefix(&self, key: String) -> Option<String> {
         let Some(prefix) = &self.prefix else {
-            return key;
+            return Some(key);
         };
         key.strip_prefix(prefix)
             .and_then(|rest| rest.strip_prefix('/'))
-            .unwrap_or(&key)
-            .to_string()
+            .map(ToString::to_string)
     }
 }
 
@@ -336,7 +338,10 @@ impl BackupRepository for BlobStoreBackupRepository {
             .store
             .list_blobs(&self.apply_prefix_to_list(prefix))
             .await?;
-        Ok(keys.into_iter().map(|key| self.strip_prefix(key)).collect())
+        Ok(keys
+            .into_iter()
+            .filter_map(|key| self.strip_prefix(key))
+            .collect())
     }
 
     async fn delete_blob(&self, key: &str) -> Result<(), BackupError> {

@@ -68,8 +68,7 @@ impl Authenticator {
     pub fn session_key(&self) -> crate::Result<[u8; 16]> {
         // Use the first 16 bytes of the session key.
         let key_info = self.ssp.query_context_session_key()?;
-        let k = &key_info.session_key.as_ref()[..16];
-        Ok(k.try_into().unwrap())
+        session_key_prefix(key_info.session_key.as_ref())
     }
 
     fn make_sspi_target_name(server_fqdn: &str) -> String {
@@ -163,5 +162,32 @@ impl Authenticator {
         };
         let ntlm_config = if config.ntlm { "ntlm" } else { "!ntlm" };
         format!("{ntlm_config},{krb_pku2u_config}")
+    }
+}
+
+/// Local patch (graphql-orm-storage): the first 16 bytes of a session key.
+/// A shorter key is refused instead of panicking. MS-SMB2 3.2.5.3.1 would
+/// right-pad it with zeros; this client fails closed rather than derive
+/// signing and encryption keys from a short key.
+fn session_key_prefix(key: &[u8]) -> crate::Result<[u8; 16]> {
+    key.get(..16)
+        .and_then(|prefix| prefix.try_into().ok())
+        .ok_or_else(|| Error::InvalidState("the session key is shorter than 16 bytes".to_string()))
+}
+
+#[cfg(test)]
+mod session_key_tests {
+    use super::session_key_prefix;
+    use crate::Error;
+
+    #[test]
+    fn a_short_session_key_is_an_error_not_a_panic() {
+        let key: Vec<u8> = (0..32).collect();
+        assert_eq!(session_key_prefix(&key).unwrap().as_slice(), &key[..16]);
+        assert!(session_key_prefix(&key[..16]).is_ok());
+        assert!(matches!(
+            session_key_prefix(&key[..8]),
+            Err(Error::InvalidState(_))
+        ));
     }
 }
