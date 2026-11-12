@@ -15,6 +15,13 @@ Hosts that pass Auth types must select the same tag. ORM behavior is unchanged
 and no data migration is needed. Upgrade ORM/macros together; see the
 [root migration guide](../../MIGRATION.md#01250-to-01260-agql-auth-0260).
 
+Version 0.126.0 enforces row policy on the rows generated writes target,
+write and return. The written row must satisfy `can_write_row`, update and
+upsert payloads release the row only to callers who may read it, and GraphQL
+writes treat rows the caller can neither read nor write as missing. Upgrade
+ORM/macros together; see the
+[root migration guide](../../MIGRATION.md#01260-row-policy-on-the-rows-generated-writes-target-write-and-return).
+
 Version 0.125.0 records PostgreSQL change-journal entries in the database
 instead of the runtime role, and journaled writes require the recorder
 trigger. Upgrade ORM/macros together; see the

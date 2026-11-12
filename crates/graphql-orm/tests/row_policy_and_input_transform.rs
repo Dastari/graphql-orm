@@ -405,28 +405,35 @@ async fn row_policy_filters_reads_and_write_transform_injects_server_fields()
         actor_a_bulk_update.errors
     );
     let actor_a_bulk_update_json = actor_a_bulk_update.data.into_json()?;
+    // The admin-owned row is neither readable nor writable for actor-a, so it is
+    // left out of the matched set exactly as if it did not exist.
     assert_eq!(
         actor_a_bulk_update_json["updateScopedCollections"]["success"].as_bool(),
-        Some(false),
-        "a bulk mutation must reject the entire locked key set when any row is unauthorized"
+        Some(true),
+        "{actor_a_bulk_update_json}"
+    );
+    assert_eq!(
+        actor_a_bulk_update_json["updateScopedCollections"]["affectedCount"].as_i64(),
+        Some(1),
+        "a bulk update must leave out rows the caller can neither read nor write"
     );
     let first_after_bulk =
         ScopedCollection::get(&pool, &graphql_orm::uuid::Uuid::parse_str(&created_id)?)
             .await?
-            .expect("first row missing after rejected bulk update");
+            .expect("first row missing after bulk update");
     let second_after_bulk = ScopedCollection::get(
         &pool,
         &graphql_orm::uuid::Uuid::parse_str(&second_created_id)?,
     )
     .await?
-    .expect("second row missing after rejected bulk update");
-    assert_eq!(first_after_bulk.name, "Renamed");
+    .expect("second row missing after bulk update");
+    assert_eq!(first_after_bulk.name, "BulkBlocked");
     assert_eq!(second_after_bulk.name, "Bravo");
 
     let actor_a_bulk_delete = actor_a_schema
         .execute(
             "mutation {
-                deleteScopedCollections(where: { name: { contains: \"a\" } }) {
+                deleteScopedCollections(where: { name: { eq: \"Bravo\" } }) {
                     success
                     error
                     deletedCount
@@ -441,14 +448,9 @@ async fn row_policy_filters_reads_and_write_transform_injects_server_fields()
     );
     let actor_a_bulk_delete_json = actor_a_bulk_delete.data.into_json()?;
     assert_eq!(
-        actor_a_bulk_delete_json["deleteScopedCollections"]["success"].as_bool(),
-        Some(false),
-        "a bulk delete must reject the entire locked key set when any row is unauthorized"
-    );
-    assert!(
-        ScopedCollection::get(&pool, &graphql_orm::uuid::Uuid::parse_str(&created_id)?)
-            .await?
-            .is_some()
+        actor_a_bulk_delete_json["deleteScopedCollections"]["deletedCount"].as_i64(),
+        Some(0),
+        "a bulk delete must leave out rows the caller can neither read nor write"
     );
     assert!(
         ScopedCollection::get(

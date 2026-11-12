@@ -986,7 +986,17 @@ async fn a_declared_policy_key_needs_entity_and_row_providers() {
 
     let mut with_entity_policy = db.clone();
     with_entity_policy.set_entity_policy(RecordingEntityPolicy::default());
-    let secured = Secured::insert(&with_entity_policy, CreateSecuredInput { name: "a".into() })
+    // Creates check the written row too, so they need the row provider as well.
+    let error = Secured::insert(&with_entity_policy, CreateSecuredInput { name: "a".into() })
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("AUTHORIZATION_MISCONFIGURED"),
+        "{error}"
+    );
+    let mut with_both = with_entity_policy.clone();
+    with_both.set_row_policy(HiddenCustomers);
+    let secured = Secured::insert(&with_both, CreateSecuredInput { name: "a".into() })
         .await
         .unwrap();
     let error = Secured::update_by_id(
@@ -1010,6 +1020,7 @@ async fn custom_resolvers_reach_policies_with_no_request_context() {
     let log = policy.0.clone();
     let mut db = database().await;
     db.set_entity_policy(policy);
+    db.set_row_policy(HiddenCustomers);
     let schema = schema_builder(db.clone()).finish();
     let secured = Secured::insert(&db, CreateSecuredInput { name: "a".into() })
         .await

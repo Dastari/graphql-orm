@@ -3,7 +3,7 @@ title: "Runtime, Writes, And Policies"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-06
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -205,7 +205,9 @@ Use these flags for legacy columns, generated columns, audit fields, and databas
 
 Runtime policies let applications enforce access control around generated operations.
 
-- `RowPolicy` can constrain read queries.
+- `RowPolicy` constrains read queries, the existing rows generated writes may target, the rows
+  they write and the rows their payloads return. See
+  [row policy on generated writes](strict-authorization.md#row-policy-on-generated-writes).
 - `FieldPolicy` can hide or reject field access.
 - `EntityPolicy` can allow or reject entity-level operations.
 - `WriteInputTransform` can normalize write inputs before generated SQL runs.
@@ -322,7 +324,7 @@ A generated write runs in this order, after its entity and row policy checks:
 
 1. `WriteInputTransform`, for creates, updates and upserts. Deletes have no transform.
 2. The `Before` hook, inside the transaction.
-3. The write.
+3. The write, then `RowPolicy::can_write_row` on the row as written, for creates, updates and upserts.
 4. The `After` hook, inside the transaction.
 5. Commit. An error from either hook rolls back instead.
 6. Queued `Changed` events.

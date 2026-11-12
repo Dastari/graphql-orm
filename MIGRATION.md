@@ -89,6 +89,76 @@ Choosing the in-place path for a restored store re-opens consumed approvals.
 See the
 [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01270-to-01280-enforced-runtime-closure-after-restore).
 
+## 0.126.0: row policy on the rows generated writes target, write and return
+
+Upgrade runtime and macros together. No schema or data migration is required.
+Review hosts that install a `RowPolicy`; nothing changes without one, or with a
+policy that allows every write.
+
+**The written row must be writable.** `can_write_row` now also receives the
+row as a generated create, update, upsert or bulk update wrote it, before the
+`After` hook, and a refusal rolls the write back with `FORBIDDEN`. This applies
+to GraphQL, repository and transaction writes on every key shape. A policy that
+allowed creating or moving rows it would refuse to write afterwards now refuses
+those writes. For example, a tenant check over a client-writable tenant column
+now rejects a create or update that sets another tenant. Repository and hook
+writes call the policy with `ctx = None` and `EntityAccessSurface::Repository`
+for the new row too, so a policy that refuses that surface now also refuses
+repository creates. Allow the rows the host writes there, or write them through
+a path the policy allows. Dependent-delete `set_null` updates check the nulled
+child row as well. A refused written row also blocks the commit of a
+caller-owned transaction: `commit_and_emit` rolls back and returns `FORBIDDEN`,
+and `Database::transaction` returns `TransactionError::Rejected` with
+`FORBIDDEN`, even when the caller ignored the error. A generated write that
+fails after changing rows, such as an `After` hook refusal, now also leaves a
+caller-owned transaction uncommittable. Hosts that caught such errors and
+committed anyway must roll back instead.
+
+**A `write_policy` needs a row provider in every mode.** An entity that
+declares an entity-level `write_policy` uses it as its row write policy key.
+In every `AuthorizationMode`, its generated creates, updates, upserts, deletes
+and bulk writes now fail with `AUTHORIZATION_MISCONFIGURED` before any lookup
+when no `RowPolicy` is installed. So do retention purges, and dependent
+deletes check every registered entity before selecting any row. Install one; a provider that allows the rows
+of entities without row isolation is enough. Most affected:
+
+- **Create-only and append-only entities** that declare only an entity-level
+  `write_policy` and run without a row provider. Their creates previously
+  succeeded in every mode, and now fail.
+- **`LegacyPermissive` databases** without a row provider. Their writes of
+  these entities were previously allowed.
+- **`ExplicitPolicyForAllExposedOperations` databases** without a row
+  provider. Updates and deletes of these entities previously returned
+  `FORBIDDEN`, or "Entity not found" for an absent id, and now return
+  `AUTHORIZATION_MISCONFIGURED`.
+
+Under `DeclaredPoliciesRequired`, updates and deletes already failed this way
+after their lookup; they now fail before it, and creates fail too.
+
+**Payloads need read access.** Generated GraphQL update and upsert payloads
+release the committed row only to callers who may read it. When `can_read_row`
+refuses the row, the entity field is `null` and `success` stays `true`. When
+the caller lacks entity read access, the mutation field fails with an error
+carrying `extensions.outcome = "committed"` and is `null` as a whole. So a
+principal with entity-level write access but no read access that selects the
+entity now gets an error. Such clients must select only `success`, and read the
+row through a query they are allowed to make.
+
+**Hidden rows look missing.** A generated GraphQL update or delete of a row the
+caller can neither read nor write now returns `success: false` with
+`error: "Entity not found"` instead of a `FORBIDDEN` error. `updateMany` and
+`deleteMany` leave such rows out instead of failing with `errorCode =
+"FORBIDDEN"`, so a filter that matched them now succeeds for the caller's other
+rows. A bulk write that relied on such a row to refuse the whole operation
+needs a narrower filter or a host-side check. Readable rows the caller may not
+write still refuse as before. `can_read_row` (and the entity read policy) now
+run for each targeted row that `can_write_row` refuses, so both must be cheap
+and side-effect free. Repository helpers are unchanged here. For a dependent
+delete only the root row is treated this way. A hidden dependent child still
+makes the whole delete refuse with `Dependent delete refused`.
+
+See [row policy on generated writes](docs/reference/graphql-orm/strict-authorization.md#row-policy-on-generated-writes).
+
 ## 0.125.0: PostgreSQL records change-journal entries in the database
 
 Upgrade runtime and macros together. This affects PostgreSQL deployments that

@@ -119,6 +119,7 @@ run_postgres_legacy() {
     --test relation_delete_policy \
     --test renamed_columns \
     --test row_policy_and_input_transform \
+    --test row_write_tracker \
     --test schema_only_entity \
     --test schema_stages \
     --test spatial_fields \

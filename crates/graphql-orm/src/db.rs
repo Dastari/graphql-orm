@@ -1348,6 +1348,126 @@ impl<B: OrmBackend> Database<B> {
         }
     }
 
+    /// Require a row policy provider for an entity that declares a write policy.
+    ///
+    /// Generated writes call this before any target lookup. A declared entity
+    /// `write_policy` is also the row write policy key, so a missing provider is
+    /// a misconfiguration in every [`AuthorizationMode`].
+    pub fn ensure_row_write_provider(
+        &self,
+        entity_name: &'static str,
+        write_policy: Option<&'static str>,
+    ) -> async_graphql::Result<()> {
+        if write_policy.is_some() && self.row_policy.is_none() {
+            return Err(OrmPublicError::new(OrmErrorCode::AuthorizationMisconfigured)
+                .with_internal(format!(
+                    "entity {entity_name} declares a row write policy key but no row policy provider is registered"
+                ))
+                .into_graphql_error());
+        }
+        Ok(())
+    }
+
+    /// Decide whether a write may target an existing row it selected.
+    ///
+    /// Returns `Ok(true)` when [`Self::can_write_row`] allows the row. On the
+    /// [`GraphqlMutation`](crate::graphql::orm::EntityAccessSurface::GraphqlMutation)
+    /// surface, a row the caller can neither write nor read (entity read access
+    /// and [`Self::can_read_row`]) returns `Ok(false)`: generated mutations treat
+    /// it exactly like a missing row, so the response does not depend on rows the
+    /// caller cannot see. A readable row the caller may not write, and an
+    /// unwritable row on any other surface, returns the forbidden error.
+    pub async fn authorize_write_target(
+        &self,
+        ctx: Option<&async_graphql::Context<'_>>,
+        entity_name: &'static str,
+        read_policy: Option<&'static str>,
+        write_policy: Option<&'static str>,
+        surface: crate::graphql::orm::EntityAccessSurface,
+        row: &(dyn Any + Send + Sync),
+    ) -> async_graphql::Result<bool> {
+        if self
+            .can_write_row(ctx, entity_name, write_policy, surface, row)
+            .await?
+        {
+            return Ok(true);
+        }
+        if surface == crate::graphql::orm::EntityAccessSurface::GraphqlMutation
+            && !(self
+                .can_access_entity(
+                    ctx,
+                    entity_name,
+                    read_policy,
+                    crate::graphql::orm::EntityAccessKind::Read,
+                    surface,
+                )
+                .await?
+                && self
+                    .can_read_row(ctx, entity_name, read_policy, surface, row)
+                    .await?)
+        {
+            return Ok(false);
+        }
+        Err(OrmPublicError::forbidden().into_graphql_error())
+    }
+
+    /// Release a committed row in a generated mutation payload only when the
+    /// caller may read it. Write access does not imply read access.
+    ///
+    /// Returns `None` when the payload does not select `result_field` or
+    /// [`Self::can_read_row`] withholds the row. Entity read denial and policy
+    /// errors fail the field with `extensions.outcome = "committed"`, because the
+    /// write has already committed.
+    #[doc(hidden)]
+    pub async fn __release_graphql_mutation_output<T: Any + Send + Sync>(
+        &self,
+        ctx: &async_graphql::Context<'_>,
+        entity_name: &'static str,
+        read_policy: Option<&'static str>,
+        result_field: &str,
+        entity: Option<T>,
+    ) -> async_graphql::Result<Option<T>> {
+        use async_graphql::ErrorExtensions as _;
+        let Some(entity) = entity else {
+            return Ok(None);
+        };
+        if !ctx.look_ahead().field(result_field).exists() {
+            return Ok(None);
+        }
+        let errors_before = ctx.query_env.errors.lock().unwrap().len();
+        let committed = |error| {
+            crate::graphql::errors::graphql_error_from_callback(error).extend_with(
+                |_, extensions| {
+                    extensions.set("outcome", "committed");
+                    extensions.set("retryable", false);
+                },
+            )
+        };
+        let output = async {
+            let surface = crate::graphql::orm::EntityAccessSurface::GraphqlMutation;
+            self.ensure_entity_access(
+                Some(ctx),
+                entity_name,
+                read_policy,
+                crate::graphql::orm::EntityAccessKind::Read,
+                surface,
+            )
+            .await
+            .map_err(committed)?;
+            let visible = self
+                .can_read_row(Some(ctx), entity_name, read_policy, surface, &entity)
+                .await
+                .map_err(committed)?;
+            Ok::<_, async_graphql::Error>(visible)
+        }
+        .await;
+        // A withheld row must not release private host diagnostics either.
+        if !matches!(output, Ok(true)) {
+            ctx.query_env.errors.lock().unwrap().truncate(errors_before);
+        }
+        Ok(output?.then_some(entity))
+    }
+
     #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
     pub async fn run_before_create(
         &self,
@@ -1566,6 +1686,15 @@ where
                         return Err(classified);
                     }
                 };
+                if context.write_refused() {
+                    context
+                        .rollback()
+                        .await
+                        .map_err(classify_transaction_error::<B>)?;
+                    return Err(crate::graphql::orm::TransactionError::Rejected(
+                        OrmPublicError::forbidden(),
+                    ));
+                }
                 context
                     .commit_and_emit()
                     .await
@@ -1659,6 +1788,16 @@ where
                         return Err(classified);
                     }
                 };
+                // A refused written row rolls back as the refusal it is.
+                if context.write_refused() {
+                    context
+                        .rollback()
+                        .await
+                        .map_err(classify_transaction_error::<B>)?;
+                    return Err(crate::graphql::orm::TransactionError::Rejected(
+                        OrmPublicError::forbidden(),
+                    ));
+                }
                 if context.runtime_cannot_commit() {
                     context
                         .rollback()
