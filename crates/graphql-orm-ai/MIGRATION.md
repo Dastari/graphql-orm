@@ -3,12 +3,34 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-12
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.133.0 to 0.134.0: internal reads honour their own bounds
+
+AI 0.134.0 adopts ORM 0.128.0, which refuses a repository limit above the
+database's maximum page limit instead of reducing it. Upgrade AI, ORM and
+macros together. No GraphQL SDL, persistent schema or data migration change is
+needed, and `AI_SCHEMA_MODULE_VERSION` is unchanged.
+
+The runtime's internal reads now read their own bound in full, whatever the
+host configures as `PaginationConfig::max_limit`. On a default database these
+reads previously stopped at 100 rows without an error. Affected work includes
+lease recovery, approval-wait reconciliation, native checkpoints, session
+retention, title-mutation cleanup and inbox pruning. A pass can now read and
+change more rows at once, up to its configured limit. Review
+`maximum_candidate_scan`, `AiInboxPruningLimits` and the session-retention
+limits if a deployment set them high and relied on the 100-row cut.
+
+Client page sizes are unchanged in effect: `inbox_event_page`,
+`session_event_page`, `message_blocks` and the conversation bootstrap still
+follow the host's page maximum, and report the remaining rows. A bootstrap
+whose tool calls exceed its window now reports `reset_required`. Hosts need not raise
+`max_page_limit` for the runtime to work.
 
 ## 0.132.0 to 0.133.0
 

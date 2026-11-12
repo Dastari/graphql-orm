@@ -395,6 +395,8 @@ pub struct EntitySearchQuery<'a, T, W, B: OrmBackend> {
     search: SearchInput,
     query: EntityQuery<T, B>,
     pagination_config: PaginationConfig,
+    /// The limit set through [`Self::limit`], checked rather than clamped.
+    explicit_limit: Option<i64>,
     _where: PhantomData<W>,
 }
 
@@ -457,7 +459,9 @@ where
         self
     }
 
-    /// Set a requested limit. The database maximum is applied before SQL execution.
+    /// Return at most `limit` hits, exactly. A limit above the database's
+    /// maximum page limit fails with `PAGE_LIMIT_EXCEEDED` instead of being
+    /// reduced.
     pub fn limit(mut self, limit: i64) -> Self {
         self.query = self.query.limit(limit);
         self
@@ -546,6 +550,7 @@ where
             search,
             query: EntityQuery::new(),
             pagination_config: PaginationConfig::default(),
+            explicit_limit: None,
             _where: PhantomData,
         }
     }
@@ -580,12 +585,27 @@ where
         self
     }
 
-    /// Limit the number of hits returned.
+    /// Return at most `limit` hits, exactly.
+    ///
+    /// A limit above the configured maximum page limit fails with
+    /// `PAGE_LIMIT_EXCEEDED` instead of being reduced; see
+    /// [`PaginationConfig::checked_explicit_limit`]. [`Self::paginate`] keeps
+    /// GraphQL page semantics and clamps.
     pub fn limit(mut self, limit: i64) -> Self {
         let mut page = self.query.page.unwrap_or_default();
         page.limit = Some(limit);
         self.query.page = Some(page);
+        self.explicit_limit = Some(limit);
         self
+    }
+
+    fn check_explicit_limit(&self) -> crate::Result<()> {
+        if let Some(limit) = self.explicit_limit {
+            self.pagination_config
+                .checked_explicit_limit(limit)
+                .map_err(crate::graphql::errors::sqlx_error_from_public)?;
+        }
+        Ok(())
     }
 
     /// Offset the returned hits.
@@ -596,9 +616,11 @@ where
         self
     }
 
-    /// Apply a generated page input.
+    /// Apply a generated page input with GraphQL page semantics: a limit
+    /// above the configured maximum is clamped.
     pub fn paginate(mut self, page: PageInput) -> Self {
         self.query = self.query.paginate(&page);
+        self.explicit_limit = None;
         self
     }
 
@@ -1109,6 +1131,7 @@ where
     /// `limit`/`offset` in SQL. Fallback scoring loads candidates, scores them
     /// in Rust, and then slices the requested page.
     pub async fn fetch_all(self) -> crate::Result<Vec<SearchHit<T>>> {
+        self.check_explicit_limit()?;
         if let Some(result) = self.try_fetch_native(None).await {
             return result;
         }
@@ -1127,6 +1150,7 @@ where
         self,
         auth: Option<&DbAuthContext>,
     ) -> crate::Result<Vec<SearchHit<T>>> {
+        self.check_explicit_limit()?;
         if let Some(result) = self.try_fetch_native(auth).await {
             return result;
         }
@@ -1144,6 +1168,7 @@ where
     /// pair-fetch API. Fallback strategies score once, count the scored hits,
     /// and slice the requested page in memory.
     pub async fn fetch_connection(self) -> crate::Result<SearchConnection<T>> {
+        self.check_explicit_limit()?;
         if let Some(result) = self.try_fetch_native_connection(None).await {
             return result;
         }
@@ -1162,6 +1187,7 @@ where
         self,
         auth: Option<&DbAuthContext>,
     ) -> crate::Result<SearchConnection<T>> {
+        self.check_explicit_limit()?;
         if let Some(result) = self.try_fetch_native_connection(auth).await {
             return result;
         }

@@ -3,12 +3,24 @@ title: "graphql-orm-macros"
 kind: reference
 status: active
 owner: graphql-orm-macros-maintainers
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-12
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm-macros`
+
+Version 0.128.0 stays aligned with ORM 0.128.0, which makes Rust repository
+limits exact or refused, so repository-only `find_all` and `find_many` fail
+with `PAGE_LIMIT_EXCEEDED` instead of returning a truncated set. Generated code
+is unchanged. Upgrade ORM/macros together; see the
+[root migration guide](../../MIGRATION.md#01270-to-01280-repository-limits-are-exact-or-refused).
+
+Version 0.128.0 also makes SQL Server connections use full-session TLS with a
+validated certificate by default, refuses weaker connection-string settings
+unless they are opted into in code, resets pooled sessions after each
+transaction, and adds pool timeouts. Upgrade ORM/macros together; see the
+[root migration guide](../../MIGRATION.md#01270-to-01280-sql-server-encryption-and-pool-defaults).
 
 Version 0.127.0 keeps a hook's deliberate public refusal (an ORM public `code`
 extension, or an `OrmPublicError` returned with `?`) on repository writes,

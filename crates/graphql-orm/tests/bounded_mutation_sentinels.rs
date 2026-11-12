@@ -890,9 +890,20 @@ async fn run_matrix(mut database: Database<TestBackend>) -> Result<(), Box<dyn s
 
     assert_eq!(PaginationConfig::DEFAULT_MAX_LIMIT, 100);
     insert_single_rows(&database, "public-page-cap", 101).await?;
-    let public_rows = BoundedSentinelSingle::query(database.pool())
+    // An explicit limit above the page maximum is refused, never reduced.
+    let refused = BoundedSentinelSingle::query(database.pool())
         .filter(single_filter("public-page-cap"))
         .limit(1_024)
+        .fetch_all()
+        .await
+        .expect_err("a limit above the page maximum must not truncate");
+    assert_eq!(
+        graphql_orm::graphql::errors::OrmPublicError::from_sqlx(&refused).code,
+        graphql_orm::graphql::errors::OrmErrorCode::PageLimitExceeded
+    );
+    let public_rows = BoundedSentinelSingle::query(database.pool())
+        .filter(single_filter("public-page-cap"))
+        .limit(100)
         .fetch_all()
         .await?;
     assert_eq!(public_rows.len(), 100);

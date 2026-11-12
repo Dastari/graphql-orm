@@ -30,7 +30,7 @@ pub(super) async fn group(
             }),
             ..Default::default()
         })
-        .limit(8_193)
+        .internal_limit(8_193)
         .fetch_all()
         .await
         .map_err(OrmPublicError::from)?;
@@ -81,7 +81,7 @@ async fn attempt_outcome(
             }),
             ..Default::default()
         })
-        .limit(2)
+        .internal_limit(2)
         .fetch_all()
         .await
         .map_err(OrmPublicError::from)?;
@@ -94,7 +94,7 @@ async fn attempt_outcome(
             }),
             ..Default::default()
         })
-        .limit(2)
+        .internal_limit(2)
         .fetch_all()
         .await
         .map_err(OrmPublicError::from)?;
@@ -178,7 +178,7 @@ pub(super) async fn validate(
             }),
             ..Default::default()
         })
-        .limit(2)
+        .internal_limit(2)
         .fetch_all()
         .await
         .map_err(OrmPublicError::from)?;
@@ -220,7 +220,7 @@ pub(super) async fn validate(
             }),
             ..Default::default()
         })
-        .limit(2)
+        .internal_limit(2)
         .fetch_all()
         .await
         .map_err(OrmPublicError::from)?;
@@ -389,7 +389,7 @@ pub(super) async fn validate(
                 }),
                 ..Default::default()
             })
-            .limit(2)
+            .internal_limit(2)
             .fetch_all()
             .await
             .map_err(OrmPublicError::from)?;
@@ -433,7 +433,7 @@ pub(super) async fn validate(
             }),
             ..Default::default()
         })
-        .limit(2)
+        .internal_limit(2)
         .fetch_all()
         .await
         .map_err(OrmPublicError::from)?;

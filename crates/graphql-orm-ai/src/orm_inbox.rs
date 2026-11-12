@@ -2,6 +2,7 @@
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
+use crate::orm_read_bounds::InternalReadBound as _;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -217,7 +218,7 @@ impl OrmAiInboxPruningService {
                 Box::pin(async move {
                     tx.query::<AiInboxStreamRecord>()
                         .default_order()
-                        .limit(limit)
+                        .internal_limit(limit)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)
@@ -259,7 +260,7 @@ impl OrmAiInboxPruningService {
                             ..Default::default()
                         })
                         .default_order()
-                        .limit(event_limit)
+                        .internal_limit(event_limit)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -312,7 +313,7 @@ impl OrmAiInboxPruningService {
                                     }),
                                     ..Default::default()
                                 })
-                                .limit(2)
+                                .internal_limit(2)
                                 .fetch_all()
                                 .await
                                 .map_err(OrmPublicError::from)?;
@@ -533,6 +534,9 @@ impl OrmAiInboxService {
                 "invalid inbox event window".to_owned(),
             ));
         }
+        // A client page follows the host's page maximum; `has_more` reports the rest.
+        let first =
+            crate::orm_read_bounds::client_page_limit(self.database.pagination_config(), first);
         let (principal_kind, principal_subject) = principal_identity(principal);
         let principal_subject = principal_subject.to_owned();
         let stream_id = inbox_stream_id(&principal_kind, &principal_subject);
@@ -579,7 +583,7 @@ impl OrmAiInboxService {
                             ..Default::default()
                         })
                         .default_order()
-                        .limit(first)
+                        .internal_limit(first)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;

@@ -220,7 +220,7 @@ jobs:
         run: cargo test --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --target-dir target/fixtures --locked --no-default-features --features postgres --test host_timestamps -- --ignored --test-threads=1
       - run: cargo check -p graphql-orm --no-default-features --features mssql
       - name: Execute MSSQL schema and query regressions without a database
-        run: cargo test -p graphql-orm --locked --no-default-features --features mssql --test federation_entity_keys_mssql --test runtime_records --test query_ir --test composite_primary_keys --test zero_public_write_inputs_backends
+        run: cargo test -p graphql-orm --locked --no-default-features --features mssql --test federation_entity_keys_mssql --test runtime_records --test query_ir --test composite_primary_keys --test zero_public_write_inputs_backends --test mssql_transport
 
   orm-security-sqlite:
     name: Current authority and subscription privacy (SQLite)
@@ -280,7 +280,7 @@ jobs:
       - name: Verify TLS and retained query notifications on owned servers
         env:
           GRAPHQL_ORM_TEST_MSSQL_PULL: missing
-        run: cargo test -p graphql-orm --locked --no-default-features --features mssql --test mssql_tls --test mssql_notifications -- --ignored --test-threads=1
+        run: cargo test -p graphql-orm --locked --no-default-features --features mssql --test mssql_tls --test mssql_transport --test mssql_notifications -- --ignored --test-threads=1
 
   orm-text-group-pages:
     runs-on: ubuntu-latest

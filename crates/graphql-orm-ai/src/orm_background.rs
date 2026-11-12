@@ -5,6 +5,7 @@
     feature = "provider-openai-core"
 ))]
 
+use crate::orm_read_bounds::InternalReadBound as _;
 use std::sync::Arc;
 
 use agql_auth::{Clock, PrincipalReference, PrincipalReferenceKind};
@@ -1181,7 +1182,7 @@ impl OrmAiOpenAiBackgroundSubmissionService {
                             }),
                             ..Default::default()
                         })
-                        .limit(1)
+                        .internal_limit(1)
                         .fetch_one()
                         .await
                         .map_err(OrmPublicError::from)?
@@ -1902,7 +1903,7 @@ impl OrmAiOpenAiBackgroundReconciliationService {
                             id: Some(OrderDirection::Asc),
                             ..Default::default()
                         })
-                        .limit(
+                        .internal_limit(
                             i64::try_from(limits.maximum_candidate_scan)
                                 .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?,
                         )
@@ -2102,7 +2103,7 @@ impl OrmAiOpenAiBackgroundReconciliationService {
                             id: Some(OrderDirection::Asc),
                             ..Default::default()
                         })
-                        .limit(
+                        .internal_limit(
                             i64::try_from(limits.maximum_candidate_scan)
                                 .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?,
                         )
@@ -2748,7 +2749,7 @@ impl OrmAiOpenAiBackgroundRetrievalService {
                             }),
                             ..Default::default()
                         })
-                        .limit(2)
+                        .internal_limit(2)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -3601,7 +3602,7 @@ async fn close_duplicate_terminal_receipts(
             None,
         ))
         .order_by(background_receipt_order())
-        .limit(limit)
+        .internal_limit(limit)
         .fetch_all()
         .await
         .map_err(OrmPublicError::from)?;
@@ -3745,7 +3746,7 @@ async fn validate_existing_background_terminal(
                         }),
                         ..Default::default()
                     })
-                    .limit(2)
+                    .internal_limit(2)
                     .fetch_all()
                     .await
                     .map_err(OrmPublicError::from)?;
@@ -3790,7 +3791,7 @@ async fn validate_existing_background_terminal(
                         }),
                         ..Default::default()
                     })
-                    .limit(2)
+                    .internal_limit(2)
                     .fetch_all()
                     .await
                     .map_err(OrmPublicError::from)?;
@@ -3819,7 +3820,7 @@ async fn validate_existing_background_terminal(
                         Some(submission.run_id),
                         Some(submission.attempt_id),
                     ))
-                    .limit(2)
+                    .internal_limit(2)
                     .fetch_all()
                     .await
                     .map_err(OrmPublicError::from)?;
@@ -3857,7 +3858,7 @@ async fn validate_existing_background_output(
             }),
             ..Default::default()
         })
-        .limit(2)
+        .internal_limit(2)
         .fetch_all()
         .await
         .map_err(OrmPublicError::from)?;
@@ -3873,7 +3874,7 @@ async fn validate_existing_background_output(
             }),
             ..Default::default()
         })
-        .limit(
+        .internal_limit(
             message
                 .block_count
                 .checked_add(1)
@@ -4147,7 +4148,7 @@ async fn load_background_claim_graph(
             }),
             ..Default::default()
         })
-        .limit(2)
+        .internal_limit(2)
         .fetch_all()
         .await
         .map_err(OrmPublicError::from)?;
@@ -4168,7 +4169,7 @@ async fn load_background_claim_graph(
             }),
             ..Default::default()
         })
-        .limit(2)
+        .internal_limit(2)
         .fetch_all()
         .await
         .map_err(OrmPublicError::from)?;
@@ -4190,7 +4191,7 @@ async fn load_background_claim_graph(
                     }),
                     ..Default::default()
                 })
-                .limit(2)
+                .internal_limit(2)
                 .fetch_all()
                 .await
                 .map_err(OrmPublicError::from)?;
@@ -4210,7 +4211,7 @@ async fn load_background_claim_graph(
             }),
             ..Default::default()
         })
-        .limit(2)
+        .internal_limit(2)
         .fetch_all()
         .await
         .map_err(OrmPublicError::from)?;
@@ -4788,7 +4789,7 @@ async fn close_matched_receipt_recovery(
             Some(submission.attempt_id),
         ))
         .order_by(background_receipt_order())
-        .limit(2)
+        .internal_limit(2)
         .fetch_all()
         .await
         .map_err(OrmPublicError::from)?;
@@ -4865,7 +4866,7 @@ async fn match_background_receipt(
             Some(submission.attempt_id),
         ))
         .order_by(background_receipt_order())
-        .limit(2)
+        .internal_limit(2)
         .fetch_all()
         .await
         .map_err(OrmPublicError::from)?;
@@ -4888,7 +4889,7 @@ async fn match_background_receipt(
             None,
         ))
         .order_by(background_receipt_order())
-        .limit(
+        .internal_limit(
             i64::try_from(maximum_scan)
                 .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?,
         )

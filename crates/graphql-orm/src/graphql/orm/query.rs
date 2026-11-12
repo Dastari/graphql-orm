@@ -426,12 +426,19 @@ pub trait GeneratedComplexObjectMounted {}
 ///
 /// Unlike the legacy pool-bound compatibility builders, this type is bound to a
 /// [`Database`](crate::db::Database), applies configured entity and row policy
-/// decisions on the repository surface, and resolves the runtime page bound
-/// before executing SQL.
+/// decisions on the repository surface, and bounds every read by the
+/// database's maximum page limit before executing SQL.
+///
+/// The bound never truncates silently: an explicit [`Self::limit`] above the
+/// maximum, or an unlimited [`Self::fetch_all`] that matches more rows than the
+/// maximum, fails with `PAGE_LIMIT_EXCEEDED`.
 pub struct RepositoryQuery<'a, T, F, O, B: OrmBackend = DefaultBackend> {
     db: &'a crate::db::Database<B>,
     auth: Option<DbAuthContext>,
     query: EntityQuery<T, B>,
+    limit: Option<i64>,
+    offset: i64,
+    max_limit: Option<i64>,
     _inputs: PhantomData<(F, O)>,
 }
 
@@ -444,15 +451,13 @@ where
 {
     /// Create a bounded repository query associated with `db`.
     pub fn new(db: &'a crate::db::Database<B>) -> Self {
-        let resolved = db.pagination_config().resolve_page(None, true);
-        let query = EntityQuery::new().paginate(&PageInput {
-            limit: resolved.limit,
-            offset: Some(resolved.offset),
-        });
         Self {
             db,
             auth: None,
-            query,
+            query: EntityQuery::new(),
+            limit: None,
+            offset: 0,
+            max_limit: None,
             _inputs: PhantomData,
         }
     }
@@ -481,24 +486,34 @@ where
         self
     }
 
-    /// Set a requested limit. The database's maximum page limit is applied before SQL execution.
+    /// Read at most `limit` rows.
+    ///
+    /// The limit is exact: it is never reduced to the database's maximum page
+    /// limit, so a `limit(bound + 1)` overflow check sees the extra row. A
+    /// limit above [`PaginationConfig::max_limit`] makes the fetch fail with
+    /// `PAGE_LIMIT_EXCEEDED`, and a negative limit with `INVALID_INPUT`; see
+    /// [`PaginationConfig::checked_explicit_limit`].
     pub fn limit(mut self, limit: i64) -> Self {
-        let limit = self
-            .db
-            .pagination_config()
-            .clamp_explicit_limit(Some(limit));
-        let offset = self.query.page.as_ref().and_then(|page| page.offset);
-        self.query = self.query.paginate(&PageInput { limit, offset });
+        self.limit = Some(limit);
         self
     }
 
-    /// Set a non-negative offset while retaining the configured bound.
+    /// Override the database's maximum page limit for this read only.
+    ///
+    /// Trusted internal reads that carry their own bound use this instead of
+    /// raising the maximum for every caller of the database. The read stays
+    /// bounded: a [`Self::limit`] above `maximum` still fails with
+    /// `PAGE_LIMIT_EXCEEDED`, and an unlimited `fetch_all` fails closed when
+    /// more than `maximum` rows match. Never pass a value a client chose
+    /// without validating it first. A negative `maximum` is treated as `0`.
+    pub fn with_max_limit(mut self, maximum: i64) -> Self {
+        self.max_limit = Some(maximum.max(0));
+        self
+    }
+
+    /// Skip `offset` matching rows. A negative offset is treated as `0`.
     pub fn offset(mut self, offset: i64) -> Self {
-        let limit = self.query.page.as_ref().and_then(|page| page.limit);
-        self.query = self.query.paginate(&PageInput {
-            limit,
-            offset: Some(offset.max(0)),
-        });
+        self.offset = offset.max(0);
         self
     }
 
@@ -519,18 +534,28 @@ where
 
     async fn fetch_visible(
         self,
-        pagination_override: Option<PaginationConfig>,
+        bound: impl FnOnce(PaginationConfig, Option<i64>) -> crate::Result<RepositoryBound>,
     ) -> crate::Result<Vec<T>> {
         let (this, metadata) = self.authorize().await?;
-        let rows = if let Some(pagination) = pagination_override {
-            this.query
-                .fetch_all_with_auth_and_pagination(this.db, this.auth.as_ref(), pagination)
-                .await?
-        } else {
-            this.query
-                .fetch_all_with_auth(this.db, this.auth.as_ref())
-                .await?
-        };
+        let config = this
+            .db
+            .pagination_config()
+            .with_read_maximum(this.max_limit);
+        let bound = bound(config, this.limit)?;
+        // The bound is resolved above, so the SQL read applies it exactly.
+        let rows = this
+            .query
+            .paginate(&PageInput {
+                limit: bound.sql_limit(),
+                offset: Some(this.offset),
+            })
+            .fetch_all_with_auth_and_pagination(
+                this.db,
+                this.auth.as_ref(),
+                PaginationConfig::unbounded(),
+            )
+            .await?;
+        bound.check_overflow(rows.len())?;
         let mut visible = Vec::with_capacity(rows.len());
         for row in rows {
             if this
@@ -563,23 +588,45 @@ where
         Ok(visible)
     }
 
-    /// Fetch all visible rows within the resolved bound.
+    /// Fetch every visible matching row, never a silently truncated subset.
+    ///
+    /// With [`Self::limit`], at most that many rows are read. Without one, at
+    /// most [`PaginationConfig::max_limit`] rows are read, and the fetch fails
+    /// with `PAGE_LIMIT_EXCEEDED` when more rows match; page explicitly with
+    /// [`Self::limit`] and [`Self::offset`] to read a larger set. The
+    /// configured `default_limit` does not apply to repository reads.
+    ///
+    /// The overflow check counts matching rows before row policy is applied,
+    /// so it fails safe: a caller can be refused because of rows it cannot
+    /// see. The error does not say how many rows matched.
     ///
     /// # Errors
     ///
-    /// Returns a safe authorization, query-rendering, backend, or row-decoding
-    /// error. Declared policies without the required provider fail closed.
+    /// Returns `PAGE_LIMIT_EXCEEDED` as described above, `INVALID_INPUT` for a
+    /// negative limit, or a safe authorization, query-rendering, backend, or
+    /// row-decoding error. Declared policies without the required provider
+    /// fail closed.
     pub async fn fetch_all(self) -> crate::Result<Vec<T>> {
-        self.fetch_visible(None).await
+        self.fetch_visible(|config, limit| config.repository_bound(limit))
+            .await
     }
 
-    /// Fetch the first visible row within the resolved bound.
+    /// Fetch the first visible row.
+    ///
+    /// Reads at most [`Self::limit`] rows, or [`PaginationConfig::max_limit`]
+    /// rows without one, and returns the first that passes row policy. More
+    /// matching rows are not an error.
     ///
     /// # Errors
     ///
-    /// Returns the same safe errors as [`Self::fetch_all`].
+    /// Returns the same safe errors as [`Self::fetch_all`], except that an
+    /// omitted limit never fails with `PAGE_LIMIT_EXCEEDED`.
     pub async fn fetch_first(self) -> crate::Result<Option<T>> {
-        Ok(self.fetch_all().await?.into_iter().next())
+        Ok(self
+            .fetch_visible(|config, limit| config.repository_scan_bound(limit))
+            .await?
+            .into_iter()
+            .next())
     }
 
     /// Fetch zero or one visible row, failing closed if more than one row is visible.
@@ -588,17 +635,12 @@ where
     ///
     /// Returns a cardinality error for multiple visible rows, or the same safe
     /// errors as [`Self::fetch_all`].
-    pub async fn fetch_optional_one(mut self) -> crate::Result<Option<T>> {
+    pub async fn fetch_optional_one(self) -> crate::Result<Option<T>> {
         // Cardinality checks always use one bounded look-ahead row. This must not
         // be clamped to a configured maximum of one, or a second matching row
         // could be mistaken for a unique result.
-        let offset = self.query.page.as_ref().and_then(|page| page.offset);
-        self.query = self.query.paginate(&PageInput {
-            limit: Some(2),
-            offset,
-        });
         let rows = self
-            .fetch_visible(Some(PaginationConfig::unbounded()))
+            .fetch_visible(|_, _| Ok(RepositoryBound::Exact(2)))
             .await?;
         if rows.len() > 1 {
             return Err(sqlx::Error::Protocol(
@@ -1154,8 +1196,90 @@ impl PaginationConfig {
     }
 
     /// Clamp one explicit limit without applying a default.
+    ///
+    /// This is GraphQL page semantics: an oversized client `page.limit` is
+    /// reduced to `max_limit`, and the connection's `pageInfo` reports the
+    /// remaining rows. Trusted Rust code that needs an exact bound, such as a
+    /// `bound + 1` overflow check, should use [`Self::checked_explicit_limit`]
+    /// instead, which refuses rather than reduces.
     pub fn clamp_explicit_limit(&self, limit: Option<i64>) -> Option<i64> {
         limit.map(|limit| self.clamp_limit_value(limit))
+    }
+
+    /// Check one trusted explicit row limit against `max_limit` without
+    /// changing it.
+    ///
+    /// The Rust repository builders' `limit(n)` uses this, so a limit is
+    /// honoured exactly or refused, never silently reduced. Raise the maximum
+    /// with [`Database::with_pagination_config`](crate::db::Database::with_pagination_config)
+    /// or `DatabaseBuilder::max_page_limit` when trusted code needs a larger
+    /// bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OrmErrorCode::PageLimitExceeded`](crate::graphql::errors::OrmErrorCode::PageLimitExceeded)
+    /// when `limit` exceeds `max_limit`, and
+    /// [`OrmErrorCode::InvalidInput`](crate::graphql::errors::OrmErrorCode::InvalidInput)
+    /// when `limit` is negative.
+    pub fn checked_explicit_limit(
+        &self,
+        limit: i64,
+    ) -> Result<i64, crate::graphql::errors::OrmPublicError> {
+        use crate::graphql::errors::{OrmErrorCode, OrmPublicError};
+        if limit < 0 {
+            return Err(OrmPublicError::with_message(
+                OrmErrorCode::InvalidInput,
+                "requested limit must not be negative",
+            ));
+        }
+        match self.max_limit {
+            Some(maximum) if limit > maximum.max(0) => Err(OrmPublicError::with_message(
+                OrmErrorCode::PageLimitExceeded,
+                format!(
+                    "requested limit {limit} exceeds the configured maximum page limit {}",
+                    maximum.max(0)
+                ),
+            )),
+            _ => Ok(limit),
+        }
+    }
+
+    /// Apply a per-read maximum set with a builder's `with_max_limit`.
+    pub(crate) fn with_read_maximum(mut self, maximum: Option<i64>) -> Self {
+        if let Some(maximum) = maximum {
+            self.max_limit = Some(maximum);
+        }
+        self
+    }
+
+    /// Resolve the row bound of one Rust repository read.
+    ///
+    /// An explicit limit is checked by [`Self::checked_explicit_limit`]. An
+    /// omitted limit reads at most `max_limit` rows and fails closed when more
+    /// rows match, so an omitted limit never truncates either.
+    pub(crate) fn repository_bound(&self, limit: Option<i64>) -> crate::Result<RepositoryBound> {
+        match limit {
+            Some(limit) => self
+                .checked_explicit_limit(limit)
+                .map(RepositoryBound::Exact)
+                .map_err(crate::graphql::errors::sqlx_error_from_public),
+            None => Ok(match self.max_limit {
+                Some(maximum) => RepositoryBound::FailClosed(maximum.max(0)),
+                None => RepositoryBound::Unbounded,
+            }),
+        }
+    }
+
+    /// Resolve a scan bound that never refuses an overflow: an explicit limit
+    /// is checked, an omitted one reads up to `max_limit` rows.
+    pub(crate) fn repository_scan_bound(
+        &self,
+        limit: Option<i64>,
+    ) -> crate::Result<RepositoryBound> {
+        Ok(match self.repository_bound(limit)? {
+            RepositoryBound::FailClosed(maximum) => RepositoryBound::Exact(maximum),
+            bound => bound,
+        })
     }
 
     /// Resolve an optional page input into an offset/limit pair.
@@ -1186,6 +1310,53 @@ impl PaginationConfig {
             Some(max_limit) => normalized.min(max_limit.max(0)),
             None => normalized,
         }
+    }
+}
+
+/// Row bound of one Rust repository read. See
+/// [`PaginationConfig::repository_bound`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RepositoryBound {
+    /// Read at most this many rows; the caller asked for exactly this bound.
+    Exact(i64),
+    /// No limit was given: read one row past this maximum and refuse if it arrives.
+    FailClosed(i64),
+    /// No limit was given and no maximum is configured.
+    Unbounded,
+}
+
+impl RepositoryBound {
+    /// The `LIMIT` to render.
+    pub(crate) fn sql_limit(self) -> Option<i64> {
+        match self {
+            Self::Exact(limit) => Some(limit),
+            Self::FailClosed(maximum) => Some(maximum.saturating_add(1)),
+            Self::Unbounded => None,
+        }
+    }
+
+    /// The same bound capped at `cap` rows, for reads that need only a few.
+    pub(crate) fn capped(self, cap: i64) -> Self {
+        match self {
+            Self::Exact(limit) => Self::Exact(limit.min(cap)),
+            Self::FailClosed(_) | Self::Unbounded => Self::Exact(cap),
+        }
+    }
+
+    /// Refuse a fail-closed read whose look-ahead row arrived.
+    pub(crate) fn check_overflow(self, rows: usize) -> crate::Result<()> {
+        if let Self::FailClosed(maximum) = self
+            && i64::try_from(rows).unwrap_or(i64::MAX) > maximum
+        {
+            use crate::graphql::errors::{OrmErrorCode, OrmPublicError, sqlx_error_from_public};
+            // The message names no row count: overflow is counted before row
+            // policy, so a count would disclose rows the caller cannot see.
+            return Err(sqlx_error_from_public(OrmPublicError::with_message(
+                OrmErrorCode::PageLimitExceeded,
+                "page limit exceeded; set an explicit limit and offset",
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -3265,9 +3436,18 @@ where
     values: Vec<SqlValue>,
     order_clauses: Vec<String>,
     limit: Option<i64>,
+    max_limit: Option<i64>,
     requires_in_memory_filtering: bool,
     filter_is_valid: bool,
     _marker: PhantomData<(P, B)>,
+}
+
+/// Which projection read is being bounded.
+#[derive(Clone, Copy)]
+enum ProjectionRead {
+    All,
+    First,
+    OptionalOne,
 }
 
 impl<P, B> ProjectionQueryState<P, B>
@@ -3281,6 +3461,7 @@ where
             values: Vec::new(),
             order_clauses: Vec::new(),
             limit: None,
+            max_limit: None,
             requires_in_memory_filtering: false,
             filter_is_valid: true,
             _marker: PhantomData,
@@ -3326,10 +3507,31 @@ where
         self
     }
 
-    fn render(
+    fn with_max_limit(mut self, maximum: i64) -> Self {
+        self.max_limit = Some(maximum.max(0));
+        self
+    }
+
+    /// Resolve the bound of one fetch.
+    fn bound(
         &self,
         pagination_config: PaginationConfig,
-        forced_limit: Option<i64>,
+        read: ProjectionRead,
+    ) -> crate::Result<RepositoryBound> {
+        let pagination_config = pagination_config.with_read_maximum(self.max_limit);
+        match read {
+            ProjectionRead::All => pagination_config.repository_bound(self.limit),
+            ProjectionRead::First => Ok(pagination_config.repository_bound(self.limit)?.capped(1)),
+            // The cardinality look-ahead ignores the limit and the configured
+            // maximum, so a second matching row is never hidden.
+            ProjectionRead::OptionalOne => Ok(RepositoryBound::Exact(2)),
+        }
+    }
+
+    /// Render with an already resolved bound, applied exactly.
+    fn render(
+        &self,
+        bound: RepositoryBound,
         visibility: Option<&FilterExpression>,
     ) -> RenderedQuery {
         let entity_default = <P::Entity as DatabaseEntity>::DEFAULT_SORT;
@@ -3357,7 +3559,7 @@ where
             }
         }
         let page = PageInput {
-            limit: forced_limit.or(self.limit),
+            limit: bound.sql_limit(),
             offset: None,
         };
         render_select_query(
@@ -3379,7 +3581,7 @@ where
                     (None, Some(policy)) => Some(policy.clone()),
                 },
                 sorts,
-                pagination: Some(pagination_config.resolve_page(Some(&page), true)),
+                pagination: Some(PaginationConfig::unbounded().resolve_page(Some(&page), false)),
                 count_only: false,
             },
         )
@@ -3492,10 +3694,25 @@ where
         self
     }
 
-    /// Request a bounded result count. Runtime maximum limits are applied
-    /// before SQL execution.
+    /// Read at most `limit` rows, exactly. A limit above the database's
+    /// maximum page limit fails with `PAGE_LIMIT_EXCEEDED` instead of being
+    /// reduced. Without a limit, `fetch_all` reads at most the maximum and
+    /// fails with `PAGE_LIMIT_EXCEEDED` when more rows match.
     pub fn limit(mut self, limit: i64) -> Self {
         self.state = self.state.limit(limit);
+        self
+    }
+
+    /// Override the database's maximum page limit for this read only.
+    ///
+    /// Trusted internal reads that carry their own bound use this instead of
+    /// raising the maximum for every caller of the database. The read stays
+    /// bounded: a `limit` above `maximum` still fails with
+    /// `PAGE_LIMIT_EXCEEDED`, and an unlimited `fetch_all` fails closed when
+    /// more than `maximum` rows match. Never pass a value a client chose
+    /// without validating it first. A negative `maximum` is treated as `0`.
+    pub fn with_max_limit(mut self, maximum: i64) -> Self {
+        self.state = self.state.with_max_limit(maximum);
         self
     }
 
@@ -3519,11 +3736,10 @@ where
     pub async fn fetch_all(self) -> crate::Result<Vec<P>> {
         let visibility = ensure_projection_access::<P, B>(self.db).await?;
         self.state.validate()?;
-        let rendered = self.state.render(
-            self.db.pagination_config(),
-            None,
-            visibility.predicate_expression(),
-        );
+        let bound = self
+            .state
+            .bound(self.db.pagination_config(), ProjectionRead::All)?;
+        let rendered = self.state.render(bound, visibility.predicate_expression());
         let rows = B::fetch_rows_with_auth(
             self.db.pool(),
             &rendered.sql,
@@ -3532,17 +3748,17 @@ where
         )
         .await?;
         self.db.observe_read(&rendered.sql, rows.len());
+        bound.check_overflow(rows.len())?;
         ProjectionQueryState::<P, B>::decode(rows)
     }
 
     pub async fn fetch_first(self) -> crate::Result<Option<P>> {
         let visibility = ensure_projection_access::<P, B>(self.db).await?;
         self.state.validate()?;
-        let rendered = self.state.render(
-            self.db.pagination_config(),
-            Some(1),
-            visibility.predicate_expression(),
-        );
+        let bound = self
+            .state
+            .bound(self.db.pagination_config(), ProjectionRead::First)?;
+        let rendered = self.state.render(bound, visibility.predicate_expression());
         let rows = B::fetch_rows_with_auth(
             self.db.pool(),
             &rendered.sql,
@@ -3559,11 +3775,10 @@ where
     pub async fn fetch_optional_one(self) -> crate::Result<Option<P>> {
         let visibility = ensure_projection_access::<P, B>(self.db).await?;
         self.state.validate()?;
-        let rendered = self.state.render(
-            self.db.pagination_config(),
-            Some(2),
-            visibility.predicate_expression(),
-        );
+        let bound = self
+            .state
+            .bound(self.db.pagination_config(), ProjectionRead::OptionalOne)?;
+        let rendered = self.state.render(bound, visibility.predicate_expression());
         let rows = B::fetch_rows_with_auth(
             self.db.pool(),
             &rendered.sql,
@@ -3615,8 +3830,25 @@ where
         self
     }
 
+    /// Read at most `limit` rows, exactly. A limit above the database's
+    /// maximum page limit fails with `PAGE_LIMIT_EXCEEDED` instead of being
+    /// reduced. Without a limit, `fetch_all` reads at most the maximum and
+    /// fails with `PAGE_LIMIT_EXCEEDED` when more rows match.
     pub fn limit(mut self, limit: i64) -> Self {
         self.state = self.state.limit(limit);
+        self
+    }
+
+    /// Override the database's maximum page limit for this read only.
+    ///
+    /// Trusted internal reads that carry their own bound use this instead of
+    /// raising the maximum for every caller of the database. The read stays
+    /// bounded: a `limit` above `maximum` still fails with
+    /// `PAGE_LIMIT_EXCEEDED`, and an unlimited `fetch_all` fails closed when
+    /// more than `maximum` rows match. Never pass a value a client chose
+    /// without validating it first. A negative `maximum` is treated as `0`.
+    pub fn with_max_limit(mut self, maximum: i64) -> Self {
+        self.state = self.state.with_max_limit(maximum);
         self
     }
 
@@ -3637,14 +3869,13 @@ where
         self
     }
 
-    async fn fetch(self, forced_limit: Option<i64>) -> crate::Result<Vec<P>> {
+    async fn fetch(self, read: ProjectionRead) -> crate::Result<Vec<P>> {
         let visibility = ensure_projection_access::<P, B>(self.context.database()).await?;
         self.state.validate()?;
-        let rendered = self.state.render(
-            self.context.database().pagination_config(),
-            forced_limit,
-            visibility.predicate_expression(),
-        );
+        let bound = self
+            .state
+            .bound(self.context.database().pagination_config(), read)?;
+        let rendered = self.state.render(bound, visibility.predicate_expression());
         let rows = self
             .context
             .fetch_rows(&rendered.sql, &rendered.values)
@@ -3652,19 +3883,20 @@ where
         self.context
             .database()
             .observe_read(&rendered.sql, rows.len());
+        bound.check_overflow(rows.len())?;
         ProjectionQueryState::<P, B>::decode(rows)
     }
 
     pub async fn fetch_all(self) -> crate::Result<Vec<P>> {
-        self.fetch(None).await
+        self.fetch(ProjectionRead::All).await
     }
 
     pub async fn fetch_first(self) -> crate::Result<Option<P>> {
-        Ok(self.fetch(Some(1)).await?.into_iter().next())
+        Ok(self.fetch(ProjectionRead::First).await?.into_iter().next())
     }
 
     pub async fn fetch_optional_one(self) -> crate::Result<Option<P>> {
-        let mut values = self.fetch(Some(2)).await?;
+        let mut values = self.fetch(ProjectionRead::OptionalOne).await?;
         if values.len() > 1 {
             return Err(sqlx::Error::Protocol(
                 "projection optional-one query matched more than one row".to_string(),
@@ -4042,9 +4274,26 @@ where
         B: SqlxBackend,
         E: sqlx::Executor<'e, Database = <B as SqlxBackend>::Database> + Send + 'e,
     {
-        let rendered = render_select_query(B::DIALECT, &self.build_select_query()?);
+        self.fetch_all_on_with_pagination(executor, PaginationConfig::default())
+            .await
+    }
+
+    /// [`Self::fetch_all_on`] with an explicit pagination configuration.
+    pub(crate) async fn fetch_all_on_with_pagination<'e, E>(
+        &self,
+        executor: E,
+        pagination: PaginationConfig,
+    ) -> crate::Result<Vec<T>>
+    where
+        B: SqlxBackend,
+        E: sqlx::Executor<'e, Database = <B as SqlxBackend>::Database> + Send + 'e,
+    {
+        let rendered = render_select_query(
+            B::DIALECT,
+            &self.build_select_query_with_config(pagination, false)?,
+        );
         let rows = B::fetch_rows_on(executor, rendered.sql, rendered.values).await?;
-        self.apply_in_memory_filtering(rows, PaginationConfig::default(), false)
+        self.apply_in_memory_filtering(rows, pagination, false)
     }
 
     #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
@@ -4056,9 +4305,16 @@ where
     where
         B: WriteBackend,
     {
-        let rendered = render_select_query(B::DIALECT, &self.build_select_query()?);
+        // In-transaction callers resolve their page before this call (against
+        // the database's configuration, or as an internal `bound + 1`
+        // look-ahead), so the page is applied exactly rather than re-clamped.
+        let pagination = PaginationConfig::unbounded();
+        let rendered = render_select_query(
+            B::DIALECT,
+            &self.build_select_query_with_config(pagination, false)?,
+        );
         let rows = context.fetch_rows(&rendered.sql, &rendered.values).await?;
-        self.apply_in_memory_filtering(rows, PaginationConfig::default(), false)
+        self.apply_in_memory_filtering(rows, pagination, false)
     }
 
     /// Fetch rows used to authorize a subsequent mutation while acquiring the
@@ -4072,9 +4328,13 @@ where
     where
         B: WriteBackend,
     {
-        let rendered = render_write_decision_select_query(B::DIALECT, &self.build_select_query()?);
+        let pagination = PaginationConfig::unbounded();
+        let rendered = render_write_decision_select_query(
+            B::DIALECT,
+            &self.build_select_query_with_config(pagination, false)?,
+        );
         let rows = context.fetch_rows(&rendered.sql, &rendered.values).await?;
-        self.apply_in_memory_filtering(rows, PaginationConfig::default(), false)
+        self.apply_in_memory_filtering(rows, pagination, false)
     }
 
     /// Fetch at most one write-decision row on the pinned transaction.
@@ -4776,7 +5036,48 @@ where
 {
     pool: &'a B::Pool,
     query: EntityQuery<T, B>,
+    max_limit: Option<i64>,
     _marker: PhantomData<(W, O, B)>,
+}
+
+/// Largest `limit` the generated `search_similar` helper accepts.
+pub const SIMILAR_SEARCH_MAX_LIMIT: i64 = 1_000;
+
+/// Candidate rows `search_similar` reads per requested result, so fuzzy
+/// filtering can still fill the requested page.
+pub const SIMILAR_SEARCH_CANDIDATE_FACTOR: i64 = 5;
+
+/// Check a generated `search_similar` limit and return its candidate bound.
+///
+/// # Errors
+///
+/// Returns `INVALID_INPUT` for a negative limit and `PAGE_LIMIT_EXCEEDED` for
+/// a limit above [`SIMILAR_SEARCH_MAX_LIMIT`].
+#[doc(hidden)]
+pub fn similar_search_candidate_limit(limit: i64) -> crate::Result<i64> {
+    use crate::graphql::errors::{OrmErrorCode, OrmPublicError, sqlx_error_from_public};
+    if limit < 0 {
+        return Err(sqlx_error_from_public(OrmPublicError::with_message(
+            OrmErrorCode::InvalidInput,
+            "requested limit must not be negative",
+        )));
+    }
+    if limit > SIMILAR_SEARCH_MAX_LIMIT {
+        return Err(sqlx_error_from_public(OrmPublicError::with_message(
+            OrmErrorCode::PageLimitExceeded,
+            format!(
+                "requested limit {limit} exceeds the similar-search maximum {SIMILAR_SEARCH_MAX_LIMIT}"
+            ),
+        )));
+    }
+    limit
+        .checked_mul(SIMILAR_SEARCH_CANDIDATE_FACTOR)
+        .ok_or_else(|| {
+            sqlx_error_from_public(OrmPublicError::with_message(
+                OrmErrorCode::PageLimitExceeded,
+                "similar-search candidate bound overflow",
+            ))
+        })
 }
 
 impl<'a, T, W, O, B> FindQuery<'a, T, W, O, B>
@@ -4789,6 +5090,7 @@ where
         Self {
             pool,
             query: EntityQuery::new(),
+            max_limit: None,
             _marker: PhantomData,
         }
     }
@@ -4806,11 +5108,36 @@ where
         self
     }
 
+    /// Read at most `limit` rows, exactly. A pool-bound query cannot see a
+    /// `Database` configuration, so a limit above
+    /// [`PaginationConfig::DEFAULT_MAX_LIMIT`] fails with `PAGE_LIMIT_EXCEEDED`
+    /// instead of being reduced. Without a limit the read is unbounded.
     pub fn limit(mut self, limit: i64) -> Self {
         let mut page = self.query.page.unwrap_or_default();
         page.limit = Some(limit);
         self.query.page = Some(page);
         self
+    }
+
+    /// Override [`PaginationConfig::DEFAULT_MAX_LIMIT`] for this read only.
+    ///
+    /// Trusted internal reads that carry their own bound use this. A
+    /// [`Self::limit`] above `maximum` still fails with `PAGE_LIMIT_EXCEEDED`.
+    /// Never pass a value a client chose without validating it first. A
+    /// negative `maximum` is treated as `0`.
+    pub fn with_max_limit(mut self, maximum: i64) -> Self {
+        self.max_limit = Some(maximum.max(0));
+        self
+    }
+
+    fn check_limit(&self) -> crate::Result<()> {
+        if let Some(limit) = self.query.page.as_ref().and_then(|page| page.limit) {
+            PaginationConfig::default()
+                .with_read_maximum(self.max_limit)
+                .checked_explicit_limit(limit)
+                .map_err(crate::graphql::errors::sqlx_error_from_public)?;
+        }
+        Ok(())
     }
 
     pub fn offset(mut self, offset: i64) -> Self {
@@ -4821,7 +5148,15 @@ where
     }
 
     pub async fn fetch_all(self) -> crate::Result<Vec<T>> {
-        self.query.fetch_all(&PoolRef { pool: self.pool }).await
+        self.check_limit()?;
+        // The limit is checked above, so the read applies it exactly.
+        self.query
+            .fetch_all_with_auth_and_pagination(
+                &PoolRef { pool: self.pool },
+                None,
+                PaginationConfig::unbounded(),
+            )
+            .await
     }
 
     pub async fn fetch_all_on<'e, E>(self, executor: E) -> crate::Result<Vec<T>>
@@ -4829,7 +5164,10 @@ where
         B: SqlxBackend,
         E: sqlx::Executor<'e, Database = <B as SqlxBackend>::Database> + Send + 'e,
     {
-        self.query.fetch_all_on(executor).await
+        self.check_limit()?;
+        self.query
+            .fetch_all_on_with_pagination(executor, PaginationConfig::unbounded())
+            .await
     }
 
     pub async fn fetch_one(self) -> crate::Result<Option<T>> {
@@ -4841,7 +5179,13 @@ where
         B: SqlxBackend,
         E: sqlx::Executor<'e, Database = <B as SqlxBackend>::Database> + Send + 'e,
     {
-        self.query.fetch_one_on(executor).await
+        self.check_limit()?;
+        Ok(self
+            .query
+            .fetch_all_on_with_pagination(executor, PaginationConfig::unbounded())
+            .await?
+            .into_iter()
+            .next())
     }
 
     pub async fn count(self) -> crate::Result<i64> {
