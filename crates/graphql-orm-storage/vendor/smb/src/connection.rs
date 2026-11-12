@@ -962,7 +962,7 @@ mod server_identity_tests {
     use futures_util::FutureExt;
     use smb_msg::{Header, HeaderFlags, Status};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
     use tokio::sync::Notify;
 
     const SERVER_GUID: Guid = Guid::MAX;
@@ -973,12 +973,12 @@ mod server_identity_tests {
         response: Vec<u8>,
         position: usize,
         request_sent: Arc<Notify>,
-        requests: Arc<AtomicUsize>,
+        commands: Arc<Mutex<Vec<u16>>>,
     }
 
     struct NotifyingWrite {
         request_sent: Arc<Notify>,
-        requests: Arc<AtomicUsize>,
+        commands: Arc<Mutex<Vec<u16>>>,
     }
 
     fn negotiate_response() -> Vec<u8> {
@@ -1039,7 +1039,7 @@ mod server_identity_tests {
         {
             let write = NotifyingWrite {
                 request_sent: self.request_sent.clone(),
-                requests: self.requests.clone(),
+                commands: self.commands.clone(),
             };
             Ok((self, Box::new(write)))
         }
@@ -1083,9 +1083,16 @@ mod server_identity_tests {
     impl SmbTransportWrite for NotifyingWrite {
         fn send_raw<'a>(
             &'a mut self,
-            _buf: &'a [u8],
+            buf: &'a [u8],
         ) -> BoxFuture<'a, smb_transport::error::Result<()>> {
-            self.requests.fetch_add(1, Ordering::SeqCst);
+            // The transport writes each message's frame length, then the
+            // message; record the command of every SMB2 message.
+            if let [0xfe, b'S', b'M', b'B', header @ ..] = buf
+                && header.len() >= 10
+            {
+                let command = u16::from_le_bytes([header[8], header[9]]);
+                self.commands.lock().unwrap().push(command);
+            }
             self.request_sent.notify_one();
             async { Ok(()) }.boxed()
         }
@@ -1104,14 +1111,16 @@ mod server_identity_tests {
     }
 
     /// Negotiates against the SMB 2.1 server with `config`, returning the
-    /// result and the number of requests the client sent.
-    async fn negotiate_with_config(config: ConnectionConfig) -> (crate::Result<Connection>, usize) {
-        let requests = Arc::new(AtomicUsize::new(0));
+    /// result and the SMB2 command of each message the client sent.
+    async fn negotiate_with_config(
+        config: ConnectionConfig,
+    ) -> (crate::Result<Connection>, Vec<u16>) {
+        let commands = Arc::new(Mutex::new(Vec::new()));
         let transport = NegotiateOnlyServer {
             response: negotiate_response(),
             position: 0,
             request_sent: Arc::new(Notify::new()),
-            requests: requests.clone(),
+            commands: commands.clone(),
         };
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(10),
@@ -1119,7 +1128,8 @@ mod server_identity_tests {
         )
         .await
         .expect("negotiation must complete");
-        (result, requests.load(Ordering::SeqCst))
+        let commands = commands.lock().unwrap().clone();
+        (result, commands)
     }
 
     #[tokio::test]
@@ -1127,7 +1137,7 @@ mod server_identity_tests {
         // The client offers only SMB 3.1.1; the server selects SMB 2.1 anyway,
         // as a party rewriting the negotiation could. Negotiation fails, and
         // nothing follows the NEGOTIATE request, so no credentials are sent.
-        let (result, requests) = negotiate_with_config(ConnectionConfig {
+        let (result, commands) = negotiate_with_config(ConnectionConfig {
             smb2_only_negotiate: true,
             min_dialect: Some(Dialect::Smb0311),
             max_dialect: None,
@@ -1139,7 +1149,11 @@ mod server_identity_tests {
             "{:?}",
             result.err()
         );
-        assert_eq!(requests, 1, "only the NEGOTIATE request may be sent");
+        assert_eq!(
+            commands,
+            [Command::Negotiate as u16],
+            "only the NEGOTIATE request may be sent"
+        );
     }
 
     #[tokio::test]

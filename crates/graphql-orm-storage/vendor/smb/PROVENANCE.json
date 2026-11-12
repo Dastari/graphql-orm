@@ -56,7 +56,7 @@
     {
       "id": "server-response-errors",
       "patch_file": "PATCHES/server-response-errors.patch",
-      "patch_sha256": "ef5fbb0874dde96f523d78c61b5773d678561296205891fa38315ec1a2869a19",
+      "patch_sha256": "491df9ced427f2a64f0a36cee43a0ad84bf173782f6912db6431754a41324adb",
       "applies_after": "PATCHES/resource-bounds-and-server-identity.patch",
       "runtime_changed_files": [
         "src/connection/transformer.rs",
@@ -64,7 +64,7 @@
         "src/resource.rs",
         "src/session/authenticator.rs"
       ],
-      "scope": "Owner-local hardening patch, not an upstream backport. Four server-reachable panics become typed errors: a transform nested inside a decrypted or decompressed payload is refused with Error::InvalidMessage; an async response header without an async ID is refused with Error::InvalidMessage; opening a file on a printer share is refused with Error::UnsupportedOperation, and dropping the unsupported handle closes it; a session key shorter than 16 bytes is refused with Error::InvalidState instead of being sliced. MS-SMB2 3.2.5.3.1 would right-pad a short key with zeros; this client fails closed instead. Includes the in-crate regression tests, and a test-only regression test in src/connection.rs that a server-selected dialect below ConnectionConfig::min_dialect fails negotiation with Error::NegotiationError after only the NEGOTIATE request was sent, so no credentials follow.",
+      "scope": "Owner-local hardening patch, not an upstream backport. Four server-reachable panics become typed errors: a transform nested inside a decrypted or decompressed payload is refused with Error::InvalidMessage; an async response header without an async ID is refused with Error::InvalidMessage; opening a file on a printer share is refused with Error::UnsupportedOperation, and dropping the unsupported handle closes it; a session key shorter than 16 bytes is refused with Error::InvalidState instead of being sliced. MS-SMB2 3.2.5.3.1 would right-pad a short key with zeros; this client fails closed instead. Includes the in-crate regression tests, and a test-only regression test in src/connection.rs that a server-selected dialect below ConnectionConfig::min_dialect fails negotiation with Error::NegotiationError and that NEGOTIATE was the only SMB2 message sent, so no credentials follow.",
       "upstream": "Upstream 0.12.0 is reported to no longer slice a short session key; the other three sites are not known to be fixed upstream. Replace with a reviewed upstream fix when one is adopted."
     }
   ],
@@ -573,7 +573,7 @@
     "src/connection/worker/single_worker.rs": "16c36362a3b4100c0290b94a99e19aefd0a0512494fdebf282b7bfc44c3a2a69",
     "src/connection/worker/worker_trait.rs": "66d24bd0dab53db0b41ce7c726bbeea93ba15d3552ca48dbc11c8e4581878938",
     "src/connection/worker.rs": "e62939d506059552d112a4dd4bc982c54f80a479eb01a3c83a5a17e4752b1958",
-    "src/connection.rs": "81a8e5f1d1e07033ebdc8ae2f6d2869f239d5c4b47c6dfc57bb60691fd68ff9f",
+    "src/connection.rs": "3f1ef621c276fd07b8f505c5aaa420154d51950f974a667db23404dc10886d0e",
     "src/crypto/encryption.rs": "6cbf79bec47a488bcfd41c2ef8911428bd2816a209034370505c75a91045ee14",
     "src/crypto/kbkdf.rs": "ddb22a78289486f828badccd2e7edfabc7390edbe069340cde74b3ad3878531d",
     "src/crypto/signing.rs": "d5452c66e11db57a201cff6db00e06c2c371ae1ffaa79f0cc0f237c9436c497b",
