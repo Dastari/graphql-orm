@@ -10,6 +10,52 @@ supersedes: []
 
 # Migration Guide
 
+## 0.131.0 to 0.132.0: credential authority for provider endpoint changes
+
+Updating a provider profile that has a credential attached now needs
+`ManageProviderCredentials` as well as `ManageProviderProfiles` when the update
+changes the profile's `provider_kind` or `base_url`. These two fields decide
+where the stored credential is sent. The endpoint is compared after the
+library's URL normalization: surrounding whitespace is trimmed, the scheme and
+host are lowercased, an internationalized host is IDNA-encoded, a default port
+is dropped, `.` and `..` path segments are resolved, and an empty path becomes
+`/`. Any other difference counts as a
+change, including a trailing slash on a non-empty path, a different path, and a
+percent-encoded spelling.
+
+- `OrmAiConfigurationService::upsert_provider_profile` (GraphQL
+  `upsertAiProviderProfile`) calls the host `AiConfigurationAccessPolicy` a
+  second time, with `ManageProviderCredentials` and the profile's scope, only
+  for such an update. If the policy denies it, the mutation returns
+  `Forbidden` (`AI_FORBIDDEN`), writes no row and appends no audit event.
+- Inside the update transaction the row must still have the expected
+  version, so a concurrent change, such as a credential being attached,
+  returns `Conflict`. The credential condition is then checked again against
+  that row.
+- Converting a credentialed profile to `LocalHarness` is a provider-kind
+  change. Without `ManageProviderCredentials` it now returns `Forbidden`; with
+  it, the existing refusal still returns `InvalidInput` until the credential is
+  removed.
+- An authorized change keeps the credential and is audited as
+  `ai.provider_profile.upsert` with reason code `credentialed_endpoint_changed`
+  rather than `configuration_updated`.
+- Other updates are unchanged: renaming, enabling or disabling, editing the
+  OpenAI-compatible capability contract, and re-pointing a profile with no
+  credential need only `ManageProviderProfiles`.
+
+Host action: an operator who holds `ManageProviderProfiles` but not
+`ManageProviderCredentials` can no longer move a credentialed profile. Either
+grant both actions to that role, have a credential administrator make the
+change, or remove the credential first (`removeAiProviderCredential`), move the
+profile, and set a credential for the new endpoint. If your access policy
+grants actions by matching on `AiConfigurationAction`, check that it answers
+`ManageProviderCredentials` for the profile's scope as intended. Credential
+administrators should check a profile's current provider kind and endpoint
+before setting a credential on it, because that is where the credential is sent.
+
+No GraphQL SDL, public Rust API, persistent schema or data migration change.
+`AI_SCHEMA_MODULE_VERSION` is unchanged.
+
 ## 0.130.0 to 0.131.0: legacy delegated stored principal references
 
 0.130.0 stopped new submissions from persisting a delegated or sessionless
