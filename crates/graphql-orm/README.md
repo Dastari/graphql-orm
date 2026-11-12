@@ -10,6 +10,14 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.129.0 authorizes every field that a `where`, `orderBy`, bulk-write
+filter or full-text search source references with the same field read policy
+as a selected field, enforces `searchable(policy)` keys at query time, and
+makes relation traversal apply the target entity's auth mode and operation
+scopes. Native search refuses invalid filters, and host callback failures on
+the remaining generated paths are sanitized. Upgrade ORM/macros together; see
+the [root migration guide](../../MIGRATION.md#01280-to-01290-field-authority-for-filters-ordering-search-and-relation-targets).
+
 Version 0.128.0 makes Rust repository limits exact or refused. An explicit
 `limit(n)` above the database's maximum page limit, or an unlimited
 `fetch_all` that matches more rows than that maximum, fails with

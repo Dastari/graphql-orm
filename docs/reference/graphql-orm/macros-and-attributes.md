@@ -581,6 +581,13 @@ This creates a generated resolver guard and operation-catalog metadata. It
 does not authorize custom resolvers, replace field/row/database policy, or
 make an arbitrary scope template safe.
 
+Relation traversal into the entity enforces the same requirement: `list` for
+to-many relation fields, related-row filters and `order_aggregate` counts, and
+`single_read` for to-one relation fields. If that category is not declared but
+another read category is, traversal requires every declared read category; a
+templated category refuses traversal. See
+[relation target auth mode and operation scopes](entities-and-relations.md#relation-target-auth-mode-and-operation-scopes).
+
 ## AI mutation execution classification
 
 Mutation execution is prohibited by default. An entity may classify only the
