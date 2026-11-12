@@ -551,8 +551,8 @@ pub const KEYSET_READ_VISIBILITY_REFUSAL_REASON: &str = "KEYSET_REQUIRES_COMPLET
 
 /// Public message carried by a refused GraphQL Keyset request.
 pub const KEYSET_READ_VISIBILITY_REFUSAL_MESSAGE: &str = "keyset pagination is not configured \
-    for this root under its read policy; use the bounded scan root, or declare complete read \
-    visibility for this entity";
+    for this root under its read policy; page with a bounded scan instead, or declare complete \
+    read visibility for this entity";
 
 fn keyset_read_visibility_refusal() -> async_graphql::Error {
     use async_graphql::ErrorExtensions;

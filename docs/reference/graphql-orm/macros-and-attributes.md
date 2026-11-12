@@ -786,8 +786,8 @@ A generated Keyset root (`recordsKeyset`) serves a GraphQL request only when
 `AUTHORIZATION_MISCONFIGURED`, the message
 `KEYSET_READ_VISIBILITY_REFUSAL_MESSAGE` and the `reason` extension
 `KEYSET_REQUIRES_COMPLETE_READ_VISIBILITY`
-(`KEYSET_READ_VISIBILITY_REFUSAL_REASON`). The refusal points to the bounded
-scan root and says nothing about the policy itself. Keyset cannot advance
+(`KEYSET_READ_VISIBILITY_REFUSAL_REASON`). The refusal suggests a bounded scan
+or a `Complete` declaration, and says nothing about the policy itself. Keyset cannot advance
 through rows a callback rejects.
 
 `read_visibility` is asynchronous and request-dependent, so a row policy
