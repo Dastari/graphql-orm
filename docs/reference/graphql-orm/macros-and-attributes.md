@@ -49,7 +49,7 @@ surface. In a build with more than one backend feature, `backend` is required.
 | `description` | nonempty string | at most 1,024 bytes; no control characters |
 | `classification` | `"public"`, `"internal"`, `"confidential"`, `"restricted"`, or `"secret"` | `"internal"`; inherited by ordinary public fields |
 | `backend` | `"sqlite"`, `"postgres"`, or `"mssql"` | inferred only when exactly one backend feature is enabled |
-| `default_sort` | string | no declared default |
+| `default_sort` | trusted backend SQL `ORDER BY` text | every primary-key column in declaration order (physical `db_column` names); `id` when keyed by `id` |
 | `schema_policy` | `"managed"`, `"external_read_only"`, `"external_writable"`, `"validate_only"`, or `"plan_only"` | no declared policy |
 | `auth` | `"required"`, `"optional"`, or `"none"` | schema-root mode, otherwise runtime compatibility default |
 | `schema_only`, `append_only`, `repository_mutations`, `aggregate`, `backup` | boolean | `false`, except `backup` has no explicit declaration; `aggregate = true` opts into a bounded generated GraphQL aggregate root |
@@ -107,7 +107,7 @@ still subject to entity policy and backend/schema-policy restrictions.
 | Attribute | Accepted values and effect |
 | --- | --- |
 | `#[primary_key]` | marks a key field; generated single-record operations require a complete key |
-| `#[filterable]` / `#[filterable(type = "…")]` | enables a filter; bare form selects `"string"` metadata |
+| `#[filterable]` / `#[filterable(type = "…")]` | enables a filter; bare form selects `"string"` metadata; only `type` is accepted |
 | `#[sortable]`, `#[unique]` | enables ordering / declares a unique field |
 | `#[db_column = "…"]` or `#[graphql_orm(db_column = "…")]` | chooses the physical column name |
 | `#[graphql(name = "…")]` | chooses GraphQL field name; `#[serde(rename = "…")]` records the serialization name |
@@ -128,8 +128,8 @@ still subject to entity policy and backend/schema-policy restrictions.
 | `#[graphql_orm(mssql_money)]` | SQL Server only: exact native `MONEY` field as `rust_decimal::Decimal` or `Option<Decimal>`; scale 4 and signed 64-bit scaled range; cannot be combined with `decimal(...)` |
 | `#[graphql_orm(auto_generated = bool)]` | declares whether the value is database-generated |
 | `#[date_field]`, `#[boolean_field]`, `#[json_field]`, `#[graphql_orm(json)]` | type metadata; JSON disables filter/order generation |
-| `#[transform(write = "…", read = "…")]` | names generated write/read transforms |
-| `#[backup(include | exclude | redact)]` | per-field backup treatment |
+| `#[transform(write = "…", read = "…")]` | names generated write/read transforms; other options are rejected |
+| `#[backup(include | exclude | redact)]` | per-field backup treatment; exactly one policy |
 
 On a `GraphQLEntity` + `SimpleObject` entity, `private`, `read = false`, and `input_only` must
 also remove the object getter: add `#[graphql(skip)]`, or place
@@ -283,7 +283,10 @@ pub account: Option<Account>;
 An entity with generated relation fields derives `GraphQLRelations` and `SimpleObject` and declares
 `#[graphql(complex)]`; it can't use the generated object, because `GraphQLEntity` and the relation
 resolvers would both implement the GraphQL type. `GraphQLRelations` without `#[graphql(complex)]` is
-a compile error that names this declaration. The one exception is an entity with `schema_only = true`,
+a compile error that names this declaration. `complex` may appear anywhere among the options,
+in one attribute or a separate one: `#[graphql(rename_fields = "PascalCase", complex)]` is
+equivalent to `#[graphql(complex, rename_fields = "PascalCase")]`. A relation without `from` uses
+the primary-key field as its source. The one exception is an entity with `schema_only = true`,
 which has no generated object. Each relation target also needs a `BatchLoadEntity` implementation
 ([#285](https://github.com/Dastari/graphql-orm/issues/285)). For generated relations the keys come
 from the relation, so `batch_column` and `batch_key_from_row` can name the primary key:
@@ -663,7 +666,9 @@ impl ApplicationQueries {
 authoritative resolver policy exists; it does not describe or execute that
 policy. Resolver and argument names honor explicit `#[graphql(name = "…")]`
 attributes, then `async-graphql`'s default camel-case convention. Descriptions
-use the same explicit/doc/fallback rules and are emitted into SDL. Unknown attributes,
+use the same explicit/doc/fallback rules and are emitted into SDL. A generated
+argument description is merged into the argument's existing `#[graphql(...)]`
+options, so the argument keeps a single `graphql` attribute. Unknown attributes,
 unbounded descriptions, malformed GraphQL types, duplicate root coordinates,
 and stale fingerprints fail closed.
 

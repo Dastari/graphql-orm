@@ -1,0 +1,5 @@
+error: expected `,`
+  --> tests/ui/custom_argument_graphql_malformed.rs:10:63
+   |
+10 |     async fn count_volumes(&self, #[graphql(name = "shelfKey" default = 1)] shelf: i32) -> i32 {
+   |                                                               ^^^^^^^

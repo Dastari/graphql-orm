@@ -34,6 +34,12 @@ work on tables with enabled triggers, and MSSQL `rows_affected` reports the
 statement's own count. Upgrade ORM/macros together; see the
 [root migration guide](../../MIGRATION.md#01260-mssql-writes-on-tables-with-triggers).
 
+Version 0.126.0 orders an entity without `default_sort` by its primary-key
+columns instead of a literal `id`, and reads combined `#[graphql(...)]` and
+`#[serde(...)]` options in any order. `#[backup]`, `#[transform]` and
+`#[filterable]` reject unknown options. Upgrade ORM/macros together; see the
+[root migration guide](../../MIGRATION.md#01260-primary-key-default-ordering-and-strict-attribute-options).
+
 Version 0.125.0 records PostgreSQL change-journal entries in the database
 instead of the runtime role, and journaled writes require the recorder
 trigger. Upgrade ORM/macros together; see the

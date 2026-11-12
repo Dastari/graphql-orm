@@ -251,7 +251,7 @@ pub(crate) fn generate_graphql_relations(
 
     let graphql_rename_fields = entity_meta.graphql_rename_fields.as_deref();
     let serde_rename_all = entity_meta.serde_rename_all.as_deref();
-    let legacy_graphql_complex = has_graphql_complex(&input.attrs);
+    let legacy_graphql_complex = has_graphql_complex(&input.attrs)?;
     let parsed_fields = collect_parsed_fields(fields.iter())?;
 
     // Find primary key field

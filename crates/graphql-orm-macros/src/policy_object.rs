@@ -79,7 +79,7 @@ fn combine(
 }
 
 pub(crate) fn expand(mut input: ItemStruct) -> syn::Result<proc_macro2::TokenStream> {
-    if !has_graphql_complex(&input.attrs) {
+    if !has_graphql_complex(&input.attrs)? {
         return Err(syn::Error::new_spanned(
             &input.ident,
             "graphql_policy_object requires #[graphql(complex)] and SimpleObject",
