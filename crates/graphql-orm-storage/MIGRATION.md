@@ -36,12 +36,27 @@ Update the storage requirement to 0.10.0 and refresh the consumer lockfile.
    never have used it. On S3 or SMB, move any such objects to another key
    with the provider's own tools before upgrading; this crate can no longer
    address them.
-3. **Local listing prefixes.** A local `list_blobs`, `list_blobs_page` or
+
+   The same applies to configured prefixes. An S3 `key_prefix` or SMB
+   `root_prefix` whose first component is in the reserved namespace now makes
+   the configuration invalid: `SmbStorageConfig::validate`, and so `connect`
+   and `probe`, refuse it, and every S3 operation, including an empty-prefix
+   listing, fails with `InvalidStorageKey` before any request. Move such a
+   repository to another prefix.
+3. **Local aliases and colons.** On local roots the reservation is by file
+   identity: a key, prefix or bucket whose first component resolves to
+   `<root>/.graphql-orm-storage` under another name, through case folding, a
+   Windows short name or a link, is refused. Local writes now create that
+   directory up front. Local keys, prefixes and buckets also refuse `:` in any
+   component, and a stored file whose name contains `:` is no longer listed.
+   Keys such as ISO timestamps with `:` must be renamed, for example to use
+   `-`, before upgrading; S3 and SMB keys are not affected by the colon rule.
+4. **Local listing prefixes.** A local `list_blobs`, `list_blobs_page` or
    `list_objects` prefix is now a string prefix, as on S3 and SMB: `a` also
    lists `ab` and `a-b/x`. To list one directory only, end the prefix with `/`
    (`a/`), which every provider now accepts, or filter the result. A custom
    `BlobStore` must accept a trailing `/` and treat prefixes the same way.
-4. **Listings skip unaddressable names.** Names that are not valid keys,
+5. **Listings skip unaddressable names.** Names that are not valid keys,
    including SMB names that are not valid UTF-16, local names that are not
    valid UTF-8 or contain `\`, and S3 folder markers, are no longer listed.
    They could not be read back through their listed key.

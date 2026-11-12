@@ -3530,9 +3530,15 @@ mod tests {
             config.server = server.to_string();
             assert!(config.validate().is_err(), "accepted {server}");
         }
-        let mut config = config();
-        config.root_prefix = Some("backups/../escape".to_string());
-        assert!(config.validate().is_err());
+        for prefix in [
+            "backups/../escape",
+            ".graphql-orm-storage",
+            ".Graphql-Orm-Storage/backups",
+        ] {
+            let mut config = config();
+            config.root_prefix = Some(prefix.to_string());
+            assert!(config.validate().is_err(), "accepted {prefix}");
+        }
     }
 
     #[test]

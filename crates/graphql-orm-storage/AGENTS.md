@@ -87,7 +87,10 @@ This crate is a reusable storage companion for applications that use `graphql-or
   Run `tests/support/listing_contract.rs` against every provider.
 - `validate_blob_key` reserves the internal `.graphql-orm-storage` namespace
   as a key's first component and as a bucket. Internal code addresses it by
-  path, never through a caller key.
+  path, never through a caller key. On local roots the reservation is by file
+  identity (`LocalStorageBackend::check_root_name`): every local entry point
+  that takes a key, prefix or bucket must call it, and writes must call
+  `ensure_internal_dir` first. Never replace it with name folding.
 - The SMB default minimum dialect is SMB 3.1.1. Never lower the default; a
   lower dialect is an explicit host opt-in.
 

@@ -137,10 +137,12 @@ does not serialize credentials.
 
 The client offers only the dialects from `min_dialect` up, and a connection
 whose server selects a lower dialect fails with a non-retryable
-`SecurityNegotiation` error before session setup. A server that supports none
-of the offered dialects refuses the negotiation itself, which the backend
-reports as a non-retryable `Protocol` error. Either way, no credentials are
-sent.
+`SecurityNegotiation` error before session setup. The vendored client's
+negotiation check enforces this and has its own regression test; the
+backend's check of the negotiated dialect after connecting is only a backstop.
+A server that supports none of the offered dialects refuses the negotiation
+itself, which the backend reports as a non-retryable `Protocol` error. Either
+way, no credentials are sent.
 
 The default minimum is SMB 3.1.1, the only dialect whose negotiation is bound
 to the session by pre-authentication integrity. The vendored client does not

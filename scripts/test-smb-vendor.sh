@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Run the owner-local SMB vendor unit tests (including the GHSA-439h-2cx8-xwgx
 # verify-before-status regression tests, the resource-bound and
-# server-identity regression tests, and the server-response error regression
-# tests) with storage's selected features.
+# server-identity regression tests, the server-response error regression
+# tests, and the server-selected dialect-minimum regression test) with
+# storage's selected features.
 #
 # The vendored package is an isolated, excluded workspace. Tests run on a
 # temporary copy with the archived upstream lockfile, under --locked, so the

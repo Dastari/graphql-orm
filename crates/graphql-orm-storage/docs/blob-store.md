@@ -213,6 +213,18 @@ portable between providers. The name is reserved only as a key's first
 component and as a streaming-object bucket: `data/.graphql-orm-storage/x`
 is an ordinary key.
 
+On local roots the reservation is by file identity, not only by spelling. A
+case-insensitive filesystem resolves other spellings to the same directory,
+for example a Unicode case fold such as `ſ` for `s` on APFS, or a Windows 8.3
+short name. `LocalStorageBackend` therefore also refuses any key, listing
+prefix or bucket whose first component resolves to the same filesystem object
+as `<root>/.graphql-orm-storage`, compared by device and file identity, and a
+listing never enters a root entry that does. Writes create the internal
+directory first, so an aliasing name can never claim it before the backend
+does. Local keys, prefixes and buckets also refuse `:` in any component, which
+names an alternate data stream on Windows (`name::$INDEX_ALLOCATION`), and a
+stored name containing `:` is not listed.
+
 `list_blobs("")` is allowed and lists all blobs.
 
 ## Local filesystem trust boundary

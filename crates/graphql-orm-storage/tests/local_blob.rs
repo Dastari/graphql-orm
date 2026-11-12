@@ -679,7 +679,7 @@ const TRICKY_COMPONENTS: &[&str] = &[
     "a!",
     "a+",
     "a0",
-    "a:",
+    "a;",
     "a~",
     "ab",
     "a_",
@@ -840,4 +840,193 @@ async fn local_blob_pagination_does_not_skip_a_sibling_sorting_below_a_directory
     let expected = ["a-b", "a.b/y", "a/x", "b"].map(String::from).to_vec();
     assert_eq!(backend.list_blobs("").await.expect("list all"), expected);
     assert_eq!(drain_pages(&backend, "", 1).await, expected);
+}
+
+/// Asserts that a local operation refused its key as invalid.
+fn assert_refused_key<T: std::fmt::Debug>(result: Result<T, StorageError>, what: &str) {
+    assert!(
+        matches!(result, Err(StorageError::InvalidStorageKey { .. })),
+        "{what} must be refused: {result:?}"
+    );
+}
+
+/// A name that resolves to the internal directory is refused by identity, not
+/// by spelling. A case-insensitive filesystem resolves `.GRAPHQL-ORM-ſTORAGE`
+/// (or a Windows short name) to the same directory; a symbolic link stands in
+/// for such an alias on a case-sensitive test filesystem.
+#[cfg(unix)]
+#[tokio::test]
+async fn local_refuses_any_name_that_resolves_to_the_internal_directory() {
+    use graphql_orm_storage::{
+        MultipartBlobStore, MultipartStartOptions, ObjectMetadata, StreamingObjectStore,
+    };
+
+    let temp = TempDir::new().expect("temp dir");
+    let internal = temp.path().join(".graphql-orm-storage");
+    std::fs::create_dir_all(internal.join("multipart")).expect("internal dir");
+    std::fs::write(internal.join("multipart/x"), b"internal").expect("internal file");
+    std::os::unix::fs::symlink(&internal, temp.path().join("alias")).expect("alias");
+    let backend = LocalStorageBackend::new(temp.path());
+    backend
+        .put_blob(
+            "kept/a",
+            StorageByteStream::from_bytes(Bytes::from_static(b"x")),
+            BlobPutOptions::default(),
+        )
+        .await
+        .expect("put an ordinary key");
+
+    for key in ["alias", "alias/multipart/x", "alias/new"] {
+        assert_refused_key(
+            backend
+                .put_blob(
+                    key,
+                    StorageByteStream::from_bytes(Bytes::from_static(b"overwrite")),
+                    BlobPutOptions::default(),
+                )
+                .await,
+            key,
+        );
+        assert_refused_key(
+            backend
+                .put_blob_if_not_exists(
+                    key,
+                    StorageByteStream::from_bytes(Bytes::from_static(b"x")),
+                    BlobPutOptions::default(),
+                )
+                .await,
+            key,
+        );
+        assert_refused_key(backend.get_blob(key).await, key);
+        assert_refused_key(backend.blob_exists(key).await, key);
+        assert_refused_key(backend.head_blob(key).await, key);
+        assert_refused_key(backend.delete_blob(key).await, key);
+        assert_refused_key(backend.copy_blob(key, "kept/copy").await, key);
+        assert_refused_key(backend.copy_blob("kept/a", key).await, key);
+        assert_refused_key(
+            backend
+                .start_multipart(key, MultipartStartOptions::default())
+                .await,
+            key,
+        );
+    }
+    for prefix in ["alias", "alias/", "alias/multipart"] {
+        assert_refused_key(backend.list_blobs(prefix).await, prefix);
+        assert_refused_key(
+            backend.list_incomplete_multipart(prefix, None, 10).await,
+            prefix,
+        );
+    }
+    // A partial name lists around the alias, never through it.
+    assert_eq!(backend.list_blobs("").await.expect("list"), ["kept/a"]);
+    assert!(backend.list_blobs("al").await.expect("list").is_empty());
+    assert_eq!(
+        backend
+            .list_blobs_page("", None, 1)
+            .await
+            .expect("page")
+            .keys,
+        ["kept/a"]
+    );
+
+    // A bucket is refused the same way.
+    assert_refused_key(
+        backend
+            .put_object_stream(
+                "alias",
+                "objects/x",
+                None,
+                ObjectMetadata::new(),
+                StorageByteStream::from_bytes(Bytes::from_static(b"x")),
+            )
+            .await,
+        "bucket alias",
+    );
+    assert_refused_key(backend.list_objects("alias", "").await, "bucket alias");
+    assert_refused_key(
+        backend.get_object_metadata("alias", "multipart/x").await,
+        "bucket alias",
+    );
+
+    assert_eq!(
+        std::fs::read(internal.join("multipart/x")).expect("read"),
+        b"internal"
+    );
+    assert!(!internal.join("new").exists());
+}
+
+/// A write creates the internal directory before it checks identities, so a
+/// name that would alias it on a case-insensitive filesystem can never claim
+/// that name first.
+#[tokio::test]
+async fn local_writes_create_the_internal_directory_first() {
+    let temp = TempDir::new().expect("temp dir");
+    let backend = LocalStorageBackend::new(temp.path());
+    backend
+        .put_blob(
+            "a",
+            StorageByteStream::from_bytes(Bytes::from_static(b"x")),
+            BlobPutOptions::default(),
+        )
+        .await
+        .expect("put");
+    assert!(temp.path().join(".graphql-orm-storage").is_dir());
+    assert_eq!(backend.list_blobs("").await.expect("list"), ["a"]);
+}
+
+/// `:` would name an alternate data stream on Windows, as in
+/// `.graphql-orm-storage::$INDEX_ALLOCATION`; local keys refuse it everywhere.
+#[tokio::test]
+async fn local_refuses_colons_in_keys_buckets_and_prefixes() {
+    use graphql_orm_storage::{ObjectMetadata, StreamingObjectStore};
+
+    let temp = TempDir::new().expect("temp dir");
+    let backend = LocalStorageBackend::new(temp.path());
+    for key in [
+        "a:b",
+        "dir/x::$INDEX_ALLOCATION",
+        ".graphql-orm-storage::$DATA",
+    ] {
+        assert_refused_key(
+            backend
+                .put_blob(
+                    key,
+                    StorageByteStream::from_bytes(Bytes::from_static(b"x")),
+                    BlobPutOptions::default(),
+                )
+                .await,
+            key,
+        );
+        assert_refused_key(backend.get_blob(key).await, key);
+        assert_refused_key(backend.list_blobs(key).await, key);
+    }
+    assert_refused_key(
+        backend
+            .put_object_stream(
+                "bucket:x",
+                "a",
+                None,
+                ObjectMetadata::new(),
+                StorageByteStream::from_bytes(Bytes::from_static(b"x")),
+            )
+            .await,
+        "bucket",
+    );
+    assert_refused_key(
+        backend
+            .put_object_stream(
+                "bucket",
+                "a:b",
+                None,
+                ObjectMetadata::new(),
+                StorageByteStream::from_bytes(Bytes::from_static(b"x")),
+            )
+            .await,
+        "object key",
+    );
+    // A stored name with a colon cannot be addressed, so it is not listed.
+    std::fs::create_dir_all(temp.path().join("dir")).expect("mkdir");
+    std::fs::write(temp.path().join("dir/c:d"), b"x").expect("write");
+    std::fs::write(temp.path().join("dir/e"), b"x").expect("write");
+    assert_eq!(backend.list_blobs("").await.expect("list"), ["dir/e"]);
 }

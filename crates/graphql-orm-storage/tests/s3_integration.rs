@@ -212,3 +212,43 @@ async fn single_attempt_delete_does_not_replay_after_lost_response_and_replaceme
     assert_eq!(deletes.load(Ordering::SeqCst), 1);
     assert!(replacement_alive.load(Ordering::SeqCst));
 }
+
+/// A `key_prefix` in the reserved internal namespace makes every operation
+/// fail before any request, listings included.
+#[tokio::test]
+async fn a_key_prefix_in_the_reserved_namespace_is_refused_without_a_request() {
+    for key_prefix in [".graphql-orm-storage", ".GRAPHQL-ORM-STORAGE/tenant"] {
+        let backend = S3StorageBackend::new(S3StorageConfig {
+            // Nothing listens here; a request would fail with another error.
+            endpoint_url: "http://127.0.0.1:9".to_string(),
+            region: "us-east-1".to_string(),
+            bucket: "bucket".to_string(),
+            key_prefix: Some(key_prefix.to_string()),
+            access_key_id: "access".to_string(),
+            secret_access_key: "secret".to_string(),
+            path_style: true,
+        });
+        let refused = |result: Result<(), graphql_orm_storage::StorageError>| {
+            assert!(
+                matches!(
+                    result,
+                    Err(graphql_orm_storage::StorageError::InvalidStorageKey { .. })
+                ),
+                "{key_prefix}: {result:?}"
+            );
+        };
+        refused(backend.list_blobs("").await.map(drop));
+        refused(backend.list_blobs("a").await.map(drop));
+        refused(backend.blob_exists("a").await.map(drop));
+        refused(
+            backend
+                .put_blob(
+                    "a",
+                    StorageByteStream::from_bytes(Bytes::from_static(b"x")),
+                    BlobPutOptions::default(),
+                )
+                .await
+                .map(drop),
+        );
+    }
+}

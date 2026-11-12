@@ -1,3 +1,108 @@
+diff --git a/src/connection.rs b/src/connection.rs
+index 41b65dcb..2ac27f26 100644
+--- a/src/connection.rs
++++ b/src/connection.rs
+@@ -962,6 +962,7 @@ mod server_identity_tests {
+     use futures_util::FutureExt;
+     use smb_msg::{Header, HeaderFlags, Status};
+     use std::sync::Arc;
++    use std::sync::atomic::{AtomicUsize, Ordering};
+     use tokio::sync::Notify;
+ 
+     const SERVER_GUID: Guid = Guid::MAX;
+@@ -972,10 +973,12 @@ mod server_identity_tests {
+         response: Vec<u8>,
+         position: usize,
+         request_sent: Arc<Notify>,
++        requests: Arc<AtomicUsize>,
+     }
+ 
+     struct NotifyingWrite {
+         request_sent: Arc<Notify>,
++        requests: Arc<AtomicUsize>,
+     }
+ 
+     fn negotiate_response() -> Vec<u8> {
+@@ -1036,6 +1039,7 @@ mod server_identity_tests {
+         {
+             let write = NotifyingWrite {
+                 request_sent: self.request_sent.clone(),
++                requests: self.requests.clone(),
+             };
+             Ok((self, Box::new(write)))
+         }
+@@ -1081,30 +1085,63 @@ mod server_identity_tests {
+             &'a mut self,
+             _buf: &'a [u8],
+         ) -> BoxFuture<'a, smb_transport::error::Result<()>> {
++            self.requests.fetch_add(1, Ordering::SeqCst);
+             self.request_sent.notify_one();
+             async { Ok(()) }.boxed()
+         }
+     }
+ 
+     async fn negotiate_with(expected_server_guid: Option<Guid>) -> crate::Result<Connection> {
+-        let transport = NegotiateOnlyServer {
+-            response: negotiate_response(),
+-            position: 0,
+-            request_sent: Arc::new(Notify::new()),
+-        };
+-        let config = ConnectionConfig {
++        negotiate_with_config(ConnectionConfig {
+             smb2_only_negotiate: true,
+             min_dialect: Some(Dialect::Smb021),
+             max_dialect: Some(Dialect::Smb021),
+             expected_server_guid,
+             ..ConnectionConfig::default()
++        })
++        .await
++        .0
++    }
++
++    /// Negotiates against the SMB 2.1 server with `config`, returning the
++    /// result and the number of requests the client sent.
++    async fn negotiate_with_config(
++        config: ConnectionConfig,
++    ) -> (crate::Result<Connection>, usize) {
++        let requests = Arc::new(AtomicUsize::new(0));
++        let transport = NegotiateOnlyServer {
++            response: negotiate_response(),
++            position: 0,
++            request_sent: Arc::new(Notify::new()),
++            requests: requests.clone(),
+         };
+-        tokio::time::timeout(
++        let result = tokio::time::timeout(
+             std::time::Duration::from_secs(10),
+             Connection::from_transport(Box::new(transport), "server", Guid::generate(), config),
+         )
+         .await
+-        .expect("negotiation must complete")
++        .expect("negotiation must complete");
++        (result, requests.load(Ordering::SeqCst))
++    }
++
++    #[tokio::test]
++    async fn a_server_selected_dialect_below_the_minimum_is_refused_at_negotiation() {
++        // The client offers only SMB 3.1.1; the server selects SMB 2.1 anyway,
++        // as a party rewriting the negotiation could. Negotiation fails, and
++        // nothing follows the NEGOTIATE request, so no credentials are sent.
++        let (result, requests) = negotiate_with_config(ConnectionConfig {
++            smb2_only_negotiate: true,
++            min_dialect: Some(Dialect::Smb0311),
++            max_dialect: None,
++            ..ConnectionConfig::default()
++        })
++        .await;
++        assert!(
++            matches!(result, Err(Error::NegotiationError(_))),
++            "{:?}",
++            result.err()
++        );
++        assert_eq!(requests, 1, "only the NEGOTIATE request may be sent");
+     }
+ 
+     #[tokio::test]
 diff --git a/src/connection/transformer.rs b/src/connection/transformer.rs
 index d5b09e4a..3d5cc62c 100644
 --- a/src/connection/transformer.rs

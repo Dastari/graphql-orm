@@ -23,7 +23,8 @@ use crate::{
 };
 
 /// Internal staging and metadata directory at the root. Caller keys cannot
-/// address it: [`validate_blob_key`] reserves its name.
+/// address it: [`validate_blob_key`] reserves its name, and
+/// [`LocalStorageBackend`] refuses any other name that resolves to it.
 pub(crate) const INTERNAL_STORAGE_DIR: &str = crate::blob::INTERNAL_NAMESPACE;
 const OBJECT_METADATA_DIR: &str = "object-metadata";
 /// Most directories a backend remembers as durable before it forgets them all.
@@ -122,18 +123,23 @@ impl LocalStorageBackend {
 
     pub(crate) fn path_for(&self, key: &str) -> Result<PathBuf, StorageError> {
         validate_blob_key(key)?;
+        self.check_root_name(key)?;
         Ok(self.root.join(Path::new(key)))
     }
 
     fn object_path_for(&self, bucket: &str, key: &str) -> Result<PathBuf, StorageError> {
         validate_object_bucket(bucket)?;
         validate_blob_key(key)?;
+        self.check_root_name(bucket)?;
+        refuse_colon(key)?;
         Ok(self.root.join(bucket).join(Path::new(key)))
     }
 
     fn object_metadata_path_for(&self, bucket: &str, key: &str) -> Result<PathBuf, StorageError> {
         validate_object_bucket(bucket)?;
         validate_blob_key(key)?;
+        self.check_root_name(bucket)?;
+        refuse_colon(key)?;
         let path = self
             .root
             .join(INTERNAL_STORAGE_DIR)
@@ -148,6 +154,54 @@ impl LocalStorageBackend {
             })?;
         Ok(path.with_file_name(format!("{file_name}.metadata.json")))
     }
+}
+
+impl LocalStorageBackend {
+    fn internal_dir(&self) -> PathBuf {
+        self.root.join(INTERNAL_STORAGE_DIR)
+    }
+
+    /// Creates the internal directory if it is missing. Writes call this before
+    /// they check names, so a name that a case-insensitive or aliasing
+    /// filesystem resolves to the internal directory can never claim it first:
+    /// it resolves to the existing directory and [`Self::check_root_name`]
+    /// refuses it. Best effort; a write that cannot create it fails on its own.
+    pub(crate) fn ensure_internal_dir(&self) {
+        let _ = std::fs::create_dir_all(self.internal_dir());
+    }
+
+    /// Whether `path` resolves to the internal directory, whatever its
+    /// spelling: another case, a Unicode case fold, a Windows short name or a
+    /// link. A path that does not exist or cannot be opened is not an alias;
+    /// the operation on it fails or creates an ordinary entry.
+    fn aliases_internal_dir(&self, path: &Path) -> bool {
+        same_file::is_same_file(path, self.internal_dir()).unwrap_or(false)
+    }
+
+    /// Local checks for a caller's root-relative key, listing prefix or bucket,
+    /// after the shared lexical validation: no component contains `:`, which
+    /// names an alternate data stream on Windows, and the first component does
+    /// not resolve to the internal directory.
+    pub(crate) fn check_root_name(&self, name: &str) -> Result<(), StorageError> {
+        refuse_colon(name)?;
+        let first = name.split('/').next().unwrap_or_default();
+        if !first.is_empty() && self.aliases_internal_dir(&self.root.join(first)) {
+            return Err(StorageError::InvalidStorageKey {
+                key: name.to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Refuses a local key or prefix containing `:`.
+fn refuse_colon(name: &str) -> Result<(), StorageError> {
+    if name.contains(':') {
+        return Err(StorageError::InvalidStorageKey {
+            key: name.to_string(),
+        });
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -173,6 +227,7 @@ impl BlobStore for LocalStorageBackend {
         body: StorageByteStream,
         _options: BlobPutOptions,
     ) -> Result<BlobWriteOutcome, StorageError> {
+        self.ensure_internal_dir();
         let path = self.path_for(key)?;
         let temp_path = temp_path_for(&path, key)?;
         self.create_parent_dir(&path).await?;
@@ -202,6 +257,7 @@ impl BlobStore for LocalStorageBackend {
         body: StorageByteStream,
         _options: BlobPutOptions,
     ) -> Result<Option<BlobWriteOutcome>, StorageError> {
+        self.ensure_internal_dir();
         let path = self.path_for(key)?;
         let temp_path = temp_path_for(&path, key)?;
         self.create_parent_dir(&path).await?;
@@ -353,6 +409,7 @@ impl BlobStore for LocalStorageBackend {
     }
 
     async fn copy_blob(&self, from: &str, to: &str) -> Result<(), StorageError> {
+        self.ensure_internal_dir();
         let from_path = self.path_for(from)?;
         let to_path = self.path_for(to)?;
         let temp_path = temp_path_for(&to_path, to)?;
@@ -460,6 +517,7 @@ impl StreamingObjectStore for LocalStorageBackend {
         content_type: Option<String>,
         metadata: ObjectMetadata,
     ) -> Result<BoxedMultipartWriter, StorageError> {
+        self.ensure_internal_dir();
         let object_path = self.object_path_for(bucket, key)?;
         let metadata_path = self.object_metadata_path_for(bucket, key)?;
         let temp_path = temp_path_for(&object_path, key)?;
@@ -566,6 +624,8 @@ impl StreamingObjectStore for LocalStorageBackend {
     ) -> Result<Vec<ObjectInfo>, StorageError> {
         validate_object_bucket(bucket)?;
         crate::blob::validate_blob_prefix(prefix)?;
+        self.check_root_name(bucket)?;
+        refuse_colon(prefix)?;
         let base = self.root.join(bucket);
         let mut objects = Vec::new();
         let mut stack = vec![listing_start(&base, prefix)];
@@ -702,6 +762,8 @@ impl LocalStorageBackend {
         limit: usize,
     ) -> Result<Vec<String>, StorageError> {
         crate::blob::validate_blob_prefix(prefix)?;
+        self.check_root_name(prefix)?;
+        let internal = same_file::Handle::from_path(self.internal_dir()).ok();
 
         let mut page = Vec::with_capacity(limit);
         let mut stack = vec![listing_start(&self.root, prefix)];
@@ -709,6 +771,14 @@ impl LocalStorageBackend {
         while let Some(path) = stack.pop() {
             if page.len() == limit {
                 break;
+            }
+            // A root entry that resolves to the internal directory under
+            // another name is never entered.
+            if internal.is_some()
+                && path.parent() == Some(self.root.as_path())
+                && same_file::Handle::from_path(&path).ok() == internal
+            {
+                continue;
             }
             // Skips the reserved internal namespace and any name that is not
             // a valid key, with everything below it.
@@ -767,8 +837,8 @@ fn listing_start(base: &Path, prefix: &str) -> PathBuf {
 }
 
 /// The key `path` has below `base`, or `None` when no valid key names it: a
-/// name that is not valid UTF-8 or that [`validate_blob_key`] refuses, such
-/// as the reserved internal namespace. Every key below such a directory
+/// name that is not valid UTF-8, contains `:`, or that [`validate_blob_key`]
+/// refuses, such as the reserved internal namespace. Every key below such a directory
 /// would contain the same component, so its whole subtree is skipped. `base`
 /// itself has the empty key.
 fn listed_key(base: &Path, path: &Path) -> Option<String> {
@@ -781,7 +851,11 @@ fn listed_key(base: &Path, path: &Path) -> Option<String> {
         if !key.is_empty() {
             key.push('/');
         }
-        key.push_str(name.to_str()?);
+        let name = name.to_str()?;
+        if name.contains(':') {
+            return None;
+        }
+        key.push_str(name);
     }
     (key.is_empty() || validate_blob_key(&key).is_ok()).then_some(key)
 }

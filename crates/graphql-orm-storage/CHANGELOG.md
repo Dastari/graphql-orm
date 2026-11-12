@@ -25,7 +25,14 @@ namespace and local listing prefixes. See [MIGRATION.md](MIGRATION.md).
   trailing dots or spaces, are refused with `InvalidStorageKey` by
   `validate_blob_key` and every provider. The local backend keeps multipart
   staging and object metadata there, which callers could previously read,
-  overwrite or delete.
+  overwrite or delete. On local roots the reservation is also by file
+  identity: a key, listing prefix or bucket whose first component resolves to
+  the internal directory under another name (a case-insensitive or Unicode
+  case fold, a Windows short name or a link) is refused, writes create the
+  internal directory first, and listings never enter such an entry. Local
+  keys, prefixes and buckets refuse `:` in any component. An S3 `key_prefix`
+  or SMB `root_prefix` in the reserved namespace makes the configuration
+  invalid; S3 now validates it for empty-prefix listings too.
 - Listing prefixes are plain string prefixes on every provider, as S3 and SMB
   already treated them: on local storage, `a` now also lists `ab` and
   `a-b/x`, not only `a` and keys under `a/`. A prefix may now end in one `/`

@@ -157,11 +157,12 @@ impl S3StorageBackend {
             .as_deref()
             .map(|prefix| prefix.trim_matches('/'))
             .unwrap_or_default();
-        Ok(if key_prefix.is_empty() {
-            String::new()
-        } else {
-            format!("{key_prefix}/")
-        })
+        if key_prefix.is_empty() {
+            return Ok(String::new());
+        }
+        // Keyed operations validate the prefix through `provider_key`.
+        validate_blob_key(key_prefix)?;
+        Ok(format!("{key_prefix}/"))
     }
 
     async fn put_blob_inner(
