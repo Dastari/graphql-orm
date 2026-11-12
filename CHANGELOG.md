@@ -61,6 +61,12 @@ ORM runtime/macros **0.126.0**.
 - **Errors:** a PostgreSQL `42501` (`insufficient_privilege`) error, including a row-level security `WITH CHECK` refusal, maps to `FORBIDDEN` instead of `INTERNAL_ERROR` (#527).
 - **Docs:** custom predicates that turn a missing request value into `true`, such as `COALESCE(..., true)` or `IS DISTINCT FROM` tests, are documented as open when the context is missing.
 
+ORM runtime/macros **0.126.0**.
+
+- **Fix:** MSSQL compare-and-swap works on tables with an enabled trigger. It ran `UPDATE ... OUTPUT INSERTED...` without `INTO`, which SQL Server rejects on such tables, so every versioned compare-and-swap against them failed and poisoned the transaction. It now runs the `UPDATE` and, in the same batch, reads the row back by key and by the version it wrote when `@@ROWCOUNT` is 1. The update keeps its exclusive row lock until the transaction ends, and the returned row includes any change an `AFTER` trigger made. An `INSTEAD OF UPDATE` trigger that suppresses the update yields `Conflict` rather than the unchanged row, and a trigger that rewrites the version column yields `Conflict` and rolls the swap back. ([#517](https://github.com/Dastari/graphql-orm/issues/517))
+- **Fix/behaviour:** MSSQL `rows_affected` reports the executed statement's own count. It summed every count SQL Server sent, including those from statements inside triggers that do not set `NOCOUNT`, so an audit trigger made a one-row insert, update or delete look like several rows and fail the generated write, and made an `insert_if_absent` that matched nothing report an insert. A trigger's counts arrive before the count of the statement that fired it, and the last count is now used. For a raw batch of several statements, `rows_affected` is now the final statement's count rather than the sum, so a batch ending in DDL or another statement that reports no count yields 0. Under an `INSTEAD OF` trigger it is what SQL Server reports for the replaced statement. ([#459](https://github.com/Dastari/graphql-orm/issues/459))
+- **Tests:** the owned MSSQL lane runs generated single-row, compare-and-swap, upsert, bulk, bounded, composite-key, transactional and GraphQL writes against tables with counting `AFTER` triggers, and compare-and-swap against `INSTEAD OF UPDATE` triggers that perform or suppress the update.
+
 ## 0.125.0
 
 ORM runtime/macros **0.125.0**.

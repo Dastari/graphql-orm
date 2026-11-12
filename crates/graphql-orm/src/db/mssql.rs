@@ -619,8 +619,21 @@ async fn execute_with_client(
     }
     let result = query.execute(client).await.map_err(map_tiberius_error)?;
     Ok(MssqlWriteResult {
-        rows_affected: result.total(),
+        rows_affected: statement_rows_affected(result.rows_affected()),
     })
+}
+
+/// The row count of the executed statement itself.
+///
+/// SQL Server reports a count for every statement it runs, including the
+/// statements inside triggers that the DML fires, unless those triggers set
+/// `NOCOUNT`. A trigger finishes before the statement that fired it, so its
+/// counts arrive first and the statement's own count arrives last. Summing
+/// them would let an audit trigger make a one-row update look like several
+/// rows, or a conditional insert that matched nothing look like one row.
+/// For a batch of several statements this is the final statement's count.
+fn statement_rows_affected(counts: &[u64]) -> u64 {
+    counts.last().copied().unwrap_or(0)
 }
 
 async fn execute_control_statement(client: &mut MssqlClient, sql: &str) -> crate::Result<()> {

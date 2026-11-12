@@ -192,6 +192,17 @@ validation to pass.
 Clients that matched `INTERNAL_ERROR` for row-level security `WITH CHECK`
 refusals now receive `FORBIDDEN`.
 
+## 0.126.0: MSSQL writes on tables with triggers
+
+Upgrade runtime and macros together. SQLite and PostgreSQL are unchanged.
+
+Generated MSSQL writes, including compare-and-swap, now succeed on tables with
+enabled triggers. Code that runs raw MSSQL batches of several statements through
+`execute` and reads `rows_affected` now receives the final statement's count
+instead of the sum of every statement's count. Run one statement per `execute`
+when each count matters. Counts from statements inside triggers are no longer
+included.
+
 ## 0.125.0: PostgreSQL records change-journal entries in the database
 
 Upgrade runtime and macros together. This affects PostgreSQL deployments that
