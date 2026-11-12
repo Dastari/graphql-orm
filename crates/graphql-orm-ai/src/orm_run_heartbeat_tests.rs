@@ -191,3 +191,36 @@ async fn exhausted_heartbeat_retries_leave_the_original_fence_unchanged() {
     assert_eq!(before.lease_expires_at, after.lease_expires_at);
     assert_eq!(before.attempt_id, after.attempt_id);
 }
+
+#[tokio::test]
+async fn fenced_retry_scheduling_recovers_from_retryable_writer_contention() {
+    let fixture = fixture(2).await;
+    let writer = hold_writer(&fixture, false).await;
+    let scheduled = fixture
+        .runs
+        .schedule_retry(&fixture.lease, Duration::ZERO, "provider_transient")
+        .await;
+    writer.await.unwrap();
+    scheduled.expect("retryable contention must not fail a fenced transition");
+    let run = AiRunRecord::find_by_id(&fixture.database, &fixture.lease.run_id().0)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.state, AiRunState::RetryScheduled.as_str());
+}
+
+#[tokio::test]
+async fn lease_recovery_recovers_from_retryable_writer_contention() {
+    let fixture = fixture(2).await;
+    fixture.clock.advance_seconds(61);
+    let writer = hold_writer(&fixture, false).await;
+    let report = fixture.runs.recover_expired_leases().await;
+    writer.await.unwrap();
+    let report = report.expect("retryable contention must not fail the recovery pass");
+    assert_eq!(report.recovery_required, 1);
+    let run = AiRunRecord::find_by_id(&fixture.database, &fixture.lease.run_id().0)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.state, AiRunState::RecoveryRequired.as_str());
+}

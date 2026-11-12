@@ -3,6 +3,7 @@
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
 use crate::orm_read_bounds::InternalReadBound as _;
+use crate::orm_runs::retry_transaction;
 use std::sync::Arc;
 
 use agql_auth::{
@@ -304,249 +305,258 @@ impl AiRunCancellationService for OrmAiRunCancellationService {
         let session_id = input.session_id;
         let run_id = input.run_id;
         let client_request_id = input.client_request_id;
-        let view = self
-            .database
-            .transaction(TransactionMode::StateMachine, move |tx| {
-                Box::pin(async move {
-                    if let Some(existing) = tx
-                        .find_by_id::<AiRunCancellationRequestRecord>(&client_request_id)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                    {
-                        if existing.session_id != session_id
-                            || existing.run_id != run_id
-                            || existing.principal_kind != principal_kind
-                            || existing.principal_subject != principal_subject
-                            || existing.outcome_state != AiRunState::Cancelled.as_str()
+        let view = retry_transaction(crate::orm_runs::DEFAULT_TRANSACTION_RETRIES, || {
+            let final_inbox_payload = final_inbox_payload.clone();
+            let final_payload = final_payload.clone();
+            let principal_kind = principal_kind.clone();
+            let principal_subject = principal_subject.clone();
+            let request_inbox_payload = request_inbox_payload.clone();
+            let request_payload = request_payload.clone();
+            let scope = scope.clone();
+            self.database
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        if let Some(existing) = tx
+                            .find_by_id::<AiRunCancellationRequestRecord>(&client_request_id)
+                            .await
+                            .map_err(OrmPublicError::from)?
                         {
-                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            if existing.session_id != session_id
+                                || existing.run_id != run_id
+                                || existing.principal_kind != principal_kind
+                                || existing.principal_subject != principal_subject
+                                || existing.outcome_state != AiRunState::Cancelled.as_str()
+                            {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                            let run = tx
+                                .find_by_id::<AiRunRecord>(&run_id)
+                                .await
+                                .map_err(OrmPublicError::from)?
+                                .ok_or_else(OrmPublicError::not_found)?;
+                            if run.session_id != session_id
+                                || run.state != AiRunState::Cancelled.as_str()
+                                || run.cancellation_request_id != Some(client_request_id)
+                                || run.cancellation_requested_at != Some(existing.requested_at)
+                            {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                            return Ok(AiRunCancellationView {
+                                session_id,
+                                run_id,
+                                client_request_id,
+                                state: existing.outcome_state,
+                                requested_at: existing.requested_at,
+                            });
+                        }
+
+                        let session = tx
+                            .find_by_id::<AiSessionRecord>(&session_id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if session.owner_principal_kind != principal_kind
+                            || session.owner_subject != principal_subject
+                            || session.deleted_at.is_some()
+                            || !matches!(session.state.as_str(), "active" | "archived")
+                        {
+                            return Err(OrmPublicError::not_found());
                         }
                         let run = tx
                             .find_by_id::<AiRunRecord>(&run_id)
                             .await
                             .map_err(OrmPublicError::from)?
                             .ok_or_else(OrmPublicError::not_found)?;
+                        let state = AiRunState::from_persisted(&run.state)
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
                         if run.session_id != session_id
-                            || run.state != AiRunState::Cancelled.as_str()
-                            || run.cancellation_request_id != Some(client_request_id)
-                            || run.cancellation_requested_at != Some(existing.requested_at)
+                            || state.is_terminal()
+                            || run.cancellation_request_id.is_some()
+                            || run.cancellation_requested_at.is_some()
                         {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }
-                        return Ok(AiRunCancellationView {
+                        if let Some(checkpoint_id) = run.latest_checkpoint_id {
+                            let checkpoint = tx
+                                .query::<AiRunCheckpointRecord>()
+                                .filter(AiRunCheckpointRecordWhereInput {
+                                    id: Some(UuidFilter {
+                                        eq: Some(checkpoint_id),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                })
+                                .internal_limit(1)
+                                .fetch_one()
+                                .await
+                                .map_err(OrmPublicError::from)?
+                                .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                            if checkpoint.run_id != run.id
+                                || checkpoint.checkpoint_kind == "assistant_output_persisted"
+                            {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                        }
+
+                        cancel_active_tool_calls(tx, &run, maximum_active_tool_calls, now_unix)
+                            .await?;
+                        cancel_background_submission(tx, &run, now_unix).await?;
+                        cancel_subscription_wait(tx, &run).await?;
+
+                        let request_sequence = session
+                            .stream_head
+                            .checked_add(1)
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                        let final_sequence = request_sequence
+                            .checked_add(1)
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                        if !matches!(
+                            tx.compare_and_swap::<AiSessionRecord>(
+                                &session.id,
+                                session.row_version,
+                                AiSessionRecordWhereInput::default(),
+                                UpdateAiSessionRecordInput {
+                                    stream_head: Some(final_sequence),
+                                    last_activity_at: Some(now_unix),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?,
+                            ConditionalUpdateOutcome::Updated(_)
+                        ) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        if !matches!(
+                            tx.compare_and_swap::<AiRunRecord>(
+                                &run.id,
+                                run.row_version,
+                                AiRunRecordWhereInput {
+                                    state: Some(StringFilter {
+                                        eq: Some(run.state.clone()),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                },
+                                UpdateAiRunRecordInput {
+                                    state: Some(AiRunState::Cancelled.as_str().to_owned()),
+                                    lease_owner: Some(None),
+                                    lease_expires_at: Some(None),
+                                    lease_heartbeat_at: Some(None),
+                                    next_attempt_at: Some(None),
+                                    error_code: Some(Some("owner_cancelled".to_owned())),
+                                    cancellation_request_id: Some(Some(client_request_id)),
+                                    cancellation_requested_at: Some(Some(now_unix)),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?,
+                            ConditionalUpdateOutcome::Updated(_)
+                        ) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+
+                        append_cancelled_attempt_outcome(tx, &run, now_unix).await?;
+                        tx.insert::<AiRunCancellationRequestRecord>(
+                            CreateAiRunCancellationRequestRecordInput {
+                                id: client_request_id,
+                                session_id,
+                                run_id,
+                                principal_kind: principal_kind.clone(),
+                                principal_subject: principal_subject.clone(),
+                                outcome_state: AiRunState::Cancelled.as_str().to_owned(),
+                                requested_at: now_unix,
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                        tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
+                            id: request_event_id,
+                            session_id,
+                            sequence: request_sequence,
+                            event_type: "run_cancellation_requested".to_owned(),
+                            run_id: Some(run_id),
+                            causation_id: Some(client_request_id.to_string()),
+                            correlation_id: client_request_id.to_string(),
+                            protected_payload: request_payload,
+                        })
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                        tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
+                            id: final_event_id,
+                            session_id,
+                            sequence: final_sequence,
+                            event_type: AiRunTerminalEvent::Cancelled.event_type().to_owned(),
+                            run_id: Some(run_id),
+                            causation_id: Some(request_event_id.to_string()),
+                            correlation_id: client_request_id.to_string(),
+                            protected_payload: final_payload,
+                        })
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                        tx.queue_event(AiSessionWakeup {
+                            session_id,
+                            sequence: request_sequence,
+                        });
+                        tx.queue_event(AiSessionWakeup {
+                            session_id,
+                            sequence: final_sequence,
+                        });
+                        append_inbox_event(
+                            tx,
+                            PreparedAiInboxEvent {
+                                id: request_inbox_event_id,
+                                principal_kind: principal_kind.clone(),
+                                principal_subject: principal_subject.clone(),
+                                scope: scope.clone(),
+                                session_id,
+                                event_type: "run_cancellation_requested".to_owned(),
+                                protected_payload: request_inbox_payload,
+                                created_at: now_unix,
+                            },
+                        )
+                        .await?;
+                        append_inbox_event(
+                            tx,
+                            PreparedAiInboxEvent {
+                                id: final_inbox_event_id,
+                                principal_kind: principal_kind.clone(),
+                                principal_subject: principal_subject.clone(),
+                                scope,
+                                session_id,
+                                event_type: AiRunTerminalEvent::Cancelled.event_type().to_owned(),
+                                protected_payload: final_inbox_payload,
+                                created_at: now_unix,
+                            },
+                        )
+                        .await?;
+                        tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
+                            actor_principal_kind: principal_kind,
+                            actor_subject: principal_subject,
+                            action: "ai.run.cancel".to_owned(),
+                            resource_kind: "ai_run".to_owned(),
+                            resource_reference: run_id.to_string(),
+                            outcome: "cancelled".to_owned(),
+                            reason_code: "owner_cancelled".to_owned(),
+                            correlation_id: client_request_id.to_string(),
+                            causation_id: None,
+                            policy_version: None,
+                        })
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                        Ok(AiRunCancellationView {
                             session_id,
                             run_id,
                             client_request_id,
-                            state: existing.outcome_state,
-                            requested_at: existing.requested_at,
-                        });
-                    }
-
-                    let session = tx
-                        .find_by_id::<AiSessionRecord>(&session_id)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    if session.owner_principal_kind != principal_kind
-                        || session.owner_subject != principal_subject
-                        || session.deleted_at.is_some()
-                        || !matches!(session.state.as_str(), "active" | "archived")
-                    {
-                        return Err(OrmPublicError::not_found());
-                    }
-                    let run = tx
-                        .find_by_id::<AiRunRecord>(&run_id)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    let state = AiRunState::from_persisted(&run.state)
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                    if run.session_id != session_id
-                        || state.is_terminal()
-                        || run.cancellation_request_id.is_some()
-                        || run.cancellation_requested_at.is_some()
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    if let Some(checkpoint_id) = run.latest_checkpoint_id {
-                        let checkpoint = tx
-                            .query::<AiRunCheckpointRecord>()
-                            .filter(AiRunCheckpointRecordWhereInput {
-                                id: Some(UuidFilter {
-                                    eq: Some(checkpoint_id),
-                                    ..Default::default()
-                                }),
-                                ..Default::default()
-                            })
-                            .internal_limit(1)
-                            .fetch_one()
-                            .await
-                            .map_err(OrmPublicError::from)?
-                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                        if checkpoint.run_id != run.id
-                            || checkpoint.checkpoint_kind == "assistant_output_persisted"
-                        {
-                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                        }
-                    }
-
-                    cancel_active_tool_calls(tx, &run, maximum_active_tool_calls, now_unix).await?;
-                    cancel_background_submission(tx, &run, now_unix).await?;
-                    cancel_subscription_wait(tx, &run).await?;
-
-                    let request_sequence = session
-                        .stream_head
-                        .checked_add(1)
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
-                    let final_sequence = request_sequence
-                        .checked_add(1)
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
-                    if !matches!(
-                        tx.compare_and_swap::<AiSessionRecord>(
-                            &session.id,
-                            session.row_version,
-                            AiSessionRecordWhereInput::default(),
-                            UpdateAiSessionRecordInput {
-                                stream_head: Some(final_sequence),
-                                last_activity_at: Some(now_unix),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?,
-                        ConditionalUpdateOutcome::Updated(_)
-                    ) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    if !matches!(
-                        tx.compare_and_swap::<AiRunRecord>(
-                            &run.id,
-                            run.row_version,
-                            AiRunRecordWhereInput {
-                                state: Some(StringFilter {
-                                    eq: Some(run.state.clone()),
-                                    ..Default::default()
-                                }),
-                                ..Default::default()
-                            },
-                            UpdateAiRunRecordInput {
-                                state: Some(AiRunState::Cancelled.as_str().to_owned()),
-                                lease_owner: Some(None),
-                                lease_expires_at: Some(None),
-                                lease_heartbeat_at: Some(None),
-                                next_attempt_at: Some(None),
-                                error_code: Some(Some("owner_cancelled".to_owned())),
-                                cancellation_request_id: Some(Some(client_request_id)),
-                                cancellation_requested_at: Some(Some(now_unix)),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?,
-                        ConditionalUpdateOutcome::Updated(_)
-                    ) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-
-                    append_cancelled_attempt_outcome(tx, &run, now_unix).await?;
-                    tx.insert::<AiRunCancellationRequestRecord>(
-                        CreateAiRunCancellationRequestRecordInput {
-                            id: client_request_id,
-                            session_id,
-                            run_id,
-                            principal_kind: principal_kind.clone(),
-                            principal_subject: principal_subject.clone(),
-                            outcome_state: AiRunState::Cancelled.as_str().to_owned(),
+                            state: AiRunState::Cancelled.as_str().to_owned(),
                             requested_at: now_unix,
-                        },
-                    )
-                    .await
-                    .map_err(OrmPublicError::from)?;
-                    tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
-                        id: request_event_id,
-                        session_id,
-                        sequence: request_sequence,
-                        event_type: "run_cancellation_requested".to_owned(),
-                        run_id: Some(run_id),
-                        causation_id: Some(client_request_id.to_string()),
-                        correlation_id: client_request_id.to_string(),
-                        protected_payload: request_payload,
-                    })
-                    .await
-                    .map_err(OrmPublicError::from)?;
-                    tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
-                        id: final_event_id,
-                        session_id,
-                        sequence: final_sequence,
-                        event_type: AiRunTerminalEvent::Cancelled.event_type().to_owned(),
-                        run_id: Some(run_id),
-                        causation_id: Some(request_event_id.to_string()),
-                        correlation_id: client_request_id.to_string(),
-                        protected_payload: final_payload,
-                    })
-                    .await
-                    .map_err(OrmPublicError::from)?;
-                    tx.queue_event(AiSessionWakeup {
-                        session_id,
-                        sequence: request_sequence,
-                    });
-                    tx.queue_event(AiSessionWakeup {
-                        session_id,
-                        sequence: final_sequence,
-                    });
-                    append_inbox_event(
-                        tx,
-                        PreparedAiInboxEvent {
-                            id: request_inbox_event_id,
-                            principal_kind: principal_kind.clone(),
-                            principal_subject: principal_subject.clone(),
-                            scope: scope.clone(),
-                            session_id,
-                            event_type: "run_cancellation_requested".to_owned(),
-                            protected_payload: request_inbox_payload,
-                            created_at: now_unix,
-                        },
-                    )
-                    .await?;
-                    append_inbox_event(
-                        tx,
-                        PreparedAiInboxEvent {
-                            id: final_inbox_event_id,
-                            principal_kind: principal_kind.clone(),
-                            principal_subject: principal_subject.clone(),
-                            scope,
-                            session_id,
-                            event_type: AiRunTerminalEvent::Cancelled.event_type().to_owned(),
-                            protected_payload: final_inbox_payload,
-                            created_at: now_unix,
-                        },
-                    )
-                    .await?;
-                    tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
-                        actor_principal_kind: principal_kind,
-                        actor_subject: principal_subject,
-                        action: "ai.run.cancel".to_owned(),
-                        resource_kind: "ai_run".to_owned(),
-                        resource_reference: run_id.to_string(),
-                        outcome: "cancelled".to_owned(),
-                        reason_code: "owner_cancelled".to_owned(),
-                        correlation_id: client_request_id.to_string(),
-                        causation_id: None,
-                        policy_version: None,
-                    })
-                    .await
-                    .map_err(OrmPublicError::from)?;
-                    Ok(AiRunCancellationView {
-                        session_id,
-                        run_id,
-                        client_request_id,
-                        state: AiRunState::Cancelled.as_str().to_owned(),
-                        requested_at: now_unix,
+                        })
                     })
                 })
-            })
-            .await
-            .map_err(map_transaction)?;
+        })
+        .await
+        .map_err(map_transaction)?;
         self.hub.notify(crate::AiRunId(run_id));
         Ok(view)
     }

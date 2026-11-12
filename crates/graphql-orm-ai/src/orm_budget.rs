@@ -1121,18 +1121,29 @@ fn validate_reconciliation_fence(
     let stored_reference: PrincipalReference =
         serde_json::from_value(run.principal_reference.clone())
             .map_err(|_| AiError::PersistenceFailed)?;
+    // A live attempt reconciles under its unexpired lease. Owner cancellation
+    // clears the lease but keeps the cancelled attempt and generation, so that
+    // exact stopped worker may still settle the usage of the provider call it
+    // already made instead of leaving the full estimate reserved. Any other
+    // closed attempt is settled by lease recovery once the reservation
+    // expires.
+    let live_attempt = run.state == "running"
+        && run
+            .lease_owner
+            .as_deref()
+            .is_some_and(|owner| !owner.is_empty())
+        && run
+            .lease_expires_at
+            .is_some_and(|expires| expires > now.unix_timestamp());
+    let cancelled_attempt = run.state == "cancelled";
     if run.id != reservation.run_id
         || run.session_id != reservation.session_id
         || stored_reference != *principal_reference
-        || run.state != "running"
+        || !(live_attempt || cancelled_attempt)
         || run.attempt_id != Some(reconciliation.attempt_id)
         || reservation.attempt_id != reconciliation.attempt_id
         || run.lease_generation != reconciliation.lease_generation
         || reservation.lease_generation != reconciliation.lease_generation
-        || run.lease_owner.as_deref().is_none_or(str::is_empty)
-        || run
-            .lease_expires_at
-            .is_none_or(|expires| expires <= now.unix_timestamp())
     {
         return Err(AiError::Conflict);
     }
@@ -2192,6 +2203,151 @@ mod tests {
             Err(AiError::Conflict)
         ));
         assert_eq!(counter_count(&fixture.database).await, 0);
+    }
+
+    async fn cancel_running_run(database: &Database<SqliteBackend>, run_id: AiRunId) {
+        database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    tx.update_by_id::<AiRunRecord>(
+                        &run_id.0,
+                        UpdateAiRunRecordInput {
+                            state: Some("cancelled".to_owned()),
+                            lease_owner: Some(None),
+                            lease_expires_at: Some(None),
+                            lease_heartbeat_at: Some(None),
+                            error_code: Some(Some("owner_cancelled".to_owned())),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                    Ok(())
+                })
+            })
+            .await
+            .expect("test cancellation should commit");
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_attempt_still_reconciles_its_own_reservation() {
+        let fixture = fixture(100).await;
+        let run = seed_running_run(&fixture.database, &fixture.principal, fixture.now).await;
+        let reservation = fixture
+            .service
+            .reserve(
+                &fixture.principal,
+                request(run.0, run.1, run.2, 60, "cancelled-late", fixture.now),
+            )
+            .await
+            .expect("reservation should succeed");
+        cancel_running_run(&fixture.database, run.1).await;
+        let reconciliation = AiBudgetReconciliation {
+            reservation_id: reservation.id(),
+            attempt_id: run.2,
+            lease_generation: 1,
+            actual: Some(AiBudgetAmounts {
+                input_tokens: 40,
+                output_tokens: 5,
+                tool_units: 0,
+                image_units: 0,
+                cost_microunits: 80,
+                runs: 1,
+            }),
+            cached_input_tokens: Some(0),
+            outcome: AiBudgetReconciliationOutcome::Commit,
+        };
+        // A different attempt of the same cancelled run stays fenced.
+        let mut stranger = reconciliation.clone();
+        stranger.attempt_id = Uuid::new_v4();
+        assert!(matches!(
+            fixture
+                .service
+                .reconcile(&fixture.principal, stranger)
+                .await,
+            Err(AiError::Conflict)
+        ));
+        fixture
+            .service
+            .reconcile(&fixture.principal, reconciliation)
+            .await
+            .expect("the cancelled attempt must settle its actual usage");
+        let counter = only_counter(&fixture.database).await;
+        assert_eq!(counter.reserved_input_tokens, 0);
+        assert_eq!(counter.committed_input_tokens, 40);
+    }
+
+    #[tokio::test]
+    async fn lease_recovery_settles_expired_reservations_of_closed_attempts() {
+        for uncertain in [false, true] {
+            let fixture = fixture(100).await;
+            let run = seed_running_run(&fixture.database, &fixture.principal, fixture.now).await;
+            let reservation = fixture
+                .service
+                .reserve(
+                    &fixture.principal,
+                    request(run.0, run.1, run.2, 60, "closed-attempt", fixture.now),
+                )
+                .await
+                .expect("reservation should succeed");
+            if uncertain {
+                fixture
+                    .service
+                    .reconcile(
+                        &fixture.principal,
+                        AiBudgetReconciliation {
+                            reservation_id: reservation.id(),
+                            attempt_id: run.2,
+                            lease_generation: 1,
+                            actual: None,
+                            cached_input_tokens: None,
+                            outcome: AiBudgetReconciliationOutcome::MarkUncertain,
+                        },
+                    )
+                    .await
+                    .expect("dispatch should mark the reservation uncertain");
+            }
+            // The worker is cancelled and never reports its usage.
+            cancel_running_run(&fixture.database, run.1).await;
+            let runs = |seconds: i64| {
+                crate::OrmAiRunService::new(
+                    fixture.database.clone(),
+                    Arc::new(FixedClock::new(fixture.now + Duration::seconds(seconds))),
+                    crate::AiRunServiceLimits::new(
+                        Duration::seconds(60),
+                        Duration::hours(1),
+                        16,
+                        2,
+                        8,
+                    )
+                    .expect("run limits should validate"),
+                )
+            };
+            // While the reservation is unexpired the stopped worker may still
+            // settle it, so recovery leaves it alone.
+            runs(60)
+                .recover_expired_leases()
+                .await
+                .expect("recovery should succeed");
+            assert_eq!(
+                only_counter(&fixture.database).await.reserved_input_tokens,
+                60
+            );
+
+            runs(180)
+                .recover_expired_leases()
+                .await
+                .expect("recovery should settle the stranded reservation");
+            let counter = only_counter(&fixture.database).await;
+            assert_eq!(counter.reserved_input_tokens, 0, "uncertain={uncertain}");
+            assert_eq!(counter.committed_input_tokens, 60, "uncertain={uncertain}");
+            let record =
+                AiBudgetReservationRecord::find_by_id(&fixture.database, &reservation.id().0)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(record.state, "committed");
+        }
     }
 
     #[tokio::test]

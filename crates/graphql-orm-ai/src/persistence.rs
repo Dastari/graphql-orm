@@ -1134,12 +1134,14 @@ pub(crate) struct AiRunRecord {
     /// Monotonic lease generation/fencing token.
     pub lease_generation: i64,
     /// Lease expiry timestamp.
+    #[filterable(type = "int64")]
     pub lease_expires_at: Option<i64>,
     /// Last heartbeat timestamp.
     pub lease_heartbeat_at: Option<i64>,
     /// Retry count.
     pub retry_count: i64,
     /// Next eligible attempt timestamp.
+    #[filterable(type = "int64")]
     pub next_attempt_at: Option<i64>,
     /// Safe error code.
     pub error_code: Option<String>,

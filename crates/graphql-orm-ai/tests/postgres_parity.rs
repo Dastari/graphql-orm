@@ -1496,3 +1496,119 @@ async fn owned_postgres_upgrades_a_prior_store_to_the_recovery_ledger() {
     assert_eq!(lease.run_id().0, fresh);
     assert_eq!(lease.recovery_epoch_id(), Some(proof.epoch_id()));
 }
+
+/// Concurrent fenced terminal transitions of one owner's runs contend on the
+/// owner's inbox stream row. Under SERIALIZABLE the losers see a retryable
+/// serialization failure, which must be retried rather than reported as a
+/// persistence failure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn owned_postgres_retries_serialization_failures_in_concurrent_run_transitions() {
+    let Some(container) = OwnedPostgres::start().expect("owned PostgreSQL should start") else {
+        return;
+    };
+    let database = Database::<PostgresBackend>::connect_postgres(container.connection_url())
+        .await
+        .expect("ORM should connect only to the owned container");
+    let migration = database
+        .schema()
+        .plan_migration_to_entities(
+            "ai-postgres-concurrency-v1",
+            "graphql-orm-ai concurrent transition parity",
+            AiSchemaModule.entities(),
+        )
+        .await
+        .expect("AI schema should plan for PostgreSQL");
+    database
+        .schema()
+        .apply_migration(&migration, ApplyOptions::default())
+        .await
+        .expect("AI schema should apply to the owned PostgreSQL database");
+    graphql_orm_ai::OrmAiRuntimeRecoveryService::new(
+        database.clone(),
+        std::sync::Arc::new(agql_auth::SystemClock),
+    )
+    .readiness_proof()
+    .await
+    .expect("a test store should record its first live epoch");
+    let sessions = OrmAiSessionService::new(
+        database.clone(),
+        Arc::new(AllowAll),
+        Arc::new(ProtectionPolicy),
+        Arc::new(DatabaseManagedContentProtector),
+    );
+    let now = OffsetDateTime::from_unix_timestamp(OffsetDateTime::now_utc().unix_timestamp())
+        .expect("current whole-second test time should validate");
+    let principal = principal(now);
+    const RUNS: usize = 8;
+    for index in 0..RUNS {
+        let session = sessions
+            .create_session(
+                &principal,
+                CreateAiSessionInput {
+                    execution_selection: None,
+                    scope: AiScopeInput {
+                        kind: "postgres-parity".to_owned(),
+                        id: "scope-1".to_owned(),
+                        tenant_id: Some("postgres-parity-tenant".to_owned()),
+                    },
+                    title: Some(format!("Concurrent transition {index}")),
+                },
+            )
+            .await
+            .expect("session should be inserted");
+        sessions
+            .send_message(
+                &principal,
+                SendAiMessageInput {
+                    session_id: session.id,
+                    text: "Synthetic concurrent transition".to_owned(),
+                    attachment_ids: vec![],
+                    client_message_id: Uuid::new_v4(),
+                },
+            )
+            .await
+            .expect("message should queue a run");
+    }
+    let runs = Arc::new(OrmAiRunService::new(
+        database.clone(),
+        Arc::new(SystemClock),
+        AiRunServiceLimits::new(Duration::seconds(60), Duration::minutes(5), 16, 2, 16)
+            .expect("run limits should validate"),
+    ));
+    let mut leases = Vec::new();
+    for _ in 0..RUNS {
+        let claimed = runs
+            .claim_next("postgres-concurrency-worker")
+            .await
+            .expect("claim should succeed")
+            .expect("queued run should be claimable");
+        leases.push(runs.start(&claimed).await.expect("run should start"));
+    }
+    let barrier = Arc::new(tokio::sync::Barrier::new(RUNS));
+    let tasks = leases.into_iter().map(|lease| {
+        let runs = Arc::clone(&runs);
+        let barrier = Arc::clone(&barrier);
+        tokio::spawn(async move {
+            barrier.wait().await;
+            runs.finish(
+                &lease,
+                AiRunCompletion::new(
+                    AiRunState::Failed,
+                    "provider_failed",
+                    Some("provider_failed".to_owned()),
+                    None,
+                )
+                .expect("completion should validate"),
+            )
+            .await
+        })
+    });
+    for task in tasks.collect::<Vec<_>>() {
+        task.await
+            .expect("transition task should join")
+            .expect("a serialization conflict must be retried, not surfaced");
+    }
+    drop(runs);
+    drop(sessions);
+    drop(container);
+}

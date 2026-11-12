@@ -3,6 +3,7 @@
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
 use crate::orm_read_bounds::InternalReadBound as _;
+use crate::orm_runs::retry_transaction;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -234,141 +235,22 @@ impl OrmAiInboxPruningService {
         now: i64,
     ) -> Result<PruneStreamOutcome, AiError> {
         let event_limit = self.limits.maximum_events_per_stream as i64;
-        self.database
-            .transaction(TransactionMode::StateMachine, move |tx| {
-                Box::pin(async move {
-                    let current = tx
-                        .find_by_id::<AiInboxStreamRecord>(&candidate.id)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    if current.row_version != candidate.row_version {
-                        return Ok(PruneStreamOutcome::Conflict);
-                    }
-                    validate_stream(&current)?;
-                    let rows = tx
-                        .query::<AiInboxEventRecord>()
-                        .filter(AiInboxEventRecordWhereInput {
-                            principal_kind: Some(StringFilter {
-                                eq: Some(current.principal_kind.clone()),
-                                ..Default::default()
-                            }),
-                            principal_subject: Some(StringFilter {
-                                eq: Some(current.principal_subject.clone()),
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        })
-                        .default_order()
-                        .internal_limit(event_limit)
-                        .fetch_all()
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    if rows.is_empty() {
-                        if current.minimum_retained_sequence
-                            != current.stream_head.saturating_add(1)
-                        {
-                            return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+        retry_transaction(crate::orm_runs::DEFAULT_TRANSACTION_RETRIES, || {
+            self.database
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        let current = tx
+                            .find_by_id::<AiInboxStreamRecord>(&candidate.id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if current.row_version != candidate.row_version {
+                            return Ok(PruneStreamOutcome::Conflict);
                         }
-                        return Ok(PruneStreamOutcome::Noop);
-                    }
-
-                    let mut policies = BTreeMap::<String, AiRetentionPolicyRecord>::new();
-                    let mut policy_versions = BTreeSet::new();
-                    let mut delete_ids = Vec::new();
-                    let mut expected_sequence = current.minimum_retained_sequence;
-                    let mut not_ready = false;
-                    for row in rows {
-                        if row.principal_kind != current.principal_kind
-                            || row.principal_subject != current.principal_subject
-                            || row.sequence != expected_sequence
-                            || row.sequence > current.stream_head
-                            || !matches!(
-                                (&row.protected_payload, row.payload_purged_at),
-                                (Some(_), None) | (None, Some(_))
-                            )
-                        {
-                            return Err(OrmPublicError::new(OrmErrorCode::InternalError));
-                        }
-                        expected_sequence = expected_sequence
-                            .checked_add(1)
-                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                        let captured_scope = AiScope {
-                            kind: row.scope_kind.clone(),
-                            id: row.scope_id.clone(),
-                            tenant_id: row.tenant_id.clone(),
-                        };
-                        if row.scope_key != scope_key(&captured_scope) {
-                            return Err(OrmPublicError::new(OrmErrorCode::InternalError));
-                        }
-                        let policy = if let Some(policy) = policies.get(&row.scope_key) {
-                            policy.clone()
-                        } else {
-                            let found = tx
-                                .query::<AiRetentionPolicyRecord>()
-                                .filter(AiRetentionPolicyRecordWhereInput {
-                                    scope_key: Some(StringFilter {
-                                        eq: Some(row.scope_key.clone()),
-                                        ..Default::default()
-                                    }),
-                                    ..Default::default()
-                                })
-                                .internal_limit(2)
-                                .fetch_all()
-                                .await
-                                .map_err(OrmPublicError::from)?;
-                            if found.len() > 1 {
-                                return Err(OrmPublicError::new(
-                                    OrmErrorCode::AuthorizationMisconfigured,
-                                ));
-                            }
-                            let Some(policy) = found.into_iter().next() else {
-                                not_ready = true;
-                                break;
-                            };
-                            if !valid_retention_policy(&policy, &captured_scope, &row.scope_key) {
-                                not_ready = true;
-                                break;
-                            }
-                            policies.insert(row.scope_key.clone(), policy.clone());
-                            policy
-                        };
-                        let retention_seconds = policy
-                            .inbox_event_retention_seconds
-                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                        let minimum_events = policy
-                            .inbox_minimum_events
-                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                        let newest_deletable = current.stream_head.saturating_sub(minimum_events);
-                        let cutoff = now
-                            .checked_sub(retention_seconds)
-                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                        if row.sequence > newest_deletable || row.created_at > cutoff {
-                            break;
-                        }
-                        policy_versions.insert(format!("{}:{}", policy.id, policy.row_version));
-                        delete_ids.push(row.id);
-                    }
-                    if delete_ids.is_empty() {
-                        return Ok(if not_ready {
-                            PruneStreamOutcome::NotReady
-                        } else {
-                            PruneStreamOutcome::Noop
-                        });
-                    }
-                    let deleted = delete_ids.len();
-                    let new_minimum = current
-                        .minimum_retained_sequence
-                        .checked_add(
-                            i64::try_from(deleted)
-                                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?,
-                        )
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                    let updated = tx
-                        .compare_and_swap::<AiInboxStreamRecord>(
-                            &current.id,
-                            current.row_version,
-                            AiInboxStreamRecordWhereInput {
+                        validate_stream(&current)?;
+                        let rows = tx
+                            .query::<AiInboxEventRecord>()
+                            .filter(AiInboxEventRecordWhereInput {
                                 principal_kind: Some(StringFilter {
                                     eq: Some(current.principal_kind.clone()),
                                     ..Default::default()
@@ -378,45 +260,168 @@ impl OrmAiInboxPruningService {
                                     ..Default::default()
                                 }),
                                 ..Default::default()
-                            },
-                            UpdateAiInboxStreamRecordInput {
-                                minimum_retained_sequence: Some(new_minimum),
-                                ..Default::default()
-                            },
-                        )
+                            })
+                            .default_order()
+                            .internal_limit(event_limit)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if rows.is_empty() {
+                            if current.minimum_retained_sequence
+                                != current.stream_head.saturating_add(1)
+                            {
+                                return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                            }
+                            return Ok(PruneStreamOutcome::Noop);
+                        }
+
+                        let mut policies = BTreeMap::<String, AiRetentionPolicyRecord>::new();
+                        let mut policy_versions = BTreeSet::new();
+                        let mut delete_ids = Vec::new();
+                        let mut expected_sequence = current.minimum_retained_sequence;
+                        let mut not_ready = false;
+                        for row in rows {
+                            if row.principal_kind != current.principal_kind
+                                || row.principal_subject != current.principal_subject
+                                || row.sequence != expected_sequence
+                                || row.sequence > current.stream_head
+                                || !matches!(
+                                    (&row.protected_payload, row.payload_purged_at),
+                                    (Some(_), None) | (None, Some(_))
+                                )
+                            {
+                                return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                            }
+                            expected_sequence = expected_sequence
+                                .checked_add(1)
+                                .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                            let captured_scope = AiScope {
+                                kind: row.scope_kind.clone(),
+                                id: row.scope_id.clone(),
+                                tenant_id: row.tenant_id.clone(),
+                            };
+                            if row.scope_key != scope_key(&captured_scope) {
+                                return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                            }
+                            let policy = if let Some(policy) = policies.get(&row.scope_key) {
+                                policy.clone()
+                            } else {
+                                let found = tx
+                                    .query::<AiRetentionPolicyRecord>()
+                                    .filter(AiRetentionPolicyRecordWhereInput {
+                                        scope_key: Some(StringFilter {
+                                            eq: Some(row.scope_key.clone()),
+                                            ..Default::default()
+                                        }),
+                                        ..Default::default()
+                                    })
+                                    .internal_limit(2)
+                                    .fetch_all()
+                                    .await
+                                    .map_err(OrmPublicError::from)?;
+                                if found.len() > 1 {
+                                    return Err(OrmPublicError::new(
+                                        OrmErrorCode::AuthorizationMisconfigured,
+                                    ));
+                                }
+                                let Some(policy) = found.into_iter().next() else {
+                                    not_ready = true;
+                                    break;
+                                };
+                                if !valid_retention_policy(&policy, &captured_scope, &row.scope_key)
+                                {
+                                    not_ready = true;
+                                    break;
+                                }
+                                policies.insert(row.scope_key.clone(), policy.clone());
+                                policy
+                            };
+                            let retention_seconds = policy
+                                .inbox_event_retention_seconds
+                                .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                            let minimum_events = policy
+                                .inbox_minimum_events
+                                .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                            let newest_deletable =
+                                current.stream_head.saturating_sub(minimum_events);
+                            let cutoff = now
+                                .checked_sub(retention_seconds)
+                                .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                            if row.sequence > newest_deletable || row.created_at > cutoff {
+                                break;
+                            }
+                            policy_versions.insert(format!("{}:{}", policy.id, policy.row_version));
+                            delete_ids.push(row.id);
+                        }
+                        if delete_ids.is_empty() {
+                            return Ok(if not_ready {
+                                PruneStreamOutcome::NotReady
+                            } else {
+                                PruneStreamOutcome::Noop
+                            });
+                        }
+                        let deleted = delete_ids.len();
+                        let new_minimum =
+                            current
+                                .minimum_retained_sequence
+                                .checked_add(i64::try_from(deleted).map_err(|_| {
+                                    OrmPublicError::new(OrmErrorCode::InternalError)
+                                })?)
+                                .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        let updated = tx
+                            .compare_and_swap::<AiInboxStreamRecord>(
+                                &current.id,
+                                current.row_version,
+                                AiInboxStreamRecordWhereInput {
+                                    principal_kind: Some(StringFilter {
+                                        eq: Some(current.principal_kind.clone()),
+                                        ..Default::default()
+                                    }),
+                                    principal_subject: Some(StringFilter {
+                                        eq: Some(current.principal_subject.clone()),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                },
+                                UpdateAiInboxStreamRecordInput {
+                                    minimum_retained_sequence: Some(new_minimum),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if !matches!(updated, ConditionalUpdateOutcome::Updated(_)) {
+                            return Ok(PruneStreamOutcome::Conflict);
+                        }
+                        for id in delete_ids {
+                            if !tx
+                                .delete_by_id::<AiInboxEventRecord>(&id)
+                                .await
+                                .map_err(OrmPublicError::from)?
+                            {
+                                return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                            }
+                        }
+                        tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
+                            actor_principal_kind: "system".to_owned(),
+                            actor_subject: "inbox-retention".to_owned(),
+                            action: "prune_inbox_events".to_owned(),
+                            resource_kind: "ai_inbox_stream".to_owned(),
+                            resource_reference: current.id.to_string(),
+                            outcome: "allowed".to_owned(),
+                            reason_code: "retention_prefix_expired".to_owned(),
+                            correlation_id: Uuid::new_v4().to_string(),
+                            causation_id: None,
+                            policy_version: Some(policy_version_hash(&policy_versions)),
+                        })
                         .await
                         .map_err(OrmPublicError::from)?;
-                    if !matches!(updated, ConditionalUpdateOutcome::Updated(_)) {
-                        return Ok(PruneStreamOutcome::Conflict);
-                    }
-                    for id in delete_ids {
-                        if !tx
-                            .delete_by_id::<AiInboxEventRecord>(&id)
-                            .await
-                            .map_err(OrmPublicError::from)?
-                        {
-                            return Err(OrmPublicError::new(OrmErrorCode::InternalError));
-                        }
-                    }
-                    tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
-                        actor_principal_kind: "system".to_owned(),
-                        actor_subject: "inbox-retention".to_owned(),
-                        action: "prune_inbox_events".to_owned(),
-                        resource_kind: "ai_inbox_stream".to_owned(),
-                        resource_reference: current.id.to_string(),
-                        outcome: "allowed".to_owned(),
-                        reason_code: "retention_prefix_expired".to_owned(),
-                        correlation_id: Uuid::new_v4().to_string(),
-                        causation_id: None,
-                        policy_version: Some(policy_version_hash(&policy_versions)),
+                        Ok(PruneStreamOutcome::Pruned(deleted))
                     })
-                    .await
-                    .map_err(OrmPublicError::from)?;
-                    Ok(PruneStreamOutcome::Pruned(deleted))
                 })
-            })
-            .await
-            .map_err(map_transaction)
+        })
+        .await
+        .map_err(map_transaction)
     }
 }
 

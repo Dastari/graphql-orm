@@ -9,7 +9,7 @@ use std::sync::Arc;
 use agql_auth::{Clock, PrincipalReference};
 use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
-use graphql_orm::graphql::filters::{IntFilter, StringFilter, UuidFilter};
+use graphql_orm::graphql::filters::{Int64Filter, IntFilter, StringFilter, UuidFilter};
 use graphql_orm::graphql::orm::{
     ConditionalUpdateOutcome, DefaultWriteBackend, MutationContext, TransactionError,
     TransactionMode,
@@ -49,6 +49,7 @@ pub struct AiRunServiceLimits {
     maximum_candidate_scan: usize,
     maximum_run_retries: u32,
     maximum_transaction_retries: usize,
+    lease_recovery_grace: Duration,
 }
 
 impl AiRunServiceLimits {
@@ -82,7 +83,39 @@ impl AiRunServiceLimits {
             maximum_candidate_scan,
             maximum_run_retries,
             maximum_transaction_retries,
+            lease_recovery_grace: Duration::ZERO,
         })
+    }
+
+    /// Returns these limits with a clock-skew grace for expired-lease
+    /// recovery.
+    ///
+    /// Lease expiry is stamped by the worker that claimed or renewed the
+    /// lease, while [`OrmAiRunService::recover_expired_leases`] compares it
+    /// with the recovering process's clock. A recovering process whose clock
+    /// runs ahead could otherwise close a live lease. Recovery treats a lease
+    /// as expired only once it is older than this grace. Ownership never
+    /// depends on it: every write remains fenced by attempt, generation and
+    /// row version. The default is zero, which preserves the previous timing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidConfiguration`] when the grace is negative or
+    /// longer than the lease TTL.
+    pub fn with_lease_recovery_grace(mut self, grace: Duration) -> Result<Self, AiError> {
+        if grace.is_negative() || grace > self.lease_ttl {
+            return Err(AiError::InvalidConfiguration(
+                "invalid lease recovery grace".to_owned(),
+            ));
+        }
+        self.lease_recovery_grace = grace;
+        Ok(self)
+    }
+
+    /// Returns the clock-skew grace applied before an expired lease is
+    /// recovered.
+    pub const fn lease_recovery_grace(&self) -> Duration {
+        self.lease_recovery_grace
     }
 
     /// Returns the duration of every newly issued or renewed lease.
@@ -318,6 +351,17 @@ pub struct AiRunRecoveryReport {
     /// Expired attempts finalized successfully because an exact same-transaction
     /// assistant-output checkpoint proved final protected output persistence.
     pub completed: u32,
+    /// Expired rows whose durable lease or checkpoint state was malformed.
+    /// Each was closed as `RecoveryRequired` with
+    /// `lease_recovery_state_invalid` and audited; the pass continued.
+    pub quarantined: u32,
+    /// Rows or reservations whose reconciliation transaction failed in this
+    /// pass. They are unchanged and are retried by the next pass.
+    pub skipped: u32,
+    /// Expired `reserved` or `uncertain` budget reservations whose attempt no
+    /// longer holds a live lease, settled by committing the full reserved
+    /// estimate as spend.
+    pub budget_reservations_settled: u32,
 }
 
 /// Fenced worker handoff for one human-approved waiting run.
@@ -407,11 +451,13 @@ pub(crate) struct PreparedProviderOutput {
     pub expected_tenant_id: Option<String>,
 }
 
+#[derive(Clone)]
 pub(crate) struct PreparedContextCheckpointSource {
     pub message: AiMessageRecord,
     pub blocks: Vec<AiMessageBlockRecord>,
 }
 
+#[derive(Clone)]
 pub(crate) struct PreparedContextCheckpoint {
     pub id: Uuid,
     pub through_sequence: i64,
@@ -430,6 +476,7 @@ pub(crate) struct PreparedContextCheckpoint {
     pub expected_tenant_id: Option<String>,
 }
 
+#[derive(Clone)]
 pub(crate) struct PreparedCoordinatorCheckpointTool {
     pub id: Uuid,
     pub provider_call_id: String,
@@ -437,6 +484,7 @@ pub(crate) struct PreparedCoordinatorCheckpointTool {
     pub result_egress_manifest_hash: String,
 }
 
+#[derive(Clone)]
 pub(crate) enum PreparedNativeCheckpointBinding {
     Completed {
         // Exact row versions whose protected arguments/results and egress were opened.
@@ -455,6 +503,7 @@ pub(crate) enum PreparedNativeCheckpointBinding {
     },
 }
 
+#[derive(Clone)]
 pub(crate) struct PreparedCoordinatorCheckpoint {
     pub id: Uuid,
     pub checkpoint_kind: String,
@@ -468,6 +517,7 @@ pub(crate) struct PreparedCoordinatorCheckpoint {
     pub native_binding: Option<PreparedNativeCheckpointBinding>,
 }
 
+#[derive(Clone)]
 pub(crate) struct PreparedLiveDeltaEvent {
     pub id: Uuid,
     pub event_type: String,
@@ -483,6 +533,7 @@ pub(crate) struct PreparedLiveDeltaEvent {
     pub expected_tenant_id: Option<String>,
 }
 
+#[derive(Clone)]
 pub(crate) struct PreparedProviderActivityEvent {
     pub id: Uuid,
     pub inbox_event_id: Uuid,
@@ -499,6 +550,7 @@ pub(crate) struct PreparedProviderActivityEvent {
     pub expected_tenant_id: Option<String>,
 }
 
+#[derive(Clone)]
 pub(crate) struct PreparedUiIntentEvent {
     pub id: Uuid,
     pub inbox_event_id: Uuid,
@@ -518,6 +570,7 @@ pub(crate) struct PreparedUiIntentEvent {
     pub expected_tenant_id: Option<String>,
 }
 
+#[derive(Clone)]
 pub(crate) struct PreparedProposal {
     pub id: Uuid,
     pub proposal_type: String,
@@ -537,6 +590,7 @@ pub(crate) struct PreparedProposal {
     pub expected_tenant_id: Option<String>,
 }
 
+#[derive(Clone)]
 pub(crate) struct PreparedApprovalRequest {
     pub id: Uuid,
     pub tool_call_id: Uuid,
@@ -584,6 +638,7 @@ pub(crate) struct PreparedApprovalProviderWait {
     pub budget_reservation_id: Uuid,
 }
 
+#[derive(Clone)]
 pub(crate) struct PreparedApprovalConsumption {
     pub approval_id: Uuid,
     pub tool_call_id: Uuid,
@@ -640,6 +695,7 @@ pub(crate) struct PreparedApprovalWaitReconciliation {
     pub worker_id: String,
 }
 
+#[derive(Clone)]
 pub(crate) struct PreparedToolCallStart {
     pub id: Uuid,
     pub provider_call_key: String,
@@ -653,7 +709,9 @@ pub(crate) struct PreparedToolCallStart {
     pub tool_id: String,
     pub tool_fingerprint: String,
     pub execution_provenance: Option<crate::AiToolExecutionProvenance>,
-    pub native_preflight_refusal: Option<crate::orm_tools::NativePreflightRefusal>,
+    /// Shared rather than cloned: the refusal is a minted-only token, and a
+    /// retried transaction must never duplicate it.
+    pub native_preflight_refusal: Option<Arc<crate::orm_tools::NativePreflightRefusal>>,
     pub protected_arguments: serde_json::Value,
     pub argument_hash: String,
     pub risk: String,
@@ -669,12 +727,14 @@ pub(crate) struct PreparedToolCallStart {
     pub expected_tenant_id: Option<String>,
 }
 
+#[derive(Clone)]
 struct NativeBlockedCall {
     candidate_id: AiToolCallId,
     receipt: PreparedNativeApprovalReceipt,
     disclosure_schema_fingerprint: String,
 }
 
+#[derive(Clone)]
 pub(crate) struct PreparedToolLifecycleEvent {
     pub event_id: Uuid,
     pub inbox_event_id: Uuid,
@@ -682,6 +742,7 @@ pub(crate) struct PreparedToolLifecycleEvent {
     pub protected_inbox_event: serde_json::Value,
 }
 
+#[derive(Clone)]
 pub(crate) struct PreparedToolCallFinish {
     pub id: Uuid,
     pub state: String,
@@ -916,6 +977,36 @@ impl OrmAiRunService {
             .await
     }
 
+    /// Drives `execution` to completion while renewing `lease` at a third of
+    /// the lease TTL, and returns its output with the latest lease proof.
+    ///
+    /// Application tools run outside any transaction and may take up to their
+    /// configured execution limit, which can exceed the lease TTL. Without
+    /// renewal, lease recovery could close a live attempt mid-tool. A failed
+    /// renewal (for example after cancellation) keeps the previous proof; the
+    /// later fenced write reports the lost lease as before.
+    pub(crate) async fn run_with_lease_heartbeat<T>(
+        &self,
+        lease: &AiRunLease,
+        execution: impl std::future::Future<Output = T>,
+    ) -> (T, AiRunLease) {
+        let third: Duration = self.limits.lease_ttl / 3;
+        let interval = third.max(Duration::SECOND).unsigned_abs();
+        let mut current = lease.clone();
+        // Boxed so wrapping a large tool future does not grow every caller.
+        let mut execution = Box::pin(execution);
+        loop {
+            tokio::select! {
+                output = &mut execution => return (output, current),
+                () = tokio::time::sleep(interval) => {
+                    if let Ok(renewed) = self.heartbeat(&current).await {
+                        current = renewed;
+                    }
+                }
+            }
+        }
+    }
+
     /// Transitions a freshly claimed run from `Leased` to `Running`.
     ///
     /// A running run must be treated as externally uncertain after its budget
@@ -946,61 +1037,65 @@ impl OrmAiRunService {
     ) -> Result<(), AiError> {
         let now = canonical_second(self.clock.now());
         let lease = lease.clone();
-        self.database
-            .transaction(TransactionMode::StateMachine, move |tx| {
-                Box::pin(async move {
-                    let current = load_and_validate_active_lease(tx, &lease, now).await?;
-                    let current_state = persisted_state(&current)?;
-                    if !current_state.can_transition_to(completion.final_state) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let outcome = tx
-                        .compare_and_swap::<AiRunRecord>(
-                            &current.id,
-                            current.row_version,
-                            exact_state(&current.state),
-                            UpdateAiRunRecordInput {
-                                state: Some(completion.final_state.as_str().to_owned()),
-                                lease_owner: Some(None),
-                                lease_expires_at: Some(None),
-                                lease_heartbeat_at: Some(None),
-                                next_attempt_at: Some(None),
-                                error_code: Some(completion.error_code.clone()),
-                                ..Default::default()
-                            },
+        retry_transaction(self.limits.maximum_transaction_retries, || {
+            let completion = completion.clone();
+            let lease = lease.clone();
+            self.database
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        let current = load_and_validate_active_lease(tx, &lease, now).await?;
+                        let current_state = persisted_state(&current)?;
+                        if !current_state.can_transition_to(completion.final_state) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let outcome = tx
+                            .compare_and_swap::<AiRunRecord>(
+                                &current.id,
+                                current.row_version,
+                                exact_state(&current.state),
+                                UpdateAiRunRecordInput {
+                                    state: Some(completion.final_state.as_str().to_owned()),
+                                    lease_owner: Some(None),
+                                    lease_expires_at: Some(None),
+                                    lease_heartbeat_at: Some(None),
+                                    next_attempt_at: Some(None),
+                                    error_code: Some(completion.error_code.clone()),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if !matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        // The event must classify from the value that lands on the
+                        // run row, because that is what the retry mutation will
+                        // later re-evaluate. Classifying from `outcome_code` would
+                        // let a completion with an outcome code but no error code
+                        // advertise a retry the mutation then refuses.
+                        let terminal_error_code = completion.error_code.clone();
+                        append_attempt_outcome(
+                            tx,
+                            &lease,
+                            completion.final_state,
+                            completion.outcome_code,
+                            completion.provider_response_id,
+                            now,
+                        )
+                        .await?;
+                        append_terminal_run_event(
+                            tx,
+                            &current,
+                            completion.final_state,
+                            terminal_error_code.as_deref(),
+                            now,
                         )
                         .await
-                        .map_err(OrmPublicError::from)?;
-                    if !matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    // The event must classify from the value that lands on the
-                    // run row, because that is what the retry mutation will
-                    // later re-evaluate. Classifying from `outcome_code` would
-                    // let a completion with an outcome code but no error code
-                    // advertise a retry the mutation then refuses.
-                    let terminal_error_code = completion.error_code.clone();
-                    append_attempt_outcome(
-                        tx,
-                        &lease,
-                        completion.final_state,
-                        completion.outcome_code,
-                        completion.provider_response_id,
-                        now,
-                    )
-                    .await?;
-                    append_terminal_run_event(
-                        tx,
-                        &current,
-                        completion.final_state,
-                        terminal_error_code.as_deref(),
-                        now,
-                    )
-                    .await
+                    })
                 })
-            })
-            .await
-            .map_err(map_transaction)
+        })
+        .await
+        .map_err(map_transaction)
     }
 
     /// Schedules a bounded retry and relinquishes the current fence.
@@ -1032,55 +1127,59 @@ impl OrmAiRunService {
             .checked_add(delay)
             .ok_or_else(|| AiError::InvalidConfiguration("run retry time overflow".to_owned()))?;
         let lease = lease.clone();
-        self.database
-            .transaction(TransactionMode::StateMachine, move |tx| {
-                Box::pin(async move {
-                    let current = load_and_validate_active_lease(tx, &lease, now).await?;
-                    let current_state = persisted_state(&current)?;
-                    if !current_state.can_transition_to(AiRunState::RetryScheduled)
-                        || current.retry_count < 0
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let retry_count = current
-                        .retry_count
-                        .checked_add(1)
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
-                    let outcome = tx
-                        .compare_and_swap::<AiRunRecord>(
-                            &current.id,
-                            current.row_version,
-                            exact_state(&current.state),
-                            UpdateAiRunRecordInput {
-                                state: Some(AiRunState::RetryScheduled.as_str().to_owned()),
-                                attempt_id: Some(None),
-                                lease_owner: Some(None),
-                                lease_expires_at: Some(None),
-                                lease_heartbeat_at: Some(None),
-                                retry_count: Some(retry_count),
-                                next_attempt_at: Some(Some(eligible_at.unix_timestamp())),
-                                error_code: Some(Some(error_code.clone())),
-                                ..Default::default()
-                            },
+        retry_transaction(self.limits.maximum_transaction_retries, || {
+            let error_code = error_code.clone();
+            let lease = lease.clone();
+            self.database
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        let current = load_and_validate_active_lease(tx, &lease, now).await?;
+                        let current_state = persisted_state(&current)?;
+                        if !current_state.can_transition_to(AiRunState::RetryScheduled)
+                            || current.retry_count < 0
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let retry_count = current
+                            .retry_count
+                            .checked_add(1)
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                        let outcome = tx
+                            .compare_and_swap::<AiRunRecord>(
+                                &current.id,
+                                current.row_version,
+                                exact_state(&current.state),
+                                UpdateAiRunRecordInput {
+                                    state: Some(AiRunState::RetryScheduled.as_str().to_owned()),
+                                    attempt_id: Some(None),
+                                    lease_owner: Some(None),
+                                    lease_expires_at: Some(None),
+                                    lease_heartbeat_at: Some(None),
+                                    retry_count: Some(retry_count),
+                                    next_attempt_at: Some(Some(eligible_at.unix_timestamp())),
+                                    error_code: Some(Some(error_code.clone())),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if !matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        append_attempt_outcome(
+                            tx,
+                            &lease,
+                            AiRunState::RetryScheduled,
+                            error_code,
+                            None,
+                            now,
                         )
                         .await
-                        .map_err(OrmPublicError::from)?;
-                    if !matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    append_attempt_outcome(
-                        tx,
-                        &lease,
-                        AiRunState::RetryScheduled,
-                        error_code,
-                        None,
-                        now,
-                    )
-                    .await
+                    })
                 })
-            })
-            .await
-            .map_err(map_transaction)
+        })
+        .await
+        .map_err(map_transaction)
     }
 
     /// Reconciles a bounded window of expired active leases.
@@ -1090,479 +1189,207 @@ impl OrmAiRunService {
     /// protected-output checkpoint is safely finalized. An exact completed
     /// read-only tool-batch checkpoint can be requeued for protected adoption;
     /// it remains unusable until current-principal revalidation and is consumed
-    /// before the next provider call. Live `WaitingApproval` runs are excluded
-    /// because the bounded approval-wait reconciler owns their current policy,
-    /// decision, and cutoff handling without heartbeating the human wait. Every
-    /// other running or waiting state becomes `RecoveryRequired`; it is never
-    /// silently replayed. Malformed checkpoint/active-lease data fails the
-    /// whole pass so startup remains closed.
+    /// before the next provider call. When the adopting attempt also loses its
+    /// lease before consuming that checkpoint, the checkpoint is validated
+    /// against the attempt that wrote it and the run is requeued for adoption
+    /// again, bounded by the run retry ceiling. Live `WaitingApproval` runs are
+    /// excluded because the bounded approval-wait reconciler owns their current
+    /// policy, decision, and cutoff handling without heartbeating the human
+    /// wait. Every other running or waiting state becomes `RecoveryRequired`;
+    /// it is never silently replayed.
+    ///
+    /// The scan selects only expired rows, oldest first, so live leases cannot
+    /// hide expired ones. Each candidate is reconciled in its own bounded
+    /// serialization-retried transaction. A row whose lease or checkpoint
+    /// state is malformed is closed as `RecoveryRequired` with
+    /// `lease_recovery_state_invalid` and counted in
+    /// [`AiRunRecoveryReport::quarantined`]; a row whose transaction still
+    /// fails is left unchanged for the next pass and counted in
+    /// [`AiRunRecoveryReport::skipped`]. Neither stops the pass. The pass then
+    /// settles expired unresolved budget reservations whose attempt no longer
+    /// holds a live lease (see
+    /// [`AiRunRecoveryReport::budget_reservations_settled`]).
     ///
     /// # Errors
     ///
-    /// Returns an error for malformed active state, duplicate outcomes, or
-    /// persistence failure.
+    /// Returns [`AiError::RuntimeNotReady`] while the runtime recovery epoch is
+    /// closed, and an error when the candidate scan itself fails.
     pub async fn recover_expired_leases(&self) -> Result<AiRunRecoveryReport, AiError> {
         let now = canonical_second(self.clock.now());
         let limits = self.limits;
-        self.database
-            .transaction(TransactionMode::StateMachine, move |tx| {
-                Box::pin(async move {
-                    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
-                    let mut candidates = Vec::new();
-                    for state in [
-                        AiRunState::Leased,
-                        AiRunState::Running,
-                        AiRunState::WaitingTool,
-                        AiRunState::WaitingReauth,
-                    ] {
-                        let mut rows = tx
-                            .query::<AiRunRecord>()
-                            .filter(exact_state(state.as_str()))
+        let cutoff = now
+            .checked_sub(limits.lease_recovery_grace)
+            .ok_or_else(|| {
+                AiError::InvalidConfiguration("lease recovery time overflow".to_owned())
+            })?
+            .unix_timestamp();
+        let candidates = retry_transaction(limits.maximum_transaction_retries, || {
+            self.database
+                .transaction(TransactionMode::Default, move |tx| {
+                    Box::pin(async move {
+                        crate::orm_runtime_recovery::require_live_epoch(tx).await?;
+                        let mut candidates = Vec::new();
+                        for state in EXPIRED_LEASE_RECOVERY_STATES {
+                            // An active row without an expiry is malformed and
+                            // is quarantined instead of being skipped forever.
+                            for expiry in [
+                                Int64Filter {
+                                    is_null: Some(true),
+                                    ..Default::default()
+                                },
+                                Int64Filter {
+                                    lte: Some(cutoff),
+                                    ..Default::default()
+                                },
+                            ] {
+                                let mut rows = tx
+                                    .query::<AiRunRecord>()
+                                    .filter(AiRunRecordWhereInput {
+                                        state: Some(StringFilter {
+                                            eq: Some(state.as_str().to_owned()),
+                                            ..Default::default()
+                                        }),
+                                        lease_expires_at: Some(expiry),
+                                        ..Default::default()
+                                    })
+                                    .default_order()
+                                    .internal_limit(limits.maximum_candidate_scan as i64)
+                                    .fetch_all()
+                                    .await
+                                    .map_err(OrmPublicError::from)?;
+                                candidates.append(&mut rows);
+                            }
+                        }
+                        candidates.sort_by_key(|run| (run.created_at, run.id));
+                        candidates.dedup_by_key(|run| run.id);
+                        candidates.truncate(limits.maximum_candidate_scan);
+                        Ok(candidates.into_iter().map(|run| run.id).collect::<Vec<_>>())
+                    })
+                })
+        })
+        .await
+        .map_err(map_transaction)?;
+
+        let mut report = AiRunRecoveryReport::default();
+        for run_id in candidates {
+            let outcome = retry_transaction(limits.maximum_transaction_retries, || {
+                self.database
+                    .transaction(TransactionMode::StateMachine, move |tx| {
+                        Box::pin(async move {
+                            recover_expired_run(tx, run_id, now, cutoff, limits).await
+                        })
+                    })
+            })
+            .await;
+            match outcome {
+                Ok(ExpiredLeaseRecovery::Unchanged) => {}
+                Ok(ExpiredLeaseRecovery::Quarantined) => {
+                    report.quarantined = report.quarantined.saturating_add(1);
+                }
+                Ok(ExpiredLeaseRecovery::Recovered(state, code)) => {
+                    let counter = match (state, code) {
+                        (AiRunState::Completed, _) => &mut report.completed,
+                        (AiRunState::Failed, _) => &mut report.failed,
+                        (AiRunState::RetryScheduled, "checkpoint_adoption_ready") => {
+                            &mut report.checkpoint_requeued
+                        }
+                        (AiRunState::RetryScheduled, _) => &mut report.requeued,
+                        _ => &mut report.recovery_required,
+                    };
+                    *counter = counter.saturating_add(1);
+                }
+                Err(error)
+                    if crate::orm_runtime_recovery::is_epoch_not_live(error.public_error()) =>
+                {
+                    return Err(AiError::RuntimeNotReady);
+                }
+                Err(_) => report.skipped = report.skipped.saturating_add(1),
+            }
+        }
+        self.settle_stranded_budget_reservations(now, &mut report)
+            .await?;
+        Ok(report)
+    }
+
+    /// Settles expired unresolved budget reservations whose attempt no longer
+    /// holds a live lease.
+    ///
+    /// Only the exact worker that reserved a budget can reconcile it with
+    /// actual usage: while its attempt is live, or after an owner cancellation
+    /// of that attempt. A lease-lost, requeued or otherwise closed attempt, or
+    /// a cancelled worker that never reports, would otherwise keep its full
+    /// estimate reserved on every counter for the rest of the period. Once
+    /// the reservation's own expiry passes, a `reserved` or `uncertain`
+    /// reservation of such an attempt is committed at its full reserved
+    /// estimate, the same conservative settlement the privileged reclaim
+    /// uses, and audited. Dispatch cannot be disproved, so the estimate is
+    /// never released. Reservations owned by a background submission keep
+    /// their own authoritative reconciliation.
+    async fn settle_stranded_budget_reservations(
+        &self,
+        now: OffsetDateTime,
+        report: &mut AiRunRecoveryReport,
+    ) -> Result<(), AiError> {
+        let limits = self.limits;
+        let now_seconds = now.unix_timestamp();
+        let candidates = retry_transaction(limits.maximum_transaction_retries, || {
+            self.database
+                .transaction(TransactionMode::Default, move |tx| {
+                    Box::pin(async move {
+                        let rows = tx
+                            .query::<AiBudgetReservationRecord>()
+                            .filter(AiBudgetReservationRecordWhereInput {
+                                state: Some(StringFilter {
+                                    in_list: Some(vec![
+                                        "reserved".to_owned(),
+                                        "uncertain".to_owned(),
+                                    ]),
+                                    ..Default::default()
+                                }),
+                                expires_at: timestamp_at_or_before(now_seconds),
+                                ..Default::default()
+                            })
+                            .default_order()
                             .internal_limit(limits.maximum_candidate_scan as i64)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
-                        candidates.append(&mut rows);
-                    }
-                    candidates.sort_by_key(|run| (run.created_at, run.id));
-                    candidates.truncate(limits.maximum_candidate_scan);
-
-                    let mut report = AiRunRecoveryReport::default();
-                    for current in candidates {
-                        let Some(expires_at) = current.lease_expires_at else {
-                            return Err(OrmPublicError::new(OrmErrorCode::InternalError));
-                        };
-                        let lease = lease_from_record(&current)?;
-                        if expires_at > now.unix_timestamp() {
-                            continue;
-                        }
-                        let current_state = persisted_state(&current)?;
-                        let (final_checkpoint, adoptable_tool_batch) = if let Some(checkpoint_id) =
-                            current.latest_checkpoint_id
-                        {
-                            let checkpoint = tx
-                                .query::<AiRunCheckpointRecord>()
-                                .filter(AiRunCheckpointRecordWhereInput {
-                                    id: Some(UuidFilter {
-                                        eq: Some(checkpoint_id),
-                                        ..Default::default()
-                                    }),
-                                    ..Default::default()
-                                })
-                                .internal_limit(1)
-                                .fetch_one()
-                                .await
-                                .map_err(OrmPublicError::from)?
-                                .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                            if checkpoint.run_id != current.id
-                                || checkpoint.attempt_id != lease.attempt_id
-                                || checkpoint.lease_generation != lease.lease_generation
-                            {
-                                return Err(OrmPublicError::new(OrmErrorCode::InternalError));
-                            }
-                            if checkpoint.checkpoint_kind == "assistant_output_persisted" {
-                                let message_id =
-                                    checkpoint.assistant_message_id.ok_or_else(|| {
-                                        OrmPublicError::new(OrmErrorCode::InternalError)
-                                    })?;
-                                let budget_reservation_id =
-                                    checkpoint.budget_reservation_id.ok_or_else(|| {
-                                        OrmPublicError::new(OrmErrorCode::InternalError)
-                                    })?;
-                                let reservation = tx
-                                    .find_by_id::<AiBudgetReservationRecord>(&budget_reservation_id)
-                                    .await
-                                    .map_err(OrmPublicError::from)?
-                                    .ok_or_else(|| {
-                                        OrmPublicError::new(OrmErrorCode::InternalError)
-                                    })?;
-                                if reservation.session_id != current.session_id
-                                    || reservation.run_id != current.id
-                                    || reservation.attempt_id != lease.attempt_id
-                                    || reservation.lease_generation != lease.lease_generation
-                                    || reservation.state != "committed"
-                                    || reservation.actual_runs != Some(1)
-                                    || reservation.reconciled_at.is_none()
-                                {
-                                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
-                                }
-                                let expected_hash = final_output_checkpoint_hash(
-                                    lease.run_id,
-                                    lease.attempt_id,
-                                    lease.lease_generation,
-                                    message_id,
-                                    checkpoint.provider_response_id.as_deref(),
-                                    budget_reservation_id,
-                                );
-                                if checkpoint.checkpoint_hash != expected_hash {
-                                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
-                                }
-                                let message = tx
-                                    .find_by_id::<AiMessageRecord>(&message_id)
-                                    .await
-                                    .map_err(OrmPublicError::from)?
-                                    .ok_or_else(|| {
-                                        OrmPublicError::new(OrmErrorCode::InternalError)
-                                    })?;
-                                if message.session_id != current.session_id
-                                    || message.run_id != Some(current.id)
-                                    || message.message_role != "assistant"
-                                    || message.provider_kind.as_deref()
-                                        != Some(reservation.provider_kind.as_str())
-                                    || message.provider_model.as_deref()
-                                        != Some(reservation.provider_model.as_str())
-                                    || message.completion_state != "complete"
-                                    || message.finalized_at.is_none()
-                                    || !(1..=4_096).contains(&message.block_count)
-                                {
-                                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
-                                }
-                                let mut blocks = tx
-                                    .query::<AiMessageBlockRecord>()
-                                    .filter(AiMessageBlockRecordWhereInput {
-                                        message_id: Some(UuidFilter {
-                                            eq: Some(message_id),
-                                            ..Default::default()
-                                        }),
-                                        ..Default::default()
-                                    })
-                                    .internal_limit(message.block_count + 1)
-                                    .fetch_all()
-                                    .await
-                                    .map_err(OrmPublicError::from)?;
-                                blocks.sort_by_key(|block| block.block_index);
-                                if i64::try_from(blocks.len()).ok() != Some(message.block_count)
-                                    || blocks.iter().enumerate().any(|(index, block)| {
-                                        i64::try_from(index).ok() != Some(block.block_index)
-                                            || block.byte_count < 0
-                                            || block.line_count < 1
-                                    })
-                                {
-                                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
-                                }
-                                (Some(checkpoint.provider_response_id), false)
-                            } else if matches!(
-                                checkpoint.checkpoint_kind.as_str(),
-                                "tool_batch_persisted"
-                                    | "supervised_tool_batch_persisted"
-                                    | native_checkpoints::OUTCOME_KIND
-                            ) {
-                                let native_outcome =
-                                    checkpoint.checkpoint_kind == native_checkpoints::OUTCOME_KIND;
-                                let supervised = native_outcome
-                                    || checkpoint.checkpoint_kind
-                                        == "supervised_tool_batch_persisted";
-                                let provider_response_id =
-                                    checkpoint.provider_response_id.as_deref();
-                                if provider_response_id
-                                    .is_some_and(|value| !valid_provider_reference(value))
-                                {
-                                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
-                                }
-                                let budget_reservation_id =
-                                    checkpoint.budget_reservation_id.ok_or_else(|| {
-                                        OrmPublicError::new(OrmErrorCode::InternalError)
-                                    })?;
-                                let protected_state = checkpoint
-                                    .protected_state
-                                    .as_ref()
-                                    .filter(|state| {
-                                        serde_json::to_vec(state)
-                                            .is_ok_and(|encoded| encoded.len() <= 64 * 1024 * 1024)
-                                    })
-                                    .ok_or_else(|| {
-                                        OrmPublicError::new(OrmErrorCode::InternalError)
-                                    })?;
-                                if checkpoint.assistant_message_id.is_some() {
-                                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
-                                }
-                                let reservation = tx
-                                    .find_by_id::<AiBudgetReservationRecord>(&budget_reservation_id)
-                                    .await
-                                    .map_err(OrmPublicError::from)?
-                                    .ok_or_else(|| {
-                                        OrmPublicError::new(OrmErrorCode::InternalError)
-                                    })?;
-                                if reservation.session_id != current.session_id
-                                    || reservation.run_id != current.id
-                                    || (!native_outcome
-                                        && (reservation.attempt_id != lease.attempt_id
-                                            || reservation.lease_generation
-                                                != lease.lease_generation))
-                                    || reservation.state != "committed"
-                                    || reservation.actual_runs != Some(1)
-                                    || reservation.reconciled_at.is_none()
-                                    || reservation.provider_kind.trim().is_empty()
-                                    || reservation.provider_model.trim().is_empty()
-                                {
-                                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
-                                }
-                                let expected_hash = coordinator_checkpoint_hash(
-                                    lease.run_id,
-                                    lease.attempt_id,
-                                    lease.lease_generation,
-                                    checkpoint.id,
-                                    &checkpoint.checkpoint_kind,
-                                    &reservation.provider_kind,
-                                    &reservation.provider_model,
-                                    provider_response_id,
-                                    budget_reservation_id,
-                                    protected_state,
-                                )
-                                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                                if checkpoint.checkpoint_hash != expected_hash {
-                                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
-                                }
-                                let calls = tx
-                                    .query::<AiToolCallRecord>()
-                                    .filter(AiToolCallRecordWhereInput {
-                                        run_id: Some(UuidFilter {
-                                            eq: Some(current.id),
-                                            ..Default::default()
-                                        }),
-                                        ..Default::default()
-                                    })
-                                    .internal_limit(4_097)
-                                    .fetch_all()
-                                    .await
-                                    .map_err(OrmPublicError::from)?;
-                                let relevant = calls
-                                    .iter()
-                                    .filter(|call| {
-                                        call.lease_generation == lease.lease_generation
-                                            && call.provider_response_id.as_deref()
-                                                == provider_response_id
-                                            && call.budget_reservation_id
-                                                == Some(budget_reservation_id)
-                                    })
-                                    .collect::<Vec<_>>();
-                                if relevant.is_empty()
-                                    || relevant.len() > 4_096
-                                    || (supervised && relevant.len() != 1)
-                                    || relevant.iter().any(|call| {
-                                        !matches!(
-                                            call.state.as_str(),
-                                            "completed" | "execution_failed"
-                                        ) || call.protected_result.is_none()
-                                            || call.result_egress_decision_id.is_none()
-                                            || call.result_egress_manifest_hash.is_none()
-                                            || call.completed_at.is_none()
-                                    })
-                                {
-                                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
-                                }
-                                if native_outcome {
-                                    native_checkpoints::outcome(
-                                        tx,
-                                        current.id,
-                                        current.session_id,
-                                        lease.lease_generation,
-                                        &reservation,
-                                        provider_response_id,
-                                        relevant[0].id,
-                                        None,
-                                        None,
-                                    )
-                                    .await?;
-                                }
-                                for call in relevant {
-                                    let authorization_matches = if supervised {
-                                        let Some(approval_id) = call.approval_id else {
-                                            return Err(OrmPublicError::new(
-                                                OrmErrorCode::InternalError,
-                                            ));
-                                        };
-                                        let approval = tx
-                                            .find_by_id::<AiApprovalRecord>(&approval_id)
-                                            .await
-                                            .map_err(OrmPublicError::from)?
-                                            .ok_or_else(|| {
-                                                OrmPublicError::new(OrmErrorCode::InternalError)
-                                            })?;
-                                        matches!(
-                                            call.risk.as_str(),
-                                            "low_risk_write"
-                                                | "non_idempotent_write"
-                                                | "high_impact"
-                                        ) && approval.tool_call_id == call.id
-                                            && approval.session_id == current.session_id
-                                            && approval.state == "consumed"
-                                            && approval.maximum_uses == 1
-                                            && approval.consumed_uses == 1
-                                            && approval.consumed_at.is_some()
-                                            && approval.argument_hash == call.argument_hash
-                                            && approval.tool_fingerprint == call.tool_fingerprint
-                                            && call.authorization_policy_version.as_deref()
-                                                == Some(approval.policy_version.as_str())
-                                            && call.authorization_state_digest.as_deref()
-                                                == Some(
-                                                    approval.authorization_state_digest.as_str(),
-                                                )
-                                    } else {
-                                        call.risk == "read_only" && call.approval_id.is_none()
-                                    };
-                                    let step = tx
-                                        .find_by_id::<AiRunStepRecord>(&call.id)
-                                        .await
-                                        .map_err(OrmPublicError::from)?
-                                        .ok_or_else(|| {
-                                            OrmPublicError::new(OrmErrorCode::InternalError)
-                                        })?;
-                                    if step.run_id != current.id
-                                        || step.lease_generation != lease.lease_generation
-                                        || step.state != call.state
-                                        || step.finished_at.is_none()
-                                        || !authorization_matches
-                                    {
-                                        return Err(OrmPublicError::new(
-                                            OrmErrorCode::InternalError,
-                                        ));
-                                    }
-                                }
-                                // Read-only provider-retained/stateless batches
-                                // and the narrow supervised provider-retained
-                                // batch have complete durable
-                                // tool/approval/step/budget proof here. The
-                                // adopter still opens and validates every
-                                // protected row under current authority before
-                                // transport.
-                                (None, true)
-                            } else {
-                                (None, false)
-                            }
-                        } else {
-                            (None, false)
-                        };
-                        if (final_checkpoint.is_some() || adoptable_tool_batch)
-                            && current_state != AiRunState::Running
-                        {
-                            return Err(OrmPublicError::new(OrmErrorCode::InternalError));
-                        }
-                        let (
-                            next_state,
-                            outcome_code,
-                            next_retry_count,
-                            next_attempt_at,
-                            provider_response_id,
-                        ) = if current_state == AiRunState::Leased {
-                            let retry_count = u32::try_from(current.retry_count)
-                                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                            if retry_count >= limits.maximum_run_retries {
-                                report.failed = report.failed.saturating_add(1);
-                                (
-                                    AiRunState::Failed,
-                                    "lease_expired_retry_exhausted",
-                                    current.retry_count,
-                                    None,
-                                    None,
-                                )
-                            } else {
-                                report.requeued = report.requeued.saturating_add(1);
-                                (
-                                    AiRunState::RetryScheduled,
-                                    "lease_expired_before_start",
-                                    current.retry_count.checked_add(1).ok_or_else(|| {
-                                        OrmPublicError::new(OrmErrorCode::InternalError)
-                                    })?,
-                                    Some(now.unix_timestamp()),
-                                    None,
-                                )
-                            }
-                        } else if let Some(provider_response_id) = final_checkpoint {
-                            report.completed = report.completed.saturating_add(1);
-                            (
-                                AiRunState::Completed,
-                                "lease_expired_after_output_persisted",
-                                current.retry_count,
-                                None,
-                                provider_response_id,
-                            )
-                        } else if adoptable_tool_batch {
-                            let retry_count = u32::try_from(current.retry_count)
-                                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                            if retry_count >= limits.maximum_run_retries {
-                                report.recovery_required =
-                                    report.recovery_required.saturating_add(1);
-                                (
-                                    AiRunState::RecoveryRequired,
-                                    "checkpoint_adoption_retry_exhausted",
-                                    current.retry_count,
-                                    None,
-                                    None,
-                                )
-                            } else {
-                                report.checkpoint_requeued =
-                                    report.checkpoint_requeued.saturating_add(1);
-                                (
-                                    AiRunState::RetryScheduled,
-                                    "checkpoint_adoption_ready",
-                                    current.retry_count.checked_add(1).ok_or_else(|| {
-                                        OrmPublicError::new(OrmErrorCode::InternalError)
-                                    })?,
-                                    Some(now.unix_timestamp()),
-                                    None,
-                                )
-                            }
-                        } else {
-                            report.recovery_required = report.recovery_required.saturating_add(1);
-                            (
-                                AiRunState::RecoveryRequired,
-                                "lease_expired_after_start",
-                                current.retry_count,
-                                None,
-                                None,
-                            )
-                        };
-                        let update = tx
-                            .compare_and_swap::<AiRunRecord>(
-                                &current.id,
-                                current.row_version,
-                                exact_state(&current.state),
-                                UpdateAiRunRecordInput {
-                                    state: Some(next_state.as_str().to_owned()),
-                                    attempt_id: Some(None),
-                                    lease_owner: Some(None),
-                                    lease_expires_at: Some(None),
-                                    lease_heartbeat_at: Some(None),
-                                    retry_count: Some(next_retry_count),
-                                    next_attempt_at: Some(next_attempt_at),
-                                    error_code: Some(
-                                        (next_state != AiRunState::Completed)
-                                            .then_some(outcome_code.to_owned()),
-                                    ),
-                                    ..Default::default()
-                                },
-                            )
-                            .await
-                            .map_err(OrmPublicError::from)?;
-                        if !matches!(update, ConditionalUpdateOutcome::Updated(_)) {
-                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                        }
-                        append_attempt_outcome(
-                            tx,
-                            &lease,
-                            next_state,
-                            outcome_code.to_owned(),
-                            provider_response_id,
-                            now,
-                        )
-                        .await?;
-                        if AiRunTerminalEvent::from_run_state(next_state).is_some() {
-                            append_terminal_run_event(
-                                tx,
-                                &current,
-                                next_state,
-                                Some(outcome_code),
-                                now,
-                            )
-                            .await?;
-                        }
-                    }
-                    Ok(report)
+                        Ok(rows
+                            .into_iter()
+                            .filter(|reservation| reservation.expires_at <= now_seconds)
+                            .map(|reservation| reservation.id)
+                            .collect::<Vec<_>>())
+                    })
                 })
+        })
+        .await
+        .map_err(map_transaction)?;
+        for reservation_id in candidates {
+            let outcome = retry_transaction(limits.maximum_transaction_retries, || {
+                self.database
+                    .transaction(TransactionMode::StateMachine, move |tx| {
+                        Box::pin(async move {
+                            crate::orm_runtime_recovery::require_live_epoch(tx).await?;
+                            settle_stranded_budget_reservation(tx, reservation_id, now).await
+                        })
+                    })
             })
-            .await
-            .map_err(map_transaction)
+            .await;
+            match outcome {
+                Ok(true) => {
+                    report.budget_reservations_settled =
+                        report.budget_reservations_settled.saturating_add(1);
+                }
+                Ok(false) => {}
+                Err(error)
+                    if crate::orm_runtime_recovery::is_epoch_not_live(error.public_error()) =>
+                {
+                    return Err(AiError::RuntimeNotReady);
+                }
+                Err(_) => report.skipped = report.skipped.saturating_add(1),
+            }
+        }
+        Ok(())
     }
 
     pub(crate) async fn append_provider_output(
@@ -1573,165 +1400,171 @@ impl OrmAiRunService {
         let now = canonical_second(self.clock.now());
         let lease_ttl = self.limits.lease_ttl;
         let lease = lease.clone();
-        self.database
-            .transaction(TransactionMode::StateMachine, move |tx| {
-                Box::pin(async move {
-                    let current = load_and_validate_active_lease(tx, &lease, now).await?;
-                    if persisted_state(&current)? != AiRunState::Running || output.blocks.is_empty()
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let session = tx
-                        .find_by_id::<AiSessionRecord>(&lease.session_id.0)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    if session.state != "active"
-                        || session.deleted_at.is_some()
-                        || session.owner_principal_kind != output.expected_owner_principal_kind
-                        || session.owner_subject != output.expected_owner_subject
-                        || session.scope_kind != output.expected_scope_kind
-                        || session.scope_id != output.expected_scope_id
-                        || session.tenant_id != output.expected_tenant_id
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let message_sequence = session
-                        .message_head
-                        .checked_add(1)
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                    let event_sequence = session
-                        .stream_head
-                        .checked_add(1)
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                    let session_update = tx
-                        .compare_and_swap::<AiSessionRecord>(
-                            &session.id,
-                            session.row_version,
-                            AiSessionRecordWhereInput::default(),
-                            UpdateAiSessionRecordInput {
-                                message_head: Some(message_sequence),
-                                stream_head: Some(event_sequence),
-                                last_activity_at: Some(now.unix_timestamp()),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    if !matches!(session_update, ConditionalUpdateOutcome::Updated(_)) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let expiry = now
-                        .checked_add(lease_ttl)
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                    let run_update = tx
-                        .compare_and_swap::<AiRunRecord>(
-                            &current.id,
-                            current.row_version,
-                            exact_state(AiRunState::Running.as_str()),
-                            UpdateAiRunRecordInput {
-                                lease_expires_at: Some(Some(expiry.unix_timestamp())),
-                                lease_heartbeat_at: Some(Some(now.unix_timestamp())),
-                                latest_checkpoint_id: Some(Some(output.message_id)),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    let updated_run = match run_update {
-                        ConditionalUpdateOutcome::Updated(updated) => updated,
-                        ConditionalUpdateOutcome::NotFound | ConditionalUpdateOutcome::Conflict => {
+        retry_transaction(self.limits.maximum_transaction_retries, || {
+            let lease = lease.clone();
+            let output = output.clone();
+            self.database
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        let current = load_and_validate_active_lease(tx, &lease, now).await?;
+                        if persisted_state(&current)? != AiRunState::Running
+                            || output.blocks.is_empty()
+                        {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }
-                    };
-                    tx.insert::<AiMessageRecord>(CreateAiMessageRecordInput {
-                        id: output.message_id,
-                        session_id: lease.session_id.0,
-                        sequence: message_sequence,
-                        message_role: "assistant".to_owned(),
-                        author_principal_kind: None,
-                        author_subject: None,
-                        client_message_id: None,
-                        content_hash: None,
-                        run_id: Some(lease.run_id.0),
-                        provider_kind: Some(output.provider_kind),
-                        provider_model: Some(output.provider_model),
-                        protected_preview: Some(output.protected_preview),
-                        block_count: i64::try_from(output.blocks.len())
-                            .map_err(|_| OrmPublicError::new(OrmErrorCode::InvalidInput))?,
-                        completion_state: "complete".to_owned(),
-                        finalized_at: Some(now.unix_timestamp()),
-                        content_purged_at: None,
-                    })
-                    .await
-                    .map_err(OrmPublicError::from)?;
-                    tx.insert::<AiRunCheckpointRecord>(CreateAiRunCheckpointRecordInput {
-                        id: output.message_id,
-                        run_id: lease.run_id.0,
-                        attempt_id: lease.attempt_id,
-                        lease_generation: lease.lease_generation,
-                        checkpoint_kind: "assistant_output_persisted".to_owned(),
-                        provider_response_id: output.provider_response_id,
-                        budget_reservation_id: Some(output.budget_reservation_id),
-                        assistant_message_id: Some(output.message_id),
-                        protected_state: None,
-                        checkpoint_hash: output.checkpoint_hash,
-                    })
-                    .await
-                    .map_err(OrmPublicError::from)?;
-                    for (block_index, block) in output.blocks.into_iter().enumerate() {
-                        tx.insert::<AiMessageBlockRecord>(CreateAiMessageBlockRecordInput {
-                            id: block.id,
-                            message_id: output.message_id,
-                            block_index: i64::try_from(block_index)
+                        let session = tx
+                            .find_by_id::<AiSessionRecord>(&lease.session_id.0)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if session.state != "active"
+                            || session.deleted_at.is_some()
+                            || session.owner_principal_kind != output.expected_owner_principal_kind
+                            || session.owner_subject != output.expected_owner_subject
+                            || session.scope_kind != output.expected_scope_kind
+                            || session.scope_id != output.expected_scope_id
+                            || session.tenant_id != output.expected_tenant_id
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let message_sequence = session
+                            .message_head
+                            .checked_add(1)
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        let event_sequence = session
+                            .stream_head
+                            .checked_add(1)
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        let session_update = tx
+                            .compare_and_swap::<AiSessionRecord>(
+                                &session.id,
+                                session.row_version,
+                                AiSessionRecordWhereInput::default(),
+                                UpdateAiSessionRecordInput {
+                                    message_head: Some(message_sequence),
+                                    stream_head: Some(event_sequence),
+                                    last_activity_at: Some(now.unix_timestamp()),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if !matches!(session_update, ConditionalUpdateOutcome::Updated(_)) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let expiry = now
+                            .checked_add(lease_ttl)
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        let run_update = tx
+                            .compare_and_swap::<AiRunRecord>(
+                                &current.id,
+                                current.row_version,
+                                exact_state(AiRunState::Running.as_str()),
+                                UpdateAiRunRecordInput {
+                                    lease_expires_at: Some(Some(expiry.unix_timestamp())),
+                                    lease_heartbeat_at: Some(Some(now.unix_timestamp())),
+                                    latest_checkpoint_id: Some(Some(output.message_id)),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        let updated_run = match run_update {
+                            ConditionalUpdateOutcome::Updated(updated) => updated,
+                            ConditionalUpdateOutcome::NotFound
+                            | ConditionalUpdateOutcome::Conflict => {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                        };
+                        tx.insert::<AiMessageRecord>(CreateAiMessageRecordInput {
+                            id: output.message_id,
+                            session_id: lease.session_id.0,
+                            sequence: message_sequence,
+                            message_role: "assistant".to_owned(),
+                            author_principal_kind: None,
+                            author_subject: None,
+                            client_message_id: None,
+                            content_hash: None,
+                            run_id: Some(lease.run_id.0),
+                            provider_kind: Some(output.provider_kind),
+                            provider_model: Some(output.provider_model),
+                            protected_preview: Some(output.protected_preview),
+                            block_count: i64::try_from(output.blocks.len())
                                 .map_err(|_| OrmPublicError::new(OrmErrorCode::InvalidInput))?,
-                            block_kind: block.kind,
-                            protected_content: block.protected_content,
-                            byte_count: block.byte_count,
-                            line_count: block.line_count,
+                            completion_state: "complete".to_owned(),
+                            finalized_at: Some(now.unix_timestamp()),
+                            content_purged_at: None,
                         })
                         .await
                         .map_err(OrmPublicError::from)?;
-                    }
-                    tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
-                        id: output.event_id,
-                        session_id: lease.session_id.0,
-                        sequence: event_sequence,
-                        event_type: "assistant_message_completed".to_owned(),
-                        run_id: Some(lease.run_id.0),
-                        causation_id: Some(lease.input_message_id.to_string()),
-                        correlation_id: output.correlation_id,
-                        protected_payload: output.protected_event,
-                    })
-                    .await
-                    .map_err(OrmPublicError::from)?;
-                    tx.queue_event(AiSessionWakeup {
-                        session_id: lease.session_id.0,
-                        sequence: event_sequence,
-                    });
-                    append_inbox_event(
-                        tx,
-                        PreparedAiInboxEvent {
-                            id: output.inbox_event_id,
-                            principal_kind: output.expected_owner_principal_kind,
-                            principal_subject: output.expected_owner_subject,
-                            scope: crate::AiScope {
-                                kind: output.expected_scope_kind,
-                                id: output.expected_scope_id,
-                                tenant_id: output.expected_tenant_id,
-                            },
+                        tx.insert::<AiRunCheckpointRecord>(CreateAiRunCheckpointRecordInput {
+                            id: output.message_id,
+                            run_id: lease.run_id.0,
+                            attempt_id: lease.attempt_id,
+                            lease_generation: lease.lease_generation,
+                            checkpoint_kind: "assistant_output_persisted".to_owned(),
+                            provider_response_id: output.provider_response_id,
+                            budget_reservation_id: Some(output.budget_reservation_id),
+                            assistant_message_id: Some(output.message_id),
+                            protected_state: None,
+                            checkpoint_hash: output.checkpoint_hash,
+                        })
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                        for (block_index, block) in output.blocks.into_iter().enumerate() {
+                            tx.insert::<AiMessageBlockRecord>(CreateAiMessageBlockRecordInput {
+                                id: block.id,
+                                message_id: output.message_id,
+                                block_index: i64::try_from(block_index)
+                                    .map_err(|_| OrmPublicError::new(OrmErrorCode::InvalidInput))?,
+                                block_kind: block.kind,
+                                protected_content: block.protected_content,
+                                byte_count: block.byte_count,
+                                line_count: block.line_count,
+                            })
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        }
+                        tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
+                            id: output.event_id,
                             session_id: lease.session_id.0,
+                            sequence: event_sequence,
                             event_type: "assistant_message_completed".to_owned(),
-                            protected_payload: output.protected_inbox_event,
-                            created_at: now.unix_timestamp(),
-                        },
-                    )
-                    .await?;
-                    lease_from_record(&updated_run)
+                            run_id: Some(lease.run_id.0),
+                            causation_id: Some(lease.input_message_id.to_string()),
+                            correlation_id: output.correlation_id,
+                            protected_payload: output.protected_event,
+                        })
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                        tx.queue_event(AiSessionWakeup {
+                            session_id: lease.session_id.0,
+                            sequence: event_sequence,
+                        });
+                        append_inbox_event(
+                            tx,
+                            PreparedAiInboxEvent {
+                                id: output.inbox_event_id,
+                                principal_kind: output.expected_owner_principal_kind,
+                                principal_subject: output.expected_owner_subject,
+                                scope: crate::AiScope {
+                                    kind: output.expected_scope_kind,
+                                    id: output.expected_scope_id,
+                                    tenant_id: output.expected_tenant_id,
+                                },
+                                session_id: lease.session_id.0,
+                                event_type: "assistant_message_completed".to_owned(),
+                                protected_payload: output.protected_inbox_event,
+                                created_at: now.unix_timestamp(),
+                            },
+                        )
+                        .await?;
+                        lease_from_record(&updated_run)
+                    })
                 })
-            })
-            .await
-            .map_err(map_transaction)
+        })
+        .await
+        .map_err(map_transaction)
     }
 
     pub(crate) async fn append_context_checkpoint(
@@ -1742,189 +1575,199 @@ impl OrmAiRunService {
         let now = canonical_second(self.clock.now());
         let lease_ttl = self.limits.lease_ttl;
         let lease = lease.clone();
-        self.database
-            .transaction(TransactionMode::StateMachine, move |tx| {
-                Box::pin(async move {
-                    let current = load_and_validate_active_lease(tx, &lease, now).await?;
-                    if persisted_state(&current)? != AiRunState::Running
-                        || checkpoint.id.is_nil()
-                        || checkpoint.through_sequence <= 0
-                        || checkpoint.source_hash.len() != 64
-                        || !checkpoint
-                            .source_hash
-                            .bytes()
-                            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-                        || checkpoint.token_estimate <= 0
-                        || checkpoint.provider_kind.trim().is_empty()
-                        || checkpoint.provider_model.trim().is_empty()
-                        || checkpoint.sources.is_empty()
-                        || !(1..=5_000).contains(&checkpoint.maximum_checkpoints_per_session)
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let session = tx
-                        .find_by_id::<AiSessionRecord>(&lease.session_id.0)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    if session.state != "active"
-                        || session.deleted_at.is_some()
-                        || session.message_head < checkpoint.through_sequence
-                        || session.owner_principal_kind != checkpoint.expected_owner_principal_kind
-                        || session.owner_subject != checkpoint.expected_owner_subject
-                        || session.scope_kind != checkpoint.expected_scope_kind
-                        || session.scope_id != checkpoint.expected_scope_id
-                        || session.tenant_id != checkpoint.expected_tenant_id
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-
-                    let checkpoint_limit =
-                        i64::try_from(checkpoint.maximum_checkpoints_per_session.saturating_add(1))
-                            .map_err(|_| OrmPublicError::new(OrmErrorCode::InvalidInput))?;
-                    let existing = tx
-                        .query::<AiContextCheckpointRecord>()
-                        .filter(AiContextCheckpointRecordWhereInput {
-                            session_id: Some(UuidFilter {
-                                eq: Some(session.id),
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        })
-                        .default_order()
-                        .internal_limit(checkpoint_limit)
-                        .fetch_all()
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    if existing.len() > checkpoint.maximum_checkpoints_per_session {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let current_parent = existing
-                        .iter()
-                        .find(|candidate| candidate.invalidated_at.is_none());
-                    if current_parent != checkpoint.expected_parent.as_ref()
-                        || current_parent.is_some_and(|parent| {
-                            parent.through_sequence >= checkpoint.through_sequence
-                        })
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-
-                    let expected_start = current_parent
-                        .map_or(1, |parent| parent.through_sequence.saturating_add(1));
-                    let expected_source_count = checkpoint
-                        .through_sequence
-                        .checked_sub(expected_start)
-                        .and_then(|value| value.checked_add(1))
-                        .and_then(|value| usize::try_from(value).ok())
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
-                    if checkpoint.sources.len() != expected_source_count {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let start = i32::try_from(expected_start)
-                        .map_err(|_| OrmPublicError::new(OrmErrorCode::Conflict))?;
-                    let through = i32::try_from(checkpoint.through_sequence)
-                        .map_err(|_| OrmPublicError::new(OrmErrorCode::Conflict))?;
-                    let message_limit = i64::try_from(expected_source_count.saturating_add(1))
-                        .map_err(|_| OrmPublicError::new(OrmErrorCode::Conflict))?;
-                    let messages = tx
-                        .query::<AiMessageRecord>()
-                        .filter(AiMessageRecordWhereInput {
-                            session_id: Some(UuidFilter {
-                                eq: Some(session.id),
-                                ..Default::default()
-                            }),
-                            sequence: Some(IntFilter {
-                                gte: Some(start),
-                                lte: Some(through),
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        })
-                        .default_order()
-                        .internal_limit(message_limit)
-                        .fetch_all()
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    if messages.len() != expected_source_count {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    for (offset, (message, expected)) in
-                        messages.iter().zip(&checkpoint.sources).enumerate()
-                    {
-                        let sequence = expected_start
-                            .checked_add(
-                                i64::try_from(offset)
-                                    .map_err(|_| OrmPublicError::new(OrmErrorCode::Conflict))?,
-                            )
-                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
-                        if message != &expected.message
-                            || message.sequence != sequence
-                            || message.content_purged_at.is_some()
+        retry_transaction(self.limits.maximum_transaction_retries, || {
+            let checkpoint = checkpoint.clone();
+            let lease = lease.clone();
+            self.database
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        let current = load_and_validate_active_lease(tx, &lease, now).await?;
+                        if persisted_state(&current)? != AiRunState::Running
+                            || checkpoint.id.is_nil()
+                            || checkpoint.through_sequence <= 0
+                            || checkpoint.source_hash.len() != 64
+                            || !checkpoint
+                                .source_hash
+                                .bytes()
+                                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                            || checkpoint.token_estimate <= 0
+                            || checkpoint.provider_kind.trim().is_empty()
+                            || checkpoint.provider_model.trim().is_empty()
+                            || checkpoint.sources.is_empty()
+                            || !(1..=5_000).contains(&checkpoint.maximum_checkpoints_per_session)
                         {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }
-                        let block_limit = i64::try_from(expected.blocks.len().saturating_add(1))
-                            .map_err(|_| OrmPublicError::new(OrmErrorCode::Conflict))?;
-                        let blocks = tx
-                            .query::<AiMessageBlockRecord>()
-                            .filter(AiMessageBlockRecordWhereInput {
-                                message_id: Some(UuidFilter {
-                                    eq: Some(message.id),
+                        let session = tx
+                            .find_by_id::<AiSessionRecord>(&lease.session_id.0)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if session.state != "active"
+                            || session.deleted_at.is_some()
+                            || session.message_head < checkpoint.through_sequence
+                            || session.owner_principal_kind
+                                != checkpoint.expected_owner_principal_kind
+                            || session.owner_subject != checkpoint.expected_owner_subject
+                            || session.scope_kind != checkpoint.expected_scope_kind
+                            || session.scope_id != checkpoint.expected_scope_id
+                            || session.tenant_id != checkpoint.expected_tenant_id
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+
+                        let checkpoint_limit = i64::try_from(
+                            checkpoint.maximum_checkpoints_per_session.saturating_add(1),
+                        )
+                        .map_err(|_| OrmPublicError::new(OrmErrorCode::InvalidInput))?;
+                        let existing = tx
+                            .query::<AiContextCheckpointRecord>()
+                            .filter(AiContextCheckpointRecordWhereInput {
+                                session_id: Some(UuidFilter {
+                                    eq: Some(session.id),
                                     ..Default::default()
                                 }),
                                 ..Default::default()
                             })
                             .default_order()
-                            .internal_limit(block_limit)
+                            .internal_limit(checkpoint_limit)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
-                        if blocks != expected.blocks {
+                        if existing.len() > checkpoint.maximum_checkpoints_per_session {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }
-                    }
+                        let current_parent = existing
+                            .iter()
+                            .find(|candidate| candidate.invalidated_at.is_none());
+                        if current_parent != checkpoint.expected_parent.as_ref()
+                            || current_parent.is_some_and(|parent| {
+                                parent.through_sequence >= checkpoint.through_sequence
+                            })
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
 
-                    let expiry = now
-                        .checked_add(lease_ttl)
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                    let run_update = tx
-                        .compare_and_swap::<AiRunRecord>(
-                            &current.id,
-                            current.row_version,
-                            exact_state(AiRunState::Running.as_str()),
-                            UpdateAiRunRecordInput {
-                                lease_expires_at: Some(Some(expiry.unix_timestamp())),
-                                lease_heartbeat_at: Some(Some(now.unix_timestamp())),
+                        let expected_start = current_parent
+                            .map_or(1, |parent| parent.through_sequence.saturating_add(1));
+                        let expected_source_count = checkpoint
+                            .through_sequence
+                            .checked_sub(expected_start)
+                            .and_then(|value| value.checked_add(1))
+                            .and_then(|value| usize::try_from(value).ok())
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                        if checkpoint.sources.len() != expected_source_count {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let start = i32::try_from(expected_start)
+                            .map_err(|_| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                        let through = i32::try_from(checkpoint.through_sequence)
+                            .map_err(|_| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                        let message_limit = i64::try_from(expected_source_count.saturating_add(1))
+                            .map_err(|_| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                        let messages = tx
+                            .query::<AiMessageRecord>()
+                            .filter(AiMessageRecordWhereInput {
+                                session_id: Some(UuidFilter {
+                                    eq: Some(session.id),
+                                    ..Default::default()
+                                }),
+                                sequence: Some(IntFilter {
+                                    gte: Some(start),
+                                    lte: Some(through),
+                                    ..Default::default()
+                                }),
                                 ..Default::default()
+                            })
+                            .default_order()
+                            .internal_limit(message_limit)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if messages.len() != expected_source_count {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        for (offset, (message, expected)) in
+                            messages.iter().zip(&checkpoint.sources).enumerate()
+                        {
+                            let sequence = expected_start
+                                .checked_add(
+                                    i64::try_from(offset)
+                                        .map_err(|_| OrmPublicError::new(OrmErrorCode::Conflict))?,
+                                )
+                                .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                            if message != &expected.message
+                                || message.sequence != sequence
+                                || message.content_purged_at.is_some()
+                            {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                            let block_limit =
+                                i64::try_from(expected.blocks.len().saturating_add(1))
+                                    .map_err(|_| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                            let blocks = tx
+                                .query::<AiMessageBlockRecord>()
+                                .filter(AiMessageBlockRecordWhereInput {
+                                    message_id: Some(UuidFilter {
+                                        eq: Some(message.id),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                })
+                                .default_order()
+                                .internal_limit(block_limit)
+                                .fetch_all()
+                                .await
+                                .map_err(OrmPublicError::from)?;
+                            if blocks != expected.blocks {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                        }
+
+                        let expiry = now
+                            .checked_add(lease_ttl)
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        let run_update = tx
+                            .compare_and_swap::<AiRunRecord>(
+                                &current.id,
+                                current.row_version,
+                                exact_state(AiRunState::Running.as_str()),
+                                UpdateAiRunRecordInput {
+                                    lease_expires_at: Some(Some(expiry.unix_timestamp())),
+                                    lease_heartbeat_at: Some(Some(now.unix_timestamp())),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        let updated_run = match run_update {
+                            ConditionalUpdateOutcome::Updated(updated) => updated,
+                            ConditionalUpdateOutcome::NotFound
+                            | ConditionalUpdateOutcome::Conflict => {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                        };
+                        tx.insert::<AiContextCheckpointRecord>(
+                            CreateAiContextCheckpointRecordInput {
+                                id: checkpoint.id,
+                                session_id: session.id,
+                                through_sequence: checkpoint.through_sequence,
+                                source_hash: checkpoint.source_hash,
+                                token_estimate: checkpoint.token_estimate,
+                                provider_kind: checkpoint.provider_kind,
+                                provider_model: checkpoint.provider_model,
+                                protected_summary: checkpoint.protected_summary,
+                                invalidated_at: None,
                             },
                         )
                         .await
                         .map_err(OrmPublicError::from)?;
-                    let updated_run = match run_update {
-                        ConditionalUpdateOutcome::Updated(updated) => updated,
-                        ConditionalUpdateOutcome::NotFound | ConditionalUpdateOutcome::Conflict => {
-                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                        }
-                    };
-                    tx.insert::<AiContextCheckpointRecord>(CreateAiContextCheckpointRecordInput {
-                        id: checkpoint.id,
-                        session_id: session.id,
-                        through_sequence: checkpoint.through_sequence,
-                        source_hash: checkpoint.source_hash,
-                        token_estimate: checkpoint.token_estimate,
-                        provider_kind: checkpoint.provider_kind,
-                        provider_model: checkpoint.provider_model,
-                        protected_summary: checkpoint.protected_summary,
-                        invalidated_at: None,
+                        lease_from_record(&updated_run)
                     })
-                    .await
-                    .map_err(OrmPublicError::from)?;
-                    lease_from_record(&updated_run)
                 })
-            })
-            .await
-            .map_err(map_transaction)
+        })
+        .await
+        .map_err(map_transaction)
     }
 
     pub(crate) async fn append_coordinator_checkpoint(
@@ -1935,8 +1778,10 @@ impl OrmAiRunService {
         let now = canonical_second(self.clock.now());
         let lease_ttl = self.limits.lease_ttl;
         let lease = lease.clone();
-        self.database
-            .transaction(TransactionMode::StateMachine, move |tx| {
+        retry_transaction(self.limits.maximum_transaction_retries, || {
+            let checkpoint = checkpoint.clone();
+            let lease = lease.clone();
+ self.database.transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
                     let current = load_and_validate_active_lease(tx, &lease, now).await?;
                     let valid_kind = match checkpoint.checkpoint_kind.as_str() {
@@ -2289,7 +2134,8 @@ impl OrmAiRunService {
                     lease_from_record(&updated_run)
                 })
             })
-            .await
+})
+.await
             .map_err(map_transaction)
     }
 
@@ -2310,64 +2156,70 @@ impl OrmAiRunService {
         let now = canonical_second(self.clock.now());
         let lease_ttl = self.limits.lease_ttl;
         let lease = lease.clone();
-        self.database
-            .transaction(TransactionMode::StateMachine, move |tx| {
-                Box::pin(async move {
-                    let current = load_and_validate_active_lease(tx, &lease, now).await?;
-                    if persisted_state(&current)? != AiRunState::Running
-                        || current.latest_checkpoint_id != Some(checkpoint_id)
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let checkpoint = tx
-                        .query::<AiRunCheckpointRecord>()
-                        .filter(AiRunCheckpointRecordWhereInput {
-                            id: Some(UuidFilter {
-                                eq: Some(checkpoint_id),
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        })
-                        .internal_limit(1)
-                        .fetch_one()
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    if checkpoint.run_id != current.id
-                        || checkpoint.checkpoint_kind != expected_kind
-                        || checkpoint.budget_reservation_id.is_none()
-                        || checkpoint.assistant_message_id.is_some()
-                        || checkpoint.protected_state.is_none()
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let expiry = now
-                        .checked_add(lease_ttl)
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                    let update = tx
-                        .compare_and_swap::<AiRunRecord>(
-                            &current.id,
-                            current.row_version,
-                            exact_state(AiRunState::Running.as_str()),
-                            UpdateAiRunRecordInput {
-                                latest_checkpoint_id: Some(None),
-                                lease_expires_at: Some(Some(expiry.unix_timestamp())),
-                                lease_heartbeat_at: Some(Some(now.unix_timestamp())),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    match update {
-                        ConditionalUpdateOutcome::Updated(updated) => lease_from_record(&updated),
-                        ConditionalUpdateOutcome::NotFound | ConditionalUpdateOutcome::Conflict => {
-                            Err(OrmPublicError::new(OrmErrorCode::Conflict))
+        retry_transaction(self.limits.maximum_transaction_retries, || {
+            let lease = lease.clone();
+            self.database
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        let current = load_and_validate_active_lease(tx, &lease, now).await?;
+                        if persisted_state(&current)? != AiRunState::Running
+                            || current.latest_checkpoint_id != Some(checkpoint_id)
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }
-                    }
+                        let checkpoint = tx
+                            .query::<AiRunCheckpointRecord>()
+                            .filter(AiRunCheckpointRecordWhereInput {
+                                id: Some(UuidFilter {
+                                    eq: Some(checkpoint_id),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .internal_limit(1)
+                            .fetch_one()
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if checkpoint.run_id != current.id
+                            || checkpoint.checkpoint_kind != expected_kind
+                            || checkpoint.budget_reservation_id.is_none()
+                            || checkpoint.assistant_message_id.is_some()
+                            || checkpoint.protected_state.is_none()
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let expiry = now
+                            .checked_add(lease_ttl)
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        let update = tx
+                            .compare_and_swap::<AiRunRecord>(
+                                &current.id,
+                                current.row_version,
+                                exact_state(AiRunState::Running.as_str()),
+                                UpdateAiRunRecordInput {
+                                    latest_checkpoint_id: Some(None),
+                                    lease_expires_at: Some(Some(expiry.unix_timestamp())),
+                                    lease_heartbeat_at: Some(Some(now.unix_timestamp())),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        match update {
+                            ConditionalUpdateOutcome::Updated(updated) => {
+                                lease_from_record(&updated)
+                            }
+                            ConditionalUpdateOutcome::NotFound
+                            | ConditionalUpdateOutcome::Conflict => {
+                                Err(OrmPublicError::new(OrmErrorCode::Conflict))
+                            }
+                        }
+                    })
                 })
-            })
-            .await
-            .map_err(map_transaction)
+        })
+        .await
+        .map_err(map_transaction)
     }
 
     pub(crate) async fn append_live_delta_event(
@@ -2390,105 +2242,109 @@ impl OrmAiRunService {
         }
         let now = canonical_second(self.clock.now());
         let lease = lease.clone();
-        self.database
-            .transaction(TransactionMode::StateMachine, move |tx| {
-                Box::pin(async move {
-                    let current = tx
-                        .find_by_id::<AiRunRecord>(&lease.run_id.0)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    require_current_lease_epoch(tx, &current, &lease).await?;
-                    let stored_reference: PrincipalReference =
-                        serde_json::from_value(current.principal_reference.clone())
-                            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                    if persisted_state(&current)? != AiRunState::Running
-                        || current.session_id != lease.session_id.0
-                        || current.input_message_id != lease.input_message_id
-                        || stored_reference != lease.principal_reference
-                        || current.attempt_id != Some(lease.attempt_id)
-                        || current.lease_owner.as_deref() != Some(lease.worker_id.as_str())
-                        || current.lease_generation != lease.lease_generation
-                        || current
-                            .lease_expires_at
-                            .is_none_or(|expires_at| expires_at <= now.unix_timestamp())
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let reservation = tx
-                        .find_by_id::<AiBudgetReservationRecord>(&event.budget_reservation_id)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    if reservation.session_id != lease.session_id.0
-                        || reservation.run_id != lease.run_id.0
-                        || reservation.attempt_id != lease.attempt_id
-                        || reservation.lease_generation != lease.lease_generation
-                        || reservation.provider_kind != event.provider_kind
-                        || reservation.provider_model != event.provider_model
-                        || reservation.state != "uncertain"
-                        || reservation.actual_runs.is_some()
-                        || reservation.reconciled_at.is_none()
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let session = tx
-                        .find_by_id::<AiSessionRecord>(&lease.session_id.0)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    if session.state != "active"
-                        || session.deleted_at.is_some()
-                        || session.owner_principal_kind != event.expected_owner_principal_kind
-                        || session.owner_subject != event.expected_owner_subject
-                        || session.scope_kind != event.expected_scope_kind
-                        || session.scope_id != event.expected_scope_id
-                        || session.tenant_id != event.expected_tenant_id
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let event_sequence = session
-                        .stream_head
-                        .checked_add(1)
-                        .filter(|sequence| *sequence <= i64::from(i32::MAX))
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                    let update = tx
-                        .compare_and_swap::<AiSessionRecord>(
-                            &session.id,
-                            session.row_version,
-                            AiSessionRecordWhereInput::default(),
-                            UpdateAiSessionRecordInput {
-                                stream_head: Some(event_sequence),
-                                last_activity_at: Some(now.unix_timestamp()),
-                                ..Default::default()
-                            },
-                        )
+        retry_transaction(self.limits.maximum_transaction_retries, || {
+            let event = event.clone();
+            let lease = lease.clone();
+            self.database
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        let current = tx
+                            .find_by_id::<AiRunRecord>(&lease.run_id.0)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        require_current_lease_epoch(tx, &current, &lease).await?;
+                        let stored_reference: PrincipalReference =
+                            serde_json::from_value(current.principal_reference.clone())
+                                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        if persisted_state(&current)? != AiRunState::Running
+                            || current.session_id != lease.session_id.0
+                            || current.input_message_id != lease.input_message_id
+                            || stored_reference != lease.principal_reference
+                            || current.attempt_id != Some(lease.attempt_id)
+                            || current.lease_owner.as_deref() != Some(lease.worker_id.as_str())
+                            || current.lease_generation != lease.lease_generation
+                            || current
+                                .lease_expires_at
+                                .is_none_or(|expires_at| expires_at <= now.unix_timestamp())
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let reservation = tx
+                            .find_by_id::<AiBudgetReservationRecord>(&event.budget_reservation_id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if reservation.session_id != lease.session_id.0
+                            || reservation.run_id != lease.run_id.0
+                            || reservation.attempt_id != lease.attempt_id
+                            || reservation.lease_generation != lease.lease_generation
+                            || reservation.provider_kind != event.provider_kind
+                            || reservation.provider_model != event.provider_model
+                            || reservation.state != "uncertain"
+                            || reservation.actual_runs.is_some()
+                            || reservation.reconciled_at.is_none()
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let session = tx
+                            .find_by_id::<AiSessionRecord>(&lease.session_id.0)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if session.state != "active"
+                            || session.deleted_at.is_some()
+                            || session.owner_principal_kind != event.expected_owner_principal_kind
+                            || session.owner_subject != event.expected_owner_subject
+                            || session.scope_kind != event.expected_scope_kind
+                            || session.scope_id != event.expected_scope_id
+                            || session.tenant_id != event.expected_tenant_id
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let event_sequence = session
+                            .stream_head
+                            .checked_add(1)
+                            .filter(|sequence| *sequence <= i64::from(i32::MAX))
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        let update = tx
+                            .compare_and_swap::<AiSessionRecord>(
+                                &session.id,
+                                session.row_version,
+                                AiSessionRecordWhereInput::default(),
+                                UpdateAiSessionRecordInput {
+                                    stream_head: Some(event_sequence),
+                                    last_activity_at: Some(now.unix_timestamp()),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if !matches!(update, ConditionalUpdateOutcome::Updated(_)) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
+                            id: event.id,
+                            session_id: session.id,
+                            sequence: event_sequence,
+                            event_type: event.event_type,
+                            run_id: Some(lease.run_id.0),
+                            causation_id: Some(lease.input_message_id.to_string()),
+                            correlation_id: event.correlation_id,
+                            protected_payload: event.protected_payload,
+                        })
                         .await
                         .map_err(OrmPublicError::from)?;
-                    if !matches!(update, ConditionalUpdateOutcome::Updated(_)) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
-                        id: event.id,
-                        session_id: session.id,
-                        sequence: event_sequence,
-                        event_type: event.event_type,
-                        run_id: Some(lease.run_id.0),
-                        causation_id: Some(lease.input_message_id.to_string()),
-                        correlation_id: event.correlation_id,
-                        protected_payload: event.protected_payload,
+                        tx.queue_event(AiSessionWakeup {
+                            session_id: session.id,
+                            sequence: event_sequence,
+                        });
+                        Ok(())
                     })
-                    .await
-                    .map_err(OrmPublicError::from)?;
-                    tx.queue_event(AiSessionWakeup {
-                        session_id: session.id,
-                        sequence: event_sequence,
-                    });
-                    Ok(())
                 })
-            })
-            .await
-            .map_err(map_transaction)
+        })
+        .await
+        .map_err(map_transaction)
     }
 
     pub(crate) async fn append_provider_activity_event(
@@ -2510,123 +2366,127 @@ impl OrmAiRunService {
         }
         let now = canonical_second(self.clock.now());
         let lease = lease.clone();
-        self.database
-            .transaction(TransactionMode::StateMachine, move |tx| {
-                Box::pin(async move {
-                    let current = tx
-                        .find_by_id::<AiRunRecord>(&lease.run_id.0)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    require_current_lease_epoch(tx, &current, &lease).await?;
-                    let stored_reference: PrincipalReference =
-                        serde_json::from_value(current.principal_reference.clone())
-                            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                    if persisted_state(&current)? != AiRunState::Running
-                        || current.session_id != lease.session_id.0
-                        || current.input_message_id != lease.input_message_id
-                        || stored_reference != lease.principal_reference
-                        || current.attempt_id != Some(lease.attempt_id)
-                        || current.lease_owner.as_deref() != Some(lease.worker_id.as_str())
-                        || current.lease_generation != lease.lease_generation
-                        || current
-                            .lease_expires_at
-                            .is_none_or(|expires_at| expires_at <= now.unix_timestamp())
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let reservation = tx
-                        .find_by_id::<AiBudgetReservationRecord>(&event.budget_reservation_id)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    if reservation.session_id != lease.session_id.0
-                        || reservation.run_id != lease.run_id.0
-                        || reservation.attempt_id != lease.attempt_id
-                        || reservation.lease_generation != lease.lease_generation
-                        || reservation.provider_kind != event.provider_kind
-                        || reservation.provider_model != event.provider_model
-                        || reservation.state != "uncertain"
-                        || reservation.actual_runs.is_some()
-                        || reservation.reconciled_at.is_none()
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let session = tx
-                        .find_by_id::<AiSessionRecord>(&lease.session_id.0)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    if session.state != "active"
-                        || session.deleted_at.is_some()
-                        || session.owner_principal_kind != event.expected_owner_principal_kind
-                        || session.owner_subject != event.expected_owner_subject
-                        || session.scope_kind != event.expected_scope_kind
-                        || session.scope_id != event.expected_scope_id
-                        || session.tenant_id != event.expected_tenant_id
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let event_sequence = session
-                        .stream_head
-                        .checked_add(1)
-                        .filter(|sequence| *sequence <= i64::from(i32::MAX))
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                    let update = tx
-                        .compare_and_swap::<AiSessionRecord>(
-                            &session.id,
-                            session.row_version,
-                            AiSessionRecordWhereInput::default(),
-                            UpdateAiSessionRecordInput {
-                                stream_head: Some(event_sequence),
-                                last_activity_at: Some(now.unix_timestamp()),
-                                ..Default::default()
-                            },
-                        )
+        retry_transaction(self.limits.maximum_transaction_retries, || {
+            let event = event.clone();
+            let lease = lease.clone();
+            self.database
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        let current = tx
+                            .find_by_id::<AiRunRecord>(&lease.run_id.0)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        require_current_lease_epoch(tx, &current, &lease).await?;
+                        let stored_reference: PrincipalReference =
+                            serde_json::from_value(current.principal_reference.clone())
+                                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        if persisted_state(&current)? != AiRunState::Running
+                            || current.session_id != lease.session_id.0
+                            || current.input_message_id != lease.input_message_id
+                            || stored_reference != lease.principal_reference
+                            || current.attempt_id != Some(lease.attempt_id)
+                            || current.lease_owner.as_deref() != Some(lease.worker_id.as_str())
+                            || current.lease_generation != lease.lease_generation
+                            || current
+                                .lease_expires_at
+                                .is_none_or(|expires_at| expires_at <= now.unix_timestamp())
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let reservation = tx
+                            .find_by_id::<AiBudgetReservationRecord>(&event.budget_reservation_id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if reservation.session_id != lease.session_id.0
+                            || reservation.run_id != lease.run_id.0
+                            || reservation.attempt_id != lease.attempt_id
+                            || reservation.lease_generation != lease.lease_generation
+                            || reservation.provider_kind != event.provider_kind
+                            || reservation.provider_model != event.provider_model
+                            || reservation.state != "uncertain"
+                            || reservation.actual_runs.is_some()
+                            || reservation.reconciled_at.is_none()
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let session = tx
+                            .find_by_id::<AiSessionRecord>(&lease.session_id.0)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if session.state != "active"
+                            || session.deleted_at.is_some()
+                            || session.owner_principal_kind != event.expected_owner_principal_kind
+                            || session.owner_subject != event.expected_owner_subject
+                            || session.scope_kind != event.expected_scope_kind
+                            || session.scope_id != event.expected_scope_id
+                            || session.tenant_id != event.expected_tenant_id
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let event_sequence = session
+                            .stream_head
+                            .checked_add(1)
+                            .filter(|sequence| *sequence <= i64::from(i32::MAX))
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        let update = tx
+                            .compare_and_swap::<AiSessionRecord>(
+                                &session.id,
+                                session.row_version,
+                                AiSessionRecordWhereInput::default(),
+                                UpdateAiSessionRecordInput {
+                                    stream_head: Some(event_sequence),
+                                    last_activity_at: Some(now.unix_timestamp()),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if !matches!(update, ConditionalUpdateOutcome::Updated(_)) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
+                            id: event.id,
+                            session_id: session.id,
+                            sequence: event_sequence,
+                            event_type: "provider_activity".to_owned(),
+                            run_id: Some(lease.run_id.0),
+                            causation_id: Some(lease.input_message_id.to_string()),
+                            correlation_id: event.correlation_id,
+                            protected_payload: event.protected_payload,
+                        })
                         .await
                         .map_err(OrmPublicError::from)?;
-                    if !matches!(update, ConditionalUpdateOutcome::Updated(_)) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
-                        id: event.id,
-                        session_id: session.id,
-                        sequence: event_sequence,
-                        event_type: "provider_activity".to_owned(),
-                        run_id: Some(lease.run_id.0),
-                        causation_id: Some(lease.input_message_id.to_string()),
-                        correlation_id: event.correlation_id,
-                        protected_payload: event.protected_payload,
-                    })
-                    .await
-                    .map_err(OrmPublicError::from)?;
-                    append_inbox_event(
-                        tx,
-                        PreparedAiInboxEvent {
-                            id: event.inbox_event_id,
-                            principal_kind: event.expected_owner_principal_kind,
-                            principal_subject: event.expected_owner_subject,
-                            scope: AiScope {
-                                kind: event.expected_scope_kind,
-                                id: event.expected_scope_id,
-                                tenant_id: event.expected_tenant_id,
+                        append_inbox_event(
+                            tx,
+                            PreparedAiInboxEvent {
+                                id: event.inbox_event_id,
+                                principal_kind: event.expected_owner_principal_kind,
+                                principal_subject: event.expected_owner_subject,
+                                scope: AiScope {
+                                    kind: event.expected_scope_kind,
+                                    id: event.expected_scope_id,
+                                    tenant_id: event.expected_tenant_id,
+                                },
+                                session_id: session.id,
+                                event_type: "provider_activity".to_owned(),
+                                protected_payload: event.protected_inbox_payload,
+                                created_at: now.unix_timestamp(),
                             },
+                        )
+                        .await?;
+                        tx.queue_event(AiSessionWakeup {
                             session_id: session.id,
-                            event_type: "provider_activity".to_owned(),
-                            protected_payload: event.protected_inbox_payload,
-                            created_at: now.unix_timestamp(),
-                        },
-                    )
-                    .await?;
-                    tx.queue_event(AiSessionWakeup {
-                        session_id: session.id,
-                        sequence: event_sequence,
-                    });
-                    Ok(())
+                            sequence: event_sequence,
+                        });
+                        Ok(())
+                    })
                 })
-            })
-            .await
-            .map_err(map_transaction)
+        })
+        .await
+        .map_err(map_transaction)
     }
 
     pub(crate) async fn append_ui_intent_event(
@@ -2653,238 +2513,243 @@ impl OrmAiRunService {
         let now = canonical_second(self.clock.now());
         let lease_ttl = self.limits.lease_ttl;
         let lease = lease.clone();
-        self.database
-            .transaction(TransactionMode::StateMachine, move |tx| {
-                Box::pin(async move {
-                    let current = tx
-                        .find_by_id::<AiRunRecord>(&lease.run_id.0)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    require_current_lease_epoch(tx, &current, &lease).await?;
-                    let stored_reference: PrincipalReference =
-                        serde_json::from_value(current.principal_reference.clone())
-                            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                    if persisted_state(&current)? != AiRunState::Running
-                        || current.session_id != lease.session_id.0
-                        || current.input_message_id != lease.input_message_id
-                        || stored_reference != lease.principal_reference
-                        || current.attempt_id != Some(lease.attempt_id)
-                        || current.lease_owner.as_deref() != Some(lease.worker_id.as_str())
-                        || current.lease_generation != lease.lease_generation
-                        || current.retry_count != i64::from(lease.retry_count)
-                        || current.latest_checkpoint_id != lease.latest_checkpoint_id
-                        || current
-                            .lease_expires_at
-                            .is_none_or(|expiry| expiry <= now.unix_timestamp())
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-
-                    let checkpoint_id = current
-                        .latest_checkpoint_id
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
-                    let checkpoint = tx
-                        .query::<AiRunCheckpointRecord>()
-                        .filter(AiRunCheckpointRecordWhereInput {
-                            id: Some(UuidFilter {
-                                eq: Some(checkpoint_id),
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        })
-                        .internal_limit(1)
-                        .fetch_one()
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
-                    if checkpoint.run_id != lease.run_id.0
-                        || checkpoint.attempt_id != lease.attempt_id
-                        || checkpoint.lease_generation != lease.lease_generation
-                        || checkpoint.checkpoint_kind != "assistant_output_persisted"
-                        || checkpoint.provider_response_id != event.provider_response_id
-                        || checkpoint.budget_reservation_id != Some(event.budget_reservation_id)
-                        || checkpoint.assistant_message_id != Some(checkpoint_id)
-                        || checkpoint.protected_state.is_some()
-                        || checkpoint.checkpoint_hash
-                            != final_output_checkpoint_hash(
-                                lease.run_id,
-                                lease.attempt_id,
-                                lease.lease_generation,
-                                checkpoint_id,
-                                event.provider_response_id.as_deref(),
-                                event.budget_reservation_id,
-                            )
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-
-                    if let Some(existing) = tx
-                        .find_by_id::<AiSessionEventRecord>(&event.id)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                    {
-                        let inbox = tx
-                            .find_by_id::<AiInboxEventRecord>(&event.inbox_event_id)
+        retry_transaction(self.limits.maximum_transaction_retries, || {
+            let event = event.clone();
+            let lease = lease.clone();
+            self.database
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        let current = tx
+                            .find_by_id::<AiRunRecord>(&lease.run_id.0)
                             .await
                             .map_err(OrmPublicError::from)?
-                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
-                        if lease.row_version.checked_add(1) != Some(current.row_version)
-                            || existing.session_id != lease.session_id.0
-                            || existing.event_type != "ui_intent_suggested"
-                            || existing.run_id != Some(lease.run_id.0)
-                            || existing.correlation_id != event.correlation_id
-                            || inbox.session_id != Some(lease.session_id.0)
-                            || inbox.event_type != "ui_intent_suggested"
-                            || inbox.principal_kind != event.expected_owner_principal_kind
-                            || inbox.principal_subject != event.expected_owner_subject
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        require_current_lease_epoch(tx, &current, &lease).await?;
+                        let stored_reference: PrincipalReference =
+                            serde_json::from_value(current.principal_reference.clone())
+                                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        if persisted_state(&current)? != AiRunState::Running
+                            || current.session_id != lease.session_id.0
+                            || current.input_message_id != lease.input_message_id
+                            || stored_reference != lease.principal_reference
+                            || current.attempt_id != Some(lease.attempt_id)
+                            || current.lease_owner.as_deref() != Some(lease.worker_id.as_str())
+                            || current.lease_generation != lease.lease_generation
+                            || current.retry_count != i64::from(lease.retry_count)
+                            || current.latest_checkpoint_id != lease.latest_checkpoint_id
+                            || current
+                                .lease_expires_at
+                                .is_none_or(|expiry| expiry <= now.unix_timestamp())
                         {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }
-                        return Ok((lease_from_record(&current)?, existing.sequence));
-                    }
-                    if current.row_version != lease.row_version {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
 
-                    let reservation = tx
-                        .find_by_id::<AiBudgetReservationRecord>(&event.budget_reservation_id)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    if reservation.scope_kind != event.expected_scope_kind
-                        || reservation.scope_id != event.expected_scope_id
-                        || reservation.tenant_id != event.expected_tenant_id
-                        || reservation.principal_kind != event.expected_owner_principal_kind
-                        || reservation.principal_subject != event.expected_owner_subject
-                        || reservation.session_id != lease.session_id.0
-                        || reservation.run_id != lease.run_id.0
-                        || reservation.attempt_id != lease.attempt_id
-                        || reservation.lease_generation != lease.lease_generation
-                        || reservation.provider_kind != event.provider_kind
-                        || reservation.provider_model != event.provider_model
-                        || reservation.state != "committed"
-                        || reservation.reconciled_at.is_none()
-                        || !reservation_usage_matches(
-                            &reservation,
-                            event.usage,
-                            event.cached_input_tokens,
-                        )?
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let session = tx
-                        .find_by_id::<AiSessionRecord>(&lease.session_id.0)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    if session.state != "active"
-                        || session.deleted_at.is_some()
-                        || session.owner_principal_kind != event.expected_owner_principal_kind
-                        || session.owner_subject != event.expected_owner_subject
-                        || session.scope_kind != event.expected_scope_kind
-                        || session.scope_id != event.expected_scope_id
-                        || session.tenant_id != event.expected_tenant_id
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let event_sequence = session
-                        .stream_head
-                        .checked_add(1)
-                        .filter(|sequence| *sequence <= i64::from(i32::MAX))
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                    if !matches!(
-                        tx.compare_and_swap::<AiSessionRecord>(
-                            &session.id,
-                            session.row_version,
-                            AiSessionRecordWhereInput::default(),
-                            UpdateAiSessionRecordInput {
-                                stream_head: Some(event_sequence),
-                                last_activity_at: Some(now.unix_timestamp()),
+                        let checkpoint_id = current
+                            .latest_checkpoint_id
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                        let checkpoint = tx
+                            .query::<AiRunCheckpointRecord>()
+                            .filter(AiRunCheckpointRecordWhereInput {
+                                id: Some(UuidFilter {
+                                    eq: Some(checkpoint_id),
+                                    ..Default::default()
+                                }),
                                 ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?,
-                        ConditionalUpdateOutcome::Updated(_)
-                    ) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let expiry = now
-                        .checked_add(lease_ttl)
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                    let updated_run = match tx
-                        .compare_and_swap::<AiRunRecord>(
-                            &current.id,
-                            current.row_version,
-                            exact_state(AiRunState::Running.as_str()),
-                            UpdateAiRunRecordInput {
-                                lease_expires_at: Some(Some(expiry.unix_timestamp())),
-                                lease_heartbeat_at: Some(Some(now.unix_timestamp())),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?
-                    {
-                        ConditionalUpdateOutcome::Updated(updated) => updated,
-                        ConditionalUpdateOutcome::NotFound | ConditionalUpdateOutcome::Conflict => {
+                            })
+                            .internal_limit(1)
+                            .fetch_one()
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                        if checkpoint.run_id != lease.run_id.0
+                            || checkpoint.attempt_id != lease.attempt_id
+                            || checkpoint.lease_generation != lease.lease_generation
+                            || checkpoint.checkpoint_kind != "assistant_output_persisted"
+                            || checkpoint.provider_response_id != event.provider_response_id
+                            || checkpoint.budget_reservation_id != Some(event.budget_reservation_id)
+                            || checkpoint.assistant_message_id != Some(checkpoint_id)
+                            || checkpoint.protected_state.is_some()
+                            || checkpoint.checkpoint_hash
+                                != final_output_checkpoint_hash(
+                                    lease.run_id,
+                                    lease.attempt_id,
+                                    lease.lease_generation,
+                                    checkpoint_id,
+                                    event.provider_response_id.as_deref(),
+                                    event.budget_reservation_id,
+                                )
+                        {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }
-                    };
-                    tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
-                        id: event.id,
-                        session_id: session.id,
-                        sequence: event_sequence,
-                        event_type: "ui_intent_suggested".to_owned(),
-                        run_id: Some(lease.run_id.0),
-                        causation_id: Some(lease.input_message_id.to_string()),
-                        correlation_id: event.correlation_id.clone(),
-                        protected_payload: event.protected_payload,
-                    })
-                    .await
-                    .map_err(OrmPublicError::from)?;
-                    tx.queue_event(AiSessionWakeup {
-                        session_id: session.id,
-                        sequence: event_sequence,
-                    });
-                    append_inbox_event(
-                        tx,
-                        PreparedAiInboxEvent {
-                            id: event.inbox_event_id,
-                            principal_kind: event.expected_owner_principal_kind,
-                            principal_subject: event.expected_owner_subject.clone(),
-                            scope: crate::AiScope {
-                                kind: event.expected_scope_kind,
-                                id: event.expected_scope_id,
-                                tenant_id: event.expected_tenant_id,
-                            },
+
+                        if let Some(existing) = tx
+                            .find_by_id::<AiSessionEventRecord>(&event.id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                        {
+                            let inbox = tx
+                                .find_by_id::<AiInboxEventRecord>(&event.inbox_event_id)
+                                .await
+                                .map_err(OrmPublicError::from)?
+                                .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                            if lease.row_version.checked_add(1) != Some(current.row_version)
+                                || existing.session_id != lease.session_id.0
+                                || existing.event_type != "ui_intent_suggested"
+                                || existing.run_id != Some(lease.run_id.0)
+                                || existing.correlation_id != event.correlation_id
+                                || inbox.session_id != Some(lease.session_id.0)
+                                || inbox.event_type != "ui_intent_suggested"
+                                || inbox.principal_kind != event.expected_owner_principal_kind
+                                || inbox.principal_subject != event.expected_owner_subject
+                            {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                            return Ok((lease_from_record(&current)?, existing.sequence));
+                        }
+                        if current.row_version != lease.row_version {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+
+                        let reservation = tx
+                            .find_by_id::<AiBudgetReservationRecord>(&event.budget_reservation_id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if reservation.scope_kind != event.expected_scope_kind
+                            || reservation.scope_id != event.expected_scope_id
+                            || reservation.tenant_id != event.expected_tenant_id
+                            || reservation.principal_kind != event.expected_owner_principal_kind
+                            || reservation.principal_subject != event.expected_owner_subject
+                            || reservation.session_id != lease.session_id.0
+                            || reservation.run_id != lease.run_id.0
+                            || reservation.attempt_id != lease.attempt_id
+                            || reservation.lease_generation != lease.lease_generation
+                            || reservation.provider_kind != event.provider_kind
+                            || reservation.provider_model != event.provider_model
+                            || reservation.state != "committed"
+                            || reservation.reconciled_at.is_none()
+                            || !reservation_usage_matches(
+                                &reservation,
+                                event.usage,
+                                event.cached_input_tokens,
+                            )?
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let session = tx
+                            .find_by_id::<AiSessionRecord>(&lease.session_id.0)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if session.state != "active"
+                            || session.deleted_at.is_some()
+                            || session.owner_principal_kind != event.expected_owner_principal_kind
+                            || session.owner_subject != event.expected_owner_subject
+                            || session.scope_kind != event.expected_scope_kind
+                            || session.scope_id != event.expected_scope_id
+                            || session.tenant_id != event.expected_tenant_id
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let event_sequence = session
+                            .stream_head
+                            .checked_add(1)
+                            .filter(|sequence| *sequence <= i64::from(i32::MAX))
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        if !matches!(
+                            tx.compare_and_swap::<AiSessionRecord>(
+                                &session.id,
+                                session.row_version,
+                                AiSessionRecordWhereInput::default(),
+                                UpdateAiSessionRecordInput {
+                                    stream_head: Some(event_sequence),
+                                    last_activity_at: Some(now.unix_timestamp()),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?,
+                            ConditionalUpdateOutcome::Updated(_)
+                        ) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let expiry = now
+                            .checked_add(lease_ttl)
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        let updated_run = match tx
+                            .compare_and_swap::<AiRunRecord>(
+                                &current.id,
+                                current.row_version,
+                                exact_state(AiRunState::Running.as_str()),
+                                UpdateAiRunRecordInput {
+                                    lease_expires_at: Some(Some(expiry.unix_timestamp())),
+                                    lease_heartbeat_at: Some(Some(now.unix_timestamp())),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?
+                        {
+                            ConditionalUpdateOutcome::Updated(updated) => updated,
+                            ConditionalUpdateOutcome::NotFound
+                            | ConditionalUpdateOutcome::Conflict => {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                        };
+                        tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
+                            id: event.id,
                             session_id: session.id,
+                            sequence: event_sequence,
                             event_type: "ui_intent_suggested".to_owned(),
-                            protected_payload: event.protected_inbox_payload,
-                            created_at: now.unix_timestamp(),
-                        },
-                    )
-                    .await?;
-                    tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
-                        actor_principal_kind: reservation.principal_kind,
-                        actor_subject: event.expected_owner_subject,
-                        action: "ai.ui_intent.persist".to_owned(),
-                        resource_kind: "ai_ui_intent".to_owned(),
-                        resource_reference: event.id.to_string(),
-                        outcome: "allowed".to_owned(),
-                        reason_code: "validated_ui_intent_suggested".to_owned(),
-                        correlation_id: event.correlation_id,
-                        causation_id: Some(lease.input_message_id.to_string()),
-                        policy_version: None,
+                            run_id: Some(lease.run_id.0),
+                            causation_id: Some(lease.input_message_id.to_string()),
+                            correlation_id: event.correlation_id.clone(),
+                            protected_payload: event.protected_payload,
+                        })
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                        tx.queue_event(AiSessionWakeup {
+                            session_id: session.id,
+                            sequence: event_sequence,
+                        });
+                        append_inbox_event(
+                            tx,
+                            PreparedAiInboxEvent {
+                                id: event.inbox_event_id,
+                                principal_kind: event.expected_owner_principal_kind,
+                                principal_subject: event.expected_owner_subject.clone(),
+                                scope: crate::AiScope {
+                                    kind: event.expected_scope_kind,
+                                    id: event.expected_scope_id,
+                                    tenant_id: event.expected_tenant_id,
+                                },
+                                session_id: session.id,
+                                event_type: "ui_intent_suggested".to_owned(),
+                                protected_payload: event.protected_inbox_payload,
+                                created_at: now.unix_timestamp(),
+                            },
+                        )
+                        .await?;
+                        tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
+                            actor_principal_kind: reservation.principal_kind,
+                            actor_subject: event.expected_owner_subject,
+                            action: "ai.ui_intent.persist".to_owned(),
+                            resource_kind: "ai_ui_intent".to_owned(),
+                            resource_reference: event.id.to_string(),
+                            outcome: "allowed".to_owned(),
+                            reason_code: "validated_ui_intent_suggested".to_owned(),
+                            correlation_id: event.correlation_id,
+                            causation_id: Some(lease.input_message_id.to_string()),
+                            policy_version: None,
+                        })
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                        Ok((lease_from_record(&updated_run)?, event_sequence))
                     })
-                    .await
-                    .map_err(OrmPublicError::from)?;
-                    Ok((lease_from_record(&updated_run)?, event_sequence))
                 })
-            })
-            .await
-            .map_err(map_transaction)
+        })
+        .await
+        .map_err(map_transaction)
     }
 
     pub(crate) async fn begin_tool_call(
@@ -3003,285 +2868,294 @@ impl OrmAiRunService {
             .or_else(|| {
                 call.native_preflight_refusal
                     .as_ref()
-                    .map(crate::orm_tools::NativePreflightRefusal::to_json)
+                    .map(|refusal| refusal.to_json())
             });
         let now = canonical_second(self.clock.now());
         let lease_ttl = self.limits.lease_ttl;
         let lease = lease.clone();
-        self.database
-            .transaction(TransactionMode::StateMachine, move |tx| {
-                Box::pin(async move {
-                    let current = load_and_validate_active_lease(tx, &lease, now).await?;
-                    if persisted_state(&current)? != AiRunState::Running {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let session = tx
-                        .find_by_id::<AiSessionRecord>(&lease.session_id.0)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    if !session_matches_tool_start(&session, &call) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    if call.risk != "read_only" {
-                        let pending = tx
-                            .query::<AiNativeApprovalCandidateRecord>()
-                            .filter(AiNativeApprovalCandidateRecordWhereInput {
-                                run_id: Some(UuidFilter {
-                                    eq: Some(lease.run_id.0),
-                                    ..Default::default()
-                                }),
-                                state: Some(StringFilter {
-                                    eq: Some("prepared".to_owned()),
-                                    ..Default::default()
-                                }),
-                                ..Default::default()
-                            })
-                            .internal_limit(2)
-                            .fetch_all()
-                            .await
-                            .map_err(OrmPublicError::from)?;
-                        if let Some(blocked) = &blocked {
-                            if pending.len() != 1 || pending[0].id != blocked.candidate_id.0 {
-                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                            }
-                            let candidate =
-                                load_native_candidate(tx, &lease, blocked.candidate_id).await?;
-                            if candidate.budget_reservation_id != call.budget_reservation_id
-                                || candidate.protected_control_receipt.is_none()
-                            {
-                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                            }
-                        } else if !pending.is_empty() {
+        retry_transaction(self.limits.maximum_transaction_retries, || {
+            let blocked = blocked.clone();
+            let call = call.clone();
+            let execution_provenance = execution_provenance.clone();
+            let lease = lease.clone();
+            let native = native.clone();
+            self.database
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        let current = load_and_validate_active_lease(tx, &lease, now).await?;
+                        if persisted_state(&current)? != AiRunState::Running {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }
-                    }
-                    if native.is_some() || blocked.is_some() {
-                        let budget = tx
-                            .find_by_id::<AiBudgetReservationRecord>(&call.budget_reservation_id)
+                        let session = tx
+                            .find_by_id::<AiSessionRecord>(&lease.session_id.0)
                             .await
                             .map_err(OrmPublicError::from)?
                             .ok_or_else(OrmPublicError::not_found)?;
-                        if budget.state != "uncertain"
-                            || budget.run_id != current.id
-                            || budget.session_id != session.id
-                            || budget.attempt_id != lease.attempt_id
-                            || budget.lease_generation != lease.lease_generation
-                            || budget.principal_kind != session.owner_principal_kind
-                            || budget.principal_subject != lease.principal_reference.subject
-                            || budget.provider_kind != call.provider_kind
-                            || budget.provider_model != call.provider_model
-                            || budget.scope_kind != session.scope_kind
-                            || budget.scope_id != session.scope_id
-                            || budget.tenant_id != session.tenant_id
-                        {
+                        if !session_matches_tool_start(&session, &call) {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }
-                    }
-                    let lifecycle_kind = if blocked.is_some() {
-                        "native_tool_control"
-                    } else if native.is_some() {
-                        "native_approval_prepared"
-                    } else {
-                        "application_tool_started"
-                    };
-                    let call_state = if blocked.is_some() {
-                        "control_blocked"
-                    } else if native.is_some() {
-                        "approval_prepared"
-                    } else {
-                        "executing"
-                    };
-                    let step_state = if blocked.is_some() {
-                        "control_blocked"
-                    } else if native.is_some() {
-                        "approval_prepared"
-                    } else {
-                        "running"
-                    };
-                    let (updated_run, event_sequence) = if call.started_event.is_some() {
-                        let event_sequence = session
-                            .stream_head
-                            .checked_add(1)
-                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                        if !matches!(
-                            tx.compare_and_swap::<AiSessionRecord>(
-                                &session.id,
-                                session.row_version,
-                                AiSessionRecordWhereInput::default(),
-                                UpdateAiSessionRecordInput {
-                                    stream_head: Some(event_sequence),
-                                    last_activity_at: Some(now.unix_timestamp()),
+                        if call.risk != "read_only" {
+                            let pending = tx
+                                .query::<AiNativeApprovalCandidateRecord>()
+                                .filter(AiNativeApprovalCandidateRecordWhereInput {
+                                    run_id: Some(UuidFilter {
+                                        eq: Some(lease.run_id.0),
+                                        ..Default::default()
+                                    }),
+                                    state: Some(StringFilter {
+                                        eq: Some("prepared".to_owned()),
+                                        ..Default::default()
+                                    }),
                                     ..Default::default()
-                                },
-                            )
-                            .await
-                            .map_err(OrmPublicError::from)?,
-                            ConditionalUpdateOutcome::Updated(_)
-                        ) {
-                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                        }
-                        let expiry = now
-                            .checked_add(lease_ttl)
-                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                        let updated_run = match tx
-                            .compare_and_swap::<AiRunRecord>(
-                                &current.id,
-                                current.row_version,
-                                exact_state(AiRunState::Running.as_str()),
-                                UpdateAiRunRecordInput {
-                                    lease_expires_at: Some(Some(expiry.unix_timestamp())),
-                                    lease_heartbeat_at: Some(Some(now.unix_timestamp())),
-                                    ..Default::default()
-                                },
-                            )
-                            .await
-                            .map_err(OrmPublicError::from)?
-                        {
-                            ConditionalUpdateOutcome::Updated(updated) => updated,
-                            ConditionalUpdateOutcome::NotFound
-                            | ConditionalUpdateOutcome::Conflict => {
+                                })
+                                .internal_limit(2)
+                                .fetch_all()
+                                .await
+                                .map_err(OrmPublicError::from)?;
+                            if let Some(blocked) = &blocked {
+                                if pending.len() != 1 || pending[0].id != blocked.candidate_id.0 {
+                                    return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                                }
+                                let candidate =
+                                    load_native_candidate(tx, &lease, blocked.candidate_id).await?;
+                                if candidate.budget_reservation_id != call.budget_reservation_id
+                                    || candidate.protected_control_receipt.is_none()
+                                {
+                                    return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                                }
+                            } else if !pending.is_empty() {
                                 return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                             }
+                        }
+                        if native.is_some() || blocked.is_some() {
+                            let budget = tx
+                                .find_by_id::<AiBudgetReservationRecord>(
+                                    &call.budget_reservation_id,
+                                )
+                                .await
+                                .map_err(OrmPublicError::from)?
+                                .ok_or_else(OrmPublicError::not_found)?;
+                            if budget.state != "uncertain"
+                                || budget.run_id != current.id
+                                || budget.session_id != session.id
+                                || budget.attempt_id != lease.attempt_id
+                                || budget.lease_generation != lease.lease_generation
+                                || budget.principal_kind != session.owner_principal_kind
+                                || budget.principal_subject != lease.principal_reference.subject
+                                || budget.provider_kind != call.provider_kind
+                                || budget.provider_model != call.provider_model
+                                || budget.scope_kind != session.scope_kind
+                                || budget.scope_id != session.scope_id
+                                || budget.tenant_id != session.tenant_id
+                            {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                        }
+                        let lifecycle_kind = if blocked.is_some() {
+                            "native_tool_control"
+                        } else if native.is_some() {
+                            "native_approval_prepared"
+                        } else {
+                            "application_tool_started"
                         };
-                        (updated_run, Some(event_sequence))
-                    } else {
-                        (current, None)
-                    };
-                    tx.insert::<AiRunStepRecord>(CreateAiRunStepRecordInput {
-                        id: call.id,
-                        run_id: lease.run_id.0,
-                        step_index: call
-                            .provider_turn_index
-                            .checked_mul(64)
-                            .and_then(|value| value.checked_add(call.tool_call_index))
-                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InvalidInput))?,
-                        step_kind: "application_tool".to_owned(),
-                        state: step_state.to_owned(),
-                        lease_generation: lease.lease_generation,
-                        started_at: Some(now.unix_timestamp()),
-                        finished_at: blocked.as_ref().map(|_| now.unix_timestamp()),
-                        error_code: None,
-                    })
-                    .await
-                    .map_err(OrmPublicError::from)?;
-                    tx.insert::<AiToolCallRecord>(CreateAiToolCallRecordInput {
-                        id: call.id,
-                        run_id: lease.run_id.0,
-                        provider_call_key: call.provider_call_key,
-                        provider_call_id: call.provider_call_id,
-                        provider_kind: Some(call.provider_kind),
-                        provider_model: Some(call.provider_model),
-                        provider_response_id: call.provider_response_id,
-                        budget_reservation_id: Some(call.budget_reservation_id),
-                        provider_turn_index: call.provider_turn_index,
-                        tool_call_index: call.tool_call_index,
-                        tool_id: call.tool_id,
-                        tool_fingerprint: call.tool_fingerprint,
-                        execution_provenance,
-                        protected_arguments: Some(call.protected_arguments),
-                        argument_hash: call.argument_hash,
-                        protected_result: blocked
-                            .as_ref()
-                            .map(|blocked| blocked.receipt.protected_receipt.clone()),
-                        protected_result_source: None,
-                        payload_purged_at: None,
-                        risk: call.risk,
-                        authorization_code: blocked
-                            .as_ref()
-                            .map(|_| "native_consequential_paused".to_owned()),
-                        authorization_policy_version: None,
-                        authorization_state_digest: None,
-                        disclosure_schema_fingerprint: blocked
-                            .as_ref()
-                            .map(|blocked| blocked.disclosure_schema_fingerprint.clone()),
-                        result_classification: blocked.as_ref().map(|_| "internal".to_owned()),
-                        result_egress_decision_id: blocked
-                            .as_ref()
-                            .map(|blocked| blocked.receipt.egress_decision_id),
-                        result_egress_manifest_hash: blocked
-                            .as_ref()
-                            .map(|blocked| blocked.receipt.egress_manifest_hash.clone()),
-                        application_audit_ref: None,
-                        approval_id: None,
-                        idempotency_key: call.idempotency_key,
-                        correlation_id: Some(call.correlation_id.clone()),
-                        causation_id: Some(call.causation_id),
-                        delegation_reference: call.delegation_reference,
-                        lease_generation: lease.lease_generation,
-                        state: call_state.to_owned(),
-                        completed_at: blocked.as_ref().map(|_| now.unix_timestamp()),
-                    })
-                    .await
-                    .map_err(OrmPublicError::from)?;
-                    if let Some((binding_hash, preview_hash, protected_preparation)) = native {
-                        tx.insert::<AiNativeApprovalCandidateRecord>(
-                            CreateAiNativeApprovalCandidateRecordInput {
-                                id: call.id,
-                                run_id: lease.run_id.0,
-                                attempt_id: lease.attempt_id,
-                                lease_generation: lease.lease_generation,
-                                budget_reservation_id: call.budget_reservation_id,
-                                binding_hash,
-                                preview_hash,
-                                protected_preparation: Some(protected_preparation),
-                                protected_control_receipt: None,
-                                control_receipt_hash: None,
-                                control_egress_decision_id: None,
-                                control_egress_manifest_hash: None,
-                                state: "prepared".to_owned(),
-                                final_approval_id: None,
-                                settled_checkpoint_id: None,
-                                payload_purged_at: None,
-                                finalized_at: None,
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    }
-                    if let (Some(event), Some(event_sequence)) =
-                        (call.started_event, event_sequence)
-                    {
-                        tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
-                            id: event.event_id,
-                            session_id: lease.session_id.0,
-                            sequence: event_sequence,
-                            event_type: lifecycle_kind.to_owned(),
-                            run_id: Some(lease.run_id.0),
-                            causation_id: Some(call.id.to_string()),
-                            correlation_id: call.correlation_id.clone(),
-                            protected_payload: event.protected_event,
+                        let call_state = if blocked.is_some() {
+                            "control_blocked"
+                        } else if native.is_some() {
+                            "approval_prepared"
+                        } else {
+                            "executing"
+                        };
+                        let step_state = if blocked.is_some() {
+                            "control_blocked"
+                        } else if native.is_some() {
+                            "approval_prepared"
+                        } else {
+                            "running"
+                        };
+                        let (updated_run, event_sequence) = if call.started_event.is_some() {
+                            let event_sequence = session
+                                .stream_head
+                                .checked_add(1)
+                                .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                            if !matches!(
+                                tx.compare_and_swap::<AiSessionRecord>(
+                                    &session.id,
+                                    session.row_version,
+                                    AiSessionRecordWhereInput::default(),
+                                    UpdateAiSessionRecordInput {
+                                        stream_head: Some(event_sequence),
+                                        last_activity_at: Some(now.unix_timestamp()),
+                                        ..Default::default()
+                                    },
+                                )
+                                .await
+                                .map_err(OrmPublicError::from)?,
+                                ConditionalUpdateOutcome::Updated(_)
+                            ) {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                            let expiry = now
+                                .checked_add(lease_ttl)
+                                .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                            let updated_run = match tx
+                                .compare_and_swap::<AiRunRecord>(
+                                    &current.id,
+                                    current.row_version,
+                                    exact_state(AiRunState::Running.as_str()),
+                                    UpdateAiRunRecordInput {
+                                        lease_expires_at: Some(Some(expiry.unix_timestamp())),
+                                        lease_heartbeat_at: Some(Some(now.unix_timestamp())),
+                                        ..Default::default()
+                                    },
+                                )
+                                .await
+                                .map_err(OrmPublicError::from)?
+                            {
+                                ConditionalUpdateOutcome::Updated(updated) => updated,
+                                ConditionalUpdateOutcome::NotFound
+                                | ConditionalUpdateOutcome::Conflict => {
+                                    return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                                }
+                            };
+                            (updated_run, Some(event_sequence))
+                        } else {
+                            (current, None)
+                        };
+                        tx.insert::<AiRunStepRecord>(CreateAiRunStepRecordInput {
+                            id: call.id,
+                            run_id: lease.run_id.0,
+                            step_index: call
+                                .provider_turn_index
+                                .checked_mul(64)
+                                .and_then(|value| value.checked_add(call.tool_call_index))
+                                .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InvalidInput))?,
+                            step_kind: "application_tool".to_owned(),
+                            state: step_state.to_owned(),
+                            lease_generation: lease.lease_generation,
+                            started_at: Some(now.unix_timestamp()),
+                            finished_at: blocked.as_ref().map(|_| now.unix_timestamp()),
+                            error_code: None,
                         })
                         .await
                         .map_err(OrmPublicError::from)?;
-                        append_inbox_event(
-                            tx,
-                            PreparedAiInboxEvent {
-                                id: event.inbox_event_id,
-                                principal_kind: call.expected_owner_principal_kind,
-                                principal_subject: call.expected_owner_subject,
-                                scope: AiScope {
-                                    kind: call.expected_scope_kind,
-                                    id: call.expected_scope_id,
-                                    tenant_id: call.expected_tenant_id,
+                        tx.insert::<AiToolCallRecord>(CreateAiToolCallRecordInput {
+                            id: call.id,
+                            run_id: lease.run_id.0,
+                            provider_call_key: call.provider_call_key,
+                            provider_call_id: call.provider_call_id,
+                            provider_kind: Some(call.provider_kind),
+                            provider_model: Some(call.provider_model),
+                            provider_response_id: call.provider_response_id,
+                            budget_reservation_id: Some(call.budget_reservation_id),
+                            provider_turn_index: call.provider_turn_index,
+                            tool_call_index: call.tool_call_index,
+                            tool_id: call.tool_id,
+                            tool_fingerprint: call.tool_fingerprint,
+                            execution_provenance,
+                            protected_arguments: Some(call.protected_arguments),
+                            argument_hash: call.argument_hash,
+                            protected_result: blocked
+                                .as_ref()
+                                .map(|blocked| blocked.receipt.protected_receipt.clone()),
+                            protected_result_source: None,
+                            payload_purged_at: None,
+                            risk: call.risk,
+                            authorization_code: blocked
+                                .as_ref()
+                                .map(|_| "native_consequential_paused".to_owned()),
+                            authorization_policy_version: None,
+                            authorization_state_digest: None,
+                            disclosure_schema_fingerprint: blocked
+                                .as_ref()
+                                .map(|blocked| blocked.disclosure_schema_fingerprint.clone()),
+                            result_classification: blocked.as_ref().map(|_| "internal".to_owned()),
+                            result_egress_decision_id: blocked
+                                .as_ref()
+                                .map(|blocked| blocked.receipt.egress_decision_id),
+                            result_egress_manifest_hash: blocked
+                                .as_ref()
+                                .map(|blocked| blocked.receipt.egress_manifest_hash.clone()),
+                            application_audit_ref: None,
+                            approval_id: None,
+                            idempotency_key: call.idempotency_key,
+                            correlation_id: Some(call.correlation_id.clone()),
+                            causation_id: Some(call.causation_id),
+                            delegation_reference: call.delegation_reference,
+                            lease_generation: lease.lease_generation,
+                            state: call_state.to_owned(),
+                            completed_at: blocked.as_ref().map(|_| now.unix_timestamp()),
+                        })
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                        if let Some((binding_hash, preview_hash, protected_preparation)) = native {
+                            tx.insert::<AiNativeApprovalCandidateRecord>(
+                                CreateAiNativeApprovalCandidateRecordInput {
+                                    id: call.id,
+                                    run_id: lease.run_id.0,
+                                    attempt_id: lease.attempt_id,
+                                    lease_generation: lease.lease_generation,
+                                    budget_reservation_id: call.budget_reservation_id,
+                                    binding_hash,
+                                    preview_hash,
+                                    protected_preparation: Some(protected_preparation),
+                                    protected_control_receipt: None,
+                                    control_receipt_hash: None,
+                                    control_egress_decision_id: None,
+                                    control_egress_manifest_hash: None,
+                                    state: "prepared".to_owned(),
+                                    final_approval_id: None,
+                                    settled_checkpoint_id: None,
+                                    payload_purged_at: None,
+                                    finalized_at: None,
                                 },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        }
+                        if let (Some(event), Some(event_sequence)) =
+                            (call.started_event, event_sequence)
+                        {
+                            tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
+                                id: event.event_id,
                                 session_id: lease.session_id.0,
+                                sequence: event_sequence,
                                 event_type: lifecycle_kind.to_owned(),
-                                protected_payload: event.protected_inbox_event,
-                                created_at: now.unix_timestamp(),
-                            },
-                        )
-                        .await?;
-                        tx.queue_event(AiSessionWakeup {
-                            session_id: lease.session_id.0,
-                            sequence: event_sequence,
-                        });
-                    }
-                    lease_from_record(&updated_run)
+                                run_id: Some(lease.run_id.0),
+                                causation_id: Some(call.id.to_string()),
+                                correlation_id: call.correlation_id.clone(),
+                                protected_payload: event.protected_event,
+                            })
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                            append_inbox_event(
+                                tx,
+                                PreparedAiInboxEvent {
+                                    id: event.inbox_event_id,
+                                    principal_kind: call.expected_owner_principal_kind,
+                                    principal_subject: call.expected_owner_subject,
+                                    scope: AiScope {
+                                        kind: call.expected_scope_kind,
+                                        id: call.expected_scope_id,
+                                        tenant_id: call.expected_tenant_id,
+                                    },
+                                    session_id: lease.session_id.0,
+                                    event_type: lifecycle_kind.to_owned(),
+                                    protected_payload: event.protected_inbox_event,
+                                    created_at: now.unix_timestamp(),
+                                },
+                            )
+                            .await?;
+                            tx.queue_event(AiSessionWakeup {
+                                session_id: lease.session_id.0,
+                                sequence: event_sequence,
+                            });
+                        }
+                        lease_from_record(&updated_run)
+                    })
                 })
-            })
-            .await
-            .map_err(map_transaction)
+        })
+        .await
+        .map_err(map_transaction)
     }
 
     pub(crate) async fn load_prepared_native_approval(
@@ -3325,78 +3199,86 @@ impl OrmAiRunService {
         let now = canonical_second(self.clock.now());
         let lease = lease.clone();
         let ttl = self.limits.lease_ttl;
-        self.database
-            .transaction(TransactionMode::StateMachine, move |tx| {
-                Box::pin(async move {
-                    let current = load_and_validate_active_lease(tx, &lease, now).await?;
-                    if current.state != "running" {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let candidate = load_native_candidate(tx, &lease, id).await?;
-                    if let Some(hash) = candidate.control_receipt_hash {
-                        if hash == receipt.receipt_hash
-                            && candidate.control_egress_decision_id
-                                == Some(receipt.egress_decision_id)
-                            && candidate.control_egress_manifest_hash.as_deref()
-                                == Some(receipt.egress_manifest_hash.as_str())
-                            && candidate.protected_control_receipt.as_ref()
-                                == Some(&receipt.protected_receipt)
-                        {
-                            return lease_from_record(&current);
+        retry_transaction(self.limits.maximum_transaction_retries, || {
+            let lease = lease.clone();
+            let receipt = receipt.clone();
+            self.database
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        let current = load_and_validate_active_lease(tx, &lease, now).await?;
+                        if current.state != "running" {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    if candidate.protected_control_receipt.is_some()
-                        || candidate.control_egress_decision_id.is_some()
-                        || candidate.control_egress_manifest_hash.is_some()
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    if !matches!(
-                        tx.compare_and_swap::<AiNativeApprovalCandidateRecord>(
-                            &candidate.id,
-                            candidate.row_version,
-                            AiNativeApprovalCandidateRecordWhereInput::default(),
-                            UpdateAiNativeApprovalCandidateRecordInput {
-                                protected_control_receipt: Some(Some(receipt.protected_receipt)),
-                                control_receipt_hash: Some(Some(receipt.receipt_hash)),
-                                control_egress_decision_id: Some(Some(receipt.egress_decision_id)),
-                                control_egress_manifest_hash: Some(Some(
-                                    receipt.egress_manifest_hash
-                                )),
-                                ..Default::default()
+                        let candidate = load_native_candidate(tx, &lease, id).await?;
+                        if let Some(hash) = candidate.control_receipt_hash {
+                            if hash == receipt.receipt_hash
+                                && candidate.control_egress_decision_id
+                                    == Some(receipt.egress_decision_id)
+                                && candidate.control_egress_manifest_hash.as_deref()
+                                    == Some(receipt.egress_manifest_hash.as_str())
+                                && candidate.protected_control_receipt.as_ref()
+                                    == Some(&receipt.protected_receipt)
+                            {
+                                return lease_from_record(&current);
                             }
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?,
-                        ConditionalUpdateOutcome::Updated(_)
-                    ) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let expiry = now
-                        .checked_add(ttl)
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                    match tx
-                        .compare_and_swap::<AiRunRecord>(
-                            &current.id,
-                            current.row_version,
-                            exact_state("running"),
-                            UpdateAiRunRecordInput {
-                                lease_expires_at: Some(Some(expiry.unix_timestamp())),
-                                lease_heartbeat_at: Some(Some(now.unix_timestamp())),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?
-                    {
-                        ConditionalUpdateOutcome::Updated(run) => lease_from_record(&run),
-                        _ => Err(OrmPublicError::new(OrmErrorCode::Conflict)),
-                    }
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        if candidate.protected_control_receipt.is_some()
+                            || candidate.control_egress_decision_id.is_some()
+                            || candidate.control_egress_manifest_hash.is_some()
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        if !matches!(
+                            tx.compare_and_swap::<AiNativeApprovalCandidateRecord>(
+                                &candidate.id,
+                                candidate.row_version,
+                                AiNativeApprovalCandidateRecordWhereInput::default(),
+                                UpdateAiNativeApprovalCandidateRecordInput {
+                                    protected_control_receipt: Some(Some(
+                                        receipt.protected_receipt
+                                    )),
+                                    control_receipt_hash: Some(Some(receipt.receipt_hash)),
+                                    control_egress_decision_id: Some(Some(
+                                        receipt.egress_decision_id
+                                    )),
+                                    control_egress_manifest_hash: Some(Some(
+                                        receipt.egress_manifest_hash
+                                    )),
+                                    ..Default::default()
+                                }
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?,
+                            ConditionalUpdateOutcome::Updated(_)
+                        ) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let expiry = now
+                            .checked_add(ttl)
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        match tx
+                            .compare_and_swap::<AiRunRecord>(
+                                &current.id,
+                                current.row_version,
+                                exact_state("running"),
+                                UpdateAiRunRecordInput {
+                                    lease_expires_at: Some(Some(expiry.unix_timestamp())),
+                                    lease_heartbeat_at: Some(Some(now.unix_timestamp())),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?
+                        {
+                            ConditionalUpdateOutcome::Updated(run) => lease_from_record(&run),
+                            _ => Err(OrmPublicError::new(OrmErrorCode::Conflict)),
+                        }
+                    })
                 })
-            })
-            .await
-            .map_err(map_transaction)
+        })
+        .await
+        .map_err(map_transaction)
     }
 
     pub(crate) async fn append_proposal(
@@ -3407,113 +3289,119 @@ impl OrmAiRunService {
         let now = canonical_second(self.clock.now());
         let lease_ttl = self.limits.lease_ttl;
         let lease = lease.clone();
-        self.database
-            .transaction(TransactionMode::StateMachine, move |tx| {
-                Box::pin(async move {
-                    let current = load_and_validate_active_lease(tx, &lease, now).await?;
-                    if persisted_state(&current)? != AiRunState::Running {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let session = tx
-                        .find_by_id::<AiSessionRecord>(&lease.session_id.0)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    if session.state != "active"
-                        || session.deleted_at.is_some()
-                        || session.owner_principal_kind != proposal.expected_owner_principal_kind
-                        || session.owner_subject != proposal.expected_owner_subject
-                        || session.scope_kind != proposal.expected_scope_kind
-                        || session.scope_id != proposal.expected_scope_id
-                        || session.tenant_id != proposal.expected_tenant_id
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let event_sequence = session
-                        .stream_head
-                        .checked_add(1)
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                    let session_update = tx
-                        .compare_and_swap::<AiSessionRecord>(
-                            &session.id,
-                            session.row_version,
-                            AiSessionRecordWhereInput::default(),
-                            UpdateAiSessionRecordInput {
-                                stream_head: Some(event_sequence),
-                                last_activity_at: Some(now.unix_timestamp()),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    if !matches!(session_update, ConditionalUpdateOutcome::Updated(_)) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let expiry = now
-                        .checked_add(lease_ttl)
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                    let run_update = tx
-                        .compare_and_swap::<AiRunRecord>(
-                            &current.id,
-                            current.row_version,
-                            exact_state(AiRunState::Running.as_str()),
-                            UpdateAiRunRecordInput {
-                                lease_expires_at: Some(Some(expiry.unix_timestamp())),
-                                lease_heartbeat_at: Some(Some(now.unix_timestamp())),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    let updated_run = match run_update {
-                        ConditionalUpdateOutcome::Updated(updated) => updated,
-                        ConditionalUpdateOutcome::NotFound | ConditionalUpdateOutcome::Conflict => {
+        retry_transaction(self.limits.maximum_transaction_retries, || {
+            let lease = lease.clone();
+            let proposal = proposal.clone();
+            self.database
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        let current = load_and_validate_active_lease(tx, &lease, now).await?;
+                        if persisted_state(&current)? != AiRunState::Running {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }
-                    };
-                    tx.insert::<AiProposalRecord>(CreateAiProposalRecordInput {
-                        id: proposal.id,
-                        session_id: lease.session_id.0,
-                        run_id: lease.run_id.0,
-                        scope_kind: proposal.expected_scope_kind,
-                        scope_id: proposal.expected_scope_id,
-                        proposal_type: proposal.proposal_type,
-                        schema_version: proposal.schema_version,
-                        item_count: proposal.item_count,
-                        protected_payload: Some(proposal.protected_payload),
-                        source_references: Some(proposal.source_references),
-                        payload_purged_at: None,
-                        state: "pending_review".to_owned(),
-                        created_by_subject: proposal.created_by_subject,
-                        reviewed_by_subject: None,
-                        applied_resource_ref: None,
-                        application_audit_ref: None,
-                        reviewed_at: None,
-                        expires_at: proposal.expires_at,
+                        let session = tx
+                            .find_by_id::<AiSessionRecord>(&lease.session_id.0)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if session.state != "active"
+                            || session.deleted_at.is_some()
+                            || session.owner_principal_kind
+                                != proposal.expected_owner_principal_kind
+                            || session.owner_subject != proposal.expected_owner_subject
+                            || session.scope_kind != proposal.expected_scope_kind
+                            || session.scope_id != proposal.expected_scope_id
+                            || session.tenant_id != proposal.expected_tenant_id
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let event_sequence = session
+                            .stream_head
+                            .checked_add(1)
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        let session_update = tx
+                            .compare_and_swap::<AiSessionRecord>(
+                                &session.id,
+                                session.row_version,
+                                AiSessionRecordWhereInput::default(),
+                                UpdateAiSessionRecordInput {
+                                    stream_head: Some(event_sequence),
+                                    last_activity_at: Some(now.unix_timestamp()),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if !matches!(session_update, ConditionalUpdateOutcome::Updated(_)) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let expiry = now
+                            .checked_add(lease_ttl)
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        let run_update = tx
+                            .compare_and_swap::<AiRunRecord>(
+                                &current.id,
+                                current.row_version,
+                                exact_state(AiRunState::Running.as_str()),
+                                UpdateAiRunRecordInput {
+                                    lease_expires_at: Some(Some(expiry.unix_timestamp())),
+                                    lease_heartbeat_at: Some(Some(now.unix_timestamp())),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        let updated_run = match run_update {
+                            ConditionalUpdateOutcome::Updated(updated) => updated,
+                            ConditionalUpdateOutcome::NotFound
+                            | ConditionalUpdateOutcome::Conflict => {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                        };
+                        tx.insert::<AiProposalRecord>(CreateAiProposalRecordInput {
+                            id: proposal.id,
+                            session_id: lease.session_id.0,
+                            run_id: lease.run_id.0,
+                            scope_kind: proposal.expected_scope_kind,
+                            scope_id: proposal.expected_scope_id,
+                            proposal_type: proposal.proposal_type,
+                            schema_version: proposal.schema_version,
+                            item_count: proposal.item_count,
+                            protected_payload: Some(proposal.protected_payload),
+                            source_references: Some(proposal.source_references),
+                            payload_purged_at: None,
+                            state: "pending_review".to_owned(),
+                            created_by_subject: proposal.created_by_subject,
+                            reviewed_by_subject: None,
+                            applied_resource_ref: None,
+                            application_audit_ref: None,
+                            reviewed_at: None,
+                            expires_at: proposal.expires_at,
+                        })
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                        tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
+                            id: proposal.event_id,
+                            session_id: lease.session_id.0,
+                            sequence: event_sequence,
+                            event_type: "proposal_created".to_owned(),
+                            run_id: Some(lease.run_id.0),
+                            causation_id: Some(lease.input_message_id.to_string()),
+                            correlation_id: proposal.correlation_id,
+                            protected_payload: proposal.protected_event,
+                        })
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                        tx.queue_event(AiSessionWakeup {
+                            session_id: lease.session_id.0,
+                            sequence: event_sequence,
+                        });
+                        lease_from_record(&updated_run)
                     })
-                    .await
-                    .map_err(OrmPublicError::from)?;
-                    tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
-                        id: proposal.event_id,
-                        session_id: lease.session_id.0,
-                        sequence: event_sequence,
-                        event_type: "proposal_created".to_owned(),
-                        run_id: Some(lease.run_id.0),
-                        causation_id: Some(lease.input_message_id.to_string()),
-                        correlation_id: proposal.correlation_id,
-                        protected_payload: proposal.protected_event,
-                    })
-                    .await
-                    .map_err(OrmPublicError::from)?;
-                    tx.queue_event(AiSessionWakeup {
-                        session_id: lease.session_id.0,
-                        sequence: event_sequence,
-                    });
-                    lease_from_record(&updated_run)
                 })
-            })
-            .await
-            .map_err(map_transaction)
+        })
+        .await
+        .map_err(map_transaction)
     }
 
     pub(crate) async fn request_approval(
@@ -3546,402 +3434,412 @@ impl OrmAiRunService {
         let now = canonical_second(self.clock.now());
         let lease_ttl = self.limits.lease_ttl;
         let lease = lease.clone();
-        self.database
-            .transaction(TransactionMode::StateMachine, move |tx| {
-                Box::pin(async move {
-                    let current = load_and_validate_active_lease(tx, &lease, now).await?;
-                    if persisted_state(&current)? != AiRunState::Running
-                        || approval.expires_at <= now.unix_timestamp()
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let session = tx
-                        .find_by_id::<AiSessionRecord>(&lease.session_id.0)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    if session.state != "active"
-                        || session.deleted_at.is_some()
-                        || session.owner_principal_kind != approval.expected_owner_principal_kind
-                        || session.owner_subject != approval.expected_owner_subject
-                        || session.scope_kind != approval.expected_scope_kind
-                        || session.scope_id != approval.expected_scope_id
-                        || session.tenant_id != approval.expected_tenant_id
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let call = tx
-                        .find_by_id::<AiToolCallRecord>(&approval.tool_call_id)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    if call.run_id != lease.run_id.0
-                        || call.lease_generation != lease.lease_generation
-                        || call.state
-                            != if native_candidate_id.is_some() {
-                                "approval_prepared"
-                            } else {
-                                "executing"
-                            }
-                        || call.approval_id.is_some()
-                        || call.argument_hash != approval.argument_hash
-                        || call.tool_fingerprint != approval.tool_fingerprint
-                        || call.risk == "read_only"
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let native_candidate = if let Some(id) = native_candidate_id {
-                        if id.0 != call.id {
-                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                        }
-                        let candidate = load_native_candidate(tx, &lease, id).await?;
-                        let checkpoint_id = current
-                            .latest_checkpoint_id
-                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
-                        let checkpoint = tx
-                            .query::<AiRunCheckpointRecord>()
-                            .filter(AiRunCheckpointRecordWhereInput {
-                                id: Some(UuidFilter {
-                                    eq: Some(checkpoint_id),
-                                    ..Default::default()
-                                }),
-                                ..Default::default()
-                            })
-                            .internal_limit(1)
-                            .fetch_one()
-                            .await
-                            .map_err(OrmPublicError::from)?
-                            .ok_or_else(OrmPublicError::not_found)?;
-                        let budget = tx
-                            .find_by_id::<AiBudgetReservationRecord>(
-                                &candidate.budget_reservation_id,
-                            )
-                            .await
-                            .map_err(OrmPublicError::from)?
-                            .ok_or_else(OrmPublicError::not_found)?;
-                        if candidate.binding_hash != approval.binding_hash
-                            || candidate.preview_hash != approval.action_preview_hash
-                            || candidate.protected_control_receipt.is_none()
-                            || candidate
-                                .control_receipt_hash
-                                .as_deref()
-                                .is_none_or(|hash| !valid_digest(hash))
-                            || candidate
-                                .control_egress_decision_id
-                                .is_none_or(|id| id.is_nil())
-                            || candidate
-                                .control_egress_manifest_hash
-                                .as_deref()
-                                .is_none_or(|hash| !valid_digest(hash))
-                            || checkpoint.run_id != current.id
-                            || checkpoint.attempt_id != lease.attempt_id
-                            || checkpoint.lease_generation != lease.lease_generation
-                            || checkpoint.checkpoint_kind
-                                != "native_approval_provider_turn_persisted"
-                            || checkpoint.budget_reservation_id
-                                != Some(candidate.budget_reservation_id)
-                            || checkpoint.provider_response_id != call.provider_response_id
-                            || checkpoint.protected_state.is_none()
-                            || !valid_digest(&checkpoint.checkpoint_hash)
-                            || budget.state != "committed"
-                            || budget.run_id != current.id
-                            || budget.session_id != session.id
-                            || budget.attempt_id != lease.attempt_id
-                            || budget.lease_generation != lease.lease_generation
-                            || budget.principal_kind != session.owner_principal_kind
-                            || budget.principal_subject != lease.principal_reference.subject
-                            || Some(budget.provider_kind.as_str()) != call.provider_kind.as_deref()
-                            || Some(budget.provider_model.as_str())
-                                != call.provider_model.as_deref()
-                            || budget.scope_kind != session.scope_kind
-                            || budget.scope_id != session.scope_id
-                            || budget.tenant_id != session.tenant_id
-                            || budget.reconciled_at.is_none()
-                            || budget.actual_runs != Some(1)
-                            || [
-                                budget.actual_input_tokens,
-                                budget.actual_cached_input_tokens,
-                                budget.actual_output_tokens,
-                                budget.actual_tool_units,
-                                budget.actual_image_units,
-                                budget.actual_cost_microunits,
-                            ]
-                            .iter()
-                            .any(|amount| amount.is_none_or(|value| value < 0))
-                            || budget.actual_cached_input_tokens > budget.actual_input_tokens
+        retry_transaction(self.limits.maximum_transaction_retries, || {
+            let approval = approval.clone();
+            let lease = lease.clone();
+            self.database
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        let current = load_and_validate_active_lease(tx, &lease, now).await?;
+                        if persisted_state(&current)? != AiRunState::Running
+                            || approval.expires_at <= now.unix_timestamp()
                         {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }
-                        Some((candidate, checkpoint_id))
-                    } else {
-                        None
-                    };
-                    let parked_provider_wait = if let Some(parked) =
-                        approval.parked_provider_wait.clone()
-                    {
-                        let source = tx
-                            .query::<AiRunCheckpointRecord>()
-                            .filter(AiRunCheckpointRecordWhereInput {
-                                id: Some(UuidFilter {
-                                    eq: Some(parked.source_checkpoint_id),
-                                    ..Default::default()
-                                }),
-                                ..Default::default()
-                            })
-                            .internal_limit(1)
-                            .fetch_one()
+                        let session = tx
+                            .find_by_id::<AiSessionRecord>(&lease.session_id.0)
                             .await
                             .map_err(OrmPublicError::from)?
                             .ok_or_else(OrmPublicError::not_found)?;
-                        let expected_hash = coordinator_checkpoint_hash(
-                            lease.run_id,
-                            lease.attempt_id,
-                            lease.lease_generation,
-                            parked.parked_checkpoint_id,
-                            "approval_wait_parked",
-                            &parked.provider_kind,
-                            &parked.provider_model,
-                            parked.provider_response_id.as_deref(),
-                            parked.budget_reservation_id,
-                            &parked.protected_parked_checkpoint,
-                        )
-                        .map_err(|_| OrmPublicError::new(OrmErrorCode::Conflict))?;
-                        if current.latest_checkpoint_id != Some(source.id)
-                            || source.id != parked.source_checkpoint_id
-                            || source.run_id != current.id
-                            || source.attempt_id != lease.attempt_id
-                            || source.lease_generation != lease.lease_generation
-                            || source.checkpoint_kind
+                        if session.state != "active"
+                            || session.deleted_at.is_some()
+                            || session.owner_principal_kind
+                                != approval.expected_owner_principal_kind
+                            || session.owner_subject != approval.expected_owner_subject
+                            || session.scope_kind != approval.expected_scope_kind
+                            || session.scope_id != approval.expected_scope_id
+                            || session.tenant_id != approval.expected_tenant_id
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let call = tx
+                            .find_by_id::<AiToolCallRecord>(&approval.tool_call_id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if call.run_id != lease.run_id.0
+                            || call.lease_generation != lease.lease_generation
+                            || call.state
                                 != if native_candidate_id.is_some() {
-                                    "native_approval_provider_turn_persisted"
+                                    "approval_prepared"
                                 } else {
-                                    "provider_turn_persisted"
+                                    "executing"
                                 }
-                            || source.checkpoint_hash != parked.source_checkpoint_fingerprint
-                            || source.provider_response_id != parked.provider_response_id
-                            || source.budget_reservation_id != Some(parked.budget_reservation_id)
-                            || call.provider_kind.as_deref() != Some(parked.provider_kind.as_str())
-                            || call.provider_model.as_deref()
-                                != Some(parked.provider_model.as_str())
-                            || call.provider_response_id != parked.provider_response_id
-                            || call.budget_reservation_id != Some(parked.budget_reservation_id)
-                            || expected_hash != parked.parked_checkpoint_fingerprint
+                            || call.approval_id.is_some()
+                            || call.argument_hash != approval.argument_hash
+                            || call.tool_fingerprint != approval.tool_fingerprint
+                            || call.risk == "read_only"
                         {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }
-                        Some((parked, source))
-                    } else {
-                        None
-                    };
-                    let event_sequence = session
-                        .stream_head
-                        .checked_add(1)
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                    let session_update = tx
-                        .compare_and_swap::<AiSessionRecord>(
-                            &session.id,
-                            session.row_version,
-                            AiSessionRecordWhereInput::default(),
-                            UpdateAiSessionRecordInput {
-                                stream_head: Some(event_sequence),
-                                last_activity_at: Some(now.unix_timestamp()),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    if !matches!(session_update, ConditionalUpdateOutcome::Updated(_)) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    if let Some((candidate, checkpoint_id)) = native_candidate {
-                        let step = tx
-                            .find_by_id::<AiRunStepRecord>(&candidate.id)
-                            .await
-                            .map_err(OrmPublicError::from)?
-                            .ok_or_else(OrmPublicError::not_found)?;
-                        if step.run_id != current.id
-                            || step.lease_generation != lease.lease_generation
-                            || step.state != "approval_prepared"
-                            || step.finished_at.is_some()
+                        let native_candidate = if let Some(id) = native_candidate_id {
+                            if id.0 != call.id {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                            let candidate = load_native_candidate(tx, &lease, id).await?;
+                            let checkpoint_id = current
+                                .latest_checkpoint_id
+                                .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                            let checkpoint = tx
+                                .query::<AiRunCheckpointRecord>()
+                                .filter(AiRunCheckpointRecordWhereInput {
+                                    id: Some(UuidFilter {
+                                        eq: Some(checkpoint_id),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                })
+                                .internal_limit(1)
+                                .fetch_one()
+                                .await
+                                .map_err(OrmPublicError::from)?
+                                .ok_or_else(OrmPublicError::not_found)?;
+                            let budget = tx
+                                .find_by_id::<AiBudgetReservationRecord>(
+                                    &candidate.budget_reservation_id,
+                                )
+                                .await
+                                .map_err(OrmPublicError::from)?
+                                .ok_or_else(OrmPublicError::not_found)?;
+                            if candidate.binding_hash != approval.binding_hash
+                                || candidate.preview_hash != approval.action_preview_hash
+                                || candidate.protected_control_receipt.is_none()
+                                || candidate
+                                    .control_receipt_hash
+                                    .as_deref()
+                                    .is_none_or(|hash| !valid_digest(hash))
+                                || candidate
+                                    .control_egress_decision_id
+                                    .is_none_or(|id| id.is_nil())
+                                || candidate
+                                    .control_egress_manifest_hash
+                                    .as_deref()
+                                    .is_none_or(|hash| !valid_digest(hash))
+                                || checkpoint.run_id != current.id
+                                || checkpoint.attempt_id != lease.attempt_id
+                                || checkpoint.lease_generation != lease.lease_generation
+                                || checkpoint.checkpoint_kind
+                                    != "native_approval_provider_turn_persisted"
+                                || checkpoint.budget_reservation_id
+                                    != Some(candidate.budget_reservation_id)
+                                || checkpoint.provider_response_id != call.provider_response_id
+                                || checkpoint.protected_state.is_none()
+                                || !valid_digest(&checkpoint.checkpoint_hash)
+                                || budget.state != "committed"
+                                || budget.run_id != current.id
+                                || budget.session_id != session.id
+                                || budget.attempt_id != lease.attempt_id
+                                || budget.lease_generation != lease.lease_generation
+                                || budget.principal_kind != session.owner_principal_kind
+                                || budget.principal_subject != lease.principal_reference.subject
+                                || Some(budget.provider_kind.as_str())
+                                    != call.provider_kind.as_deref()
+                                || Some(budget.provider_model.as_str())
+                                    != call.provider_model.as_deref()
+                                || budget.scope_kind != session.scope_kind
+                                || budget.scope_id != session.scope_id
+                                || budget.tenant_id != session.tenant_id
+                                || budget.reconciled_at.is_none()
+                                || budget.actual_runs != Some(1)
+                                || [
+                                    budget.actual_input_tokens,
+                                    budget.actual_cached_input_tokens,
+                                    budget.actual_output_tokens,
+                                    budget.actual_tool_units,
+                                    budget.actual_image_units,
+                                    budget.actual_cost_microunits,
+                                ]
+                                .iter()
+                                .any(|amount| amount.is_none_or(|value| value < 0))
+                                || budget.actual_cached_input_tokens > budget.actual_input_tokens
+                            {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                            Some((candidate, checkpoint_id))
+                        } else {
+                            None
+                        };
+                        let parked_provider_wait = if let Some(parked) =
+                            approval.parked_provider_wait.clone()
                         {
-                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                        }
-                        if !matches!(
-                            tx.compare_and_swap::<AiRunStepRecord>(
-                                &step.id,
-                                step.row_version,
-                                AiRunStepRecordWhereInput::default(),
-                                UpdateAiRunStepRecordInput {
-                                    state: Some("running".to_owned()),
+                            let source = tx
+                                .query::<AiRunCheckpointRecord>()
+                                .filter(AiRunCheckpointRecordWhereInput {
+                                    id: Some(UuidFilter {
+                                        eq: Some(parked.source_checkpoint_id),
+                                        ..Default::default()
+                                    }),
                                     ..Default::default()
-                                }
+                                })
+                                .internal_limit(1)
+                                .fetch_one()
+                                .await
+                                .map_err(OrmPublicError::from)?
+                                .ok_or_else(OrmPublicError::not_found)?;
+                            let expected_hash = coordinator_checkpoint_hash(
+                                lease.run_id,
+                                lease.attempt_id,
+                                lease.lease_generation,
+                                parked.parked_checkpoint_id,
+                                "approval_wait_parked",
+                                &parked.provider_kind,
+                                &parked.provider_model,
+                                parked.provider_response_id.as_deref(),
+                                parked.budget_reservation_id,
+                                &parked.protected_parked_checkpoint,
                             )
-                            .await
-                            .map_err(OrmPublicError::from)?,
-                            ConditionalUpdateOutcome::Updated(_)
-                        ) {
-                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                        }
-                        if !matches!(
-                            tx.compare_and_swap::<AiNativeApprovalCandidateRecord>(
-                                &candidate.id,
-                                candidate.row_version,
-                                AiNativeApprovalCandidateRecordWhereInput::default(),
-                                UpdateAiNativeApprovalCandidateRecordInput {
-                                    state: Some("finalized".to_owned()),
-                                    final_approval_id: Some(Some(approval.id)),
-                                    settled_checkpoint_id: Some(Some(checkpoint_id)),
-                                    finalized_at: Some(Some(now.unix_timestamp())),
-                                    ..Default::default()
-                                }
-                            )
-                            .await
-                            .map_err(OrmPublicError::from)?,
-                            ConditionalUpdateOutcome::Updated(_)
-                        ) {
-                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                        }
-                    }
-                    let call_update = tx
-                        .compare_and_swap::<AiToolCallRecord>(
-                            &call.id,
-                            call.row_version,
-                            AiToolCallRecordWhereInput::default(),
-                            UpdateAiToolCallRecordInput {
-                                approval_id: Some(Some(approval.id)),
-                                state: Some("waiting_approval".to_owned()),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    if !matches!(call_update, ConditionalUpdateOutcome::Updated(_)) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let has_parked_provider_wait = parked_provider_wait.is_some();
-                    let run_update_input = if let Some((parked, _)) = parked_provider_wait.as_ref()
-                    {
-                        UpdateAiRunRecordInput {
-                            state: Some(AiRunState::WaitingApproval.as_str().to_owned()),
-                            attempt_id: Some(None),
-                            lease_owner: Some(None),
-                            lease_expires_at: Some(None),
-                            lease_heartbeat_at: Some(None),
-                            next_attempt_at: Some(None),
-                            latest_checkpoint_id: Some(Some(parked.parked_checkpoint_id)),
-                            error_code: Some(Some("approval_wait_parked".to_owned())),
-                            ..Default::default()
-                        }
-                    } else {
-                        let expiry = now
-                            .checked_add(lease_ttl)
+                            .map_err(|_| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                            if current.latest_checkpoint_id != Some(source.id)
+                                || source.id != parked.source_checkpoint_id
+                                || source.run_id != current.id
+                                || source.attempt_id != lease.attempt_id
+                                || source.lease_generation != lease.lease_generation
+                                || source.checkpoint_kind
+                                    != if native_candidate_id.is_some() {
+                                        "native_approval_provider_turn_persisted"
+                                    } else {
+                                        "provider_turn_persisted"
+                                    }
+                                || source.checkpoint_hash != parked.source_checkpoint_fingerprint
+                                || source.provider_response_id != parked.provider_response_id
+                                || source.budget_reservation_id
+                                    != Some(parked.budget_reservation_id)
+                                || call.provider_kind.as_deref()
+                                    != Some(parked.provider_kind.as_str())
+                                || call.provider_model.as_deref()
+                                    != Some(parked.provider_model.as_str())
+                                || call.provider_response_id != parked.provider_response_id
+                                || call.budget_reservation_id != Some(parked.budget_reservation_id)
+                                || expected_hash != parked.parked_checkpoint_fingerprint
+                            {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                            Some((parked, source))
+                        } else {
+                            None
+                        };
+                        let event_sequence = session
+                            .stream_head
+                            .checked_add(1)
                             .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                        UpdateAiRunRecordInput {
-                            state: Some(AiRunState::WaitingApproval.as_str().to_owned()),
-                            lease_expires_at: Some(Some(expiry.unix_timestamp())),
-                            lease_heartbeat_at: Some(Some(now.unix_timestamp())),
-                            ..Default::default()
-                        }
-                    };
-                    let run_update = tx
-                        .compare_and_swap::<AiRunRecord>(
-                            &current.id,
-                            current.row_version,
-                            exact_state(AiRunState::Running.as_str()),
-                            run_update_input,
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    let updated_run = match run_update {
-                        ConditionalUpdateOutcome::Updated(updated) => updated,
-                        ConditionalUpdateOutcome::NotFound | ConditionalUpdateOutcome::Conflict => {
+                        let session_update = tx
+                            .compare_and_swap::<AiSessionRecord>(
+                                &session.id,
+                                session.row_version,
+                                AiSessionRecordWhereInput::default(),
+                                UpdateAiSessionRecordInput {
+                                    stream_head: Some(event_sequence),
+                                    last_activity_at: Some(now.unix_timestamp()),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if !matches!(session_update, ConditionalUpdateOutcome::Updated(_)) {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }
-                    };
-                    tx.insert::<AiApprovalRecord>(CreateAiApprovalRecordInput {
-                        id: approval.id,
-                        tool_call_id: approval.tool_call_id,
-                        session_id: lease.session_id.0,
-                        principal_subject: approval.principal_subject,
-                        principal_reference_fingerprint: approval.principal_reference_fingerprint,
-                        delegated_actor_subject: approval.delegated_actor_subject,
-                        delegation_reference: approval.delegation_reference,
-                        argument_hash: approval.argument_hash,
-                        tool_fingerprint: approval.tool_fingerprint,
-                        binding_hash: approval.binding_hash,
-                        execution_target_id: approval.execution_target_id,
-                        target_schema_fingerprint: approval.target_schema_fingerprint,
-                        operation_name: approval.operation_name,
-                        operation_document_hash: approval.operation_document_hash,
-                        result_projection_fingerprint: approval.result_projection_fingerprint,
-                        disclosure_schema_fingerprint: approval.disclosure_schema_fingerprint,
-                        policy_version: approval.policy_version,
-                        authorization_state_digest: approval.authorization_state_digest,
-                        protected_resource_bindings: Some(approval.protected_resource_bindings),
-                        protected_action_preview: Some(approval.protected_action_preview),
-                        payload_purged_at: None,
-                        action_preview_hash: approval.action_preview_hash,
-                        state: "pending".to_owned(),
-                        recent_mfa_required: approval.recent_mfa_required,
-                        approver_subject: None,
-                        expires_at: approval.expires_at,
-                        decided_at: None,
-                        maximum_uses: 1,
-                        consumed_uses: 0,
-                        consumed_at: None,
-                    })
-                    .await
-                    .map_err(OrmPublicError::from)?;
-                    if let Some((parked, source)) = parked_provider_wait {
-                        tx.insert::<AiRunCheckpointRecord>(CreateAiRunCheckpointRecordInput {
-                            id: parked.parked_checkpoint_id,
-                            run_id: current.id,
-                            attempt_id: lease.attempt_id,
-                            lease_generation: lease.lease_generation,
-                            checkpoint_kind: "approval_wait_parked".to_owned(),
-                            provider_response_id: parked.provider_response_id.clone(),
-                            budget_reservation_id: Some(parked.budget_reservation_id),
-                            assistant_message_id: None,
-                            protected_state: Some(parked.protected_parked_checkpoint.clone()),
-                            checkpoint_hash: parked.parked_checkpoint_fingerprint.clone(),
+                        if let Some((candidate, checkpoint_id)) = native_candidate {
+                            let step = tx
+                                .find_by_id::<AiRunStepRecord>(&candidate.id)
+                                .await
+                                .map_err(OrmPublicError::from)?
+                                .ok_or_else(OrmPublicError::not_found)?;
+                            if step.run_id != current.id
+                                || step.lease_generation != lease.lease_generation
+                                || step.state != "approval_prepared"
+                                || step.finished_at.is_some()
+                            {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                            if !matches!(
+                                tx.compare_and_swap::<AiRunStepRecord>(
+                                    &step.id,
+                                    step.row_version,
+                                    AiRunStepRecordWhereInput::default(),
+                                    UpdateAiRunStepRecordInput {
+                                        state: Some("running".to_owned()),
+                                        ..Default::default()
+                                    }
+                                )
+                                .await
+                                .map_err(OrmPublicError::from)?,
+                                ConditionalUpdateOutcome::Updated(_)
+                            ) {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                            if !matches!(
+                                tx.compare_and_swap::<AiNativeApprovalCandidateRecord>(
+                                    &candidate.id,
+                                    candidate.row_version,
+                                    AiNativeApprovalCandidateRecordWhereInput::default(),
+                                    UpdateAiNativeApprovalCandidateRecordInput {
+                                        state: Some("finalized".to_owned()),
+                                        final_approval_id: Some(Some(approval.id)),
+                                        settled_checkpoint_id: Some(Some(checkpoint_id)),
+                                        finalized_at: Some(Some(now.unix_timestamp())),
+                                        ..Default::default()
+                                    }
+                                )
+                                .await
+                                .map_err(OrmPublicError::from)?,
+                                ConditionalUpdateOutcome::Updated(_)
+                            ) {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                        }
+                        let call_update = tx
+                            .compare_and_swap::<AiToolCallRecord>(
+                                &call.id,
+                                call.row_version,
+                                AiToolCallRecordWhereInput::default(),
+                                UpdateAiToolCallRecordInput {
+                                    approval_id: Some(Some(approval.id)),
+                                    state: Some("waiting_approval".to_owned()),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if !matches!(call_update, ConditionalUpdateOutcome::Updated(_)) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let has_parked_provider_wait = parked_provider_wait.is_some();
+                        let run_update_input =
+                            if let Some((parked, _)) = parked_provider_wait.as_ref() {
+                                UpdateAiRunRecordInput {
+                                    state: Some(AiRunState::WaitingApproval.as_str().to_owned()),
+                                    attempt_id: Some(None),
+                                    lease_owner: Some(None),
+                                    lease_expires_at: Some(None),
+                                    lease_heartbeat_at: Some(None),
+                                    next_attempt_at: Some(None),
+                                    latest_checkpoint_id: Some(Some(parked.parked_checkpoint_id)),
+                                    error_code: Some(Some("approval_wait_parked".to_owned())),
+                                    ..Default::default()
+                                }
+                            } else {
+                                let expiry = now.checked_add(lease_ttl).ok_or_else(|| {
+                                    OrmPublicError::new(OrmErrorCode::InternalError)
+                                })?;
+                                UpdateAiRunRecordInput {
+                                    state: Some(AiRunState::WaitingApproval.as_str().to_owned()),
+                                    lease_expires_at: Some(Some(expiry.unix_timestamp())),
+                                    lease_heartbeat_at: Some(Some(now.unix_timestamp())),
+                                    ..Default::default()
+                                }
+                            };
+                        let run_update = tx
+                            .compare_and_swap::<AiRunRecord>(
+                                &current.id,
+                                current.row_version,
+                                exact_state(AiRunState::Running.as_str()),
+                                run_update_input,
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        let updated_run = match run_update {
+                            ConditionalUpdateOutcome::Updated(updated) => updated,
+                            ConditionalUpdateOutcome::NotFound
+                            | ConditionalUpdateOutcome::Conflict => {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                        };
+                        tx.insert::<AiApprovalRecord>(CreateAiApprovalRecordInput {
+                            id: approval.id,
+                            tool_call_id: approval.tool_call_id,
+                            session_id: lease.session_id.0,
+                            principal_subject: approval.principal_subject,
+                            principal_reference_fingerprint: approval
+                                .principal_reference_fingerprint,
+                            delegated_actor_subject: approval.delegated_actor_subject,
+                            delegation_reference: approval.delegation_reference,
+                            argument_hash: approval.argument_hash,
+                            tool_fingerprint: approval.tool_fingerprint,
+                            binding_hash: approval.binding_hash,
+                            execution_target_id: approval.execution_target_id,
+                            target_schema_fingerprint: approval.target_schema_fingerprint,
+                            operation_name: approval.operation_name,
+                            operation_document_hash: approval.operation_document_hash,
+                            result_projection_fingerprint: approval.result_projection_fingerprint,
+                            disclosure_schema_fingerprint: approval.disclosure_schema_fingerprint,
+                            policy_version: approval.policy_version,
+                            authorization_state_digest: approval.authorization_state_digest,
+                            protected_resource_bindings: Some(approval.protected_resource_bindings),
+                            protected_action_preview: Some(approval.protected_action_preview),
+                            payload_purged_at: None,
+                            action_preview_hash: approval.action_preview_hash,
+                            state: "pending".to_owned(),
+                            recent_mfa_required: approval.recent_mfa_required,
+                            approver_subject: None,
+                            expires_at: approval.expires_at,
+                            decided_at: None,
+                            maximum_uses: 1,
+                            consumed_uses: 0,
+                            consumed_at: None,
                         })
                         .await
                         .map_err(OrmPublicError::from)?;
-                        append_attempt_outcome(
-                            tx,
-                            &lease,
-                            AiRunState::WaitingApproval,
-                            "approval_wait_parked".to_owned(),
-                            source.provider_response_id,
-                            now,
-                        )
-                        .await?;
-                    }
-                    tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
-                        id: approval.event_id,
-                        session_id: session.id,
-                        sequence: event_sequence,
-                        event_type: "approval_requested".to_owned(),
-                        run_id: Some(lease.run_id.0),
-                        causation_id: Some(approval.tool_call_id.to_string()),
-                        correlation_id: approval.correlation_id,
-                        protected_payload: approval.protected_event,
+                        if let Some((parked, source)) = parked_provider_wait {
+                            tx.insert::<AiRunCheckpointRecord>(CreateAiRunCheckpointRecordInput {
+                                id: parked.parked_checkpoint_id,
+                                run_id: current.id,
+                                attempt_id: lease.attempt_id,
+                                lease_generation: lease.lease_generation,
+                                checkpoint_kind: "approval_wait_parked".to_owned(),
+                                provider_response_id: parked.provider_response_id.clone(),
+                                budget_reservation_id: Some(parked.budget_reservation_id),
+                                assistant_message_id: None,
+                                protected_state: Some(parked.protected_parked_checkpoint.clone()),
+                                checkpoint_hash: parked.parked_checkpoint_fingerprint.clone(),
+                            })
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                            append_attempt_outcome(
+                                tx,
+                                &lease,
+                                AiRunState::WaitingApproval,
+                                "approval_wait_parked".to_owned(),
+                                source.provider_response_id,
+                                now,
+                            )
+                            .await?;
+                        }
+                        tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
+                            id: approval.event_id,
+                            session_id: session.id,
+                            sequence: event_sequence,
+                            event_type: "approval_requested".to_owned(),
+                            run_id: Some(lease.run_id.0),
+                            causation_id: Some(approval.tool_call_id.to_string()),
+                            correlation_id: approval.correlation_id,
+                            protected_payload: approval.protected_event,
+                        })
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                        tx.queue_event(AiSessionWakeup {
+                            session_id: session.id,
+                            sequence: event_sequence,
+                        });
+                        if has_parked_provider_wait {
+                            approval_wait_proof_from_record(&lease, &updated_run)
+                        } else {
+                            lease_from_record(&updated_run)
+                        }
                     })
-                    .await
-                    .map_err(OrmPublicError::from)?;
-                    tx.queue_event(AiSessionWakeup {
-                        session_id: session.id,
-                        sequence: event_sequence,
-                    });
-                    if has_parked_provider_wait {
-                        approval_wait_proof_from_record(&lease, &updated_run)
-                    } else {
-                        lease_from_record(&updated_run)
-                    }
                 })
-            })
-            .await
-            .map_err(map_transaction)
+        })
+        .await
+        .map_err(map_transaction)
     }
 
     pub(crate) async fn consume_approval(
@@ -3952,195 +3850,201 @@ impl OrmAiRunService {
         let now = canonical_second(self.clock.now());
         let lease_ttl = self.limits.lease_ttl;
         let lease = lease.clone();
-        self.database
-            .transaction(TransactionMode::StateMachine, move |tx| {
-                Box::pin(async move {
-                    let current = load_and_validate_active_lease(tx, &lease, now).await?;
-                    if !matches!(
-                        persisted_state(&current)?,
-                        AiRunState::WaitingApproval | AiRunState::WaitingTool
-                    ) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let session = tx
-                        .find_by_id::<AiSessionRecord>(&lease.session_id.0)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    if session.state != "active"
-                        || session.deleted_at.is_some()
-                        || session.owner_principal_kind != consumption.expected_owner_principal_kind
-                        || session.owner_subject != consumption.expected_owner_subject
-                        || session.scope_kind != consumption.expected_scope_kind
-                        || session.scope_id != consumption.expected_scope_id
-                        || session.tenant_id != consumption.expected_tenant_id
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let call = tx
-                        .find_by_id::<AiToolCallRecord>(&consumption.tool_call_id)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    if call.run_id != lease.run_id.0
-                        || call.lease_generation != lease.lease_generation
-                        || call.approval_id != Some(consumption.approval_id)
-                        || call.state != "waiting_approval"
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let approval = tx
-                        .find_by_id::<AiApprovalRecord>(&consumption.approval_id)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    if approval.tool_call_id != call.id
-                        || approval.session_id != session.id
-                        || approval.row_version != consumption.expected_approval_version
-                        || !matches!(approval.state.as_str(), "approved" | "resume_claimed")
-                        || approval.binding_hash != consumption.binding_hash
-                        || approval.maximum_uses != 1
-                        || approval.consumed_uses != 0
-                        || approval.consumed_at.is_some()
-                        || approval.decided_at.is_none()
-                        || approval.expires_at <= now.unix_timestamp()
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let approval_event_sequence = session
-                        .stream_head
-                        .checked_add(1)
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                    let started_event_sequence = approval_event_sequence
-                        .checked_add(1)
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                    let session_update = tx
-                        .compare_and_swap::<AiSessionRecord>(
-                            &session.id,
-                            session.row_version,
-                            AiSessionRecordWhereInput::default(),
-                            UpdateAiSessionRecordInput {
-                                stream_head: Some(started_event_sequence),
-                                last_activity_at: Some(now.unix_timestamp()),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    if !matches!(session_update, ConditionalUpdateOutcome::Updated(_)) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let approval_update = tx
-                        .compare_and_swap::<AiApprovalRecord>(
-                            &approval.id,
-                            approval.row_version,
-                            AiApprovalRecordWhereInput::default(),
-                            UpdateAiApprovalRecordInput {
-                                state: Some("consumed".to_owned()),
-                                consumed_uses: Some(1),
-                                consumed_at: Some(Some(now.unix_timestamp())),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    if !matches!(approval_update, ConditionalUpdateOutcome::Updated(_)) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let call_update = tx
-                        .compare_and_swap::<AiToolCallRecord>(
-                            &call.id,
-                            call.row_version,
-                            AiToolCallRecordWhereInput::default(),
-                            UpdateAiToolCallRecordInput {
-                                state: Some("executing".to_owned()),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    if !matches!(call_update, ConditionalUpdateOutcome::Updated(_)) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let expiry = now
-                        .checked_add(lease_ttl)
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                    let run_update = tx
-                        .compare_and_swap::<AiRunRecord>(
-                            &current.id,
-                            current.row_version,
-                            exact_state(&current.state),
-                            UpdateAiRunRecordInput {
-                                state: Some(AiRunState::Running.as_str().to_owned()),
-                                lease_expires_at: Some(Some(expiry.unix_timestamp())),
-                                lease_heartbeat_at: Some(Some(now.unix_timestamp())),
-                                error_code: Some(None),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    let updated_run = match run_update {
-                        ConditionalUpdateOutcome::Updated(updated) => updated,
-                        ConditionalUpdateOutcome::NotFound | ConditionalUpdateOutcome::Conflict => {
+        retry_transaction(self.limits.maximum_transaction_retries, || {
+            let consumption = consumption.clone();
+            let lease = lease.clone();
+            self.database
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        let current = load_and_validate_active_lease(tx, &lease, now).await?;
+                        if !matches!(
+                            persisted_state(&current)?,
+                            AiRunState::WaitingApproval | AiRunState::WaitingTool
+                        ) {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }
-                    };
-                    tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
-                        id: consumption.event_id,
-                        session_id: session.id,
-                        sequence: approval_event_sequence,
-                        event_type: "approval_consumed".to_owned(),
-                        run_id: Some(lease.run_id.0),
-                        causation_id: Some(consumption.approval_id.to_string()),
-                        correlation_id: consumption.correlation_id.clone(),
-                        protected_payload: consumption.protected_event,
-                    })
-                    .await
-                    .map_err(OrmPublicError::from)?;
-                    tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
-                        id: consumption.started_event.event_id,
-                        session_id: session.id,
-                        sequence: started_event_sequence,
-                        event_type: "application_tool_started".to_owned(),
-                        run_id: Some(lease.run_id.0),
-                        causation_id: Some(consumption.tool_call_id.to_string()),
-                        correlation_id: consumption.correlation_id.clone(),
-                        protected_payload: consumption.started_event.protected_event,
-                    })
-                    .await
-                    .map_err(OrmPublicError::from)?;
-                    append_inbox_event(
-                        tx,
-                        PreparedAiInboxEvent {
-                            id: consumption.started_event.inbox_event_id,
-                            principal_kind: consumption.expected_owner_principal_kind,
-                            principal_subject: consumption.expected_owner_subject,
-                            scope: AiScope {
-                                kind: consumption.expected_scope_kind,
-                                id: consumption.expected_scope_id,
-                                tenant_id: consumption.expected_tenant_id,
-                            },
+                        let session = tx
+                            .find_by_id::<AiSessionRecord>(&lease.session_id.0)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if session.state != "active"
+                            || session.deleted_at.is_some()
+                            || session.owner_principal_kind
+                                != consumption.expected_owner_principal_kind
+                            || session.owner_subject != consumption.expected_owner_subject
+                            || session.scope_kind != consumption.expected_scope_kind
+                            || session.scope_id != consumption.expected_scope_id
+                            || session.tenant_id != consumption.expected_tenant_id
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let call = tx
+                            .find_by_id::<AiToolCallRecord>(&consumption.tool_call_id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if call.run_id != lease.run_id.0
+                            || call.lease_generation != lease.lease_generation
+                            || call.approval_id != Some(consumption.approval_id)
+                            || call.state != "waiting_approval"
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let approval = tx
+                            .find_by_id::<AiApprovalRecord>(&consumption.approval_id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if approval.tool_call_id != call.id
+                            || approval.session_id != session.id
+                            || approval.row_version != consumption.expected_approval_version
+                            || !matches!(approval.state.as_str(), "approved" | "resume_claimed")
+                            || approval.binding_hash != consumption.binding_hash
+                            || approval.maximum_uses != 1
+                            || approval.consumed_uses != 0
+                            || approval.consumed_at.is_some()
+                            || approval.decided_at.is_none()
+                            || approval.expires_at <= now.unix_timestamp()
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let approval_event_sequence = session
+                            .stream_head
+                            .checked_add(1)
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        let started_event_sequence = approval_event_sequence
+                            .checked_add(1)
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        let session_update = tx
+                            .compare_and_swap::<AiSessionRecord>(
+                                &session.id,
+                                session.row_version,
+                                AiSessionRecordWhereInput::default(),
+                                UpdateAiSessionRecordInput {
+                                    stream_head: Some(started_event_sequence),
+                                    last_activity_at: Some(now.unix_timestamp()),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if !matches!(session_update, ConditionalUpdateOutcome::Updated(_)) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let approval_update = tx
+                            .compare_and_swap::<AiApprovalRecord>(
+                                &approval.id,
+                                approval.row_version,
+                                AiApprovalRecordWhereInput::default(),
+                                UpdateAiApprovalRecordInput {
+                                    state: Some("consumed".to_owned()),
+                                    consumed_uses: Some(1),
+                                    consumed_at: Some(Some(now.unix_timestamp())),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if !matches!(approval_update, ConditionalUpdateOutcome::Updated(_)) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let call_update = tx
+                            .compare_and_swap::<AiToolCallRecord>(
+                                &call.id,
+                                call.row_version,
+                                AiToolCallRecordWhereInput::default(),
+                                UpdateAiToolCallRecordInput {
+                                    state: Some("executing".to_owned()),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if !matches!(call_update, ConditionalUpdateOutcome::Updated(_)) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let expiry = now
+                            .checked_add(lease_ttl)
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        let run_update = tx
+                            .compare_and_swap::<AiRunRecord>(
+                                &current.id,
+                                current.row_version,
+                                exact_state(&current.state),
+                                UpdateAiRunRecordInput {
+                                    state: Some(AiRunState::Running.as_str().to_owned()),
+                                    lease_expires_at: Some(Some(expiry.unix_timestamp())),
+                                    lease_heartbeat_at: Some(Some(now.unix_timestamp())),
+                                    error_code: Some(None),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        let updated_run = match run_update {
+                            ConditionalUpdateOutcome::Updated(updated) => updated,
+                            ConditionalUpdateOutcome::NotFound
+                            | ConditionalUpdateOutcome::Conflict => {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                        };
+                        tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
+                            id: consumption.event_id,
                             session_id: session.id,
+                            sequence: approval_event_sequence,
+                            event_type: "approval_consumed".to_owned(),
+                            run_id: Some(lease.run_id.0),
+                            causation_id: Some(consumption.approval_id.to_string()),
+                            correlation_id: consumption.correlation_id.clone(),
+                            protected_payload: consumption.protected_event,
+                        })
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                        tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
+                            id: consumption.started_event.event_id,
+                            session_id: session.id,
+                            sequence: started_event_sequence,
                             event_type: "application_tool_started".to_owned(),
-                            protected_payload: consumption.started_event.protected_inbox_event,
-                            created_at: now.unix_timestamp(),
-                        },
-                    )
-                    .await?;
-                    tx.queue_event(AiSessionWakeup {
-                        session_id: session.id,
-                        sequence: approval_event_sequence,
-                    });
-                    tx.queue_event(AiSessionWakeup {
-                        session_id: session.id,
-                        sequence: started_event_sequence,
-                    });
-                    lease_from_record(&updated_run)
+                            run_id: Some(lease.run_id.0),
+                            causation_id: Some(consumption.tool_call_id.to_string()),
+                            correlation_id: consumption.correlation_id.clone(),
+                            protected_payload: consumption.started_event.protected_event,
+                        })
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                        append_inbox_event(
+                            tx,
+                            PreparedAiInboxEvent {
+                                id: consumption.started_event.inbox_event_id,
+                                principal_kind: consumption.expected_owner_principal_kind,
+                                principal_subject: consumption.expected_owner_subject,
+                                scope: AiScope {
+                                    kind: consumption.expected_scope_kind,
+                                    id: consumption.expected_scope_id,
+                                    tenant_id: consumption.expected_tenant_id,
+                                },
+                                session_id: session.id,
+                                event_type: "application_tool_started".to_owned(),
+                                protected_payload: consumption.started_event.protected_inbox_event,
+                                created_at: now.unix_timestamp(),
+                            },
+                        )
+                        .await?;
+                        tx.queue_event(AiSessionWakeup {
+                            session_id: session.id,
+                            sequence: approval_event_sequence,
+                        });
+                        tx.queue_event(AiSessionWakeup {
+                            session_id: session.id,
+                            sequence: started_event_sequence,
+                        });
+                        lease_from_record(&updated_run)
+                    })
                 })
-            })
-            .await
-            .map_err(map_transaction)
+        })
+        .await
+        .map_err(map_transaction)
     }
 
     pub(crate) async fn finish_tool_call(
@@ -4170,186 +4074,200 @@ impl OrmAiRunService {
         let now = canonical_second(self.clock.now());
         let lease_ttl = self.limits.lease_ttl;
         let lease = lease.clone();
-        self.database
-            .transaction(TransactionMode::StateMachine, move |tx| {
-                Box::pin(async move {
-                    let current = load_and_validate_active_lease(tx, &lease, now).await?;
-                    if persisted_state(&current)? != AiRunState::Running {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let session = tx
-                        .find_by_id::<AiSessionRecord>(&lease.session_id.0)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    if !session_matches_tool_finish(&session, &finish) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let call = tx
-                        .find_by_id::<AiToolCallRecord>(&finish.id)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    if call.run_id != lease.run_id.0
-                        || call.lease_generation != lease.lease_generation
-                        || call.provider_call_key != finish.expected_provider_call_key
-                        || call.tool_fingerprint != finish.expected_tool_fingerprint
-                        || match &retained_source {
-                            Some(source) => {
-                                call.state != "source_retained"
-                                    || call.protected_result.as_ref()
-                                        != Some(&finish.protected_result)
-                                    || call.protected_result_source.as_ref() != Some(source)
-                            }
-                            None => {
-                                call.state != "executing"
-                                    || call.protected_result.is_some()
-                                    || call.protected_result_source.is_some()
-                            }
+        retry_transaction(self.limits.maximum_transaction_retries, || {
+            let finish = finish.clone();
+            let lease = lease.clone();
+            let retained_source = retained_source.clone();
+            self.database
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        let current = load_and_validate_active_lease(tx, &lease, now).await?;
+                        if persisted_state(&current)? != AiRunState::Running {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let step = tx
-                        .find_by_id::<AiRunStepRecord>(&finish.id)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    if step.run_id != lease.run_id.0
-                        || step.lease_generation != lease.lease_generation
-                        || step.state != "running"
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let call_update = tx
-                        .compare_and_swap::<AiToolCallRecord>(
-                            &call.id,
-                            call.row_version,
-                            AiToolCallRecordWhereInput::default(),
-                            UpdateAiToolCallRecordInput {
-                                protected_result: Some(Some(finish.protected_result)),
-                                authorization_code: Some(Some(finish.authorization_code.clone())),
-                                authorization_policy_version: Some(
-                                    finish.authorization_policy_version,
-                                ),
-                                authorization_state_digest: Some(finish.authorization_state_digest),
-                                disclosure_schema_fingerprint: Some(Some(
-                                    finish.disclosure_schema_fingerprint,
-                                )),
-                                result_classification: Some(Some(finish.result_classification)),
-                                result_egress_decision_id: Some(finish.result_egress_decision_id),
-                                result_egress_manifest_hash: Some(
-                                    finish.result_egress_manifest_hash,
-                                ),
-                                application_audit_ref: Some(finish.application_audit_ref),
-                                state: Some(finish.state.clone()),
-                                completed_at: Some(Some(now.unix_timestamp())),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    if !matches!(call_update, ConditionalUpdateOutcome::Updated(_)) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let step_update = tx
-                        .compare_and_swap::<AiRunStepRecord>(
-                            &step.id,
-                            step.row_version,
-                            AiRunStepRecordWhereInput::default(),
-                            UpdateAiRunStepRecordInput {
-                                state: Some(finish.state.clone()),
-                                finished_at: Some(Some(now.unix_timestamp())),
-                                error_code: (finish.state != "completed")
-                                    .then_some(Some(finish.authorization_code)),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    if !matches!(step_update, ConditionalUpdateOutcome::Updated(_)) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let event_sequence = session
-                        .stream_head
-                        .checked_add(1)
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                    let session_update = tx
-                        .compare_and_swap::<AiSessionRecord>(
-                            &session.id,
-                            session.row_version,
-                            AiSessionRecordWhereInput::default(),
-                            UpdateAiSessionRecordInput {
-                                stream_head: Some(event_sequence),
-                                last_activity_at: Some(now.unix_timestamp()),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    if !matches!(session_update, ConditionalUpdateOutcome::Updated(_)) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
-                        id: finish.event_id,
-                        session_id: lease.session_id.0,
-                        sequence: event_sequence,
-                        event_type: "application_tool_completed".to_owned(),
-                        run_id: Some(lease.run_id.0),
-                        causation_id: Some(finish.id.to_string()),
-                        correlation_id: finish.correlation_id.clone(),
-                        protected_payload: finish.protected_event,
-                    })
-                    .await
-                    .map_err(OrmPublicError::from)?;
-                    append_inbox_event(
-                        tx,
-                        PreparedAiInboxEvent {
-                            id: finish.inbox_event_id,
-                            principal_kind: finish.expected_owner_principal_kind.clone(),
-                            principal_subject: finish.expected_owner_subject.clone(),
-                            scope: AiScope {
-                                kind: finish.expected_scope_kind.clone(),
-                                id: finish.expected_scope_id.clone(),
-                                tenant_id: finish.expected_tenant_id.clone(),
-                            },
+                        let session = tx
+                            .find_by_id::<AiSessionRecord>(&lease.session_id.0)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if !session_matches_tool_finish(&session, &finish) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let call = tx
+                            .find_by_id::<AiToolCallRecord>(&finish.id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if call.run_id != lease.run_id.0
+                            || call.lease_generation != lease.lease_generation
+                            || call.provider_call_key != finish.expected_provider_call_key
+                            || call.tool_fingerprint != finish.expected_tool_fingerprint
+                            || match &retained_source {
+                                Some(source) => {
+                                    call.state != "source_retained"
+                                        || call.protected_result.as_ref()
+                                            != Some(&finish.protected_result)
+                                        || call.protected_result_source.as_ref() != Some(source)
+                                }
+                                None => {
+                                    call.state != "executing"
+                                        || call.protected_result.is_some()
+                                        || call.protected_result_source.is_some()
+                                }
+                            }
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let step = tx
+                            .find_by_id::<AiRunStepRecord>(&finish.id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if step.run_id != lease.run_id.0
+                            || step.lease_generation != lease.lease_generation
+                            || step.state != "running"
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let call_update = tx
+                            .compare_and_swap::<AiToolCallRecord>(
+                                &call.id,
+                                call.row_version,
+                                AiToolCallRecordWhereInput::default(),
+                                UpdateAiToolCallRecordInput {
+                                    protected_result: Some(Some(finish.protected_result)),
+                                    authorization_code: Some(Some(
+                                        finish.authorization_code.clone(),
+                                    )),
+                                    authorization_policy_version: Some(
+                                        finish.authorization_policy_version,
+                                    ),
+                                    authorization_state_digest: Some(
+                                        finish.authorization_state_digest,
+                                    ),
+                                    disclosure_schema_fingerprint: Some(Some(
+                                        finish.disclosure_schema_fingerprint,
+                                    )),
+                                    result_classification: Some(Some(finish.result_classification)),
+                                    result_egress_decision_id: Some(
+                                        finish.result_egress_decision_id,
+                                    ),
+                                    result_egress_manifest_hash: Some(
+                                        finish.result_egress_manifest_hash,
+                                    ),
+                                    application_audit_ref: Some(finish.application_audit_ref),
+                                    state: Some(finish.state.clone()),
+                                    completed_at: Some(Some(now.unix_timestamp())),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if !matches!(call_update, ConditionalUpdateOutcome::Updated(_)) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let step_update = tx
+                            .compare_and_swap::<AiRunStepRecord>(
+                                &step.id,
+                                step.row_version,
+                                AiRunStepRecordWhereInput::default(),
+                                UpdateAiRunStepRecordInput {
+                                    state: Some(finish.state.clone()),
+                                    finished_at: Some(Some(now.unix_timestamp())),
+                                    error_code: (finish.state != "completed")
+                                        .then_some(Some(finish.authorization_code)),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if !matches!(step_update, ConditionalUpdateOutcome::Updated(_)) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let event_sequence = session
+                            .stream_head
+                            .checked_add(1)
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        let session_update = tx
+                            .compare_and_swap::<AiSessionRecord>(
+                                &session.id,
+                                session.row_version,
+                                AiSessionRecordWhereInput::default(),
+                                UpdateAiSessionRecordInput {
+                                    stream_head: Some(event_sequence),
+                                    last_activity_at: Some(now.unix_timestamp()),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if !matches!(session_update, ConditionalUpdateOutcome::Updated(_)) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
+                            id: finish.event_id,
                             session_id: lease.session_id.0,
+                            sequence: event_sequence,
                             event_type: "application_tool_completed".to_owned(),
-                            protected_payload: finish.protected_inbox_event,
-                            created_at: now.unix_timestamp(),
-                        },
-                    )
-                    .await?;
-                    tx.queue_event(AiSessionWakeup {
-                        session_id: lease.session_id.0,
-                        sequence: event_sequence,
-                    });
-                    let expiry = now
-                        .checked_add(lease_ttl)
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                    let run_update = tx
-                        .compare_and_swap::<AiRunRecord>(
-                            &current.id,
-                            current.row_version,
-                            exact_state(AiRunState::Running.as_str()),
-                            UpdateAiRunRecordInput {
-                                lease_expires_at: Some(Some(expiry.unix_timestamp())),
-                                lease_heartbeat_at: Some(Some(now.unix_timestamp())),
-                                ..Default::default()
-                            },
-                        )
+                            run_id: Some(lease.run_id.0),
+                            causation_id: Some(finish.id.to_string()),
+                            correlation_id: finish.correlation_id.clone(),
+                            protected_payload: finish.protected_event,
+                        })
                         .await
                         .map_err(OrmPublicError::from)?;
-                    match run_update {
-                        ConditionalUpdateOutcome::Updated(updated) => lease_from_record(&updated),
-                        ConditionalUpdateOutcome::NotFound | ConditionalUpdateOutcome::Conflict => {
-                            Err(OrmPublicError::new(OrmErrorCode::Conflict))
+                        append_inbox_event(
+                            tx,
+                            PreparedAiInboxEvent {
+                                id: finish.inbox_event_id,
+                                principal_kind: finish.expected_owner_principal_kind.clone(),
+                                principal_subject: finish.expected_owner_subject.clone(),
+                                scope: AiScope {
+                                    kind: finish.expected_scope_kind.clone(),
+                                    id: finish.expected_scope_id.clone(),
+                                    tenant_id: finish.expected_tenant_id.clone(),
+                                },
+                                session_id: lease.session_id.0,
+                                event_type: "application_tool_completed".to_owned(),
+                                protected_payload: finish.protected_inbox_event,
+                                created_at: now.unix_timestamp(),
+                            },
+                        )
+                        .await?;
+                        tx.queue_event(AiSessionWakeup {
+                            session_id: lease.session_id.0,
+                            sequence: event_sequence,
+                        });
+                        let expiry = now
+                            .checked_add(lease_ttl)
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        let run_update = tx
+                            .compare_and_swap::<AiRunRecord>(
+                                &current.id,
+                                current.row_version,
+                                exact_state(AiRunState::Running.as_str()),
+                                UpdateAiRunRecordInput {
+                                    lease_expires_at: Some(Some(expiry.unix_timestamp())),
+                                    lease_heartbeat_at: Some(Some(now.unix_timestamp())),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        match run_update {
+                            ConditionalUpdateOutcome::Updated(updated) => {
+                                lease_from_record(&updated)
+                            }
+                            ConditionalUpdateOutcome::NotFound
+                            | ConditionalUpdateOutcome::Conflict => {
+                                Err(OrmPublicError::new(OrmErrorCode::Conflict))
+                            }
                         }
-                    }
+                    })
                 })
-            })
-            .await
-            .map_err(map_transaction)
+        })
+        .await
+        .map_err(map_transaction)
     }
 
     async fn claim_once(
@@ -4363,49 +4281,72 @@ impl OrmAiRunService {
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
                     let epoch = crate::orm_runtime_recovery::require_live_epoch(tx).await?;
+                    let expiry = match now.checked_add(limits.lease_ttl) {
+                        Some(expiry) => expiry,
+                        None => return Ok(Err(AiError::PersistenceFailed)),
+                    };
+                    // Select only eligible rows, oldest first, in SQL so rows
+                    // not yet due cannot fill the bounded window.
                     let mut candidates = Vec::new();
                     for state in [AiRunState::Queued, AiRunState::RetryScheduled] {
-                        let mut rows = tx
-                            .query::<AiRunRecord>()
-                            .filter(exact_state(state.as_str()))
-                            .internal_limit(limits.maximum_candidate_scan as i64)
-                            .fetch_all()
-                            .await
-                            .map_err(OrmPublicError::from)?;
-                        candidates.append(&mut rows);
+                        for eligible in [
+                            Int64Filter {
+                                is_null: Some(true),
+                                ..Default::default()
+                            },
+                            Int64Filter {
+                                lte: Some(now.unix_timestamp()),
+                                ..Default::default()
+                            },
+                        ] {
+                            let mut rows = tx
+                                .query::<AiRunRecord>()
+                                .filter(AiRunRecordWhereInput {
+                                    state: Some(StringFilter {
+                                        eq: Some(state.as_str().to_owned()),
+                                        ..Default::default()
+                                    }),
+                                    next_attempt_at: Some(eligible),
+                                    ..Default::default()
+                                })
+                                .default_order()
+                                .internal_limit(limits.maximum_candidate_scan as i64)
+                                .fetch_all()
+                                .await
+                                .map_err(OrmPublicError::from)?;
+                            candidates.append(&mut rows);
+                        }
                     }
                     candidates.retain(|run| {
                         run.next_attempt_at
                             .is_none_or(|eligible_at| eligible_at <= now.unix_timestamp())
                     });
                     candidates.sort_by_key(|run| (run.created_at, run.id));
+                    candidates.dedup_by_key(|run| run.id);
+                    candidates.truncate(limits.maximum_candidate_scan);
                     for current in candidates {
-                        if current.lease_generation < 0
-                            || current.retry_count < 0
-                            || current.attempt_id.is_some()
-                            || current.lease_owner.is_some()
-                            || current.lease_expires_at.is_some()
-                            || (current.error_code.as_deref() == Some("checkpoint_adoption_ready")
-                                && current.latest_checkpoint_id.is_none())
-                        {
-                            return Ok(Err(AiError::PersistenceFailed));
-                        }
-                        let generation = match current.lease_generation.checked_add(1) {
-                            Some(generation) => generation,
-                            None => return Ok(Err(AiError::PersistenceFailed)),
-                        };
-                        let expiry = match now.checked_add(limits.lease_ttl) {
-                            Some(expiry) => expiry,
-                            None => return Ok(Err(AiError::PersistenceFailed)),
-                        };
-                        let delegated = match serde_json::from_value::<PrincipalReference>(
+                        let generation = current.lease_generation.checked_add(1).filter(|_| {
+                            current.lease_generation >= 0
+                                && current.retry_count >= 0
+                                && current.attempt_id.is_none()
+                                && current.lease_owner.is_none()
+                                && current.lease_expires_at.is_none()
+                                && (current.error_code.as_deref()
+                                    != Some("checkpoint_adoption_ready")
+                                    || current.latest_checkpoint_id.is_some())
+                        });
+                        let reference = serde_json::from_value::<PrincipalReference>(
                             current.principal_reference.clone(),
-                        ) {
-                            Ok(reference) => {
-                                crate::principal_projection::is_delegated_reference(&reference)
-                            }
-                            Err(_) => return Ok(Err(AiError::PersistenceFailed)),
+                        );
+                        let (Some(generation), Ok(reference)) = (generation, reference) else {
+                            // One malformed queued row must not block every
+                            // other run. Close it without a lease or attempt;
+                            // it is never replayed.
+                            quarantine_unclaimable_run(tx, &current, &worker_id).await?;
+                            continue;
                         };
+                        let delegated =
+                            crate::principal_projection::is_delegated_reference(&reference);
                         let attempt = tx
                             .insert::<AiRunAttemptRecord>(CreateAiRunAttemptRecordInput {
                                 run_id: current.id,
@@ -4486,6 +4427,7 @@ impl OrmAiRunService {
                             }),
                             ..Default::default()
                         })
+                        .default_order()
                         .internal_limit(limits.maximum_candidate_scan as i64)
                         .fetch_all()
                         .await
@@ -4531,6 +4473,7 @@ impl OrmAiRunService {
                             .map_err(OrmPublicError::from)?;
                             continue;
                         }
+                        let validated = async {
                         if approval.maximum_uses != 1
                             || approval.consumed_uses != 0
                             || approval.consumed_at.is_some()
@@ -4549,6 +4492,18 @@ impl OrmAiRunService {
                             .await
                             .map_err(OrmPublicError::from)?
                             .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        if approval.session_id == run.session_id
+                            && call.approval_id == Some(approval.id)
+                            && AiRunState::from_persisted(&run.state).is_some_and(|state| {
+                                state != AiRunState::WaitingApproval
+                                    && AiRunTerminalEvent::from_run_state(state).is_some()
+                            })
+                        {
+                            // The run left its wait (for example the wait
+                            // reconciler closed it) while the approval stayed
+                            // open. The approval can never be consumed.
+                            return Ok(ApprovedHandoff::Expire("approval_run_closed"));
+                        }
                         if approval.session_id != run.session_id
                             || call.approval_id != Some(approval.id)
                             || call.state != "waiting_approval"
@@ -4570,43 +4525,9 @@ impl OrmAiRunService {
                             // so it cannot be consumed; the approval-wait
                             // reconciler then closes the run with the same
                             // safe code, without resolving the reference.
-                            let expired = tx
-                                .compare_and_swap::<AiApprovalRecord>(
-                                    &approval.id,
-                                    approval.row_version,
-                                    AiApprovalRecordWhereInput {
-                                        state: Some(StringFilter {
-                                            eq: Some("approved".to_owned()),
-                                            ..Default::default()
-                                        }),
-                                        ..Default::default()
-                                    },
-                                    UpdateAiApprovalRecordInput {
-                                        state: Some("expired".to_owned()),
-                                        ..Default::default()
-                                    },
-                                )
-                                .await
-                                .map_err(OrmPublicError::from)?;
-                            if !matches!(expired, ConditionalUpdateOutcome::Updated(_)) {
-                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                            }
-                            tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
-                                actor_principal_kind: "ai_worker".to_owned(),
-                                actor_subject: worker_id.clone(),
-                                action: "ai.approval.expired".to_owned(),
-                                resource_kind: "ai_approval".to_owned(),
-                                resource_reference: approval.id.to_string(),
-                                outcome: "denied".to_owned(),
-                                reason_code: crate::principal_projection::DELEGATED_REFERENCE_CODE
-                                    .to_owned(),
-                                correlation_id: approval.id.to_string(),
-                                causation_id: Some(approval.tool_call_id.to_string()),
-                                policy_version: Some(approval.policy_version),
-                            })
-                            .await
-                            .map_err(OrmPublicError::from)?;
-                            continue;
+                            return Ok(ApprovedHandoff::Expire(
+                                crate::principal_projection::DELEGATED_REFERENCE_CODE,
+                            ));
                         }
                         let parked_checkpoint =
                             if run.error_code.as_deref() == Some("approval_wait_parked") {
@@ -4742,7 +4663,7 @@ impl OrmAiRunService {
                                 // Leave the approved row eligible so provider
                                 // maintenance can confirm that graph before a
                                 // fresh run attempt is claimed.
-                                continue;
+                                return Ok(ApprovedHandoff::Skip);
                             }
                             if binding.parked_checkpoint_id != Some(checkpoint.id)
                                 || binding.parked_checkpoint_fingerprint.as_deref()
@@ -4775,6 +4696,45 @@ impl OrmAiRunService {
                                 budget: &reservation,
                             }, &candidate, native_checkpoints::PendingPhase::Waiting, None).await?;
                         }
+                            Ok(ApprovedHandoff::Proceed {
+                                call,
+                                run,
+                                parked_wait,
+                            })
+                        }
+                        .await;
+                        let (call, run, parked_wait) = match validated {
+                            Ok(ApprovedHandoff::Proceed {
+                                call,
+                                run,
+                                parked_wait,
+                            }) => (call, run, parked_wait),
+                            Ok(ApprovedHandoff::Skip) => continue,
+                            Ok(ApprovedHandoff::Expire(reason)) => {
+                                expire_unclaimable_approval(tx, &approval, &worker_id, reason)
+                                    .await?;
+                                continue;
+                            }
+                            Err(error)
+                                if matches!(
+                                    error.code,
+                                    OrmErrorCode::InternalError | OrmErrorCode::Conflict
+                                ) =>
+                            {
+                                // One malformed approved row must not fail every
+                                // later approved claim. It is expired, so it can
+                                // never be consumed, and audited.
+                                expire_unclaimable_approval(
+                                    tx,
+                                    &approval,
+                                    &worker_id,
+                                    "approval_handoff_invalid",
+                                )
+                                .await?;
+                                continue;
+                            }
+                            Err(error) => return Err(error),
+                        };
                         let expiry = now
                             .checked_add(limits.lease_ttl)
                             .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
@@ -5340,13 +5300,23 @@ impl OrmAiRunService {
                         PreparedApprovalWaitOutcome::RecoveryRequired {
                             approval_id,
                             tool_call_id,
-                        } => (
-                            AiRunState::RecoveryRequired,
-                            approval_id,
-                            tool_call_id,
-                            None,
-                            "recovery_required",
-                        ),
+                        } => {
+                            // The run leaves its wait for good, so its open
+                            // approval closes in the same transaction. A
+                            // decision can then never approve it, and an
+                            // approved row cannot strand the approved claim.
+                            if let Some(approval_id) = approval_id {
+                                expire_open_approval_of_closed_run(tx, approval_id, current.id)
+                                    .await?;
+                            }
+                            (
+                                AiRunState::RecoveryRequired,
+                                approval_id,
+                                tool_call_id,
+                                None,
+                                "recovery_required",
+                            )
+                        }
                     };
 
                     let reconciled_event = match reconciliation.protected_event {
@@ -5538,6 +5508,752 @@ impl OrmAiRunService {
 enum LeaseUpdate {
     Heartbeat,
     Start,
+}
+
+/// Exact transition chosen for one expired active lease.
+struct ExpiredLeaseTransition {
+    next_state: AiRunState,
+    outcome_code: &'static str,
+    next_retry_count: i64,
+    next_attempt_at: Option<i64>,
+    provider_response_id: Option<String>,
+}
+
+/// Outcome of reconciling one expired-lease candidate in its own transaction.
+enum ExpiredLeaseRecovery {
+    /// The row changed or renewed after the scan; nothing was written.
+    Unchanged,
+    /// The row moved to the transition's state.
+    Recovered(AiRunState, &'static str),
+    /// The row's durable lease or checkpoint state was malformed and it was
+    /// closed as `RecoveryRequired`.
+    Quarantined,
+}
+
+/// Classifies one expired lease from committed rows only. Every write happens
+/// in [`recover_expired_run`]; malformed linked state returns `InternalError`.
+async fn classify_expired_lease(
+    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    current: &AiRunRecord,
+    lease: &AiRunLease,
+    now: OffsetDateTime,
+    limits: AiRunServiceLimits,
+) -> Result<ExpiredLeaseTransition, OrmPublicError> {
+    let current_state = persisted_state(&current)?;
+    let (final_checkpoint, adoptable_tool_batch, inherited_checkpoint) =
+        if let Some(checkpoint_id) = current.latest_checkpoint_id {
+            let checkpoint = tx
+                .query::<AiRunCheckpointRecord>()
+                .filter(AiRunCheckpointRecordWhereInput {
+                    id: Some(UuidFilter {
+                        eq: Some(checkpoint_id),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+                .internal_limit(1)
+                .fetch_one()
+                .await
+                .map_err(OrmPublicError::from)?
+                .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+            // A checkpoint written by an earlier attempt is inherited only by an
+            // adoption requeue: `claim_once` keeps the pointer for the adopting
+            // attempt, which clears it when it consumes the batch. Validate it
+            // against the attempt and generation that wrote it.
+            let source_attempt_id = checkpoint.attempt_id;
+            let source_generation = checkpoint.lease_generation;
+            let inherited = source_generation < lease.lease_generation;
+            if checkpoint.run_id != current.id
+                || source_generation > lease.lease_generation
+                || (!inherited && source_attempt_id != lease.attempt_id)
+                || (inherited
+                    && !matches!(
+                        checkpoint.checkpoint_kind.as_str(),
+                        "tool_batch_persisted"
+                            | "supervised_tool_batch_persisted"
+                            | native_checkpoints::OUTCOME_KIND
+                    ))
+            {
+                return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+            }
+            if checkpoint.checkpoint_kind == "assistant_output_persisted" {
+                let message_id = checkpoint
+                    .assistant_message_id
+                    .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                let budget_reservation_id = checkpoint
+                    .budget_reservation_id
+                    .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                let reservation = tx
+                    .find_by_id::<AiBudgetReservationRecord>(&budget_reservation_id)
+                    .await
+                    .map_err(OrmPublicError::from)?
+                    .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                if reservation.session_id != current.session_id
+                    || reservation.run_id != current.id
+                    || reservation.attempt_id != source_attempt_id
+                    || reservation.lease_generation != source_generation
+                    || reservation.state != "committed"
+                    || reservation.actual_runs != Some(1)
+                    || reservation.reconciled_at.is_none()
+                {
+                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                }
+                let expected_hash = final_output_checkpoint_hash(
+                    lease.run_id,
+                    source_attempt_id,
+                    source_generation,
+                    message_id,
+                    checkpoint.provider_response_id.as_deref(),
+                    budget_reservation_id,
+                );
+                if checkpoint.checkpoint_hash != expected_hash {
+                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                }
+                let message = tx
+                    .find_by_id::<AiMessageRecord>(&message_id)
+                    .await
+                    .map_err(OrmPublicError::from)?
+                    .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                if message.session_id != current.session_id
+                    || message.run_id != Some(current.id)
+                    || message.message_role != "assistant"
+                    || message.provider_kind.as_deref() != Some(reservation.provider_kind.as_str())
+                    || message.provider_model.as_deref()
+                        != Some(reservation.provider_model.as_str())
+                    || message.completion_state != "complete"
+                    || message.finalized_at.is_none()
+                    || !(1..=4_096).contains(&message.block_count)
+                {
+                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                }
+                let mut blocks = tx
+                    .query::<AiMessageBlockRecord>()
+                    .filter(AiMessageBlockRecordWhereInput {
+                        message_id: Some(UuidFilter {
+                            eq: Some(message_id),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    })
+                    .internal_limit(message.block_count + 1)
+                    .fetch_all()
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                blocks.sort_by_key(|block| block.block_index);
+                if i64::try_from(blocks.len()).ok() != Some(message.block_count)
+                    || blocks.iter().enumerate().any(|(index, block)| {
+                        i64::try_from(index).ok() != Some(block.block_index)
+                            || block.byte_count < 0
+                            || block.line_count < 1
+                    })
+                {
+                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                }
+                (Some(checkpoint.provider_response_id), false, inherited)
+            } else if matches!(
+                checkpoint.checkpoint_kind.as_str(),
+                "tool_batch_persisted"
+                    | "supervised_tool_batch_persisted"
+                    | native_checkpoints::OUTCOME_KIND
+            ) {
+                let native_outcome = checkpoint.checkpoint_kind == native_checkpoints::OUTCOME_KIND;
+                let supervised = native_outcome
+                    || checkpoint.checkpoint_kind == "supervised_tool_batch_persisted";
+                let provider_response_id = checkpoint.provider_response_id.as_deref();
+                if provider_response_id.is_some_and(|value| !valid_provider_reference(value)) {
+                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                }
+                let budget_reservation_id = checkpoint
+                    .budget_reservation_id
+                    .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                let protected_state = checkpoint
+                    .protected_state
+                    .as_ref()
+                    .filter(|state| {
+                        serde_json::to_vec(state)
+                            .is_ok_and(|encoded| encoded.len() <= 64 * 1024 * 1024)
+                    })
+                    .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                if checkpoint.assistant_message_id.is_some() {
+                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                }
+                let reservation = tx
+                    .find_by_id::<AiBudgetReservationRecord>(&budget_reservation_id)
+                    .await
+                    .map_err(OrmPublicError::from)?
+                    .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                if reservation.session_id != current.session_id
+                    || reservation.run_id != current.id
+                    || (!native_outcome
+                        && (reservation.attempt_id != source_attempt_id
+                            || reservation.lease_generation != source_generation))
+                    || reservation.state != "committed"
+                    || reservation.actual_runs != Some(1)
+                    || reservation.reconciled_at.is_none()
+                    || reservation.provider_kind.trim().is_empty()
+                    || reservation.provider_model.trim().is_empty()
+                {
+                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                }
+                let expected_hash = coordinator_checkpoint_hash(
+                    lease.run_id,
+                    source_attempt_id,
+                    source_generation,
+                    checkpoint.id,
+                    &checkpoint.checkpoint_kind,
+                    &reservation.provider_kind,
+                    &reservation.provider_model,
+                    provider_response_id,
+                    budget_reservation_id,
+                    protected_state,
+                )
+                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                if checkpoint.checkpoint_hash != expected_hash {
+                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                }
+                let calls = tx
+                    .query::<AiToolCallRecord>()
+                    .filter(AiToolCallRecordWhereInput {
+                        run_id: Some(UuidFilter {
+                            eq: Some(current.id),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    })
+                    .internal_limit(4_097)
+                    .fetch_all()
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                let relevant = calls
+                    .iter()
+                    .filter(|call| {
+                        call.lease_generation == source_generation
+                            && call.provider_response_id.as_deref() == provider_response_id
+                            && call.budget_reservation_id == Some(budget_reservation_id)
+                    })
+                    .collect::<Vec<_>>();
+                if relevant.is_empty()
+                    || relevant.len() > 4_096
+                    || (supervised && relevant.len() != 1)
+                    || relevant.iter().any(|call| {
+                        !matches!(call.state.as_str(), "completed" | "execution_failed")
+                            || call.protected_result.is_none()
+                            || call.result_egress_decision_id.is_none()
+                            || call.result_egress_manifest_hash.is_none()
+                            || call.completed_at.is_none()
+                    })
+                {
+                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                }
+                if native_outcome {
+                    native_checkpoints::outcome(
+                        tx,
+                        current.id,
+                        current.session_id,
+                        source_generation,
+                        &reservation,
+                        provider_response_id,
+                        relevant[0].id,
+                        None,
+                        None,
+                    )
+                    .await?;
+                }
+                for call in relevant {
+                    let authorization_matches = if supervised {
+                        let Some(approval_id) = call.approval_id else {
+                            return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                        };
+                        let approval = tx
+                            .find_by_id::<AiApprovalRecord>(&approval_id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        matches!(
+                            call.risk.as_str(),
+                            "low_risk_write" | "non_idempotent_write" | "high_impact"
+                        ) && approval.tool_call_id == call.id
+                            && approval.session_id == current.session_id
+                            && approval.state == "consumed"
+                            && approval.maximum_uses == 1
+                            && approval.consumed_uses == 1
+                            && approval.consumed_at.is_some()
+                            && approval.argument_hash == call.argument_hash
+                            && approval.tool_fingerprint == call.tool_fingerprint
+                            && call.authorization_policy_version.as_deref()
+                                == Some(approval.policy_version.as_str())
+                            && call.authorization_state_digest.as_deref()
+                                == Some(approval.authorization_state_digest.as_str())
+                    } else {
+                        call.risk == "read_only" && call.approval_id.is_none()
+                    };
+                    let step = tx
+                        .find_by_id::<AiRunStepRecord>(&call.id)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    if step.run_id != current.id
+                        || step.lease_generation != source_generation
+                        || step.state != call.state
+                        || step.finished_at.is_none()
+                        || !authorization_matches
+                    {
+                        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                    }
+                }
+                // Read-only provider-retained/stateless batches
+                // and the narrow supervised provider-retained
+                // batch have complete durable
+                // tool/approval/step/budget proof here. The
+                // adopter still opens and validates every
+                // protected row under current authority before
+                // transport.
+                (None, true, inherited)
+            } else {
+                (None, false, inherited)
+            }
+        } else {
+            (None, false, false)
+        };
+    if (final_checkpoint.is_some() && current_state != AiRunState::Running)
+        || (adoptable_tool_batch
+            && current_state != AiRunState::Running
+            && !(inherited_checkpoint && current_state == AiRunState::Leased))
+    {
+        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+    }
+    let (next_state, outcome_code, next_retry_count, next_attempt_at, provider_response_id) =
+        if let Some(provider_response_id) = final_checkpoint {
+            (
+                AiRunState::Completed,
+                "lease_expired_after_output_persisted",
+                current.retry_count,
+                None,
+                provider_response_id,
+            )
+        } else if adoptable_tool_batch {
+            let retry_count = u32::try_from(current.retry_count)
+                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+            if retry_count >= limits.maximum_run_retries {
+                (
+                    AiRunState::RecoveryRequired,
+                    "checkpoint_adoption_retry_exhausted",
+                    current.retry_count,
+                    None,
+                    None,
+                )
+            } else {
+                (
+                    AiRunState::RetryScheduled,
+                    "checkpoint_adoption_ready",
+                    current
+                        .retry_count
+                        .checked_add(1)
+                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?,
+                    Some(now.unix_timestamp()),
+                    None,
+                )
+            }
+        } else if current_state == AiRunState::Leased {
+            let retry_count = u32::try_from(current.retry_count)
+                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+            if retry_count >= limits.maximum_run_retries {
+                (
+                    AiRunState::Failed,
+                    "lease_expired_retry_exhausted",
+                    current.retry_count,
+                    None,
+                    None,
+                )
+            } else {
+                (
+                    AiRunState::RetryScheduled,
+                    "lease_expired_before_start",
+                    current
+                        .retry_count
+                        .checked_add(1)
+                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?,
+                    Some(now.unix_timestamp()),
+                    None,
+                )
+            }
+        } else {
+            (
+                AiRunState::RecoveryRequired,
+                "lease_expired_after_start",
+                current.retry_count,
+                None,
+                None,
+            )
+        };
+    Ok(ExpiredLeaseTransition {
+        next_state,
+        outcome_code,
+        next_retry_count,
+        next_attempt_at,
+        provider_response_id,
+    })
+}
+
+/// Reconciles one scanned expired-lease candidate.
+///
+/// Malformed linked state cannot abort the whole pass: the row is closed as
+/// `RecoveryRequired` with `lease_recovery_state_invalid`, which is never
+/// replayed, and the caller continues with the next candidate.
+async fn recover_expired_run(
+    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    run_id: Uuid,
+    now: OffsetDateTime,
+    cutoff: i64,
+    limits: AiRunServiceLimits,
+) -> Result<ExpiredLeaseRecovery, OrmPublicError> {
+    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
+    let Some(current) = tx
+        .find_by_id::<AiRunRecord>(&run_id)
+        .await
+        .map_err(OrmPublicError::from)?
+    else {
+        return Ok(ExpiredLeaseRecovery::Unchanged);
+    };
+    if !EXPIRED_LEASE_RECOVERY_STATES
+        .iter()
+        .any(|state| state.as_str() == current.state)
+        || current
+            .lease_expires_at
+            .is_some_and(|expires_at| expires_at > cutoff)
+    {
+        return Ok(ExpiredLeaseRecovery::Unchanged);
+    }
+    let lease = current
+        .lease_expires_at
+        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))
+        .and_then(|_| lease_from_record(&current));
+    let classified = match &lease {
+        Ok(lease) => classify_expired_lease(tx, &current, lease, now, limits).await,
+        Err(error) => Err(error.clone()),
+    };
+    let (transition, quarantined) = match classified {
+        Ok(transition) => (transition, false),
+        Err(error) if error.code == OrmErrorCode::InternalError => (
+            ExpiredLeaseTransition {
+                next_state: AiRunState::RecoveryRequired,
+                outcome_code: "lease_recovery_state_invalid",
+                next_retry_count: current.retry_count,
+                next_attempt_at: None,
+                provider_response_id: None,
+            },
+            true,
+        ),
+        Err(error) => return Err(error),
+    };
+    let update = tx
+        .compare_and_swap::<AiRunRecord>(
+            &current.id,
+            current.row_version,
+            exact_state(&current.state),
+            UpdateAiRunRecordInput {
+                state: Some(transition.next_state.as_str().to_owned()),
+                attempt_id: Some(None),
+                lease_owner: Some(None),
+                lease_expires_at: Some(None),
+                lease_heartbeat_at: Some(None),
+                retry_count: Some(transition.next_retry_count),
+                next_attempt_at: Some(transition.next_attempt_at),
+                error_code: Some(
+                    (transition.next_state != AiRunState::Completed)
+                        .then_some(transition.outcome_code.to_owned()),
+                ),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(OrmPublicError::from)?;
+    if !matches!(update, ConditionalUpdateOutcome::Updated(_)) {
+        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+    }
+    if quarantined {
+        // No attempt outcome or terminal event is written: both validate the
+        // linkage that failed classification. The audit row and the run state
+        // are the durable record; clients observe the state on their next read.
+        tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
+            actor_principal_kind: "system".to_owned(),
+            actor_subject: "run-lease-recovery".to_owned(),
+            action: "ai.run.lease_recovery_quarantined".to_owned(),
+            resource_kind: "ai_run".to_owned(),
+            resource_reference: current.id.to_string(),
+            outcome: "denied".to_owned(),
+            reason_code: "lease_recovery_state_invalid".to_owned(),
+            correlation_id: current.id.to_string(),
+            causation_id: current.attempt_id.map(|attempt| attempt.to_string()),
+            policy_version: None,
+        })
+        .await
+        .map_err(OrmPublicError::from)?;
+        return Ok(ExpiredLeaseRecovery::Quarantined);
+    }
+    let lease = lease?;
+    append_attempt_outcome(
+        tx,
+        &lease,
+        transition.next_state,
+        transition.outcome_code.to_owned(),
+        transition.provider_response_id,
+        now,
+    )
+    .await?;
+    if AiRunTerminalEvent::from_run_state(transition.next_state).is_some() {
+        append_terminal_run_event(
+            tx,
+            &current,
+            transition.next_state,
+            Some(transition.outcome_code),
+            now,
+        )
+        .await?;
+    }
+    Ok(ExpiredLeaseRecovery::Recovered(
+        transition.next_state,
+        transition.outcome_code,
+    ))
+}
+
+/// Commits one expired unresolved reservation whose attempt is closed.
+/// Returns `false` without writing when the reservation is still owned.
+async fn settle_stranded_budget_reservation(
+    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    reservation_id: Uuid,
+    now: OffsetDateTime,
+) -> Result<bool, OrmPublicError> {
+    let Some(reservation) = tx
+        .find_by_id::<AiBudgetReservationRecord>(&reservation_id)
+        .await
+        .map_err(OrmPublicError::from)?
+    else {
+        return Ok(false);
+    };
+    if !matches!(reservation.state.as_str(), "reserved" | "uncertain")
+        || reservation.expires_at > now.unix_timestamp()
+    {
+        return Ok(false);
+    }
+    let Some(run) = tx
+        .find_by_id::<AiRunRecord>(&reservation.run_id)
+        .await
+        .map_err(OrmPublicError::from)?
+    else {
+        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+    };
+    if run.session_id != reservation.session_id {
+        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+    }
+    let attempt_live = run.attempt_id == Some(reservation.attempt_id)
+        && run.lease_generation == reservation.lease_generation
+        && run.lease_expires_at.is_some();
+    if attempt_live {
+        return Ok(false);
+    }
+    let submissions = tx
+        .query::<AiProviderBackgroundSubmissionRecord>()
+        .filter(AiProviderBackgroundSubmissionRecordWhereInput {
+            run_id: Some(UuidFilter {
+                eq: Some(run.id),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .internal_limit(4_097)
+        .fetch_all()
+        .await
+        .map_err(OrmPublicError::from)?;
+    if submissions.len() > 4_096
+        || submissions
+            .iter()
+            .any(|submission| submission.budget_reservation_id == reservation.id)
+    {
+        return Ok(false);
+    }
+    crate::orm_budget::commit_stranded_reservation(tx, &reservation, now).await?;
+    tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
+        actor_principal_kind: "system".to_owned(),
+        actor_subject: "run-lease-recovery".to_owned(),
+        action: "ai.budget.reservation_settled".to_owned(),
+        resource_kind: "ai_budget_reservation".to_owned(),
+        resource_reference: reservation.id.to_string(),
+        outcome: "allowed".to_owned(),
+        reason_code: "budget_reservation_attempt_closed".to_owned(),
+        correlation_id: run.id.to_string(),
+        causation_id: Some(reservation.attempt_id.to_string()),
+        policy_version: Some(reservation.pricing_policy_version.clone()),
+    })
+    .await
+    .map_err(OrmPublicError::from)?;
+    Ok(true)
+}
+
+/// Active states whose expired lease the recovery pass reconciles.
+const EXPIRED_LEASE_RECOVERY_STATES: [AiRunState; 4] = [
+    AiRunState::Leased,
+    AiRunState::Running,
+    AiRunState::WaitingTool,
+    AiRunState::WaitingReauth,
+];
+
+/// Read-only validation result for one approved approval handoff.
+enum ApprovedHandoff {
+    /// The exact wait graph is current and may be claimed.
+    Proceed {
+        call: AiToolCallRecord,
+        run: AiRunRecord,
+        parked_wait: bool,
+    },
+    /// The graph is repairable by other maintenance; leave it eligible.
+    Skip,
+    /// The approval can never be consumed; expire it with this safe reason.
+    Expire(&'static str),
+}
+
+/// Expires a still-open approval whose run is closing in this transaction.
+async fn expire_open_approval_of_closed_run(
+    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    approval_id: Uuid,
+    run_id: Uuid,
+) -> Result<(), OrmPublicError> {
+    let Some(approval) = tx
+        .find_by_id::<AiApprovalRecord>(&approval_id)
+        .await
+        .map_err(OrmPublicError::from)?
+    else {
+        return Ok(());
+    };
+    if !matches!(approval.state.as_str(), "pending" | "approved") {
+        return Ok(());
+    }
+    let Some(call) = tx
+        .find_by_id::<AiToolCallRecord>(&approval.tool_call_id)
+        .await
+        .map_err(OrmPublicError::from)?
+    else {
+        return Ok(());
+    };
+    if call.run_id != run_id || call.approval_id != Some(approval.id) {
+        return Ok(());
+    }
+    let expired = tx
+        .compare_and_swap::<AiApprovalRecord>(
+            &approval.id,
+            approval.row_version,
+            AiApprovalRecordWhereInput {
+                state: Some(StringFilter {
+                    eq: Some(approval.state.clone()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            UpdateAiApprovalRecordInput {
+                state: Some("expired".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(OrmPublicError::from)?;
+    if !matches!(expired, ConditionalUpdateOutcome::Updated(_)) {
+        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+    }
+    Ok(())
+}
+
+/// Expires an approved approval that can never be handed off and audits it.
+async fn expire_unclaimable_approval(
+    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    approval: &AiApprovalRecord,
+    worker_id: &str,
+    reason_code: &str,
+) -> Result<(), OrmPublicError> {
+    let expired = tx
+        .compare_and_swap::<AiApprovalRecord>(
+            &approval.id,
+            approval.row_version,
+            AiApprovalRecordWhereInput {
+                state: Some(StringFilter {
+                    eq: Some("approved".to_owned()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            UpdateAiApprovalRecordInput {
+                state: Some("expired".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(OrmPublicError::from)?;
+    if !matches!(expired, ConditionalUpdateOutcome::Updated(_)) {
+        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+    }
+    tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
+        actor_principal_kind: "ai_worker".to_owned(),
+        actor_subject: worker_id.to_owned(),
+        action: "ai.approval.expired".to_owned(),
+        resource_kind: "ai_approval".to_owned(),
+        resource_reference: approval.id.to_string(),
+        outcome: "denied".to_owned(),
+        reason_code: reason_code.to_owned(),
+        correlation_id: approval.id.to_string(),
+        causation_id: Some(approval.tool_call_id.to_string()),
+        policy_version: Some(approval.policy_version.clone()),
+    })
+    .await
+    .map_err(OrmPublicError::from)?;
+    Ok(())
+}
+
+/// Closes a queued or retry-scheduled run whose durable claim state is
+/// malformed, so it cannot block the bounded claim window.
+async fn quarantine_unclaimable_run(
+    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    current: &AiRunRecord,
+    worker_id: &str,
+) -> Result<(), OrmPublicError> {
+    const CODE: &str = "claim_state_invalid";
+    let update = tx
+        .compare_and_swap::<AiRunRecord>(
+            &current.id,
+            current.row_version,
+            exact_state(&current.state),
+            UpdateAiRunRecordInput {
+                state: Some(AiRunState::RecoveryRequired.as_str().to_owned()),
+                attempt_id: Some(None),
+                lease_owner: Some(None),
+                lease_expires_at: Some(None),
+                lease_heartbeat_at: Some(None),
+                next_attempt_at: Some(None),
+                error_code: Some(Some(CODE.to_owned())),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(OrmPublicError::from)?;
+    if !matches!(update, ConditionalUpdateOutcome::Updated(_)) {
+        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+    }
+    // No terminal event or attempt outcome is written: both validate the very
+    // linkage that is malformed here. The audit row and the run state are the
+    // durable record; clients observe the state on their next read.
+    tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
+        actor_principal_kind: "ai_worker".to_owned(),
+        actor_subject: worker_id.to_owned(),
+        action: "ai.run.claim_quarantined".to_owned(),
+        resource_kind: "ai_run".to_owned(),
+        resource_reference: current.id.to_string(),
+        outcome: "denied".to_owned(),
+        reason_code: CODE.to_owned(),
+        correlation_id: current.id.to_string(),
+        causation_id: None,
+        policy_version: None,
+    })
+    .await
+    .map_err(OrmPublicError::from)?;
+    Ok(())
 }
 
 pub(crate) async fn abandon_native_approval_candidates(
@@ -6176,6 +6892,10 @@ pub(crate) async fn append_terminal_run_event(
                 )
                 .await?,
                 provider_dispatch_possible: run_provider_dispatch_possible(tx, run.id).await?,
+                consequential_tool_dispatch_possible: run_consequential_tool_dispatch_possible(
+                    tx, run.id,
+                )
+                .await?,
             };
             Some(AiRunFailure::new(
                 classify_run_retry(evidence, outcome_code),
@@ -6348,6 +7068,48 @@ fn valid_safe_code(code: &str) -> bool {
 pub(crate) fn canonical_second(value: OffsetDateTime) -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp(value.unix_timestamp())
         .expect("an existing OffsetDateTime timestamp remains representable")
+}
+
+/// Runs one state-machine transaction, retrying the whole callback when the
+/// database classifies the failure as retryable (SQLite busy, PostgreSQL
+/// serialization failure or deadlock).
+///
+/// `attempt` must build a fresh transaction each time. Every callback in this
+/// crate re-reads and re-validates its fence inside the transaction, so a
+/// retry can never act on state observed by an aborted attempt.
+pub(crate) async fn retry_transaction<T, F, Fut>(
+    maximum_retries: usize,
+    mut attempt: F,
+) -> Result<T, TransactionError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, TransactionError>>,
+{
+    let mut retry = 0;
+    loop {
+        match attempt().await {
+            Err(TransactionError::Retryable(_)) if retry < maximum_retries => {
+                retry += 1;
+                tokio::task::yield_now().await;
+            }
+            outcome => return outcome,
+        }
+    }
+}
+
+/// Serialization-retry bound for services without their own retry limit.
+pub(crate) const DEFAULT_TRANSACTION_RETRIES: usize = 8;
+
+/// Builds an `IntFilter` selecting timestamps at or before `timestamp`.
+///
+/// ORM integer filters carry `i32` values. After 2038 the predicate cannot be
+/// expressed, so the filter is omitted and the caller's in-memory check
+/// remains authoritative instead of the scan failing.
+pub(crate) fn timestamp_at_or_before(timestamp: i64) -> Option<IntFilter> {
+    i32::try_from(timestamp).ok().map(|timestamp| IntFilter {
+        lte: Some(timestamp),
+        ..Default::default()
+    })
 }
 
 fn map_transaction(error: TransactionError) -> AiError {
@@ -6865,7 +7627,42 @@ mod tests {
 
     async fn assert_recovery_requeues_completed_tool_batch(provider_response_id: Option<&str>) {
         let fixture = fixture().await;
-        let run_id = seed_queued(&fixture).await;
+        let (run_id, checkpoint_id) =
+            seed_completed_tool_batch(&fixture, provider_response_id).await;
+
+        fixture.clock.advance_seconds(61);
+        let report = fixture
+            .service
+            .recover_expired_leases()
+            .await
+            .expect("exact tool checkpoint should requeue for adoption");
+        assert_eq!(report.checkpoint_requeued, 1);
+        assert_eq!(report.recovery_required, 0);
+        let retry = run_record(&fixture, run_id).await;
+        assert_eq!(retry.state, AiRunState::RetryScheduled.as_str());
+        assert_eq!(retry.latest_checkpoint_id, Some(checkpoint_id));
+        assert_eq!(
+            retry.error_code.as_deref(),
+            Some("checkpoint_adoption_ready")
+        );
+
+        let replacement = fixture
+            .service
+            .claim_next("worker-tool-adopter")
+            .await
+            .expect("replacement claim should succeed")
+            .expect("checkpoint retry should be eligible");
+        assert_eq!(replacement.lease_generation(), 2);
+        assert_eq!(replacement.latest_checkpoint_id(), Some(checkpoint_id));
+    }
+
+    /// Seeds a started run whose current attempt committed an exact completed
+    /// read-only tool-batch checkpoint, and returns its run and checkpoint IDs.
+    async fn seed_completed_tool_batch(
+        fixture: &Fixture,
+        provider_response_id: Option<&str>,
+    ) -> (AiRunId, Uuid) {
+        let run_id = seed_queued(fixture).await;
         let lease = fixture
             .service
             .claim_next("worker-tool-checkpoint")
@@ -7017,31 +7814,467 @@ mod tests {
             .await
             .expect("tool batch checkpoint should commit");
         assert_eq!(checkpointed.latest_checkpoint_id(), Some(checkpoint_id));
+        (run_id, checkpoint_id)
+    }
+
+    /// Inserts a queued run with a chosen ID into a fresh session.
+    async fn seed_queued_with_id(fixture: &Fixture, run_id: Uuid) -> AiRunId {
+        let session_id = AiSessionId::new();
+        AiSessionRecord::insert(
+            &fixture.database,
+            CreateAiSessionRecordInput {
+                execution_selection: None,
+                id: session_id.0,
+                owner_principal_kind: "user".to_owned(),
+                owner_subject: "run-user".to_owned(),
+                tenant_id: Some("tenant-run".to_owned()),
+                scope_kind: "tenant".to_owned(),
+                scope_id: "tenant-run".to_owned(),
+                title: "Run service test".to_owned(),
+                title_revision: 0,
+                title_source: "default".to_owned(),
+                state: "active".to_owned(),
+                stream_head: 0,
+                message_head: 0,
+                last_activity_at: fixture.clock.now().unix_timestamp(),
+                archived_at: None,
+                deleted_at: None,
+            },
+        )
+        .await
+        .expect("test session should insert");
+        AiRunRecord::insert(
+            &fixture.database,
+            CreateAiRunRecordInput {
+                recovery_epoch_id: None,
+                execution_selection: None,
+                id: run_id,
+                session_id: session_id.0,
+                input_message_id: Uuid::new_v4(),
+                principal_reference: serde_json::to_value(&fixture.principal_reference)
+                    .expect("principal reference should serialize"),
+                state: AiRunState::Queued.as_str().to_owned(),
+                attempt_id: None,
+                lease_owner: None,
+                lease_generation: 0,
+                lease_expires_at: None,
+                lease_heartbeat_at: None,
+                retry_count: 0,
+                next_attempt_at: Some(fixture.clock.now().unix_timestamp()),
+                error_code: None,
+                latest_checkpoint_id: None,
+                cancellation_request_id: None,
+                cancellation_requested_at: None,
+            },
+        )
+        .await
+        .expect("queued test run should insert");
+        AiRunId(run_id)
+    }
+
+    #[tokio::test]
+    async fn second_lease_expiry_before_adoption_requeues_again_without_aborting_the_pass() {
+        for start_replacement in [false, true] {
+            let fixture = fixture().await;
+            let (run_id, checkpoint_id) =
+                seed_completed_tool_batch(&fixture, Some("response-adoption-retry")).await;
+            fixture.clock.advance_seconds(61);
+            let first = fixture
+                .service
+                .recover_expired_leases()
+                .await
+                .expect("first recovery should requeue for adoption");
+            assert_eq!(first.checkpoint_requeued, 1);
+            let replacement = fixture
+                .service
+                .claim_next("worker-adopter")
+                .await
+                .expect("adoption claim should succeed")
+                .expect("adoption retry should be eligible");
+            assert_eq!(replacement.latest_checkpoint_id(), Some(checkpoint_id));
+            if start_replacement {
+                fixture
+                    .service
+                    .start(&replacement)
+                    .await
+                    .expect("adoption attempt should start");
+            }
+            // An unrelated run whose lease expires in the same pass.
+            let other_run = seed_queued(&fixture).await;
+            fixture
+                .service
+                .claim_next("worker-other")
+                .await
+                .expect("unrelated claim should succeed")
+                .expect("unrelated run should be eligible");
+
+            // The adopting attempt dies before consuming the checkpoint.
+            fixture.clock.advance_seconds(61);
+            let second = fixture
+                .service
+                .recover_expired_leases()
+                .await
+                .expect("a pre-adoption expiry must not abort the recovery pass");
+            assert_eq!(second.checkpoint_requeued, 1, "start={start_replacement}");
+            assert_eq!(second.requeued, 1, "start={start_replacement}");
+            assert_eq!(second.quarantined, 0, "start={start_replacement}");
+            let retry = run_record(&fixture, run_id).await;
+            assert_eq!(retry.state, AiRunState::RetryScheduled.as_str());
+            assert_eq!(retry.latest_checkpoint_id, Some(checkpoint_id));
+            assert_eq!(
+                retry.error_code.as_deref(),
+                Some("checkpoint_adoption_ready")
+            );
+            assert_eq!(
+                run_record(&fixture, other_run).await.state,
+                AiRunState::RetryScheduled.as_str()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_quarantines_a_malformed_row_and_still_recovers_the_rest() {
+        let fixture = fixture().await;
+        let broken = seed_queued(&fixture).await;
+        let broken_lease = fixture
+            .service
+            .claim_next("worker-broken")
+            .await
+            .expect("claim should succeed")
+            .expect("run should be eligible");
+        fixture
+            .service
+            .start(&broken_lease)
+            .await
+            .expect("broken run should start");
+        let healthy = seed_queued(&fixture).await;
+        fixture
+            .service
+            .claim_next("worker-healthy")
+            .await
+            .expect("claim should succeed")
+            .expect("run should be eligible");
+        // Corrupt the running row: its checkpoint pointer names no checkpoint.
+        let current = run_record(&fixture, broken).await;
+        let outcome = fixture
+            .database
+            .transaction(TransactionMode::Default, move |tx| {
+                Box::pin(async move {
+                    tx.compare_and_swap::<AiRunRecord>(
+                        &current.id,
+                        current.row_version,
+                        AiRunRecordWhereInput::default(),
+                        UpdateAiRunRecordInput {
+                            latest_checkpoint_id: Some(Some(Uuid::new_v4())),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("test corruption should commit");
+        assert!(matches!(outcome, ConditionalUpdateOutcome::Updated(_)));
 
         fixture.clock.advance_seconds(61);
         let report = fixture
             .service
             .recover_expired_leases()
             .await
-            .expect("exact tool checkpoint should requeue for adoption");
-        assert_eq!(report.checkpoint_requeued, 1);
-        assert_eq!(report.recovery_required, 0);
-        let retry = run_record(&fixture, run_id).await;
-        assert_eq!(retry.state, AiRunState::RetryScheduled.as_str());
-        assert_eq!(retry.latest_checkpoint_id, Some(checkpoint_id));
+            .expect("one malformed row must not abort the recovery pass");
+        assert_eq!(report.requeued, 1);
+        assert_eq!(report.quarantined, 1);
         assert_eq!(
-            retry.error_code.as_deref(),
-            Some("checkpoint_adoption_ready")
+            run_record(&fixture, healthy).await.state,
+            AiRunState::RetryScheduled.as_str()
         );
-
-        let replacement = fixture
+        let quarantined = run_record(&fixture, broken).await;
+        assert_eq!(quarantined.state, AiRunState::RecoveryRequired.as_str());
+        assert_eq!(
+            quarantined.error_code.as_deref(),
+            Some("lease_recovery_state_invalid")
+        );
+        assert!(quarantined.lease_owner.is_none());
+        assert!(quarantined.lease_expires_at.is_none());
+        // The quarantined row leaves the scan, so the next pass is clean.
+        let next = fixture
             .service
-            .claim_next("worker-tool-adopter")
+            .recover_expired_leases()
             .await
-            .expect("replacement claim should succeed")
-            .expect("checkpoint retry should be eligible");
-        assert_eq!(replacement.lease_generation(), 2);
-        assert_eq!(replacement.latest_checkpoint_id(), Some(checkpoint_id));
+            .expect("the next pass should succeed");
+        assert_eq!(next, AiRunRecoveryReport::default());
+    }
+
+    #[tokio::test]
+    async fn a_malformed_queued_row_cannot_block_every_claim() {
+        let fixture = fixture().await;
+        // The malformed row sorts first by primary key and creation time.
+        let broken = seed_queued_with_id(&fixture, Uuid::from_u128(1)).await;
+        let current = run_record(&fixture, broken).await;
+        fixture
+            .database
+            .transaction(TransactionMode::Default, move |tx| {
+                Box::pin(async move {
+                    tx.compare_and_swap::<AiRunRecord>(
+                        &current.id,
+                        current.row_version,
+                        AiRunRecordWhereInput::default(),
+                        UpdateAiRunRecordInput {
+                            lease_owner: Some(Some("ghost-worker".to_owned())),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("test corruption should commit");
+        let healthy = seed_queued_with_id(&fixture, Uuid::from_u128(2)).await;
+        let lease = fixture
+            .service
+            .claim_next("worker-claim")
+            .await
+            .expect("one malformed row must not fail every claim")
+            .expect("the healthy run should be claimed");
+        assert_eq!(lease.run_id(), healthy);
+        let quarantined = run_record(&fixture, broken).await;
+        assert_eq!(quarantined.state, AiRunState::RecoveryRequired.as_str());
+        assert_eq!(
+            quarantined.error_code.as_deref(),
+            Some("claim_state_invalid")
+        );
+    }
+
+    async fn insert_tool_call(
+        fixture: &Fixture,
+        lease: &AiRunLease,
+        risk: &str,
+        state: &str,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        AiToolCallRecord::insert(
+            &fixture.database,
+            CreateAiToolCallRecordInput {
+                id,
+                run_id: lease.run_id().0,
+                provider_call_key: format!("call-key-{id}"),
+                provider_call_id: format!("call-{id}"),
+                provider_kind: Some("openai".to_owned()),
+                provider_model: Some("retry-evidence".to_owned()),
+                provider_response_id: Some("response-retry-evidence".to_owned()),
+                budget_reservation_id: None,
+                provider_turn_index: 0,
+                tool_call_index: 0,
+                tool_id: "records.update".to_owned(),
+                tool_fingerprint: "tool-fingerprint".to_owned(),
+                execution_provenance: None,
+                protected_arguments: None,
+                argument_hash: "argument-hash".to_owned(),
+                protected_result: None,
+                protected_result_source: None,
+                payload_purged_at: None,
+                risk: risk.to_owned(),
+                authorization_code: Some("allowed".to_owned()),
+                authorization_policy_version: None,
+                authorization_state_digest: None,
+                disclosure_schema_fingerprint: None,
+                result_classification: None,
+                result_egress_decision_id: None,
+                result_egress_manifest_hash: None,
+                application_audit_ref: None,
+                approval_id: None,
+                idempotency_key: None,
+                correlation_id: None,
+                causation_id: None,
+                delegation_reference: None,
+                lease_generation: lease.lease_generation(),
+                state: state.to_owned(),
+                completed_at: None,
+            },
+        )
+        .await
+        .expect("tool call should insert");
+        id
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_run_whose_mutation_may_have_run_is_not_retryable() {
+        for (risk, state, admission) in [
+            ("read_only", "completed", "allowed"),
+            ("non_idempotent_write", "waiting_approval", "allowed"),
+            ("non_idempotent_write", "completed", "refused_uncertain"),
+            ("low_risk_write", "executing", "refused_uncertain"),
+            // Cancellation of an executing call records `cancelled` with no
+            // consumed approval proving it never reached the resolver.
+            ("high_impact", "cancelled", "refused_uncertain"),
+        ] {
+            let fixture = fixture().await;
+            seed_queued(&fixture).await;
+            let lease = fixture
+                .service
+                .claim_next("worker-cancel-evidence")
+                .await
+                .expect("claim should succeed")
+                .expect("run should be eligible");
+            let lease = fixture
+                .service
+                .start(&lease)
+                .await
+                .expect("run should start");
+            insert_tool_call(&fixture, &lease, risk, state).await;
+            fixture
+                .service
+                .finish(
+                    &lease,
+                    AiRunCompletion::new(
+                        AiRunState::Cancelled,
+                        "owner_cancelled",
+                        Some("owner_cancelled".to_owned()),
+                        None,
+                    )
+                    .expect("cancellation should validate"),
+                )
+                .await
+                .expect("cancellation should commit");
+            let events = session_events(&fixture).await;
+            assert_eq!(events.len(), 1);
+            assert_eq!(
+                events[0].protected_payload["value"]["failure"]["admission"],
+                serde_json::json!(admission),
+                "risk={risk} state={state}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_execution_renews_the_lease_until_it_finishes() {
+        let fixture = fixture().await;
+        seed_queued(&fixture).await;
+        // A three-second lease renews every second.
+        let service = OrmAiRunService::new(
+            fixture.database.clone(),
+            Arc::new(fixture.clock.clone()),
+            AiRunServiceLimits::new(Duration::seconds(3), Duration::hours(1), 16, 2, 8)
+                .expect("short lease limits should validate"),
+        );
+        let lease = service
+            .claim_next("worker-tool-heartbeat")
+            .await
+            .expect("claim should succeed")
+            .expect("run should be eligible");
+        let lease = service.start(&lease).await.expect("run should start");
+        let clock = fixture.clock.clone();
+        // A resolver that runs for more than twice the lease TTL.
+        let execution = async move {
+            for _ in 0..7 {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                clock.advance_seconds(1);
+            }
+            "done"
+        };
+        let (output, renewed) = service.run_with_lease_heartbeat(&lease, execution).await;
+        assert_eq!(output, "done");
+        assert!(renewed.lease_expires_at() > fixture.clock.now());
+        assert_eq!(
+            service
+                .recover_expired_leases()
+                .await
+                .expect("recovery should succeed"),
+            AiRunRecoveryReport::default()
+        );
+        service
+            .heartbeat(&renewed)
+            .await
+            .expect("the renewed proof stays current");
+    }
+
+    #[tokio::test]
+    async fn lease_recovery_grace_tolerates_a_fast_recovery_clock() {
+        let fixture = fixture().await;
+        let run_id = seed_queued(&fixture).await;
+        fixture
+            .service
+            .claim_next("worker-grace")
+            .await
+            .expect("claim should succeed")
+            .expect("run should be eligible");
+        let limits = fixture
+            .service
+            .limits
+            .with_lease_recovery_grace(Duration::seconds(30))
+            .expect("grace within the lease TTL should validate");
+        assert!(
+            fixture
+                .service
+                .limits
+                .with_lease_recovery_grace(Duration::seconds(61))
+                .is_err()
+        );
+        let recovering = OrmAiRunService::new(
+            fixture.database.clone(),
+            Arc::new(fixture.clock.clone()),
+            limits,
+        );
+        // The recovering process's clock runs 20 seconds past the lease.
+        fixture.clock.advance_seconds(80);
+        assert_eq!(
+            recovering
+                .recover_expired_leases()
+                .await
+                .expect("recovery should succeed")
+                .requeued,
+            0
+        );
+        assert_eq!(
+            run_record(&fixture, run_id).await.state,
+            AiRunState::Leased.as_str()
+        );
+        fixture.clock.advance_seconds(11);
+        assert_eq!(
+            recovering
+                .recover_expired_leases()
+                .await
+                .expect("recovery should succeed")
+                .requeued,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_scan_finds_an_expired_lease_behind_a_full_window_of_live_leases() {
+        let fixture = fixture().await;
+        // The expired run sorts after every live run by primary key.
+        let expired = seed_queued_with_id(&fixture, Uuid::from_u128(u128::MAX)).await;
+        fixture
+            .service
+            .claim_next("worker-expired")
+            .await
+            .expect("claim should succeed")
+            .expect("run should be eligible");
+        fixture.clock.advance_seconds(30);
+        let scan = fixture.service.limits.maximum_candidate_scan();
+        for index in 0..=scan {
+            seed_queued_with_id(&fixture, Uuid::from_u128(index as u128 + 1)).await;
+            fixture
+                .service
+                .claim_next("worker-live")
+                .await
+                .expect("claim should succeed")
+                .expect("run should be eligible");
+        }
+        fixture.clock.advance_seconds(31);
+        let report = fixture
+            .service
+            .recover_expired_leases()
+            .await
+            .expect("recovery should succeed");
+        assert_eq!(report.requeued, 1);
+        assert_eq!(
+            run_record(&fixture, expired).await.state,
+            AiRunState::RetryScheduled.as_str()
+        );
     }
 
     #[tokio::test]
@@ -8488,6 +9721,61 @@ pub(crate) async fn run_provider_dispatch_possible(
         .await
         .map_err(OrmPublicError::from)?;
     Ok(!rows.is_empty())
+}
+
+/// Returns whether committed tool-call rows leave a consequential
+/// (non-read-only) application tool effect possible for this run.
+///
+/// Absence is proof-bearing only for calls that never reached execution: a
+/// call still awaiting native preparation or approval, a control-blocked call,
+/// or a call cancelled while waiting for an approval that was never consumed.
+/// Cancellation records an executing or source-retained call as `cancelled`
+/// without approval consumption evidence, so such a call stays possible, as
+/// does any unknown state or an unbounded call set.
+pub(crate) async fn run_consequential_tool_dispatch_possible(
+    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    run_id: Uuid,
+) -> Result<bool, OrmPublicError> {
+    const MAXIMUM_CALLS: usize = 4_096;
+    let calls = tx
+        .query::<AiToolCallRecord>()
+        .filter(AiToolCallRecordWhereInput {
+            run_id: Some(UuidFilter {
+                eq: Some(run_id),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .internal_limit(MAXIMUM_CALLS as i64 + 1)
+        .fetch_all()
+        .await
+        .map_err(OrmPublicError::from)?;
+    if calls.len() > MAXIMUM_CALLS {
+        return Ok(true);
+    }
+    for call in calls.iter().filter(|call| call.risk != "read_only") {
+        let never_dispatched = match call.state.as_str() {
+            "control_blocked" | "approval_prepared" | "waiting_approval" => true,
+            "cancelled" => match call.approval_id {
+                Some(approval_id) => tx
+                    .find_by_id::<AiApprovalRecord>(&approval_id)
+                    .await
+                    .map_err(OrmPublicError::from)?
+                    .is_some_and(|approval| {
+                        approval.tool_call_id == call.id
+                            && approval.consumed_uses == 0
+                            && approval.consumed_at.is_none()
+                            && approval.state != "consumed"
+                    }),
+                None => false,
+            },
+            _ => false,
+        };
+        if !never_dispatched {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(all(test, feature = "sqlite"))]

@@ -81,7 +81,7 @@ pub(crate) struct AiProviderSessionBindingRecord {
     pub claimed_run_lease_generation: Option<i64>,
     pub claim_owner: Option<String>,
     pub claim_generation: i64,
-    #[filterable(type = "number")]
+    #[filterable(type = "int64")]
     pub claim_expires_at: Option<i64>,
     /// Closed approval/subscription wait kind while the retained cursor is
     /// parked. This is safe lifecycle metadata, never authority.
@@ -104,23 +104,23 @@ pub(crate) struct AiProviderSessionBindingRecord {
     /// Time at which the exact run/wait/checkpoint graph was confirmed.
     pub parked_confirmed_at: Option<i64>,
     /// Bounded expiry inherited from the durable wait after confirmation.
-    #[filterable(type = "number")]
+    #[filterable(type = "int64")]
     pub parked_expires_at: Option<i64>,
     /// One-shot reclaim timestamp retained as audit evidence.
     pub parked_reclaimed_at: Option<i64>,
-    #[filterable(type = "number")]
+    #[filterable(type = "int64")]
     pub provider_expires_at: Option<i64>,
-    #[filterable(type = "number")]
+    #[filterable(type = "int64")]
     pub idle_expires_at: i64,
-    #[filterable(type = "number")]
+    #[filterable(type = "int64")]
     pub absolute_expires_at: i64,
     pub cleanup_owner: Option<String>,
     pub cleanup_generation: i64,
-    #[filterable(type = "number")]
+    #[filterable(type = "int64")]
     pub cleanup_lease_expires_at: Option<i64>,
     /// Cleanup attempts consumed, including expired worker leases. Reset on rebind.
     pub cleanup_retry_count: i64,
-    #[filterable(type = "number")]
+    #[filterable(type = "int64")]
     pub cleanup_next_attempt_at: Option<i64>,
     pub cleanup_reason_code: Option<String>,
     pub provider_absence_observed_at: Option<i64>,
@@ -138,7 +138,7 @@ mod service {
     use async_trait::async_trait;
     use graphql_orm::db::Database;
     use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
-    use graphql_orm::graphql::filters::{IntFilter, StringFilter, UuidFilter};
+    use graphql_orm::graphql::filters::{Int64Filter, StringFilter, UuidFilter};
     use graphql_orm::graphql::orm::{
         ConditionalUpdateOutcome, DefaultWriteBackend, MutationContext, TransactionMode,
     };
@@ -2341,9 +2341,21 @@ mod service {
                 .database
                 .transaction(TransactionMode::StateMachine, move |tx| {
                     Box::pin(async move {
-                        let mut candidates = tx
-                            .query::<AiProviderSessionBindingRecord>()
-                            .filter(AiProviderSessionBindingRecordWhereInput {
+                        // Buckets are scanned in priority order, each bounded
+                        // and filtered by its own readiness predicate in SQL,
+                        // so a window full of unexpired rows in one bucket
+                        // cannot hide a ready row in another.
+                        let now_seconds = now.unix_timestamp();
+                        let due = || Int64Filter {
+                            lte: Some(now_seconds),
+                            ..Default::default()
+                        };
+                        let state_is = |state: AiProviderSessionState| StringFilter {
+                            eq: Some(state.as_str().to_owned()),
+                            ..Default::default()
+                        };
+                        let buckets = [
+                            AiProviderSessionBindingRecordWhereInput {
                                 state: Some(StringFilter {
                                     in_list: Some(vec![
                                         AiProviderSessionState::CleanupRequired.as_str().to_owned(),
@@ -2354,101 +2366,60 @@ mod service {
                                     ]),
                                     ..Default::default()
                                 }),
-                                cleanup_next_attempt_at: Some(IntFilter {
-                                    lte: Some(i32::try_from(now.unix_timestamp()).map_err(
-                                        |_| OrmPublicError::new(OrmErrorCode::InternalError),
-                                    )?),
-                                    ..Default::default()
-                                }),
+                                cleanup_next_attempt_at: Some(due()),
                                 ..Default::default()
-                            })
-                            .default_order()
-                            .internal_limit(limit)
-                            .fetch_all()
-                            .await
-                            .map_err(OrmPublicError::from)?;
-                        let mut expired_claims = tx
-                            .query::<AiProviderSessionBindingRecord>()
-                            .filter(AiProviderSessionBindingRecordWhereInput {
-                                state: Some(StringFilter {
-                                    eq: Some(AiProviderSessionState::Claimed.as_str().to_owned()),
-                                    ..Default::default()
-                                }),
-                                claim_expires_at: Some(IntFilter {
-                                    lte: Some(i32::try_from(now.unix_timestamp()).map_err(
-                                        |_| OrmPublicError::new(OrmErrorCode::InternalError),
-                                    )?),
-                                    ..Default::default()
-                                }),
+                            },
+                            AiProviderSessionBindingRecordWhereInput {
+                                state: Some(state_is(AiProviderSessionState::Claimed)),
+                                claim_expires_at: Some(due()),
                                 ..Default::default()
-                            })
-                            .default_order()
-                            .internal_limit(limit)
-                            .fetch_all()
-                            .await
-                            .map_err(OrmPublicError::from)?;
-                        candidates.append(&mut expired_claims);
-                        let mut parked_candidates = tx
-                            .query::<AiProviderSessionBindingRecord>()
-                            .filter(AiProviderSessionBindingRecordWhereInput {
-                                state: Some(StringFilter {
-                                    eq: Some(
-                                        AiProviderSessionState::ParkedWait.as_str().to_owned(),
-                                    ),
-                                    ..Default::default()
-                                }),
+                            },
+                            AiProviderSessionBindingRecordWhereInput {
+                                state: Some(state_is(AiProviderSessionState::CleanupInProgress)),
+                                cleanup_lease_expires_at: Some(due()),
                                 ..Default::default()
-                            })
-                            .default_order()
-                            .internal_limit(limit)
-                            .fetch_all()
-                            .await
-                            .map_err(OrmPublicError::from)?;
-                        candidates.append(&mut parked_candidates);
-                        let mut active_candidates = tx
-                            .query::<AiProviderSessionBindingRecord>()
-                            .filter(AiProviderSessionBindingRecordWhereInput {
-                                state: Some(StringFilter {
-                                    eq: Some(AiProviderSessionState::Active.as_str().to_owned()),
-                                    ..Default::default()
-                                }),
+                            },
+                            AiProviderSessionBindingRecordWhereInput {
+                                state: Some(state_is(AiProviderSessionState::Active)),
+                                idle_expires_at: Some(due()),
                                 ..Default::default()
-                            })
-                            .default_order()
-                            .internal_limit(limit)
-                            .fetch_all()
-                            .await
-                            .map_err(OrmPublicError::from)?;
-                        candidates.append(&mut active_candidates);
-                        let mut expired_cleanup_claims = tx
-                            .query::<AiProviderSessionBindingRecord>()
-                            .filter(AiProviderSessionBindingRecordWhereInput {
-                                state: Some(StringFilter {
-                                    eq: Some(
-                                        AiProviderSessionState::CleanupInProgress
-                                            .as_str()
-                                            .to_owned(),
-                                    ),
-                                    ..Default::default()
-                                }),
-                                cleanup_lease_expires_at: Some(IntFilter {
-                                    lte: Some(i32::try_from(now.unix_timestamp()).map_err(
-                                        |_| OrmPublicError::new(OrmErrorCode::InternalError),
-                                    )?),
-                                    ..Default::default()
-                                }),
+                            },
+                            AiProviderSessionBindingRecordWhereInput {
+                                state: Some(state_is(AiProviderSessionState::Active)),
+                                absolute_expires_at: Some(due()),
                                 ..Default::default()
-                            })
-                            .default_order()
-                            .internal_limit(limit)
-                            .fetch_all()
-                            .await
-                            .map_err(OrmPublicError::from)?;
-                        candidates.append(&mut expired_cleanup_claims);
-                        candidates.sort_by_key(|record| (record.updated_at, record.id));
-                        candidates.truncate(limit as usize);
+                            },
+                            AiProviderSessionBindingRecordWhereInput {
+                                state: Some(state_is(AiProviderSessionState::Active)),
+                                provider_expires_at: Some(due()),
+                                ..Default::default()
+                            },
+                            // A parked wait is also ready when its run closed,
+                            // which only a per-row read can prove.
+                            AiProviderSessionBindingRecordWhereInput {
+                                state: Some(state_is(AiProviderSessionState::ParkedWait)),
+                                ..Default::default()
+                            },
+                        ];
+                        let mut candidates = Vec::new();
+                        let mut seen = std::collections::BTreeSet::new();
+                        for bucket in buckets {
+                            let rows = tx
+                                .query::<AiProviderSessionBindingRecord>()
+                                .filter(bucket)
+                                .default_order()
+                                .internal_limit(limit)
+                                .fetch_all()
+                                .await
+                                .map_err(OrmPublicError::from)?;
+                            candidates.extend(rows.into_iter().filter(|row| seen.insert(row.id)));
+                        }
                         for candidate in candidates {
-                            validate_binding_record(&candidate)?;
+                            // A malformed row is left for operators; it must not
+                            // stop cleanup of every other binding.
+                            if validate_binding_record(&candidate).is_err() {
+                                continue;
+                            }
                             let state = AiProviderSessionState::from_persisted(&candidate.state)
                                 .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
                             if state == AiProviderSessionState::ParkedWait
@@ -2494,6 +2465,12 @@ mod service {
                                             && candidate
                                                 .parked_expires_at
                                                 .is_some_and(|value| value <= now.unix_timestamp())
+                                        // A park never outlives the binding's
+                                        // own absolute or provider expiry.
+                                        || candidate.absolute_expires_at <= now.unix_timestamp()
+                                        || candidate
+                                            .provider_expires_at
+                                            .is_some_and(|value| value <= now.unix_timestamp())
                                 }
                                 AiProviderSessionState::Active => {
                                     candidate.idle_expires_at <= now.unix_timestamp()
@@ -2562,6 +2539,13 @@ mod service {
                                             AiProviderSessionState::CleanupInProgress
                                                 .as_str()
                                                 .to_owned(),
+                                        ),
+                                        // An expired claim or park belonged to
+                                        // that run; keep it as the last run so
+                                        // the same run is never offered a fresh
+                                        // rebind after deletion.
+                                        last_run_id: Some(
+                                            candidate.claimed_run_id.or(candidate.last_run_id),
                                         ),
                                         claimed_run_id: Some(None),
                                         claimed_attempt_id: Some(None),
@@ -3430,6 +3414,10 @@ mod service {
             || record
                 .parked_expires_at
                 .is_none_or(|expiry| expiry <= now.unix_timestamp())
+            || record.absolute_expires_at <= now.unix_timestamp()
+            || record
+                .provider_expires_at
+                .is_some_and(|expiry| expiry <= now.unix_timestamp())
             || record.parked_reclaimed_at.is_some()
         {
             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
@@ -5133,6 +5121,169 @@ mod service {
                 .open_for_run(&fresh_lease, &claim)
                 .await
                 .expect("repaired retained cursor should open");
+        }
+
+        async fn update_binding(
+            database: &Database<SqliteBackend>,
+            id: Uuid,
+            update: UpdateAiProviderSessionBindingRecordInput,
+        ) {
+            database
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        tx.update_by_id::<AiProviderSessionBindingRecord>(&id, update)
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        Ok(())
+                    })
+                })
+                .await
+                .expect("test binding update should commit");
+        }
+
+        #[tokio::test]
+        async fn expired_claim_takeover_keeps_the_claimed_run_as_last_run() {
+            let fixture = parked_wait_fixture().await;
+            fixture.clock.advance_seconds(6 * 60);
+            let cleanup = fixture
+                .service
+                .claim_cleanup("expired-claim-cleaner")
+                .await
+                .expect("expired claim should scan")
+                .expect("expired claim should be taken over for cleanup");
+            assert_eq!(cleanup.binding_id(), fixture.binding_id);
+            let binding =
+                AiProviderSessionBindingRecord::find_by_id(&fixture.database, &fixture.binding_id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert!(binding.claimed_run_id.is_none());
+            assert_eq!(binding.last_run_id, Some(fixture.lease.run_id().0));
+        }
+
+        #[tokio::test]
+        async fn parked_wait_never_outlives_the_binding_absolute_expiry() {
+            let fixture = parked_wait_fixture().await;
+            fixture
+                .service
+                .park_for_wait(&fixture.lease, fixture.request.clone())
+                .await
+                .expect("exact provider session should park");
+            let past = fixture.clock.now().unix_timestamp() - 1;
+            update_binding(
+                &fixture.database,
+                fixture.binding_id,
+                UpdateAiProviderSessionBindingRecordInput {
+                    idle_expires_at: Some(past),
+                    absolute_expires_at: Some(past),
+                    ..Default::default()
+                },
+            )
+            .await;
+            let cleanup = fixture
+                .service
+                .claim_cleanup("absolute-expiry-cleaner")
+                .await
+                .expect("parked binding should scan")
+                .expect("a park past the binding's absolute expiry requires cleanup");
+            assert_eq!(cleanup.binding_id(), fixture.binding_id);
+        }
+
+        #[tokio::test]
+        async fn unexpired_bindings_cannot_hide_a_ready_cleanup_row() {
+            let fixture = parked_wait_fixture().await;
+            let template =
+                AiProviderSessionBindingRecord::find_by_id(&fixture.database, &fixture.binding_id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            AiProviderSessionBindingRecord::delete_by_id(&fixture.database, &fixture.binding_id)
+                .await
+                .unwrap();
+            let insert = |id: Uuid, state: AiProviderSessionState| {
+                let template = template.clone();
+                let database = fixture.database.clone();
+                async move {
+                    let cleanup = state == AiProviderSessionState::CleanupRequired;
+                    AiProviderSessionBindingRecord::insert(
+                        &database,
+                        CreateAiProviderSessionBindingRecordInput {
+                            id,
+                            session_id: Uuid::new_v4(),
+                            owner_principal_kind: template.owner_principal_kind,
+                            owner_subject: template.owner_subject,
+                            principal_reference: template.principal_reference,
+                            scope_key: template.scope_key,
+                            scope_kind: template.scope_kind,
+                            scope_id: template.scope_id,
+                            tenant_id: template.tenant_id,
+                            provider_kind: template.provider_kind,
+                            provider_profile_id: template.provider_profile_id,
+                            provider_model: template.provider_model,
+                            registration_fingerprint: template.registration_fingerprint,
+                            protocol_version: template.protocol_version,
+                            policy_fingerprint: template.policy_fingerprint,
+                            cursor_kind: template.cursor_kind,
+                            cursor_fingerprint: template.cursor_fingerprint,
+                            installed_offering_fingerprint: None,
+                            protected_cursor: template.protected_cursor,
+                            through_message_sequence: 0,
+                            transcript_fingerprint: template.transcript_fingerprint,
+                            last_run_id: None,
+                            last_assistant_message_id: None,
+                            state: state.as_str().to_owned(),
+                            claimed_run_id: None,
+                            claimed_attempt_id: None,
+                            claimed_run_lease_generation: None,
+                            claim_owner: None,
+                            claim_generation: 1,
+                            claim_expires_at: None,
+                            parked_wait_kind: None,
+                            parked_wait_id: None,
+                            park_generation: 0,
+                            parked_source_checkpoint_id: None,
+                            parked_source_checkpoint_fingerprint: None,
+                            parked_checkpoint_id: None,
+                            parked_checkpoint_fingerprint: None,
+                            parked_continuation_fingerprint: None,
+                            parked_confirmed_at: None,
+                            parked_expires_at: None,
+                            parked_reclaimed_at: None,
+                            provider_expires_at: None,
+                            idle_expires_at: template.idle_expires_at,
+                            absolute_expires_at: template.absolute_expires_at,
+                            cleanup_owner: None,
+                            cleanup_generation: 0,
+                            cleanup_lease_expires_at: None,
+                            cleanup_retry_count: 0,
+                            cleanup_next_attempt_at: cleanup.then_some(0),
+                            cleanup_reason_code: cleanup
+                                .then(|| "provider_session_expired".to_owned()),
+                            provider_absence_observed_at: None,
+                        },
+                    )
+                    .await
+                    .expect("binding should insert");
+                }
+            };
+            // A full window of idle, unexpired bindings sorts ahead of the
+            // ready row by update time and primary key.
+            for index in 0..AiProviderSessionLimits::default().maximum_candidate_scan() {
+                insert(
+                    Uuid::from_u128(index as u128 + 1),
+                    AiProviderSessionState::Active,
+                )
+                .await;
+            }
+            let ready = Uuid::from_u128(u128::MAX);
+            insert(ready, AiProviderSessionState::CleanupRequired).await;
+            let cleanup = fixture
+                .service
+                .claim_cleanup("starvation-cleaner")
+                .await
+                .expect("cleanup scan should succeed")
+                .expect("the ready cleanup row must be claimed");
+            assert_eq!(cleanup.binding_id(), ready);
         }
 
         #[tokio::test]

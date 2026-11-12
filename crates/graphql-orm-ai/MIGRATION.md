@@ -10,6 +10,40 @@ supersedes: []
 
 # Migration Guide
 
+## 0.135.0 to 0.136.0
+
+### Run and session lifecycle fixes
+
+No data migration is needed, and the persistent schema is unchanged.
+
+- `AiRunRecoveryReport` has three new public fields: `quarantined`,
+  `skipped` and `budget_reservations_settled`. `AiSessionRetentionReport` has
+  `sessions_failed`. Code that builds these structs with a literal must set
+  them (`0` or `..Default::default()`). Monitor `quarantined` and
+  `sessions_failed`: they count rows that need operator attention, which used
+  to fail the whole pass.
+- `AiRunRetryEvidence` has a new public field,
+  `consequential_tool_dispatch_possible`. Code that builds it must set it;
+  `false` keeps the previous classification. `classify_run_retry` now refuses
+  a `Cancelled` run when it is `true`.
+- `AiRunServiceLimits::with_lease_recovery_grace` is new and optional. Set it
+  to your maximum expected clock skew between workers and the process that
+  runs `recover_expired_leases`; it must not exceed the lease TTL.
+- Behaviour changes hosts can observe: a malformed expired or queued run is
+  closed as `RecoveryRequired` (`lease_recovery_state_invalid` or
+  `claim_state_invalid`) instead of failing the pass or claim; an approval is
+  expired when its run is closed for recovery, and approving one whose run is
+  no longer waiting returns `Conflict`; lease recovery commits the reserved
+  estimate of an expired `reserved` or `uncertain` reservation whose attempt
+  is closed; retention moves an idle retained provider thread to cleanup when
+  it purges content the thread holds.
+- The internal provider-session binding entity's timestamp filters
+  (`claimExpiresAt`, `parkedExpiresAt`, `providerExpiresAt`, `idleExpiresAt`,
+  `absoluteExpiresAt`, `cleanupLeaseExpiresAt`, `cleanupNextAttemptAt`) now
+  use `Int64Filter`, and the internal run entity gains `leaseExpiresAt` and
+  `nextAttemptAt` filters. These entities are not part of the AI GraphQL
+  surface.
+
 ## 0.134.0 to 0.135.0
 
 No GraphQL SDL, persistent schema or data migration change, and

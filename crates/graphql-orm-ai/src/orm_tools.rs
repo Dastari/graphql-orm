@@ -1126,11 +1126,11 @@ impl OrmAiApplicationToolCallService {
                 PreparedToolCallStart {
                     execution_provenance: None,
                     native_preflight_refusal: native_preflight.then(|| {
-                        native_preflight::receipt(
+                        std::sync::Arc::new(native_preflight::receipt(
                             code,
                             provider_call.tool_fingerprint(),
                             &argument_hash,
-                        )
+                        ))
                     }),
                     id: id.0,
                     provider_call_key: provider_call_key.clone(),
@@ -2286,7 +2286,8 @@ impl OrmAiApplicationToolCallService {
         let provenance = provenance
             .map(|origin| origin.with_effect_execution(lease))
             .transpose()?;
-        let execution =
+        let (execution, renewed_lease) = Box::pin(self.run_service.run_with_lease_heartbeat(
+            lease,
             tokio::time::timeout(self.limits.maximum_execution_time.unsigned_abs(), async {
                 if generated_query {
                     self.runtime
@@ -2312,9 +2313,11 @@ impl OrmAiApplicationToolCallService {
                         )
                         .await
                 }
-            })
-            .await
-            .unwrap_or(Err(AiError::ToolExecutionFailed));
+            }),
+        ))
+        .await;
+        let execution = execution.unwrap_or(Err(AiError::ToolExecutionFailed));
+        let lease = &renewed_lease;
         let (
             state,
             model_output,
@@ -3798,6 +3801,23 @@ impl OrmAiConsequentialToolCallService {
             .consume_approval(lease, approval_id, &binding, &preview)
             .await?;
         let (approval, running_lease) = consumed.into_parts();
+        // Cancellation can win between consumption and dispatch. Re-check it
+        // so a cancelled run never starts the resolver it was approved for.
+        if !matches!(
+            self.application_tools
+                .run_service
+                .cancellation(&running_lease)
+                .await,
+            Ok(None)
+        ) {
+            return self
+                .mark_consequential_recovery(
+                    &running_lease,
+                    tool_call_id,
+                    call.provider_response_id,
+                )
+                .await;
+        }
         let provenance = provenance
             .map(|origin| origin.with_effect_execution(&running_lease))
             .transpose()?;
@@ -3809,41 +3829,49 @@ impl OrmAiConsequentialToolCallService {
                     .map_err(|_| AiError::Conflict)
             })
             .transpose()?;
-        let execution = if let Some(prepared) = prepared {
-            tokio::time::timeout(
-                self.application_tools
-                    .limits
-                    .maximum_execution_time
-                    .unsigned_abs(),
-                self.application_tools
-                    .runtime
-                    .execute_approved_prepared_mutation(
-                        running_lease.principal_reference(),
-                        prepared,
-                        &approval,
-                        &binding,
-                    ),
-            )
-            .await
-        } else {
-            tokio::time::timeout(
-                self.application_tools
-                    .limits
-                    .maximum_execution_time
-                    .unsigned_abs(),
-                self.application_tools
-                    .runtime
-                    .execute_approved_tool_with_provenance(
-                        running_lease.principal_reference(),
-                        &descriptor.id,
-                        request,
-                        &approval,
-                        &binding,
-                        provenance.clone(),
-                    ),
-            )
-            .await
+        let approved_execution = async {
+            if let Some(prepared) = prepared {
+                tokio::time::timeout(
+                    self.application_tools
+                        .limits
+                        .maximum_execution_time
+                        .unsigned_abs(),
+                    self.application_tools
+                        .runtime
+                        .execute_approved_prepared_mutation(
+                            running_lease.principal_reference(),
+                            prepared,
+                            &approval,
+                            &binding,
+                        ),
+                )
+                .await
+            } else {
+                tokio::time::timeout(
+                    self.application_tools
+                        .limits
+                        .maximum_execution_time
+                        .unsigned_abs(),
+                    self.application_tools
+                        .runtime
+                        .execute_approved_tool_with_provenance(
+                            running_lease.principal_reference(),
+                            &descriptor.id,
+                            request,
+                            &approval,
+                            &binding,
+                            provenance.clone(),
+                        ),
+                )
+                .await
+            }
         };
+        let (execution, running_lease) = Box::pin(
+            self.application_tools
+                .run_service
+                .run_with_lease_heartbeat(&running_lease, Box::pin(approved_execution)),
+        )
+        .await;
         let (
             model_output,
             classification,

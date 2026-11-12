@@ -82,7 +82,12 @@ alert on repeated `sessions_not_ready`, `sessions_conflicted`,
 `proposal_payload_purges_blocked`, `tool_payload_purges_blocked`,
 `raw_payload_purges_blocked`, `raw_checkpoint_purges_blocked`,
 `run_checkpoint_purges_blocked`, `provider_session_cleanups_blocked`, or
-nonzero `deleting_session_provider_cleanups_requested`. Also alert on parent or artifact cleanup
+nonzero `deleting_session_provider_cleanups_requested` or `sessions_failed`.
+A session whose pruning fails is counted in `sessions_failed` and retried by a
+later pass; it never stops the rest of the page. Purging message content that
+a retained provider thread still holds (at or below its watermark) moves an
+idle binding to exact-reference cleanup in the same transaction, and waits
+while the binding is claimed or parked. Also alert on parent or artifact cleanup
 failures/deferred claims and never treat a partial scan cycle as complete.
 
 ## Policy and deletion rules

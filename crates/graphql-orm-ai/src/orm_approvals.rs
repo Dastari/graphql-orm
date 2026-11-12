@@ -3,6 +3,7 @@
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
 use crate::orm_read_bounds::InternalReadBound as _;
+use crate::orm_runs::retry_transaction;
 use std::sync::Arc;
 
 use agql_auth::{
@@ -1351,88 +1352,115 @@ impl OrmAiApprovalService {
         } else {
             "approval_decided"
         };
-        let updated = self
-            .database
-            .transaction(TransactionMode::StateMachine, move |tx| {
-                Box::pin(async move {
-                    let current = tx
-                        .find_by_id::<AiApprovalRecord>(&id)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    if current.row_version != expected_version
-                        || !expected_states.contains(&current.state.as_str())
-                        || current.expires_at <= now.unix_timestamp()
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let session = tx
-                        .find_by_id::<AiSessionRecord>(&current.session_id)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    let event_sequence = session
-                        .stream_head
-                        .checked_add(1)
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                    let session_update = tx
-                        .compare_and_swap::<AiSessionRecord>(
-                            &session.id,
-                            session.row_version,
-                            AiSessionRecordWhereInput::default(),
-                            UpdateAiSessionRecordInput {
-                                stream_head: Some(event_sequence),
-                                last_activity_at: Some(now.unix_timestamp()),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    if !matches!(session_update, ConditionalUpdateOutcome::Updated(_)) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let approval_update = tx
-                        .compare_and_swap::<AiApprovalRecord>(
-                            &current.id,
-                            current.row_version,
-                            AiApprovalRecordWhereInput::default(),
-                            UpdateAiApprovalRecordInput {
-                                state: Some(next_state.to_owned()),
-                                approver_subject: record_decision
-                                    .then_some(Some(actor_subject.clone())),
-                                decided_at: record_decision.then_some(Some(now.unix_timestamp())),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    let updated = match approval_update {
-                        ConditionalUpdateOutcome::Updated(updated) => updated,
-                        ConditionalUpdateOutcome::NotFound | ConditionalUpdateOutcome::Conflict => {
+        let updated = retry_transaction(crate::orm_runs::DEFAULT_TRANSACTION_RETRIES, || {
+            let actor_subject = actor_subject.clone();
+            let protected_event = protected_event.clone();
+            self.database
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        let current = tx
+                            .find_by_id::<AiApprovalRecord>(&id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if current.row_version != expected_version
+                            || !expected_states.contains(&current.state.as_str())
+                            || current.expires_at <= now.unix_timestamp()
+                        {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }
-                    };
-                    tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
-                        id: event_id,
-                        session_id: session.id,
-                        sequence: event_sequence,
-                        event_type: event_type.to_owned(),
-                        run_id: None,
-                        causation_id: Some(id.to_string()),
-                        correlation_id: id.to_string(),
-                        protected_payload: protected_event,
+                        if next_state == "approved" {
+                            // An approval is decided for one waiting run. Once the
+                            // run has left its wait it can never be resumed, so an
+                            // approval decision would only strand the approved
+                            // claim scan.
+                            let call = tx
+                                .find_by_id::<AiToolCallRecord>(&current.tool_call_id)
+                                .await
+                                .map_err(OrmPublicError::from)?
+                                .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                            let run = tx
+                                .find_by_id::<AiRunRecord>(&call.run_id)
+                                .await
+                                .map_err(OrmPublicError::from)?
+                                .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                            if call.approval_id != Some(current.id)
+                                || run.session_id != current.session_id
+                                || run.state != crate::AiRunState::WaitingApproval.as_str()
+                            {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                        }
+                        let session = tx
+                            .find_by_id::<AiSessionRecord>(&current.session_id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        let event_sequence = session
+                            .stream_head
+                            .checked_add(1)
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        let session_update = tx
+                            .compare_and_swap::<AiSessionRecord>(
+                                &session.id,
+                                session.row_version,
+                                AiSessionRecordWhereInput::default(),
+                                UpdateAiSessionRecordInput {
+                                    stream_head: Some(event_sequence),
+                                    last_activity_at: Some(now.unix_timestamp()),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if !matches!(session_update, ConditionalUpdateOutcome::Updated(_)) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let approval_update = tx
+                            .compare_and_swap::<AiApprovalRecord>(
+                                &current.id,
+                                current.row_version,
+                                AiApprovalRecordWhereInput::default(),
+                                UpdateAiApprovalRecordInput {
+                                    state: Some(next_state.to_owned()),
+                                    approver_subject: record_decision
+                                        .then_some(Some(actor_subject.clone())),
+                                    decided_at: record_decision
+                                        .then_some(Some(now.unix_timestamp())),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        let updated = match approval_update {
+                            ConditionalUpdateOutcome::Updated(updated) => updated,
+                            ConditionalUpdateOutcome::NotFound
+                            | ConditionalUpdateOutcome::Conflict => {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                        };
+                        tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
+                            id: event_id,
+                            session_id: session.id,
+                            sequence: event_sequence,
+                            event_type: event_type.to_owned(),
+                            run_id: None,
+                            causation_id: Some(id.to_string()),
+                            correlation_id: id.to_string(),
+                            protected_payload: protected_event,
+                        })
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                        tx.queue_event(AiSessionWakeup {
+                            session_id: session.id,
+                            sequence: event_sequence,
+                        });
+                        Ok(updated)
                     })
-                    .await
-                    .map_err(OrmPublicError::from)?;
-                    tx.queue_event(AiSessionWakeup {
-                        session_id: session.id,
-                        sequence: event_sequence,
-                    });
-                    Ok(updated)
                 })
-            })
-            .await
-            .map_err(map_transaction)?;
+        })
+        .await
+        .map_err(map_transaction)?;
         self.view(&principal, &updated).await
     }
 }
@@ -3692,17 +3720,105 @@ mod tests {
             run.error_code.as_deref(),
             Some("approval_wait_linkage_invalid")
         );
+        // The run left its wait for good, so its approval closes with it and
+        // can no longer be approved into a stranded handoff.
         let approval = AiApprovalRecord::find_by_id(&fixture.database, &requested.approval_id().0)
             .await
-            .expect("untouched approval lookup should succeed")
-            .expect("untouched approval should remain durable");
-        assert_eq!(approval.state, "pending");
+            .expect("closed approval lookup should succeed")
+            .expect("closed approval should remain durable");
+        assert_eq!(approval.state, "expired");
+        assert_eq!(approval.consumed_uses, 0);
         let call = AiToolCallRecord::find_by_id(&fixture.database, &tool_call_id.0)
             .await
             .expect("untouched call lookup should succeed")
             .expect("untouched call should remain durable");
         assert_eq!(call.state, "waiting_approval");
         assert!(call.completed_at.is_none());
+    }
+
+    async fn force_run_state(fixture: &Fixture, run_id: Uuid, state: &'static str) {
+        fixture
+            .database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    tx.update_by_id::<AiRunRecord>(
+                        &run_id,
+                        UpdateAiRunRecordInput {
+                            state: Some(state.to_owned()),
+                            error_code: Some(Some("approval_wait_linkage_invalid".to_owned())),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                    Ok(())
+                })
+            })
+            .await
+            .expect("test run state should commit");
+    }
+
+    #[tokio::test]
+    async fn an_approval_whose_run_left_its_wait_can_neither_be_approved_nor_strand_claims() {
+        let fixture = fixture().await;
+        // A row written before the reconciler closed approvals with their run.
+        let (requested, _) = request_wait(&fixture, fixture.now + Duration::minutes(30)).await;
+        let run_id = requested.lease().run_id().0;
+        force_run_state(&fixture, run_id, "recovery_required").await;
+        let view = fixture
+            .approval_service
+            .approval(&fixture.principal, requested.approval_id())
+            .await
+            .expect("approval read should succeed")
+            .expect("approval should remain visible");
+        assert!(matches!(
+            fixture
+                .approval_service
+                .decide_approval(
+                    &fixture.principal,
+                    DecideAiApprovalInput {
+                        id: view.id,
+                        decision: AiApprovalDecision::Approve,
+                        expected_version: view.row_version,
+                    },
+                )
+                .await,
+            Err(AiError::Conflict)
+        ));
+
+        // An approval already approved before its run closed must not fail
+        // every later approved claim.
+        let (stranded, _) = request_wait(&fixture, fixture.now + Duration::minutes(30)).await;
+        let view = fixture
+            .approval_service
+            .approval(&fixture.principal, stranded.approval_id())
+            .await
+            .expect("approval read should succeed")
+            .expect("approval should remain visible");
+        fixture
+            .approval_service
+            .decide_approval(
+                &fixture.principal,
+                DecideAiApprovalInput {
+                    id: view.id,
+                    decision: AiApprovalDecision::Approve,
+                    expected_version: view.row_version,
+                },
+            )
+            .await
+            .expect("a waiting run's approval should be approved");
+        force_run_state(&fixture, stranded.lease().run_id().0, "recovery_required").await;
+        let claimed = fixture
+            .run_service
+            .claim_next_approved("approved-claim-worker")
+            .await
+            .expect("a closed run's approval must not fail the approved claim scan");
+        assert!(claimed.is_none());
+        let approval = AiApprovalRecord::find_by_id(&fixture.database, &stranded.approval_id().0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(approval.state, "expired");
     }
 
     #[tokio::test]
