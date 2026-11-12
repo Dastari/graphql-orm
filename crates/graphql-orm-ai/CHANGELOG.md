@@ -22,7 +22,7 @@ supersedes: []
 - **Fixed (serialization retries):** run transitions (finish, retry scheduling, provider output, checkpoints, live, activity and UI events, tool start and finish, proposals, approval request and consumption), cancellation, disposition, approval decisions, inbox pruning and subscription-wait transitions now retry a transaction the database reports as retryable (SQLite busy, PostgreSQL serialization failure) up to the service's transaction retry limit, instead of failing with `PersistenceFailed`. A committed tool effect no longer ends in `RecoveryRequired` because of a routine conflict on a hot row. Fixes #535.
 - **Fixed (approvals and leases):** when the approval-wait reconciler closes a run as `RecoveryRequired`, its open approval is expired in the same transaction, and approving an approval whose run has left `WaitingApproval` returns `Conflict`. The run lease is renewed while an application tool executes, so a tool limit longer than the lease TTL no longer lets recovery close a live attempt. `AiRunServiceLimits::with_lease_recovery_grace` adds an optional clock-skew grace before recovery treats a lease as expired; it defaults to zero. Fixes #536.
 
-No persistent schema or data migration change; `AI_SCHEMA_MODULE_VERSION` is unchanged. See the migration guide.
+`AI_SCHEMA_MODULE_VERSION` is `0.78.0`. The run entity gains lease-expiry and next-attempt filters and the provider-session binding's timestamp filters become 64-bit; no table, column, index or data changes, and no data migration is needed. See the migration guide.
 
 ## Unreleased - 0.135.0
 

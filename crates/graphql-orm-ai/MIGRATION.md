@@ -14,7 +14,9 @@ supersedes: []
 
 ### Run and session lifecycle fixes
 
-No data migration is needed, and the persistent schema is unchanged.
+Apply `AiSchemaModule` version `0.78.0` with the normal module migration. It
+changes only generated filter metadata (see the last item below); it adds no
+table, column or index, and no data migration is needed.
 
 - `AiRunRecoveryReport` has three new public fields: `quarantined`,
   `skipped` and `budget_reservations_settled`. `AiSessionRetentionReport` has
