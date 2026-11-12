@@ -110,6 +110,11 @@ pub enum GeneratedGraphqlOperationCategory {
     DeleteMany,
     /// Subscribe to generated entity change events.
     Subscription,
+    /// A hidden placeholder that keeps a generated root object non-empty when
+    /// the entity serves no generated writes. It is not an operation: the
+    /// resolver refuses every request, and its authorization requirement is
+    /// one no caller can satisfy.
+    Unavailable,
 }
 
 impl GeneratedGraphqlOperationCategory {
@@ -128,6 +133,43 @@ impl GeneratedGraphqlOperationCategory {
             Self::Delete => "delete",
             Self::DeleteMany => "delete_many",
             Self::Subscription => "subscription",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+/// Generated query shape of a root field, matching the `query_shapes` selectors.
+///
+/// Structural metadata for adapters that must tell shapes apart where they
+/// share a category, such as Keyset and bounded Scan roots. It does not
+/// participate in any fingerprint.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[non_exhaustive]
+pub enum GeneratedGraphqlQueryShape {
+    /// Single entity lookup (`single`).
+    Single,
+    /// Offset-paginated connection (`list`).
+    List,
+    /// Keyset-paginated connection (`keyset`).
+    Keyset,
+    /// Bounded authorized scan (`scan`).
+    Scan,
+    /// Full-text search connection (`search`).
+    Search,
+    /// Bounded aggregate query (`aggregate`).
+    Aggregate,
+}
+
+impl GeneratedGraphqlQueryShape {
+    /// Returns the `query_shapes` selector for this shape.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Single => "single",
+            Self::List => "list",
+            Self::Keyset => "keyset",
+            Self::Scan => "scan",
+            Self::Search => "search",
+            Self::Aggregate => "aggregate",
         }
     }
 }
@@ -149,6 +191,7 @@ fn default_operation_description(
         GeneratedGraphqlOperationCategory::Delete => "Delete one",
         GeneratedGraphqlOperationCategory::DeleteMany => "Delete matching",
         GeneratedGraphqlOperationCategory::Subscription => "Observe changes to",
+        GeneratedGraphqlOperationCategory::Unavailable => "No generated operation for",
     };
     format!("{action} {entity_name} records")
 }
@@ -276,7 +319,27 @@ impl Default for GraphqlAuthorizationRequirement {
     }
 }
 
+/// The one scope of [`GraphqlAuthorizationRequirement::unsatisfiable`].
+///
+/// It contains a space. Bearer scope sets are space-delimited, and routers
+/// refuse a granted scope containing whitespace, so no caller can hold it.
+/// Only a scope matcher that grants every requirement to some token, such as
+/// an opted-in bare wildcard, could match it, and the generated resolvers that
+/// carry this requirement refuse every request themselves.
+pub const GRAPHQL_UNSATISFIABLE_SCOPE: &str = "graphql-orm unavailable";
+
 impl GraphqlAuthorizationRequirement {
+    /// Returns a requirement that no caller can satisfy.
+    ///
+    /// Generated placeholder roots, which exist only to keep a root object
+    /// non-empty, carry it so a router that binds every root field refuses
+    /// them before they reach the subgraph.
+    pub fn unsatisfiable() -> Self {
+        Self::AllScopes {
+            scopes: vec![GRAPHQL_UNSATISFIABLE_SCOPE.to_owned()],
+        }
+    }
+
     fn canonicalized(&self) -> Self {
         match self {
             Self::AllScopes { scopes } => {
@@ -408,6 +471,7 @@ pub struct GeneratedGraphqlOperationDescriptor {
     backend: &'static str,
     kind: GraphqlOperationKind,
     category: GeneratedGraphqlOperationCategory,
+    query_shape: Option<GeneratedGraphqlQueryShape>,
     field_name: &'static str,
     description: String,
     arguments: Box<[GraphqlOperationArgumentDescriptor]>,
@@ -609,6 +673,7 @@ impl GeneratedGraphqlOperationDescriptor {
             backend,
             kind,
             category,
+            query_shape: None,
             field_name,
             description: description.into(),
             arguments: arguments.into_boxed_slice(),
@@ -629,6 +694,25 @@ impl GeneratedGraphqlOperationDescriptor {
         descriptor.authorization_fingerprint = descriptor.compute_authorization_fingerprint();
         descriptor.router_export_fingerprint = descriptor.compute_router_export_fingerprint();
         descriptor
+    }
+
+    /// Records the generated query shape of a query root.
+    ///
+    /// This builder is public only for derive output. It has no effect on
+    /// mutations or subscriptions, and changes no fingerprint.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_query_shape(mut self, shape: GeneratedGraphqlQueryShape) -> Self {
+        if self.kind == GraphqlOperationKind::Query {
+            self.query_shape = Some(shape);
+        }
+        self
+    }
+
+    /// Returns the generated query shape, or `None` for mutations,
+    /// subscriptions and descriptors that do not record one.
+    pub const fn query_shape(&self) -> Option<GeneratedGraphqlQueryShape> {
+        self.query_shape
     }
 
     /// Returns the fully qualified Rust entity type emitted with `module_path!`.
@@ -885,6 +969,11 @@ impl GraphqlResolverOperationDescriptor {
     /// Returns the stable generated resolver category.
     pub const fn category(&self) -> GeneratedGraphqlOperationCategory {
         self.generated.category()
+    }
+
+    /// Returns the generated query shape, when the derive recorded one.
+    pub const fn query_shape(&self) -> Option<GeneratedGraphqlQueryShape> {
+        self.generated.query_shape()
     }
 
     /// Returns the conventional root type name.

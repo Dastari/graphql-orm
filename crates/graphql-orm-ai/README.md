@@ -10,6 +10,8 @@ supersedes: []
 
 # graphql-orm-ai
 
+Version `0.133.0` selects published Auth `v0.26.0` and ORM 0.126.0, and applies capability-discovery policy before the result ceiling, so restricted principals receive their highest-ranked permitted candidates. Hosts that pass Auth types must select the same tag. AI schema is unchanged; no data migration is needed. See the [migration guide](MIGRATION.md#01320-to-01330).
+
 Version `0.128.0` enforces AI runtime closure after a snapshot restore. The runtime start gate opens only with a proof minted from a store's live recovery epoch, and leases are bound to that epoch. A restored store stays closed until an operator runs `OrmAiRuntimeRecoveryService::reconcile_restore`, which expires restored approvals and moves unfinished runs to `RecoveryRequired`, reviews the result, and acknowledges it. After upgrading an existing deployment in place, call `acknowledge_in_place_upgrade` once; a store restored from a backup uses reconcile and acknowledge instead. Apply AI schema module `0.77.0`; see the [migration guide](MIGRATION.md#01270-to-01280-enforced-runtime-closure-after-restore).
 
 Version `0.127.0` aligns private helper and test feature gates and adds PostgreSQL/MSSQL all-target compile and warnings-denied Clippy CI checks. Default SQLite test coverage and runtime behavior are unchanged; no data migration is needed.
@@ -50,11 +52,11 @@ producer metadata and finished SDL; see [MIGRATION.md](MIGRATION.md). No AI
 schema-module, persistence, provider or authorization behavior changes. The
 spatial/JSON scalar-codec gate remains outstanding.
 
-The current workspace selects published Auth `v0.24.0`, peeled to
-`1f4b4bfb6d052d04e6c80b80cb7aa3d0c2ebaacd`. Direct Auth consumers must select
+The current workspace selects published Auth `v0.26.0`, peeled to
+`7d016f6a6bc3e697382e2e05865f596862189240`. Direct Auth consumers must select
 that same tag and refresh their locks to one source; matching the commit alone
 does not unify revision and tag selectors. See the
-[published Auth selection](../../MIGRATION.md#published-agql-auth-0240-selection).
+[Auth 0.26.0 migration](../../MIGRATION.md#agql-auth-0260).
 
 Version `0.117.0` disables incidental async-graphql defaults and adopts the
 canonical reviewed Auth 0.24 source above. UUID and base GraphQL APIs remain;

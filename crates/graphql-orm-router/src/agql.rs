@@ -4,9 +4,12 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use agql_auth::{AccessTokenValidator, AuthError, ScopeMatch};
+use agql_auth::{AccessTokenValidator, AuthError, HierarchicalScopeMatch, ScopeMatch};
 
-use crate::{AuthenticatedPrincipal, AuthenticationError, AuthenticationProvider, ScopeMatcher};
+use crate::{
+    AuthenticatedPrincipal, AuthenticationError, AuthenticationProvider, RouterError,
+    RouterErrorKind, ScopeMatcher, auth::is_plain_scope_character,
+};
 
 /// One-way resource-server adapter over the pinned `agql-auth` validator.
 pub struct AgqlAuthenticationProvider {
@@ -81,10 +84,56 @@ pub struct AgqlScopeMatcher {
 }
 
 impl AgqlScopeMatcher {
-    /// Adapts a host-configured `agql-auth` matcher to router policy.
+    /// Adapts a host-configured `agql-auth` matcher to router policy without
+    /// checking its syntax.
+    ///
+    /// # Warning
+    ///
+    /// The router cannot inspect an opaque matcher. Scope-template values may
+    /// contain ASCII letters, digits, `-` and `_`, so a matcher whose
+    /// separator or wildcard is made of those characters would split or widen
+    /// a rendered scope. For example, separator `-` turns the value `a-b` into
+    /// two segments. Use [`hierarchical`](Self::hierarchical) for an `agql-auth`
+    /// hierarchical matcher, which refuses that syntax. Pass only matchers
+    /// whose separators and wildcards lie outside the template value
+    /// characters to this constructor.
     pub fn new(matcher: Arc<dyn ScopeMatch>) -> Self {
         Self { matcher }
     }
+
+    /// Adapts an `agql-auth` hierarchical matcher after checking that its
+    /// separator and wildcard cannot appear inside a scope-template value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RouterErrorKind::InvalidConfiguration`] when the separator is
+    /// an ASCII letter, digit, `-` or `_`, or the wildcard consists only of
+    /// those characters.
+    pub fn hierarchical(matcher: HierarchicalScopeMatch) -> Result<Self, RouterError> {
+        let options = matcher.options();
+        validate_hierarchical_syntax(options.separator, &options.wildcard)?;
+        Ok(Self::new(Arc::new(matcher)))
+    }
+}
+
+/// Refuses hierarchical syntax that a scope-template value could contain.
+pub(crate) fn validate_hierarchical_syntax(
+    separator: char,
+    wildcard: &str,
+) -> Result<(), RouterError> {
+    if is_plain_scope_character(separator) {
+        return Err(RouterError::new(
+            RouterErrorKind::InvalidConfiguration,
+            "scope matcher separator must not be a letter, digit, `-` or `_`",
+        ));
+    }
+    if wildcard.chars().all(is_plain_scope_character) {
+        return Err(RouterError::new(
+            RouterErrorKind::InvalidConfiguration,
+            "scope matcher wildcard must contain a character other than a letter, digit, `-` or `_`",
+        ));
+    }
+    Ok(())
 }
 
 impl fmt::Debug for AgqlScopeMatcher {
@@ -116,6 +165,34 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use crate::jwt::tests::RSA_PRIVATE_KEY;
+
+    #[test]
+    fn hierarchical_adapter_refuses_syntax_inside_template_values() {
+        use agql_auth::HierarchicalScopeOptions;
+        assert!(AgqlScopeMatcher::hierarchical(HierarchicalScopeMatch::with_defaults()).is_ok());
+        for options in [
+            HierarchicalScopeOptions::default().with_separator('-'),
+            HierarchicalScopeOptions::default().with_separator('_'),
+            HierarchicalScopeOptions::default().with_separator('a'),
+            HierarchicalScopeOptions::default().with_wildcard("any"),
+            HierarchicalScopeOptions::default().with_wildcard("_"),
+        ] {
+            let Ok(matcher) = HierarchicalScopeMatch::new(options.clone()) else {
+                continue;
+            };
+            let error = AgqlScopeMatcher::hierarchical(matcher).unwrap_err();
+            assert_eq!(
+                error.kind(),
+                crate::RouterErrorKind::InvalidConfiguration,
+                "{options:?}"
+            );
+        }
+        // Each refused shape is constructible, so the adapter is what refuses it.
+        assert!(
+            HierarchicalScopeMatch::new(HierarchicalScopeOptions::default().with_separator('-'))
+                .is_ok()
+        );
+    }
 
     #[test]
     fn pinned_validator_adapter_preserves_scope_migration_and_matcher_semantics() {

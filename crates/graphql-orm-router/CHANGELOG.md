@@ -3,12 +3,67 @@ title: graphql-orm-router changelog
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-11-09
+last_reviewed: 2026-11-12
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # Changelog
+
+## 0.11.0 (unreleased)
+
+- **Breaking (public Auth dependency types):** optional `auth-agql` now uses
+  published Auth `v0.26.0`, peeled to full revision
+  `7d016f6a6bc3e697382e2e05865f596862189240`, instead of `v0.24.0`. Host values
+  passed to `AgqlAuthenticationProvider::new` and `AgqlScopeMatcher::new` must
+  come from that tag source. The router does not use Auth 0.25's fixed-audience
+  delegation or 0.26's refresh-reuse grace window, and no other locked
+  dependency changes. The Auth update itself changes no router behavior. No
+  data migration is required. See [MIGRATION.md](MIGRATION.md#agql-auth-0260).
+
+- **Breaking:** introspection (`__schema`, `__type`) is off by default. Turn it
+  on with `"introspection": true` or `RouterConfig::with_introspection(true)`.
+  When it is on and authentication is configured, introspection needs a valid
+  bearer, and anonymous callers get HTTP 401 `UNAUTHENTICATED`. When it is off,
+  every caller gets `INTROSPECTION_DISABLED`. The depth limit still applies to
+  introspection, and the root `__typename` field is not affected.
+- **Breaking:** router preflight refuses any root field that has no
+  authorization metadata, with `FORBIDDEN`. It used to skip such fields. Only
+  Federation's planner-owned `_entities` and `_service` are left out of the
+  descriptor contract now. Other underscore-prefixed root fields must be
+  described like any other root field.
+- **Breaking:** argument values substituted into scope templates must be one
+  plain segment: 1–256 ASCII letters, digits, `-` or `_`. Any other value,
+  including one with a separator, a wildcard, braces, whitespace or an empty
+  string, fails that template, and the request is refused unless another
+  alternative matches. File-configured hierarchical matchers now refuse a
+  `separator`, or an all-plain `wildcard`, made only of those characters.
+- **Breaking:** WebSocket admission uses two separate budgets.
+  `maxConnections` now counts only authenticated connections. A connection is
+  charged against it after its `connection_init` bearer validates. If the
+  limit is reached at that point, the connection closes with code `1013`. A new
+  `maxPendingConnections` limits upgraded sockets that have not authenticated
+  yet. By default it is `min(ceil(attempt rate × init timeout), maxConnections)`,
+  which is 384 with the defaults, so the attempt rate is reached before the
+  pending budget fills. Sockets that never authenticate can no longer take
+  authenticated capacity. The attempt-rate limit is unchanged, and it is a
+  shared upgrade-rate limit. Per-client limits belong at the proxy.
+- The default `connection_init` timeout is now 3 seconds (was 5).
+- `router_websocket_connections` now counts authenticated connections only.
+  A new `router_pending_websocket_connections` gauge, also available as
+  `RouterMetricsSnapshot::pending_websocket_connections`, counts sockets that
+  have not authenticated yet. Each socket is counted in exactly one of them.
+- Add `AgqlScopeMatcher::hierarchical`. It refuses an `agql-auth`
+  hierarchical matcher whose separator is a letter, digit, `-` or `_`, or
+  whose wildcard is made only of those characters. The file loader uses it.
+  `AgqlScopeMatcher::new` still accepts any matcher, and its documentation now
+  warns about this.
+- The internal subscription endpoint's path is drawn independently of its
+  secret, and the secret is checked in constant time.
+- The administrative listener must use a different port from the public
+  listener on every address, not just a different socket address.
+- A failed background refresh of authentication verification state is now
+  logged as a warning, without credential detail.
 
 ## 0.10.0 (unreleased)
 

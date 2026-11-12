@@ -3,7 +3,7 @@ title: GraphQL ORM macro and attribute reference
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-10
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -24,7 +24,7 @@ does not.
 | `GraphQLSchemaEntity` | schema/entity metadata for validation and planning | you need GraphQL or repository operations |
 | `RepositoryEntity` | typed repository CRUD, filters, ordering, projections, and Rust write inputs | you need generated `async-graphql` types or resolvers |
 | `GraphQLRelations` | relation resolver/loading implementations | the struct has no relation fields |
-| `graphql_complex_object` | handwritten `ComplexObject` fields composed with generated relation fields | the entity does not opt into complex-object composition |
+| `graphql_complex_object` | handwritten `ComplexObject` fields composed with generated relation, `NodeId` and `RecordVersion` fields | the entity does not opt into complex-object composition |
 | `GraphQLOperations` | generated query, mutation, and subscription operation types plus discovery descriptors | the entity uses `#[repository_entity(...)]` |
 | `schema_roots!` | `QueryRoot`, `MutationRoot`, `SubscriptionRoot`, `AppSchema`, schema builders, schema metadata helpers, and operation/semantic catalogs | no generated operation types participate in the schema |
 | `graphql_orm_custom_operations` | canonical semantic metadata beside one handwritten `async-graphql` root impl | the impl is not actually composed into the finished schema |
@@ -49,7 +49,7 @@ surface. In a build with more than one backend feature, `backend` is required.
 | `description` | nonempty string | at most 1,024 bytes; no control characters |
 | `classification` | `"public"`, `"internal"`, `"confidential"`, `"restricted"`, or `"secret"` | `"internal"`; inherited by ordinary public fields |
 | `backend` | `"sqlite"`, `"postgres"`, or `"mssql"` | inferred only when exactly one backend feature is enabled |
-| `default_sort` | string | no declared default |
+| `default_sort` | trusted backend SQL `ORDER BY` text | every primary-key column in declaration order (physical `db_column` names); `id` when keyed by `id` |
 | `schema_policy` | `"managed"`, `"external_read_only"`, `"external_writable"`, `"validate_only"`, or `"plan_only"` | no declared policy |
 | `auth` | `"required"`, `"optional"`, or `"none"` | schema-root mode, otherwise runtime compatibility default |
 | `schema_only`, `append_only`, `repository_mutations`, `aggregate`, `backup` | boolean | `false`, except `backup` has no explicit declaration; `aggregate = true` opts into a bounded generated GraphQL aggregate root |
@@ -88,7 +88,7 @@ schema/search metadata.
 | --- | --- | --- |
 | `search` | `(index = bool, language = "…", tokenizer = "…", min_token_len = integer, fallback = "enabled" | "disabled")` | defaults are supplied by the runtime; only these keys are accepted |
 | `order_expression` | `(name = "GraphQLField", expression = "trusted SQL expression", parameters = "server_function_path")` | repeatable; `parameters` is required only when the expression contains `:named` binds; the client supplies only `ASC` or `DESC`; raw placeholders, comments, and statement separators are rejected |
-| `compose_complex_object` | marker | use with `GraphQLRelations`, `#[graphql(complex)]`, and `#[graphql_complex_object]` on the handwritten inherent impl |
+| `compose_complex_object` | marker | use with `#[graphql(complex)]` and `#[graphql_complex_object]` on the handwritten inherent impl; `GraphQLRelations` is needed only for relation fields |
 | `conditional_index` | `(name = "…", columns = ["…"], unique = bool, predicate_field = "…", predicate_values = ["…"])` | `columns`, `predicate_field`, and nonempty `predicate_values` are required |
 | `projection` | `(name = "TypeName", fields = [field, …], private = true)` | all three facts are required; public projections are rejected |
 | `operation_authorization` | described below | consumed by `GraphQLOperations` |
@@ -107,11 +107,11 @@ still subject to entity policy and backend/schema-policy restrictions.
 | Attribute | Accepted values and effect |
 | --- | --- |
 | `#[primary_key]` | marks a key field; generated single-record operations require a complete key |
-| `#[filterable]` / `#[filterable(type = "…")]` | enables a filter; bare form selects `"string"` metadata |
+| `#[filterable]` / `#[filterable(type = "…")]` | enables a filter; bare form selects `"string"` metadata; only `type` is accepted |
 | `#[sortable]`, `#[unique]` | enables ordering / declares a unique field |
 | `#[db_column = "…"]` or `#[graphql_orm(db_column = "…")]` | chooses the physical column name |
 | `#[graphql(name = "…")]` | chooses GraphQL field name; `#[serde(rename = "…")]` records the serialization name |
-| `#[graphql(skip)]`, `#[graphql_orm(skip_input)]` | omits the field from generated inputs; `graphql(skip)` also supports relation implementation fields |
+| `#[graphql(skip)]`, `#[graphql_orm(skip_input)]` | omits the field from generated GraphQL inputs (Rust repository inputs keep it); `graphql(skip)` also supports relation implementation fields. See [read-only and zero-input entities](#read-only-and-zero-input-entities) |
 | `#[skip_db]` | excludes a field from persisted row decoding |
 | `#[input_only]` | keeps a writable field in inputs even where it is skipped from GraphQL reads |
 | `#[graphql_orm(private)]` | removes generated read/filter/order/subscription exposure and inputs. On a `GraphQLEntity` + `SimpleObject` entity this requires `#[graphql(skip)]` or `graphql_policy_object`; otherwise compilation fails. Metadata-only `GraphQLSchemaEntity` is exempt |
@@ -128,8 +128,8 @@ still subject to entity policy and backend/schema-policy restrictions.
 | `#[graphql_orm(mssql_money)]` | SQL Server only: exact native `MONEY` field as `rust_decimal::Decimal` or `Option<Decimal>`; scale 4 and signed 64-bit scaled range; cannot be combined with `decimal(...)` |
 | `#[graphql_orm(auto_generated = bool)]` | declares whether the value is database-generated |
 | `#[date_field]`, `#[boolean_field]`, `#[json_field]`, `#[graphql_orm(json)]` | type metadata; JSON disables filter/order generation |
-| `#[transform(write = "…", read = "…")]` | names generated write/read transforms |
-| `#[backup(include | exclude | redact)]` | per-field backup treatment |
+| `#[transform(write = "…", read = "…")]` | names generated write/read transforms; other options are rejected |
+| `#[backup(include | exclude | redact)]` | per-field backup treatment; exactly one policy |
 
 On a `GraphQLEntity` + `SimpleObject` entity, `private`, `read = false`, and `input_only` must
 also remove the object getter: add `#[graphql(skip)]`, or place
@@ -283,7 +283,10 @@ pub account: Option<Account>;
 An entity with generated relation fields derives `GraphQLRelations` and `SimpleObject` and declares
 `#[graphql(complex)]`; it can't use the generated object, because `GraphQLEntity` and the relation
 resolvers would both implement the GraphQL type. `GraphQLRelations` without `#[graphql(complex)]` is
-a compile error that names this declaration. The one exception is an entity with `schema_only = true`,
+a compile error that names this declaration. `complex` may appear anywhere among the options,
+in one attribute or a separate one: `#[graphql(rename_fields = "PascalCase", complex)]` is
+equivalent to `#[graphql(complex, rename_fields = "PascalCase")]`. A relation without `from` uses
+the primary-key field as its source. The one exception is an entity with `schema_only = true`,
 which has no generated object. Each relation target also needs a `BatchLoadEntity` implementation
 ([#285](https://github.com/Dastari/graphql-orm/issues/285)). For generated relations the keys come
 from the relation, so `batch_column` and `batch_key_from_row` can name the primary key:
@@ -447,9 +450,63 @@ relations through an internal flattened object, so handwritten fields and
 batched relation resolvers share the one `async_graphql::ComplexObject` trait
 implementation required by `SimpleObject`.
 
-Composed objects also include the generated identity fields. Existing handwritten
-`RecordVersion` resolvers remain compatible, but equivalent resolvers can be removed.
-The declared managed column controls subscription preflight policy.
+Composed objects also include the generated identity fields, and these always
+win: `graphql_complex_object` mounts the generated object ahead of the handwritten
+fields, so it resolves first, and again after them, so its definitions are the
+advertised ones. A handwritten field that names a generated identity field
+(`NodeId`, or `RecordVersion` for a managed version) is a compile error, and so is
+a struct field or derived struct field with such a name, because `SimpleObject`
+resolves its own fields before complex ones. The published name follows
+async-graphql: an explicit `#[graphql(name = "…")]` is used as written and also
+names every `derived(...)` copy. Otherwise the identifier, or a derived copy's
+`derived(name = "…")`, is renamed by `rename_fields` (the impl's for methods, the
+struct's for struct fields, camelCase by default); the `field-case-*` features do
+not apply. Derived copies of a skipped struct field are still published. Names
+must be string literals, also when passed through `macro_rules!`. Remove such
+fields. The declared managed column controls subscription preflight
+policy.
+
+An entity whose handwritten fields are typed computed values, with no relation
+fields, uses the same layout without `GraphQLRelations`. `GraphQLEntity` then
+mounts `NodeId` and `RecordVersion` itself, with the same encoding,
+`@key(fields: "NodeId")` and `Changed` snapshot rules as a generated object.
+`RecordVersion` checks the managed column's read policy. Deriving
+`GraphQLRelations` on it as well is accepted and adds nothing.
+
+The scalar fields of this shape come from `SimpleObject`, which applies no ORM
+column read policy. When any column declares `read_policy`, or the database has a
+field policy, place `#[graphql_orm::graphql_policy_object]` before the derives so
+every scalar field is checked too. Skipping the managed version column with
+`#[graphql(skip)]` instead also removes `RecordVersion`.
+
+```rust,ignore
+#[graphql_orm::graphql_policy_object]
+#[derive(GraphQLEntity, GraphQLOperations, SimpleObject, Clone)]
+#[graphql(complex)]
+#[graphql_orm(compose_complex_object)]
+#[graphql_entity(table = "records", plural = "Records", node_id)]
+struct Record {
+    #[primary_key]
+    id: String,
+    scope_json: String,
+    #[graphql_orm(version = "managed", default = "0", read_policy = "version.read")]
+    version: i64,
+}
+
+#[graphql_complex_object]
+impl Record {
+    async fn scope(&self) -> async_graphql::Result<TypedScope> {
+        Ok(serde_json::from_str(&self.scope_json)?)
+    }
+}
+```
+
+A plain `#[ComplexObject]` impl is the entire complex object, so nothing can add
+`NodeId` to it: `node_id` on such an entity is a compile error that names this
+composed declaration. `compose_complex_object` with `node_id` is also a compile
+error when no `#[graphql_complex_object]` impl mounts the composed object, whether
+`GraphQLEntity` or `GraphQLRelations` emits it. `tests/node_id_complex_object.rs`
+covers the layout.
 
 Polymorphic references can add one fixed discriminator condition:
 
@@ -663,7 +720,9 @@ impl ApplicationQueries {
 authoritative resolver policy exists; it does not describe or execute that
 policy. Resolver and argument names honor explicit `#[graphql(name = "…")]`
 attributes, then `async-graphql`'s default camel-case convention. Descriptions
-use the same explicit/doc/fallback rules and are emitted into SDL. Unknown attributes,
+use the same explicit/doc/fallback rules and are emitted into SDL. A generated
+argument description is merged into the argument's existing `#[graphql(...)]`
+options, so the argument keeps a single `graphql` attribute. Unknown attributes,
 unbounded descriptions, malformed GraphQL types, duplicate root coordinates,
 and stale fingerprints fail closed.
 
@@ -772,17 +831,75 @@ Enable at most one in each group:
 `#[graphql_entity(query_shapes = "list,keyset,scan")]` selects generated query
 shapes for the entity. The available selectors are `single`, `list`, `keyset`,
 `scan`, `search`, and `aggregate`; optional capabilities must be configured.
-Omission preserves all current generated queries.
-If a row policy can only return `Prefilter` or `CallbackOnly`, omit `keyset`,
-for example `query_shapes = "single,list,scan"`, and install finite scan bounds.
-Keyset requires `Complete` or `Unrestricted`; residual-only policies otherwise
-fail every keyset request with `AUTHORIZATION_MISCONFIGURED`. This is explicit
-shape guidance rather than a registration diagnostic because policy decisions
-are request-dependent; working keyset entities keep their existing behavior. Disabled shapes are absent
+Omission preserves all current generated queries. Disabled shapes are absent
 from both SDL and operation metadata. This selection does not alter repository
 APIs, relations, mutations, subscriptions or authorization. See the
 [migration guide](../../../MIGRATION.md#0590-to-0600-generated-query-shape-selection).
 Mutations have their own selector, [`mutation_shapes`](#generated-mutation-shapes).
+
+### Keyset roots and residual-only read policies
+
+A generated Keyset root (`recordsKeyset`) serves a GraphQL request only when
+`RowPolicy::read_visibility` returns `Complete` or `Unrestricted` for it. With
+`CallbackOnly` or `Prefilter`, the request fails with code
+`AUTHORIZATION_MISCONFIGURED`, the message
+`KEYSET_READ_VISIBILITY_REFUSAL_MESSAGE` and the `reason` extension
+`KEYSET_REQUIRES_COMPLETE_READ_VISIBILITY`
+(`KEYSET_READ_VISIBILITY_REFUSAL_REASON`). The refusal suggests a bounded scan
+or a `Complete` declaration, and says nothing about the policy itself. Keyset cannot advance
+through rows a callback rejects.
+
+`read_visibility` is asynchronous and request-dependent, so a row policy
+declares what it can return, per entity and policy key, with
+`RowPolicy::read_visibility_capability`:
+
+| Declaration | Meaning | Exposed Keyset root |
+| --- | --- | --- |
+| `Unknown` (default) | Not declared | Kept; reported by `keyset_read_policy_diagnostics` |
+| `ResidualOnly` | Every GraphQL request gets `CallbackOnly` or `Prefilter` | Refused at registration |
+| `Complete` | Some GraphQL requests get `Complete` or `Unrestricted` | Kept |
+
+The default keeps existing Keyset roots, including those whose policy returns
+`Complete` without declaring it. Declaring `ResidualOnly` for an entity whose
+Keyset root is exposed is a contradiction, so the generated builders refuse it:
+
+- `try_schema_builder` and `try_schema_builder_with_limits` return a
+  `KeysetReadPolicyError` naming the root, entity, policy key and fixes.
+- `schema_builder` and `schema_builder_with_limits` panic with the same message.
+
+They also refuse a Keyset root whose entity is missing from the entity
+metadata. With no row policy installed, reads are `Unrestricted` and nothing
+else is refused. A schema built directly with `Schema::build` skips this check;
+call `Database::validate_keyset_read_policies(catalog, &entity_metadata)` for it.
+
+`Database::keyset_read_policy_diagnostics(catalog, &entity_metadata)` lists every
+exposed Keyset root the policy has not declared `Complete`, with a
+`KeysetReadPolicyReason`. Log it at startup, or treat a non-empty result as an
+error for a strict check that also refuses `Unknown`. The catalog identifies
+Keyset roots by `query_shape() == Some(GeneratedGraphqlQueryShape::Keyset)`, not
+by category, since bounded Scan roots share the `KeysetList` category.
+
+For an entity whose policy needs residual checks, leave `keyset` out of its
+shapes and page with the bounded scan, which supports residual checks:
+
+```rust
+#[derive(GraphQLEntity, GraphQLOperations)]
+#[graphql_entity(
+    table = "records",
+    plural = "Records",
+    read_policy = "record.read",
+    keyset = "id asc",
+    query_shapes = "single,list,scan"
+)]
+struct Record { /* ... */ }
+```
+
+Install finite scan bounds for that root. If the policy returns `Complete` or
+`Unrestricted` for the entity on some requests, declare `Complete` instead. A
+declaration never grants access or bypasses runtime checks: a request that
+still gets residual visibility is refused as above. Standalone repository Keyset
+helpers, which run without a request, keep their residual checks. See the
+[0.126.0 migration guide](../../../MIGRATION.md#keyset-read-visibility-declarations-and-diagnostics).
 
 ## Generated mutation shapes
 
@@ -830,6 +947,59 @@ This exposes `createOrder` and `updateOrder` but not `deleteOrder`,
   authorization behave exactly as before.
 
 See the [migration guide](../../../MIGRATION.md#0920-to-0930-generated-mutation-shape-selection).
+
+## Read-only and zero-input entities
+
+A GraphQL input object must declare at least one field. Each generated input
+therefore exists only when it has a public member, and the roots that accept
+it follow it. The rules apply to entities with the standard write surface and
+to `append_only` entities:
+
+| Case | Condition | Generated GraphQL surface |
+| --- | --- | --- |
+| Zero-create | no create field reaches `Create<Entity>Input`: each create column is a generated key, a managed timestamp, `skip_input`, `write = false` or a version | no `Create<Entity>Input`, no `create` or `upsert` root |
+| Zero-update | no non-key column reaches `Update<Entity>Input`: each is a managed timestamp, `skip_input`, `write = false` or a version | no `Update<Entity>Input`, no `update` or `update_many` root |
+| Both | zero-create and zero-update | only the input-free `delete` and `delete_many` roots (`append_only`: none) |
+| `generated_mutations = "none"` | set on `schema_roots!` | no generated mutation root for any entity in that schema |
+
+- **Writable fields.** A field is publicly writable on create when it is
+  writable (`write` is not `false`), not `skip_input` (or it is
+  `input_only`), not a managed timestamp and not a generated key. Update uses
+  the same rule and never includes a key. `skip_input` and server-owned
+  columns are never made public to fill an input, and no placeholder argument
+  is added.
+- **Read-only public entity.** An entity is read-only on the public GraphQL
+  surface when its schema omits its generated mutations (`generated_mutations`
+  or `mutation_shapes`), when it is `external_read_only`, composite-keyed or a
+  non-writable MSSQL entity, or when it is zero-create and zero-update and the
+  schema also omits `delete` and `delete_many`. Reads, relations and the
+  `<entity>Changed` subscription are generated in every case.
+- **Delete stays input free.** `delete` and `delete_many` take a key or a
+  filter and no input, so zero-create and zero-update do not remove them.
+  Remove them with `mutation_shapes` or `generated_mutations`.
+- **Repository writes are unchanged.** `Create<Entity>Input` and
+  `Update<Entity>Input` remain Rust repository inputs that include every
+  repository-writable column, `skip_input` columns included. `insert`,
+  `update_by_id`, `upsert`, transaction writes, hooks and the `Changed` events
+  they emit behave as for any other entity.
+- **Append-only.** An `append_only` entity without a public create field has
+  no public mutation. Its `<Entity>Mutations` object holds only the
+  introspection-hidden `gom{Entity}WritesUnavailable` placeholder that
+  composite-key and read-only entities also carry, so `schema_roots!` can
+  still merge it. The placeholder is described in the operation catalogue with
+  category `Unavailable` and an unsatisfiable requirement, and refuses every
+  request with `FORBIDDEN`.
+- **Compile-time checks.** `mutation_shapes`, `operation_authorization` or
+  `ai_mutations` naming `create`, `upsert`, `update` or `update_many` on an
+  entity with no input for it is a compile error that names the missing
+  writable fields. So is `dependent_deletes` on a zero-update entity, because
+  it wraps the generated update.
+- **Other inputs.** `<Entity>WhereInput` always has `and`, `or` and `not`, so
+  it is never empty. `<Entity>OrderByInput` needs an orderable field, and an
+  entity without one is a compile error that asks for `#[sortable]`.
+  `aggregate = true` needs a public persisted readable field. The runtime
+  GraphQL module applies its own rule: without client-writable fields its
+  `create<Object>` takes no input and its update is omitted.
 
 ## Implicit timestamps
 
@@ -919,8 +1089,9 @@ type Ticket {
   availability. Generated `Changed` payloads may select it.
 - It has no column and no input, filter, order or aggregate entry.
 - CAS-only `version` fields and repository-only and schema-only entities do not get it.
-  Complex entities deriving `GraphQLRelations` receive it through their relation object;
-  standalone handwritten complex objects still need their own resolver.
+  Complex entities deriving `GraphQLRelations`, and `compose_complex_object` entities, receive it
+  through their composed object, where a handwritten `RecordVersion` resolver is a compile error.
+  A plain handwritten `#[ComplexObject]` without `GraphQLRelations` still needs its own resolver.
 - A field whose GraphQL name is `RecordVersion` on an entity with a managed version is a compile
   error.
 

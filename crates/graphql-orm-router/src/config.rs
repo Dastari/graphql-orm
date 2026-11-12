@@ -53,6 +53,7 @@ pub struct RouterConfig {
     pub(crate) listener: SocketAddr,
     pub(crate) graphql_path: String,
     pub(crate) anonymous_development_mode: bool,
+    pub(crate) introspection: bool,
     pub(crate) forwarded_headers: BTreeSet<String>,
     pub(crate) subgraphs: Vec<StaticSubgraph>,
     pub(crate) schema_fetch_timeout: Duration,
@@ -87,6 +88,7 @@ impl RouterConfig {
             listener,
             graphql_path: "/graphql".to_owned(),
             anonymous_development_mode: false,
+            introspection: false,
             forwarded_headers: BTreeSet::new(),
             subgraphs: Vec::new(),
             node_lookup: None,
@@ -124,6 +126,20 @@ impl RouterConfig {
     #[must_use]
     pub fn allow_anonymous_development(mut self, allowed: bool) -> Self {
         self.anonymous_development_mode = allowed;
+        self
+    }
+
+    /// Enables GraphQL introspection (`__schema` and `__type`) on the public
+    /// endpoint. It is disabled by default.
+    ///
+    /// With an authentication provider installed, enabled introspection still
+    /// requires a validated bearer credential; anonymous callers are refused.
+    /// In anonymous development mode it is open to every caller. The
+    /// configured depth limit applies to introspection either way. The root
+    /// `__typename` meta field is never affected.
+    #[must_use]
+    pub fn with_introspection(mut self, enabled: bool) -> Self {
+        self.introspection = enabled;
         self
     }
 
@@ -190,6 +206,11 @@ impl RouterConfig {
     }
 
     /// Installs the scope matcher shared with router preflight policy.
+    ///
+    /// Scope-template values may contain ASCII letters, digits, `-` and `_`.
+    /// A matcher must not treat any of those characters as a separator or
+    /// wildcard, or a substituted value could split or widen a rendered
+    /// requirement. See [`ScopeMatcher`].
     #[must_use]
     pub fn with_scope_matcher(mut self, matcher: Arc<dyn ScopeMatcher>) -> Self {
         self.scope_matcher = matcher;
@@ -580,6 +601,7 @@ impl fmt::Debug for StaticSubgraph {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SubscriptionConfig {
     pub(crate) max_connections: usize,
+    pub(crate) max_pending_connections: Option<usize>,
     pub(crate) max_connection_attempts_per_second: usize,
     pub(crate) max_operations_per_connection: usize,
     pub(crate) broadcast_capacity: usize,
@@ -594,18 +616,68 @@ impl SubscriptionConfig {
         Self::default()
     }
 
-    /// Sets the process-wide public WebSocket connection limit.
+    /// Sets the process-wide limit on authenticated public WebSocket
+    /// connections.
+    ///
+    /// A connection is charged against this limit only after its
+    /// `connection_init` bearer credential validates, so unauthenticated
+    /// sockets can never occupy it. A connection that authenticates while the
+    /// limit is reached closes with code `1013`. When the limit is already
+    /// reached, new upgrades are refused with `503` before any budget is used.
     #[must_use]
     pub fn with_max_connections(mut self, value: usize) -> Self {
         self.max_connections = value;
         self
     }
 
+    /// Sets the process-wide limit on public WebSocket connections that have
+    /// not yet authenticated.
+    ///
+    /// Every upgrade holds one of these slots until its `connection_init`
+    /// credential validates, the socket closes, or the connection-init timeout
+    /// expires. It is a separate budget from
+    /// [`with_max_connections`](Self::with_max_connections), so sockets that
+    /// never authenticate cannot take authenticated capacity. Upgrades beyond
+    /// the limit are refused with `503`.
+    ///
+    /// When unset, the limit is the number of upgrades the attempt rate admits
+    /// within one connection-init timeout, rounded up and capped at
+    /// `max_connections`:
+    /// `min(ceil(max_connection_attempts_per_second × timeout), max_connections)`.
+    /// The attempt rate is then the first limit that idle upgrades reach,
+    /// unless `max_connections` is the smaller value. An explicit value below
+    /// that product lets fewer idle upgrades than the rate admits fill the
+    /// budget.
+    #[must_use]
+    pub fn with_max_pending_connections(mut self, value: usize) -> Self {
+        self.max_pending_connections = Some(value);
+        self
+    }
+
+    /// The effective pending-connection limit: the configured value, or the
+    /// default derived from the attempt rate, init timeout and connection
+    /// limit.
+    pub(crate) fn pending_connection_limit(&self) -> usize {
+        self.max_pending_connections.unwrap_or_else(|| {
+            let admitted = (self.max_connection_attempts_per_second as u128)
+                .saturating_mul(self.connection_init_timeout.as_millis())
+                .div_ceil(1_000);
+            usize::try_from(admitted)
+                .unwrap_or(usize::MAX)
+                .clamp(1, self.max_connections.max(1))
+        })
+    }
+
     /// Sets the process-wide public WebSocket upgrade-attempt rate.
     ///
     /// The limiter uses a token bucket with one second of burst capacity. It
     /// contains reconnect storms before they can repeatedly create private
-    /// subscription transports.
+    /// subscription transports. It is charged before any credential is
+    /// presented, so it is a shared upgrade-rate limit rather than a per-caller
+    /// quota; apply per-client connection limits at the proxy or load balancer
+    /// that sees client addresses. Unless
+    /// [`with_max_pending_connections`](Self::with_max_pending_connections) is
+    /// set, this rate also sizes the pending-connection budget.
     #[must_use]
     pub fn with_max_connection_attempts_per_second(mut self, value: usize) -> Self {
         self.max_connection_attempts_per_second = value;
@@ -644,6 +716,10 @@ impl SubscriptionConfig {
     }
 
     /// Sets how long a client may wait before sending `connection_init`.
+    ///
+    /// Defaults to 3 seconds and must be between zero and 60 seconds. Unless
+    /// [`with_max_pending_connections`](Self::with_max_pending_connections) is
+    /// set, it also sizes the pending-connection budget.
     #[must_use]
     pub fn with_connection_init_timeout(mut self, value: Duration) -> Self {
         self.connection_init_timeout = value;
@@ -653,6 +729,10 @@ impl SubscriptionConfig {
     fn validate(&self) -> Result<(), RouterError> {
         let bounded = [
             ("maximum WebSocket connections", self.max_connections),
+            (
+                "maximum pending WebSocket connections",
+                self.max_pending_connections.unwrap_or(1),
+            ),
             (
                 "maximum WebSocket connection attempts per second",
                 self.max_connection_attempts_per_second,
@@ -697,12 +777,13 @@ impl Default for SubscriptionConfig {
     fn default() -> Self {
         Self {
             max_connections: 1_024,
+            max_pending_connections: None,
             max_connection_attempts_per_second: 128,
             max_operations_per_connection: 32,
             broadcast_capacity: 32,
             subgraph_buffer_capacity: 1_024,
             max_client_message_bytes: MAX_WEBSOCKET_MESSAGE_BYTES,
-            connection_init_timeout: Duration::from_secs(5),
+            connection_init_timeout: Duration::from_secs(3),
         }
     }
 }
@@ -1012,10 +1093,12 @@ impl AdminConfig {
         public_listener: SocketAddr,
         static_subgraphs: &[StaticSubgraph],
     ) -> Result<(), RouterError> {
-        if self.listener.port() == 0 || self.listener == public_listener {
+        // Compare ports, not whole addresses: an unspecified or second address
+        // on the public port would share or shadow the public listener.
+        if self.listener.port() == 0 || self.listener.port() == public_listener.port() {
             return Err(RouterError::new(
                 RouterErrorKind::InvalidConfiguration,
-                "the administrative listener needs a nonzero address distinct from the public listener",
+                "the administrative listener needs a nonzero port distinct from the public listener",
             ));
         }
         self.network_policy.validate()?;
@@ -1488,5 +1571,133 @@ mod tests {
                 AdminConfig::new("127.0.0.1:4001".parse().unwrap(), policy).trust_subgraph(trusted),
             );
         assert!(authenticated.validate().is_ok());
+    }
+
+    fn authenticated_with_admin(admin: AdminConfig) -> RouterConfig {
+        RouterConfig::new("127.0.0.1:4000".parse().unwrap())
+            .with_authentication_provider(Arc::new(RejectingProvider))
+            .with_subgraph(
+                StaticSubgraph::new(
+                    "products",
+                    "http://products.test/graphql",
+                    "http://products.test/sdl",
+                )
+                .with_protocol_url("http://products.test/.well-known/graphql-router"),
+            )
+            .with_admin(admin)
+    }
+
+    #[test]
+    fn administrative_listener_needs_its_own_port_on_every_address() {
+        for listener in ["0.0.0.0:4000", "127.0.0.2:4000", "[::]:4000"] {
+            let error = authenticated_with_admin(AdminConfig::new(
+                listener.parse().unwrap(),
+                NetworkPolicy::new(),
+            ))
+            .validate()
+            .unwrap_err();
+            assert_eq!(
+                error.kind(),
+                RouterErrorKind::InvalidConfiguration,
+                "{listener}"
+            );
+        }
+        assert!(
+            authenticated_with_admin(AdminConfig::new(
+                "0.0.0.0:4001".parse().unwrap(),
+                NetworkPolicy::new(),
+            ))
+            .validate()
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn trusted_dynamic_subgraphs_cannot_take_the_reserved_node_lookup_name() {
+        let trusted = TrustedSubgraph::new(
+            "node-service",
+            "node-id",
+            NODE_SUBGRAPH_NAME,
+            "http://node.test:8080/.well-known/graphql-router",
+            "http://node.test:8080",
+            "http://node.test:8080",
+        );
+        let error = authenticated_with_admin(
+            AdminConfig::new("127.0.0.1:4001".parse().unwrap(), NetworkPolicy::new())
+                .trust_subgraph(trusted),
+        )
+        .validate()
+        .unwrap_err();
+        // The reserved name is not GraphQL-name compatible, so trusted-record
+        // validation refuses it before any registration can use it.
+        assert_eq!(
+            error.kind(),
+            RouterErrorKind::InvalidConfiguration,
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn introspection_is_disabled_unless_explicitly_enabled() {
+        assert!(!base().validate().unwrap().introspection);
+        assert!(
+            base()
+                .with_introspection(true)
+                .validate()
+                .unwrap()
+                .introspection
+        );
+    }
+
+    #[test]
+    fn pending_websocket_budget_is_bounded_and_separate() {
+        let defaults = SubscriptionConfig::new();
+        assert_eq!(defaults.connection_init_timeout, Duration::from_secs(3));
+        assert_eq!(defaults.max_connections, 1_024);
+        // The attempt rate is the first limit a stream of idle upgrades hits:
+        // by default the pending budget holds a full init timeout of attempts.
+        for config in [
+            defaults.clone(),
+            SubscriptionConfig::new().with_max_connection_attempts_per_second(10),
+            SubscriptionConfig::new().with_connection_init_timeout(Duration::from_millis(2_500)),
+            SubscriptionConfig::new()
+                .with_max_connection_attempts_per_second(1_000)
+                .with_connection_init_timeout(Duration::from_secs(60)),
+            SubscriptionConfig::new()
+                .with_max_connection_attempts_per_second(3)
+                .with_connection_init_timeout(Duration::from_millis(1)),
+        ] {
+            let held = (config.max_connection_attempts_per_second as u128
+                * config.connection_init_timeout.as_millis())
+            .div_ceil(1_000) as usize;
+            assert_eq!(
+                config.pending_connection_limit(),
+                held.clamp(1, config.max_connections),
+                "{config:?}"
+            );
+            assert!(
+                config.pending_connection_limit() >= held.min(config.max_connections),
+                "{config:?}"
+            );
+        }
+        assert_eq!(defaults.pending_connection_limit(), 384);
+        assert_eq!(
+            SubscriptionConfig::new()
+                .with_max_pending_connections(5)
+                .pending_connection_limit(),
+            5
+        );
+        assert!(
+            SubscriptionConfig::new()
+                .with_max_pending_connections(0)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            SubscriptionConfig::new()
+                .with_max_pending_connections(3)
+                .validate()
+                .is_ok()
+        );
     }
 }

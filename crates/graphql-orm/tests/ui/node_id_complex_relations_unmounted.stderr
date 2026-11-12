@@ -1,0 +1,18 @@
+error[E0277]: `Parent` declares `node_id` and `compose_complex_object`, but no `#[graphql_complex_object]` impl mounts the generated `NodeId`
+  --> tests/ui/node_id_complex_relations_unmounted.rs:39:8
+   |
+39 | struct Parent {
+   |        ^^^^^^ `NodeId` is not mounted on this complex object
+   |
+help: the trait `graphql_orm::prelude::GeneratedComplexObjectMounted` is not implemented for `Parent`
+  --> tests/ui/node_id_complex_relations_unmounted.rs:39:1
+   |
+39 | struct Parent {
+   | ^^^^^^^^^^^^^
+   = note: replace `#[ComplexObject]` with `#[graphql_orm::graphql_complex_object]` on the entity's handwritten impl
+note: required by a bound in `_::assert_mounted`
+  --> tests/ui/node_id_complex_relations_unmounted.rs:27:5
+   |
+27 |     GraphQLEntity,
+   |     ^^^^^^^^^^^^^ required by this bound in `assert_mounted`
+   = note: this error originates in the derive macro `GraphQLEntity` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -76,8 +76,11 @@ fn start_router(zones: SocketAddr, readings: SocketAddr) -> Result<RunningRouter
                 .name("federation-e2e-router")
                 .build(ntex::rt::DefaultRuntime)
                 .block_on(async move {
+                    // The join test introspects the composed `Zone` type, and
+                    // the router serves introspection only when enabled.
                     let config = RouterConfig::new(address)
                         .allow_anonymous_development(true)
+                        .with_introspection(true)
                         .forward_header(SCOPE_HEADER)
                         .with_subgraph(StaticSubgraph::new(
                             "zones",

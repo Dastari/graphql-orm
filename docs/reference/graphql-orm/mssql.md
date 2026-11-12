@@ -95,6 +95,20 @@ hooks, policies, change events, and subscriptions. This mode still cannot manage
 schema, search structures, RLS, or backups. Unsupported entity features continue to fail during
 macro expansion rather than silently degrading.
 
+Writable tables may carry enabled triggers. Generated DML never uses `OUTPUT` without `INTO`,
+which SQL Server rejects on such tables. Compare-and-swap updates the row and, in the same batch
+and while it holds the row's exclusive lock, reads it back by key and by the version the swap
+wrote. The returned row includes changes an `AFTER` trigger made. An `INSTEAD OF UPDATE` trigger
+that suppresses the update yields `Conflict` rather than the unchanged row. A trigger that rewrites
+the version column yields `Conflict` even when the swap applied, and the savepoint rolls the swap
+back. That outcome fails closed, so keep the version column under the ORM's control.
+
+A write result's `rows_affected` is the executed statement's own count, so counts from statements
+inside triggers that do not set `NOCOUNT` are excluded. When an `INSTEAD OF` trigger replaces the
+statement, it is whatever SQL Server reports for the replaced statement. For a raw batch of several
+statements it is the final statement's count, so a batch that ends in DDL or another statement
+that reports no count yields 0.
+
 CI and release validation execute the TLS, writable-transaction and query-notification
 regressions on test-owned loopback SQL Server containers. The TLS fixture checks
 an untrusted private CA, an explicitly trusted CA, and a mismatched hostname.
@@ -532,7 +546,8 @@ scripts/run-owned-database-lanes.sh mssql
 
 It verifies physical read-only defaults, deliberate writable DML, generated keys and defaults,
 native decimal/JSON/binary/date-time values, single and composite keys, bounded mutations,
-concurrent upsert locking, compare-and-swap, commit/rollback, cancellation socket disposal, and
+concurrent upsert locking, compare-and-swap, writes on tables with counting `AFTER` triggers,
+commit/rollback, cancellation socket disposal, and
 typed grouped aggregate parity. The runner rejects ambient database URL
 variables, and Docker must be available to the test user. A Docker failure is
 a failed required lane rather than a skip.

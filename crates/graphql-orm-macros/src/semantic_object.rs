@@ -3,7 +3,8 @@ use syn::{Data, DeriveInput, Field, Fields, GenericArgument, PathArguments, Type
 
 use crate::entity::{
     humanize_identifier, semantic_classification_rank, semantic_classification_tokens,
-    semantic_doc_description, validate_semantic_classification, validate_semantic_description,
+    semantic_doc_description, skip_foreign_option, validate_semantic_classification,
+    validate_semantic_description,
 };
 use crate::naming::apply_rename_rule;
 
@@ -44,8 +45,8 @@ fn parse_object_options(input: &DeriveInput) -> syn::Result<ObjectOptions> {
                     return Err(nested.error(
                         "GraphQLSemanticObject does not admit undeclared ComplexObject fields",
                     ));
-                } else if nested.input.peek(syn::Token![=]) {
-                    let _: syn::Expr = nested.value()?.parse()?;
+                } else {
+                    skip_foreign_option(&nested)?;
                 }
                 Ok(())
             })?;
@@ -81,13 +82,17 @@ fn parse_field_options(field: &Field) -> syn::Result<FieldOptions> {
                     validate_semantic_description(&lit.value(), lit.span())?;
                     options.description = Some(lit.value());
                 } else if nested.path.is_ident("skip") {
-                    options.skip = true;
+                    options.skip = if nested.input.peek(syn::Token![=]) {
+                        nested.value()?.parse::<syn::LitBool>()?.value
+                    } else {
+                        true
+                    };
                 } else if nested.path.is_ident("flatten") {
                     return Err(nested.error(
                         "GraphQLSemanticObject requires flattened fields to be declared explicitly",
                     ));
-                } else if nested.input.peek(syn::Token![=]) {
-                    let _: syn::Expr = nested.value()?.parse()?;
+                } else {
+                    skip_foreign_option(&nested)?;
                 }
                 Ok(())
             })?;

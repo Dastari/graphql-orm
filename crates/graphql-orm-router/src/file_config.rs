@@ -33,6 +33,8 @@ pub struct RouterFileConfig {
     graphql_path: String,
     #[serde(default)]
     anonymous_development: bool,
+    #[serde(default)]
+    introspection: bool,
     authentication: Option<FileAuthentication>,
     scope_matcher: Option<FileScopeMatcher>,
     subgraphs: Vec<FileSubgraph>,
@@ -96,7 +98,8 @@ impl RouterFileConfig {
             .unwrap_or(self.listener);
         let mut config = RouterConfig::builder(listener)
             .with_graphql_path(self.graphql_path)
-            .allow_anonymous_development(self.anonymous_development);
+            .allow_anonymous_development(self.anonymous_development)
+            .with_introspection(self.introspection);
         if let Some(scope_matcher) = self.scope_matcher {
             config = scope_matcher.apply(config)?;
         }
@@ -461,7 +464,7 @@ fn build_hierarchical_scope_matcher(
             "scopeMatcher hierarchical options are invalid: {error}"
         ))
     })?;
-    Ok(config.with_scope_matcher(Arc::new(AgqlScopeMatcher::new(Arc::new(matcher)))))
+    Ok(config.with_scope_matcher(Arc::new(AgqlScopeMatcher::hierarchical(matcher)?)))
 }
 
 #[cfg(not(feature = "auth-agql"))]
@@ -487,6 +490,10 @@ fn validate_scope_syntax(separator: char, wildcard: &str) -> Result<(), RouterEr
     if separator.is_whitespace() || separator.is_control() {
         return Err(invalid("scopeMatcher separator must be visible"));
     }
+    // Scope-template values are limited to letters, digits, `-` and `_`. The
+    // separator and wildcard must stay outside that set, so no substituted
+    // value can introduce either one.
+    crate::agql::validate_hierarchical_syntax(separator, wildcard)?;
     if wildcard.is_empty()
         || wildcard.contains(separator)
         || wildcard
@@ -578,6 +585,7 @@ impl FileRequestLimits {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct FileSubscriptions {
     max_connections: Option<usize>,
+    max_pending_connections: Option<usize>,
     max_connection_attempts_per_second: Option<usize>,
     max_operations_per_connection: Option<usize>,
     broadcast_capacity: Option<usize>,
@@ -591,6 +599,9 @@ impl FileSubscriptions {
         let mut value = SubscriptionConfig::new();
         if let Some(limit) = self.max_connections {
             value = value.with_max_connections(limit);
+        }
+        if let Some(limit) = self.max_pending_connections {
+            value = value.with_max_pending_connections(limit);
         }
         if let Some(limit) = self.max_connection_attempts_per_second {
             value = value.with_max_connection_attempts_per_second(limit);
@@ -839,7 +850,8 @@ mod tests {
         "maxSubgraphConnectionsPerHost": 75,
         "nodeLookup": {"maxNodes": 50},
         "requestLimits": {"maxDepth": 12},
-        "subscriptions": {"maxConnectionAttemptsPerSecond": 55},
+        "introspection": true,
+        "subscriptions": {"maxConnectionAttemptsPerSecond": 55, "maxPendingConnections": 7},
         "telemetry": {"logLevel": "warn", "prometheus": {"port": 4900}}
     }"#;
 
@@ -873,6 +885,25 @@ mod tests {
                 .unwrap()
                 .max_connection_attempts_per_second,
             55
+        );
+        assert_eq!(
+            config
+                .subscriptions
+                .as_ref()
+                .unwrap()
+                .pending_connection_limit(),
+            7
+        );
+        assert!(config.introspection);
+        assert!(
+            !RouterFileConfig::from_json(&FILE.replace("\"introspection\": true,", ""))
+                .unwrap()
+                .into_router_config_with(|name| Ok(
+                    (name == "PRODUCTS_SCHEMA_TOKEN").then(|| "Bearer schema-secret".to_owned())
+                ))
+                .unwrap()
+                .introspection,
+            "file configuration keeps introspection off unless it is named"
         );
         assert_eq!(config.telemetry.prometheus_port, Some(4900));
         assert_eq!(
@@ -1022,6 +1053,37 @@ mod tests {
                 enabled.scope_matcher.matches(granted, required),
                 enabled_expected,
                 "enabled exact-only grant {granted:?} for requirement {required:?}"
+            );
+        }
+    }
+
+    #[cfg(feature = "auth-agql")]
+    #[test]
+    fn hierarchical_file_matcher_syntax_stays_outside_template_values() {
+        for options in [
+            r#""separator": "-""#,
+            r#""separator": "a""#,
+            r#""wildcard": "any""#,
+            r#""wildcard": "_""#,
+        ] {
+            let json = FILE.replacen(
+                "\"authentication\":",
+                &format!(
+                    r#""scopeMatcher": {{"kind": "hierarchical", {options}}},
+            "authentication":"#
+                ),
+                1,
+            );
+            let error = RouterFileConfig::from_json(&json)
+                .unwrap()
+                .into_router_config_with(|name| {
+                    Ok((name == "PRODUCTS_SCHEMA_TOKEN").then(|| "Bearer secret".to_owned()))
+                })
+                .unwrap_err();
+            assert_eq!(
+                error.kind(),
+                RouterErrorKind::InvalidConfiguration,
+                "{options}"
             );
         }
     }

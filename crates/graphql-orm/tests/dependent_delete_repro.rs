@@ -1976,3 +1976,181 @@ async fn dependent_deletes_are_journaled() {
         ]
     );
 }
+
+/// Allows every row except a dependent `set_null` child whose parent link is gone.
+struct RefuseNulledChild;
+impl RowPolicy for RefuseNulledChild {
+    fn can_read_row<'a>(
+        &'a self,
+        _: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessSurface,
+        _: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(true) })
+    }
+    fn can_write_row<'a>(
+        &'a self,
+        _: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessSurface,
+        row: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async move {
+            Ok(row
+                .downcast_ref::<DeleteNull>()
+                .is_none_or(|row| row.parent_id.is_some()))
+        })
+    }
+}
+#[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
+async fn set_null_checks_the_nulled_child_row() {
+    let pool = fixture("dependent-set-null-written-row").await;
+    let mut db = Database::new(pool.clone());
+    db.set_entity_policy(Policy {
+        deny_entity: false,
+        deny_field: false,
+    });
+    db.set_field_policy(Policy {
+        deny_entity: false,
+        deny_field: false,
+    });
+    db.set_row_policy(RefuseNulledChild);
+    let registry =
+        StaticDependentDeletes::<DefaultBackend>::new(RuntimeDependentLimits::new(10, 4).unwrap())
+            .register::<DeleteParent>()
+            .unwrap()
+            .register::<DeleteChild>()
+            .unwrap()
+            .register::<DeleteLeaf>()
+            .unwrap()
+            .register::<DeleteNull>()
+            .unwrap();
+    let schema = schema_builder(db)
+        .data(AuthSubject::new("test-principal"))
+        .data(registry)
+        .finish();
+    let response = schema
+        .execute("mutation { deleteDeleteParent(id: \"parent\") { success } }")
+        .await;
+    assert_eq!(response.errors[0].message, "Dependent delete refused");
+    assert_intact(&pool).await;
+}
+
+// A dependent that declares an entity write policy needs its row provider. The
+// registry checks every registered entity before selecting or locking any row.
+mod write_policy_dependent {
+    use super::*;
+    #[derive(
+        GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug,
+    )]
+    #[graphql_entity(
+        dependent_deletes,
+        table = "guarded_parents",
+        plural = "GuardedParents",
+        default_sort = "id ASC"
+    )]
+    struct GuardedParent {
+        #[primary_key]
+        id: String,
+        #[sortable]
+        #[filterable(type = "string")]
+        name: String,
+    }
+    #[derive(
+        GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug,
+    )]
+    #[graphql_entity(
+        dependent_deletes,
+        table = "guarded_children",
+        plural = "GuardedChildren",
+        default_sort = "id ASC",
+        write_policy = "guarded_child.write"
+    )]
+    struct GuardedChild {
+        #[primary_key]
+        id: String,
+        #[sortable]
+        #[filterable(type = "string")]
+        parent_id: String,
+        #[relation(
+            target = "GuardedParent",
+            from = "parent_id",
+            to = "id",
+            on_delete = "cascade"
+        )]
+        parent: Option<GuardedParent>,
+    }
+    schema_roots! { query_custom_ops: [], entities: [GuardedParent,GuardedChild], }
+
+    #[tokio::test]
+    #[cfg_attr(
+        feature = "postgres",
+        ignore = "requires test-owned PostgreSQL container"
+    )]
+    async fn a_dependent_write_policy_without_a_row_provider_is_refused_before_selection() {
+        #[cfg(feature = "sqlite")]
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        #[cfg(feature = "postgres")]
+        let pool = owned_postgres::OwnedPostgres::pool("dependent-row-provider", 5)
+            .await
+            .unwrap();
+        for sql in [
+            "CREATE TABLE guarded_parents(id TEXT PRIMARY KEY,name TEXT NOT NULL)",
+            "CREATE TABLE guarded_children(id TEXT PRIMARY KEY,parent_id TEXT NOT NULL REFERENCES guarded_parents(id) ON DELETE CASCADE)",
+            "INSERT INTO guarded_parents VALUES('parent','parent')",
+            "INSERT INTO guarded_children VALUES('child','parent')",
+        ] {
+            sqlx::query(sql).execute(&pool).await.unwrap();
+        }
+        let hook = Hook::default();
+        let mut db = Database::with_mutation_hook(pool.clone(), hook.clone());
+        db.set_entity_policy(Policy {
+            deny_entity: false,
+            deny_field: false,
+        });
+        let registry = StaticDependentDeletes::<DefaultBackend>::new(
+            RuntimeDependentLimits::new(10, 4).unwrap(),
+        )
+        .register::<GuardedParent>()
+        .unwrap()
+        .register::<GuardedChild>()
+        .unwrap();
+        let schema = schema_builder(db)
+            .data(AuthSubject::new("test-principal"))
+            .data(registry)
+            .finish();
+        let response = schema
+            .execute("mutation { deleteGuardedParent(id:\"parent\") { success } }")
+            .await;
+        assert_eq!(response.errors.len(), 1, "{:?}", response.errors);
+        assert_eq!(
+            response.errors[0]
+                .extensions
+                .as_ref()
+                .and_then(|extensions| extensions.get("code").cloned()),
+            Some(async_graphql::Value::from("AUTHORIZATION_MISCONFIGURED"))
+        );
+        // No dependent was prepared: neither the root nor the child ran a hook.
+        assert!(hook.0.lock().unwrap().is_empty());
+        for table in ["guarded_parents", "guarded_children"] {
+            let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(count, 1, "{table}");
+        }
+    }
+}

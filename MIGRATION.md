@@ -10,6 +10,345 @@ supersedes: []
 
 # Migration Guide
 
+## 0.125.0 to 0.126.0
+
+ORM runtime/macros 0.126.0 and operation catalogue 0.7.3 ship together with AI
+0.133.0, tool profiles 0.22.0 and router 0.11.0. Upgrade ORM and macros
+together. Each subsection below names whether a schema or data migration is
+needed; the AI, tool-profile and router changes have their own migration
+guides under `crates/`.
+
+### agql-auth 0.26.0
+
+ORM/macros 0.126.0, AI 0.133.0 and router 0.11.0 select published Auth
+`v0.26.0` instead of `v0.24.0`. The annotated tag
+`04c514280d685a8975d63a8a6b9a1e0db11f503f` peels to commit
+`7d016f6a6bc3e697382e2e05865f596862189240`. Every direct Auth host must select:
+
+```toml
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", tag = "v0.26.0", version = "0.26.0" }
+```
+
+Cargo treats each tag as a separate source, so Auth types from a `v0.24.0`
+selector no longer match the types that ORM `auth-agql`, AI and router
+`auth-agql` accept. Change the host selector, run `cargo update -p agql-auth`,
+and check that `cargo tree -i agql-auth` shows one `0.26.0` source locked to the
+commit above. Upgrade ORM/macros, AI and router together.
+
+Auth 0.25.0 and 0.26.0 only add opt-in APIs: the fixed-audience delegation
+facade and the refresh-reuse grace window, which is off by default. The ORM,
+AI and router do not use either, so the Auth update itself changes none of
+their behavior. A host that
+wants them opts in on its own `AuthService`. Auth's own dependencies are
+unchanged, so no other locked package moves. No data, schema or wire migration
+is needed.
+
+The [official release](https://github.com/Dastari/agql-auth/releases/tag/v0.26.0)
+was published on 2026-11-08. Its `v0.26.0.json` records version `0.26.0`, the
+commit above and Auth Cargo.lock SHA-256
+`95588a5ad25f2df4068fa2e44e17f28c67f9e97457d9dc7dd8da7da1e3b98a58`. The JSON
+SHA-256 is `c62b84823b125183db6824cbd69866b5f97c9b7c5273efd3bdb1a200f87af7d2`,
+matching the release's `SHA256SUMS`. The workspace release manifest retains
+the tag and full locked commit together.
+
+### Row policy on the rows generated writes target, write and return
+
+Upgrade runtime and macros together. No schema or data migration is required.
+Review hosts that install a `RowPolicy`; nothing changes without one, or with a
+policy that allows every write.
+
+**The written row must be writable.** `can_write_row` now also receives the
+row as a generated create, update, upsert or bulk update wrote it, before the
+`After` hook, and a refusal rolls the write back with `FORBIDDEN`. This applies
+to GraphQL, repository and transaction writes on every key shape. A policy that
+allowed creating or moving rows it would refuse to write afterwards now refuses
+those writes. For example, a tenant check over a client-writable tenant column
+now rejects a create or update that sets another tenant. Repository and hook
+writes call the policy with `ctx = None` and `EntityAccessSurface::Repository`
+for the new row too, so a policy that refuses that surface now also refuses
+repository creates. Allow the rows the host writes there, or write them through
+a path the policy allows. Dependent-delete `set_null` updates check the nulled
+child row as well. A refused written row also blocks the commit of a
+caller-owned transaction: `commit_and_emit` rolls back and returns `FORBIDDEN`,
+and `Database::transaction` returns `TransactionError::Rejected` with
+`FORBIDDEN`, even when the caller ignored the error. A generated write that
+fails after changing rows, such as an `After` hook refusal, now also leaves a
+caller-owned transaction uncommittable. Hosts that caught such errors and
+committed anyway must roll back instead.
+
+**A `write_policy` needs a row provider in every mode.** An entity that
+declares an entity-level `write_policy` uses it as its row write policy key.
+In every `AuthorizationMode`, its generated creates, updates, upserts, deletes
+and bulk writes now fail with `AUTHORIZATION_MISCONFIGURED` before any lookup
+when no `RowPolicy` is installed. So do retention purges, and dependent
+deletes check every registered entity before selecting any row. Install one; a provider that allows the rows
+of entities without row isolation is enough. Most affected:
+
+- **Create-only and append-only entities** that declare only an entity-level
+  `write_policy` and run without a row provider. Their creates previously
+  succeeded in every mode, and now fail.
+- **`LegacyPermissive` databases** without a row provider. Their writes of
+  these entities were previously allowed.
+- **`ExplicitPolicyForAllExposedOperations` databases** without a row
+  provider. Updates and deletes of these entities previously returned
+  `FORBIDDEN`, or "Entity not found" for an absent id, and now return
+  `AUTHORIZATION_MISCONFIGURED`.
+
+Under `DeclaredPoliciesRequired`, updates and deletes already failed this way
+after their lookup; they now fail before it, and creates fail too.
+
+**Payloads need read access.** Generated GraphQL update and upsert payloads
+release the committed row only to callers who may read it. When `can_read_row`
+refuses the row, the entity field is `null` and `success` stays `true`. When
+the caller lacks entity read access, the mutation field fails with an error
+carrying `extensions.outcome = "committed"` and is `null` as a whole. So a
+principal with entity-level write access but no read access that selects the
+entity now gets an error. Such clients must select only `success`, and read the
+row through a query they are allowed to make.
+
+**Hidden rows look missing.** A generated GraphQL update or delete of a row the
+caller can neither read nor write now returns `success: false` with
+`error: "Entity not found"` instead of a `FORBIDDEN` error. `updateMany` and
+`deleteMany` leave such rows out instead of failing with `errorCode =
+"FORBIDDEN"`, so a filter that matched them now succeeds for the caller's other
+rows. A bulk write that relied on such a row to refuse the whole operation
+needs a narrower filter or a host-side check. Readable rows the caller may not
+write still refuse as before. `can_read_row` (and the entity read policy) now
+run for each targeted row that `can_write_row` refuses, so both must be cheap
+and side-effect free. Repository helpers are unchanged here. For a dependent
+delete only the root row is treated this way. A hidden dependent child still
+makes the whole delete refuse with `Dependent delete refused`.
+
+See [row policy on generated writes](docs/reference/graphql-orm/strict-authorization.md#row-policy-on-generated-writes).
+
+### RLS drift validation compares PostgreSQL's rendering
+
+`validate_target` now compares RLS policy expressions as PostgreSQL parses them,
+so a freshly applied target validates clean. It is stricter elsewhere:
+
+- Any policy on an RLS entity or search-document table that the target does not
+  declare is an `Error`, including `FOR ALL` and restrictive policies. Move such
+  policies into the entity's `#[graphql_rls]` predicates or drop them. Policies
+  graphql-orm generated for operations you have since removed are dropped when
+  you re-apply the target.
+- A declared policy must be `PERMISSIVE`, apply to `PUBLIC` and keep its
+  command.
+- The `graphql_orm` helper functions must match what the plan installs;
+  re-apply the target if validation reports one as differing.
+- The validating role needs the `TEMP` privilege on the database (PostgreSQL
+  grants it to `PUBLIC` by default). Without it, or on a read-only standby,
+  policies are reported as "could not be compared". The temporary views are
+  rolled back, but DDL event triggers and `log_statement = 'ddl'` see them.
+- Expressions are compared with `search_path` pinned to `pg_catalog, pg_temp`.
+  Custom `predicate = "..."` text must schema-qualify every function, operator,
+  table and type outside `pg_catalog`: write `app.is_member(tenant_id)`, not
+  `is_member(tenant_id)`. Unqualified names are reported as "could not be
+  compared". Re-apply the target after qualifying them.
+
+`#[graphql_rls]` `tenant` and `owner` must name a stored column of the entity,
+by field name or `db_column`, written exactly as declared (a quoted
+`db_column` keeps its quotes). Qualified or other values no longer compile. Generated predicates now wrap each condition in parentheses; the
+policies PostgreSQL stores are unchanged, so re-applying is not required for
+validation to pass.
+
+Clients that matched `INTERNAL_ERROR` for row-level security `WITH CHECK`
+refusals now receive `FORBIDDEN`.
+
+### MSSQL writes on tables with triggers
+
+Upgrade runtime and macros together. SQLite and PostgreSQL are unchanged.
+
+Generated MSSQL writes, including compare-and-swap, now succeed on tables with
+enabled triggers. Code that runs raw MSSQL batches of several statements through
+`execute` and reads `rows_affected` now receives the final statement's count
+instead of the sum of every statement's count. Run one statement per `execute`
+when each count matters. Counts from statements inside triggers are no longer
+included.
+
+### Primary-key default ordering and strict attribute options
+
+Upgrade ORM/macros together.
+
+- An entity without `default_sort` orders by its primary-key columns, in
+  declaration order. Entities keyed by `id` keep their default. The old default
+  failed at runtime for any other key. You can remove `default_sort = "<key> ASC"`
+  workarounds or keep them. Regenerate stored catalogues and SDL documentation
+  for affected entities, because `EntityMetadata::default_sort` changes.
+- An entity whose `id` key has `db_column` and no `#[primary_key]` now reports
+  that column in `PRIMARY_KEYS` and its default sort.
+- `#[backup(...)]` accepts only one of `include`, `exclude` or `redact`.
+  `#[transform(...)]` accepts only `write` and `read`. `#[filterable(...)]`
+  accepts only `type`. Remove any other option, which was previously ignored.
+- Malformed `#[graphql(...)]` metadata on an entity, field or described custom
+  root argument is a compile error. Fix the reported syntax.
+- An upsert target that names only the first column of a composite primary key
+  is rejected. Name the whole key, or a declared unique index.
+
+No data migration is needed.
+
+### Entities without public write fields
+
+Upgrade runtime and macros together. No change is required: every entity that
+compiled with 0.125.0 generates the same schema.
+
+An entity whose create or update input would have no public member now
+compiles. Before, `GraphQLOperations` emitted an empty input object for it,
+even under `generated_mutations: "none"`, and the build failed. Such an entity
+now has no `Create<Entity>Input` with `create` and `upsert`, or no
+`Update<Entity>Input` with `update` and `update_many`. Its reads, relations,
+`<entity>Changed` subscription, Rust repository inputs and repository or
+transaction writes are generated as for any entity. If you worked around the
+failure with a placeholder writable column or argument, you can remove it.
+See [read-only and zero-input entities](docs/reference/graphql-orm/macros-and-attributes.md#read-only-and-zero-input-entities).
+
+### Keyset read-visibility declarations and diagnostics
+
+Upgrade ORM/macros together, with operation catalog 0.7.3. No data migration is
+needed, and existing schemas build unchanged unless a row policy opts in to the
+new declaration.
+
+- `RowPolicy::read_visibility_capability(entity_name, policy_key)` is a new
+  defaulted method. Its default, `ReadVisibilityCapability::Unknown`, keeps
+  every Keyset root registered, as before. Declare `Complete` when
+  `read_visibility` returns `Complete` or `Unrestricted` for the entity on some
+  GraphQL requests, or `ResidualOnly` when it never does.
+- With `ResidualOnly` declared, the generated builders refuse an exposed Keyset
+  root for that entity. `try_schema_builder` and
+  `try_schema_builder_with_limits` return the `KeysetReadPolicyError`, and
+  `schema_builder` and `schema_builder_with_limits` panic with it. Leave
+  `keyset` out of the entity's `query_shapes` (for example
+  `query_shapes = "single,list,scan"`), install finite scan bounds and page with
+  the scan root.
+- `Database::keyset_read_policy_diagnostics` lists Keyset roots whose entity is
+  still `Unknown`. Such a root works only on requests where `read_visibility`
+  returns `Complete` or `Unrestricted`. Log the list at startup, or treat a
+  non-empty list as an error to make the check strict.
+- A schema built directly with `Schema::build` skips the check. Call
+  `Database::validate_keyset_read_policies` with the catalog and entity
+  metadata. It also refuses a Keyset root whose entity is missing from that
+  metadata.
+- A GraphQL Keyset request refused for `CallbackOnly` or `Prefilter` visibility
+  keeps code `AUTHORIZATION_MISCONFIGURED`. Its message is now
+  `KEYSET_READ_VISIBILITY_REFUSAL_MESSAGE`, and it carries the `reason`
+  extension `KEYSET_REQUIRES_COMPLETE_READ_VISIBILITY`. Clients that match the
+  previous message, "authorization is misconfigured", should match the code or
+  reason instead.
+- A `schema_roots!` module now also defines `try_schema_builder` and
+  `try_schema_builder_with_limits`. Rename any host function with those names
+  in the same module.
+
+See [Keyset roots and residual-only read policies](docs/reference/graphql-orm/macros-and-attributes.md#keyset-roots-and-residual-only-read-policies).
+
+### Generated catalogue arguments follow the SDL
+
+Upgrade runtime, macros and graphql-orm-operation-catalog 0.7.3 together. No
+database or schema migration is needed.
+
+- Each generated catalogue descriptor now lists exactly the arguments its
+  resolver declares. On an entity with a managed `version`, the update and
+  delete descriptors gain the optional `expectedVersion` argument. Remove any
+  host code that copied argument metadata from the SDL into the catalogue or
+  router descriptor, or recomputed descriptor fingerprints after doing so.
+- Argument descriptions now equal the SDL descriptions. Subscription `key` and
+  `keys` arguments carry the resolver text, and the scan root's `where` and
+  `page` arguments now have descriptions in the SDL too.
+- An entity that serves no generated writes, such as a composite-key or
+  entity-level read-only entity in a writable schema, still contributes one
+  hidden mutation field. It was `gomCompositeKeyWritesUnavailable`, shared by
+  every such entity and absent from the catalogue. It is now
+  `gom{Entity}WritesUnavailable`, one per entity, and it is a catalogue
+  operation of the new category `GeneratedGraphqlOperationCategory::Unavailable`.
+  It has no leading underscore, because routers that drop underscore root
+  fields from their binding contract would refuse its descriptor.
+  Its authorization requirement is
+  `GraphqlAuthorizationRequirement::unsatisfiable()`, which no caller can hold,
+  its AI mutation policy is `Prohibited`, and its resolver refuses every
+  request with `FORBIDDEN`. Routers accept the generated descriptor whether
+  or not they exempt underscore root fields, so a composite-key entity no
+  longer needs to be
+  excluded from generated mutations. `OperationAssuranceRegistry::builder`
+  records it as exempt, so strict classification needs no host entry, and
+  `ensure_schema_sdl` now covers it. `GraphqlOperationCatalog::operations()`
+  lists it even where the schema root omits mutations, unexposed like the
+  root's other mutations; use `exposed_operations()` to read what is served.
+  Update any SDL snapshot that includes the old name, and any exhaustive
+  handling of catalogue categories.
+- The finished SDL changes, through the scan descriptions and the
+  placeholder, and so do the generated catalogue, authorization and
+  router-export fingerprints for every entity. After upgrading:
+  1. regenerate and republish router descriptors from the new build;
+  2. regenerate AI capability manifests and tool profiles from the new SDL;
+  3. re-approve pending AI approvals. An approval records the target schema
+     fingerprint, so one created before the upgrade is refused after it. This
+     fails closed.
+
+### NodeId on complex objects with computed fields
+
+Upgrade runtime and macros together. No data conversion is required.
+
+A `#[graphql(complex)]` `SimpleObject` entity with handwritten computed fields
+can now declare `node_id` and a managed version without `GraphQLRelations`.
+Mark the entity `#[graphql_orm(compose_complex_object)]` and replace
+`#[ComplexObject]` on the handwritten impl with `#[graphql_complex_object]`:
+
+```rust,ignore
+#[graphql_orm::graphql_policy_object]
+#[derive(GraphQLEntity, GraphQLOperations, SimpleObject, Clone)]
+#[graphql(complex)]
+#[graphql_orm(compose_complex_object)]
+#[graphql_entity(table = "records", plural = "Records", node_id)]
+struct Record {
+    #[primary_key]
+    id: String,
+    scope_json: String,
+}
+
+#[graphql_complex_object]
+impl Record {
+    async fn scope(&self) -> async_graphql::Result<TypedScope> {
+        Ok(serde_json::from_str(&self.scope_json)?)
+    }
+}
+```
+
+The `SimpleObject` scalar fields apply column read policies only with
+`#[graphql_orm::graphql_policy_object]` before the derives, as on any complex
+`SimpleObject` entity; keep or add it when a column declares `read_policy` or the
+database has a field policy.
+
+Two declarations that compiled before now fail to compile:
+
+- A `#[graphql_complex_object]` resolver whose GraphQL name is `NodeId`, or
+  `RecordVersion` on an entity with a managed version. The composed object
+  generates these fields, and the handwritten resolver would be served in place of
+  the policy-checked generated one. The handwritten resolver must be removed. A
+  struct field or derived struct field published under one of these names is
+  refused too, because `SimpleObject` resolves struct fields first.
+
+  The published name follows async-graphql. An explicit
+  `#[graphql(name = "…")]` is used as written, and also names every
+  `derived(...)` copy of that field or method. Otherwise the identifier (the
+  method or field name, or a derived copy's `derived(name = "…")`) is renamed by
+  `rename_fields`: the impl's for complex-object methods, the struct's for struct
+  fields, camelCase by default either way. The `field-case-*` features do not
+  apply. Derived copies of a struct field are published even when the field
+  itself is skipped; a skipped method has no published copies.
+
+  `name`, `derived(name)` and `rename_fields` values must be string literals,
+  also when passed through `macro_rules!`, and every `#[graphql(...)]` on these
+  fields and methods must parse.
+
+  The generated fields now also resolve ahead of any handwritten composed field,
+  including fields of a handwritten `#[graphql(flatten)]` object, and are the
+  advertised definitions.
+- `compose_complex_object` with `node_id` and relation fields whose handwritten
+  impl uses `#[ComplexObject]` rather than `#[graphql_complex_object]`. The
+  composed object was never mounted, so `NodeId` was declared as a key without a
+  field. Switch the impl to `#[graphql_complex_object]`.
+
+A `GraphQLRelations` derive kept only to mount these fields on an entity with no
+relation fields may be removed; keeping it adds nothing.
+
 ## AI 0.130.0 to 0.131.0: legacy delegated stored principal references
 
 Runs and session-title work queued before 0.130.0 with a delegated or

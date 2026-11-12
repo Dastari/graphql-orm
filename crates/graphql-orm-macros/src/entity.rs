@@ -145,6 +145,8 @@ pub(crate) struct RlsOperationMetadata {
     pub(crate) scope: Option<String>,
     pub(crate) tenant_column: Option<String>,
     pub(crate) owner_column: Option<String>,
+    pub(crate) tenant_span: Option<proc_macro2::Span>,
+    pub(crate) owner_span: Option<proc_macro2::Span>,
 }
 
 pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<EntityMetadata> {
@@ -777,20 +779,22 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;
                     metadata.graphql_rename_fields = Some(lit.value());
-                } else if meta.input.peek(syn::Token![=]) {
-                    // async-graphql owns foreign object options such as guards.
-                    let _: syn::Expr = meta.value()?.parse()?;
+                    Ok(())
+                } else {
+                    // async-graphql owns the other object options (guards, complex, ...).
+                    skip_foreign_option(&meta)
                 }
-                Ok(())
             })?;
         } else if attr.path().is_ident("serde") {
             attr.parse_nested_meta(|meta| {
-                if meta.path.is_ident("rename_all") {
+                if meta.path.is_ident("rename_all") && meta.input.peek(syn::Token![=]) {
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;
                     metadata.serde_rename_all = Some(lit.value());
+                    Ok(())
+                } else {
+                    skip_foreign_option(&meta)
                 }
-                Ok(())
             })?;
         }
     }
@@ -1079,8 +1083,10 @@ fn parse_rls_metadata(attr: &syn::Attribute) -> syn::Result<RlsMetadata> {
                 operation.scope = Some(lit.value());
             } else if op.path.is_ident("tenant") {
                 operation.tenant_column = Some(lit.value());
+                operation.tenant_span = Some(lit.span());
             } else if op.path.is_ident("owner") {
                 operation.owner_column = Some(lit.value());
+                operation.owner_span = Some(lit.span());
             } else {
                 return Err(syn::Error::new(
                     op.path.span(),
@@ -1203,6 +1209,48 @@ fn option_lit_tokens(value: Option<&str>, span: proc_macro2::Span) -> proc_macro
             quote! { Some(#lit) }
         })
         .unwrap_or_else(|| quote! { None })
+}
+
+/// Require every `tenant` and `owner` of `#[graphql_rls]` to name a stored
+/// column of the entity, so generated policies compare a real column.
+fn validate_rls_columns<'a>(
+    rls: &RlsMetadata,
+    fields: impl IntoIterator<Item = &'a Field>,
+) -> syn::Result<()> {
+    let mut columns = Vec::new();
+    for field in fields {
+        let meta = parse_field_metadata(field)?;
+        if meta.is_relation || meta.skip_db {
+            continue;
+        }
+        let Some(ident) = field.ident.as_ref() else {
+            continue;
+        };
+        columns.push(meta.db_column.clone().unwrap_or_else(|| ident.to_string()));
+    }
+    for operation in [&rls.select, &rls.insert, &rls.update, &rls.delete]
+        .into_iter()
+        .flatten()
+    {
+        for (option, column, span) in [
+            ("tenant", &operation.tenant_column, operation.tenant_span),
+            ("owner", &operation.owner_column, operation.owner_span),
+        ] {
+            let (Some(column), Some(span)) = (column, span) else {
+                continue;
+            };
+            if !columns.iter().any(|candidate| candidate == column) {
+                return Err(syn::Error::new(
+                    span,
+                    format!(
+                        "graphql_rls {option} = \"{column}\" must name a stored column of this entity; expected one of: {}",
+                        columns.join(", ")
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn rls_operation_policy_tokens(
@@ -1550,21 +1598,35 @@ pub(crate) fn graphql_relation_target_checks(
     Ok(quote! { #(#assertions)* })
 }
 
-pub(crate) fn has_graphql_complex(attrs: &[syn::Attribute]) -> bool {
-    attrs.iter().any(|attr| {
-        if !attr.path().is_ident("graphql") {
-            return false;
-        }
+/// Whether any `#[graphql(...)]` attribute declares `complex`, wherever it
+/// appears among the attribute's other options. Malformed `graphql` metadata is
+/// an error rather than a silent "not complex".
+pub(crate) fn has_graphql_complex(attrs: &[syn::Attribute]) -> syn::Result<bool> {
+    let mut complex = false;
+    for attr in attrs.iter().filter(|attr| attr.path().is_ident("graphql")) {
+        attr.parse_nested_meta(|option| {
+            if option.path.is_ident("complex") && !option.input.peek(syn::Token![=]) {
+                complex = true;
+            }
+            skip_foreign_option(&option)
+        })?;
+    }
+    Ok(complex)
+}
 
-        attr.parse_args_with(
-            syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
-        )
-        .is_ok_and(|options| {
-            options
-                .iter()
-                .any(|option| option.path().is_ident("complex"))
-        })
-    })
+/// Consume the value of an option this crate does not read from an attribute
+/// that another crate owns (async-graphql, serde): `key = expression` or
+/// `key(...)`. Leaving it unconsumed would stop `parse_nested_meta` before the
+/// options that follow, so their order would decide whether they are seen.
+pub(crate) fn skip_foreign_option(option: &syn::meta::ParseNestedMeta<'_>) -> syn::Result<()> {
+    if option.input.peek(syn::Token![=]) {
+        let _: syn::Expr = option.value()?.parse()?;
+    } else if option.input.peek(syn::token::Paren) {
+        let content;
+        syn::parenthesized!(content in option.input);
+        let _: proc_macro2::TokenStream = content.parse()?;
+    }
+    Ok(())
 }
 
 // ============================================================================
@@ -2206,18 +2268,38 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                                 .iter()
                                 .any(|name| option.path().is_ident(name))
                         });
+                        // Read `name` wherever it appears; the nested parse
+                        // below stops at the first option it does not consume.
+                        for option in &options {
+                            if let syn::Meta::NameValue(value) = option
+                                && value.path.is_ident("name")
+                            {
+                                meta.graphql_name = Some(crate::composed_identity::string_literal(
+                                    &value.value,
+                                    "name",
+                                )?);
+                            }
+                        }
                     }
-                    let _ = attr.parse_nested_meta(|nested| {
+                    attr.parse_nested_meta(|nested| {
                         if nested.path.is_ident("name") {
                             let value = nested.value()?;
                             let lit: syn::LitStr = value.parse()?;
                             meta.graphql_name = Some(lit.value());
                         } else if nested.path.is_ident("skip") {
+                            // Any `skip` keeps the legacy ORM input exclusion, even
+                            // `skip = false`; `has_graphql_object_skip` decides the
+                            // object getter. Consume the value so later options parse.
+                            if nested.input.peek(syn::Token![=]) {
+                                nested.value()?.parse::<syn::LitBool>()?;
+                            }
                             meta.skip_input = true;
                             meta.graphql_skip = true;
+                        } else {
+                            skip_foreign_option(&nested)?;
                         }
                         Ok(())
-                    });
+                    })?;
                 }
                 "graphql_orm" => {
                     attr.parse_nested_meta(|nested| {
@@ -2612,40 +2694,48 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                     })?;
                 }
                 "backup" => {
-                    let _ = attr.parse_nested_meta(|nested| {
-                        if nested.path.is_ident("include") {
-                            meta.backup_policy = Some("include".to_string());
-                        } else if nested.path.is_ident("exclude") {
-                            meta.backup_policy = Some("exclude".to_string());
-                        } else if nested.path.is_ident("redact") {
-                            meta.backup_policy = Some("redact".to_string());
+                    attr.parse_nested_meta(|nested| {
+                        let policy = ["include", "exclude", "redact"]
+                            .into_iter()
+                            .find(|policy| nested.path.is_ident(policy))
+                            .ok_or_else(|| {
+                                nested.error(
+                                    "unsupported backup option; expected include, exclude, or redact",
+                                )
+                            })?;
+                        if meta.backup_policy.replace(policy.to_string()).is_some() {
+                            return Err(nested.error("a field takes one backup policy"));
                         }
                         Ok(())
-                    });
+                    })?;
                 }
                 "serde" => {
-                    let _ = attr.parse_nested_meta(|nested| {
-                        if nested.path.is_ident("rename") {
+                    attr.parse_nested_meta(|nested| {
+                        if nested.path.is_ident("rename") && nested.input.peek(syn::Token![=]) {
                             let value = nested.value()?;
                             let lit: syn::LitStr = value.parse()?;
                             meta.serde_name = Some(lit.value());
+                            Ok(())
+                        } else {
+                            skip_foreign_option(&nested)
                         }
-                        Ok(())
-                    });
+                    })?;
                 }
                 "primary_key" => {
                     meta.is_primary_key = true;
                 }
                 "filterable" => {
                     if let Meta::List(_) = &attr.meta {
-                        let _ = attr.parse_nested_meta(|nested| {
+                        attr.parse_nested_meta(|nested| {
                             if nested.path.is_ident("type") {
                                 let value = nested.value()?;
                                 let lit: syn::LitStr = value.parse()?;
                                 meta.filterable = Some(lit.value());
+                                Ok(())
+                            } else {
+                                Err(nested.error("unsupported filterable option; expected type"))
                             }
-                            Ok(())
-                        });
+                        })?;
                     } else {
                         meta.filterable = Some("string".to_string());
                     }
@@ -2781,7 +2871,7 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                     meta.order = false;
                 }
                 "transform" => {
-                    let _ = attr.parse_nested_meta(|nested| {
+                    attr.parse_nested_meta(|nested| {
                         if nested.path.is_ident("write") {
                             let value = nested.value()?;
                             let lit: syn::LitStr = value.parse()?;
@@ -2790,9 +2880,12 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                             let value = nested.value()?;
                             let lit: syn::LitStr = value.parse()?;
                             meta.transform_read = Some(lit.value());
+                        } else {
+                            return Err(nested
+                                .error("unsupported transform option; expected write or read"));
                         }
                         Ok(())
-                    });
+                    })?;
                 }
                 "input_only" => {
                     meta.input_only = true;
@@ -3139,7 +3232,7 @@ fn validate_relation_delete_policy(
     let source_column = field_meta
         .relation_from
         .clone()
-        .unwrap_or_else(|| "id".to_string());
+        .unwrap_or_else(|| default_relation_source_field(parsed_fields));
     let source_field = parsed_fields
         .iter()
         .find(|parsed| {
@@ -3228,6 +3321,51 @@ pub(crate) fn maybe_wrap_read_transform(
     }
 }
 
+/// The physical column of an implicit `id` key: the persisted scalar field
+/// named `id`, when no field declares `#[primary_key]`.
+pub(crate) fn implicit_id_db_column(parsed_fields: &[ParsedField]) -> Option<String> {
+    parsed_fields
+        .iter()
+        .find(|parsed| {
+            !parsed.meta.is_relation
+                && !parsed.meta.skip_db
+                && parsed
+                    .field
+                    .ident
+                    .as_ref()
+                    .is_some_and(|ident| ident == "id")
+        })
+        .map(|parsed| {
+            parsed
+                .meta
+                .db_column
+                .clone()
+                .unwrap_or_else(|| "id".to_string())
+        })
+}
+
+/// The Rust field that a relation without `from` uses as its source key: the
+/// first `#[primary_key]` field, or the implicit `id` key.
+pub(crate) fn default_relation_source_field(parsed_fields: &[ParsedField]) -> String {
+    parsed_fields
+        .iter()
+        .find(|parsed| parsed.meta.is_primary_key)
+        .and_then(|parsed| parsed.field.ident.as_ref())
+        .map(|ident| ident.to_string())
+        .unwrap_or_else(|| "id".to_string())
+}
+
+/// `ORDER BY` text for an omitted `default_sort`: every primary-key column in
+/// declaration order. `columns` hold each key's identity as `PRIMARY_KEYS`
+/// stores it.
+fn primary_key_default_sort(backend: BackendKind, columns: &[String]) -> String {
+    columns
+        .iter()
+        .map(|column| backend_render_identifier_path(backend, column))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 // ============================================================================
 // GraphQL Entity Code Generation
 // ============================================================================
@@ -3238,11 +3376,15 @@ pub(crate) fn generate_graphql_entity(
     generate_entity_impl(input, false, false)
 }
 
-/// Reuse the generated identity resolvers inside the relation-owned complex object.
+/// Reuse the generated identity resolvers inside a composed complex object.
+///
+/// Returns the resolvers and the GraphQL names of the fields they serve.
 pub(crate) fn generate_complex_identity_fields(
     input: &DeriveInput,
-) -> syn::Result<proc_macro2::TokenStream> {
-    generate_entity_impl(input, false, true)
+) -> syn::Result<(proc_macro2::TokenStream, Vec<&'static str>)> {
+    let mut names = Vec::new();
+    let fields = generate_entity_tokens(input, false, Some(&mut names))?;
+    Ok((fields, names))
 }
 
 /// Require the operations derive whenever a Federation key is declared.
@@ -3288,6 +3430,21 @@ fn generate_entity_impl(
     schema_only_override: bool,
     identity_only: bool,
 ) -> syn::Result<proc_macro2::TokenStream> {
+    let mut names = Vec::new();
+    generate_entity_tokens(
+        input,
+        schema_only_override,
+        identity_only.then_some(&mut names),
+    )
+}
+
+/// With `identity_names`, return only the identity resolvers and record their names.
+fn generate_entity_tokens(
+    input: &DeriveInput,
+    schema_only_override: bool,
+    identity_names: Option<&mut Vec<&'static str>>,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let identity_only = identity_names.is_some();
     let struct_name = &input.ident;
     let entity_meta = parse_entity_metadata(&input.attrs)?;
     let backend = resolve_backend(
@@ -3519,7 +3676,7 @@ fn generate_entity_impl(
             quote! { Some(#lit) }
         })
         .unwrap_or_else(|| quote! { None });
-    let legacy_graphql_complex = has_graphql_complex(&input.attrs);
+    let legacy_graphql_complex = has_graphql_complex(&input.attrs)?;
     // Rustc removes derive lists before invoking derives. Valid externally owned
     // objects opt into complex or schema_only, so check those ownership modes.
     // Pure GraphQLSchemaEntity metadata does not own a GraphQL read contract.
@@ -3537,6 +3694,9 @@ fn generate_entity_impl(
     }
     let raw_table_name = entity_meta.table_name.as_deref().unwrap_or("unknown");
     let table_name = backend_quote_identifier_path(backend, raw_table_name);
+    if let Some(rls) = entity_meta.rls.as_ref() {
+        validate_rls_columns(rls, fields.iter())?;
+    }
     let rls_impl = rls_impl_tokens(
         struct_name,
         &struct_name.to_string(),
@@ -3549,13 +3709,6 @@ fn generate_entity_impl(
         .as_deref()
         .map(|s| s.to_string())
         .unwrap_or_else(|| format!("{}s", struct_name));
-    let raw_default_sort = entity_meta.default_sort.as_deref().unwrap_or("id");
-    let default_sort =
-        if backend == BackendKind::Mssql && !raw_default_sort.chars().any(char::is_whitespace) {
-            backend_quote_identifier_path(backend, raw_default_sort)
-        } else {
-            raw_default_sort.to_string()
-        };
     let composite_unique_indexes = entity_meta
         .unique_composite
         .iter()
@@ -3751,6 +3904,7 @@ fn generate_entity_impl(
     let mut order_by_rust_names = std::collections::BTreeSet::new();
     let mut object_field_methods = Vec::new();
     let mut identity_field_methods = Vec::new();
+    let mut identity_field_names = Vec::new();
     // GraphQL name of the managed record version field, also served as
     // `RecordVersion`; none for CAS-only versions and unversioned entities.
     let mut managed_version_api_name: Option<String> = None;
@@ -3973,7 +4127,7 @@ fn generate_entity_impl(
                         field_meta
                             .relation_from
                             .clone()
-                            .unwrap_or_else(|| "id".to_string()),
+                            .unwrap_or_else(|| default_relation_source_field(&parsed_fields)),
                     ]
                 });
                 let target_columns = field_meta.relation_to_fields.clone().unwrap_or_else(|| {
@@ -4033,7 +4187,7 @@ fn generate_entity_impl(
                 let source_column = source_columns
                     .first()
                     .cloned()
-                    .unwrap_or_else(|| "id".to_string());
+                    .unwrap_or_else(|| default_relation_source_field(&parsed_fields));
                 let target_column = target_columns
                     .first()
                     .cloned()
@@ -5236,6 +5390,7 @@ fn generate_entity_impl(
                 };
                 object_field_methods.push(method.clone());
                 identity_field_methods.push(method);
+                identity_field_names.push(RECORD_VERSION_FIELD);
             }
         }
 
@@ -5289,14 +5444,23 @@ fn generate_entity_impl(
         });
     }
 
-    let default_primary_key = if backend == BackendKind::Mssql {
-        backend_quote_identifier_path(backend, "id")
-    } else {
-        "id".to_string()
-    };
     if primary_key_cols.is_empty() {
-        primary_key_cols.push(default_primary_key);
+        // Without `#[primary_key]`, an `id` field is the key; use its physical
+        // column so a `db_column` rename reaches every key consumer.
+        let implicit_key =
+            implicit_id_db_column(&parsed_fields).unwrap_or_else(|| "id".to_string());
+        primary_key_cols.push(backend_quote_identifier_path(backend, &implicit_key));
     }
+    // An omitted default sort orders by every primary-key column, in
+    // declaration order. A key that is not named `id` must not fall back to a
+    // literal `id` column (#404).
+    let default_sort = match entity_meta.default_sort.as_deref() {
+        Some(raw) if backend == BackendKind::Mssql && !raw.chars().any(char::is_whitespace) => {
+            backend_quote_identifier_path(backend, raw)
+        }
+        Some(raw) => raw.to_string(),
+        None => primary_key_default_sort(backend, &primary_key_cols),
+    };
     let primary_key = primary_key_cols.first().map(String::as_str).unwrap_or("id");
     let primary_key_literals: Vec<syn::LitStr> = primary_key_cols
         .iter()
@@ -5528,12 +5692,14 @@ fn generate_entity_impl(
         let method = crate::federation::node_id_field_tokens(&struct_name_str, &parts);
         object_field_methods.push(method.clone());
         identity_field_methods.push(method);
+        identity_field_names.push("NodeId");
         subscription_field_policy_arms.push(quote! {
             "NodeId" => Some(("__gom_node_id", true, None)),
         });
     }
 
-    if identity_only {
+    if let Some(names) = identity_names {
+        names.extend(identity_field_names);
         return Ok(quote! { #(#identity_field_methods)* });
     }
 
@@ -5541,10 +5707,100 @@ fn generate_entity_impl(
         Some(name) if !schema_only => quote! { Some(#name) },
         _ => quote! { None },
     };
-    let object_impl = if legacy_graphql_complex && entity_meta.node_id.is_some() {
+    // Reported beside the expansion so one misnamed field is the only error.
+    let identity_field_error = crate::composed_identity::check_struct_fields(
+        &parsed_fields,
+        externally_owned_object,
+        graphql_rename_fields,
+        serde_rename_all,
+        entity_meta.node_id.is_some(),
+        managed_version_api_name.is_some(),
+    )
+    .err()
+    .map(|error| error.to_compile_error());
+    // `GraphQLSchemaEntity` has no generated object, but a relation-less composed
+    // entity still needs its composed object, which `GraphQLRelations` leaves to
+    // the entity derive.
+    let schema_entity_composed = if schema_only_override
+        && !entity_meta.schema_only
+        && crate::relations::entity_owns_composed_object(
+            legacy_graphql_complex,
+            &entity_meta,
+            &parsed_fields,
+        ) {
+        let (identity_fields, identity_names) = generate_complex_identity_fields(input)?;
+        if identity_names.is_empty() {
+            quote! {}
+        } else {
+            let composed =
+                crate::relations::composed_object_tokens(input, identity_fields, &identity_names);
+            quote! {
+                #composed
+
+                impl #struct_name {
+                    #[doc(hidden)]
+                    pub fn __gom_generated_relation_fields() -> &'static [&'static str] {
+                        &[]
+                    }
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+    // A composed object reaches the schema only through `#[graphql_complex_object]`,
+    // whichever derive emits it, so a declared key needs that impl too.
+    let composed_mounted = if !schema_only
+        && legacy_graphql_complex
+        && entity_meta.compose_complex_object
+        && entity_meta.node_id.is_some()
+    {
+        quote! {
+            const _: () = {
+                const fn assert_mounted<
+                    T: ::graphql_orm::graphql::orm::GeneratedComplexObjectMounted,
+                >() {}
+                assert_mounted::<#struct_name>();
+            };
+        }
+    } else {
+        quote! {}
+    };
+    let object_impl = if !schema_only
+        && !identity_field_methods.is_empty()
+        && crate::relations::entity_owns_composed_object(
+            legacy_graphql_complex,
+            &entity_meta,
+            &parsed_fields,
+        ) {
+        // No relation resolvers exist, so mount the identity fields here for
+        // `#[graphql_complex_object]` to flatten beside the handwritten ones.
+        let (identity_fields, identity_names) = generate_complex_identity_fields(input)?;
+        let composed =
+            crate::relations::composed_object_tokens(input, identity_fields, &identity_names);
+        quote! {
+            #composed
+            #composed_mounted
+
+            impl #struct_name {
+                #[doc(hidden)]
+                pub fn __gom_generated_relation_fields() -> &'static [&'static str] {
+                    &[]
+                }
+            }
+        }
+    } else if legacy_graphql_complex && entity_meta.node_id.is_some() {
         // The relation derive owns the ComplexObject implementation. Require it
         // rather than accepting a resolvable key whose field was never emitted.
-        quote! { const _: () = #struct_name::__GOM_COMPLEX_IDENTITY_FIELDS; }
+        quote! {
+            const _: () = {
+                const fn assert_mounted<
+                    T: ::graphql_orm::graphql::orm::GeneratedComplexIdentityFields,
+                >() {}
+                assert_mounted::<#struct_name>();
+            };
+            #composed_mounted
+        }
     } else if schema_only || legacy_graphql_complex {
         quote! {}
     } else {
@@ -5559,6 +5815,8 @@ fn generate_entity_impl(
 
     if schema_only {
         return Ok(quote! {
+            #schema_entity_composed
+            #identity_field_error
             #relation_readability_impl
             #(#relation_target_checks)*
             #rls_impl
@@ -5804,6 +6062,7 @@ fn generate_entity_impl(
         }
 
         #object_impl
+        #identity_field_error
 
         impl ::graphql_orm::graphql::orm::DatabaseOrderBy for #order_by_name {
             fn to_sql_order(&self) -> Option<String> {
@@ -8509,6 +8768,200 @@ mod object_visibility_tests {
                     assert!(error.to_string().contains("unreadable SimpleObject field"));
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod default_sort_tests {
+    use super::*;
+    #[cfg(feature = "sqlite")]
+    use syn::parse_quote;
+
+    #[test]
+    fn primary_key_default_sort_renders_every_key_column_per_backend() {
+        assert_eq!(
+            primary_key_default_sort(BackendKind::Sqlite, &["region".into(), "slot".into()]),
+            "region, slot"
+        );
+        // Reserved or spaced physical names stay valid SQL.
+        assert_eq!(
+            primary_key_default_sort(BackendKind::Postgres, &["order".into(), "line no".into()]),
+            "\"order\", \"line no\""
+        );
+        // MSSQL key identities are already bracketed and are not re-quoted.
+        let keys =
+            ["region", "slot"].map(|key| backend_quote_identifier_path(BackendKind::Mssql, key));
+        assert_eq!(
+            primary_key_default_sort(BackendKind::Mssql, &keys),
+            "[region], [slot]"
+        );
+        assert_eq!(
+            primary_key_default_sort(
+                BackendKind::Mssql,
+                &[backend_quote_identifier_path(BackendKind::Mssql, "id")]
+            ),
+            "[id]"
+        );
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn id_default_expansion_is_byte_identical_to_explicit_id() {
+        let implicit: DeriveInput = parse_quote! {
+            #[graphql_entity(backend = "sqlite", table = "records")]
+            struct Record {
+                #[primary_key]
+                #[sortable]
+                id: String,
+            }
+        };
+        let explicit: DeriveInput = parse_quote! {
+            #[graphql_entity(backend = "sqlite", table = "records", default_sort = "id")]
+            struct Record {
+                #[primary_key]
+                #[sortable]
+                id: String,
+            }
+        };
+        assert_eq!(
+            generate_graphql_entity(&implicit).unwrap().to_string(),
+            generate_graphql_entity(&explicit).unwrap().to_string(),
+        );
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn implicit_id_key_uses_its_physical_column() {
+        let input: DeriveInput = parse_quote! {
+            #[graphql_entity(backend = "sqlite", table = "records")]
+            struct Record {
+                #[graphql_orm(db_column = "record_key")]
+                id: String,
+                label: String,
+            }
+        };
+        let generated = generate_graphql_entity(&input).unwrap().to_string();
+        assert!(
+            generated.contains("const DEFAULT_SORT : & 'static str = \"record_key\""),
+            "{generated}"
+        );
+        assert!(
+            generated
+                .contains("const PRIMARY_KEYS : & 'static [& 'static str] = & [\"record_key\"]"),
+            "{generated}"
+        );
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn composite_key_default_follows_declaration_order() {
+        let input: DeriveInput = parse_quote! {
+            #[graphql_entity(backend = "sqlite", table = "allocations")]
+            struct Allocation {
+                #[primary_key]
+                #[graphql_orm(db_column = "slot_number")]
+                slot: i64,
+                #[primary_key]
+                region: String,
+            }
+        };
+        let generated = generate_graphql_entity(&input).unwrap().to_string();
+        assert!(
+            generated.contains("const DEFAULT_SORT : & 'static str = \"slot_number, region\""),
+            "{generated}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod attribute_composition_tests {
+    use super::*;
+    use syn::parse::Parser;
+    use syn::parse_quote;
+
+    #[test]
+    fn complex_is_found_in_any_option_order() {
+        for attrs in [
+            vec![parse_quote!(#[graphql(rename_fields = "PascalCase", complex)])],
+            vec![parse_quote!(#[graphql(complex, rename_fields = "PascalCase")])],
+            vec![
+                parse_quote!(#[graphql(rename_fields = "PascalCase")]),
+                parse_quote!(#[graphql(complex)]),
+            ],
+            vec![
+                parse_quote!(#[graphql(guard = "Guard::new()", concrete(name = "A", params(i32)), complex)]),
+            ],
+        ] {
+            let attrs: Vec<syn::Attribute> = attrs;
+            assert!(has_graphql_complex(&attrs).unwrap());
+        }
+        let plain: Vec<syn::Attribute> =
+            vec![parse_quote!(#[graphql(rename_fields = "PascalCase")])];
+        assert!(!has_graphql_complex(&plain).unwrap());
+        let malformed: Vec<syn::Attribute> =
+            vec![parse_quote!(#[graphql(rename_fields = "PascalCase" complex)])];
+        assert!(has_graphql_complex(&malformed).is_err());
+    }
+
+    #[test]
+    fn entity_options_follow_foreign_options_with_values() {
+        let input: DeriveInput = parse_quote! {
+            #[graphql_entity(table = "records")]
+            #[graphql(concrete(name = "Record", params(i32)), rename_fields = "snake_case")]
+            #[serde(tag = "kind", rename_all = "camelCase")]
+            struct Record {
+                #[primary_key]
+                id: String,
+            }
+        };
+        let metadata = parse_entity_metadata(&input.attrs).unwrap();
+        assert_eq!(
+            metadata.graphql_rename_fields.as_deref(),
+            Some("snake_case")
+        );
+        assert_eq!(metadata.serde_rename_all.as_deref(), Some("camelCase"));
+    }
+
+    #[test]
+    fn field_options_follow_foreign_options_with_values() {
+        let field: Field = Field::parse_named
+            .parse2(quote::quote! {
+                #[graphql(deprecation = "replaced", validator(min_length = 1), name = "renamed")]
+                #[serde(skip_serializing_if = "String::is_empty", rename = "serdeName")]
+                label: String
+            })
+            .unwrap();
+        let meta = parse_field_metadata(&field).unwrap();
+        assert_eq!(meta.graphql_name.as_deref(), Some("renamed"));
+        assert_eq!(meta.serde_name.as_deref(), Some("serdeName"));
+
+        let field: Field = Field::parse_named
+            .parse2(quote::quote! {
+                #[graphql(skip = false)]
+                #[serde(rename(serialize = "a", deserialize = "b"))]
+                label: String
+            })
+            .unwrap();
+        let meta = parse_field_metadata(&field).unwrap();
+        // `skip = false` keeps the legacy input exclusion (skip_false_compat_ui).
+        assert!(meta.graphql_skip && meta.skip_input);
+        assert!(!has_graphql_object_skip(&field));
+        assert_eq!(meta.serde_name, None);
+    }
+
+    #[test]
+    fn owned_field_attributes_reject_unknown_or_malformed_options() {
+        for tokens in [
+            quote::quote! { #[backup(encrypt)] label: String },
+            quote::quote! { #[backup(include, redact)] label: String },
+            quote::quote! { #[transform(write = "lower", encode = "x")] label: String },
+            quote::quote! { #[filterable(type = "string", strict)] label: String },
+            quote::quote! { #[graphql(name = "a" skip)] label: String },
+            quote::quote! { #[serde(rename = 3)] label: String },
+        ] {
+            let field: Field = Field::parse_named.parse2(tokens.clone()).unwrap();
+            assert!(parse_field_metadata(&field).is_err(), "{tokens}");
         }
     }
 }

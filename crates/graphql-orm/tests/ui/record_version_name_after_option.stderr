@@ -1,0 +1,5 @@
+error: this entity has a managed record version, which is also served as the generated `RecordVersion` field; rename this field
+  --> tests/ui/record_version_name_after_option.rs:10:5
+   |
+10 |     #[graphql(deprecation = "old", name = "RecordVersion")]
+   |     ^

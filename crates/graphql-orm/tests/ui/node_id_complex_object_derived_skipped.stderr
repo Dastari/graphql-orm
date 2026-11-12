@@ -1,0 +1,6 @@
+error: derived field `alias` is published as `NodeId`, which this entity serves as a generated identity field; choose another name
+  --> tests/ui/node_id_complex_object_derived_skipped.rs:27:5
+   |
+27 | /     #[graphql(skip, name = "NodeId", derived(name = "alias", into = "String"))]
+28 | |     legacy: String,
+   | |__________________^

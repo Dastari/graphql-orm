@@ -226,6 +226,11 @@ impl OrmPublicError {
         }
         match error {
             sqlx::Error::RowNotFound => Self::not_found(),
+            // PostgreSQL `insufficient_privilege`: a row-level security
+            // `WITH CHECK` refusal or a missing privilege.
+            sqlx::Error::Database(db) if db.code().as_deref() == Some("42501") => {
+                Self::new(OrmErrorCode::Forbidden).with_internal(error.to_string())
+            }
             sqlx::Error::Database(db)
                 if db.is_unique_violation()
                     || db.is_foreign_key_violation()

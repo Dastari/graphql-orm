@@ -3,18 +3,28 @@ title: graphql-orm-router
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-11-09
+last_reviewed: 2026-11-12
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # graphql-orm-router
 
-The current workspace selects published Auth `v0.24.0`, peeled to
-`1f4b4bfb6d052d04e6c80b80cb7aa3d0c2ebaacd`. Direct Auth consumers must select
+The current workspace selects published Auth `v0.26.0`, peeled to
+`7d016f6a6bc3e697382e2e05865f596862189240`. Direct Auth consumers must select
 that same tag and refresh their locks to one source; matching the commit alone
 does not unify revision and tag selectors. See the
-[published Auth selection](../../MIGRATION.md#published-agql-auth-0240-selection).
+[Auth 0.26.0 migration](../../MIGRATION.md#agql-auth-0260).
+
+Version 0.11.0 builds the optional `auth-agql` feature on published Auth
+`v0.26.0`; hosts passing Auth types to `AgqlAuthenticationProvider::new` or
+`AgqlScopeMatcher::new` must select the same tag. It also turns introspection
+off by default. Opt in with `"introspection": true`. On an authenticated
+router, enabled introspection needs a valid bearer. Preflight now refuses
+undescribed root fields. Scope-template values must be one plain segment.
+WebSocket admission keeps sockets that have not authenticated in a separate
+`maxPendingConnections` budget, sized by default from the attempt rate and a
+3-second init deadline. See [MIGRATION.md](MIGRATION.md#0100-to-0110).
 
 Version 0.10.0 serves subscriptions only through the public
 `graphql-transport-ws` gateway. HTTP SSE and multipart subscription requests

@@ -181,6 +181,11 @@ struct RegisteredOperation {
     classification: OperationAssuranceClassification,
 }
 
+/// Exemption reason recorded for generated placeholder roots, which refuse
+/// every request.
+pub const GENERATED_PLACEHOLDER_EXEMPTION: &str =
+    "generated placeholder root; every request is refused";
+
 /// Mutable builder for generated and custom operation classification.
 #[derive(Clone, Debug)]
 pub struct OperationAssuranceRegistryBuilder {
@@ -205,12 +210,23 @@ impl OperationAssuranceRegistryBuilder {
             .map(|operation| {
                 let coordinate =
                     OperationAssuranceCoordinate::new(operation.kind(), operation.field_name());
+                // A generated placeholder refuses every request, so it needs
+                // no assurance and no host classification.
+                let classification = if operation.category()
+                    == crate::graphql::orm::GeneratedGraphqlOperationCategory::Unavailable
+                {
+                    OperationAssuranceClassification::Exempt {
+                        reason: GENERATED_PLACEHOLDER_EXEMPTION.to_owned(),
+                    }
+                } else {
+                    OperationAssuranceClassification::Unclassified
+                };
                 let registered = RegisteredOperation {
                     operation_id: operation.fingerprint().to_string(),
                     coordinate: coordinate.clone(),
                     origin: OperationAssuranceOrigin::Generated,
                     actor_class: AssuranceActorClass::Interactive,
-                    classification: OperationAssuranceClassification::Unclassified,
+                    classification,
                 };
                 (coordinate, registered)
             })

@@ -142,7 +142,8 @@ impl Composed {
     }
 }
 
-// Pin the existing manual RecordVersion workaround with no NodeId opt-in.
+// A composed entity with no NodeId opt-in serves the generated RecordVersion;
+// a handwritten `RecordVersion` resolver here is a compile error.
 #[derive(
     GraphQLEntity,
     GraphQLOperations,
@@ -197,9 +198,8 @@ pub struct Legacy {
 }
 #[graphql_complex_object]
 impl Legacy {
-    #[graphql(name = "RecordVersion")]
-    async fn record_version(&self) -> i64 {
-        self.version
+    async fn label(&self) -> String {
+        self.name.clone()
     }
 }
 

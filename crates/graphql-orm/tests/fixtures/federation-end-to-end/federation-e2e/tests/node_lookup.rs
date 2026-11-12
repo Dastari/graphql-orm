@@ -128,7 +128,7 @@ async fn post(
 
 const SELECTION: &str = "__typename NodeId \
     ... on Zone { id name RecordVersion selfZone { NodeId } } \
-    ... on Sensor { id name } \
+    ... on Sensor { id name nameWords { words } } \
     ... on Calibration { sensorId slot label }";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -215,6 +215,8 @@ async fn node_and_nodes_resolve_each_type_from_its_owning_subgraph() {
     assert_eq!(nodes[0]["selfZone"]["NodeId"], zone_north);
     assert_eq!(nodes[1]["__typename"], "Sensor");
     assert_eq!(nodes[1]["name"], "colliding sensor");
+    assert_eq!(nodes[1]["NodeId"], sensor_north.as_str());
+    assert_eq!(nodes[1]["nameWords"]["words"], json!(["colliding", "sensor"]));
     assert_eq!(nodes[2]["label"], "high");
     // Denied, missing, mismatched, unknown and malformed are all plain null.
     for (index, node) in nodes.iter().enumerate().skip(3) {

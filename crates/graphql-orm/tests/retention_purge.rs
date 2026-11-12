@@ -43,9 +43,26 @@ struct RetentionFact {
     affected: i32,
 }
 
+/// A retention entity that also declares an entity write policy.
+#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[graphql_entity(
+    table = "guarded_retained_events",
+    plural = "GuardedRetainedEvents",
+    append_only = true,
+    retention_purge = "guarded_retained.purge",
+    write_policy = "guarded_retained.write"
+)]
+struct GuardedRetainedEvent {
+    #[primary_key]
+    id: graphql_orm::uuid::Uuid,
+    #[filterable(type = "string")]
+    #[sortable]
+    kind: String,
+}
+
 schema_roots! {
     query_custom_ops: [],
-    entities: [RetainedEvent],
+    entities: [RetainedEvent, GuardedRetainedEvent],
 }
 
 #[derive(Clone)]
@@ -767,5 +784,74 @@ async fn retention_predicate_values_are_bound_not_interpolated()
     let remaining = RetainedEvent::query(database.pool()).fetch_all().await?;
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0].kind, "safe");
+    Ok(())
+}
+
+#[derive(Clone)]
+struct AllowGuardedRetention;
+
+impl graphql_orm::graphql::orm::EntityPolicy<SqliteBackend> for AllowGuardedRetention {
+    fn can_access_entity<'a>(
+        &'a self,
+        _ctx: Option<&'a async_graphql::Context<'_>>,
+        _db: &'a Database<SqliteBackend>,
+        _entity_name: &'static str,
+        _policy_key: Option<&'static str>,
+        _kind: EntityAccessKind,
+        _surface: EntityAccessSurface,
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(true) })
+    }
+}
+
+#[tokio::test]
+async fn retention_purge_requires_the_row_provider_of_a_write_policy_entity()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
+        .await?
+        .with_authorization_mode(graphql_orm::graphql::auth::AuthorizationMode::LegacyPermissive);
+    database.set_entity_policy(AllowGuardedRetention);
+    let entities = [GuardedRetainedEvent::metadata()];
+    let plan = database
+        .schema()
+        .plan_migration_to_entities("guarded-retention-v1", "guarded retention", &entities)
+        .await?;
+    database
+        .schema()
+        .apply_migration(&plan, ApplyOptions::default())
+        .await?;
+    sqlx::query("INSERT INTO guarded_retained_events (id, kind) VALUES (?, 'expired')")
+        .bind(graphql_orm::uuid::Uuid::new_v4().to_string())
+        .execute(database.pool())
+        .await?;
+    let outcome = database
+        .retention_transaction(|maintenance| {
+            Box::pin(async move {
+                maintenance
+                    .purge::<GuardedRetainedEvent>(
+                        GuardedRetainedEventWhereInput {
+                            kind: Some(StringFilter {
+                                eq: Some("expired".to_string()),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        },
+                        MutationLimit::new(10)?,
+                    )
+                    .await
+                    .map_err(Into::into)
+            })
+        })
+        .await;
+    match outcome {
+        Err(TransactionError::Rejected(error)) => {
+            assert_eq!(error.code, OrmErrorCode::AuthorizationMisconfigured)
+        }
+        other => panic!("purge without a row provider must be refused: {other:?}"),
+    }
+    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM guarded_retained_events")
+        .fetch_one(database.pool())
+        .await?;
+    assert_eq!(remaining, 1);
     Ok(())
 }

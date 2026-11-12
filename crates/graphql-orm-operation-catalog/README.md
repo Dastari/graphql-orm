@@ -10,6 +10,13 @@ supersedes: []
 
 # `graphql-orm-operation-catalog`
 
+Version `0.7.3` adds:
+
+- `GeneratedGraphqlQueryShape` and `query_shape()` on generated and resolved descriptors, so adapters can tell Keyset roots from bounded Scan roots that share the `KeysetList` category. Shapes take part in no fingerprint or encoding.
+- `GeneratedGraphqlOperationCategory::Unavailable` for generated placeholder roots, `GraphqlAuthorizationRequirement::unsatisfiable()` and `GRAPHQL_UNSATISFIABLE_SCOPE`.
+
+The category and shape enums are non-exhaustive, so existing code compiles unchanged, and existing catalogue fingerprints are unchanged. No data migration is needed. See the [root migration guide](../../MIGRATION.md#generated-catalogue-arguments-follow-the-sdl).
+
 Version `0.7.2` pins legacy default descriptions for patch compatibility. ORM/macros 0.98 explicitly supply corrected SDL descriptions through existing constructors; consumers of 0.95/0.96 keep their descriptions and fingerprints when updating only this package. No data migration is needed.
 
 Version `0.7.1` adds pure receiver-purpose bindings and canonical hash functions with golden vectors. Existing catalogue fingerprints and signed encodings are unchanged; no data migration is needed.

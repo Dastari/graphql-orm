@@ -26,8 +26,8 @@ dependencies = [
 
 [[package]]
 name = "agql-auth"
-version = "0.24.0"
-source = "git+https://github.com/Dastari/agql-auth.git?tag=v0.24.0#1f4b4bfb6d052d04e6c80b80cb7aa3d0c2ebaacd"
+version = "0.26.0"
+source = "git+https://github.com/Dastari/agql-auth.git?tag=v0.26.0#7d016f6a6bc3e697382e2e05865f596862189240"
 dependencies = [
  "argon2",
  "async-graphql",
@@ -1284,7 +1284,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm"
-version = "0.125.0"
+version = "0.126.0"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -1315,7 +1315,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-ai"
-version = "0.132.0"
+version = "0.133.0"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -1345,7 +1345,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-ai-tool-profiles"
-version = "0.21.1"
+version = "0.22.0"
 dependencies = [
  "async-graphql",
  "async-graphql-parser",
@@ -1360,7 +1360,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-macros"
-version = "0.125.0"
+version = "0.126.0"
 dependencies = [
  "convert_case",
  "proc-macro2",
@@ -1371,7 +1371,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-operation-catalog"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "serde",
  "serde_json",

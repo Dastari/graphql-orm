@@ -36,11 +36,33 @@ where
     H: Fn(GraphqlRequest) -> F + Send + Sync + 'static,
     F: Future<Output = String> + Send + 'static,
 {
+    bind_and_serve(sdl, |_| None, handler).await
+}
+
+/// Like [`serve`], and also serves at `GET /descriptor` the router protocol
+/// descriptor that `describe` builds for the bound address.
+pub async fn serve_with_descriptor<D, H, F>(sdl: String, describe: D, handler: H) -> SocketAddr
+where
+    D: FnOnce(SocketAddr) -> String,
+    H: Fn(GraphqlRequest) -> F + Send + Sync + 'static,
+    F: Future<Output = String> + Send + 'static,
+{
+    bind_and_serve(sdl, |address| Some(describe(address)), handler).await
+}
+
+async fn bind_and_serve<D, H, F>(sdl: String, describe: D, handler: H) -> SocketAddr
+where
+    D: FnOnce(SocketAddr) -> Option<String>,
+    H: Fn(GraphqlRequest) -> F + Send + Sync + 'static,
+    F: Future<Output = String> + Send + 'static,
+{
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .await
         .expect("bind a loopback subgraph listener");
     let address = listener.local_addr().expect("loopback listener address");
+    let descriptor = describe(address);
     let sdl = Arc::new(sdl);
+    let descriptor = Arc::new(descriptor);
     let handler = Arc::new(handler);
     tokio::spawn(async move {
         loop {
@@ -48,9 +70,10 @@ where
                 return;
             };
             let sdl = sdl.clone();
+            let descriptor = descriptor.clone();
             let handler = handler.clone();
             tokio::spawn(async move {
-                let _ = handle(stream, sdl, handler).await;
+                let _ = handle(stream, sdl, descriptor, handler).await;
             });
         }
     });
@@ -60,6 +83,7 @@ where
 async fn handle<H, F>(
     mut stream: TcpStream,
     sdl: Arc<String>,
+    descriptor: Arc<Option<String>>,
     handler: Arc<H>,
 ) -> std::io::Result<()>
 where
@@ -103,6 +127,11 @@ where
 
     let (status, content_type, payload) = if request_line.starts_with("GET /sdl ") {
         ("200 OK", "text/plain; charset=utf-8", sdl.to_string())
+    } else if let (true, Some(descriptor)) = (
+        request_line.starts_with("GET /descriptor "),
+        descriptor.as_ref(),
+    ) {
+        ("200 OK", "application/json", descriptor.clone())
     } else if request_line.starts_with("POST /graphql ") {
         let response = handler(GraphqlRequest { body, headers }).await;
         ("200 OK", "application/json; charset=utf-8", response)

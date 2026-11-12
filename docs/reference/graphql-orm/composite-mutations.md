@@ -3,7 +3,7 @@ title: "Typed Composite-Key and Bounded Mutations"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -90,7 +90,9 @@ fields are absent from public GraphQL inputs.
 Repository `upsert` starts a state-machine transaction automatically. A caller-owned transaction
 must use `TransactionMode::StateMachine`; `MutationContext::upsert` fails closed in `Default` mode.
 Complete-key update/delete decisions use a backend write lock and keep row-policy evaluation, input
-transformation, hooks, and exact-key DML on the same pinned transaction.
+transformation, hooks, and exact-key DML on the same pinned transaction. Every inserted, updated or
+upserted row must also satisfy `can_write_row` as written, before the `After` hook; see
+[row policy on generated writes](strict-authorization.md#row-policy-on-generated-writes).
 
 Input transforms run before conflict evaluation. A before-create mutation hook can run on the
 losing side of a concurrent insert race, but no after hook, change event, search update, or deferred
