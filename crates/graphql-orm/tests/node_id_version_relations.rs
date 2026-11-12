@@ -281,7 +281,7 @@ mod runtime {
                 "action changeKind sourceEntity",
                 &format!("{} {} {}", f("action"), f("changeKind"), f("sourceEntity")),
             );
-        Request::new(query).data("test-user".to_owned())
+        Request::new(query).data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
     }
 
     fn object<'a>(sdl: &'a str, name: &str) -> &'a str {

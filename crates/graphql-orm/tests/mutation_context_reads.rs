@@ -325,7 +325,7 @@ async fn mutation_hooks_can_read_related_rows_on_the_active_transaction()
     let hook = TransactionalReadHook::default();
     let db = graphql_orm::db::Database::with_mutation_hook(pool.clone(), hook.clone());
     let schema = schema_builder(db.clone())
-        .data("test-user".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
         .finish();
 
     let user = HookUser::insert(

@@ -230,7 +230,7 @@ async fn staged_field_rename_keeps_legacy_db_column_and_preserves_data()
     }
 
     let schema = schema_builder(database.clone())
-        .data("test-user".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
         .finish();
     let sdl = schema.sdl();
     assert!(sdl.contains("roles: [String!]!"));

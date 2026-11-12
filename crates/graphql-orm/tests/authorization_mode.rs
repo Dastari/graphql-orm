@@ -121,15 +121,74 @@ async fn strict_mode_succeeds_when_provider_registered() -> Result<(), Box<dyn s
     let mut database =
         Database::new(pool).with_authorization_mode(AuthorizationMode::DeclaredPoliciesRequired);
     database.set_entity_policy(AllowAllEntityPolicy);
-    let schema = schema_builder(database)
-        .data(AuthSubject::new("user-1"))
-        .finish();
+    let query = "{ strictDocs { edges { node { id name } } } strictDoc(id: \"1\") { name } }";
 
-    let response = schema
-        .execute("{ strictDocs { edges { node { id name } } } }")
+    // The entity read key is also its row key: lists and point reads both
+    // need a row provider.
+    let response = schema_builder(database.clone())
+        .data(AuthSubject::new("user-1"))
+        .finish()
+        .execute(query)
+        .await;
+    assert!(
+        response
+            .errors
+            .iter()
+            .any(|error| error.message == "authorization is misconfigured"),
+        "{:?}",
+        response.errors
+    );
+
+    database.set_row_policy(AllowAllRowPolicy);
+    let response = schema_builder(database)
+        .data(AuthSubject::new("user-1"))
+        .finish()
+        .execute(query)
         .await;
     assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let json = response.data.into_json()?;
+    assert_eq!(json["strictDocs"]["edges"][0]["node"]["name"], "alpha");
+    assert_eq!(json["strictDoc"]["name"], "alpha");
     Ok(())
+}
+
+struct AllowAllRowPolicy;
+
+impl RowPolicy for AllowAllRowPolicy {
+    fn read_visibility<'a>(
+        &'a self,
+        _: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessSurface,
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<ReadVisibility>> {
+        Box::pin(async { Ok(ReadVisibility::Unrestricted) })
+    }
+
+    fn can_read_row<'a>(
+        &'a self,
+        _: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessSurface,
+        _: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(true) })
+    }
+
+    fn can_write_row<'a>(
+        &'a self,
+        _: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessSurface,
+        _: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(true) })
+    }
 }
 
 #[tokio::test]

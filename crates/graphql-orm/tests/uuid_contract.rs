@@ -143,7 +143,7 @@ async fn uuid_ids_are_first_class_across_crud_migrations_and_hooks()
     let hook = RecordingHook::default();
     let database = graphql_orm::db::Database::with_mutation_hook(pool.clone(), hook.clone());
     let schema = schema_builder(database)
-        .data("test-user".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
         .finish();
 
     let created = schema

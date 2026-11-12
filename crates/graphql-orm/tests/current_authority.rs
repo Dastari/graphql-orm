@@ -336,7 +336,9 @@ async fn fixture_for(
     schema_subject: Option<AuthSubject>,
     schema_identity: bool,
 ) -> (AppSchema, Arc<Host>, AgqlAcceptedRequest) {
-    fixture_config(principal, schema_subject, schema_identity, None).await
+    // The entity read key needs a row provider in this mode; the fixture's
+    // grants explicitly unrestricted visibility.
+    fixture_config(principal, schema_subject, schema_identity, Some(false)).await
 }
 async fn fixture_config(
     principal: AuthPrincipal,

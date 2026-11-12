@@ -228,7 +228,7 @@ async fn mssql_generated_queries_read_existing_tables() -> Result<(), Box<dyn st
     assert_eq!(projected[&30], "900719925474.0993");
     assert_eq!(projected[&40], "0.0000");
     let schema = schema_builder(database)
-        .data("test-user".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
         .finish();
 
     let list_response = schema

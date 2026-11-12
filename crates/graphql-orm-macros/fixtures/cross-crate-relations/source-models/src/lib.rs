@@ -279,6 +279,44 @@ mod tests {
             name_allowed: true,
         }
     }
+    /// Explicitly unrestricted rows for every entity.
+    struct UnrestrictedRows;
+    impl RowPolicy<DefaultBackend> for UnrestrictedRows {
+        fn read_visibility<'a>(
+            &'a self,
+            _: Option<&'a Context<'_>>,
+            _: &'a Database<DefaultBackend>,
+            _: &'static str,
+            _: Option<&'static str>,
+            _: EntityAccessSurface,
+        ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<ReadVisibility>>
+        {
+            Box::pin(async { Ok(ReadVisibility::Unrestricted) })
+        }
+        fn can_read_row<'a>(
+            &'a self,
+            _: Option<&'a Context<'_>>,
+            _: &'a Database<DefaultBackend>,
+            _: &'static str,
+            _: Option<&'static str>,
+            _: EntityAccessSurface,
+            _: &'a (dyn std::any::Any + Send + Sync),
+        ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+            Box::pin(async { Ok(true) })
+        }
+        fn can_write_row<'a>(
+            &'a self,
+            _: Option<&'a Context<'_>>,
+            _: &'a Database<DefaultBackend>,
+            _: &'static str,
+            _: Option<&'static str>,
+            _: EntityAccessSurface,
+            _: &'a (dyn std::any::Any + Send + Sync),
+        ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+            Box::pin(async { Ok(true) })
+        }
+    }
+
     struct CurrentRowPolicy {
         allowed: Arc<AtomicBool>,
         complete: bool,
@@ -479,7 +517,7 @@ mod tests {
             EmptySubscription,
         )
         .data(db.clone())
-        .data("fixture-user".to_owned());
+        .data(graphql_orm::graphql::auth::AuthSubject::new("fixture-user"));
         if loader {
             builder
                 .data(DataLoader::new(
@@ -550,7 +588,7 @@ mod tests {
             EmptySubscription,
         )
         .data(db.clone())
-        .data("fixture-user".to_owned())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("fixture-user"))
         .data(loader)
         .finish();
         let current = schema
@@ -611,7 +649,7 @@ mod tests {
         .await?;
         let schema = Schema::build(SessionQueries, EmptyMutation, EmptySubscription)
             .data(db.clone())
-            .data("fixture-user".to_owned())
+            .data(graphql_orm::graphql::auth::AuthSubject::new("fixture-user"))
             .finish();
         let response = schema
             .execute("{ session(id: \"parent\") { id link: endpoint { id name } } }")
@@ -879,8 +917,10 @@ mod tests {
             .await?;
         }
         // Endpoint.name declares a field policy even in this batching fixture.
-        // Keep entity-only visibility unrestricted; no row callback is needed.
+        // Endpoint's read key needs a row provider; grant explicitly
+        // unrestricted visibility so no row callback is needed.
         db.set_field_policy(CurrentFieldPolicy);
+        db.set_row_policy(UnrestrictedRows);
         let db_pool = db.pool().clone();
         let schema = Schema::build(
             Query {
@@ -901,7 +941,7 @@ mod tests {
             EmptySubscription,
         )
         .data(db.clone())
-        .data("fixture-user".to_owned())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("fixture-user"))
         .data(identity("fixture-user"))
         .data(DataLoader::new(
             RelationLoader::<Endpoint, DefaultBackend>::new(db),
@@ -1001,7 +1041,7 @@ mod tests {
             EmptySubscription,
         )
         .data(db.clone())
-        .data("fixture-user".to_owned())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("fixture-user"))
         .data(DataLoader::new(
             RelationLoader::<Endpoint, DefaultBackend>::new(db),
             tokio::spawn,

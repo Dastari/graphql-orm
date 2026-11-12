@@ -545,7 +545,10 @@ where
         self,
         bound: impl FnOnce(PaginationConfig, Option<i64>) -> crate::Result<RepositoryBound>,
     ) -> crate::Result<Vec<T>> {
-        let (this, metadata) = self.authorize().await?;
+        let (mut this, metadata) = self.authorize().await?;
+        // The Repository-surface predicate narrows the SQL; every row still
+        // passes `can_read_row` below.
+        this.query = super::with_repository_read_visibility(this.db, this.query).await?;
         let config = this
             .db
             .pagination_config()
@@ -2837,7 +2840,7 @@ where
             .await
             .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
         if visibility.requires_residual_checks() {
-            return Err(invalid_aggregate(
+            return Err(residual_visibility_refused(
                 "aggregate group pages require complete SQL row authorization",
             ));
         }
@@ -2967,7 +2970,7 @@ where
             .await
             .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
         if visibility.requires_residual_checks() {
-            return Err(invalid_aggregate(
+            return Err(residual_visibility_refused(
                 "aggregate queries require complete SQL row authorization",
             ));
         }
@@ -3007,6 +3010,16 @@ where
 
 fn invalid_aggregate(message: &'static str) -> sqlx::Error {
     sqlx::Error::Protocol(message.to_owned())
+}
+
+/// A read path that needs SQL-only row visibility got a residual decision.
+pub(crate) fn residual_visibility_refused(message: &'static str) -> sqlx::Error {
+    crate::graphql::errors::sqlx_error_from_public(
+        crate::graphql::errors::OrmPublicError::new(
+            crate::graphql::errors::OrmErrorCode::AuthorizationMisconfigured,
+        )
+        .with_internal(message),
+    )
 }
 
 fn decode_group_value<B: OrmBackend>(
@@ -3656,9 +3669,8 @@ where
         .await
         .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
     if visibility.requires_residual_checks() {
-        return Err(sqlx::Error::Protocol(
-            "projection reads are denied when an application row policy requires a full entity; use complete SQL visibility or explicit unrestricted visibility"
-                .to_string(),
+        return Err(residual_visibility_refused(
+            "projection reads are denied when an application row policy requires a full entity; use complete SQL visibility or explicit unrestricted visibility",
         ));
     }
     Ok(visibility)

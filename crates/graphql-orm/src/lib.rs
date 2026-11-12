@@ -156,11 +156,11 @@
 //!
 //! Generated resolvers understand a project-agnostic
 //! [`graphql::auth::AuthSubject`] with an id, optional user id, roles, scopes,
-//! tenant id, token/session references, and safe claims. Applications can
-//! attach `AuthSubject` to async-graphql request data directly, or keep
-//! attaching the legacy `String` user id while migrating;
-//! [`graphql::auth::AuthExt::auth_subject`] upgrades legacy ids into subjects
-//! with empty roles and scopes.
+//! tenant id, token/session references, and safe claims. Applications attach
+//! `AuthSubject` to async-graphql request data. Only this typed value
+//! authenticates a request: other context data, including a bare `String`, is
+//! never read as a subject. [`graphql::auth::AuthSubject::new`] builds a
+//! subject with only an id.
 //!
 //! Generated list and single-record reads can declare distinct fixed policies:
 //!

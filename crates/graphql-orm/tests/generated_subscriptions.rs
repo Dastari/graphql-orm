@@ -124,7 +124,7 @@ async fn generated_subscriptions_work_without_manual_sender_registration()
     let _guard = test_mutex().lock().await;
     let pool = setup_pool().await?;
     let schema: TestSchema = schema_builder(graphql_orm::db::Database::new(pool))
-        .data("test-user".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
         .finish();
 
     let mut stream = Box::pin(
@@ -137,7 +137,7 @@ async fn generated_subscriptions_work_without_manual_sender_registration()
                 }
             }",
             )
-            .data("test-user".to_string()),
+            .data(graphql_orm::graphql::auth::AuthSubject::new("test-user")),
         ),
     );
     graphql_orm::futures::future::poll_fn(|cx| match stream.as_mut().poll_next(cx) {
@@ -162,7 +162,7 @@ async fn generated_subscriptions_work_without_manual_sender_registration()
                     }
                 }",
             )
-            .data("test-user".to_string()),
+            .data(graphql_orm::graphql::auth::AuthSubject::new("test-user")),
         )
         .await;
     assert!(created.errors.is_empty(), "{:?}", created.errors);
@@ -192,7 +192,7 @@ async fn generated_subscription_events_are_emitted_only_after_commit()
     let _guard = test_mutex().lock().await;
     let database = graphql_orm::db::Database::new(setup_pool().await?);
     let schema: TestSchema = schema_builder(database.clone())
-        .data("test-user".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
         .finish();
 
     let mut stream = Box::pin(
@@ -205,7 +205,7 @@ async fn generated_subscription_events_are_emitted_only_after_commit()
                     }
                 }",
             )
-            .data("test-user".to_string()),
+            .data(graphql_orm::graphql::auth::AuthSubject::new("test-user")),
         ),
     );
     graphql_orm::futures::future::poll_fn(|cx| match stream.as_mut().poll_next(cx) {
@@ -227,7 +227,7 @@ async fn generated_subscription_events_are_emitted_only_after_commit()
                     }
                 }",
             )
-            .data("test-user".to_string()),
+            .data(graphql_orm::graphql::auth::AuthSubject::new("test-user")),
         )
         .await;
     assert!(committed.errors.is_empty(), "{:?}", committed.errors);
@@ -258,7 +258,7 @@ async fn generated_subscription_events_are_emitted_only_after_commit()
                     }
                 }",
             )
-            .data("test-user".to_string()),
+            .data(graphql_orm::graphql::auth::AuthSubject::new("test-user")),
         )
         .await;
     let rolled_back_json = rolled_back.data.into_json()?;
@@ -296,7 +296,7 @@ async fn generated_subscriptions_fail_explicitly_when_database_runtime_is_missin
         MutationRoot::default(),
         SubscriptionRoot::default(),
     )
-    .data("test-user".to_string())
+    .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
     .extension(
         graphql_orm::graphql::subscriptions::GeneratedSubscriptionAdmission(vec![
             Record::__GOM_CHANGED_ROOT_NAME,
@@ -313,7 +313,7 @@ async fn generated_subscriptions_fail_explicitly_when_database_runtime_is_missin
                 }
             }",
             )
-            .data("test-user".to_string()),
+            .data(graphql_orm::graphql::auth::AuthSubject::new("test-user")),
         ),
     );
 

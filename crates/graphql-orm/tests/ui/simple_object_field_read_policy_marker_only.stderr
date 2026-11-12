@@ -1,0 +1,16 @@
+error[E0277]: `PolicyField` carries the policy-object marker without `#[graphql_orm::graphql_policy_object]`
+ --> tests/ui/simple_object_field_read_policy_marker_only.rs:9:8
+  |
+9 | struct PolicyField {
+  |        ^^^^^^^^^^^ apply `#[graphql_orm::graphql_policy_object]` before the derives instead of the marker
+  |
+help: the trait `graphql_orm::graphql::__policy_object::Installed` is not implemented for `PolicyField`
+ --> tests/ui/simple_object_field_read_policy_marker_only.rs:9:1
+  |
+9 | struct PolicyField {
+  | ^^^^^^^^^^^^^^^^^^
+note: required by a bound in `graphql_orm::graphql::__policy_object::assert_installed`
+ --> src/graphql/mod.rs
+  |
+  |     pub fn assert_installed<T: Installed>() {}
+  |                                ^^^^^^^^^ required by this bound in `assert_installed`

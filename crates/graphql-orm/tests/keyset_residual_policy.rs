@@ -195,7 +195,7 @@ const KEYSET_QUERY: &str = "{ residualItemsKeyset(page: { limit: 2 }) { edges { 
 async fn keyset_ids(db: Database) -> Vec<String> {
     let schema = try_schema_builder(db)
         .expect("Keyset root registers")
-        .data("test-user".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
         .finish();
     assert!(schema.sdl().contains("residualItemsKeyset("));
     let response = schema.execute(KEYSET_QUERY).await;
@@ -210,7 +210,9 @@ async fn keyset_ids(db: Database) -> Vec<String> {
 }
 
 async fn assert_runtime_keyset_refusal(db: Database) {
-    let schema = schema_builder(db).data("test-user".to_string()).finish();
+    let schema = schema_builder(db)
+        .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
+        .finish();
     let response = schema.execute(KEYSET_QUERY).await;
     assert_eq!(response.errors.len(), 1, "{:?}", response.errors);
     let error = &response.errors[0];
@@ -374,8 +376,32 @@ async fn declaration_never_bypasses_the_runtime_refusal() {
 }
 
 #[tokio::test]
-async fn no_row_policy_reports_nothing_and_serves_keyset() {
+async fn no_row_policy_refuses_a_keyed_keyset_root_outside_legacy_mode() {
+    // A declared read key defers every row to `can_read_row`, which needs a
+    // row provider outside `LegacyPermissive`.
     let db = database().await;
+    let findings = diagnostics(&db);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert_eq!(
+        findings[0].reason(),
+        KeysetReadPolicyReason::MissingRowPolicy
+    );
+    assert_eq!(findings[0].policy_key(), Some("item.read"));
+    assert!(findings[0].refuses_registration());
+    assert!(
+        db.validate_keyset_read_policies(
+            graphql_orm_operation_catalog(),
+            &graphql_orm_entity_metadata()
+        )
+        .is_err()
+    );
+    assert!(try_schema_builder(db).is_err());
+}
+
+#[tokio::test]
+async fn no_row_policy_in_legacy_mode_reports_nothing_and_serves_keyset() {
+    let mut db = database().await;
+    db.set_authorization_mode(AuthorizationMode::LegacyPermissive);
     assert!(diagnostics(&db).is_empty());
     assert_eq!(keyset_ids(db).await, ["hidden", "one"]);
 }

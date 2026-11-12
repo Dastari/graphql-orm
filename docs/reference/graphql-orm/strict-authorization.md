@@ -66,17 +66,49 @@ An entity that declares no policy has no such requirement: with `auth: "required
 subject can use its generated operations.
 [#287](https://github.com/Dastari/graphql-orm/issues/287) tracks requiring an explicit decision.
 
-Generated Federation entity-key resolvers check `RowPolicy::can_read_row` on
-each fetched entity, using its declared entity `read_policy` key. Subgraphs
+Generated single-row reads (get-by-key roots, `NodeId` lookups and Federation
+`_entities`) apply the same row authority as generated list reads. The SQL
+predicate from `RowPolicy::read_visibility` restricts the row, and
+`RowPolicy::can_read_row` runs when that decision is `CallbackOnly` or
+`Prefilter`. A `Complete` or `Unrestricted` decision is sufficient on its own,
+so a row outside a `Complete` predicate is `null` even when `can_read_row`
+would allow it. The default `read_visibility` is `CallbackOnly`, so a provider
+that implements only `can_read_row` keeps checking each fetched entity, using
+its declared entity `read_policy` key. Subgraphs
 with that key must install a row provider in addition to the entity provider.
 The row decision must authorize the typed row using current request authority.
 The [disposable zones subgraph](../../../crates/graphql-orm/tests/fixtures/federation-end-to-end/zones-subgraph/src/lib.rs)
 uses a synthetic forwarded-scope header as test input for both providers and
 denies row writes. Production providers must derive decisions from authenticated
 current authority; an arbitrary forwarded header does not establish that authority.
-Collection/relation paths that obtain `Unrestricted` visibility without a row
-provider retain their entity-policy-only contract. That visibility behavior
-does not bypass the Federation resolver's independent per-row check.
+Without a row provider, an entity that declares a `read_policy` key no longer
+reads as `Unrestricted` outside `LegacyPermissive`. Under
+`DeclaredPoliciesRequired` every read of it fails with
+`AUTHORIZATION_MISCONFIGURED` before its row decision is applied, so on
+get-by-key, `_entities` and `NodeId` an existing and a missing key answer
+alike. Under `ExplicitPolicyForAllExposedOperations` its visibility is
+`CallbackOnly`, so every read defers to `can_read_row`, which refuses:
+single-row reads return `null`, a list or search root with an authorized scan
+configuration returns no rows, and paths that need SQL-only visibility (offset
+lists and search roots without a scan configuration, relation filters and
+counts, aggregates and group pages, projections, repository counts and Keyset
+roots) fail with `AUTHORIZATION_MISCONFIGURED`. Generated `Changed`
+subscriptions for such an entity silently deliver no events in either mode;
+the runtime prints one warning per process to standard error. Entities without
+a key keep `Unrestricted` visibility and their entity-policy-only contract.
+
+Generated mutation payloads release the committed row under the same
+authority: after the commit it is re-read by key under the
+`GraphqlMutation`-surface predicate, the re-read row is the one checked and
+released, and it is withheld (`null`, with `success: true`) outside it.
+Repository reads (`find_by_key`, `RepositoryQuery`, and
+`MutationContext::query()` reads in a transaction) add the `Repository`-surface
+predicate to their SQL and still call `can_read_row` for every row;
+generated writes look up their target rows with an internal locking fetch that
+checks `can_read_row` only, and `find_by_key_in_mutation_context` wraps the same
+fetch for hosts as a trusted host surface. Errors from entity
+policies, `read_visibility` and `can_read_row` on these paths, Federation
+`_entities` and `NodeId` included, are sanitized like other callback errors.
 
 Unmarked operations still require explicit host policy
 for protection; this default does not establish tenant isolation. For sensitive
@@ -111,12 +143,15 @@ write. Updates and upserts still check the existing row first. A client-writable
 create a row outside the caller's write scope or move one out of it.
 
 **The returned row.** Generated GraphQL create, update and upsert payloads
-contain the committed row only when the caller has entity read access and
-`can_read_row` allows the row. Write access does not imply read access. The
-outcome depends on which check refuses:
+contain the committed row only when the caller has entity read access and the
+row passes the read authority a generated list read would apply: the
+`GraphqlMutation`-surface read visibility predicate, re-read by key after the
+commit, then `can_read_row` when that decision is `CallbackOnly` or
+`Prefilter`. Write access does not imply read access. The outcome depends on
+which check refuses:
 
-- `can_read_row` refuses the row: the payload's entity field is `null` and it
-  still reports `success: true`.
+- The row is outside the predicate, or `can_read_row` refuses it: the payload's
+  entity field is `null` and it still reports `success: true`.
 - The caller lacks entity read access, or a policy returns an error: the
   mutation field fails with an error carrying `extensions.outcome = "committed"`,
   and the whole field is `null`. A principal with entity-level write access but

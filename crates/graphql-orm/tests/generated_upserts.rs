@@ -248,9 +248,11 @@ async fn generated_upserts_work_for_graphql_and_repository_paths()
 
     let actor_a_schema: TestSchema = schema_builder(db.clone())
         .data("actor-a".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("actor-a"))
         .finish();
     let actor_b_schema: TestSchema = schema_builder(db.clone())
         .data("actor-b".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("actor-b"))
         .finish();
 
     let created = actor_a_schema
@@ -264,7 +266,8 @@ async fn generated_upserts_work_for_graphql_and_repository_paths()
                     }
                 }",
             )
-            .data("actor-a".to_string()),
+            .data("actor-a".to_string())
+            .data(graphql_orm::graphql::auth::AuthSubject::new("actor-a")),
         )
         .await;
     assert!(created.errors.is_empty(), "{:?}", created.errors);
@@ -297,7 +300,8 @@ async fn generated_upserts_work_for_graphql_and_repository_paths()
                     }
                 }",
             )
-            .data("actor-a".to_string()),
+            .data("actor-a".to_string())
+            .data(graphql_orm::graphql::auth::AuthSubject::new("actor-a")),
         )
         .await;
     assert!(updated.errors.is_empty(), "{:?}", updated.errors);
@@ -351,7 +355,8 @@ async fn generated_upserts_work_for_graphql_and_repository_paths()
                     }
                 }",
             )
-            .data("actor-b".to_string()),
+            .data("actor-b".to_string())
+            .data(graphql_orm::graphql::auth::AuthSubject::new("actor-b")),
         )
         .await;
     assert!(!denied.errors.is_empty());

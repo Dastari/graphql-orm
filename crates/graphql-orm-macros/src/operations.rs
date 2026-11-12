@@ -2196,10 +2196,10 @@ fn generate_graphql_operations_unfiltered(
     let mutation_output_release = quote! {
         result.entity = db.__release_graphql_mutation_output(
             ctx,
-            #entity_name_lit,
-            <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
             #entity_result_field_name,
             result.entity.take(),
+            &#struct_name::__gom_key_where_clause(),
+            #struct_name::__gom_subscription_key_values,
         ).await?;
     };
     // The written row must itself satisfy the row write policy. Checked inside the
@@ -4083,10 +4083,16 @@ fn generate_graphql_operations_unfiltered(
                 ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
             ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
 
-            let entity = ::graphql_orm::graphql::orm::EntityQuery::<Self, #backend_marker>::new()
-                .where_values(&Self::__gom_key_where_clause(), Self::__gom_key_values(key))
-                .fetch_one(db)
-                .await?;
+            // The Repository-surface predicate narrows the SQL, as for
+            // repository list reads; the row still passes `can_read_row`.
+            let entity = ::graphql_orm::graphql::orm::with_repository_read_visibility(
+                db,
+                ::graphql_orm::graphql::orm::EntityQuery::<Self, #backend_marker>::new()
+                    .where_values(&Self::__gom_key_where_clause(), Self::__gom_key_values(key)),
+            )
+            .await?
+            .fetch_one(db)
+            .await?;
 
             if let Some(ref loaded) = entity {
                 if !db.can_read_row(
@@ -5863,10 +5869,10 @@ fn generate_graphql_operations_unfiltered(
     let create_output_authorization = quote! {
         let entity = db.__release_graphql_mutation_output(
             ctx,
-            #entity_name_lit,
-            <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
             #entity_result_field_name,
             Some(entity),
+            &#struct_name::__gom_key_where_clause(),
+            #struct_name::__gom_subscription_key_values,
         ).await?;
     };
     // Ordinary and append-only GraphQL creates use one resolver pipeline. Only
@@ -8408,23 +8414,13 @@ fn generate_graphql_operations_unfiltered(
                         ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
                     ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
 
-                    let mut entity = EntityQuery::<#struct_name, #backend_marker>::new()
-                        .where_values(&#struct_name::__gom_key_where_clause(), #struct_name::__gom_key_values(&key))
-                        .fetch_one_with_auth(db, auth_context.as_ref())
-                        .await
-                        .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
-
-                    if let Some(ref loaded) = entity {
-                        if !db.can_read_row(
-                            Some(ctx),
-                            #entity_name_lit,
-                            <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
-                            ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
-                            loaded as &(dyn ::std::any::Any + Send + Sync),
-                        ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)? {
-                            return Ok(None);
-                        }
-                    }
+                    // The same row authority as generated list reads.
+                    let mut entity = ::graphql_orm::graphql::orm::fetch_authorized_point_row(
+                        db,
+                        ctx,
+                        EntityQuery::<#struct_name, #backend_marker>::new()
+                            .where_values(&#struct_name::__gom_key_where_clause(), #struct_name::__gom_key_values(&key)),
+                    ).await?;
 
                     #relation_preload_single
 
@@ -9069,23 +9065,13 @@ fn generate_graphql_operations_unfiltered(
                     ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
 
-                let mut entity = EntityQuery::<#struct_name, #backend_marker>::new()
-                    .where_values(&#struct_name::__gom_key_where_clause(), #struct_name::__gom_key_values(&key))
-                    .fetch_one_with_auth(db, auth_context.as_ref())
-                    .await
-                    .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
-
-                if let Some(ref loaded) = entity {
-                    if !db.can_read_row(
-                        Some(ctx),
-                        #entity_name_lit,
-                        <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
-                        ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
-                        loaded as &(dyn ::std::any::Any + Send + Sync),
-                    ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)? {
-                        return Ok(None);
-                    }
-                }
+                // The same row authority as generated list reads.
+                let mut entity = ::graphql_orm::graphql::orm::fetch_authorized_point_row(
+                    db,
+                    ctx,
+                    EntityQuery::<#struct_name, #backend_marker>::new()
+                        .where_values(&#struct_name::__gom_key_where_clause(), #struct_name::__gom_key_values(&key)),
+                ).await?;
 
                 #relation_preload_single
 

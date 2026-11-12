@@ -46,19 +46,29 @@ async fn auth_ext_reports_missing_auth() {
 }
 
 #[tokio::test]
-async fn auth_ext_upgrades_legacy_string_to_subject() -> Result<(), Box<dyn std::error::Error>> {
+async fn auth_ext_ignores_a_bare_string_in_context() -> Result<(), Box<dyn std::error::Error>> {
+    // Any `String` in context data is not an authenticated subject: the
+    // subject must be the typed `AuthSubject`.
     let schema = graphql_orm::async_graphql::Schema::build(
         AuthProbe,
         graphql_orm::async_graphql::EmptyMutation,
         graphql_orm::async_graphql::EmptySubscription,
     )
-    .data("legacy-user".to_string())
+    .data("unrelated-string".to_string())
     .finish();
 
     let response = schema.execute("{ subjectSummary }").await;
-    assert!(response.errors.is_empty(), "{:?}", response.errors);
-    let json = response.data.into_json()?;
-    assert_eq!(json["subjectSummary"], "legacy-user|||");
+    assert_eq!(response.errors.len(), 1, "{:?}", response.errors);
+    assert_eq!(response.errors[0].message, "unauthenticated");
+
+    let response = schema
+        .execute(
+            graphql_orm::async_graphql::Request::new("{ subjectId }")
+                .data("request-string".to_string()),
+        )
+        .await;
+    assert_eq!(response.errors.len(), 1, "{:?}", response.errors);
+    assert_eq!(response.errors[0].message, "unauthenticated");
     Ok(())
 }
 
@@ -216,6 +226,71 @@ mod sqlite_auth {
                 .iter()
                 .all(|error| error.message.contains("unauthenticated"))
         );
+        Ok(())
+    }
+
+    async fn probe_json(
+        policy: ScopeEntityPolicy,
+        subject: Option<AuthSubject>,
+    ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+        let response = execute_scope_probe(policy, subject).await?;
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+        Ok(response.data.into_json()?)
+    }
+
+    #[tokio::test]
+    async fn scope_entity_policy_empty_scope_list_denies() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let subject = || {
+            Some(AuthSubject::from_parts(
+                "subject",
+                Vec::new(),
+                vec!["records.read".to_string()],
+                None,
+            ))
+        };
+        let json = probe_json(ScopeEntityPolicy::new(&[], &[]), subject()).await?;
+        assert_eq!(json["read"], false);
+        assert_eq!(json["write"], false);
+
+        let json = probe_json(ScopeEntityPolicy::new(&["records.read"], &[]), subject()).await?;
+        assert_eq!(json["read"], true);
+        assert_eq!(json["write"], false);
+
+        // Without a subject, an optional policy never grants on an empty list.
+        let json = probe_json(ScopeEntityPolicy::optional(&[], &[]), None).await?;
+        assert_eq!(json["read"], false);
+        assert_eq!(json["write"], false);
+        let json = probe_json(ScopeEntityPolicy::optional(&[], &[]), subject()).await?;
+        assert_eq!(json["read"], false);
+        assert_eq!(json["write"], false);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scope_entity_policy_any_authenticated_is_explicit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let subject = || Some(AuthSubject::new("subject"));
+        let json = probe_json(ScopeEntityPolicy::authenticated(), subject()).await?;
+        assert_eq!(json["read"], true);
+        assert_eq!(json["write"], true);
+
+        let response = execute_scope_probe(ScopeEntityPolicy::authenticated(), None).await?;
+        assert_eq!(response.errors.len(), 2);
+
+        let policy = ScopeEntityPolicy::new(&[], &["records.write"])
+            .with_read(ScopeRequirement::AnyAuthenticated);
+        let json = probe_json(policy, subject()).await?;
+        assert_eq!(json["read"], true);
+        assert_eq!(json["write"], false);
+
+        // `optional` with any-authenticated still refuses an absent subject.
+        let policy = ScopeEntityPolicy::optional(&[], &[])
+            .with_read(ScopeRequirement::AnyAuthenticated)
+            .with_write(ScopeRequirement::AnyAuthenticated);
+        let json = probe_json(policy, None).await?;
+        assert_eq!(json["read"], false);
+        assert_eq!(json["write"], false);
         Ok(())
     }
 

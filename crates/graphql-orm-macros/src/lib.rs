@@ -347,6 +347,7 @@ pub fn backend_selected_graphql_entity(args: TokenStream, input: TokenStream) ->
         graphql_rls,
         graphql,
         graphql_orm,
+        graphql_orm_policy_object,
         serde,
         primary_key,
         filterable,
@@ -404,6 +405,7 @@ pub fn derive_graphql_entity(input: TokenStream) -> TokenStream {
         graphql_rls,
         graphql,
         graphql_orm,
+        graphql_orm_policy_object,
         serde,
         primary_key,
         filterable,
@@ -459,6 +461,7 @@ pub fn derive_repository_entity(input: TokenStream) -> TokenStream {
         graphql_rls,
         graphql,
         graphql_orm,
+        graphql_orm_policy_object,
         serde,
         primary_key,
         filterable,
@@ -497,6 +500,7 @@ pub fn derive_graphql_schema_entity(input: TokenStream) -> TokenStream {
         graphql_rls,
         graphql,
         graphql_orm,
+        graphql_orm_policy_object,
         serde,
         relation,
         transform,
@@ -643,6 +647,7 @@ pub fn graphql_complex_object(args: TokenStream, input: TokenStream) -> TokenStr
         graphql_rls,
         graphql,
         graphql_orm,
+        graphql_orm_policy_object,
         serde,
         primary_key,
         transform,
@@ -679,7 +684,10 @@ pub fn derive_graphql_operations(input: TokenStream) -> TokenStream {
     }
 }
 
-#[proc_macro_derive(GraphQLSemanticObject, attributes(graphql, graphql_orm))]
+#[proc_macro_derive(
+    GraphQLSemanticObject,
+    attributes(graphql, graphql_orm, graphql_orm_policy_object)
+)]
 /// Emits safe public field semantics for a handwritten GraphQL object.
 pub fn derive_graphql_semantic_object(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);

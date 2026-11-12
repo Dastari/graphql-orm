@@ -294,7 +294,7 @@ async fn setup_schema_with_wide_rows(rows: i64) -> Result<TestSchema, Box<dyn st
         .execute(&pool)
         .await?;
     Ok(schema_builder(graphql_orm::db::Database::new(pool))
-        .data("test-user".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
         .finish())
 }
 

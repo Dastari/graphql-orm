@@ -1112,7 +1112,11 @@ where
             .pagination_config()
             .with_read_maximum(self.max_limit)
             .repository_bound(self.limit)?;
-        let rows = Self::bounded(self.query, bound, self.offset)
+        // The Repository-surface predicate narrows the SQL, as for repository
+        // reads outside a transaction; every row still passes `can_read_row`.
+        let query =
+            super::with_repository_read_visibility(self.hook_ctx.database(), self.query).await?;
+        let rows = Self::bounded(query, bound, self.offset)
             .fetch_all_in_transaction(self.hook_ctx)
             .await?;
         bound.check_overflow(rows.len())?;
@@ -1128,7 +1132,9 @@ where
             .with_read_maximum(self.max_limit)
             .repository_bound(self.limit)?
             .capped(1);
-        let row = Self::bounded(self.query, bound, self.offset)
+        let query =
+            super::with_repository_read_visibility(self.hook_ctx.database(), self.query).await?;
+        let row = Self::bounded(query, bound, self.offset)
             .fetch_one_in_transaction(self.hook_ctx)
             .await?;
         let Some(row) = row else {
@@ -1162,8 +1168,8 @@ where
         if visibility.requires_residual_checks()
             || (database.row_policy().is_some() && self.query.requires_in_memory_filtering())
         {
-            return Err(sqlx::Error::Protocol(
-                "repository count reads require database-visible row-policy predicates".to_string(),
+            return Err(super::query::residual_visibility_refused(
+                "repository count reads require database-visible row-policy predicates",
             ));
         }
         let query = self.query;
@@ -2751,6 +2757,25 @@ pub enum EntityAccessSurface {
     RetentionMaintenance,
 }
 
+/// Which authenticated subjects a [`ScopeEntityPolicy`] admits for one access kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScopeRequirement {
+    /// Admit any authenticated subject, whatever scopes it holds.
+    AnyAuthenticated,
+    /// Admit a subject holding at least one of these exact scopes. An empty
+    /// list admits no subject.
+    AnyOf(&'static [&'static str]),
+}
+
+impl ScopeRequirement {
+    fn admits(self, subject: &crate::graphql::auth::AuthSubject) -> bool {
+        match self {
+            Self::AnyAuthenticated => true,
+            Self::AnyOf(scopes) => scopes.iter().any(|scope| subject.has_scope(scope)),
+        }
+    }
+}
+
 /// Entity policy helper that gates generated access by exact scope strings.
 ///
 /// `ScopeEntityPolicy` is intentionally backend- and auth-crate agnostic. It
@@ -2758,55 +2783,71 @@ pub enum EntityAccessSurface {
 /// `async-graphql` context through [`AuthExt`](crate::graphql::auth::AuthExt)
 /// and matches scopes exactly; wildcard or hierarchical semantics belong in an
 /// optional application/auth integration layer, not in database RLS.
+///
+/// An empty scope list denies that access kind. Admitting any authenticated
+/// subject is explicit: [`ScopeEntityPolicy::authenticated`], or
+/// [`ScopeRequirement::AnyAuthenticated`] through
+/// [`ScopeEntityPolicy::with_read`] and [`ScopeEntityPolicy::with_write`]. A
+/// request without a subject is never admitted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScopeEntityPolicy {
-    /// Scopes accepted for read access.
-    pub read_scopes: &'static [&'static str],
-    /// Scopes accepted for write access.
-    pub write_scopes: &'static [&'static str],
-    /// Return an unauthenticated error when no subject is present.
+    /// Subjects admitted for read access.
+    pub read: ScopeRequirement,
+    /// Subjects admitted for write access.
+    pub write: ScopeRequirement,
+    /// Return an unauthenticated error when no subject is present. Otherwise
+    /// the policy denies the request and host policies decide the response.
     pub require_auth: bool,
 }
 
 impl ScopeEntityPolicy {
-    /// Create a policy that requires auth and exact scope matches.
+    /// Create a policy that requires auth and exact scope matches. An empty
+    /// list denies that access kind.
     pub const fn new(
         read_scopes: &'static [&'static str],
         write_scopes: &'static [&'static str],
     ) -> Self {
         Self {
-            read_scopes,
-            write_scopes,
+            read: ScopeRequirement::AnyOf(read_scopes),
+            write: ScopeRequirement::AnyOf(write_scopes),
             require_auth: true,
         }
     }
 
-    /// Create a policy that permits any authenticated subject when no scopes
-    /// are configured for the requested access kind.
+    /// Create a policy that admits any authenticated subject for reads and
+    /// writes, whatever scopes it holds.
     pub const fn authenticated() -> Self {
         Self {
-            read_scopes: &[],
-            write_scopes: &[],
+            read: ScopeRequirement::AnyAuthenticated,
+            write: ScopeRequirement::AnyAuthenticated,
             require_auth: true,
         }
     }
 
-    /// Create a policy that lets host policies decide when auth is absent.
+    /// Create a policy that denies, rather than fails, when auth is absent,
+    /// so host policies decide the response. An empty list denies that access
+    /// kind.
     pub const fn optional(
         read_scopes: &'static [&'static str],
         write_scopes: &'static [&'static str],
     ) -> Self {
         Self {
-            read_scopes,
-            write_scopes,
+            read: ScopeRequirement::AnyOf(read_scopes),
+            write: ScopeRequirement::AnyOf(write_scopes),
             require_auth: false,
         }
     }
-}
 
-impl Default for ScopeEntityPolicy {
-    fn default() -> Self {
-        Self::authenticated()
+    /// Replace the read requirement.
+    pub const fn with_read(mut self, read: ScopeRequirement) -> Self {
+        self.read = read;
+        self
+    }
+
+    /// Replace the write requirement.
+    pub const fn with_write(mut self, write: ScopeRequirement) -> Self {
+        self.write = write;
+        self
     }
 }
 
@@ -2821,25 +2862,18 @@ impl<B: OrmBackend> EntityPolicy<B> for ScopeEntityPolicy {
         _surface: EntityAccessSurface,
     ) -> futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
         Box::pin(async move {
-            let required_scopes = match kind {
-                EntityAccessKind::Read => self.read_scopes,
-                EntityAccessKind::Write => self.write_scopes,
+            let requirement = match kind {
+                EntityAccessKind::Read => self.read,
+                EntityAccessKind::Write => self.write,
             };
-            let subject = ctx.and_then(AuthExt::auth_subject_opt);
-
-            let Some(subject) = subject else {
+            let Some(subject) = ctx.and_then(AuthExt::auth_subject_opt) else {
                 if self.require_auth {
                     return Err(crate::graphql::errors::OrmPublicError::unauthenticated()
                         .into_graphql_error());
                 }
-                return Ok(required_scopes.is_empty());
+                return Ok(false);
             };
-
-            if required_scopes.is_empty() {
-                return Ok(true);
-            }
-
-            Ok(required_scopes.iter().any(|scope| subject.has_scope(scope)))
+            Ok(requirement.admits(&subject))
         })
     }
 }

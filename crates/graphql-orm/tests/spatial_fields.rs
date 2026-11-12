@@ -450,7 +450,9 @@ async fn postgis_spatial_fields_indexes_and_predicates_round_trip()
     );
 
     let schema = schema_builder(database.clone())
-        .data("spatial-test-user".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new(
+            "spatial-test-user",
+        ))
         .finish();
     let graph_response = schema
         .execute(Request::new(

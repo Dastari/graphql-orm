@@ -241,9 +241,9 @@ let subject = AuthSubject {
 let request = request.data(subject);
 ```
 
-For compatibility, applications can still attach a `String` user id. `ctx.auth_subject()` first reads
-an `AuthSubject`, then upgrades a legacy `String` into a subject with empty roles, scopes, and tenant
-id. `ctx.auth_user()` remains as a deprecated alias; use `ctx.auth_user_id()` or
+Only a typed `AuthSubject` authenticates a request. Other context data, including a bare `String`,
+is never read as a subject; attach `AuthSubject::new(id)` for a subject with only an id.
+`ctx.auth_user()` remains as a deprecated alias; use `ctx.auth_user_id()` or
 `ctx.auth_subject()` in new code.
 
 Generated resolvers use an explicit auth mode. The default preserves the older fail-closed generated
@@ -282,7 +282,9 @@ database.set_entity_policy(ScopeEntityPolicy::new(
 
 `ScopeEntityPolicy` matches exact scope strings only. With `require_auth: true`, missing auth returns
 an unauthenticated GraphQL error. A present subject without the required scope is a normal policy
-deny.
+deny. An empty scope list denies that access kind. Admitting any authenticated subject is explicit:
+`ScopeEntityPolicy::authenticated()`, or `ScopeRequirement::AnyAuthenticated` through
+`with_read` or `with_write`. `ScopeEntityPolicy::optional` denies a request without a subject.
 
 PostgreSQL RLS support is defense in depth, not a replacement for GraphQL authorization. Generated
 resolvers still enforce the selected auth mode and still evaluate configured entity, row, and field
