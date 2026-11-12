@@ -53,6 +53,9 @@ may enable or scope a `LocalHarness` logical profile but must supply no base
 URL and cannot alter deployment process facts. Credential set/rotation is
 rejected, and an already credentialed provider profile cannot be converted to
 `LocalHarness` until its credential is removed through the audited lifecycle.
+The conversion is a provider-kind change, so a caller without
+`ManageProviderCredentials` receives `Forbidden`; one with it receives
+`InvalidInput` while the credential remains.
 
 Registration validation is not sandbox proof. A trusted implementation of
 `AiLocalHarnessProcessLauncher` must:

@@ -374,6 +374,8 @@ the compiled test-backed recipe and the missing reusable bootstrap API.
 - Provider-neutral adapters plus deterministic network-free mocks.
 - Optional provider profiles, attachments, skills, UI intents, rules, and
   usage/pricing controls, each behind independent proof and policy boundaries.
+  Profile routing and credentials are separate configuration actions, and
+  changing a credentialed profile's provider kind or endpoint requires both.
 
 Detailed mechanics stay in the task-oriented [documentation index](docs/README.md)
 rather than hiding the quick start behind an implementation inventory.

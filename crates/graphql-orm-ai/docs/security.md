@@ -25,6 +25,13 @@ built-ins, and remote MCP data as untrusted input.
 - AI execution preserves the human actor and records the run/tool as mechanism.
 - Approval is intent confirmation, not authorization. Resolver, row, field,
   rate-limit, assurance, and resource-version checks run again after approval.
+- Provider configuration separates routing from secrets.
+  `ManageProviderProfiles` edits profile metadata, and
+  `ManageProviderCredentials` stores, rotates, or removes credentials. Changing
+  a credentialed profile's provider kind or normalized endpoint, which decides
+  where its credential is sent, requires both actions and fails with
+  `Forbidden` otherwise. Credential administrators should check a profile's
+  current endpoint before attaching a credential to it.
 
 Hierarchical rules are negative constraints, never cached authority. The host
 derives the complete application-defined lineage from the current principal;

@@ -19,8 +19,14 @@ pub enum AiConfigurationAction {
     /// Read redacted provider configuration.
     ReadProviderProfiles,
     /// Create or alter provider routing/endpoint metadata.
+    ///
+    /// On its own this does not permit changing the provider kind or endpoint
+    /// of a profile that has a credential attached, because those fields
+    /// decide where the credential is sent. That change also requires
+    /// [`Self::ManageProviderCredentials`] for the same scope.
     ManageProviderProfiles,
-    /// Store, rotate, or remove provider credentials.
+    /// Store, rotate, or remove provider credentials, and change the provider
+    /// kind or endpoint of a profile that has a credential attached.
     ManageProviderCredentials,
     /// Read content-protection readiness.
     ReadContentProtection,
@@ -617,6 +623,19 @@ pub trait AiConfigurationService: Send + Sync {
     ) -> Result<Vec<AiBudgetPolicyView>, AiError>;
 
     /// Creates or CAS-updates a provider profile and audits the change.
+    ///
+    /// Requires [`AiConfigurationAction::ManageProviderProfiles`]. An update
+    /// that changes the provider kind or normalized endpoint of a profile with
+    /// an attached credential must also require
+    /// [`AiConfigurationAction::ManageProviderCredentials`] for the profile's
+    /// scope and keep the credential only when both are granted.
+    ///
+    /// # Errors
+    ///
+    /// Implementations return [`AiError::Forbidden`] when either required
+    /// action is denied, [`AiError::RecentMfaRequired`] without current MFA,
+    /// [`AiError::Conflict`] for a stale version or scope mismatch, and
+    /// [`AiError::InvalidInput`] for invalid profile data.
     async fn upsert_provider_profile(
         &self,
         principal: &AuthPrincipal,
