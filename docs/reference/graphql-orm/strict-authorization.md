@@ -105,7 +105,9 @@ even if the caller ignored the error, and `Database::transaction` returns
 savepoint on any failure after it opens, including a refused existing row. Any
 generated write helper that fails after changing rows, for example in an
 `After` hook or on a cardinality check, also leaves a caller-owned transaction
-uncommittable. A refusal before any row changes leaves the transaction usable. Updates and upserts still check the existing row first. A client-writable owner or tenant column therefore can't
+uncommittable. A refusal before any row changes leaves the transaction usable,
+including an `insert_if_absent` that finds an existing row the caller may not
+write. Updates and upserts still check the existing row first. A client-writable owner or tenant column therefore can't
 create a row outside the caller's write scope or move one out of it.
 
 **The returned row.** Generated GraphQL create, update and upsert payloads

@@ -907,15 +907,27 @@ pub struct MutationContext<'tx, B: WriteBackend = DefaultWriteBackend> {
     pub(crate) change_journal_verified_tables: Vec<&'static str>,
 }
 
-/// Savepoint and session statements change no rows.
+/// Whether a statement run through [`MutationContext::execute`] changed rows.
+///
+/// Savepoint and session statements change no rows. A data-modifying
+/// statement changed rows when its affected-row count is nonzero, which every
+/// backend reports exactly for its own `INSERT`, `UPDATE`, `DELETE` and
+/// `MERGE`. SQLite reports a stale count for any other statement, so those
+/// (for example a SQL Server `SELECT ... INTO` batch, or host SQL) count as
+/// writes.
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
-fn is_transaction_control(sql: &str) -> bool {
+fn statement_changed_rows(sql: &str, rows_affected: u64) -> bool {
     let keyword = sql
         .trim_start()
         .split(|c: char| c.is_whitespace())
         .next()
         .unwrap_or("");
-    [
+    let is = |keywords: &[&str]| {
+        keywords
+            .iter()
+            .any(|candidate| keyword.eq_ignore_ascii_case(candidate))
+    };
+    if is(&[
         "SAVEPOINT",
         "RELEASE",
         "ROLLBACK",
@@ -923,9 +935,13 @@ fn is_transaction_control(sql: &str) -> bool {
         "BEGIN",
         "COMMIT",
         "SET",
-    ]
-    .iter()
-    .any(|control| keyword.eq_ignore_ascii_case(control))
+    ]) {
+        false
+    } else if is(&["INSERT", "UPDATE", "DELETE", "MERGE", "REPLACE"]) {
+        rows_affected > 0
+    } else {
+        true
+    }
 }
 
 /// Tracks one generated write operation on a [`MutationContext`].
@@ -1477,9 +1493,7 @@ where
         values: &[SqlValue],
     ) -> crate::Result<B::WriteResult> {
         let result = B::execute_in_transaction(&mut self.tx, sql, values).await?;
-        // Count statements, not affected rows: SQLite's change count is not
-        // reset by transaction-control statements such as SAVEPOINT.
-        if !is_transaction_control(sql) {
+        if statement_changed_rows(sql, B::rows_affected(&result)) {
             self.runtime_state.note_write();
         }
         Ok(result)
@@ -5228,5 +5242,46 @@ mod mssql_money_domain_tests {
             money
         );
         assert!(serde_json::from_str::<DecimalDef>(r#"{"precision":19,"scale":4}"#).is_err());
+    }
+}
+
+#[cfg(all(test, any(feature = "sqlite", feature = "postgres", feature = "mssql")))]
+mod statement_changed_rows_tests {
+    use super::statement_changed_rows;
+
+    #[test]
+    fn control_statements_never_count() {
+        for sql in [
+            "SAVEPOINT graphql_orm_cas",
+            "release savepoint graphql_orm_cas",
+            "ROLLBACK TO SAVEPOINT graphql_orm_cas",
+            "SAVE TRANSACTION graphql_orm_cas",
+            "SET LOCAL row_security = off",
+        ] {
+            assert!(!statement_changed_rows(sql, 1), "{sql}");
+        }
+    }
+
+    #[test]
+    fn data_statements_count_only_changed_rows() {
+        for sql in [
+            "INSERT INTO t (a) VALUES (?) ON CONFLICT (a) DO NOTHING",
+            "  update t SET a = ?",
+            "DELETE FROM t",
+            "MERGE INTO t USING s ON (t.a = s.a)",
+        ] {
+            assert!(!statement_changed_rows(sql, 0), "{sql}");
+            assert!(statement_changed_rows(sql, 2), "{sql}");
+        }
+    }
+
+    #[test]
+    fn other_statements_count_whatever_they_report() {
+        // SQLite reports the previous statement's change count for these.
+        assert!(statement_changed_rows(
+            "SELECT 1 INTO #source; MERGE INTO t USING #source",
+            0
+        ));
+        assert!(statement_changed_rows("EXEC write_rows", 0));
     }
 }

@@ -10,7 +10,7 @@ pub(crate) struct RuntimeTransactionState {
     poisoned: AtomicBool,
     /// A row this transaction wrote failed the row write policy.
     refused_write: AtomicBool,
-    /// Generated writes that changed at least one row.
+    /// Statements that changed rows, or that report no exact count.
     writes: AtomicUsize,
 }
 impl RuntimeTransactionState {
