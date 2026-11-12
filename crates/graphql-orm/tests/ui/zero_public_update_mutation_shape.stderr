@@ -1,0 +1,5 @@
+error: mutation_shapes selects unavailable update mutation: the entity has no publicly writable update field (each non-key column is a managed timestamp, skip_input or write = false), so no UpdateInput or update/update_many mutation is generated
+ --> tests/ui/zero_public_update_mutation_shape.rs:5:8
+  |
+5 | struct Badge {
+  |        ^^^^^

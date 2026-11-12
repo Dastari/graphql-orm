@@ -130,7 +130,18 @@ pub(crate) fn generate(
                 syn::ImplItem::Fn(f) if f.sig.ident == action => Some(f),
                 _ => None,
             })
-            .ok_or_else(|| error("dependent_deletes requires delete and update mutation shapes"))?;
+            .ok_or_else(|| {
+                // Backend, profile and key checks above already passed and
+                // mutation_shapes selects update, so a missing update root
+                // means the entity has no publicly writable update field.
+                if action == "update" {
+                    error(
+                        "dependent_deletes requires the generated update mutation, but the entity has no publicly writable update field (each non-key column is a managed timestamp, skip_input or write = false), so no UpdateInput or update/update_many mutation is generated",
+                    )
+                } else {
+                    error("dependent_deletes requires delete and update mutation shapes")
+                }
+            })?;
         let operation_name = method
             .attrs
             .iter()

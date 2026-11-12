@@ -1,0 +1,5 @@
+error: AI mutation policy `create` names an operation that is not generated: the entity has no publicly writable create field (each create column is a generated key, a managed timestamp, skip_input or write = false), so no CreateInput or create/upsert mutation is generated
+ --> tests/ui/zero_public_create_ai_policy.rs:5:8
+  |
+5 | struct Snapshot {
+  |        ^^^^^^^^

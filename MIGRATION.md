@@ -224,6 +224,21 @@ Upgrade ORM/macros together.
 
 No data migration is needed.
 
+## 0.125.0 to 0.126.0: entities without public write fields
+
+Upgrade runtime and macros together. No change is required: every entity that
+compiled with 0.125.0 generates the same schema.
+
+An entity whose create or update input would have no public member now
+compiles. Before, `GraphQLOperations` emitted an empty input object for it,
+even under `generated_mutations: "none"`, and the build failed. Such an entity
+now has no `Create<Entity>Input` with `create` and `upsert`, or no
+`Update<Entity>Input` with `update` and `update_many`. Its reads, relations,
+`<entity>Changed` subscription, Rust repository inputs and repository or
+transaction writes are generated as for any entity. If you worked around the
+failure with a placeholder writable column or argument, you can remove it.
+See [read-only and zero-input entities](docs/reference/graphql-orm/macros-and-attributes.md#read-only-and-zero-input-entities).
+
 ## 0.125.0: PostgreSQL records change-journal entries in the database
 
 Upgrade runtime and macros together. This affects PostgreSQL deployments that

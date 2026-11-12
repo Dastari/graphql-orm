@@ -1,0 +1,5 @@
+error: dependent_deletes requires the generated update mutation, but the entity has no publicly writable update field (each non-key column is a managed timestamp, skip_input or write = false), so no UpdateInput or update/update_many mutation is generated
+ --> tests/ui/zero_public_update_dependent_deletes.rs:4:1
+  |
+4 | #[graphql_entity(dependent_deletes, table = "holders", plural = "Holders", default_sort = "id ASC")]
+  | ^

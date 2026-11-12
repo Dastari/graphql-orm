@@ -40,6 +40,11 @@ columns instead of a literal `id`, and reads combined `#[graphql(...)]` and
 `#[filterable]` reject unknown options. Upgrade ORM/macros together; see the
 [root migration guide](../../MIGRATION.md#01260-primary-key-default-ordering-and-strict-attribute-options).
 
+Version 0.126.0 generates entities whose create or update input has no
+public member: it omits the empty input and the roots that need it instead of
+failing to compile. No compiling entity changes; see
+[read-only and zero-input entities](../../docs/reference/graphql-orm/macros-and-attributes.md#read-only-and-zero-input-entities).
+
 Version 0.125.0 records PostgreSQL change-journal entries in the database
 instead of the runtime role, and journaled writes require the recorder
 trigger. Upgrade ORM/macros together; see the

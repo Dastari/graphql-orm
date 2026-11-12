@@ -3,7 +3,7 @@ title: GraphQL ORM macro and attribute reference
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-10
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -111,7 +111,7 @@ still subject to entity policy and backend/schema-policy restrictions.
 | `#[sortable]`, `#[unique]` | enables ordering / declares a unique field |
 | `#[db_column = "…"]` or `#[graphql_orm(db_column = "…")]` | chooses the physical column name |
 | `#[graphql(name = "…")]` | chooses GraphQL field name; `#[serde(rename = "…")]` records the serialization name |
-| `#[graphql(skip)]`, `#[graphql_orm(skip_input)]` | omits the field from generated inputs; `graphql(skip)` also supports relation implementation fields |
+| `#[graphql(skip)]`, `#[graphql_orm(skip_input)]` | omits the field from generated GraphQL inputs (Rust repository inputs keep it); `graphql(skip)` also supports relation implementation fields. See [read-only and zero-input entities](#read-only-and-zero-input-entities) |
 | `#[skip_db]` | excludes a field from persisted row decoding |
 | `#[input_only]` | keeps a writable field in inputs even where it is skipped from GraphQL reads |
 | `#[graphql_orm(private)]` | removes generated read/filter/order/subscription exposure and inputs. On a `GraphQLEntity` + `SimpleObject` entity this requires `#[graphql(skip)]` or `graphql_policy_object`; otherwise compilation fails. Metadata-only `GraphQLSchemaEntity` is exempt |
@@ -835,6 +835,56 @@ This exposes `createOrder` and `updateOrder` but not `deleteOrder`,
   authorization behave exactly as before.
 
 See the [migration guide](../../../MIGRATION.md#0920-to-0930-generated-mutation-shape-selection).
+
+## Read-only and zero-input entities
+
+A GraphQL input object must declare at least one field. Each generated input
+therefore exists only when it has a public member, and the roots that accept
+it follow it. The rules apply to entities with the standard write surface and
+to `append_only` entities:
+
+| Case | Condition | Generated GraphQL surface |
+| --- | --- | --- |
+| Zero-create | no create field reaches `Create<Entity>Input`: each create column is a generated key, a managed timestamp, `skip_input`, `write = false` or a version | no `Create<Entity>Input`, no `create` or `upsert` root |
+| Zero-update | no non-key column reaches `Update<Entity>Input`: each is a managed timestamp, `skip_input`, `write = false` or a version | no `Update<Entity>Input`, no `update` or `update_many` root |
+| Both | zero-create and zero-update | only the input-free `delete` and `delete_many` roots (`append_only`: none) |
+| `generated_mutations = "none"` | set on `schema_roots!` | no generated mutation root for any entity in that schema |
+
+- **Writable fields.** A field is publicly writable on create when it is
+  writable (`write` is not `false`), not `skip_input` (or it is
+  `input_only`), not a managed timestamp and not a generated key. Update uses
+  the same rule and never includes a key. `skip_input` and server-owned
+  columns are never made public to fill an input, and no placeholder argument
+  is added.
+- **Read-only public entity.** An entity is read-only on the public GraphQL
+  surface when its schema omits its generated mutations (`generated_mutations`
+  or `mutation_shapes`), when it is `external_read_only`, composite-keyed or a
+  non-writable MSSQL entity, or when it is zero-create and zero-update and the
+  schema also omits `delete` and `delete_many`. Reads, relations and the
+  `<entity>Changed` subscription are generated in every case.
+- **Delete stays input free.** `delete` and `delete_many` take a key or a
+  filter and no input, so zero-create and zero-update do not remove them.
+  Remove them with `mutation_shapes` or `generated_mutations`.
+- **Repository writes are unchanged.** `Create<Entity>Input` and
+  `Update<Entity>Input` remain Rust repository inputs that include every
+  repository-writable column, `skip_input` columns included. `insert`,
+  `update_by_id`, `upsert`, transaction writes, hooks and the `Changed` events
+  they emit behave as for any other entity.
+- **Append-only.** An `append_only` entity without a public create field has
+  no public mutation. Its `<Entity>Mutations` object holds only an
+  introspection-hidden placeholder, as composite-key and read-only entities
+  already do, so `schema_roots!` can still merge it.
+- **Compile-time checks.** `mutation_shapes`, `operation_authorization` or
+  `ai_mutations` naming `create`, `upsert`, `update` or `update_many` on an
+  entity with no input for it is a compile error that names the missing
+  writable fields. So is `dependent_deletes` on a zero-update entity, because
+  it wraps the generated update.
+- **Other inputs.** `<Entity>WhereInput` always has `and`, `or` and `not`, so
+  it is never empty. `<Entity>OrderByInput` needs an orderable field, and an
+  entity without one is a compile error that asks for `#[sortable]`.
+  `aggregate = true` needs a public persisted readable field. The runtime
+  GraphQL module applies its own rule: without client-writable fields its
+  `create<Object>` takes no input and its update is omitted.
 
 ## Implicit timestamps
 
