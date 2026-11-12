@@ -419,6 +419,14 @@ Entity-access and retention row-write refusals on repository reads and writes
 now keep their public code, so a denied entity write reads as `FORBIDDEN`
 instead of `INTERNAL_ERROR`.
 
+The `Display` text of a carried public refusal is now the code's default
+message and code, such as `error occurred while decoding: forbidden
+(FORBIDDEN)`, and no longer contains `graphql-orm-public:<CODE>`. Code that
+matched that token should use `OrmPublicError::from_sqlx`. A hook that turns a
+refused nested write into `async_graphql::Error::new(error.to_string())` shows
+clients that safe text without a `code` extension; return the error with `?`
+instead to keep the code.
+
 ## 0.125.0: PostgreSQL records change-journal entries in the database
 
 Upgrade runtime and macros together. This affects PostgreSQL deployments that

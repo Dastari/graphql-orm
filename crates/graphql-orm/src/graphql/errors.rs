@@ -323,8 +323,12 @@ impl fmt::Debug for PublicErrorCarrier {
 }
 impl fmt::Display for PublicErrorCarrier {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Repository callers read this text; it carries only the stable public code.
-        write!(f, "graphql-orm-public:{}", self.0.code.as_str())
+        // Hosts commonly turn a repository error into a GraphQL message with
+        // `to_string()`, so this text may reach clients. It carries only the
+        // code's default message and the stable code: never authored text or
+        // the transport token.
+        let code = self.0.code;
+        write!(f, "{} ({})", code.default_message(), code.as_str())
     }
 }
 impl std::error::Error for PublicErrorCarrier {}
@@ -483,6 +487,7 @@ mod tests {
         ));
         assert!(!matches!(error, sqlx::Error::Io(_)));
         assert!(error.to_string().contains("AUTHORIZATION_MISCONFIGURED"));
+        assert!(!error.to_string().contains("graphql-orm-public"));
         let refusal = async_graphql::Error::new("private application detail")
             .extend_with(|_, ext| ext.set("code", "FORBIDDEN"));
         let error = sqlx_error_from_graphql(refusal);

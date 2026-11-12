@@ -223,6 +223,60 @@ impl EntityPolicy for DenyWrites {
     }
 }
 
+/// Denies writes to `HookGrant` only, so a hook's nested write is refused.
+struct DenyGrantWrites;
+impl EntityPolicy for DenyGrantWrites {
+    fn can_access_entity<'a>(
+        &'a self,
+        _: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database,
+        entity_name: &'static str,
+        _: Option<&'static str>,
+        kind: EntityAccessKind,
+        _: EntityAccessSurface,
+    ) -> BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(
+            async move { Ok(!(entity_name == "HookGrant" && kind == EntityAccessKind::Write)) },
+        )
+    }
+}
+
+/// How a hook hands back the refusal of its own nested repository write.
+#[derive(Clone, Copy, Debug)]
+enum NestedRefusal {
+    /// `?` on the repository error.
+    Propagated,
+    /// `async_graphql::Error::new(error.to_string())`.
+    Stringified,
+}
+
+/// Before deleting a `HookRecord`, deletes the grants, which the policy refuses.
+struct NestedWriteHook(NestedRefusal);
+impl MutationHook for NestedWriteHook {
+    fn on_mutation<'a>(
+        &'a self,
+        _: Option<&'a async_graphql::Context<'_>>,
+        hook_ctx: &'a mut MutationContext<'_>,
+        event: &'a MutationEvent,
+    ) -> BoxFuture<'a, async_graphql::Result<()>> {
+        Box::pin(async move {
+            if event.entity_name != "HookRecord" || event.phase != MutationPhase::Before {
+                return Ok(());
+            }
+            let nested = hook_ctx.delete_by_key::<HookGrant>(&grant_key()).await;
+            match self.0 {
+                NestedRefusal::Propagated => {
+                    nested?;
+                }
+                NestedRefusal::Stringified => {
+                    nested.map_err(|error| async_graphql::Error::new(error.to_string()))?;
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
 #[cfg(feature = "sqlite")]
 struct FixtureOwner;
 #[cfg(feature = "sqlite")]
@@ -639,6 +693,81 @@ async fn entity_write_denial_reports_forbidden() {
     owner.cleanup().unwrap();
 }
 
+/// A hook's refused nested write reaches GraphQL and repository callers with
+/// its public code when propagated, and as safe text when stringified: the
+/// carried refusal's text never exposes the internal transport token.
+async fn nested_hook_write_refusals_keep_their_code_and_safe_text() {
+    for mode in [NestedRefusal::Propagated, NestedRefusal::Stringified] {
+        let (mut db, mut owner, _hook) = fixture().await;
+        let existing = HookRecord::insert(&db, create("existing")).await.unwrap();
+        HookGrant::insert(&db, grant("existing")).await.unwrap();
+        db.set_entity_policy(DenyGrantWrites);
+        db.set_mutation_hook(NestedWriteHook(mode));
+        let label = format!("{mode:?}");
+
+        let schema = schema_builder(db.clone())
+            .data(AuthSubject::new("test-principal"))
+            .finish();
+        let response = schema
+            .execute(format!(
+                "mutation {{ deleteHookRecord(id: \"{}\") {{ success }} }}",
+                existing.id
+            ))
+            .await;
+        assert_eq!(response.errors.len(), 1, "{label}: {response:?}");
+        let error = &response.errors[0];
+        assert!(
+            !error.message.contains("graphql-orm-public"),
+            "{label}: {error:?}"
+        );
+        assert!(error.message.contains("forbidden"), "{label}: {error:?}");
+        let code = error.extensions.as_ref().and_then(|ext| ext.get("code"));
+        match mode {
+            NestedRefusal::Propagated => {
+                assert_eq!(error.message, "forbidden", "{label}");
+                assert_eq!(
+                    code,
+                    Some(&async_graphql::Value::from("FORBIDDEN")),
+                    "{label}"
+                );
+            }
+            // An uncoded authored refusal keeps its GraphQL rendering.
+            NestedRefusal::Stringified => assert_eq!(code, None, "{label}"),
+        }
+
+        let id = existing.id;
+        let result = db
+            .transaction(TransactionMode::StateMachine, |tx| {
+                Box::pin(async move {
+                    tx.delete_by_id::<HookRecord>(&id)
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await;
+        let error = match result {
+            Err(TransactionError::Rejected(error)) => error,
+            other => panic!("{label}: expected a rejected transaction, got {other:?}"),
+        };
+        match mode {
+            NestedRefusal::Propagated => {
+                assert_eq!(error.code, OrmErrorCode::Forbidden, "{label}: {error:?}");
+                assert_eq!(error.message, "forbidden", "{label}");
+            }
+            NestedRefusal::Stringified => {
+                assert_eq!(
+                    error.code,
+                    OrmErrorCode::InternalError,
+                    "{label}: {error:?}"
+                );
+                assert_eq!(error.message, "internal error", "{label}");
+            }
+        }
+        assert_unchanged(&db, &existing).await;
+        owner.cleanup().unwrap();
+    }
+}
+
 /// Generated GraphQL mutations return the same public code and message.
 async fn graphql_refusals_match_repository_refusals() {
     let (db, mut owner, hook) = fixture().await;
@@ -696,5 +825,6 @@ mod cases {
     case!(standalone_refusals_preserve_only_public_codes);
     case!(retention_purge_refusals_preserve_only_public_codes);
     case!(entity_write_denial_reports_forbidden);
+    case!(nested_hook_write_refusals_keep_their_code_and_safe_text);
     case!(graphql_refusals_match_repository_refusals);
 }
