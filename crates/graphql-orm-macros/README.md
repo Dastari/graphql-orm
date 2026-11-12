@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.126.0 makes generated MSSQL writes, including compare-and-swap,
+work on tables with enabled triggers, and MSSQL `rows_affected` reports the
+statement's own count. Upgrade ORM/macros together; see the
+[root migration guide](../../MIGRATION.md#01260-mssql-writes-on-tables-with-triggers).
+
 Version 0.125.0 records PostgreSQL change-journal entries in the database
 instead of the runtime role, and journaled writes require the recorder
 trigger. Upgrade ORM/macros together; see the

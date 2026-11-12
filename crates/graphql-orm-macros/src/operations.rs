@@ -4509,25 +4509,31 @@ fn generate_graphql_operations_unfiltered(
     let cas_update_sql = if backend == BackendKind::Mssql {
         quote! {
             {
+                // SQL Server rejects `OUTPUT` without `INTO` on a table with an
+                // enabled trigger. Read the row back in the same batch instead:
+                // the update holds its exclusive lock until the transaction
+                // ends, and `@@ROWCOUNT` excludes statements run by triggers.
                 let output_columns = <Self as ::graphql_orm::graphql::orm::DatabaseSchema>::columns()
                     .iter()
                     .map(|column| {
                         let quoted = dialect.quote_identifier_path(column.name);
-                        let source = format!("INSERTED.{quoted}");
                         if column.decimal.is_some_and(|definition| definition.is_mssql_money()) {
-                            format!("CAST({source} AS DECIMAL(19,4)) AS {quoted}")
+                            format!("CAST({quoted} AS DECIMAL(19,4)) AS {quoted}")
                         } else {
-                            source
+                            quoted
                         }
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
+                let quoted_table = dialect.quote_identifier_path(#table_name);
+                // The read-back binds the key again: placeholders are numbered in order.
+                values.push(#pk_bind_value_ref);
                 format!(
-                    "UPDATE {} SET {} OUTPUT {} WHERE {}",
-                    dialect.quote_identifier_path(#table_name),
+                    "UPDATE {quoted_table} SET {} WHERE {}; \
+                     IF @@ROWCOUNT = 1 SELECT {output_columns} FROM {quoted_table} WHERE {} = ?",
                     set_clauses.join(", "),
-                    output_columns,
                     predicates.join(" AND "),
+                    dialect.quote_identifier_path(Self::PRIMARY_KEY),
                 )
             }
         }

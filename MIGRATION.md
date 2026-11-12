@@ -57,6 +57,17 @@ Choosing the in-place path for a restored store re-opens consumed approvals.
 See the
 [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01270-to-01280-enforced-runtime-closure-after-restore).
 
+## 0.126.0: MSSQL writes on tables with triggers
+
+Upgrade runtime and macros together. SQLite and PostgreSQL are unchanged.
+
+Generated MSSQL writes, including compare-and-swap, now succeed on tables with
+enabled triggers. Code that runs raw MSSQL batches of several statements through
+`execute` and reads `rows_affected` now receives the final statement's count
+instead of the sum of every statement's count. Run one statement per `execute`
+when each count matters. Counts from statements inside triggers are no longer
+included.
+
 ## 0.125.0: PostgreSQL records change-journal entries in the database
 
 Upgrade runtime and macros together. This affects PostgreSQL deployments that
