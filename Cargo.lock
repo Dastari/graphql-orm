@@ -3267,6 +3267,7 @@ dependencies = [
  "sha1 0.10.6",
  "sha2 0.10.9",
  "signal-hook",
+ "subtle",
  "thiserror 2.0.18",
  "time",
  "tracing",

@@ -364,6 +364,7 @@ async fn metrics_handler(
         "router_subgraph_latency_microseconds_total": metrics.subgraph_latency_microseconds_total(),
         "router_active_graph_version": metrics.active_graph_version(),
         "router_websocket_connections": metrics.active_websocket_connections(),
+        "router_pending_websocket_connections": metrics.pending_websocket_connections(),
         "router_active_subscriptions": metrics.active_subscriptions(),
         "router_websocket_rejections_total": metrics.websocket_rejections_total(),
         "router_schema_refresh_total": metrics.schema_refresh_total(),

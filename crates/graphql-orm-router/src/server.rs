@@ -342,6 +342,7 @@ impl PreparedRouter {
             scope_matcher: self.config.scope_matcher.clone(),
             internal_subscription: internal_subscription.clone(),
             request_limits: self.config.request_limits.clone(),
+            introspection: self.config.introspection,
         };
         plugin_runtimes()
             .lock()
@@ -548,6 +549,7 @@ struct PluginRuntime {
     scope_matcher: Arc<dyn ScopeMatcher>,
     internal_subscription: Option<InternalSubscriptionEndpoint>,
     request_limits: crate::RequestLimits,
+    introspection: bool,
 }
 
 fn plugin_runtimes() -> &'static Mutex<BTreeMap<u64, PluginRuntime>> {
@@ -693,15 +695,36 @@ impl RouterPlugin for StaticGraphPlugin {
         let operation_name = payload.graphql_params.operation_name.clone();
         let gateway_enabled = self.runtime.internal_subscription.is_some();
         let metrics = self.runtime.lifecycle.metrics();
+        // Hive refuses introspection itself unless it is enabled. When it is
+        // enabled on an authenticated router it still needs a validated
+        // caller, as every described root field does.
+        let introspection_needs_caller = self.runtime.introspection
+            && self.runtime.authentication.is_some()
+            && payload
+                .context
+                .get_ref::<AuthenticatedPrincipal>()
+                .is_none();
         payload.on_end(move |payload| {
-            if !may_select_subscription(&payload.document, operation_name.as_deref()) {
-                return payload.proceed();
+            if may_select_subscription(&payload.document, operation_name.as_deref()) {
+                metrics.graphql_error();
+                return payload.end_with_graphql_error(
+                    http_subscription_refusal(gateway_enabled),
+                    hive_router::http::StatusCode::BAD_REQUEST,
+                );
             }
-            metrics.graphql_error();
-            payload.end_with_graphql_error(
-                http_subscription_refusal(gateway_enabled),
-                hive_router::http::StatusCode::BAD_REQUEST,
-            )
+            if introspection_needs_caller
+                && may_select_introspection(&payload.document, operation_name.as_deref())
+            {
+                metrics.graphql_error();
+                return payload.end_with_graphql_error(
+                    GraphQLError::from_message_and_code(
+                        "authentication is required",
+                        "UNAUTHENTICATED",
+                    ),
+                    hive_router::http::StatusCode::UNAUTHORIZED,
+                );
+            }
+            payload.proceed()
         })
     }
 
@@ -974,7 +997,14 @@ impl background_tasks::BackgroundTask for AuthenticationRefreshTask {
             hive_router::tokio::select! {
                 _ = token.cancelled() => return,
                 _ = hive_router::tokio::time::sleep(self.interval) => {
-                    let _ = self.provider.refresh().await;
+                    // The provider keeps its previous verification state on
+                    // failure; record the failure without credential detail.
+                    if let Err(error) = self.provider.refresh().await {
+                        tracing::warn!(
+                            kind = ?error.kind(),
+                            "authentication verification refresh failed; keeping the previous state"
+                        );
+                    }
                 }
             }
         }
@@ -994,13 +1024,24 @@ fn http_subscription_refusal(gateway_enabled: bool) -> GraphQLError {
     )
 }
 
-/// Whether any operation the request could select is a subscription. With no
-/// operation name Hive selects the first operation, and with a name it selects
-/// the first operation of that name; both are subsets of this check.
+/// Whether any operation the request could select is a subscription.
 fn may_select_subscription(
     document: &hive_router::graphql_tools::static_graphql::query::Document,
     operation_name: Option<&str>,
 ) -> bool {
+    use hive_router::graphql_tools::static_graphql::query::OperationDefinition;
+    selectable_operations(document, operation_name)
+        .any(|operation| matches!(operation, OperationDefinition::Subscription(_)))
+}
+
+/// Every operation the request could select. With no operation name Hive
+/// selects the first operation, and with a name it selects the first operation
+/// of that name; both are subsets of this set.
+fn selectable_operations<'a>(
+    document: &'a hive_router::graphql_tools::static_graphql::query::Document,
+    operation_name: Option<&'a str>,
+) -> impl Iterator<Item = &'a hive_router::graphql_tools::static_graphql::query::OperationDefinition>
+{
     use hive_router::graphql_tools::static_graphql::query::{Definition, OperationDefinition};
     document
         .definitions
@@ -1009,7 +1050,7 @@ fn may_select_subscription(
             Definition::Operation(operation) => Some(operation),
             Definition::Fragment(_) => None,
         })
-        .filter(|operation| {
+        .filter(move |operation| {
             let name = match operation {
                 OperationDefinition::Query(query) => query.name.as_deref(),
                 OperationDefinition::Mutation(mutation) => mutation.name.as_deref(),
@@ -1018,7 +1059,57 @@ fn may_select_subscription(
             };
             operation_name.is_none_or(|selected| name == Some(selected))
         })
-        .any(|operation| matches!(operation, OperationDefinition::Subscription(_)))
+}
+
+/// Whether any operation the request could select reads a root introspection
+/// field (`__schema`, `__type`, or any other `__` field except `__typename`),
+/// directly or through inline fragments and fragment spreads.
+fn may_select_introspection(
+    document: &hive_router::graphql_tools::static_graphql::query::Document,
+    operation_name: Option<&str>,
+) -> bool {
+    use hive_router::graphql_tools::static_graphql::query::{
+        Definition, FragmentDefinition, OperationDefinition, Selection, SelectionSet,
+    };
+
+    fn selects<'a>(
+        set: &'a SelectionSet,
+        fragments: &BTreeMap<&'a str, &'a FragmentDefinition>,
+        visited: &mut std::collections::BTreeSet<&'a str>,
+    ) -> bool {
+        set.items.iter().any(|selection| match selection {
+            Selection::Field(field) => field.name.starts_with("__") && field.name != "__typename",
+            Selection::InlineFragment(fragment) => {
+                selects(&fragment.selection_set, fragments, visited)
+            }
+            Selection::FragmentSpread(spread) => {
+                visited.insert(spread.fragment_name.as_str())
+                    && fragments
+                        .get(spread.fragment_name.as_str())
+                        .is_some_and(|fragment| {
+                            selects(&fragment.selection_set, fragments, visited)
+                        })
+            }
+        })
+    }
+
+    let fragments = document
+        .definitions
+        .iter()
+        .filter_map(|definition| match definition {
+            Definition::Fragment(fragment) => Some((fragment.name.as_str(), fragment)),
+            Definition::Operation(_) => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    selectable_operations(document, operation_name).any(|operation| {
+        let set = match operation {
+            OperationDefinition::Query(query) => &query.selection_set,
+            OperationDefinition::Mutation(mutation) => &mutation.selection_set,
+            OperationDefinition::Subscription(subscription) => &subscription.selection_set,
+            OperationDefinition::SelectionSet(set) => set,
+        };
+        selects(set, &fragments, &mut std::collections::BTreeSet::new())
+    })
 }
 
 fn invalid_bearer_response(payload: OnHttpRequestHookPayload<'_>) -> OnHttpRequestHookResult<'_> {
@@ -1118,6 +1209,7 @@ fn build_hive_config(
             "graphql_endpoint": config.graphql_path,
         },
         "laboratory": {"enabled": false},
+        "introspection": config.introspection,
         "headers": {"all": {"request": request_rules}},
         "websocket": websocket,
         "subscriptions": subscriptions,
@@ -1235,6 +1327,75 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn private_hive_introspection_is_off_unless_enabled_and_always_depth_bounded() {
+        let base = || {
+            RouterConfig::new("127.0.0.1:4000".parse().unwrap())
+                .allow_anonymous_development(true)
+                .with_subgraph(StaticSubgraph::new(
+                    "status",
+                    "http://status.test/graphql",
+                    "http://status.test/sdl",
+                ))
+        };
+        for (config, enabled) in [(base(), false), (base().with_introspection(true), true)] {
+            let config = config.validate().unwrap();
+            let serialized =
+                serde_json::to_value(build_hive_config(&config, 3, None).unwrap()).unwrap();
+            assert_eq!(serialized["introspection"], enabled);
+            assert_eq!(
+                serialized["limits"]["max_depth"]["ignore_introspection"],
+                false
+            );
+        }
+    }
+
+    #[test]
+    fn introspection_detection_covers_fragments_and_the_selected_operation() {
+        let parse = |query: &str| {
+            hive_router::graphql_tools::parser::parse_query::<String>(query)
+                .unwrap()
+                .into_static()
+        };
+        for (query, operation, expected) in [
+            ("{ __schema { queryType { name } } }", None, true),
+            ("{ item: __type(name: \"Query\") { name } }", None, true),
+            ("{ __typename }", None, false),
+            ("{ product(id: \"1\") { __typename id } }", None, false),
+            (
+                "{ ... on Query { __schema { types { name } } } }",
+                None,
+                true,
+            ),
+            (
+                "query { ...Root } fragment Root on Query { ...Deep } fragment Deep on Query { __type(name: \"Query\") { name } }",
+                None,
+                true,
+            ),
+            (
+                "query { ...Loop } fragment Loop on Query { ...Loop }",
+                None,
+                false,
+            ),
+            (
+                "query Plain { __typename } query Schema { __schema { types { name } } }",
+                Some("Plain"),
+                false,
+            ),
+            (
+                "query Plain { __typename } query Schema { __schema { types { name } } }",
+                None,
+                true,
+            ),
+        ] {
+            assert_eq!(
+                may_select_introspection(&parse(query), operation),
+                expected,
+                "{query} {operation:?}"
+            );
+        }
     }
 
     #[test]

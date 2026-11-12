@@ -52,6 +52,7 @@ fn executable_routes_http_and_websocket_then_handles_sigterm() {
         r#"{{
           "listener": "{router_address}",
           "graphqlPath": "/graphql",
+          "introspection": true,
           "authentication": {{
             "jwksUrl": "{}/jwks",
             "issuer": "{TOKEN_ISSUER}",
@@ -142,6 +143,23 @@ fn executable_routes_http_and_websocket_then_handles_sigterm() {
     let body: serde_json::Value = serde_json::from_slice(&response.1)
         .unwrap_or_else(|error| panic!("invalid router JSON {error}: {:?}", response.1));
     assert_eq!(body["data"]["hello"], "world", "{body}");
+
+    // Enabled introspection on an authenticated router still needs a caller.
+    let anonymous = http(
+        router_address,
+        "POST",
+        "/graphql",
+        &[],
+        br#"{"query":"{ __type(name: \"Query\") { name } }"}"#,
+    )
+    .expect("anonymous introspection response");
+    let anonymous_body: Value = serde_json::from_slice(&anonymous.1).unwrap();
+    assert_eq!(anonymous.0, 401, "{anonymous_body}");
+    assert!(anonymous_body["data"].is_null(), "{anonymous_body}");
+    assert_eq!(
+        anonymous_body["errors"][0]["extensions"]["code"], "UNAUTHENTICATED",
+        "{anonymous_body}"
+    );
 
     // Composite key order must survive the complete SDL-fetch, composition,
     // runtime-schema and HTTP introspection path. graphql-orm-client also pins
