@@ -2,7 +2,7 @@ use super::core::{
     AppliedMigrationRecord, DbAuthContext, MigrationApplicationMetadata, SchemaModel, SqlValue,
 };
 use super::dialect::{DatabaseBackend, SqlDialect};
-use super::rls::{LiveRlsEnforcement, LiveRlsTable};
+use super::rls::{LiveRlsEnforcement, LiveRlsTable, LiveRlsTarget, RlsTableProbe};
 use futures::future::BoxFuture;
 
 pub trait OrmBackend: Copy + Clone + Send + Sync + 'static {
@@ -232,6 +232,21 @@ pub trait RlsIntrospectionBackend: OrmBackend {
     /// Return live table RLS flags and policies known to this backend.
     async fn introspect_rls(_pool: &Self::Pool) -> crate::Result<Vec<LiveRlsTable>> {
         Ok(Vec::new())
+    }
+
+    /// Return the live RLS state of each probed table and the RLS helper
+    /// functions, with PostgreSQL's rendering of the declared and live
+    /// policy expressions.
+    ///
+    /// Each probe's path is resolved as the plan's SQL resolves it. The
+    /// expressions are rendered by parsing each one against that table in a
+    /// temporary view, inside a transaction that is rolled back, so the
+    /// declared and the live expressions are compared in the same form.
+    async fn introspect_rls_target(
+        _pool: &Self::Pool,
+        _probes: &[RlsTableProbe],
+    ) -> crate::Result<LiveRlsTarget> {
+        Ok(LiveRlsTarget::default())
     }
 
     /// Return whether the current connection role is subject to RLS.

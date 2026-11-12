@@ -25,7 +25,7 @@ use super::owned_schema::{
 };
 use super::query::PoolProvider;
 #[cfg(feature = "postgres")]
-use super::rls::{LiveRlsEnforcement, LiveRlsPolicy, LiveRlsTable};
+use super::rls::{LiveRlsEnforcement, LiveRlsPolicy, LiveRlsTable, LiveRlsTarget, RlsTableProbe};
 use super::{IntrospectionBackend, RlsIntrospectionBackend};
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 use sqlx::Row;
@@ -4446,6 +4446,19 @@ impl RlsIntrospectionBackend for super::PostgresBackend {
             .collect()
     }
 
+    async fn introspect_rls_target(
+        pool: &Self::Pool,
+        probes: &[RlsTableProbe],
+    ) -> crate::Result<LiveRlsTarget> {
+        // Rendering creates temporary views; nothing of it may persist.
+        let mut tx = pool.begin().await?;
+        let result = postgres_rls_target(&mut tx, probes).await;
+        let rollback = tx.rollback().await;
+        let target = result?;
+        rollback?;
+        Ok(target)
+    }
+
     async fn introspect_rls_enforcement(
         pool: &Self::Pool,
     ) -> crate::Result<Option<LiveRlsEnforcement>> {
@@ -4790,6 +4803,192 @@ impl RlsIntrospectionBackend for super::PostgresBackend {
         }
         Ok(Some(live))
     }
+}
+
+/// Read the live RLS state of `probes` and the RLS helper functions.
+#[cfg(feature = "postgres")]
+async fn postgres_rls_target(
+    conn: &mut sqlx::PgConnection,
+    probes: &[RlsTableProbe],
+) -> crate::Result<LiveRlsTarget> {
+    use super::rls::{
+        LiveRlsCommand, LiveRlsHelperFunction, LiveRlsPolicyState, LiveRlsTableState,
+    };
+
+    let mut target = LiveRlsTarget::default();
+    for probe in probes {
+        let mut state = LiveRlsTableState {
+            table_sql: probe.table_sql.clone(),
+            ..Default::default()
+        };
+        let table = sqlx::query(
+            "SELECT c.oid AS oid, n.nspname::text AS schema_name, c.relname::text AS table_name,
+                    c.oid::regclass::text AS relation_sql,
+                    c.relrowsecurity AS enabled, c.relforcerowsecurity AS forced,
+                    row_security_active(c.oid) AS active
+             FROM pg_catalog.pg_class c
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+             WHERE c.oid = pg_catalog.to_regclass($1) AND c.relkind IN ('r', 'p')",
+        )
+        .bind(&probe.table_sql)
+        .fetch_optional(&mut *conn)
+        .await?;
+        let Some(table) = table else {
+            target.tables.push(state);
+            continue;
+        };
+        let oid: sqlx::postgres::types::Oid = table.try_get("oid")?;
+        let relation_sql: String = table.try_get("relation_sql")?;
+        state.relation = Some((table.try_get("schema_name")?, table.try_get("table_name")?));
+        state.enabled = table.try_get("enabled")?;
+        state.forced = table.try_get("forced")?;
+        state.row_security_active = table.try_get("active")?;
+        let policies = sqlx::query(
+            "SELECT p.polname::text AS name, p.polcmd::text AS command,
+                    p.polpermissive AS permissive,
+                    ARRAY(SELECT CASE WHEN r.grantee = 0 THEN 'public' ELSE pg_catalog.pg_get_userbyid(r.grantee)::text END
+                          FROM pg_catalog.unnest(p.polroles) AS r(grantee) ORDER BY 1) AS roles,
+                    pg_catalog.pg_get_expr(p.polqual, p.polrelid) AS using_expression,
+                    pg_catalog.pg_get_expr(p.polwithcheck, p.polrelid) AS check_expression
+             FROM pg_catalog.pg_policy p
+             WHERE p.polrelid = $1
+             ORDER BY p.polname",
+        )
+        .bind(oid)
+        .fetch_all(&mut *conn)
+        .await?;
+        for policy in policies {
+            let command: String = policy.try_get("command")?;
+            let command = match command.as_str() {
+                "r" => LiveRlsCommand::Select,
+                "a" => LiveRlsCommand::Insert,
+                "w" => LiveRlsCommand::Update,
+                "d" => LiveRlsCommand::Delete,
+                _ => LiveRlsCommand::All,
+            };
+            let using: Option<String> = policy.try_get("using_expression")?;
+            let check: Option<String> = policy.try_get("check_expression")?;
+            let using = render_policy_clause(conn, &relation_sql, using, probe.render).await?;
+            let check = render_policy_clause(conn, &relation_sql, check, probe.render).await?;
+            state.policies.push(LiveRlsPolicyState {
+                name: policy.try_get("name")?,
+                command,
+                permissive: policy.try_get("permissive")?,
+                roles: policy.try_get("roles")?,
+                using,
+                check,
+            });
+        }
+        for expression in probe.expressions.iter().filter(|_| probe.render) {
+            let rendered =
+                render_postgres_policy_expression(conn, &relation_sql, expression).await?;
+            state.expected.push((expression.clone(), rendered));
+        }
+        target.tables.push(state);
+    }
+
+    let names = super::rls::RLS_HELPER_FUNCTIONS
+        .iter()
+        .map(|helper| helper.name.to_string())
+        .collect::<Vec<_>>();
+    let helpers = sqlx::query(
+        "SELECT p.proname::text AS name,
+                pg_catalog.pg_get_function_identity_arguments(p.oid) AS arguments,
+                pg_catalog.pg_get_function_result(p.oid) AS returns,
+                p.prosrc AS body, l.lanname::text AS language,
+                p.provolatile::text AS volatility, p.prokind::text AS kind,
+                p.prosecdef AS security_definer, p.proisstrict AS strict,
+                p.proretset AS returns_set,
+                COALESCE(p.proconfig, ARRAY[]::text[]) AS config
+         FROM pg_catalog.pg_proc p
+         JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+         JOIN pg_catalog.pg_language l ON l.oid = p.prolang
+         WHERE n.nspname = 'graphql_orm' AND p.proname = ANY($1)
+         ORDER BY p.proname, 2",
+    )
+    .bind(&names)
+    .fetch_all(&mut *conn)
+    .await?;
+    for helper in helpers {
+        target.helper_functions.push(LiveRlsHelperFunction {
+            name: helper.try_get("name")?,
+            arguments: helper.try_get("arguments")?,
+            returns: helper.try_get("returns")?,
+            body: helper.try_get("body")?,
+            language: helper.try_get("language")?,
+            volatility: helper.try_get("volatility")?,
+            kind: helper.try_get("kind")?,
+            security_definer: helper.try_get("security_definer")?,
+            strict: helper.try_get("strict")?,
+            returns_set: helper.try_get("returns_set")?,
+            config: helper.try_get("config")?,
+        });
+    }
+    Ok(target)
+}
+
+/// Render one live policy clause, when it exists and `render` is set.
+#[cfg(feature = "postgres")]
+async fn render_policy_clause(
+    conn: &mut sqlx::PgConnection,
+    relation_sql: &str,
+    expression: Option<String>,
+    render: bool,
+) -> crate::Result<Option<Result<String, String>>> {
+    Ok(match expression {
+        Some(expression) if render => {
+            Some(render_postgres_policy_expression(conn, relation_sql, &expression).await?)
+        }
+        Some(_) => Some(Err("not rendered".to_string())),
+        None => None,
+    })
+}
+
+/// PostgreSQL's rendering of `expression` as a policy expression on
+/// `relation_sql`, or why it could not render it.
+///
+/// The expression is parsed as the `WHERE` clause of a temporary view over the
+/// table, so its names resolve and its result is coerced to `boolean` as in a
+/// policy, and the view's definition is read back. Rendering a declared
+/// predicate and a live policy expression this way gives equal text exactly
+/// when they parse to the same expression. The view is created under a
+/// savepoint that is always rolled back. The statement is sent through the
+/// extended query protocol, which accepts exactly one command, so the text
+/// cannot add statements; creating the view executes nothing it names.
+#[cfg(feature = "postgres")]
+async fn render_postgres_policy_expression(
+    conn: &mut sqlx::PgConnection,
+    relation_sql: &str,
+    expression: &str,
+) -> crate::Result<Result<String, String>> {
+    sqlx::raw_sql("SAVEPOINT graphql_orm_rls_render")
+        .execute(&mut *conn)
+        .await?;
+    let create = format!(
+        "CREATE TEMP VIEW graphql_orm_rls_render AS SELECT FROM {relation_sql} WHERE ({expression})"
+    );
+    let created = sqlx::query(&create)
+        .persistent(false)
+        .execute(&mut *conn)
+        .await;
+    let rendered = match created {
+        Ok(_) => sqlx::query_scalar::<_, String>(
+            "SELECT pg_catalog.pg_get_viewdef('pg_temp.graphql_orm_rls_render'::pg_catalog.regclass, false)",
+        )
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(|error| error.to_string()),
+        Err(error) => Err(match error.as_database_error() {
+            Some(database) => database.message().to_string(),
+            None => error.to_string(),
+        }),
+    };
+    sqlx::raw_sql(
+        "ROLLBACK TO SAVEPOINT graphql_orm_rls_render; RELEASE SAVEPOINT graphql_orm_rls_render",
+    )
+    .execute(&mut *conn)
+    .await?;
+    Ok(rendered)
 }
 
 #[cfg(feature = "mssql")]

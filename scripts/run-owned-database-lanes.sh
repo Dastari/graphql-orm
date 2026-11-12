@@ -112,6 +112,7 @@ run_postgres_legacy() {
     --test portable_primitives_postgres \
     --test postgres_compat \
     --test postgres_rls \
+    --test postgres_rls_drift \
     --test propagated_subscriptions \
     --test read_predicate \
     --test read_projections \

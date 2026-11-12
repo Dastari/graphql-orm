@@ -57,6 +57,33 @@ Choosing the in-place path for a restored store re-opens consumed approvals.
 See the
 [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01270-to-01280-enforced-runtime-closure-after-restore).
 
+## 0.126.0: RLS drift validation compares PostgreSQL's rendering
+
+`validate_target` now compares RLS policy expressions as PostgreSQL parses them,
+so a freshly applied target validates clean. It is stricter elsewhere:
+
+- Any policy on an RLS entity or search-document table that the target does not
+  declare is an `Error`, including `FOR ALL` and restrictive policies. Move such
+  policies into the entity's `#[graphql_rls]` predicates or drop them. Policies
+  graphql-orm generated for operations you have since removed are dropped when
+  you re-apply the target.
+- A declared policy must be `PERMISSIVE`, apply to `PUBLIC` and keep its
+  command.
+- The `graphql_orm` helper functions must match what the plan installs;
+  re-apply the target if validation reports one as differing.
+- The validating role needs the `TEMP` privilege on the database (PostgreSQL
+  grants it to `PUBLIC` by default). Without it, or on a read-only standby,
+  policies are reported as "could not be compared".
+
+`#[graphql_rls]` `tenant` and `owner` must name a stored column of the entity,
+by field name or renamed column. Pre-quoted or qualified values no longer
+compile. Generated predicates now wrap each condition in parentheses; the
+policies PostgreSQL stores are unchanged, so re-applying is not required for
+validation to pass.
+
+Clients that matched `INTERNAL_ERROR` for row-level security `WITH CHECK`
+refusals now receive `FORBIDDEN`.
+
 ## 0.125.0: PostgreSQL records change-journal entries in the database
 
 Upgrade runtime and macros together. This affects PostgreSQL deployments that

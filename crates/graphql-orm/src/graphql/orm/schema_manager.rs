@@ -13,8 +13,8 @@ use super::migrations::{
 };
 use super::owned_schema::{SchemaRef, StepRef};
 use super::rls::{
-    build_schema_target_rls_plan, validate_change_journal, validate_protected_rls_tables,
-    validate_rls_enforcement_state, validate_rls_models,
+    LiveRlsTarget, build_schema_target_rls_plan, rls_table_probes, validate_change_journal,
+    validate_protected_rls_tables, validate_rls_enforcement_state, validate_rls_models,
 };
 use super::{IntrospectionBackend, MigrationBackend, OrmBackend, RlsIntrospectionBackend};
 use crate::db::Database;
@@ -89,6 +89,14 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
     /// recorder function or trigger on any single-key table in the target.
     /// Run it with the runtime pool: the role being checked is the one the
     /// pool connects as.
+    ///
+    /// RLS policy expressions are compared in the form PostgreSQL renders
+    /// them: the declared predicate and the live expression are each parsed
+    /// against the table in a temporary view, inside a transaction that is
+    /// rolled back. Any other policy on an RLS or search document table, and
+    /// a policy whose command, `PERMISSIVE` mode or roles differ, is an error,
+    /// as is an expression PostgreSQL could not render. Rendering needs the
+    /// `TEMP` privilege, which PostgreSQL grants to `PUBLIC` by default.
     pub async fn validate_target(
         &self,
         target: &SchemaTarget,
@@ -103,6 +111,19 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         } else {
             B::introspect_rls_enforcement(self.database.pool()).await?
         };
+        let probed = if target.rls.entities.is_empty() {
+            LiveRlsTarget::default()
+        } else {
+            let mut probes = rls_table_probes(target);
+            // External policies validate enforcement only.
+            if matches!(
+                self.policy(),
+                SchemaPolicy::ExternalReadOnly | SchemaPolicy::ExternalWritable
+            ) {
+                probes.iter_mut().for_each(|probe| probe.render = false);
+            }
+            B::introspect_rls_target(self.database.pool(), &probes).await?
+        };
         let mut rls_diagnostics = if matches!(
             self.policy(),
             SchemaPolicy::ExternalReadOnly | SchemaPolicy::ExternalWritable
@@ -111,11 +132,11 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         } else {
             let current_rls = B::introspect_rls(self.database.pool()).await?;
             let mut diagnostics =
-                validate_rls_models(B::DIALECT, self.policy(), &current_rls, &target.rls);
+                validate_rls_models(B::DIALECT, self.policy(), &probed, &target.rls);
             diagnostics.extend(validate_protected_rls_tables(
                 B::DIALECT,
                 self.policy(),
-                &current_rls,
+                &probed,
                 live.as_ref(),
                 target,
             ));
@@ -129,7 +150,12 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
             diagnostics
         };
         if let Some(live) = &live {
-            rls_diagnostics.extend(validate_rls_enforcement_state(B::DIALECT, live, target));
+            rls_diagnostics.extend(validate_rls_enforcement_state(
+                B::DIALECT,
+                live,
+                &probed,
+                target,
+            ));
         }
         Ok(SchemaTargetValidationReport {
             backend: B::DIALECT.name(),
@@ -159,12 +185,20 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         if target.rls.entities.is_empty() {
             return Ok(Vec::new());
         }
-        Ok(
-            match B::introspect_rls_enforcement(self.database.pool()).await? {
-                Some(live) => validate_rls_enforcement_state(B::DIALECT, &live, target),
-                None => Vec::new(),
-            },
-        )
+        let Some(live) = B::introspect_rls_enforcement(self.database.pool()).await? else {
+            return Ok(Vec::new());
+        };
+        // Only table resolution and enforcement are read; no expression is
+        // rendered.
+        let mut probes = rls_table_probes(target);
+        probes.iter_mut().for_each(|probe| probe.render = false);
+        let probed = B::introspect_rls_target(self.database.pool(), &probes).await?;
+        Ok(validate_rls_enforcement_state(
+            B::DIALECT,
+            &live,
+            &probed,
+            target,
+        ))
     }
 
     /// Build a structured migration plan from one schema model to another.

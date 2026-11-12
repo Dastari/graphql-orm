@@ -907,6 +907,29 @@ fn identifier_path_parts(identifier: &str) -> impl Iterator<Item = &str> {
     })
 }
 
+/// The names PostgreSQL resolves each part of a declared path to when the
+/// ORM's SQL renders it with [`DatabaseBackend::render_identifier_path`]:
+/// a delimited part keeps its case, a part rendered bare folds to lower case,
+/// and a part that rendering quotes keeps its case.
+pub(crate) fn postgres_resolved_identifier_parts(path: &str) -> Vec<String> {
+    identifier_path_parts(path)
+        .filter(|part| !part.is_empty())
+        .map(postgres_resolved_identifier)
+        .collect()
+}
+
+/// The name PostgreSQL resolves one identifier to when the ORM's SQL renders
+/// it with [`DatabaseBackend::render_identifier`].
+pub(crate) fn postgres_resolved_identifier(identifier: &str) -> String {
+    if identifier.len() >= 2 && identifier.starts_with('"') && identifier.ends_with('"') {
+        identifier[1..identifier.len() - 1].replace("\"\"", "\"")
+    } else if DatabaseBackend::Postgres.identifier_needs_quoting(identifier) {
+        identifier.to_string()
+    } else {
+        identifier.to_ascii_lowercase()
+    }
+}
+
 /// Whether a declared table path has a single part, with no schema.
 pub(crate) fn identifier_path_is_bare(path: &str) -> bool {
     identifier_path_parts(path)

@@ -4,21 +4,79 @@ use super::core::{
 };
 use super::dialect::{DatabaseBackend, SqlDialect};
 
+/// One PostgreSQL helper function the RLS plan installs in `graphql_orm`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RlsHelperFunction {
+    /// Function name in schema `graphql_orm`.
+    pub(crate) name: &'static str,
+    /// Arguments, as `pg_get_function_identity_arguments` renders them.
+    pub(crate) arguments: &'static str,
+    /// Result type, as `pg_get_function_result` renders it.
+    pub(crate) returns: &'static str,
+    /// `LANGUAGE sql` body, exactly as stored in `pg_proc.prosrc`.
+    pub(crate) body: &'static str,
+}
+
+/// The helper functions RLS predicates call. Each is `LANGUAGE sql STABLE`,
+/// `SECURITY INVOKER`, not `STRICT`, with no `SET` options.
+pub(crate) const RLS_HELPER_FUNCTIONS: &[RlsHelperFunction] = &[
+    RlsHelperFunction {
+        name: "current_user_id",
+        arguments: "",
+        returns: "text",
+        body: " SELECT NULLIF(current_setting('app.user_id', true), '') ",
+    },
+    RlsHelperFunction {
+        name: "current_subject",
+        arguments: "",
+        returns: "text",
+        body: " SELECT NULLIF(current_setting('app.subject', true), '') ",
+    },
+    RlsHelperFunction {
+        name: "current_tenant_id",
+        arguments: "",
+        returns: "text",
+        body: " SELECT NULLIF(current_setting('app.tenant_id', true), '') ",
+    },
+    RlsHelperFunction {
+        name: "current_roles",
+        arguments: "",
+        returns: "text[]",
+        body: " SELECT ARRAY(SELECT jsonb_array_elements_text(COALESCE(NULLIF(current_setting('app.roles', true), '')::jsonb, '[]'::jsonb))) ",
+    },
+    RlsHelperFunction {
+        name: "current_scopes",
+        arguments: "",
+        returns: "text[]",
+        body: " SELECT ARRAY(SELECT jsonb_array_elements_text(COALESCE(NULLIF(current_setting('app.scopes', true), '')::jsonb, '[]'::jsonb))) ",
+    },
+    RlsHelperFunction {
+        name: "claims",
+        arguments: "",
+        returns: "jsonb",
+        body: " SELECT COALESCE(NULLIF(current_setting('app.claims', true), '')::jsonb, '{}'::jsonb) ",
+    },
+    RlsHelperFunction {
+        name: "has_scope",
+        arguments: "scope text",
+        returns: "boolean",
+        body: " SELECT scope = ANY(graphql_orm.current_scopes()) ",
+    },
+];
+
 /// Render deterministic PostgreSQL helper function SQL for RLS predicates.
 ///
 /// The helpers read transaction-local `app.*` settings set from
 /// [`DbAuthContext`](crate::graphql::orm::DbAuthContext).
 pub fn postgres_rls_helper_sql() -> Vec<String> {
-    vec![
-        "CREATE SCHEMA IF NOT EXISTS graphql_orm".to_string(),
-        "CREATE OR REPLACE FUNCTION graphql_orm.current_user_id() RETURNS text LANGUAGE sql STABLE AS $$ SELECT NULLIF(current_setting('app.user_id', true), '') $$".to_string(),
-        "CREATE OR REPLACE FUNCTION graphql_orm.current_subject() RETURNS text LANGUAGE sql STABLE AS $$ SELECT NULLIF(current_setting('app.subject', true), '') $$".to_string(),
-        "CREATE OR REPLACE FUNCTION graphql_orm.current_tenant_id() RETURNS text LANGUAGE sql STABLE AS $$ SELECT NULLIF(current_setting('app.tenant_id', true), '') $$".to_string(),
-        "CREATE OR REPLACE FUNCTION graphql_orm.current_roles() RETURNS text[] LANGUAGE sql STABLE AS $$ SELECT ARRAY(SELECT jsonb_array_elements_text(COALESCE(NULLIF(current_setting('app.roles', true), '')::jsonb, '[]'::jsonb))) $$".to_string(),
-        "CREATE OR REPLACE FUNCTION graphql_orm.current_scopes() RETURNS text[] LANGUAGE sql STABLE AS $$ SELECT ARRAY(SELECT jsonb_array_elements_text(COALESCE(NULLIF(current_setting('app.scopes', true), '')::jsonb, '[]'::jsonb))) $$".to_string(),
-        "CREATE OR REPLACE FUNCTION graphql_orm.claims() RETURNS jsonb LANGUAGE sql STABLE AS $$ SELECT COALESCE(NULLIF(current_setting('app.claims', true), '')::jsonb, '{}'::jsonb) $$".to_string(),
-        "CREATE OR REPLACE FUNCTION graphql_orm.has_scope(scope text) RETURNS boolean LANGUAGE sql STABLE AS $$ SELECT scope = ANY(graphql_orm.current_scopes()) $$".to_string(),
-    ]
+    let mut statements = vec!["CREATE SCHEMA IF NOT EXISTS graphql_orm".to_string()];
+    statements.extend(RLS_HELPER_FUNCTIONS.iter().map(|helper| {
+        format!(
+            "CREATE OR REPLACE FUNCTION graphql_orm.{}({}) RETURNS {} LANGUAGE sql STABLE AS $${}$$",
+            helper.name, helper.arguments, helper.returns, helper.body
+        )
+    }));
+    statements
 }
 
 /// Fail closed when a generated GraphQL resolver reaches a PostgreSQL RLS
@@ -223,16 +281,13 @@ pub(crate) fn search_key_encoding(search: &RlsSearchTable) -> &'static str {
 /// Predicate exposing a search document only while its base row is visible.
 ///
 /// The document key is converted to the base key type so the base primary-key
-/// index serves the correlated lookup. The text is written in PostgreSQL's
-/// deparsed form so drift validation can compare it with `pg_policies`.
+/// index serves the correlated lookup. Drift validation compares
+/// PostgreSQL's rendering of this text with its rendering of the live policy.
 pub(crate) fn render_search_document_predicate(search: &RlsSearchTable) -> String {
     let backend = DatabaseBackend::Postgres;
-    let base = backend.quote_identifier_path(&search.base_table);
-    let key = format!("b.{}", backend.quote_identifier(&search.primary_key));
-    let document_key = format!(
-        "{}.entity_pk",
-        backend.quote_identifier(&search.search_table)
-    );
+    let base = backend.render_identifier_path(&search.base_table);
+    let key = format!("b.{}", quote_policy_column(&search.primary_key));
+    let document_key = format!("{}.entity_pk", search_table_sql(search));
     let normalized = search.primary_key_sql_type.trim().to_ascii_lowercase();
     let condition = match normalized.as_str() {
         "text" => format!("{key} = {document_key}"),
@@ -249,7 +304,7 @@ pub(crate) fn render_search_document_predicate(search: &RlsSearchTable) -> Strin
 
 fn render_postgres_search_table_rls_sql(search: &RlsSearchTable) -> Vec<String> {
     let backend = DatabaseBackend::Postgres;
-    let table = backend.quote_identifier(&search.search_table);
+    let table = search_table_sql(search);
     let predicate = render_search_document_predicate(search);
     let mut statements = vec![format!("ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")];
     if search.force {
@@ -283,9 +338,9 @@ fn render_postgres_search_table_rls_sql(search: &RlsSearchTable) -> Vec<String> 
 /// session's `search_path` and cannot be redirected to a `pg_temp` table.
 fn render_search_delete_trigger_sql(search: &RlsSearchTable) -> String {
     let backend = DatabaseBackend::Postgres;
-    let base = backend.quote_identifier_path(&search.base_table);
+    let base = backend.render_identifier_path(&search.base_table);
     let trigger = backend.quote_identifier(SEARCH_DELETE_TRIGGER);
-    let search_regclass = sql_string_literal(&backend.quote_identifier(&search.search_table));
+    let search_regclass = sql_string_literal(&search_table_sql(search));
     format!(
         "DO $graphql_orm$ DECLARE target pg_catalog.regclass := pg_catalog.to_regclass({search_regclass}); target_schema pg_catalog.text; target_name pg_catalog.text; BEGIN \
          IF target IS NULL THEN RAISE EXCEPTION USING ERRCODE = '42P01', MESSAGE = format('graphql-orm search document table %s does not exist', {search_regclass}); END IF; \
@@ -296,7 +351,9 @@ fn render_search_delete_trigger_sql(search: &RlsSearchTable) -> String {
          END $graphql_orm$",
         trigger_name = sql_string_literal(SEARCH_DELETE_TRIGGER),
         base_literal = sql_string_literal(&base),
-        primary_key = sql_string_literal(&search.primary_key),
+        primary_key = sql_string_literal(&super::dialect::postgres_resolved_identifier(
+            &search.primary_key
+        )),
         encoding = sql_string_literal(search_key_encoding(search)),
     )
 }
@@ -304,7 +361,7 @@ fn render_search_delete_trigger_sql(search: &RlsSearchTable) -> String {
 /// Drop the search-document delete trigger from `base_table`, if present.
 pub(crate) fn render_drop_search_delete_trigger_sql(base_table: &str) -> String {
     let backend = DatabaseBackend::Postgres;
-    let base = backend.quote_identifier_path(base_table);
+    let base = backend.render_identifier_path(base_table);
     format!(
         "DO $graphql_orm$ BEGIN IF to_regclass({}) IS NOT NULL THEN DROP TRIGGER IF EXISTS {} ON {}; END IF; END $graphql_orm$",
         sql_string_literal(&base),
@@ -707,7 +764,8 @@ fn sql_string_literal(value: &str) -> String {
 ///
 /// Output includes `ENABLE ROW LEVEL SECURITY`, optional `FORCE ROW LEVEL
 /// SECURITY`, and create-or-replace policy statements for operations with a
-/// configured predicate.
+/// configured predicate. The generated policy of every other operation is
+/// dropped, so removing an operation from `#[graphql_rls]` removes its policy.
 pub fn render_postgres_entity_rls_sql(entity: &RlsEntityMetadata) -> Vec<String> {
     let table = DatabaseBackend::Postgres.render_identifier_path(entity.table_name);
     let mut statements = vec![format!("ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")];
@@ -715,34 +773,46 @@ pub fn render_postgres_entity_rls_sql(entity: &RlsEntityMetadata) -> Vec<String>
         statements.push(format!("ALTER TABLE {table} FORCE ROW LEVEL SECURITY"));
     }
 
-    for policy in sorted_policies(entity) {
-        let Some(predicate) = render_policy_predicate(DatabaseBackend::Postgres, policy) else {
-            continue;
-        };
-        let policy_name = DatabaseBackend::Postgres
-            .quote_identifier(&policy_name(entity.table_name, policy.operation));
-        statements.push(format!(
-            "DROP POLICY IF EXISTS {} ON {}",
-            policy_name, table
-        ));
-        statements.push(render_create_policy_statement(
-            &policy_name,
-            &table,
-            policy.operation,
-            &predicate,
-        ));
+    for operation in RLS_OPERATIONS {
+        let policy_name =
+            DatabaseBackend::Postgres.quote_identifier(&policy_name(entity.table_name, operation));
+        statements.push(format!("DROP POLICY IF EXISTS {policy_name} ON {table}"));
+        for policy in sorted_policies(entity) {
+            if policy.operation != operation {
+                continue;
+            }
+            let Some(predicate) = render_policy_predicate(DatabaseBackend::Postgres, policy) else {
+                continue;
+            };
+            statements.push(render_create_policy_statement(
+                &policy_name,
+                &table,
+                operation,
+                &predicate,
+            ));
+        }
     }
 
     statements
 }
 
+/// Every policy operation, in policy-name order.
+const RLS_OPERATIONS: [RlsOperation; 4] = [
+    RlsOperation::Select,
+    RlsOperation::Insert,
+    RlsOperation::Update,
+    RlsOperation::Delete,
+];
+
 /// Render the SQL predicate for one operation policy.
 ///
 /// Custom predicates are returned exactly. Generated predicates combine scope,
-/// tenant, and owner conditions in deterministic order. Returns `None` when the
-/// operation intentionally has no policy.
+/// tenant, and owner conditions in deterministic order, each in parentheses.
+/// Tenant and owner columns are always quoted as one identifier, so a value
+/// that is not a plain column name cannot change the predicate. Returns `None`
+/// when the operation intentionally has no policy.
 pub fn render_policy_predicate(
-    backend: DatabaseBackend,
+    _backend: DatabaseBackend,
     policy: &RlsOperationPolicy,
 ) -> Option<String> {
     if let Some(predicate) = policy.predicate {
@@ -752,27 +822,45 @@ pub fn render_policy_predicate(
     let mut conditions = Vec::new();
     if let Some(scope) = policy.scope {
         conditions.push(format!(
-            "graphql_orm.has_scope('{}')",
-            scope.replace('\'', "''")
+            "graphql_orm.has_scope({})",
+            sql_string_literal(scope)
         ));
     }
     if let Some(column) = policy.tenant_column {
         conditions.push(format!(
             "{} = graphql_orm.current_tenant_id()",
-            backend.quote_identifier_path(column)
+            quote_policy_column(column)
         ));
     }
     if let Some(column) = policy.owner_column {
         conditions.push(format!(
             "{} = graphql_orm.current_user_id()",
-            backend.quote_identifier_path(column)
+            quote_policy_column(column)
         ));
     }
 
     if conditions.is_empty() {
         None
     } else {
-        Some(conditions.join(" AND "))
+        Some(
+            conditions
+                .iter()
+                .map(|condition| format!("({condition})"))
+                .collect::<Vec<_>>()
+                .join(" AND "),
+        )
+    }
+}
+
+/// Render a policy column as exactly one PostgreSQL identifier naming the
+/// column the ORM's DDL creates: a plain name bare, as the DDL writes it, and
+/// anything else quoted in full, so the text cannot change the predicate.
+fn quote_policy_column(column: &str) -> String {
+    let rendered = DatabaseBackend::Postgres.render_identifier(column);
+    if rendered == column && !column.starts_with('"') {
+        rendered.into_owned()
+    } else {
+        format!("\"{}\"", column.replace('"', "\"\""))
     }
 }
 
@@ -878,10 +966,238 @@ pub struct LiveRlsTable {
     pub policies: Vec<LiveRlsPolicy>,
 }
 
+/// One table whose RLS state target validation reads, with the declared
+/// policy expressions PostgreSQL renders for comparison.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RlsTableProbe {
+    /// Table path exactly as the plan's statements render it.
+    pub table_sql: String,
+    /// Declared policy expressions on the table, without duplicates.
+    pub expressions: Vec<String>,
+    /// Whether to render the declared and live policy expressions. Without
+    /// it only the table and its policies' other attributes are read.
+    pub render: bool,
+}
+
+/// A policy command as `pg_policy.polcmd` records it.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LiveRlsCommand {
+    /// `FOR SELECT`.
+    Select,
+    /// `FOR INSERT`.
+    Insert,
+    /// `FOR UPDATE`.
+    Update,
+    /// `FOR DELETE`.
+    Delete,
+    /// `FOR ALL`.
+    All,
+}
+
+impl LiveRlsCommand {
+    /// The SQL keyword after `FOR`.
+    pub const fn sql(self) -> &'static str {
+        match self {
+            Self::Select => "SELECT",
+            Self::Insert => "INSERT",
+            Self::Update => "UPDATE",
+            Self::Delete => "DELETE",
+            Self::All => "ALL",
+        }
+    }
+
+    fn of(operation: RlsOperation) -> Self {
+        match operation {
+            RlsOperation::Select => Self::Select,
+            RlsOperation::Insert => Self::Insert,
+            RlsOperation::Update => Self::Update,
+            RlsOperation::Delete => Self::Delete,
+        }
+    }
+}
+
+/// PostgreSQL's rendering of one policy expression, or why it could not
+/// render it.
+#[doc(hidden)]
+pub type RenderedRlsExpression = Result<String, String>;
+
+/// One live policy on a probed table.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiveRlsPolicyState {
+    /// `pg_policy.polname`.
+    pub name: String,
+    /// `pg_policy.polcmd`.
+    pub command: LiveRlsCommand,
+    /// `pg_policy.polpermissive`.
+    pub permissive: bool,
+    /// Role names the policy applies to; `public` stands for `PUBLIC`.
+    pub roles: Vec<String>,
+    /// Rendered `USING` expression, when the policy has one.
+    pub using: Option<RenderedRlsExpression>,
+    /// Rendered `WITH CHECK` expression, when the policy has one.
+    pub check: Option<RenderedRlsExpression>,
+}
+
+/// Live RLS state of one probed table.
+#[doc(hidden)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LiveRlsTableState {
+    /// [`RlsTableProbe::table_sql`] of the probe.
+    pub table_sql: String,
+    /// Schema and name the path resolves to; `None` when it does not resolve.
+    pub relation: Option<(String, String)>,
+    /// `pg_class.relrowsecurity`.
+    pub enabled: bool,
+    /// `pg_class.relforcerowsecurity`.
+    pub forced: bool,
+    /// `row_security_active(table)` for the introspecting role.
+    pub row_security_active: bool,
+    /// Every policy on the table, `FOR ALL` and restrictive ones included.
+    pub policies: Vec<LiveRlsPolicyState>,
+    /// Each probe expression with PostgreSQL's rendering of it.
+    pub expected: Vec<(String, RenderedRlsExpression)>,
+}
+
+/// One live function in schema `graphql_orm` named like an RLS helper.
+#[doc(hidden)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LiveRlsHelperFunction {
+    /// `pg_proc.proname`.
+    pub name: String,
+    /// `pg_get_function_identity_arguments`.
+    pub arguments: String,
+    /// `pg_get_function_result`.
+    pub returns: String,
+    /// `pg_proc.prosrc`.
+    pub body: String,
+    /// `pg_language.lanname`.
+    pub language: String,
+    /// `pg_proc.provolatile`.
+    pub volatility: String,
+    /// `pg_proc.prokind`.
+    pub kind: String,
+    /// `pg_proc.prosecdef`.
+    pub security_definer: bool,
+    /// `pg_proc.proisstrict`.
+    pub strict: bool,
+    /// `pg_proc.proretset`.
+    pub returns_set: bool,
+    /// `pg_proc.proconfig`.
+    pub config: Vec<String>,
+}
+
+/// Live RLS state read for target validation.
+#[doc(hidden)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LiveRlsTarget {
+    /// One state per probe, in probe order.
+    pub tables: Vec<LiveRlsTableState>,
+    /// Functions in `graphql_orm` named like an RLS helper.
+    pub helper_functions: Vec<LiveRlsHelperFunction>,
+}
+
+/// One policy the target declares on a table.
+struct DeclaredPolicy {
+    name: String,
+    operation: RlsOperation,
+    predicate: String,
+}
+
+/// Tables target validation probes: every RLS entity table, then every
+/// search document table of an RLS entity, each with its declared policy
+/// expressions.
+pub(crate) fn rls_table_probes(target: &SchemaTarget) -> Vec<RlsTableProbe> {
+    let mut probes: Vec<RlsTableProbe> = Vec::new();
+    let mut add = |table_sql: String, expressions: Vec<String>| {
+        let index = match probes.iter().position(|probe| probe.table_sql == table_sql) {
+            Some(index) => index,
+            None => {
+                probes.push(RlsTableProbe {
+                    table_sql,
+                    expressions: Vec::new(),
+                    render: true,
+                });
+                probes.len() - 1
+            }
+        };
+        for expression in expressions {
+            if !probes[index].expressions.contains(&expression) {
+                probes[index].expressions.push(expression);
+            }
+        }
+    };
+    for entity in sorted_entities(&target.rls) {
+        add(
+            entity_table_sql(entity),
+            declared_entity_policies(entity)
+                .into_iter()
+                .map(|policy| policy.predicate)
+                .collect(),
+        );
+    }
+    for search in rls_search_tables(target) {
+        add(
+            search_table_sql(&search),
+            vec![render_search_document_predicate(&search)],
+        );
+    }
+    probes
+}
+
+fn entity_table_sql(entity: &RlsEntityMetadata) -> String {
+    DatabaseBackend::Postgres
+        .render_identifier_path(entity.table_name)
+        .into_owned()
+}
+
+/// The search table as the ORM's search SQL names it.
+fn search_table_sql(search: &RlsSearchTable) -> String {
+    DatabaseBackend::Postgres
+        .render_identifier(&search.search_table)
+        .into_owned()
+}
+
+/// Flattened [`LiveRlsEnforcement`] key of the table a declared path resolves
+/// to when the ORM's SQL renders it.
+fn resolved_table_key(table_name: &str) -> String {
+    let joined = super::dialect::postgres_resolved_identifier_parts(table_name).join("_");
+    joined
+        .strip_prefix("public_")
+        .map(str::to_string)
+        .unwrap_or(joined)
+}
+
+fn declared_entity_policies(entity: &RlsEntityMetadata) -> Vec<DeclaredPolicy> {
+    sorted_policies(entity)
+        .into_iter()
+        .filter_map(|policy| {
+            render_policy_predicate(DatabaseBackend::Postgres, policy).map(|predicate| {
+                DeclaredPolicy {
+                    name: policy_name(entity.table_name, policy.operation),
+                    operation: policy.operation,
+                    predicate,
+                }
+            })
+        })
+        .collect()
+}
+
+/// Validate RLS entity tables and the RLS helper functions against the live
+/// state read for `target`.
+///
+/// Each declared policy must exist under its generated name as a
+/// `PERMISSIVE` policy for `PUBLIC` with the declared command, and
+/// PostgreSQL's rendering of its live expressions must equal its rendering of
+/// the declared predicate, parsed against the same table in the same session.
+/// Any other policy on the table is an error. An expression PostgreSQL could
+/// not render is reported as an error, never treated as matching.
 pub(crate) fn validate_rls_models(
     backend: DatabaseBackend,
     policy: SchemaPolicy,
-    current: &[LiveRlsTable],
+    live: &LiveRlsTarget,
     target: &RlsSchemaModel,
 ) -> Vec<SchemaDiagnostic> {
     if target.entities.is_empty()
@@ -894,110 +1210,189 @@ pub(crate) fn validate_rls_models(
         return Vec::new();
     }
 
-    let current = current
-        .iter()
-        .map(|table| (normalize_table_key(&table.table_name), table))
-        .collect::<std::collections::BTreeMap<_, _>>();
     let mut diagnostics = Vec::new();
-
     for entity in sorted_entities(target) {
-        let table_key = normalize_table_key(entity.table_name);
-        let Some(current_table) = current.get(&table_key) else {
+        let table_name = entity.table_name;
+        let Some(state) = live_table_state(live, &entity_table_sql(entity)) else {
             diagnostics.push(rls_diagnostic(
                 SchemaDiagnosticSeverity::Error,
-                entity.table_name,
-                format!("Missing RLS table state for {}", entity.table_name),
+                table_name,
+                format!("Missing RLS table state for {table_name}"),
             ));
             continue;
         };
-        if !current_table.enabled {
+        if !state.enabled {
             diagnostics.push(rls_diagnostic(
                 SchemaDiagnosticSeverity::Error,
-                entity.table_name,
-                format!("RLS is not enabled on {}", entity.table_name),
+                table_name,
+                format!("RLS is not enabled on {table_name}"),
             ));
         }
-        if entity.force && !current_table.forced {
+        if entity.force && !state.forced {
             diagnostics.push(rls_diagnostic(
                 SchemaDiagnosticSeverity::Error,
-                entity.table_name,
-                format!("RLS is not forced on {}", entity.table_name),
+                table_name,
+                format!("RLS is not forced on {table_name}"),
             ));
         }
+        validate_declared_policies(
+            &mut diagnostics,
+            table_name,
+            state,
+            &declared_entity_policies(entity),
+            "the declared predicate",
+        );
+    }
+    validate_rls_helper_functions(&mut diagnostics, live);
+    diagnostics
+}
 
-        let policies = current_table
-            .policies
+/// The probed state of `table_sql`, when its table resolved.
+fn live_table_state<'a>(live: &'a LiveRlsTarget, table_sql: &str) -> Option<&'a LiveRlsTableState> {
+    live.tables
+        .iter()
+        .find(|state| state.table_sql == table_sql && state.relation.is_some())
+}
+
+/// Compare a table's live policies with exactly the `declared` set.
+fn validate_declared_policies(
+    diagnostics: &mut Vec<SchemaDiagnostic>,
+    table_name: &str,
+    state: &LiveRlsTableState,
+    declared: &[DeclaredPolicy],
+    predicate_label: &str,
+) {
+    let mut error = |message: String| {
+        diagnostics.push(rls_diagnostic(
+            SchemaDiagnosticSeverity::Error,
+            table_name,
+            message,
+        ));
+    };
+    for expected in declared {
+        let name = &expected.name;
+        let Some(live) = state.policies.iter().find(|live| &live.name == name) else {
+            error(format!("Missing RLS policy {name} on {table_name}"));
+            continue;
+        };
+        let command = LiveRlsCommand::of(expected.operation);
+        if live.command != command {
+            error(format!(
+                "RLS policy {name} on {table_name} is FOR {}, not FOR {}",
+                live.command.sql(),
+                command.sql()
+            ));
+            continue;
+        }
+        if !live.permissive {
+            error(format!(
+                "RLS policy {name} on {table_name} is RESTRICTIVE, not PERMISSIVE"
+            ));
+        }
+        if live.roles != ["public"] {
+            error(format!(
+                "RLS policy {name} on {table_name} applies to roles {}, not PUBLIC",
+                live.roles.join(", ")
+            ));
+        }
+        let rendered = state
+            .expected
             .iter()
-            .map(|policy| (policy.policy_name.as_str(), policy))
-            .collect::<std::collections::BTreeMap<_, _>>();
-        for expected in sorted_policies(entity) {
-            let Some(predicate) = render_policy_predicate(DatabaseBackend::Postgres, expected)
-            else {
-                continue;
-            };
-            let expected_name = policy_name(entity.table_name, expected.operation);
-            let Some(current_policy) = policies.get(expected_name.as_str()) else {
-                diagnostics.push(rls_diagnostic(
-                    SchemaDiagnosticSeverity::Error,
-                    entity.table_name,
-                    format!(
-                        "Missing RLS policy {} on {}",
-                        expected_name, entity.table_name
-                    ),
+            .find(|(expression, _)| expression == &expected.predicate)
+            .map(|(_, rendered)| rendered);
+        let rendered = match rendered {
+            Some(Ok(rendered)) => rendered,
+            Some(Err(reason)) => {
+                error(format!(
+                    "RLS policy {name} on {table_name} could not be compared: PostgreSQL did not render {predicate_label}: {reason}"
                 ));
                 continue;
-            };
-            if current_policy.operation != expected.operation {
-                diagnostics.push(rls_diagnostic(
-                    SchemaDiagnosticSeverity::Error,
-                    entity.table_name,
-                    format!("RLS policy {} has unexpected operation", expected_name),
-                ));
             }
-            let expected = normalize_policy_expr(&predicate);
-            let using_expr = current_policy
-                .using_expression
-                .as_deref()
-                .map(normalize_policy_expr);
-            let check_expr = current_policy
-                .check_expression
-                .as_deref()
-                .map(normalize_policy_expr);
-            match current_policy.operation {
-                RlsOperation::Select | RlsOperation::Delete => {
-                    if using_expr.as_deref() != Some(expected.as_str()) {
-                        diagnostics.push(rls_diagnostic(
-                            SchemaDiagnosticSeverity::Error,
-                            entity.table_name,
-                            format!("RLS policy {} USING expression differs", expected_name),
-                        ));
-                    }
-                }
-                RlsOperation::Insert => {
-                    if check_expr.as_deref() != Some(expected.as_str()) {
-                        diagnostics.push(rls_diagnostic(
-                            SchemaDiagnosticSeverity::Error,
-                            entity.table_name,
-                            format!("RLS policy {} WITH CHECK expression differs", expected_name),
-                        ));
-                    }
-                }
-                RlsOperation::Update => {
-                    if using_expr.as_deref() != Some(expected.as_str())
-                        || check_expr.as_deref() != Some(expected.as_str())
-                    {
-                        diagnostics.push(rls_diagnostic(
-                            SchemaDiagnosticSeverity::Error,
-                            entity.table_name,
-                            format!("RLS policy {} expression differs", expected_name),
-                        ));
-                    }
-                }
+            None => {
+                error(format!(
+                    "RLS policy {name} on {table_name} could not be compared: {predicate_label} was not rendered"
+                ));
+                continue;
+            }
+        };
+        let clauses: &[(&str, &Option<RenderedRlsExpression>)] = match expected.operation {
+            RlsOperation::Select | RlsOperation::Delete => &[("USING", &live.using)],
+            RlsOperation::Insert => &[("WITH CHECK", &live.check)],
+            RlsOperation::Update => &[("USING", &live.using), ("WITH CHECK", &live.check)],
+        };
+        for (clause, live_expression) in clauses {
+            match live_expression {
+                Some(Ok(live_expression)) if live_expression == rendered => {}
+                Some(Ok(_)) => error(format!(
+                    "RLS policy {name} on {table_name} {clause} expression differs from {predicate_label}"
+                )),
+                Some(Err(reason)) => error(format!(
+                    "RLS policy {name} on {table_name} could not be compared: PostgreSQL did not render its live {clause} expression: {reason}"
+                )),
+                None => error(format!(
+                    "RLS policy {name} on {table_name} has no {clause} expression; it differs from {predicate_label}"
+                )),
             }
         }
     }
+    let generated = RLS_OPERATIONS.map(|operation| policy_name(table_name, operation));
+    for live in &state.policies {
+        if declared.iter().any(|expected| expected.name == live.name) {
+            continue;
+        }
+        let kind = if live.permissive {
+            "PERMISSIVE"
+        } else {
+            "RESTRICTIVE"
+        };
+        let reason = if generated.contains(&live.name) {
+            "is a graphql-orm policy for an operation the target has not declared; re-apply the schema target to drop it"
+        } else {
+            "is not declared by the target, and PostgreSQL combines it with the declared policies; drop it"
+        };
+        error(format!(
+            "Unexpected RLS policy {} on {table_name} (FOR {}, {kind}) {reason}",
+            live.name,
+            live.command.sql()
+        ));
+    }
+}
 
-    diagnostics
+/// Report RLS helper functions that are missing or differ from the
+/// definitions the plan installs.
+fn validate_rls_helper_functions(diagnostics: &mut Vec<SchemaDiagnostic>, live: &LiveRlsTarget) {
+    for helper in RLS_HELPER_FUNCTIONS {
+        let signature = format!("graphql_orm.{}({})", helper.name, helper.arguments);
+        let found = live.helper_functions.iter().find(|function| {
+            function.name == helper.name && function.arguments == helper.arguments
+        });
+        let message = match found {
+            None => format!("Missing RLS helper function {signature}; re-apply the schema target"),
+            Some(function)
+                if function.body == helper.body
+                    && function.returns == helper.returns
+                    && function.language == "sql"
+                    && function.volatility == "s"
+                    && function.kind == "f"
+                    && !function.security_definer
+                    && !function.strict
+                    && !function.returns_set
+                    && function.config.is_empty() =>
+            {
+                continue;
+            }
+            Some(_) => format!(
+                "RLS helper function {signature} differs from the definition graphql-orm installs; re-apply the schema target"
+            ),
+        };
+        diagnostics.push(SchemaDiagnostic {
+            severity: SchemaDiagnosticSeverity::Error,
+            kind: SchemaDiagnosticKind::RlsMismatch,
+            table: None,
+            column: None,
+            message,
+        });
+    }
 }
 
 /// Live PostgreSQL facts that decide whether RLS is enforced for the current
@@ -1147,6 +1542,7 @@ pub(crate) const SEARCH_DELETE_TRIGGER_TYPE: i32 = 1 | 2 | 8;
 pub(crate) fn validate_rls_enforcement_state(
     backend: DatabaseBackend,
     live: &LiveRlsEnforcement,
+    probed: &LiveRlsTarget,
     target: &SchemaTarget,
 ) -> Vec<SchemaDiagnostic> {
     if backend != DatabaseBackend::Postgres || target.rls.entities.is_empty() {
@@ -1175,18 +1571,27 @@ pub(crate) fn validate_rls_enforcement_state(
         return diagnostics;
     }
 
+    // Entity and search tables are resolved by the path the ORM's SQL uses;
+    // the change journal by its table key.
     let mut protected = sorted_entities(&target.rls)
         .into_iter()
-        .map(|entity| entity.table_name.to_string())
+        .map(|entity| {
+            let active = live_table_state(probed, &entity_table_sql(entity))
+                .map(|state| state.row_security_active);
+            (entity.table_name.to_string(), active)
+        })
         .collect::<Vec<_>>();
-    protected.extend(
-        rls_search_tables(target)
-            .into_iter()
-            .map(|search| search.search_table),
-    );
-    protected.push(CHANGE_LOG_TABLE.to_string());
-    for table in protected {
-        if live.row_security_active.get(&normalize_table_key(&table)) == Some(&false) {
+    protected.extend(rls_search_tables(target).into_iter().map(|search| {
+        let active = live_table_state(probed, &search_table_sql(&search))
+            .map(|state| state.row_security_active);
+        (search.search_table, active)
+    }));
+    protected.push((
+        CHANGE_LOG_TABLE.to_string(),
+        live.row_security_active.get(CHANGE_LOG_TABLE).copied(),
+    ));
+    for (table, active) in protected {
+        if active == Some(false) {
             diagnostics.push(enforcement_diagnostic(
                 Some(&table),
                 format!(
@@ -1209,12 +1614,15 @@ fn enforcement_diagnostic(table: Option<&str>, message: String) -> SchemaDiagnos
     }
 }
 
-/// Validate RLS on the ORM-managed search document tables of RLS entities and
-/// on the change journal.
+/// Validate RLS on the ORM-managed search document tables of RLS entities.
+///
+/// Each search table must carry exactly the four generated policies exposing
+/// a document while its base row is visible, compared as in
+/// [`validate_rls_models`], and its base table an intact delete trigger.
 pub(crate) fn validate_protected_rls_tables(
     backend: DatabaseBackend,
     policy: SchemaPolicy,
-    current: &[LiveRlsTable],
+    current: &LiveRlsTarget,
     live: Option<&LiveRlsEnforcement>,
     target: &SchemaTarget,
 ) -> Vec<SchemaDiagnostic> {
@@ -1227,16 +1635,11 @@ pub(crate) fn validate_protected_rls_tables(
     {
         return Vec::new();
     }
-    let current = current
-        .iter()
-        .map(|table| (normalize_table_key(&table.table_name), table))
-        .collect::<std::collections::BTreeMap<_, _>>();
     let mut diagnostics = Vec::new();
 
     for search in rls_search_tables(target) {
         let table_name = search.search_table.as_str();
-        let key = normalize_table_key(table_name);
-        let Some(current_table) = current.get(&key) else {
+        let Some(current_table) = live_table_state(current, &search_table_sql(&search)) else {
             diagnostics.push(rls_diagnostic(
                 SchemaDiagnosticSeverity::Error,
                 table_name,
@@ -1258,65 +1661,27 @@ pub(crate) fn validate_protected_rls_tables(
                 format!("RLS is not forced on {table_name}"),
             ));
         }
-        let predicate = canonical_policy_expr(&render_search_document_predicate(&search));
-        let mut expected_names = Vec::new();
-        for operation in [
-            RlsOperation::Select,
-            RlsOperation::Insert,
-            RlsOperation::Update,
-            RlsOperation::Delete,
-        ] {
-            let name = policy_name(table_name, operation);
-            let Some(live_policy) = current_table
-                .policies
-                .iter()
-                .find(|live_policy| live_policy.policy_name == name)
-            else {
-                diagnostics.push(rls_diagnostic(
-                    SchemaDiagnosticSeverity::Error,
-                    table_name,
-                    format!("Missing RLS policy {name} on {table_name}"),
-                ));
-                expected_names.push(name);
-                continue;
-            };
-            let using = live_policy
-                .using_expression
-                .as_deref()
-                .map(canonical_policy_expr);
-            let check = live_policy
-                .check_expression
-                .as_deref()
-                .map(canonical_policy_expr);
-            let matches = live_policy.operation == operation
-                && match operation {
-                    RlsOperation::Select | RlsOperation::Delete => {
-                        using.as_deref() == Some(predicate.as_str())
-                    }
-                    RlsOperation::Insert => check.as_deref() == Some(predicate.as_str()),
-                    RlsOperation::Update => {
-                        using.as_deref() == Some(predicate.as_str())
-                            && check.as_deref() == Some(predicate.as_str())
-                    }
-                };
-            if !matches {
-                diagnostics.push(rls_diagnostic(
-                    SchemaDiagnosticSeverity::Error,
-                    table_name,
-                    format!("RLS policy {name} on {table_name} does not match the visible base row predicate"),
-                ));
-            }
-            expected_names.push(name);
-        }
-        if let Some(live) = live {
-            report_unexpected_policies(&mut diagnostics, live, table_name, &expected_names);
-            if let Some(message) = search_delete_trigger_problem(live, &search) {
-                diagnostics.push(rls_diagnostic(
-                    SchemaDiagnosticSeverity::Error,
-                    table_name,
-                    message,
-                ));
-            }
+        let predicate = render_search_document_predicate(&search);
+        let declared = RLS_OPERATIONS.map(|operation| DeclaredPolicy {
+            name: policy_name(table_name, operation),
+            operation,
+            predicate: predicate.clone(),
+        });
+        validate_declared_policies(
+            &mut diagnostics,
+            table_name,
+            current_table,
+            &declared,
+            "the visible base row predicate",
+        );
+        if let Some(live) = live
+            && let Some(message) = search_delete_trigger_problem(live, &search)
+        {
+            diagnostics.push(rls_diagnostic(
+                SchemaDiagnosticSeverity::Error,
+                table_name,
+                message,
+            ));
         }
     }
 
@@ -1581,7 +1946,7 @@ fn search_delete_trigger_problem(
     search: &RlsSearchTable,
 ) -> Option<String> {
     let base = &search.base_table;
-    let Some(trigger) = live.search_delete_triggers.get(&normalize_table_key(base)) else {
+    let Some(trigger) = live.search_delete_triggers.get(&resolved_table_key(base)) else {
         return Some(format!(
             "Missing search document delete trigger {SEARCH_DELETE_TRIGGER} on {base}"
         ));
@@ -1602,8 +1967,8 @@ fn search_delete_trigger_problem(
         [schema, table, key, encoding]
             if !schema.starts_with("pg_temp")
                 && !schema.starts_with("pg_toast_temp")
-                && *table == search.search_table
-                && *key == search.primary_key
+                && [table.clone()] == super::dialect::postgres_resolved_identifier_parts(&search_table_sql(search)).as_slice()
+                && *key == super::dialect::postgres_resolved_identifier(&search.primary_key)
                 && encoding == search_key_encoding(search)
     );
     if !targets_search_table || !trigger.target_exists {
@@ -1628,60 +1993,12 @@ fn search_delete_trigger_problem(
     None
 }
 
-fn report_unexpected_policies(
-    diagnostics: &mut Vec<SchemaDiagnostic>,
-    live: &LiveRlsEnforcement,
-    table_name: &str,
-    expected: &[String],
-) {
-    let Some(names) = live.policy_names.get(&normalize_table_key(table_name)) else {
-        return;
-    };
-    for name in names {
-        if !expected.contains(name) {
-            diagnostics.push(rls_diagnostic(
-                SchemaDiagnosticSeverity::Error,
-                table_name,
-                format!(
-                    "Unexpected RLS policy {name} on {table_name} widens access to ORM-managed rows"
-                ),
-            ));
-        }
-    }
-}
-
-/// Canonicalize a policy expression for comparison with PostgreSQL's deparsed
-/// `pg_policies` text: case, whitespace, quoting, grouping parentheses and the
-/// default `public.` qualification are not significant for the fixed-shape
-/// expressions generated for ORM-managed tables.
-fn canonical_policy_expr(value: &str) -> String {
-    value
-        .chars()
-        .filter(|ch| !ch.is_whitespace() && !matches!(ch, '(' | ')' | '"'))
-        .collect::<String>()
-        .to_ascii_lowercase()
-        .replace("public.", "")
-}
-
 fn normalize_table_key(table_name: &str) -> String {
     let unquoted = unquote_identifier_path(table_name);
     unquoted
         .strip_prefix("public_")
         .unwrap_or(&unquoted)
         .to_string()
-}
-
-fn normalize_policy_expr(value: &str) -> String {
-    let mut value = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    loop {
-        let trimmed = value.trim();
-        if trimmed.starts_with('(') && trimmed.ends_with(')') {
-            value = trimmed[1..trimmed.len() - 1].trim().to_string();
-        } else {
-            break;
-        }
-    }
-    value
 }
 
 fn rls_diagnostic(
@@ -1695,6 +2012,269 @@ fn rls_diagnostic(
         table: Some(table.to_string()),
         column: None,
         message,
+    }
+}
+
+#[cfg(test)]
+mod drift_tests {
+    use super::*;
+
+    static POLICIES: &[RlsOperationPolicy] = &[
+        RlsOperationPolicy::generated(
+            RlsOperation::Select,
+            Some("docs.read"),
+            Some("tenant_id"),
+            None,
+        ),
+        RlsOperationPolicy::custom(RlsOperation::Delete, "status IN ('a', 'b')"),
+    ];
+
+    fn entity() -> RlsEntityMetadata {
+        RlsEntityMetadata {
+            entity_name: "Doc",
+            table_name: "docs",
+            force: true,
+            policies: POLICIES,
+        }
+    }
+
+    fn rls_target() -> RlsSchemaModel {
+        RlsSchemaModel {
+            entities: vec![entity()],
+        }
+    }
+
+    /// A rendering stand-in: PostgreSQL would render both sides identically.
+    fn rendered(expression: &str) -> RenderedRlsExpression {
+        Ok(format!("rendered[{expression}]"))
+    }
+
+    fn select_predicate() -> String {
+        render_policy_predicate(DatabaseBackend::Postgres, &POLICIES[0]).expect("predicate")
+    }
+
+    fn policy(name: &str, command: LiveRlsCommand, expression: &str) -> LiveRlsPolicyState {
+        let clause = Some(rendered(expression));
+        LiveRlsPolicyState {
+            name: name.to_string(),
+            command,
+            permissive: true,
+            roles: vec!["public".to_string()],
+            using: (command != LiveRlsCommand::Insert)
+                .then(|| clause.clone())
+                .flatten(),
+            check: matches!(command, LiveRlsCommand::Insert | LiveRlsCommand::Update)
+                .then_some(clause)
+                .flatten(),
+        }
+    }
+
+    fn healthy() -> LiveRlsTarget {
+        let select = select_predicate();
+        let delete = "status IN ('a', 'b')".to_string();
+        LiveRlsTarget {
+            tables: vec![LiveRlsTableState {
+                table_sql: "docs".to_string(),
+                relation: Some(("public".to_string(), "docs".to_string())),
+                enabled: true,
+                forced: true,
+                row_security_active: true,
+                policies: vec![
+                    policy("graphql_orm_docs_select", LiveRlsCommand::Select, &select),
+                    policy("graphql_orm_docs_delete", LiveRlsCommand::Delete, &delete),
+                ],
+                expected: vec![
+                    (select.clone(), rendered(&select)),
+                    (delete.clone(), rendered(&delete)),
+                ],
+            }],
+            helper_functions: RLS_HELPER_FUNCTIONS
+                .iter()
+                .map(|helper| LiveRlsHelperFunction {
+                    name: helper.name.to_string(),
+                    arguments: helper.arguments.to_string(),
+                    returns: helper.returns.to_string(),
+                    body: helper.body.to_string(),
+                    language: "sql".to_string(),
+                    volatility: "s".to_string(),
+                    kind: "f".to_string(),
+                    ..Default::default()
+                })
+                .collect(),
+        }
+    }
+
+    fn messages(live: &LiveRlsTarget) -> Vec<String> {
+        validate_rls_models(
+            DatabaseBackend::Postgres,
+            SchemaPolicy::Managed,
+            live,
+            &rls_target(),
+        )
+        .into_iter()
+        .map(|diagnostic| {
+            assert_eq!(diagnostic.severity, SchemaDiagnosticSeverity::Error);
+            diagnostic.message
+        })
+        .collect()
+    }
+
+    fn assert_reported(live: &LiveRlsTarget, fragments: &[&str]) {
+        let messages = messages(live);
+        assert!(
+            messages
+                .iter()
+                .any(|message| fragments.iter().all(|fragment| message.contains(fragment))),
+            "{fragments:?}: {messages:#?}"
+        );
+    }
+
+    #[test]
+    fn the_plan_drops_policies_of_undeclared_operations() {
+        let statements = render_postgres_entity_rls_sql(&entity());
+        for operation in RLS_OPERATIONS {
+            let name = policy_name("docs", operation);
+            assert!(
+                statements
+                    .iter()
+                    .any(|statement| statement
+                        == &format!("DROP POLICY IF EXISTS \"{name}\" ON docs")),
+                "{name}: {statements:#?}"
+            );
+        }
+        let created = statements
+            .iter()
+            .filter(|statement| statement.starts_with("CREATE POLICY"))
+            .count();
+        assert_eq!(created, 2, "{statements:#?}");
+    }
+
+    #[test]
+    fn generated_predicates_quote_one_identifier_and_group_each_condition() {
+        let policy = RlsOperationPolicy::generated(
+            RlsOperation::Select,
+            Some("it's"),
+            Some("\"tenant_id\" = \"tenant_id\" OR true OR \"tenant_id\""),
+            Some("owner_id"),
+        );
+        assert_eq!(
+            render_policy_predicate(DatabaseBackend::Postgres, &policy).as_deref(),
+            Some(
+                "(graphql_orm.has_scope('it''s')) AND (\"\"\"tenant_id\"\" = \"\"tenant_id\"\" OR true OR \"\"tenant_id\"\"\" = graphql_orm.current_tenant_id()) AND (owner_id = graphql_orm.current_user_id())"
+            )
+        );
+    }
+
+    #[test]
+    fn matching_renderings_validate_clean() {
+        assert_eq!(messages(&healthy()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn every_difference_is_an_error() {
+        let mut differs = healthy();
+        differs.tables[0].policies[0].using = Some(rendered("true"));
+        assert_reported(
+            &differs,
+            &["graphql_orm_docs_select", "USING expression differs"],
+        );
+
+        let mut unrendered = healthy();
+        unrendered.tables[0].expected[0].1 = Err("permission denied".to_string());
+        assert_reported(
+            &unrendered,
+            &["graphql_orm_docs_select", "could not be compared"],
+        );
+
+        let mut live_unrendered = healthy();
+        live_unrendered.tables[0].policies[1].using = Some(Err("syntax".to_string()));
+        assert_reported(
+            &live_unrendered,
+            &["graphql_orm_docs_delete", "could not be compared"],
+        );
+
+        let mut unmatched = healthy();
+        unmatched.tables[0].expected.clear();
+        assert_reported(
+            &unmatched,
+            &["graphql_orm_docs_select", "could not be compared"],
+        );
+
+        let mut extra = healthy();
+        extra.tables[0]
+            .policies
+            .push(policy("widen", LiveRlsCommand::All, "true"));
+        assert_reported(&extra, &["Unexpected RLS policy widen", "FOR ALL"]);
+
+        let mut stale = healthy();
+        stale.tables[0].policies.push(policy(
+            "graphql_orm_docs_update",
+            LiveRlsCommand::Update,
+            "true",
+        ));
+        assert_reported(&stale, &["graphql_orm_docs_update", "has not declared"]);
+
+        let mut restrictive = healthy();
+        restrictive.tables[0].policies[0].permissive = false;
+        assert_reported(&restrictive, &["graphql_orm_docs_select", "RESTRICTIVE"]);
+
+        let mut roles = healthy();
+        roles.tables[0].policies[0].roles = vec!["app".to_string()];
+        assert_reported(&roles, &["graphql_orm_docs_select", "applies to roles app"]);
+
+        let mut command = healthy();
+        command.tables[0].policies[1].command = LiveRlsCommand::All;
+        assert_reported(
+            &command,
+            &["graphql_orm_docs_delete", "FOR ALL, not FOR DELETE"],
+        );
+
+        let mut missing = healthy();
+        missing.tables[0].policies.remove(1);
+        assert_reported(&missing, &["Missing RLS policy graphql_orm_docs_delete"]);
+
+        let mut unresolved = healthy();
+        unresolved.tables[0].relation = None;
+        assert_reported(&unresolved, &["Missing RLS table state for docs"]);
+
+        let mut disabled = healthy();
+        disabled.tables[0].enabled = false;
+        disabled.tables[0].forced = false;
+        assert_reported(&disabled, &["RLS is not enabled on docs"]);
+        assert_reported(&disabled, &["RLS is not forced on docs"]);
+
+        let mut helper = healthy();
+        helper.helper_functions[2].body = " SELECT 'tenant-a' ".to_string();
+        assert_reported(&helper, &["graphql_orm.current_tenant_id()", "differs"]);
+        let mut definer = healthy();
+        definer.helper_functions[6].security_definer = true;
+        assert_reported(&definer, &["graphql_orm.has_scope(scope text)", "differs"]);
+        let mut absent = healthy();
+        absent.helper_functions.remove(0);
+        assert_reported(
+            &absent,
+            &["Missing RLS helper function graphql_orm.current_user_id()"],
+        );
+    }
+
+    #[test]
+    fn probes_cover_entity_and_search_tables_once() {
+        let target = SchemaTarget {
+            schema: super::super::core::SchemaModel {
+                extensions: Vec::new(),
+                tables: Vec::new(),
+            },
+            rls: RlsSchemaModel {
+                entities: vec![entity(), entity()],
+            },
+        };
+        let probes = rls_table_probes(&target);
+        assert_eq!(probes.len(), 1, "{probes:#?}");
+        assert_eq!(probes[0].table_sql, "docs");
+        assert_eq!(
+            probes[0].expressions,
+            vec![select_predicate(), "status IN ('a', 'b')".to_string()]
+        );
     }
 }
 

@@ -24,6 +24,23 @@ for historical context.
 
 - AI 0.128.0: **breaking:** enforce AI runtime closure after a snapshot restore. The runtime start gate opens only with a proof minted from a store's live recovery epoch (AI schema module `0.77.0`), and leases are bound to that epoch. Worker claims, lease-fenced writes and approval consumption refuse while the epoch is not live. A restored store stays closed until `OrmAiRuntimeRecoveryService::reconcile_restore` expires its approvals, revokes its egress consents and moves unfinished runs to `RecoveryRequired`, and an operator acknowledges the reviewed result. An existing deployment upgraded in place opens once the operator calls `acknowledge_in_place_upgrade`, which leaves its work unchanged. Restore facts now decode strictly. See the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01270-to-01280-enforced-runtime-closure-after-restore).
 
+## 0.126.0
+
+ORM runtime/macros **0.126.0**.
+
+- **Fix (security):** `validate_target` no longer reports `Error` drift for RLS policies a plan has just applied. It compared the declared predicate text with PostgreSQL's re-rendered `pg_policies` expression, which drops identifier quotes and adds casts and parentheses, so generated `tenant`/`owner` policies always read as drifted (#590). It also stripped grouping parentheses on search-document tables, so `a OR (b AND c)` matched `(a OR b) AND c`. Validation now has PostgreSQL parse both the declared predicate and the live expression against the table, as the `WHERE` clause of a temporary view in a rolled-back transaction, and compares the two renderings. They are equal exactly when both parse to the same expression. An expression PostgreSQL cannot render is reported as an `Error` instead of matching. Rendering needs the `TEMP` privilege, which PostgreSQL grants to `PUBLIC` by default.
+- **Security/breaking:** `validate_target` reports as errors, on RLS entity and search-document tables (#525):
+  - any policy outside the declared set, including `FOR ALL` and restrictive policies; extra permissive policies are OR-combined with the declared ones;
+  - a declared policy with another command, `RESTRICTIVE` mode, or roles other than `PUBLIC`;
+  - a missing RLS helper function in `graphql_orm`, or one whose body, result, language, volatility, `SECURITY DEFINER`, `STRICT` or `SET` options differ from the plan's.
+
+  Tables are resolved by the path the plan's SQL uses, so `audit.logs` and `public.audit_logs` no longer shadow each other in policy, enablement and enforcement checks. A deployment with hand-made policies on RLS entity tables now fails validation; fold them into the entity's `#[graphql_rls]` predicates or drop them.
+- **Fix:** plans drop the generated policy of every operation `#[graphql_rls]` no longer declares, so removing `update(...)` removes its policy on re-apply (#525).
+- **Breaking:** `#[graphql_rls]` `tenant` and `owner` must name a stored column of the entity; anything else is a compile error. Generated predicates write a plain column bare, as the ORM's DDL does, quote any other value in full as one identifier, and wrap each condition in parentheses, so a value that is not a plain column name cannot change the predicate (#527).
+- **Fix:** search-document policies, their base-table lookup and the `graphql_orm_search_delete` trigger render table names as the ORM's DDL and writes do. For an unquoted mixed-case table such as `table = "Docs"` the plan referenced `"Docs"` and `"__graphql_orm_search_Docs"` instead of the folded `docs` and `__graphql_orm_search_docs` the ORM creates, so applying failed, or bound to another table of that exact name. Generated `tenant`/`owner` columns and the search key column follow the same rule, and validation compares trigger targets by the folded name (#605).
+- **Errors:** a PostgreSQL `42501` (`insufficient_privilege`) error, including a row-level security `WITH CHECK` refusal, maps to `FORBIDDEN` instead of `INTERNAL_ERROR` (#527).
+- **Docs:** custom predicates that turn a missing request value into `true`, such as `COALESCE(..., true)` or `IS DISTINCT FROM` tests, are documented as open when the context is missing.
+
 ## 0.125.0
 
 ORM runtime/macros **0.125.0**.
