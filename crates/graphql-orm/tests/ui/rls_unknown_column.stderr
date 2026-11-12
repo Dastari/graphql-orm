@@ -1,0 +1,5 @@
+error: graphql_rls tenant = "tenant_id" = "tenant_id" OR true OR "tenant_id" must name a stored column of this entity; expected one of: id, tenant_id
+ --> tests/ui/rls_unknown_column.rs:5:31
+  |
+5 | #[graphql_rls(select(tenant = "tenant_id\" = \"tenant_id\" OR true OR \"tenant_id"))]
+  |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

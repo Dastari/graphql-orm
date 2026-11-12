@@ -322,13 +322,13 @@ fn full_target_rls_plan_covers_search_documents_and_the_change_log() {
     let joined = plan.statements.join("\n");
     assert!(
         joined.contains(&format!(
-            "ALTER TABLE \"{SEARCH_TABLE}\" ENABLE ROW LEVEL SECURITY"
+            "ALTER TABLE {SEARCH_TABLE} ENABLE ROW LEVEL SECURITY"
         )),
         "{joined}"
     );
     assert!(
         joined.contains(&format!(
-            "ALTER TABLE \"{SEARCH_TABLE}\" FORCE ROW LEVEL SECURITY"
+            "ALTER TABLE {SEARCH_TABLE} FORCE ROW LEVEL SECURITY"
         )),
         "{joined}"
     );
@@ -336,7 +336,7 @@ fn full_target_rls_plan_covers_search_documents_and_the_change_log() {
         plan.statements.iter().any(|statement| {
             statement.starts_with("CREATE POLICY")
                 && statement.contains(SEARCH_TABLE)
-                && statement.contains("EXISTS (SELECT 1 FROM \"rls_cov_docs\"")
+                && statement.contains("EXISTS (SELECT 1 FROM rls_cov_docs")
         }),
         "{joined}"
     );
@@ -345,9 +345,9 @@ fn full_target_rls_plan_covers_search_documents_and_the_change_log() {
     assert!(
         plan.statements.iter().any(|statement| {
             statement.starts_with("DO $graphql_orm$")
-                && statement.contains("to_regclass('\"__graphql_orm_search_rls_cov_docs\"')")
+                && statement.contains("to_regclass('__graphql_orm_search_rls_cov_docs')")
                 && statement.contains("CREATE TRIGGER %I BEFORE DELETE ON %s")
-                && statement.contains("'\"rls_cov_docs\"'")
+                && statement.contains("'rls_cov_docs'")
         }),
         "{joined}"
     );
@@ -1316,7 +1316,7 @@ async fn search_delete_trigger_resists_redirection_and_drift()
     )?;
     assert!(
         plan.statements.iter().any(|statement| statement
-            .contains("DROP TRIGGER IF EXISTS \"graphql_orm_search_delete\" ON \"rls_cov_docs\"")),
+            .contains("DROP TRIGGER IF EXISTS \"graphql_orm_search_delete\" ON rls_cov_docs")),
         "{:#?}",
         plan.statements
     );

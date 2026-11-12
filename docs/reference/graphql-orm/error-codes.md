@@ -20,7 +20,7 @@ constraint names, filesystem paths, and configuration strings stay server-side.
 | `INVALID_INPUT` | Client input failed validation |
 | `UNAUTHENTICATED` | No principal present |
 | `STEP_UP_REQUIRED` | Current user session does not satisfy declared operation assurance |
-| `FORBIDDEN` | Principal present but not authorized |
+| `FORBIDDEN` | Principal present but not authorized, including a PostgreSQL row-level security `WITH CHECK` refusal or missing privilege (SQLSTATE `42501`) |
 | `NOT_FOUND` | Resource missing or not visible (no cross-tenant existence leak) |
 | `CONFLICT` | State conflict |
 | `CONSTRAINT_VIOLATION` | Database constraint failed without schema leak |

@@ -145,6 +145,8 @@ pub(crate) struct RlsOperationMetadata {
     pub(crate) scope: Option<String>,
     pub(crate) tenant_column: Option<String>,
     pub(crate) owner_column: Option<String>,
+    pub(crate) tenant_span: Option<proc_macro2::Span>,
+    pub(crate) owner_span: Option<proc_macro2::Span>,
 }
 
 pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<EntityMetadata> {
@@ -1079,8 +1081,10 @@ fn parse_rls_metadata(attr: &syn::Attribute) -> syn::Result<RlsMetadata> {
                 operation.scope = Some(lit.value());
             } else if op.path.is_ident("tenant") {
                 operation.tenant_column = Some(lit.value());
+                operation.tenant_span = Some(lit.span());
             } else if op.path.is_ident("owner") {
                 operation.owner_column = Some(lit.value());
+                operation.owner_span = Some(lit.span());
             } else {
                 return Err(syn::Error::new(
                     op.path.span(),
@@ -1203,6 +1207,48 @@ fn option_lit_tokens(value: Option<&str>, span: proc_macro2::Span) -> proc_macro
             quote! { Some(#lit) }
         })
         .unwrap_or_else(|| quote! { None })
+}
+
+/// Require every `tenant` and `owner` of `#[graphql_rls]` to name a stored
+/// column of the entity, so generated policies compare a real column.
+fn validate_rls_columns<'a>(
+    rls: &RlsMetadata,
+    fields: impl IntoIterator<Item = &'a Field>,
+) -> syn::Result<()> {
+    let mut columns = Vec::new();
+    for field in fields {
+        let meta = parse_field_metadata(field)?;
+        if meta.is_relation || meta.skip_db {
+            continue;
+        }
+        let Some(ident) = field.ident.as_ref() else {
+            continue;
+        };
+        columns.push(meta.db_column.clone().unwrap_or_else(|| ident.to_string()));
+    }
+    for operation in [&rls.select, &rls.insert, &rls.update, &rls.delete]
+        .into_iter()
+        .flatten()
+    {
+        for (option, column, span) in [
+            ("tenant", &operation.tenant_column, operation.tenant_span),
+            ("owner", &operation.owner_column, operation.owner_span),
+        ] {
+            let (Some(column), Some(span)) = (column, span) else {
+                continue;
+            };
+            if !columns.iter().any(|candidate| candidate == column) {
+                return Err(syn::Error::new(
+                    span,
+                    format!(
+                        "graphql_rls {option} = \"{column}\" must name a stored column of this entity; expected one of: {}",
+                        columns.join(", ")
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn rls_operation_policy_tokens(
@@ -3537,6 +3583,9 @@ fn generate_entity_impl(
     }
     let raw_table_name = entity_meta.table_name.as_deref().unwrap_or("unknown");
     let table_name = backend_quote_identifier_path(backend, raw_table_name);
+    if let Some(rls) = entity_meta.rls.as_ref() {
+        validate_rls_columns(rls, fields.iter())?;
+    }
     let rls_impl = rls_impl_tokens(
         struct_name,
         &struct_name.to_string(),

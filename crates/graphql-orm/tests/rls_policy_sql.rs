@@ -54,7 +54,7 @@ fn default_predicates_are_conservative_and_ordered() {
     assert_eq!(
         render_policy_predicate(DatabaseBackend::Postgres, &policy).as_deref(),
         Some(
-            "graphql_orm.has_scope('users.read') AND \"tenant_id\" = graphql_orm.current_tenant_id() AND \"owner_id\" = graphql_orm.current_user_id()"
+            "(graphql_orm.has_scope('users.read')) AND (tenant_id = graphql_orm.current_tenant_id()) AND (owner_id = graphql_orm.current_user_id())"
         )
     );
 }
@@ -93,7 +93,9 @@ fn policy_sql_is_deterministic_and_quotes_schema_qualified_tables() {
             "ALTER TABLE \"app\".\"users\" ENABLE ROW LEVEL SECURITY",
             "ALTER TABLE \"app\".\"users\" FORCE ROW LEVEL SECURITY",
             "DROP POLICY IF EXISTS \"graphql_orm_app_users_select\" ON \"app\".\"users\"",
-            "CREATE POLICY \"graphql_orm_app_users_select\" ON \"app\".\"users\" FOR SELECT USING (graphql_orm.has_scope('users.read') AND \"tenant_id\" = graphql_orm.current_tenant_id() AND \"owner_id\" = graphql_orm.current_user_id())",
+            "CREATE POLICY \"graphql_orm_app_users_select\" ON \"app\".\"users\" FOR SELECT USING ((graphql_orm.has_scope('users.read')) AND (tenant_id = graphql_orm.current_tenant_id()) AND (owner_id = graphql_orm.current_user_id()))",
+            "DROP POLICY IF EXISTS \"graphql_orm_app_users_insert\" ON \"app\".\"users\"",
+            "DROP POLICY IF EXISTS \"graphql_orm_app_users_update\" ON \"app\".\"users\"",
             "DROP POLICY IF EXISTS \"graphql_orm_app_users_delete\" ON \"app\".\"users\"",
             "CREATE POLICY \"graphql_orm_app_users_delete\" ON \"app\".\"users\" FOR DELETE USING (graphql_orm.has_scope('users.delete') AND owner_id = graphql_orm.current_user_id())",
         ]

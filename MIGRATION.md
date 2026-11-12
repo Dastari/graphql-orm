@@ -159,6 +159,39 @@ makes the whole delete refuse with `Dependent delete refused`.
 
 See [row policy on generated writes](docs/reference/graphql-orm/strict-authorization.md#row-policy-on-generated-writes).
 
+## 0.126.0: RLS drift validation compares PostgreSQL's rendering
+
+`validate_target` now compares RLS policy expressions as PostgreSQL parses them,
+so a freshly applied target validates clean. It is stricter elsewhere:
+
+- Any policy on an RLS entity or search-document table that the target does not
+  declare is an `Error`, including `FOR ALL` and restrictive policies. Move such
+  policies into the entity's `#[graphql_rls]` predicates or drop them. Policies
+  graphql-orm generated for operations you have since removed are dropped when
+  you re-apply the target.
+- A declared policy must be `PERMISSIVE`, apply to `PUBLIC` and keep its
+  command.
+- The `graphql_orm` helper functions must match what the plan installs;
+  re-apply the target if validation reports one as differing.
+- The validating role needs the `TEMP` privilege on the database (PostgreSQL
+  grants it to `PUBLIC` by default). Without it, or on a read-only standby,
+  policies are reported as "could not be compared". The temporary views are
+  rolled back, but DDL event triggers and `log_statement = 'ddl'` see them.
+- Expressions are compared with `search_path` pinned to `pg_catalog, pg_temp`.
+  Custom `predicate = "..."` text must schema-qualify every function, operator,
+  table and type outside `pg_catalog`: write `app.is_member(tenant_id)`, not
+  `is_member(tenant_id)`. Unqualified names are reported as "could not be
+  compared". Re-apply the target after qualifying them.
+
+`#[graphql_rls]` `tenant` and `owner` must name a stored column of the entity,
+by field name or `db_column`, written exactly as declared (a quoted
+`db_column` keeps its quotes). Qualified or other values no longer compile. Generated predicates now wrap each condition in parentheses; the
+policies PostgreSQL stores are unchanged, so re-applying is not required for
+validation to pass.
+
+Clients that matched `INTERNAL_ERROR` for row-level security `WITH CHECK`
+refusals now receive `FORBIDDEN`.
+
 ## 0.125.0: PostgreSQL records change-journal entries in the database
 
 Upgrade runtime and macros together. This affects PostgreSQL deployments that
