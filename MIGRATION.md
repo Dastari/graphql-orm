@@ -57,6 +57,27 @@ Choosing the in-place path for a restored store re-opens consumed approvals.
 See the
 [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01270-to-01280-enforced-runtime-closure-after-restore).
 
+## 0.126.0: primary-key default ordering and strict attribute options
+
+Upgrade ORM/macros together.
+
+- An entity without `default_sort` orders by its primary-key columns, in
+  declaration order. Entities keyed by `id` keep their default. The old default
+  failed at runtime for any other key. You can remove `default_sort = "<key> ASC"`
+  workarounds or keep them. Regenerate stored catalogues and SDL documentation
+  for affected entities, because `EntityMetadata::default_sort` changes.
+- An entity whose `id` key has `db_column` and no `#[primary_key]` now reports
+  that column in `PRIMARY_KEYS` and its default sort.
+- `#[backup(...)]` accepts only one of `include`, `exclude` or `redact`.
+  `#[transform(...)]` accepts only `write` and `read`. `#[filterable(...)]`
+  accepts only `type`. Remove any other option, which was previously ignored.
+- Malformed `#[graphql(...)]` metadata on an entity, field or described custom
+  root argument is a compile error. Fix the reported syntax.
+- An upsert target that names only the first column of a composite primary key
+  is rejected. Name the whole key, or a declared unique index.
+
+No data migration is needed.
+
 ## 0.125.0: PostgreSQL records change-journal entries in the database
 
 Upgrade runtime and macros together. This affects PostgreSQL deployments that

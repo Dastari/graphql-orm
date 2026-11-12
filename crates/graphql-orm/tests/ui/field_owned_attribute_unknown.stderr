@@ -1,0 +1,5 @@
+error: unsupported backup option; expected include, exclude, or redact
+ --> tests/ui/field_owned_attribute_unknown.rs:8:14
+  |
+8 |     #[backup(encrypt)]
+  |              ^^^^^^^

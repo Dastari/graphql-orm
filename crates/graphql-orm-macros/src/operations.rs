@@ -897,17 +897,29 @@ fn resolve_upsert_config(
             target_fields.push(resolved.clone());
         }
 
-        let primary_key = resolved_fields
+        // The whole primary key (every column, in order) is a unique target;
+        // without `#[primary_key]`, the implicit `id` field's column is.
+        let mut primary_key = resolved_fields
             .iter()
-            .find(|field| field.meta.is_primary_key)
+            .filter(|field| field.meta.is_primary_key)
             .map(|field| field.db_column.clone())
-            .unwrap_or_else(|| "id".to_string());
+            .collect::<Vec<_>>();
+        if primary_key.is_empty() {
+            primary_key.push(
+                resolved_fields
+                    .iter()
+                    .find(|field| {
+                        field.rust_name == "id" && !field.meta.is_relation && !field.meta.skip_db
+                    })
+                    .map_or_else(|| "id".to_string(), |field| field.db_column.clone()),
+            );
+        }
         let target_columns = target_fields
             .iter()
             .map(|field| field.db_column.clone())
             .collect::<Vec<_>>();
 
-        let mut unique_targets = vec![vec![primary_key]];
+        let mut unique_targets = vec![primary_key];
         unique_targets.extend(
             resolved_fields
                 .iter()
@@ -10674,6 +10686,61 @@ mod query_shape_tests {
                 generate_graphql_operations(&entity(shapes)).is_err(),
                 "{shapes}"
             );
+        }
+    }
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod upsert_primary_key_tests {
+    use super::generate_graphql_operations;
+
+    #[test]
+    fn the_whole_composite_primary_key_is_an_upsert_target() {
+        let input: syn::DeriveInput = syn::parse_quote! {
+            #[graphql_entity(backend = "sqlite", table = "allocations", upsert = "region, slot")]
+            struct Allocation {
+                #[primary_key]
+                #[graphql_orm(auto_generated = false)]
+                region: String,
+                #[primary_key]
+                #[graphql_orm(auto_generated = false, db_column = "slot_number")]
+                slot: i64,
+                label: String,
+            }
+        };
+        if let Err(error) = generate_graphql_operations(&input) {
+            panic!("{error}");
+        }
+        let partial: syn::DeriveInput = syn::parse_quote! {
+            #[graphql_entity(backend = "sqlite", table = "allocations", upsert = "slot")]
+            struct Allocation {
+                #[primary_key]
+                #[graphql_orm(auto_generated = false)]
+                region: String,
+                #[primary_key]
+                #[graphql_orm(auto_generated = false)]
+                slot: i64,
+            }
+        };
+        let error = generate_graphql_operations(&partial).unwrap_err();
+        assert!(
+            error.to_string().contains("must match a unique field"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_implicit_renamed_id_key_is_an_upsert_target() {
+        let input: syn::DeriveInput = syn::parse_quote! {
+            #[graphql_entity(backend = "sqlite", table = "records", upsert = "id")]
+            struct Record {
+                #[graphql_orm(auto_generated = false, db_column = "record_key")]
+                id: String,
+                label: String,
+            }
+        };
+        if let Err(error) = generate_graphql_operations(&input) {
+            panic!("{error}");
         }
     }
 }

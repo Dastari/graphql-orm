@@ -198,6 +198,30 @@ fn graphql_metas(attrs: &[syn::Attribute]) -> syn::Result<Vec<Meta>> {
     Ok(metas)
 }
 
+/// Add a generated `desc` to an argument's async-graphql options as one
+/// `#[graphql(...)]` attribute. Existing options (`name`, `default`,
+/// validators, ...) keep their order and the merged attribute takes the place
+/// of the first `graphql` attribute; a second, description-only attribute is
+/// never added beside them.
+fn merge_graphql_argument_description(
+    attrs: &mut Vec<syn::Attribute>,
+    description: syn::LitStr,
+) -> syn::Result<()> {
+    let mut metas = graphql_metas(attrs)?;
+    metas.push(syn::parse_quote!(desc = #description));
+    let position = attrs
+        .iter()
+        .position(|attr| attr.path().is_ident("graphql"))
+        .unwrap_or(attrs.len());
+    attrs.retain(|attr| !attr.path().is_ident("graphql"));
+    let metas = metas.into_iter().collect::<Punctuated<Meta, Token![,]>>();
+    attrs.insert(
+        position.min(attrs.len()),
+        syn::parse_quote!(#[graphql(#metas)]),
+    );
+    Ok(())
+}
+
 fn graphql_attribute_value(attrs: &[syn::Attribute], key: &str) -> syn::Result<Option<String>> {
     let mut result = None;
     for meta in graphql_metas(attrs)? {
@@ -864,9 +888,11 @@ pub(crate) fn expand(args: TokenStream, input: TokenStream) -> TokenStream {
             }
             if !explicit_argument_description {
                 let description = syn::LitStr::new(&argument_description, pat.ident.span());
-                argument
-                    .attrs
-                    .push(syn::parse_quote!(#[graphql(desc = #description)]));
+                if let Err(error) =
+                    merge_graphql_argument_description(&mut argument.attrs, description)
+                {
+                    return error.to_compile_error().into();
+                }
             }
             let argument_type = &argument.ty;
             arguments.push(quote! {
