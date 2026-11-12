@@ -537,6 +537,21 @@ fn serve_bytes(mut stream: TcpStream, requests: &Mutex<Vec<String>>, gate: &Slow
             "Content-Type: application/json\r\n",
             br#"{"errors":[{"message":"upstream says no","extensions":{"code":"BYTE_ROUTE_UPSTREAM_UNAVAILABLE"}}]}"#,
         ),
+        "/files/chunked-lying-length" => {
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 3\r\nConnection: close\r\n\r\n6\r\nabcdef\r\n0\r\n\r\n",
+            );
+        }
+        "/files/gzip-coded" => {
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\nContent-Length: 10\r\nConnection: close\r\n\r\n0123456789",
+            );
+        }
+        "/files/gzip-chunked" => {
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\nConnection: close\r\n\r\n4\r\nabcd\r\n0\r\n\r\n",
+            );
+        }
         "/files/close-delimited" => {
             let _ = stream.write_all(
                 b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\npartial",
@@ -801,8 +816,8 @@ fn byte_routes_authenticate_and_allow_list_headers() {
     }
     assert_eq!(response.router_error(), None);
 
-    // A deliberately public route needs no bearer and forwards none; a bad
-    // bearer is still refused exactly as on GraphQL.
+    // A deliberately public route needs no bearer and forwards none; on a
+    // router with a provider, a bad bearer gets 401 as on GraphQL.
     let response = fixture.get("/public/echo", &[("cookie", "session=client")]);
     assert_eq!(response.status, 200);
     assert_eq!(received_header(&response.text(), "authorization"), None);
@@ -842,6 +857,25 @@ fn byte_routes_authenticate_and_allow_list_headers() {
     assert_eq!(response.body, b"0123");
     assert_eq!(response.header("content-range"), Some("bytes 0-3/10"));
     assert_eq!(response.header("accept-ranges"), Some("bytes"));
+    // A header the client names in `Connection` is hop-by-hop for that
+    // request and is not forwarded even when allow-listed.
+    let response = fixture.get(
+        "/ranged/echo",
+        &[
+            ("authorization", "Bearer product-p1"),
+            ("connection", "X-Request-Id, accept-language"),
+            ("x-request-id", "trace-0"),
+            ("accept-language", "en"),
+            ("accept", "text/plain"),
+        ],
+    );
+    assert_eq!(response.status, 200, "{}", response.text());
+    assert_eq!(received_header(&response.text(), "x-request-id"), None);
+    assert_eq!(received_header(&response.text(), "accept-language"), None);
+    assert_eq!(
+        received_header(&response.text(), "accept"),
+        Some("text/plain")
+    );
     let response = fixture.get(
         "/ranged/echo",
         &[
@@ -945,6 +979,11 @@ fn byte_routes_refuse_unsafe_requests_before_the_upstream() {
         "/files/a%00b",
         "/files/a%252e%252e",
         "/files/..;/echo",
+        "/files/%E0%80%AE%E0%80%AE/api/graphql",
+        "/files/a%E0%80%AFb",
+        "/files/%F0%80%80%AE",
+        "/files/%EF%BC%8E%EF%BC%8E/api/graphql",
+        "/files/a%EF%BC%8Fb",
     ] {
         let response = fixture.get(path, &[bearer]);
         assert_eq!(response.status, 400, "{path}: {}", response.text());
@@ -1016,7 +1055,7 @@ fn byte_routes_refuse_unsafe_requests_before_the_upstream() {
         metrics["router_byte_route_rejected_total"]["/files"]
             .as_u64()
             .unwrap()
-            >= 20
+            >= 26
     );
     assert_eq!(metrics["router_byte_route_rejected_total"]["/limited"], 4);
     assert_eq!(metrics["router_byte_route_rejected_total"]["/single"], 1);
@@ -1156,4 +1195,67 @@ fn byte_routes_enforce_limits_and_report_upstream_failures() {
         .as_u64()
         .unwrap();
     assert!((1024..=2048).contains(&small_bytes), "{small_bytes}");
+}
+
+#[test]
+fn byte_routes_refuse_ambiguous_framing_and_close_aborted_connections() {
+    let fixture = Fixture::start();
+    let bearer = [("authorization", "Bearer product-p1")];
+
+    // Framing the router cannot trust is refused before any body is relayed:
+    // a Content-Length beside Transfer-Encoding, and any coding but chunked.
+    for path in [
+        "/files/chunked-lying-length",
+        "/files/gzip-coded",
+        "/files/gzip-chunked",
+    ] {
+        let response = fixture.get(path, &bearer);
+        assert_eq!(response.status, 502, "{path}: {}", response.text());
+        assert_eq!(
+            response.error_code(),
+            "BYTE_ROUTE_UPSTREAM_UNAVAILABLE",
+            "{path}"
+        );
+    }
+
+    // A completed response keeps the connection usable; an aborted one closes
+    // it, and a fresh connection is clean afterwards.
+    let request = |path: &str| {
+        format!(
+            "GET {path} HTTP/1.1\r\nHost: router.test\r\nAuthorization: Bearer product-p1\r\n\r\n"
+        )
+    };
+    let mut kept = connect(fixture.router.address);
+    kept.write_all(request("/small/big?size=100").as_bytes())
+        .unwrap();
+    let first = read_response(&mut kept, false);
+    assert_eq!(first.status, 200);
+    assert!(first.complete);
+    assert_eq!(first.body.len(), 100);
+    kept.write_all(request("/small/chunked?size=8192").as_bytes())
+        .unwrap();
+    let aborted = read_response(&mut kept, false);
+    assert_eq!(aborted.status, 200);
+    assert!(!aborted.complete);
+    let mut after = [0_u8; 64];
+    let closed = match kept.read(&mut after) {
+        Ok(0) | Err(_) => true,
+        Ok(_) => false,
+    };
+    assert!(closed, "an aborted response must close its connection");
+    let mut fresh = connect(fixture.router.address);
+    fresh
+        .write_all(request("/small/big?size=100").as_bytes())
+        .unwrap();
+    let clean = read_response(&mut fresh, false);
+    assert_eq!(clean.status, 200);
+    assert!(clean.complete);
+    assert_eq!(clean.body.len(), 100);
+    assert!(
+        clean
+            .body
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| *byte == (index % 251) as u8)
+    );
 }

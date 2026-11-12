@@ -68,6 +68,11 @@ const DENIED_REQUEST_HEADERS: &[&str] = &[
     "cf-connecting-ip",
     "x-cluster-client-ip",
     "fastly-client-ip",
+    "x-goog-iap-jwt-assertion",
+    "cf-access-jwt-assertion",
+    "x-jwt-assertion",
+    "x-client-cert",
+    "x-forwarded-client-cert",
 ];
 
 /// Request header prefixes that are never configurable for forwarding.
@@ -77,6 +82,10 @@ const DENIED_REQUEST_HEADER_PREFIXES: &[&str] = &[
     "x-auth",
     "x-authenticated-",
     "x-envoy-",
+    "x-amzn-oidc-",
+    "x-ms-client-principal",
+    "x-consumer-",
+    "x-ssl-client-",
     "x-graphql-orm-router",
     "graphql-orm-router",
 ];
@@ -102,6 +111,17 @@ const DENIED_RESPONSE_HEADERS: &[&str] = &[
     "strict-transport-security",
     "clear-site-data",
     "public-key-pins",
+    "nel",
+    "report-to",
+    "reporting-endpoints",
+    "accept-ch",
+    "critical-ch",
+    "origin-agent-cluster",
+    "service-worker-allowed",
+    // Byte routes never relay redirects or linked resources.
+    "location",
+    "refresh",
+    "link",
 ];
 
 const DENIED_RESPONSE_HEADER_PREFIXES: &[&str] = &[
@@ -450,6 +470,13 @@ fn normalize_headers(
             ))
         })?;
         let name = parsed.as_str().to_owned();
+        // CGI-style servers map `_` and `-` to the same variable, so an
+        // underscore name could alias a denied hyphenated one.
+        if name.contains('_') {
+            return Err(invalid(format!(
+                "byte route `{prefix}` {direction} header `{name}` must not contain `_`"
+            )));
+        }
         if denied.contains(&name.as_str())
             || denied_prefixes
                 .iter()
@@ -578,10 +605,24 @@ fn safe_segment(segment: &str) -> bool {
     true
 }
 
+/// Characters that Unicode compatibility normalization (NFKC) maps to `.`,
+/// `/`, or `\`, which a normalizing upstream could read as path syntax.
+const NORMALIZES_TO_PATH_SYNTAX: &[char] = &[
+    '\u{2024}', // ONE DOT LEADER -> .
+    '\u{2025}', // TWO DOT LEADER -> ..
+    '\u{2026}', // HORIZONTAL ELLIPSIS -> ...
+    '\u{FE52}', // SMALL FULL STOP -> .
+    '\u{FE68}', // SMALL REVERSE SOLIDUS -> \
+    '\u{FF0E}', // FULLWIDTH FULL STOP -> .
+    '\u{FF0F}', // FULLWIDTH SOLIDUS -> /
+    '\u{FF3C}', // FULLWIDTH REVERSE SOLIDUS -> \
+];
+
 /// Refuses segments that some servers normalize into a dot segment: Windows
 /// strips leading spaces and trailing spaces and dots, so `..%20` or `.. .`
-/// become `..`. Overlong UTF-8 lead bytes `C0` and `C1` (for example `%C0%AE`
-/// for `.`) are also refused.
+/// become `..`. The decoded segment must also be valid UTF-8 and must not
+/// contain a character that compatibility normalization turns into path
+/// syntax.
 fn safe_decoded_segment(bytes: &[u8]) -> bool {
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut index = 0;
@@ -599,7 +640,15 @@ fn safe_decoded_segment(bytes: &[u8]) -> bool {
             index += 1;
         }
     }
-    if decoded.iter().any(|byte| matches!(byte, 0xc0 | 0xc1)) {
+    // Valid UTF-8 excludes every overlong form (such as `%C0%AE` or
+    // `%E0%80%AE` for `.`), surrogates, and stray continuation bytes.
+    let Ok(text) = std::str::from_utf8(&decoded) else {
+        return false;
+    };
+    if text
+        .chars()
+        .any(|character| NORMALIZES_TO_PATH_SYNTAX.contains(&character))
+    {
         return false;
     }
     let start = decoded
@@ -726,6 +775,18 @@ mod tests {
             "/files/.%20.%20/x",
             "/files/%C0%AE%C0%AE/x",
             "/files/%c1%9c",
+            "/files/%E0%80%AE%E0%80%AE",
+            "/files/%E0%80%AF",
+            "/files/%F0%80%80%AE",
+            "/files/%ED%A0%80",
+            "/files/%80",
+            "/files/a%C3",
+            "/files/%EF%BC%8E%EF%BC%8E",
+            "/files/a%EF%BC%8Fb",
+            "/files/a%EF%BC%BCb",
+            "/files/%E2%80%A4%E2%80%A4",
+            "/files/%E2%80%A5",
+            "/files/%EF%B9%92",
             "/files/%20",
             "/files/a b",
             "/files/a\"b",
@@ -847,6 +908,19 @@ mod tests {
             "x-http-method-override",
             "x-envoy-original-path",
             "cf-connecting-ip",
+            "x_forwarded_for",
+            "X_User_Id",
+            "x-amzn-oidc-identity",
+            "x-amzn-oidc-data",
+            "x-ms-client-principal",
+            "x-ms-client-principal-name",
+            "x-goog-iap-jwt-assertion",
+            "cf-access-jwt-assertion",
+            "x-jwt-assertion",
+            "x-consumer-username",
+            "x-ssl-client-dn",
+            "x-client-cert",
+            "x-forwarded-client-cert",
             "transfer-encoding",
             "connection",
             "bad header",
@@ -870,6 +944,17 @@ mod tests {
             "alt-svc",
             "access-control-allow-origin",
             "clear-site-data",
+            "nel",
+            "report-to",
+            "reporting-endpoints",
+            "accept-ch",
+            "critical-ch",
+            "origin-agent-cluster",
+            "service-worker-allowed",
+            "location",
+            "refresh",
+            "link",
+            "x_checksum",
         ] {
             assert!(
                 validate(ByteRoute::new("/files", "http://files.test").pass_response_header(name))

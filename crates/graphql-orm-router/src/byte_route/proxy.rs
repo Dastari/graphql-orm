@@ -231,7 +231,18 @@ impl ByteRouteRuntime {
             },
             url,
         );
+        // RFC 9110 section 7.6.1: headers the client names in `Connection`
+        // are hop-by-hop for this request and are never forwarded.
+        let connection_scoped = headers
+            .get_all(ntex_header::CONNECTION)
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|value| value.split(','))
+            .map(|name| name.trim().to_ascii_lowercase())
+            .collect::<std::collections::BTreeSet<_>>();
         for name in &route.request_headers {
+            if connection_scoped.contains(name.as_str()) {
+                continue;
+            }
             for value in headers.get_all(name) {
                 if let Ok(value) = HeaderValue::from_bytes(value.as_bytes()) {
                     upstream = upstream.header(name.clone(), value);
@@ -265,35 +276,72 @@ impl ByteRouteRuntime {
             }
         };
 
-        let declared_length = response
+        let raw_length = response
             .headers()
             .get(reqwest::header::CONTENT_LENGTH)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<u64>().ok());
-        let chunked = response
+            .map(|value| {
+                value
+                    .to_str()
+                    .ok()
+                    .and_then(|value| value.parse::<u64>().ok())
+            });
+        let codings = response
             .headers()
             .get_all(reqwest::header::TRANSFER_ENCODING)
             .iter()
-            .filter_map(|value| value.to_str().ok())
-            .flat_map(|value| value.split(','))
-            .any(|coding| coding.trim().eq_ignore_ascii_case("chunked"));
+            .map(|value| value.to_str().ok())
+            .collect::<Option<Vec<_>>>();
         let has_body = !head
             && response.status() != reqwest::StatusCode::NO_CONTENT
             && response.status() != reqwest::StatusCode::NOT_MODIFIED;
-        // An HTTP/1 body ended only by the connection closing cannot be told
-        // apart from a truncated one, so it is never relayed as complete.
-        if has_body
-            && declared_length.is_none()
-            && !chunked
-            && response.version() < reqwest::Version::HTTP_2
+        let http1 = response.version() < reqwest::Version::HTTP_2;
+        // Fail closed on any HTTP/1 framing the router cannot relay exactly:
+        // a transfer coding other than `chunked` (whose bytes would otherwise
+        // pass as plain content), a `Content-Length` beside
+        // `Transfer-Encoding` (which the upstream client ignores, so relaying
+        // it would truncate the body), an unreadable length, or a body ended
+        // only by the connection closing (which cannot show truncation).
+        let framing_error = if !http1 {
+            None
+        } else if let Some(codings) = &codings
+            && !codings.is_empty()
         {
+            let only_chunked =
+                codings.len() == 1 && codings[0].trim().eq_ignore_ascii_case("chunked");
+            if !only_chunked {
+                Some("byte route upstream response uses an unsupported transfer coding")
+            } else if raw_length.is_some() {
+                Some("byte route upstream response declares both a length and chunked framing")
+            } else {
+                None
+            }
+        } else if codings.is_none() {
+            Some("byte route upstream response uses an unsupported transfer coding")
+        } else if raw_length.is_some_and(|length| length.is_none()) {
+            Some("byte route upstream response has an invalid length")
+        } else if has_body && raw_length.is_none() {
+            Some("byte route upstream response has no length or chunked framing")
+        } else {
+            None
+        };
+        if let Some(message) = framing_error {
             route.counters.upstream_error();
             return router_error(
                 StatusCode::BAD_GATEWAY,
                 "BYTE_ROUTE_UPSTREAM_UNAVAILABLE",
-                "byte route upstream response has no length or chunked framing",
+                message,
             );
         }
+        // Relay the length the upstream client actually decodes, never the
+        // raw header. A HEAD response has no body to decode, so its validated
+        // header is the only length there is.
+        let declared_length = if head {
+            raw_length.flatten()
+        } else if has_body {
+            response.content_length()
+        } else {
+            None
+        };
         if declared_length.is_some_and(|length| length > route.config.max_response_bytes) {
             route.counters.upstream_error();
             return router_error(

@@ -55,10 +55,12 @@ and RLS remain authoritative after router preflight.
   streams cannot bypass those controls.
 - Byte routes are off by default and static. A route claims only its exact
   prefix at a segment boundary, refuses dot segments, empty segments, `;`,
-  `\`, and encoded separators or dots under it, and takes its scheme, host,
+  `\`, encoded separators or dots, invalid or overlong UTF-8, and characters
+  that normalize to path syntax under it, and takes its scheme, host,
   and port from configuration only. It accepts `GET` and `HEAD` without a
   body, authenticates like GraphQL unless explicitly public, forwards and
-  returns headers only through allow-lists, drops `Set-Cookie` by default,
+  returns headers only through allow-lists, refuses HTTP/1 upstream framing it
+  cannot relay exactly, drops `Set-Cookie` by default,
   adds `nosniff` and a sandbox content policy, and bounds size, concurrency,
   rate, connect, idle, and total time. An abort closes the client connection,
   so a truncated body never looks complete.

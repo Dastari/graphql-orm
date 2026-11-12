@@ -308,8 +308,8 @@ configuration alone.
 | `public` | `false`. When `false`, the route needs a valid bearer and the router must have an authentication provider. |
 | `allowRange` | `false`. When `false`, a `Range` request is refused with 416. |
 | `allowSetCookie` | `false`. When `false`, upstream `Set-Cookie` headers are dropped. |
-| `forwardRequestHeaders` | Empty. Extra request headers to forward. Credentials, cookies, range, transport, forwarding, and common caller-identity headers are refused. |
-| `passResponseHeaders` | Empty. Extra upstream response headers to pass back. `Set-Cookie`, range, transport, and router-owned headers are refused. |
+| `forwardRequestHeaders` | Empty. Extra request headers to forward. Names containing `_`, and credentials, cookies, range, transport, forwarding, client-address, method-override, and common caller-identity headers are refused. |
+| `passResponseHeaders` | Empty. Extra upstream response headers to pass back. Names containing `_`, and `Set-Cookie`, range, transport, redirect, origin-wide, and router-owned headers are refused. |
 | `maxResponseBytes` | 67108864 (64 MiB); valid range 1 byte to 1 TiB. |
 | `maxConcurrentRequests` | 16; valid range 1–10000. |
 | `maxRequestsPerSecond` | 32; valid range 1–10000. The same token bucket as WebSocket attempts, with one second of burst capacity, shared by all clients of the route. Only authenticated requests (or any request on a public route) spend it. |
@@ -332,8 +332,13 @@ character outside RFC 3986's unreserved characters and `! $ & ' ( ) * + , = :
 @`, or an encoded `/`, `\`, `.`, `%`, `;`, or control byte. That refuses
 `%2e%2e`, `%2f`, and double-encoding such as `%252e`. A segment that becomes
 empty once leading spaces and trailing spaces and dots are removed, such as
-`..%20` or `.%20.`, is refused because some servers normalize it to `..`, and
-so are the overlong UTF-8 bytes `%C0` and `%C1`. Queries must be
+`..%20` or `.%20.`, is refused because some servers normalize it to `..`. The percent-decoded
+segment must be valid UTF-8, which refuses every overlong encoding (such as
+`%C0%AE` or `%E0%80%AE` for `.` and `%E0%80%AF` for `/`), surrogates, and stray
+continuation bytes. It must also not contain a character that Unicode
+compatibility normalization (NFKC) turns into `.`, `/`, or `\`: the fullwidth
+`%EF%BC%8E`, `%EF%BC%8F`, and `%EF%BC%BC`, the small `%EF%B9%92` and
+`%EF%B9%A8`, and the leaders `%E2%80%A4`, `%E2%80%A5`, and `%E2%80%A6`. Queries must be
 printable ASCII up to 4096 bytes. Other percent-encoded bytes, such as UTF-8
 file names, are relayed unchanged.
 
@@ -354,7 +359,11 @@ GraphQL error shape. An unavailable provider gets 503. A verified bearer is
 forwarded upstream unchanged, as GraphQL forwards it to subgraphs, so the
 service still makes its own authorization decision. A public route needs no
 bearer and forwards none. If a client sends one anyway, it is verified and
-forwarded, and an invalid one is refused exactly as on GraphQL. At startup,
+forwarded, and an invalid one gets 401 as on GraphQL. A router without an
+authentication provider (anonymous development mode) can serve only public
+routes, and there any `Authorization` header gets 401 because the router
+cannot verify it; the GraphQL endpoint of such a router ignores the header
+instead. At startup,
 the router logs one warning naming every public route.
 
 Upstream requests carry only these client headers: `Accept`,
@@ -363,23 +372,33 @@ Upstream requests carry only these client headers: `Accept`,
 `If-Range` when `allowRange` is set, the verified `Authorization`, and the
 route's `forwardRequestHeaders`. Cookies, `Forwarded`, `X-Forwarded-*`,
 client-supplied identity and client-address headers, method-override and
-URL-rewrite headers, router internal headers, and hop-by-hop headers are never
-forwarded. Do not list an identity header in
+URL-rewrite headers, proxy-asserted identity headers (such as
+`X-Amzn-Oidc-*`, `X-Ms-Client-Principal*`, `X-Goog-Iap-Jwt-Assertion`,
+`Cf-Access-Jwt-Assertion`, `X-Jwt-Assertion`, `X-Consumer-*`,
+`X-Ssl-Client-*`, `X-Client-Cert`, and `X-Forwarded-Client-Cert`), router
+internal headers, and hop-by-hop headers are never forwarded. Neither is any
+header the client names in its `Connection` header (RFC 9110 section 7.6.1).
+Configured names must not contain `_`, because CGI-style servers read
+`X_User_Id` and `X-User-Id` as the same variable. Do not list an identity header in
 `forwardRequestHeaders`: a client can set any header it sends. The upstream
 client ignores ambient proxy settings and does not follow redirects.
 
 ### Responses
 
-The upstream status and body pass through, including errors. `Content-Length`
-is preserved, and a response without one is relayed chunked. Only these
+The upstream status and body pass through, including errors. The relayed
+`Content-Length` is the length the router's upstream client decodes, never the
+raw header, and a response without one is relayed chunked. Only these
 response headers pass: `Content-Type`, `Content-Disposition`,
 `Content-Encoding`, `Content-Language`, `Cache-Control`, `Expires`, `ETag`,
 `Last-Modified`, `Vary`, `Age`, and `Retry-After`. With `allowRange`,
 `Content-Range` and `Accept-Ranges` also pass, and with `allowSetCookie`,
 `Set-Cookie` does. The route's `passResponseHeaders` are added to the list. Headers that would
-apply to the router's whole origin (`Strict-Transport-Security`, `Alt-Svc`,
-`Clear-Site-Data`, `Public-Key-Pins`, and `Access-Control-*`) cannot be
-added.
+apply to the router's whole origin cannot be added: `Strict-Transport-Security`,
+`Alt-Svc`, `Clear-Site-Data`, `Public-Key-Pins`, `Access-Control-*`, `NEL`,
+`Report-To`, `Reporting-Endpoints`, `Accept-CH`, `Critical-CH`,
+`Origin-Agent-Cluster`, and `Service-Worker-Allowed`. Byte routes never relay
+redirects or linked resources, so `Location`, `Refresh`, and `Link` cannot be
+added either; an upstream 3xx passes through without its `Location`.
 Every relayed response also gets `X-Content-Type-Options: nosniff`, and, unless
 an allowed upstream header supplies one,
 `Content-Security-Policy: default-src 'none'; sandbox`. A route without
@@ -387,13 +406,21 @@ an allowed upstream header supplies one,
 running as active content on the router's origin.
 
 The body is streamed with at most one chunk queued between the upstream and the
-client. An HTTP/1 upstream response with a body but neither `Content-Length`
-nor chunked framing gets 502 `BYTE_ROUTE_UPSTREAM_UNAVAILABLE`, because a body
-ended only by the upstream closing its connection cannot show truncation. A declared `Content-Length` above `maxResponseBytes` is refused before
+client. An HTTP/1 upstream response gets 502 `BYTE_ROUTE_UPSTREAM_UNAVAILABLE`
+when its framing cannot be relayed exactly:
+
+- a `Transfer-Encoding` other than exactly `chunked`, such as `gzip`, whose
+  coded bytes would otherwise pass as plain content;
+- both `Transfer-Encoding` and `Content-Length`, where the length is ignored
+  when decoding and relaying it would truncate the body;
+- an unparseable `Content-Length`;
+- a body with neither `Content-Length` nor chunked framing, because a body
+  ended only by the upstream closing its connection cannot show truncation. A declared `Content-Length` above `maxResponseBytes` is refused before
 any body is sent. A body without a declared length that grows past the limit,
 an idle timeout, the request deadline, an upstream read error, and a client
 that stops reading all abort the transfer. On HTTP/1 the router closes the
-client connection, so a client never sees a truncated body as complete. On
+client connection, including a keep-alive one, so a client never sees a
+truncated body as complete and never reuses that connection. On
 HTTP/2 the router ends the stream with an error when the server next polls the
 body; a stalled HTTP/2 stream keeps its connection until the client or a
 fronting proxy closes it. An abort also releases the upstream connection and
@@ -419,7 +446,7 @@ error:
 | 405 | `BYTE_ROUTE_METHOD_NOT_ALLOWED` | Not `GET` or `HEAD`. |
 | 416 | `BYTE_ROUTE_RANGE_NOT_ALLOWED` | `Range` on a route without `allowRange`. |
 | 429 | `BYTE_ROUTE_RATE_LIMITED` | Route admission rate exceeded; `Retry-After: 1`. |
-| 502 | `BYTE_ROUTE_UPSTREAM_UNAVAILABLE` | Connection refused, failed, or timed out; an informational or unframed HTTP/1 response; or a protocol error. |
+| 502 | `BYTE_ROUTE_UPSTREAM_UNAVAILABLE` | Connection refused, failed, or timed out; an informational response; HTTP/1 framing that cannot be relayed exactly; or a protocol error. |
 | 502 | `BYTE_ROUTE_RESPONSE_TOO_LARGE` | Declared length over `maxResponseBytes`. |
 | 503 | `BYTE_ROUTE_BUSY` | All `maxConcurrentRequests` slots in use. |
 | 504 | `BYTE_ROUTE_UPSTREAM_TIMEOUT` | Connected, but no response headers within the idle timeout. |

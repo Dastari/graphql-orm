@@ -23,13 +23,16 @@ supersedes: []
     forwarded the same way. A route must be marked `public` to serve without
     one, and the router logs a warning naming every public route at startup.
   - Matching compares whole segments of the raw path, so `/files` never claims
-    `/files-admin`. A claimed path with an empty or dot segment, `;`, `\`, or
-    an encoded separator or dot is refused with 400 and never reaches another
-    handler. Only the path below the prefix and the query are copied upstream;
+    `/files-admin`. A claimed path is refused with 400 and never reaches
+    another handler when it has an empty or dot segment, `;`, `\`, an encoded
+    separator or dot, a segment that is not valid UTF-8 once decoded (every
+    overlong form), or a character that NFKC normalizes to `.`, `/` or `\`. Only the path below the prefix and the query are copied upstream;
     the scheme, host, and port come from configuration.
   - Request and response headers cross only through allow-lists. Cookies,
-    forwarding and client identity headers, router internal headers, and
-    hop-by-hop headers are never forwarded. `Set-Cookie` is dropped unless
+    forwarding, client identity and proxy-asserted identity headers, router
+    internal headers, hop-by-hop headers, and headers named in `Connection`
+    are never forwarded, and configured header names may not contain `_`.
+    Origin-wide, redirect and `Link` response headers are never passed. `Set-Cookie` is dropped unless
     `allowSetCookie` is set, and every relayed response gets `nosniff` and a
     sandbox content security policy.
   - Each route bounds response size, concurrency, request rate (the WebSocket
@@ -39,8 +42,10 @@ supersedes: []
     `allowRange` is set. A declared length over the limit gets 502. An
     overlong stream, a stalled upstream, or a client that stops reading aborts
     the transfer by closing the connection, so a truncated body never looks
-    complete. An HTTP/1 upstream body framed only by its connection closing
-    gets 502 for the same reason. Authentication runs before the rate limit,
+    complete. HTTP/1 upstream framing that cannot be relayed exactly gets
+    502 for the same reason: a coding other than `chunked`, `Content-Length`
+    beside `Transfer-Encoding`, or a body framed only by the connection
+    closing. The relayed length is the decoded one, never the raw header. Authentication runs before the rate limit,
     so anonymous callers cannot spend an authenticated route's budget.
   - Upstream errors pass through unchanged. Router errors use the GraphQL
     error shape and a `graphql-orm-router-error` header, including the
