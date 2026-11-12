@@ -82,7 +82,21 @@ canonical set and the candidate's exact owning index.
 `AiCapabilityDiscoveryBroker` rehydrates the current principal and reapplies
 host scope, target, kind, classification, provider and session policy while
 filtering search results, again while loading, and again immediately before
-execution. `AiCapabilityAuthorityPolicy` receives the exact owning index on
+execution. Search applies policy to every ranked match through
+`AiCapabilityAuthorityPolicy::authorize_discovery` and only then applies the
+result ceiling, so a restricted principal receives the highest-ranked
+candidates it may use. The policy work depends on the query and catalogue, not
+on the decisions, and the response carries no score, count or continuation.
+Each batch decision names the capability it decides, and the broker refuses
+the batch unless decision `i` names ranked match `i`. The default
+`authorize_discovery` calls `authorize` per match with up to 16 calls in
+flight; hosts with an expensive check override it to decide the batch from one
+current lookup. A broad query can send up to the index set's `maximum_entries`
+matches to policy. `with_maximum_discovery_authorizations` optionally refuses
+such a query before any policy call with the stable
+`AI_CAPABILITY_DISCOVERY_TOO_BROAD` input error. Report a denial as
+`allowed: false`: a policy `Err` fails the whole search and would reveal that a
+hidden entry matched. `AiCapabilityAuthorityPolicy` receives the exact owning index on
 each check; hosts apply target policy from that proof rather than parsing an
 ID. Its `AiLoadedCapabilityBinding` is crate-created, private-field,
 short-lived and fenced to owner reference, session, run, attempt, lease,

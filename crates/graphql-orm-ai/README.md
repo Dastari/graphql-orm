@@ -12,6 +12,8 @@ supersedes: []
 
 Version `0.132.0` selects published Auth `v0.26.0` and ORM 0.126.0. Hosts that pass Auth types must select the same tag. AI behavior and schema are unchanged; no data migration is needed. See the [migration guide](MIGRATION.md#01310-to-01320-agql-auth-0260).
 
+Version `0.132.0` applies capability-discovery policy before the result ceiling, so restricted principals receive their highest-ranked permitted candidates. No data migration is needed; see the [migration guide](MIGRATION.md#01310-to-01320-capability-discovery-applies-policy-before-its-result-ceiling).
+
 Version `0.128.0` enforces AI runtime closure after a snapshot restore. The runtime start gate opens only with a proof minted from a store's live recovery epoch, and leases are bound to that epoch. A restored store stays closed until an operator runs `OrmAiRuntimeRecoveryService::reconcile_restore`, which expires restored approvals and moves unfinished runs to `RecoveryRequired`, reviews the result, and acknowledges it. After upgrading an existing deployment in place, call `acknowledge_in_place_upgrade` once; a store restored from a backup uses reconcile and acknowledge instead. Apply AI schema module `0.77.0`; see the [migration guide](MIGRATION.md#01270-to-01280-enforced-runtime-closure-after-restore).
 
 Version `0.127.0` aligns private helper and test feature gates and adds PostgreSQL/MSSQL all-target compile and warnings-denied Clippy CI checks. Default SQLite test coverage and runtime behavior are unchanged; no data migration is needed.

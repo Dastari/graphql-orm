@@ -22,6 +22,8 @@ are separate runtime decisions and must remain default-deny.
 
 Version `0.21.2` adds regression coverage that query-plan disclosure follows each field's own coordinate, never a name prefix shared with a private relation. Capabilities and fingerprints are unchanged; no migration is needed.
 
+Version `0.22.0` adds `AiCapabilityIndexSet::ranked_matches`, the complete capability ranking before any result ceiling, so policy can filter before truncation. No data migration is needed.
+
 Version `0.21.1` re-exports receiver-purpose bindings and shares exact document hashing with the catalogue. Existing signed encodings and profile fingerprints are unchanged; no data migration is needed.
 
 Version `0.21.0` preserves proven pre-transport failure classification and exposes closed retry refusal reasons. No data migration is needed.
