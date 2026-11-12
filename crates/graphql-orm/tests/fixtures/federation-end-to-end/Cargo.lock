@@ -2064,13 +2064,18 @@ dependencies = [
 name = "federation-e2e"
 version = "0.1.0"
 dependencies = [
+ "async-graphql",
  "base64 0.22.1",
  "fixture-database",
+ "graphql-orm",
  "graphql-orm-router",
+ "graphql-orm-router-protocol",
  "ntex",
  "readings-subgraph",
  "reqwest 0.13.5",
+ "serde",
  "serde_json",
+ "subgraph-http",
  "tokio",
  "zones-subgraph",
 ]
@@ -2542,6 +2547,7 @@ dependencies = [
 name = "graphql-orm-operation-catalog"
 version = "0.7.3"
 dependencies = [
+ "graphql-orm-router-protocol",
  "serde",
  "serde_json",
  "sha2",

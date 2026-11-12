@@ -187,6 +187,7 @@ use syn::{
 };
 
 mod backend;
+mod catalog_arguments;
 mod custom_operations;
 mod entity;
 mod federation;

@@ -109,10 +109,10 @@ jobs:
       # The fixture runner tests run in orm-fixtures; scripts/check-ci-orm-split.py
       # requires this list to be exactly the tests those binaries define.
       - run: cargo test -p graphql-orm -- --exact --skip sqlite_and_mssql_services_can_share_one_graphql_orm_build --skip direct_host_dependency_resolves_one_exact_agql_auth_universe --skip generated_relationships_execute_across_real_crate_boundaries --skip two_orm_subgraphs_compose_and_join_through_the_router --skip external_legacy_migration_surface_compiles --skip pascal_relationship_semantics_compile_as_a_complete_query_capability --skip external_repository_aggregate_consumer_requires_no_direct_graphql_dependency
-      - run: cargo test -p graphql-orm --no-default-features --features sqlite,router-protocol --test federation_entity_keys_contract
+      - run: cargo test -p graphql-orm --no-default-features --features sqlite,router-protocol --test federation_entity_keys_contract --test operation_catalog_sdl_conformance
       - run: cargo test -p graphql-orm --no-default-features --features sqlite,field-case-pascal,argument-case-snake --test federation_entity_keys_case_features
       - name: Check Changed catalogue and provenance with PascalCase arguments
-        run: cargo test -p graphql-orm --features router-protocol,resolver-case-pascal,argument-case-pascal,field-case-pascal --test keyed_changed_subscriptions --test subscription_path_order --test empty_filter_semantics --test composite_subscription_scopes --test node_id_version_relations --test link_relation_patterns
+        run: cargo test -p graphql-orm --features router-protocol,resolver-case-pascal,argument-case-pascal,field-case-pascal --test keyed_changed_subscriptions --test subscription_path_order --test empty_filter_semantics --test composite_subscription_scopes --test node_id_version_relations --test link_relation_patterns --test operation_catalog_sdl_conformance
       - run: cargo clippy -p graphql-orm --all-targets -- -D warnings
       - run: RUSTDOCFLAGS="-D warnings" cargo doc -p graphql-orm -p graphql-orm-macros --no-deps
 
@@ -335,7 +335,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - run: cargo test -p graphql-orm --locked --no-default-features --features sqlite,resolver-case-snake,argument-case-snake,field-case-snake --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test grouped_aggregates --test record_version_ui --test subscription_path_order --test composite_subscription_scopes
+      - run: cargo test -p graphql-orm --locked --no-default-features --features sqlite,resolver-case-snake,argument-case-snake,field-case-snake --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test grouped_aggregates --test record_version_ui --test subscription_path_order --test composite_subscription_scopes --test operation_catalog_sdl_conformance
 
   companions:
     runs-on: ubuntu-latest
