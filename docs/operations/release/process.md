@@ -3,8 +3,8 @@ title: Workspace release process
 kind: runbook
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-11
-review_by: 2026-12-11
+last_reviewed: 2026-11-12
+review_by: 2027-02-12
 supersedes: []
 ---
 
