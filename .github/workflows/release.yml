@@ -353,7 +353,7 @@ jobs:
       - name: Verify TLS and retained query notifications on owned servers
         env:
           GRAPHQL_ORM_TEST_MSSQL_PULL: missing
-        run: cargo test -p graphql-orm --locked --no-default-features --features mssql --test mssql_tls --test mssql_notifications -- --ignored --test-threads=1
+        run: cargo test -p graphql-orm --locked --no-default-features --features mssql --test mssql_tls --test mssql_transport --test mssql_notifications -- --ignored --test-threads=1
 
   ai-provider-matrix:
     if: inputs.validation_profile == 'full'

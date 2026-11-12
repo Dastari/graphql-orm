@@ -29,9 +29,12 @@ exists. Do not treat liveness as readiness.
 
 The optional admin listener provides authenticated `GET /_router/status`,
 `GET /_router/metrics`, `POST /_router/refresh`,
-`POST /_router/subgraphs`, and explicit removal. Dynamic registration and
-removal are process-local. Static sources return after restart and dynamic
-services must re-register.
+`POST /_router/subgraphs`, and explicit removal of dynamic subgraphs. It
+authenticates with its own provider, whose audience public tokens do not carry.
+Dynamic registration and removal are process-local, and dynamic services must
+re-register after restart. The admin endpoint refuses to remove a static
+source; only the embedding host's `RouterHandle::remove_subgraph` can, and the
+source returns after restart.
 
 ## Resource budgets
 
@@ -85,6 +88,12 @@ authorization catalog validate. A fetch timeout, unavailable source, invalid
 descriptor, composition error, or runtime error marks status but does not
 remove the active source. Use explicit removal only for an intended topology
 change.
+
+Refresh rounds run one at a time, but a round holds no lifecycle lock while it
+fetches. A slow or unreachable schema endpoint delays only the next round; it
+never blocks GraphQL execution, status, removal, or registration. A source
+removed or re-registered while a round fetches keeps that newer decision, and
+the round discards its result for that source.
 
 For a rejected candidate, inspect the sanitized admin status, repair the source,
 and use the authenticated refresh operation or wait for the next poll. The

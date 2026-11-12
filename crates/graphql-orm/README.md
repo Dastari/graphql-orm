@@ -3,12 +3,27 @@ title: "graphql-orm"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-12
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm`
+
+Version 0.128.0 makes Rust repository limits exact or refused. An explicit
+`limit(n)` above the database's maximum page limit, or an unlimited
+`fetch_all` that matches more rows than that maximum, fails with
+`PAGE_LIMIT_EXCEEDED` instead of returning a silently truncated set, so a
+`limit(bound + 1)` overflow check works with any bound. Transaction reads honour
+the configured maximum. GraphQL page clamping is unchanged. Upgrade ORM/macros
+together; see the
+[root migration guide](../../MIGRATION.md#01270-to-01280-repository-limits-are-exact-or-refused).
+
+Version 0.128.0 also makes SQL Server connections use full-session TLS with a
+validated certificate by default, refuses weaker connection-string settings
+unless they are opted into in code, resets pooled sessions after each
+transaction, and adds pool timeouts. Upgrade ORM/macros together; see the
+[root migration guide](../../MIGRATION.md#01270-to-01280-sql-server-encryption-and-pool-defaults).
 
 Version 0.127.0 keeps a hook's deliberate public refusal (an ORM public `code`
 extension, or an `OrmPublicError` returned with `?`) on repository writes,

@@ -3,13 +3,16 @@ use std::{
     net::{SocketAddr, TcpListener, TcpStream},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicUsize, Ordering},
     },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, jwk::Jwk};
+use jsonwebtoken::{
+    Algorithm, EncodingKey, Header, encode,
+    jwk::{Jwk, JwkSet},
+};
 use serde_json::{Value as JsonValue, json};
 
 #[cfg(feature = "auth-agql")]
@@ -73,6 +76,8 @@ struct JwksFixture {
     body: Arc<Mutex<String>>,
     status: Arc<AtomicU16>,
     requests: Arc<AtomicUsize>,
+    /// Delays only the next accepted request's response, in milliseconds.
+    delay_next_ms: Arc<AtomicU64>,
     #[cfg(feature = "auth-agql")]
     last_request: Arc<Mutex<String>>,
     stop: Arc<AtomicBool>,
@@ -87,12 +92,14 @@ impl JwksFixture {
         let body = Arc::new(Mutex::new(body));
         let status = Arc::new(AtomicU16::new(200));
         let requests = Arc::new(AtomicUsize::new(0));
+        let delay_next_ms = Arc::new(AtomicU64::new(0));
         #[cfg(feature = "auth-agql")]
         let last_request = Arc::new(Mutex::new(String::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let thread_body = body.clone();
         let thread_status = status.clone();
         let thread_requests = requests.clone();
+        let thread_delay = delay_next_ms.clone();
         #[cfg(feature = "auth-agql")]
         let thread_last_request = last_request.clone();
         let thread_stop = stop.clone();
@@ -101,25 +108,34 @@ impl JwksFixture {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         thread_requests.fetch_add(1, Ordering::Relaxed);
-                        let mut request = [0_u8; 2048];
-                        #[cfg(feature = "auth-agql")]
-                        let bytes_read = stream.read(&mut request).unwrap_or_default();
-                        #[cfg(not(feature = "auth-agql"))]
-                        let _ = stream.read(&mut request);
-                        #[cfg(feature = "auth-agql")]
-                        {
-                            *thread_last_request.lock().unwrap() =
-                                String::from_utf8_lossy(&request[..bytes_read]).into_owned();
-                        }
+                        // The response is chosen when the request arrives, so
+                        // a delayed response carries the then-current body.
                         let body = thread_body.lock().unwrap().clone();
                         let status = thread_status.load(Ordering::Relaxed);
-                        let reason = if status == 200 { "OK" } else { "Unavailable" };
-                        let response = format!(
-                            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                            body.len()
-                        );
-                        // A bounded client may close immediately after rejecting Content-Length.
-                        let _ = stream.write_all(response.as_bytes());
+                        let delay = Duration::from_millis(thread_delay.swap(0, Ordering::AcqRel));
+                        #[cfg(feature = "auth-agql")]
+                        let last_request = thread_last_request.clone();
+                        thread::spawn(move || {
+                            let _ = stream.set_nonblocking(false);
+                            let mut request = [0_u8; 2048];
+                            #[cfg(feature = "auth-agql")]
+                            let bytes_read = stream.read(&mut request).unwrap_or_default();
+                            #[cfg(not(feature = "auth-agql"))]
+                            let _ = stream.read(&mut request);
+                            #[cfg(feature = "auth-agql")]
+                            {
+                                *last_request.lock().unwrap() =
+                                    String::from_utf8_lossy(&request[..bytes_read]).into_owned();
+                            }
+                            thread::sleep(delay);
+                            let reason = if status == 200 { "OK" } else { "Unavailable" };
+                            let response = format!(
+                                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                body.len()
+                            );
+                            // A bounded client may close immediately after rejecting Content-Length.
+                            let _ = stream.write_all(response.as_bytes());
+                        });
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(2));
@@ -133,6 +149,7 @@ impl JwksFixture {
             body,
             status,
             requests,
+            delay_next_ms,
             #[cfg(feature = "auth-agql")]
             last_request,
             stop,
@@ -146,6 +163,11 @@ impl JwksFixture {
 
     fn replace(&self, body: String) {
         *self.body.lock().unwrap() = body;
+    }
+
+    fn delay_next_response(&self, delay: Duration) {
+        self.delay_next_ms
+            .store(delay.as_millis() as u64, Ordering::Release);
     }
 
     fn set_status(&self, status: u16) {
@@ -953,4 +975,237 @@ fn complete_signed_catalogue_over_one_mib_is_verified_with_finite_body_limits() 
         AuthenticationErrorKind::Unavailable
     );
     assert!(invalid.authenticate_bearer(&credential).is_err());
+}
+
+fn rsa_jwk(kid: &str) -> JsonValue {
+    serde_json::from_str::<JsonValue>(&jwks(kid)).unwrap()["keys"][0].clone()
+}
+
+/// Waits inside a runtime so a background JWKS refresh can run to completion.
+fn authenticate_then_settle(
+    provider: &JwksAuthenticationProvider,
+    fixture: &JwksFixture,
+    token: &str,
+    expected_requests: usize,
+) -> Result<AuthenticatedPrincipal, AuthenticationError> {
+    let provider = provider.clone();
+    let token = token.to_owned();
+    let requests = fixture.requests.clone();
+    ntex::rt::System::build()
+        .name("jwks-unknown-key-test")
+        .build(ntex::rt::DefaultRuntime)
+        .block_on(async move {
+            let result = provider.authenticate_bearer(&token);
+            for _ in 0..250 {
+                if requests.load(Ordering::Relaxed) >= expected_requests {
+                    break;
+                }
+                hive_router::tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            // Let the refresh publish its keys, or an unrequested one show up.
+            hive_router::tokio::time::sleep(Duration::from_millis(50)).await;
+            result
+        })
+}
+
+#[test]
+fn jwks_document_with_unusable_keys_keeps_its_usable_rs256_keys() {
+    let mut encryption = rsa_jwk("encryption-key");
+    encryption["use"] = json!("enc");
+    let mut without_id = rsa_jwk("unused");
+    without_id.as_object_mut().unwrap().remove("kid");
+    let document = json!({
+        "keys": [
+            // RFC 7517 appendix A.1 elliptic-curve public key.
+            {
+                "kty": "EC", "crv": "P-256", "use": "sig", "kid": "ec-key",
+                "x": "MKBCTNIcKUSDii11ySs3526iDZ8AiTo7Tu6KPAqv7D4",
+                "y": "4Etl6SRW2YiLUrN5vfvVHuhp7x8PxltmWWlbbM4IFyM"
+            },
+            encryption,
+            without_id,
+            { "kty": "future-key-type", "kid": "future-key" },
+            rsa_jwk("key-a"),
+        ]
+    });
+    let fixture = JwksFixture::start(document.to_string());
+    let clock = Arc::new(TestClock::at(1_000));
+    let provider = provider(&fixture, clock, LegacyScopeClaims::Reject);
+    initialize(&provider).unwrap();
+    provider
+        .authenticate_bearer(&token("key-a", claims(1_100)))
+        .unwrap();
+    assert_eq!(
+        provider
+            .authenticate_bearer(&token("encryption-key", claims(1_100)))
+            .unwrap_err()
+            .kind(),
+        AuthenticationErrorKind::InvalidCredential
+    );
+
+    // A document with no usable key still fails closed, preserving the
+    // previous complete key set.
+    fixture.replace(
+        json!({"keys": [{
+            "kty": "EC", "crv": "P-256", "kid": "ec-key",
+            "x": "MKBCTNIcKUSDii11ySs3526iDZ8AiTo7Tu6KPAqv7D4",
+            "y": "4Etl6SRW2YiLUrN5vfvVHuhp7x8PxltmWWlbbM4IFyM"
+        }]})
+        .to_string(),
+    );
+    assert_eq!(
+        refresh(&provider).unwrap_err().kind(),
+        AuthenticationErrorKind::Unavailable
+    );
+    provider
+        .authenticate_bearer(&token("key-a", claims(1_100)))
+        .unwrap();
+
+    // Two usable keys under one ID stay ambiguous and fail closed.
+    fixture.replace(json!({"keys": [rsa_jwk("key-a"), rsa_jwk("key-a")]}).to_string());
+    assert_eq!(
+        refresh(&provider).unwrap_err().kind(),
+        AuthenticationErrorKind::Unavailable
+    );
+}
+
+#[test]
+fn unknown_key_id_requests_a_rate_limited_jwks_refresh() {
+    let fixture = JwksFixture::start(jwks("key-a"));
+    let clock = Arc::new(TestClock::at(2_000));
+    let config =
+        JwksAuthenticationConfig::new(fixture.url(), "https://issuer.test", ["graphql-router"])
+            .unwrap()
+            .with_cache_ttl(Duration::from_secs(600))
+            .with_refresh_interval(Duration::from_secs(300))
+            .with_clock(clock.clone())
+            .allow_insecure_loopback_http_for_development(true);
+    let provider = JwksAuthenticationProvider::new(config).unwrap();
+    initialize(&provider).unwrap();
+    assert_eq!(fixture.requests.load(Ordering::Relaxed), 1);
+
+    // The issuer rotates before the scheduled refresh. The first bearer that
+    // names the new key is refused, and asks for one background refresh.
+    fixture.replace(json!({"keys": [rsa_jwk("key-a"), rsa_jwk("key-b")]}).to_string());
+    let rotated = token("key-b", claims(3_000));
+    assert_eq!(
+        authenticate_then_settle(&provider, &fixture, &rotated, 2)
+            .unwrap_err()
+            .kind(),
+        AuthenticationErrorKind::InvalidCredential
+    );
+    assert_eq!(fixture.requests.load(Ordering::Relaxed), 2);
+    provider.authenticate_bearer(&rotated).unwrap();
+
+    // Unknown IDs inside the cooldown do not reach the issuer again.
+    let forged = token("forged-key", claims(3_000));
+    for _ in 0..3 {
+        assert_eq!(
+            authenticate_then_settle(&provider, &fixture, &forged, 2)
+                .unwrap_err()
+                .kind(),
+            AuthenticationErrorKind::InvalidCredential
+        );
+    }
+    assert_eq!(fixture.requests.load(Ordering::Relaxed), 2);
+
+    // After the default 30-second cooldown one more unknown ID may refresh.
+    clock.set(2_030);
+    assert!(authenticate_then_settle(&provider, &fixture, &forged, 3).is_err());
+    assert_eq!(fixture.requests.load(Ordering::Relaxed), 3);
+}
+
+#[test]
+fn unknown_key_refresh_cooldown_is_bounded_and_overflow_is_never_due() {
+    let config = |cooldown: Duration| {
+        JwksAuthenticationConfig::new("https://issuer.test/jwks", "https://issuer.test", ["api"])
+            .unwrap()
+            .with_unknown_key_refresh_cooldown(cooldown)
+    };
+    for cooldown in [
+        Duration::ZERO,
+        MAX_UNKNOWN_KEY_REFRESH_COOLDOWN + Duration::from_secs(1),
+    ] {
+        assert!(JwksAuthenticationProvider::new(config(cooldown)).is_err());
+    }
+    JwksAuthenticationProvider::new(config(MAX_UNKNOWN_KEY_REFRESH_COOLDOWN)).unwrap();
+
+    // A previous refresh so late that adding the cooldown overflows is not
+    // treated as "due"; overflow must never lift the rate limit.
+    let fixture = JwksFixture::start(jwks("key-a"));
+    let clock = Arc::new(TestClock::at(2_000));
+    let provider = JwksAuthenticationProvider::new(
+        JwksAuthenticationConfig::new(fixture.url(), "https://issuer.test", ["graphql-router"])
+            .unwrap()
+            .with_cache_ttl(Duration::from_secs(600))
+            .with_refresh_interval(Duration::from_secs(300))
+            .with_unknown_key_refresh_cooldown(MAX_UNKNOWN_KEY_REFRESH_COOLDOWN)
+            .with_clock(clock)
+            .allow_insecure_loopback_http_for_development(true),
+    )
+    .unwrap();
+    initialize(&provider).unwrap();
+    *provider.last_unknown_key_refresh.write().unwrap() =
+        SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(i64::MAX as u64 - 60));
+    let forged = token("forged-key", claims(3_000));
+    assert!(authenticate_then_settle(&provider, &fixture, &forged, 2).is_err());
+    assert_eq!(fixture.requests.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn a_slow_older_jwks_fetch_never_replaces_a_newer_key_set() {
+    let fixture = JwksFixture::start(jwks("key-a"));
+    let clock = Arc::new(TestClock::at(2_000));
+    let provider = provider(&fixture, clock, LegacyScopeClaims::Reject);
+    initialize(&provider).unwrap();
+
+    // The first refresh is answered slowly with the key set current when it
+    // arrived; a second refresh starts while it is still in flight.
+    fixture.replace(jwks("key-old"));
+    fixture.delay_next_response(Duration::from_millis(400));
+    let slow = provider.clone();
+    let first = thread::spawn(move || refresh(&slow));
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while fixture.requests.load(Ordering::Relaxed) < 2 {
+        assert!(std::time::Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(2));
+    }
+    fixture.replace(jwks("key-new"));
+    refresh(&provider).unwrap();
+    first.join().unwrap().unwrap();
+
+    provider
+        .authenticate_bearer(&token("key-new", claims(3_000)))
+        .unwrap();
+    assert_eq!(
+        provider
+            .authenticate_bearer(&token("key-old", claims(3_000)))
+            .unwrap_err()
+            .kind(),
+        AuthenticationErrorKind::InvalidCredential
+    );
+}
+
+#[test]
+fn a_dropped_unknown_key_refresh_task_clears_its_in_flight_flag() {
+    let fixture = JwksFixture::start(jwks("key-a"));
+    let clock = Arc::new(TestClock::at(2_000));
+    let provider = provider(&fixture, clock, LegacyScopeClaims::Reject);
+    initialize(&provider).unwrap();
+
+    fixture.delay_next_response(Duration::from_secs(2));
+    let in_runtime = provider.clone();
+    ntex::rt::System::build()
+        .name("jwks-dropped-refresh-test")
+        .build(ntex::rt::DefaultRuntime)
+        .block_on(async move {
+            assert!(
+                in_runtime
+                    .authenticate_bearer(&token("unknown", claims(3_000)))
+                    .is_err()
+            );
+            assert!(in_runtime.key_refresh_in_flight.load(Ordering::Acquire));
+        });
+    // The runtime ended with the refresh task still waiting on its fetch.
+    assert!(!provider.key_refresh_in_flight.load(Ordering::Acquire));
 }

@@ -73,6 +73,8 @@ pub struct RouterConfig {
     pub(crate) max_subgraph_connections_per_host: usize,
     pub(crate) node_lookup: Option<NodeLookupConfig>,
     pub(crate) byte_routes: Vec<ByteRoute>,
+    pub(crate) allow_plaintext_http: bool,
+    pub(crate) use_environment_proxy: bool,
 }
 
 /// Fluent engine-neutral router builder.
@@ -109,6 +111,8 @@ impl RouterConfig {
             subgraph_request_timeout: DEFAULT_SUBGRAPH_REQUEST_TIMEOUT,
             max_subgraph_connections_per_host: 100,
             byte_routes: Vec::new(),
+            allow_plaintext_http: false,
+            use_environment_proxy: false,
         }
     }
 
@@ -121,6 +125,33 @@ impl RouterConfig {
     #[must_use]
     pub fn with_graphql_path(mut self, path: impl Into<String>) -> Self {
         self.graphql_path = path.into();
+        self
+    }
+
+    /// Permits plaintext `http` subgraph, byte route, and trusted dynamic
+    /// subgraph URLs whose host is not loopback.
+    ///
+    /// Off by default: plaintext `http` is accepted only for `localhost` and
+    /// loopback IP literals, and every other outbound URL must use `https`.
+    /// Enable this only when the network path to those hosts is otherwise
+    /// protected, for example inside a private service mesh.
+    #[must_use]
+    pub fn allow_plaintext_http(mut self, allowed: bool) -> Self {
+        self.allow_plaintext_http = allowed;
+        self
+    }
+
+    /// Routes the schema, SDL, and router-protocol client through the proxy
+    /// named by the standard proxy environment variables.
+    ///
+    /// Off by default: that client connects directly and ignores
+    /// `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY`. Subgraph
+    /// execution, byte routes, and dynamic registration never use a proxy.
+    /// The JWKS client has its own
+    /// [`JwksAuthenticationConfig::use_environment_proxy`](crate::JwksAuthenticationConfig::use_environment_proxy).
+    #[must_use]
+    pub fn use_environment_proxy(mut self, enabled: bool) -> Self {
+        self.use_environment_proxy = enabled;
         self
     }
 
@@ -328,13 +359,14 @@ impl RouterConfig {
         }
         self.request_limits.validate()?;
         if let Some(admin) = &self.admin {
-            if self.authentication.is_none() {
+            let Some(public) = &self.authentication else {
                 return Err(RouterError::new(
                     RouterErrorKind::InvalidConfiguration,
                     "administrative endpoints require a resource-server authentication provider",
                 ));
-            }
-            admin.validate(self.listener, &self.subgraphs)?;
+            };
+            validate_admin_authentication(public, admin.authentication.as_ref())?;
+            admin.validate(self.listener, &self.subgraphs, self.allow_plaintext_http)?;
         }
         self.telemetry.validate(
             self.listener,
@@ -375,6 +407,7 @@ impl RouterConfig {
                 graphql_path: &self.graphql_path,
                 authentication_configured: self.authentication.is_some(),
             },
+            self.allow_plaintext_http,
         )?;
         if let Some(node_lookup) = &self.node_lookup
             && !(1..=10_000).contains(&node_lookup.max_nodes)
@@ -447,8 +480,9 @@ impl RouterConfig {
                     format!("duplicate static subgraph name `{}`", subgraph.name),
                 ));
             }
-            validate_http_url(&subgraph.graphql_url, "GraphQL endpoint")?;
-            validate_http_url(&subgraph.sdl_url, "SDL endpoint")?;
+            let plaintext = self.allow_plaintext_http;
+            validate_outbound_url(&subgraph.graphql_url, "GraphQL endpoint", plaintext)?;
+            validate_outbound_url(&subgraph.sdl_url, "SDL endpoint", plaintext)?;
             if self.authentication.is_some() {
                 let Some(protocol_url) = &subgraph.protocol_url else {
                     return Err(RouterError::new(
@@ -459,9 +493,9 @@ impl RouterConfig {
                         ),
                     ));
                 };
-                validate_http_url(protocol_url, "router protocol endpoint")?;
+                validate_outbound_url(protocol_url, "router protocol endpoint", plaintext)?;
             } else if let Some(protocol_url) = &subgraph.protocol_url {
-                validate_http_url(protocol_url, "router protocol endpoint")?;
+                validate_outbound_url(protocol_url, "router protocol endpoint", plaintext)?;
             }
             for (name, value) in &subgraph.schema_headers {
                 validate_header(name, value)?;
@@ -537,6 +571,8 @@ impl fmt::Debug for RouterConfig {
                 &self.max_subgraph_connections_per_host,
             )
             .field("byte_routes", &self.byte_routes)
+            .field("allow_plaintext_http", &self.allow_plaintext_http)
+            .field("use_environment_proxy", &self.use_environment_proxy)
             .finish()
     }
 }
@@ -1033,6 +1069,7 @@ impl Default for RouterTelemetryConfig {
 #[derive(Clone)]
 pub struct AdminConfig {
     pub(crate) listener: SocketAddr,
+    pub(crate) authentication: Option<Arc<dyn AuthenticationProvider>>,
     pub(crate) network_policy: NetworkPolicy,
     pub(crate) trusted_subgraphs: Vec<TrustedSubgraph>,
     pub(crate) status_scope: String,
@@ -1048,6 +1085,7 @@ impl AdminConfig {
     pub fn new(listener: SocketAddr, network_policy: NetworkPolicy) -> Self {
         Self {
             listener,
+            authentication: None,
             network_policy,
             trusted_subgraphs: Vec::new(),
             status_scope: "router.status".to_owned(),
@@ -1057,6 +1095,28 @@ impl AdminConfig {
             metrics_scope: "router.metrics".to_owned(),
             max_request_body_bytes: 16 * 1024,
         }
+    }
+
+    /// Installs the resource-server provider that authenticates every
+    /// administrative request. Required.
+    ///
+    /// It must accept a token audience that public GraphQL bearers do not
+    /// carry, so a token issued for the public API cannot administer the
+    /// router even when it holds an administrative scope. Validation refuses
+    /// the public provider itself, and refuses overlapping audiences when
+    /// both providers state them through
+    /// [`AuthenticationProvider::accepted_audiences`]. Providers that cannot
+    /// state them, including the `auth-agql` adapter, are not compared, so
+    /// their validators must be configured with distinct audiences. A token
+    /// whose `aud` lists both audiences is accepted by both providers, so
+    /// issuers must never mint one.
+    #[must_use]
+    pub fn with_authentication_provider(
+        mut self,
+        provider: Arc<dyn AuthenticationProvider>,
+    ) -> Self {
+        self.authentication = Some(provider);
+        self
     }
 
     /// Adds one identity- and destination-bound dynamic subgraph trust record.
@@ -1112,6 +1172,7 @@ impl AdminConfig {
         &self,
         public_listener: SocketAddr,
         static_subgraphs: &[StaticSubgraph],
+        allow_plaintext_http: bool,
     ) -> Result<(), RouterError> {
         // Compare ports, not whole addresses: an unspecified or second address
         // on the public port would share or shadow the public listener.
@@ -1154,7 +1215,7 @@ impl AdminConfig {
         let mut ids = BTreeSet::new();
         let mut names = BTreeSet::new();
         for trusted in &self.trusted_subgraphs {
-            trusted.validate()?;
+            trusted.validate(allow_plaintext_http)?;
             if !subjects.insert(trusted.service_subject.as_str())
                 || !ids.insert(trusted.subgraph_id.as_str())
                 || !names.insert(trusted.name.as_str())
@@ -1175,6 +1236,7 @@ impl fmt::Debug for AdminConfig {
         formatter
             .debug_struct("AdminConfig")
             .field("listener", &self.listener)
+            .field("authentication_configured", &self.authentication.is_some())
             .field("network_policy", &self.network_policy)
             .field("trusted_subgraphs", &self.trusted_subgraphs)
             .field("status_scope", &self.status_scope)
@@ -1229,7 +1291,7 @@ impl TrustedSubgraph {
         self
     }
 
-    fn validate(&self) -> Result<(), RouterError> {
+    fn validate(&self, allow_plaintext_http: bool) -> Result<(), RouterError> {
         if self.service_subject.trim().is_empty() {
             return Err(RouterError::new(
                 RouterErrorKind::InvalidConfiguration,
@@ -1240,9 +1302,21 @@ impl TrustedSubgraph {
             .map_err(|detail| RouterError::new(RouterErrorKind::InvalidConfiguration, detail))?;
         SubgraphName::try_from(self.name.clone())
             .map_err(|detail| RouterError::new(RouterErrorKind::InvalidConfiguration, detail))?;
-        validate_http_url(&self.metadata_url, "trusted metadata endpoint")?;
-        validate_origin(&self.graphql_origin, "trusted GraphQL origin")?;
-        validate_origin(&self.schema_origin, "trusted schema origin")?;
+        validate_outbound_url(
+            &self.metadata_url,
+            "trusted metadata endpoint",
+            allow_plaintext_http,
+        )?;
+        for (origin, field) in [
+            (&self.graphql_origin, "trusted GraphQL origin"),
+            (&self.schema_origin, "trusted schema origin"),
+        ] {
+            require_secure_transport(
+                &validate_origin(origin, field)?,
+                allow_plaintext_http,
+                field,
+            )?;
+        }
         for (name, value) in &self.schema_headers {
             validate_header(name, value)?;
             if HOP_BY_HOP_HEADERS.contains(&name.to_ascii_lowercase().as_str()) {
@@ -1325,6 +1399,65 @@ fn validate_http_url(value: &str, field: &str) -> Result<Url, RouterError> {
     Ok(url)
 }
 
+/// Public bearer tokens must never authenticate administrative requests.
+fn validate_admin_authentication(
+    public: &Arc<dyn AuthenticationProvider>,
+    admin: Option<&Arc<dyn AuthenticationProvider>>,
+) -> Result<(), RouterError> {
+    let Some(admin) = admin else {
+        return Err(RouterError::new(
+            RouterErrorKind::InvalidConfiguration,
+            "administrative endpoints require their own authentication provider, accepting an audience that public bearer tokens do not carry",
+        ));
+    };
+    let same_provider = std::ptr::addr_eq(Arc::as_ptr(public), Arc::as_ptr(admin));
+    let shared_audience = match (public.accepted_audiences(), admin.accepted_audiences()) {
+        (Some(public), Some(admin)) => admin.iter().any(|audience| public.contains(audience)),
+        _ => false,
+    };
+    if same_provider || shared_audience {
+        return Err(RouterError::new(
+            RouterErrorKind::InvalidConfiguration,
+            "the administrative authentication provider must not accept a public token audience",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_outbound_url(
+    value: &str,
+    field: &str,
+    allow_plaintext_http: bool,
+) -> Result<Url, RouterError> {
+    let url = validate_http_url(value, field)?;
+    require_secure_transport(&url, allow_plaintext_http, field)?;
+    Ok(url)
+}
+
+/// Refuses plaintext `http` to a host that is not loopback unless the
+/// operator has explicitly allowed it.
+pub(crate) fn require_secure_transport(
+    url: &Url,
+    allow_plaintext_http: bool,
+    field: &str,
+) -> Result<(), RouterError> {
+    let loopback = match url.host() {
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    };
+    if url.scheme() == "http" && !loopback && !allow_plaintext_http {
+        return Err(RouterError::new(
+            RouterErrorKind::InvalidConfiguration,
+            format!(
+                "{field} uses plaintext HTTP to a host that is not loopback; use HTTPS, or explicitly allow plaintext HTTP"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_origin(value: &str, field: &str) -> Result<Url, RouterError> {
     let url = validate_http_url(value, field)?;
     if !matches!(url.path(), "" | "/") {
@@ -1386,6 +1519,7 @@ mod tests {
 
     fn base() -> RouterConfig {
         RouterConfig::new("127.0.0.1:4000".parse().unwrap())
+            .allow_plaintext_http(true)
             .allow_anonymous_development(true)
             .with_subgraph(StaticSubgraph::new(
                 "products",
@@ -1452,6 +1586,85 @@ mod tests {
                 "http://products.test/sdl",
             ));
         assert!(embedded_secret.validate().is_err());
+    }
+
+    #[test]
+    fn plaintext_outbound_urls_need_a_loopback_host() {
+        let anonymous = |graphql: &str, sdl: &str| {
+            RouterConfig::new("127.0.0.1:4000".parse().unwrap())
+                .allow_anonymous_development(true)
+                .with_subgraph(StaticSubgraph::new("products", graphql, sdl))
+        };
+        for (graphql, sdl) in [
+            ("http://products.test/graphql", "https://products.test/sdl"),
+            ("https://products.test/graphql", "http://products.test/sdl"),
+            ("http://10.0.0.5/graphql", "https://10.0.0.5/sdl"),
+            (
+                "http://localhost.example/graphql",
+                "https://localhost.example/sdl",
+            ),
+        ] {
+            let error = anonymous(graphql, sdl).validate().unwrap_err();
+            assert_eq!(error.kind(), RouterErrorKind::InvalidConfiguration);
+            assert!(error.to_string().contains("plaintext"), "{error}");
+        }
+        let protocol = RouterConfig::new("127.0.0.1:4000".parse().unwrap())
+            .allow_anonymous_development(true)
+            .with_subgraph(
+                StaticSubgraph::new(
+                    "products",
+                    "https://products.test/graphql",
+                    "https://products.test/sdl",
+                )
+                .with_protocol_url("http://products.test/.well-known/graphql-router"),
+            );
+        assert!(protocol.validate().is_err());
+        let byte_route = anonymous("https://products.test/graphql", "https://products.test/sdl")
+            .with_byte_route(ByteRoute::new("/files", "http://files.test/download").public(true));
+        assert!(byte_route.validate().is_err());
+        let trusted = TrustedSubgraph::new(
+            "reviews-service",
+            "reviews-id",
+            "reviews",
+            "http://reviews.test:8080/.well-known/graphql-router",
+            "http://reviews.test:8080",
+            "http://reviews.test:8080",
+        );
+        let admin = RouterConfig::new("127.0.0.1:4000".parse().unwrap())
+            .with_authentication_provider(Arc::new(RejectingProvider))
+            .with_subgraph(
+                StaticSubgraph::new(
+                    "products",
+                    "https://products.test/graphql",
+                    "https://products.test/sdl",
+                )
+                .with_protocol_url("https://products.test/.well-known/graphql-router"),
+            )
+            .with_admin(
+                AdminConfig::new("127.0.0.1:4001".parse().unwrap(), NetworkPolicy::new())
+                    .trust_subgraph(trusted),
+            );
+        assert!(admin.validate().is_err());
+
+        for host in [
+            "127.0.0.1:4100",
+            "localhost:4100",
+            "[::1]:4100",
+            "127.8.9.10",
+        ] {
+            anonymous(
+                &format!("http://{host}/graphql"),
+                &format!("http://{host}/sdl"),
+            )
+            .with_byte_route(ByteRoute::new("/files", format!("http://{host}/files")).public(true))
+            .validate()
+            .unwrap_or_else(|error| panic!("{host}: {error}"));
+        }
+        assert!(
+            anonymous("https://products.test/graphql", "https://products.test/sdl")
+                .validate()
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1578,6 +1791,7 @@ mod tests {
         assert!(unauthenticated.validate().is_err());
 
         let authenticated = RouterConfig::new("127.0.0.1:4000".parse().unwrap())
+            .allow_plaintext_http(true)
             .with_authentication_provider(Arc::new(RejectingProvider))
             .with_subgraph(
                 StaticSubgraph::new(
@@ -1588,13 +1802,21 @@ mod tests {
                 .with_protocol_url("http://products.test/.well-known/graphql-router"),
             )
             .with_admin(
-                AdminConfig::new("127.0.0.1:4001".parse().unwrap(), policy).trust_subgraph(trusted),
+                AdminConfig::new("127.0.0.1:4001".parse().unwrap(), policy)
+                    .with_authentication_provider(Arc::new(RejectingProvider))
+                    .trust_subgraph(trusted),
             );
         assert!(authenticated.validate().is_ok());
     }
 
     fn authenticated_with_admin(admin: AdminConfig) -> RouterConfig {
+        let admin = if admin.authentication.is_none() {
+            admin.with_authentication_provider(Arc::new(RejectingProvider))
+        } else {
+            admin
+        };
         RouterConfig::new("127.0.0.1:4000".parse().unwrap())
+            .allow_plaintext_http(true)
             .with_authentication_provider(Arc::new(RejectingProvider))
             .with_subgraph(
                 StaticSubgraph::new(
@@ -1630,6 +1852,94 @@ mod tests {
             .validate()
             .is_ok()
         );
+    }
+
+    #[test]
+    fn administrative_endpoints_need_a_provider_that_refuses_public_audiences() {
+        let admin = || AdminConfig::new("127.0.0.1:4001".parse().unwrap(), NetworkPolicy::new());
+        let jwks = |audiences: &[&str]| -> Arc<dyn AuthenticationProvider> {
+            Arc::new(
+                crate::JwksAuthenticationProvider::new(
+                    crate::JwksAuthenticationConfig::new(
+                        "https://issuer.test/jwks",
+                        "https://issuer.test",
+                        audiences.iter().copied(),
+                    )
+                    .unwrap(),
+                )
+                .unwrap(),
+            )
+        };
+        let router = |public: Arc<dyn AuthenticationProvider>, admin: AdminConfig| {
+            RouterConfig::new("127.0.0.1:4000".parse().unwrap())
+                .with_authentication_provider(public)
+                .with_subgraph(
+                    StaticSubgraph::new(
+                        "products",
+                        "http://127.0.0.1:4100/graphql",
+                        "http://127.0.0.1:4100/sdl",
+                    )
+                    .with_protocol_url("http://127.0.0.1:4100/.well-known/graphql-router"),
+                )
+                .with_admin(admin)
+        };
+
+        // Without its own provider a public bearer could administer the router.
+        let error = router(jwks(&["graphql-router"]), admin())
+            .validate()
+            .unwrap_err();
+        assert!(error.to_string().contains("own authentication"), "{error}");
+        let public = jwks(&["graphql-router"]);
+        let error = router(public.clone(), admin().with_authentication_provider(public))
+            .validate()
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("public token audience"),
+            "{error}"
+        );
+        let error = router(
+            jwks(&["graphql-router", "another-api"]),
+            admin().with_authentication_provider(jwks(&["router-admin", "another-api"])),
+        )
+        .validate()
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("public token audience"),
+            "{error}"
+        );
+
+        router(
+            jwks(&["graphql-router"]),
+            admin().with_authentication_provider(jwks(&["router-admin"])),
+        )
+        .validate()
+        .unwrap();
+        // A provider that cannot state its audiences is the operator's to keep distinct.
+        router(
+            Arc::new(RejectingProvider),
+            admin().with_authentication_provider(Arc::new(RejectingProvider)),
+        )
+        .validate()
+        .unwrap();
+    }
+
+    #[test]
+    fn plaintext_outbound_urls_to_other_hosts_need_an_explicit_opt_in() {
+        let config = RouterConfig::new("127.0.0.1:4000".parse().unwrap())
+            .allow_anonymous_development(true)
+            .allow_plaintext_http(true)
+            .with_subgraph(
+                StaticSubgraph::new(
+                    "products",
+                    "http://products.internal/graphql",
+                    "http://10.0.0.5/sdl",
+                )
+                .with_protocol_url("http://products.internal/.well-known/graphql-router"),
+            )
+            .with_byte_route(
+                ByteRoute::new("/files", "http://files.internal/download").public(true),
+            );
+        config.validate().unwrap();
     }
 
     #[test]

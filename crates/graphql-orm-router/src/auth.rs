@@ -182,6 +182,16 @@ pub trait AuthenticationProvider: Send + Sync + fmt::Debug + 'static {
         None
     }
 
+    /// Token audiences this provider accepts, when it can state them.
+    ///
+    /// The router refuses an administrative provider that accepts an audience
+    /// the public provider also accepts. `None`, the default, means the
+    /// provider cannot state its audiences, and the operator is responsible
+    /// for keeping them distinct.
+    fn accepted_audiences(&self) -> Option<&[String]> {
+        None
+    }
+
     /// Refreshes remote verification state. Providers without remote state use
     /// the default no-op implementation.
     fn refresh(&self) -> BoxFuture<'_, Result<(), AuthenticationError>> {

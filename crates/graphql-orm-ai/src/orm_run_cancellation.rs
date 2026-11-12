@@ -2,6 +2,7 @@
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
+use crate::orm_read_bounds::InternalReadBound as _;
 use std::sync::Arc;
 
 use agql_auth::{
@@ -377,7 +378,7 @@ impl AiRunCancellationService for OrmAiRunCancellationService {
                                 }),
                                 ..Default::default()
                             })
-                            .limit(1)
+                            .internal_limit(1)
                             .fetch_one()
                             .await
                             .map_err(OrmPublicError::from)?
@@ -577,7 +578,7 @@ async fn cancel_active_tool_calls(
             }),
             ..Default::default()
         })
-        .limit(
+        .internal_limit(
             i64::try_from(maximum + 1)
                 .map_err(|_| OrmPublicError::new(OrmErrorCode::InvalidInput))?,
         )
@@ -673,7 +674,7 @@ async fn cancel_subscription_wait(
             }),
             ..Default::default()
         })
-        .limit(2)
+        .internal_limit(2)
         .fetch_all()
         .await
         .map_err(OrmPublicError::from)?;
@@ -712,7 +713,7 @@ async fn cancel_subscription_wait(
             }),
             ..Default::default()
         })
-        .limit(2)
+        .internal_limit(2)
         .fetch_all()
         .await
         .map_err(OrmPublicError::from)?;
@@ -755,7 +756,7 @@ async fn cancel_background_submission(
             }),
             ..Default::default()
         })
-        .limit(2)
+        .internal_limit(2)
         .fetch_all()
         .await
         .map_err(OrmPublicError::from)?;
@@ -808,7 +809,7 @@ async fn append_cancelled_attempt_outcome(
             }),
             ..Default::default()
         })
-        .limit(1)
+        .internal_limit(1)
         .fetch_one()
         .await
         .map_err(OrmPublicError::from)?

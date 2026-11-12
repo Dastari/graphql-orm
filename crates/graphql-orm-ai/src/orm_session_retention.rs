@@ -2,6 +2,7 @@
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
+use crate::orm_read_bounds::InternalReadBound as _;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -79,7 +80,7 @@ macro_rules! bounded_retention_rows {
                 .query::<$record>()
                 .filter(filter)
                 .default_order()
-                .limit(requested_i64)
+                .internal_limit(requested_i64)
                 .fetch_all()
                 .await
                 .map_err(OrmPublicError::from)?;
@@ -617,7 +618,7 @@ impl OrmAiSessionRetentionService {
                             }),
                             ..Default::default()
                         })
-                        .limit(2)
+                        .internal_limit(2)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -664,7 +665,7 @@ impl OrmAiSessionRetentionService {
                             ..Default::default()
                         })
                         .default_order()
-                        .limit(event_limit)
+                        .internal_limit(event_limit)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -713,7 +714,7 @@ impl OrmAiSessionRetentionService {
                                 ..Default::default()
                             })
                             .default_order()
-                            .limit(inbox_event_limit)
+                            .internal_limit(inbox_event_limit)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?
@@ -754,7 +755,7 @@ impl OrmAiSessionRetentionService {
                                 ..Default::default()
                             })
                             .default_order()
-                            .limit(context_checkpoint_limit)
+                            .internal_limit(context_checkpoint_limit)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?
@@ -1532,7 +1533,7 @@ impl OrmAiSessionRetentionService {
                                 ..Default::default()
                             })
                             .default_order()
-                            .limit(message_limit)
+                            .internal_limit(message_limit)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
@@ -1575,7 +1576,7 @@ impl OrmAiSessionRetentionService {
                                     }),
                                     ..Default::default()
                                 })
-                                .limit(1)
+                                .internal_limit(1)
                                 .fetch_all()
                                 .await
                                 .map_err(OrmPublicError::from)?;
@@ -1771,7 +1772,7 @@ impl OrmAiSessionRetentionService {
                                 }),
                                 ..Default::default()
                             })
-                            .limit(1)
+                            .internal_limit(1)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
@@ -1784,7 +1785,7 @@ impl OrmAiSessionRetentionService {
                                 }),
                                 ..Default::default()
                             })
-                            .limit(1)
+                            .internal_limit(1)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
@@ -1801,7 +1802,7 @@ impl OrmAiSessionRetentionService {
                                 }),
                                 ..Default::default()
                             })
-                            .limit(1)
+                            .internal_limit(1)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
@@ -1841,7 +1842,7 @@ impl OrmAiSessionRetentionService {
                                 }),
                                 ..Default::default()
                             })
-                            .limit(1)
+                            .internal_limit(1)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
@@ -1854,7 +1855,7 @@ impl OrmAiSessionRetentionService {
                                 }),
                                 ..Default::default()
                             })
-                            .limit(1)
+                            .internal_limit(1)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
@@ -1902,7 +1903,7 @@ impl OrmAiSessionRetentionService {
                                             }),
                                             ..Default::default()
                                         })
-                                        .limit(2)
+                                        .internal_limit(2)
                                         .fetch_all()
                                         .await
                                         .map_err(OrmPublicError::from)?;
@@ -2062,7 +2063,7 @@ impl OrmAiSessionRetentionService {
                             }),
                             ..Default::default()
                         })
-                        .limit(2)
+                        .internal_limit(2)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -2199,7 +2200,7 @@ impl OrmAiSessionRetentionService {
                             }),
                             ..Default::default()
                         })
-                        .limit(2)
+                        .internal_limit(2)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -2224,7 +2225,7 @@ impl OrmAiSessionRetentionService {
                             }),
                             ..Default::default()
                         })
-                        .limit(1)
+                        .internal_limit(1)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -2241,7 +2242,7 @@ impl OrmAiSessionRetentionService {
                             }),
                             ..Default::default()
                         })
-                        .limit(1)
+                        .internal_limit(1)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -2258,7 +2259,7 @@ impl OrmAiSessionRetentionService {
                             }),
                             ..Default::default()
                         })
-                        .limit(1)
+                        .internal_limit(1)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -2271,7 +2272,7 @@ impl OrmAiSessionRetentionService {
                             }),
                             ..Default::default()
                         })
-                        .limit(1)
+                        .internal_limit(1)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -2288,7 +2289,7 @@ impl OrmAiSessionRetentionService {
                             }),
                             ..Default::default()
                         })
-                        .limit(1)
+                        .internal_limit(1)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -2301,7 +2302,7 @@ impl OrmAiSessionRetentionService {
                             }),
                             ..Default::default()
                         })
-                        .limit(1)
+                        .internal_limit(1)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -2314,7 +2315,7 @@ impl OrmAiSessionRetentionService {
                             }),
                             ..Default::default()
                         })
-                        .limit(1)
+                        .internal_limit(1)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -2372,7 +2373,7 @@ impl OrmAiSessionRetentionService {
                                 }),
                                 ..Default::default()
                             })
-                            .limit(1)
+                            .internal_limit(1)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
@@ -2419,7 +2420,7 @@ impl OrmAiSessionRetentionService {
                                 }),
                                 ..Default::default()
                             })
-                            .limit(1)
+                            .internal_limit(1)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
@@ -2435,7 +2436,7 @@ impl OrmAiSessionRetentionService {
                                 }),
                                 ..Default::default()
                             })
-                            .limit(1)
+                            .internal_limit(1)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
@@ -2453,7 +2454,7 @@ impl OrmAiSessionRetentionService {
                             }),
                             ..Default::default()
                         })
-                        .limit(2)
+                        .internal_limit(2)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -2480,7 +2481,7 @@ impl OrmAiSessionRetentionService {
                             ..Default::default()
                         })
                         .default_order()
-                        .limit(MAXIMUM_TITLE_MUTATION_DELETES_PER_PASS)
+                        .internal_limit(MAXIMUM_TITLE_MUTATION_DELETES_PER_PASS)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -2581,7 +2582,7 @@ impl OrmAiSessionRetentionService {
                             }),
                             ..Default::default()
                         })
-                        .limit(2)
+                        .internal_limit(2)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -2604,7 +2605,7 @@ impl OrmAiSessionRetentionService {
                             }),
                             ..Default::default()
                         })
-                        .limit(2)
+                        .internal_limit(2)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -2638,7 +2639,7 @@ impl OrmAiSessionRetentionService {
                             }),
                             ..Default::default()
                         })
-                        .limit(1)
+                        .internal_limit(1)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -2651,7 +2652,7 @@ impl OrmAiSessionRetentionService {
                             }),
                             ..Default::default()
                         })
-                        .limit(1)
+                        .internal_limit(1)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -2694,7 +2695,7 @@ impl OrmAiSessionRetentionService {
                                 }),
                                 ..Default::default()
                             })
-                            .limit(2)
+                            .internal_limit(2)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
@@ -2754,7 +2755,7 @@ impl OrmAiSessionRetentionService {
                             }),
                             ..Default::default()
                         })
-                        .limit(1)
+                        .internal_limit(1)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -2767,7 +2768,7 @@ impl OrmAiSessionRetentionService {
                             }),
                             ..Default::default()
                         })
-                        .limit(1)
+                        .internal_limit(1)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -2883,7 +2884,7 @@ impl OrmAiSessionRetentionService {
                                 }),
                                 ..Default::default()
                             })
-                            .limit(2)
+                            .internal_limit(2)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
@@ -2937,7 +2938,7 @@ impl OrmAiSessionRetentionService {
                             created_at: Some(OrderDirection::Asc),
                             id: Some(OrderDirection::Asc),
                         })
-                        .limit(checkpoint_limit)
+                        .internal_limit(checkpoint_limit)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -3036,7 +3037,7 @@ impl OrmAiSessionRetentionService {
                             }),
                             ..Default::default()
                         })
-                        .limit(2)
+                        .internal_limit(2)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -3056,7 +3057,7 @@ impl OrmAiSessionRetentionService {
                             }),
                             ..Default::default()
                         })
-                        .limit(2)
+                        .internal_limit(2)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -3127,7 +3128,7 @@ impl OrmAiSessionRetentionService {
                                     }),
                                     ..Default::default()
                                 })
-                                .limit(2)
+                                .internal_limit(2)
                                 .fetch_all()
                                 .await
                                 .map_err(OrmPublicError::from)?;
@@ -3186,7 +3187,7 @@ impl OrmAiSessionRetentionService {
                             created_at: Some(OrderDirection::Asc),
                             id: Some(OrderDirection::Asc),
                         })
-                        .limit(checkpoint_scan_limit)
+                        .internal_limit(checkpoint_scan_limit)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -3358,7 +3359,7 @@ impl OrmAiSessionRetentionService {
                                 }),
                                 ..Default::default()
                             })
-                            .limit(2)
+                            .internal_limit(2)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
@@ -3385,7 +3386,7 @@ impl OrmAiSessionRetentionService {
                                 }),
                                 ..Default::default()
                             })
-                            .limit(2)
+                            .internal_limit(2)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
@@ -3428,7 +3429,7 @@ impl OrmAiSessionRetentionService {
                                 }),
                                 ..Default::default()
                             })
-                            .limit(2)
+                            .internal_limit(2)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
@@ -3478,7 +3479,7 @@ impl OrmAiSessionRetentionService {
                                     }),
                                     ..Default::default()
                                 })
-                                .limit(2)
+                                .internal_limit(2)
                                 .fetch_all()
                                 .await
                                 .map_err(OrmPublicError::from)?;
@@ -3519,7 +3520,7 @@ impl OrmAiSessionRetentionService {
                                     }),
                                     ..Default::default()
                                 })
-                                .limit(2)
+                                .internal_limit(2)
                                 .fetch_all()
                                 .await
                                 .map_err(OrmPublicError::from)?;
@@ -3580,7 +3581,7 @@ impl OrmAiSessionRetentionService {
                                     }),
                                     ..Default::default()
                                 })
-                                .limit(2)
+                                .internal_limit(2)
                                 .fetch_all()
                                 .await
                                 .map_err(OrmPublicError::from)?;
@@ -4141,7 +4142,7 @@ async fn purge_terminal_subscription_waits(
             ..Default::default()
         })
         .default_order()
-        .limit(page_size)
+        .internal_limit(page_size)
         .fetch_all()
         .await
         .map_err(OrmPublicError::from)?;
@@ -4182,7 +4183,7 @@ async fn purge_terminal_subscription_waits(
                 }),
                 ..Default::default()
             })
-            .limit(2)
+            .internal_limit(2)
             .fetch_all()
             .await
             .map_err(OrmPublicError::from)?;
@@ -4213,7 +4214,7 @@ async fn purge_terminal_subscription_waits(
                 }),
                 ..Default::default()
             })
-            .limit(1)
+            .internal_limit(1)
             .fetch_all()
             .await
             .map_err(OrmPublicError::from)?;
@@ -4284,7 +4285,7 @@ async fn purge_native_candidate_payload(
                 }),
                 ..Default::default()
             })
-            .limit(2)
+            .internal_limit(2)
             .fetch_all()
             .await
             .map_err(OrmPublicError::from)?;

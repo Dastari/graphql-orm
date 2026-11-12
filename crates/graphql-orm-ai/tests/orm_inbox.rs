@@ -199,10 +199,32 @@ async fn services_with_limits(
     AuthPrincipal,
     Arc<AtomicBool>,
 ) {
+    services_with_config(
+        reauthorization_interval,
+        replay_page_size,
+        PaginationConfig::explicit_only(maximum_page_limit),
+        AiInboxPruningLimits::new(10, 100).expect("valid pruning limits"),
+    )
+    .await
+}
+
+async fn services_with_config(
+    reauthorization_interval: Duration,
+    replay_page_size: i64,
+    pagination: PaginationConfig,
+    pruning_limits: AiInboxPruningLimits,
+) -> (
+    OrmAiSessionService,
+    OrmAiInboxService,
+    OrmAiInboxPruningService,
+    OrmAiSessionRetentionService,
+    AuthPrincipal,
+    Arc<AtomicBool>,
+) {
     let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
         .await
         .expect("in-memory SQLite opens")
-        .with_pagination_config(PaginationConfig::explicit_only(maximum_page_limit));
+        .with_pagination_config(pagination);
     let module = AiSchemaModule;
     let plan = database
         .schema()
@@ -289,7 +311,7 @@ async fn services_with_limits(
     let pruning = OrmAiInboxPruningService::new(
         database.clone(),
         Arc::new(FixedClock::new(now + TimeDuration::seconds(61))),
-        AiInboxPruningLimits::new(10, 100).expect("valid pruning limits"),
+        pruning_limits,
     );
     let session_retention = OrmAiSessionRetentionService::new(
         database,
@@ -508,6 +530,56 @@ async fn owner_inbox_pages_follow_a_smaller_orm_maximum() {
     assert_eq!(page_lengths, [7, 7, 6]);
     assert_eq!(sequences, (1..=20).collect::<Vec<_>>());
     assert_eq!(watermark, 20);
+}
+
+#[tokio::test]
+async fn owner_inbox_client_page_is_capped_by_a_smaller_host_maximum() {
+    let (sessions, inbox, _pruning, _retention, owner, _active) =
+        services_with_limits(Duration::from_secs(60), 7, 7).await;
+    let session = create_session(&sessions, &owner).await;
+    append_title_events(&sessions, &owner, session.id, 0, 19).await;
+
+    // The client asks for more than the host allows: the page follows the
+    // host maximum and reports the rest, rather than reading 100 rows.
+    let page = inbox
+        .inbox_event_page(&owner, 0, 100)
+        .await
+        .expect("an oversized client page should be capped, not refused");
+    assert_eq!(page.events.len(), 7);
+    assert!(page.has_more);
+}
+
+#[tokio::test]
+async fn pruning_reads_its_own_event_bound_above_the_default_page_maximum() {
+    // A default database caps pages at 100 rows. The pruning pass's own
+    // per-stream bound (500) must be honoured, not reduced to that maximum.
+    assert_eq!(
+        PaginationConfig::default().max_limit,
+        Some(PaginationConfig::SECURE_MAX_LIMIT)
+    );
+    let (sessions, inbox, pruning, _retention, owner, _active) = services_with_config(
+        Duration::from_secs(60),
+        100,
+        PaginationConfig::default(),
+        AiInboxPruningLimits::new(10, 500).expect("valid pruning limits"),
+    )
+    .await;
+    let session = create_session(&sessions, &owner).await;
+    append_title_events(&sessions, &owner, session.id, 0, 150).await;
+    let watermark = inbox
+        .inbox_event_page(&owner, 0, 1)
+        .await
+        .expect("inbox page should load")
+        .watermark;
+    assert!(watermark > 150);
+
+    let report = pruning
+        .prune_inbox_events()
+        .await
+        .expect("bounded pruning succeeds on a default database");
+    assert_eq!(report.streams_pruned, 1);
+    // Every expired event except the retained floor of one.
+    assert_eq!(i64::from(report.events_deleted), watermark - 1);
 }
 
 #[tokio::test]

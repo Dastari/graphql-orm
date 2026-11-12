@@ -10,6 +10,54 @@ supersedes: []
 
 # Changelog
 
+## 0.13.0 (unreleased)
+
+- **Breaking:** outbound `http` URLs are accepted only for `localhost` and
+  loopback IP literals (#489). Static subgraph GraphQL, SDL and protocol URLs,
+  byte route upstreams, and trusted dynamic subgraph metadata URLs and origins
+  to any other host must use `https`, or the operator sets the new
+  `allowPlaintextHttp` (`RouterConfig::allow_plaintext_http`). The JWKS and
+  role-scope catalogue URL rules are unchanged.
+- **Breaking:** the schema and JWKS clients ignore `HTTP_PROXY`,
+  `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` (#489). They used to route
+  through an environment proxy. Opt back in with top-level
+  `useEnvironmentProxy` (`RouterConfig::use_environment_proxy`) for the schema
+  client and `authentication.useEnvironmentProxy`
+  (`JwksAuthenticationConfig::use_environment_proxy`) for the JWKS and
+  role-scope catalogue client. Subgraph execution, byte routes, and dynamic
+  registration already connected directly.
+- **Breaking:** the admin listener needs its own authentication provider
+  (#491). Set `admin.authentication`, which takes the same fields as
+  `authentication`, or `AdminConfig::with_authentication_provider`. Its
+  audiences must not include a public audience, so a public GraphQL token can
+  no longer administer the router through an administrative scope. Validation
+  refuses the public provider itself and overlapping audiences. The new
+  `AuthenticationProvider::accepted_audiences` method, `None` by default and
+  implemented by `JwksAuthenticationProvider`, lets the router compare them.
+  `AgqlAuthenticationProvider` audiences are not checked, because the pinned
+  `agql-auth` validator does not expose them, so operators must configure
+  distinct audiences for those validators.
+- **Breaking:** `DELETE /_router/subgraphs/{name}` refuses a static subgraph
+  with 409 `REMOVAL_REJECTED` (#491). It used to disable one until restart.
+  Dynamic removal is unchanged, and `RouterHandle::remove_subgraph` can still
+  remove a static subgraph in-process.
+- Schema refresh no longer holds the lifecycle lock while it fetches (#484).
+  Rounds still run one at a time, but GraphQL execution, status, removal, and
+  registration no longer wait behind a slow schema endpoint. A source removed
+  or re-registered during a round keeps that newer decision.
+- A JWKS document keeps its usable RS256 keys when it also holds keys of other
+  types, encryption keys, keys without an ID, or entries the router cannot
+  parse (#486). It used to be rejected whole. A document with no usable key,
+  or two usable keys under one ID, is still refused and the previous key set
+  stays in use.
+- A bearer naming an unknown key ID asks for one background JWKS refresh, at
+  most once per `unknownKeyRefreshCooldownSeconds`
+  (`JwksAuthenticationConfig::with_unknown_key_refresh_cooldown`, default 30
+  seconds, at most one day), so a key the issuer has just rotated in works
+  without waiting for the scheduled refresh (#486). That bearer is still
+  refused. Initial, scheduled, and unknown-key JWKS fetches are serialized, so
+  a slow older fetch cannot replace a newer key set.
+
 ## 0.12.0 (unreleased)
 
 - Add opt-in byte routes for service file downloads (#639). A statically

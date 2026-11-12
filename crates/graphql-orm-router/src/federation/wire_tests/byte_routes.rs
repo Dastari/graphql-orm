@@ -38,7 +38,10 @@ pub(super) async fn run_child() {
         .with_scope_matcher(Arc::new(TestHierarchicalScopeMatcher))
         .with_subgraph(products)
         .with_subgraph(reviews)
-        .with_admin(AdminConfig::new(admin_address, NetworkPolicy::new()))
+        .with_admin(
+            AdminConfig::new(admin_address, NetworkPolicy::new())
+                .with_authentication_provider(Arc::new(TestAuthenticationProvider)),
+        )
         .with_byte_route(
             ByteRoute::new("/files", format!("{bytes}/files"))
                 .with_max_response_bytes(LARGE_BODY_BYTES as u64 + 1024)

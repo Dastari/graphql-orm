@@ -305,6 +305,7 @@ pub(crate) struct ReservedPaths<'a> {
 pub(crate) fn validate_byte_routes(
     routes: &mut [ByteRoute],
     reserved: &ReservedPaths<'_>,
+    allow_plaintext_http: bool,
 ) -> Result<(), RouterError> {
     for route in routes.iter_mut() {
         validate_prefix(&route.prefix)?;
@@ -327,6 +328,11 @@ pub(crate) fn validate_byte_routes(
             )));
         }
         let upstream = validate_upstream(&route.upstream, &prefix)?;
+        crate::config::require_secure_transport(
+            &upstream,
+            allow_plaintext_http,
+            &format!("byte route `{prefix}` upstream"),
+        )?;
         route.upstream = upstream.to_string();
         if !route.public && !reserved.authentication_configured {
             return Err(invalid(format!(
@@ -713,7 +719,7 @@ mod tests {
 
     fn validate(route: ByteRoute) -> Result<ByteRoute, RouterError> {
         let mut routes = vec![route];
-        validate_byte_routes(&mut routes, &reserved(true))?;
+        validate_byte_routes(&mut routes, &reserved(true), true)?;
         Ok(routes.remove(0))
     }
 
@@ -859,12 +865,12 @@ mod tests {
             ByteRoute::new("/files", "http://files.test"),
             ByteRoute::new("/files/private", "http://files.test"),
         ];
-        assert!(validate_byte_routes(&mut nested, &reserved(true)).is_err());
+        assert!(validate_byte_routes(&mut nested, &reserved(true), true).is_err());
         let mut sibling = vec![
             ByteRoute::new("/files", "http://files.test"),
             ByteRoute::new("/files-admin", "http://files.test"),
         ];
-        assert!(validate_byte_routes(&mut sibling, &reserved(true)).is_ok());
+        assert!(validate_byte_routes(&mut sibling, &reserved(true), true).is_ok());
         for upstream in [
             "files.test/x",
             "ftp://files.test",
@@ -884,9 +890,9 @@ mod tests {
             validate(ByteRoute::new("/files", "http://files.test/downloads/")).unwrap();
         assert_eq!(normalized.upstream, "http://files.test/downloads");
         let mut anonymous = vec![ByteRoute::new("/files", "http://files.test")];
-        assert!(validate_byte_routes(&mut anonymous, &reserved(false)).is_err());
+        assert!(validate_byte_routes(&mut anonymous, &reserved(false), true).is_err());
         let mut anonymous_public = vec![ByteRoute::new("/files", "http://files.test").public(true)];
-        assert!(validate_byte_routes(&mut anonymous_public, &reserved(false)).is_ok());
+        assert!(validate_byte_routes(&mut anonymous_public, &reserved(false), true).is_ok());
     }
 
     #[test]

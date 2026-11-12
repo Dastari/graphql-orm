@@ -96,7 +96,7 @@ pub(crate) async fn cohort(
             }),
             ..Default::default()
         })
-        .limit(4_097)
+        .internal_limit(4_097)
         .fetch_all()
         .await
         .map_err(OrmPublicError::from)?;
@@ -254,7 +254,7 @@ async fn validate_egress(
             }),
             ..Default::default()
         })
-        .limit(1)
+        .internal_limit(1)
         .fetch_one()
         .await
         .map_err(OrmPublicError::from)?
@@ -288,7 +288,7 @@ pub(crate) async fn source(
             }),
             ..Default::default()
         })
-        .limit(1)
+        .internal_limit(1)
         .fetch_one()
         .await
         .map_err(OrmPublicError::from)?
@@ -389,7 +389,7 @@ pub(crate) async fn outcome(
             }),
             ..Default::default()
         })
-        .limit(1)
+        .internal_limit(1)
         .fetch_one()
         .await
         .map_err(OrmPublicError::from)?
@@ -536,7 +536,7 @@ impl OrmAiRunService {
                             }),
                             ..Default::default()
                         })
-                        .limit(1)
+                        .internal_limit(1)
                         .fetch_one()
                         .await
                         .map_err(OrmPublicError::from)?
@@ -582,7 +582,7 @@ impl OrmAiRunService {
                             }),
                             ..Default::default()
                         })
-                        .limit(1)
+                        .internal_limit(1)
                         .fetch_one()
                         .await
                         .map_err(OrmPublicError::from)?
@@ -606,7 +606,7 @@ impl OrmAiRunService {
                                 ..Default::default()
                             },
                         )
-                        .limit(2)
+                        .internal_limit(2)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;

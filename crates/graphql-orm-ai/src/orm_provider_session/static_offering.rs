@@ -32,7 +32,7 @@ async fn validate_static_reset_graph(
             }),
             ..Default::default()
         })
-        .limit(1)
+        .internal_limit(1)
         .fetch_one()
         .await
         .map_err(OrmPublicError::from)?
@@ -94,7 +94,7 @@ async fn validate_static_reset_graph(
             }),
             ..Default::default()
         })
-        .limit(1)
+        .internal_limit(1)
         .fetch_one()
         .await
         .map_err(OrmPublicError::from)?;
@@ -111,7 +111,7 @@ async fn validate_static_reset_graph(
             }),
             ..Default::default()
         })
-        .limit(1)
+        .internal_limit(1)
         .fetch_one()
         .await
         .map_err(OrmPublicError::from)?;

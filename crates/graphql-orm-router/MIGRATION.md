@@ -10,6 +10,77 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.12.0 to 0.13.0: outbound transport and admin authentication
+
+### Plaintext outbound URLs
+
+Outbound `http` URLs now need a `localhost` or loopback IP-literal host. This
+covers static subgraph `graphqlUrl`, `sdlUrl` and `protocolUrl`, byte route
+`upstream`, and trusted subgraph `metadataUrl`, `graphqlOrigin` and
+`schemaOrigin`. Startup fails with `InvalidConfiguration` naming the field.
+Move those endpoints to `https`. Where the network path is protected another
+way, such as inside a service mesh, keep plaintext with:
+
+```json
+"allowPlaintextHttp": true
+```
+
+or `RouterConfig::allow_plaintext_http(true)`.
+
+### Proxy environment variables
+
+The schema and JWKS clients now ignore `HTTP_PROXY`, `HTTPS_PROXY`,
+`ALL_PROXY` and `NO_PROXY`. A deployment that reaches subgraph schemas or the
+issuer only through such a proxy sets top-level `"useEnvironmentProxy": true`
+for schema fetches and `"useEnvironmentProxy": true` inside `authentication`
+(and inside `admin.authentication`) for key fetches. Programmatic hosts call
+`RouterConfig::use_environment_proxy(true)` and
+`JwksAuthenticationConfig::use_environment_proxy(true)`. Deployments without
+proxy variables need no change.
+
+### Administrative authentication
+
+A router with `admin` fails validation until the admin listener has its own
+provider. Issue administrative tokens for a dedicated audience, then add:
+
+```json
+"admin": {
+  "listener": "0.0.0.0:4001",
+  "authentication": {
+    "jwksUrl": "https://identity.example/.well-known/jwks.json",
+    "issuer": "https://identity.example",
+    "audiences": ["graphql-router-admin"]
+  },
+  "network": {}
+}
+```
+
+Programmatic hosts pass a second provider to
+`AdminConfig::with_authentication_provider`. Its audiences must not overlap the
+public provider's. Operators and dynamic services that registered with public
+tokens must request tokens for the admin audience. A custom
+`AuthenticationProvider` may implement the new `accepted_audiences` method so
+validation can compare audiences; the default `None` leaves that to the
+operator. The router does not check `AgqlAuthenticationProvider` audiences,
+because the pinned `agql-auth` validator does not expose them: build the admin
+validator with an audience the public validator does not accept. Never issue a
+token whose `aud` lists both a public and an administrative audience; both
+providers accept it.
+
+### Static subgraph removal
+
+`DELETE /_router/subgraphs/{name}` now answers 409 `REMOVAL_REJECTED` for a
+static subgraph. To retire one, remove it from configuration and restart, or
+call `RouterHandle::remove_subgraph` from the embedding host.
+
+### JWKS key handling
+
+No change is needed. JWKS documents that mix RS256 signing keys with other
+keys now load instead of failing, and an unknown key ID requests one
+background refresh per 30-second cooldown, at most one day. Tune it with
+`unknownKeyRefreshCooldownSeconds` or
+`JwksAuthenticationConfig::with_unknown_key_refresh_cooldown`.
+
 ## 0.11.0 to 0.12.0: opt-in byte routes
 
 No change is needed. Byte routes are off until `byteRoutes` or

@@ -2,6 +2,7 @@
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
+use crate::orm_read_bounds::InternalReadBound as _;
 use std::sync::Arc;
 
 use agql_auth::{AuthPrincipal, Clock, RecentMfaPolicy};
@@ -175,7 +176,7 @@ impl OrmAiPricingService {
                                 }),
                                 ..Default::default()
                             })
-                            .limit(2)
+                            .internal_limit(2)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)
@@ -234,7 +235,7 @@ impl AiPricingCatalogService for OrmAiPricingService {
                             ..Default::default()
                         })
                         .default_order()
-                        .limit(101)
+                        .internal_limit(101)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)

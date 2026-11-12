@@ -3,7 +3,7 @@ title: "Microsoft SQL Server Backend"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-15
+last_reviewed: 2026-11-12
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -109,9 +109,14 @@ statement, it is whatever SQL Server reports for the replaced statement. For a r
 statements it is the final statement's count, so a batch that ends in DDL or another statement
 that reports no count yields 0.
 
-CI and release validation execute the TLS, writable-transaction and query-notification
-regressions on test-owned loopback SQL Server containers. The TLS fixture checks
-an untrusted private CA, an explicitly trusted CA, and a mismatched hostname.
+CI and release validation execute the TLS, transport, writable-transaction and
+query-notification regressions on test-owned loopback SQL Server containers. Each
+owned server gets a certificate signed by a private root generated for it alone,
+so these tests run with full-session TLS and certificate validation. The TLS
+fixture checks an untrusted private CA, an explicitly trusted CA, and a
+mismatched hostname. The transport fixture checks the encryption default, each
+explicit opt-in, session reset between checkouts, pool timeouts and a server
+default of `NOCOUNT ON`.
 
 ## Connections
 
@@ -121,16 +126,152 @@ Windows uses Schannel and macOS uses Security Framework. Cross-compilation and
 static images need an appropriate target OpenSSL configuration. See the
 [0.48 migration](../../../MIGRATION.md#0470-to-0480-sql-server-platform-tls).
 
-During TLS negotiation, certificate-chain and hostname verification are enabled
-by default. Use the real server DNS name and `Encrypt=true` to require TLS for the
-full session. Omitting `Encrypt` from an ADO connection string allows login-only
-encryption when the server does not require encrypted sessions. Install private
-roots in the platform store, or add `TrustServerCertificateCA=/absolute/path/ca.pem`
-to the connection string;
-PEM/CRT/DER are supported and hostname validation remains enabled. This adds to
-platform trust rather than pinning an exclusive root. `TrustServerCertificate=true`
-explicitly disables both chain and hostname verification; reserve it for isolated
-test infrastructure. Never recommend it as a production connection-error workaround.
+### Transport security
+
+Since 0.128.0 every SQL Server connection the ORM opens uses TLS for the whole
+session and validates the server certificate's chain and hostname. The driver
+on its own treats a connection string without `Encrypt` as login-only TLS,
+which encrypts the login packet and then sends SQL, parameters and results in
+clear. The ORM treats an omitted `Encrypt` as `Encrypt=true`.
+
+Use the server's real DNS name. To trust a private root, install it in the
+platform store, or add `TrustServerCertificateCA=/absolute/path/ca.pem` to the
+connection string. PEM, CRT and DER are supported, hostname validation stays
+on, and the file adds to platform trust rather than pinning an exclusive root.
+
+Before connecting, the ADO constructors (`MssqlPool::connect_ado*`,
+`Database::connect_ado*` and `MssqlQueryNotificationConnection::connect_ado*`)
+refuse, with `sqlx::Error::Configuration`:
+
+| Setting | Why |
+|---|---|
+| `Encrypt=false` or `no` | Login-only TLS. Allowed only with an explicit opt-in. |
+| `TrustServerCertificate=true` or `yes`, with or without `Encrypt=true` | Disables certificate validation, so anyone on the network path can impersonate the server. Allowed only with an explicit opt-in. |
+| `Encrypt=DANGER_PLAINTEXT` | No TLS at all, including the login. Never allowed. |
+| `Encrypt=strict`, `mandatory` or `optional` | Not supported by this driver. |
+| `TrustServerCertificate=true` with `TrustServerCertificateCA` | Contradictory; the driver would panic. |
+| `Integrated Security` or `IntegratedSecurity` set to `true`, `yes` or `SSPI` | This build supports SQL logins only; the driver would silently use SQL authentication. |
+| Any other key that mentions encryption, trust, SSL, TLS, certificates or authentication, such as `Encryption`, `Trust Server Certificate` or `Authentication` | The driver ignores keys it does not know, so the setting would have no effect. |
+
+Diagnostics name the key, never its value.
+
+The two weaker modes are opt-ins in code, through `MssqlTransportPolicy`. A
+connection string alone cannot enable them:
+
+```rust
+use graphql_orm::db::mssql::{MssqlPool, MssqlPoolOptions, MssqlTransportPolicy};
+
+// Disposable local servers only: full-session TLS, unvalidated certificate.
+let insecure = MssqlPoolOptions::new().transport(
+    MssqlTransportPolicy::verified().insecure_allow_unverified_certificate(),
+);
+let pool = MssqlPool::connect_ado_with(
+    "server=tcp:127.0.0.1,1433;database=Scratch;user id=sa;password=<secret>;\
+     TrustServerCertificate=true",
+    insecure,
+)
+.await?;
+```
+
+- `insecure_allow_unverified_certificate()` accepts `TrustServerCertificate=true`.
+  The session is still encrypted, which stops passive capture only.
+- `insecure_allow_login_only_encryption()` accepts `Encrypt=false`. Only the
+  login is encrypted unless the server forces encryption.
+
+Each opt-in admits only its own weakening. Never use either as a workaround for
+a production connection error.
+
+`MssqlPool::new`, `with_max_connections`, `with_options` and their
+external-writable forms take a caller-built `tiberius::Config`. The pool raises
+its encryption level to `Required` unless login-only encryption is allowed, in
+which case it keeps the level the caller set. That level can be
+`EncryptionLevel::NotSupported`, which means no TLS at all, so even the login
+credentials cross the network in clear. The driver cannot report a `Config`'s
+level, so the ORM cannot refuse it, and it cannot raise the level to at least
+login-only without downgrading a caller who set `Required`. Only combine
+`insecure_allow_login_only_encryption()` with a caller-built `Config` whose
+level you set yourself. A connection string cannot ask for plaintext. The
+driver also cannot report whether
+a `Config` trusts every certificate, so a caller that calls `Config::trust_cert`
+has chosen that in code. Build pools from connection strings to have
+certificate settings checked.
+
+### Pool sessions and bounds
+
+`MssqlPoolOptions` configures a pool. Its defaults:
+
+| Option | Default | Effect |
+|---|---|---|
+| `max_connections` | 5 | Open connections, at least 1. |
+| `acquire_timeout` | 30 s | Waiting for a connection, including opening one. Exceeding it returns `sqlx::Error::PoolTimedOut`. |
+| `connect_timeout` | 15 s | Opening one connection: TCP, TLS, login and session setup. Also bounds the idle health check. |
+| `query_timeout` | none | Each statement. A statement that exceeds it fails with an `io::ErrorKind::TimedOut` error. The driver cannot cancel a running statement, so the connection is closed and SQL Server rolls back its open transaction. See the caveats below. |
+| `idle_timeout` | 10 min | Idle connections older than this are closed. |
+| `max_lifetime` | 30 min | Connections older than this are closed when next released or acquired. |
+| `health_check_after_idle` | 30 s | A connection idle this long is reset and checked before reuse. |
+| `transport` | `verified()` | See above. |
+
+A statement timeout has two caveats. First, the outcome of a timed-out
+autocommit write is indeterminate: the server can still finish and commit the
+statement after the client has received `TimedOut`, so check before retrying
+a write that is not idempotent. A timed-out statement inside a transaction is
+rolled back, because the transaction never commits. Second, the timed-out
+connection's permit is released as soon as the client gives up, while SQL
+Server may keep the old session until it notices the closed socket and
+finishes or rolls back its work. For that time the number of live server
+sessions can briefly exceed `max_connections`.
+
+The pool resets a connection's session when it opens it, in the same batch
+that commits or rolls back each transaction, before returning a connection
+after a non-fatal server error, and before reusing a connection that has been
+idle past `health_check_after_idle`. The reset rolls back any open transaction
+and sets `READ COMMITTED` isolation, `NOCOUNT OFF` and
+`IMPLICIT_TRANSACTIONS OFF`. If the reset fails, the connection is closed.
+
+Pooled statements run through `sp_executesql`, so SQL Server refuses one that
+leaves its transaction count changed (error 266). For example,
+`BEGIN TRANSACTION` without a `COMMIT` in the same call, or a `BEGIN
+TRANSACTION` issued inside an ORM transaction, fails, and the pool then resets
+the session. The work of a batch that fails while its own transaction is open
+is rolled back by that reset, never committed. As a further guard, every ORM
+transaction begins by rolling back any transaction still open on the session,
+so it never nests inside one. If a `COMMIT` leaves `@@TRANCOUNT` above zero,
+the commit fails with an error and everything is rolled back; it is never
+reported as committed. So a `SERIALIZABLE` state-machine transaction no
+longer leaves later autocommit reads on that connection serializable. A server,
+database or login default of `NOCOUNT ON` (for example `user options` bit 512)
+no longer makes every affected-row count 0. Raw SQL run through
+`MssqlPool::fetch_rows` that changes session options affects that connection
+until its next reset, so restore them in the same batch.
+
+The reset is not a full `sp_reset_connection`. It does **not** clear:
+
+- local temporary tables (`#name`) and table variables still in scope;
+- session-owned application locks from `sp_getapplock` with
+  `@LockOwner = 'Session'`;
+- `CONTEXT_INFO` and `SESSION_CONTEXT` values;
+- the current database after `USE`;
+- an impersonation from `EXECUTE AS` that was not reverted;
+- `SET ROWCOUNT`, `SET XACT_ABORT`, `SET LOCK_TIMEOUT`, `SET IDENTITY_INSERT`
+  and other `SET` options it does not list.
+
+Raw SQL that changes any of these must undo it in the same call. Full
+`sp_reset_connection` semantics need the driver to send the TDS reset flag,
+which the pinned fork does not; that is part of the fork decision in
+[#516](https://github.com/Dastari/graphql-orm/issues/516).
+
+> **Warning:** do not rely on `SESSION_CONTEXT` or `CONTEXT_INFO` that persists
+> on a pooled connection, for example for SQL Server row-level security
+> predicates. A value set by one borrower is still visible to the next. Set it
+> at the start of every transaction that depends on it, with
+> `sp_set_session_context ... @read_only = 0`, and clear it before the
+> transaction ends.
+
+An error that SQL Server reports, such as a constraint violation, resets the
+connection and returns it to the pool. A transport, TLS or protocol error, a timeout, or a
+dropped future closes it. Inside a transaction any error closes the connection.
+
+### Database handles
 
 Create a read-only MSSQL database handle from a Tiberius ADO.NET-style connection string:
 
@@ -139,8 +280,7 @@ let database = graphql_orm::db::Database::<graphql_orm::MssqlBackend>::connect_a
     "server=tcp:sql.internal.example,1433;\
      database=LegacyDb;\
      user id=application_reader;\
-     password=<secret>;\
-     Encrypt=true",
+     password=<secret>",
 )
 .await?
     .with_schema_policy(graphql_orm::graphql::orm::SchemaPolicy::ExternalReadOnly);
@@ -162,8 +302,7 @@ let database = graphql_orm::db::Database::<graphql_orm::MssqlBackend>
         "server=tcp:sql.internal.example,1433;\
          database=ApplicationDb;\
          user id=application_writer;\
-         password=<secret>;\
-         Encrypt=true",
+         password=<secret>",
     )
     .await?;
 ```
@@ -190,10 +329,12 @@ struct WorkItem {
 }
 ```
 
-`connect_ado`, `MssqlPool::new`, and `MssqlPool::with_max_connections` always configure Tiberius as
-read-only. Changing only `SchemaPolicy` cannot turn those pools into writable connections. The
-explicit `connect_ado_external_writable`, `new_external_writable`, and
-`with_max_connections_external_writable` constructors are the only writable entry points.
+`connect_ado`, `connect_ado_with`, `MssqlPool::new`, `with_max_connections` and `with_options`
+always configure Tiberius as read-only. Changing only `SchemaPolicy` cannot turn those pools into
+writable connections. The explicit `connect_ado_external_writable`,
+`connect_ado_external_writable_with`, `new_external_writable`,
+`with_max_connections_external_writable` and `with_options_external_writable` constructors are the
+only writable entry points.
 
 ## Host-supplied integer primary keys
 
@@ -502,12 +643,16 @@ ORM scalar types in this phase.
 
 ## Tests
 
-The certificate regression creates a private test CA and an owned SQL Server,
-then verifies encryption, trusted private-CA access, untrusted-chain rejection and
-hostname rejection. It needs the cached pinned Docker image and OpenSSL:
+Every owned SQL Server test generates a private CA with OpenSSL and installs a
+server certificate signed by it before the server starts, so owned tests need
+the cached pinned Docker image and the `openssl` command. The certificate
+regression verifies encryption, trusted private-CA access, untrusted-chain
+rejection and hostname rejection. The transport regression verifies the
+encryption default, the explicit opt-ins, session reset between checkouts, pool
+timeouts and a `NOCOUNT ON` session default:
 
 ```bash
-cargo test -p graphql-orm --no-default-features --features mssql --locked --test mssql_tls -- --ignored --test-threads=1
+cargo test -p graphql-orm --no-default-features --features mssql --locked --test mssql_tls --test mssql_transport -- --ignored --test-threads=1
 ```
 
 Pure SQL rendering tests run with the default test suite:

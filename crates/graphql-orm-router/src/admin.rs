@@ -468,7 +468,7 @@ async fn removal_handler(
         return response;
     }
     let name = request.match_info().get("name").unwrap_or_default();
-    match runtime.lifecycle.remove_subgraph(name).await {
+    match runtime.lifecycle.remove_dynamic_subgraph(name).await {
         Ok(identity) => hive_router::ntex::web::HttpResponse::Ok().json(&json!({
             "state": "disabled",
             "graph": {

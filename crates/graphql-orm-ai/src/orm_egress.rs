@@ -2,6 +2,7 @@
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
+use crate::orm_read_bounds::InternalReadBound as _;
 use async_trait::async_trait;
 use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
@@ -63,7 +64,7 @@ impl AiEgressDecisionAudit for OrmAiEgressDecisionAudit {
                                 }),
                                 ..Default::default()
                             })
-                            .limit(1)
+                            .internal_limit(1)
                             .fetch_one()
                             .await
                             .map_err(OrmPublicError::from)?

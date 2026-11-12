@@ -676,7 +676,14 @@ async fn repository_only_crud_projection_transaction_cas_and_policy_are_shared()
     )
     .await?;
     database.set_pagination_config(PaginationConfig::secure().with_max_limit(Some(1)));
-    assert_eq!(RepositoryCredential::find_all(&database).await?.len(), 1);
+    // Two rows match and the maximum is one: refused, never truncated to one.
+    let Err(overflow) = RepositoryCredential::find_all(&database).await else {
+        panic!("an unlimited list above the maximum fails closed");
+    };
+    assert_eq!(
+        OrmPublicError::from_sqlx(&overflow).code,
+        OrmErrorCode::PageLimitExceeded
+    );
     let ambiguous = RepositoryCredential::query(&database)
         .filter(RepositoryCredentialWhereInput::default())
         .fetch_optional_one()
@@ -686,6 +693,7 @@ async fn repository_only_crud_projection_transaction_cas_and_policy_are_shared()
         "optional-one must fetch one look-ahead row"
     );
 
+    database.set_pagination_config(PaginationConfig::secure());
     database.set_row_policy(DenyRepositoryRows);
     let denied =
         RepositoryCredential::find_many(&database, RepositoryCredentialWhereInput::default())

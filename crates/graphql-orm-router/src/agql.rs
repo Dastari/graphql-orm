@@ -12,6 +12,12 @@ use crate::{
 };
 
 /// One-way resource-server adapter over the pinned `agql-auth` validator.
+///
+/// The validator does not expose its accepted audiences, so this adapter
+/// leaves [`AuthenticationProvider::accepted_audiences`] as `None`. When it
+/// authenticates the admin listener, the router cannot check that the admin
+/// and public audiences differ; build the two validators with distinct
+/// audiences.
 pub struct AgqlAuthenticationProvider {
     validator: Arc<AccessTokenValidator>,
 }

@@ -2,6 +2,7 @@
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
+use crate::orm_read_bounds::InternalReadBound as _;
 use std::sync::Arc;
 
 use agql_auth::{
@@ -1853,7 +1854,7 @@ impl OrmAiApprovalWaitReconciliationService {
                             }),
                             ..Default::default()
                         })
-                        .limit(maximum_candidate_scan as i64)
+                        .internal_limit(maximum_candidate_scan as i64)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -1883,7 +1884,7 @@ impl OrmAiApprovalWaitReconciliationService {
                             }),
                             ..Default::default()
                         })
-                        .limit(4_097)
+                        .internal_limit(4_097)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -1926,7 +1927,7 @@ impl OrmAiApprovalWaitReconciliationService {
                                 }),
                                 ..Default::default()
                             })
-                            .limit(1)
+                            .internal_limit(1)
                             .fetch_one()
                             .await
                             .map_err(OrmPublicError::from)?,
@@ -1943,7 +1944,7 @@ impl OrmAiApprovalWaitReconciliationService {
                                     }),
                                     ..Default::default()
                                 })
-                                .limit(4_097)
+                                .internal_limit(4_097)
                                 .fetch_all()
                                 .await
                                 .map_err(OrmPublicError::from)?;
@@ -1980,7 +1981,7 @@ impl OrmAiApprovalWaitReconciliationService {
                                     }),
                                     ..Default::default()
                                 })
-                                .limit(1)
+                                .internal_limit(1)
                                 .fetch_one()
                                 .await
                                 .map_err(OrmPublicError::from)?;

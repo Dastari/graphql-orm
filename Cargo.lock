@@ -3110,7 +3110,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm"
-version = "0.127.0"
+version = "0.128.0"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -3120,6 +3120,7 @@ dependencies = [
  "base64",
  "chacha20poly1305",
  "chrono",
+ "connection-string",
  "convert_case 0.7.1",
  "futures",
  "geo",
@@ -3225,7 +3226,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-macros"
-version = "0.127.0"
+version = "0.128.0"
 dependencies = [
  "convert_case 0.7.1",
  "proc-macro2",
@@ -3246,7 +3247,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-router"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "agql-auth",
  "arc-swap",

@@ -2,6 +2,8 @@
 
 #![allow(missing_docs)]
 
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+use crate::orm_read_bounds::InternalReadBound as _;
 use graphql_orm::prelude::*;
 
 /// One protected, provider-neutral resume binding per AI session.
@@ -578,7 +580,7 @@ mod service {
                                 }),
                                 ..Default::default()
                             })
-                            .limit(2)
+                            .internal_limit(2)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
@@ -838,7 +840,7 @@ mod service {
                                 }),
                                 ..Default::default()
                             })
-                            .limit(1)
+                            .internal_limit(1)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
@@ -1244,7 +1246,7 @@ mod service {
                                 }),
                                 ..Default::default()
                             })
-                            .limit(2)
+                            .internal_limit(2)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
@@ -1480,7 +1482,7 @@ mod service {
                                 }),
                                 ..Default::default()
                             })
-                            .limit(1)
+                            .internal_limit(1)
                             .fetch_one()
                             .await
                             .map_err(OrmPublicError::from)?
@@ -1610,7 +1612,7 @@ mod service {
                                 }),
                                 ..Default::default()
                             })
-                            .limit(1)
+                            .internal_limit(1)
                             .fetch_one()
                             .await
                             .map_err(OrmPublicError::from)?
@@ -1646,7 +1648,7 @@ mod service {
                                 }),
                                 ..Default::default()
                             })
-                            .limit(1)
+                            .internal_limit(1)
                             .fetch_one()
                             .await
                             .map_err(OrmPublicError::from)?
@@ -1883,7 +1885,7 @@ mod service {
                                 }),
                                 ..Default::default()
                             })
-                            .limit(2)
+                            .internal_limit(2)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
@@ -2015,7 +2017,7 @@ mod service {
                                 }),
                                 ..Default::default()
                             })
-                            .limit(1)
+                            .internal_limit(1)
                             .fetch_one()
                             .await
                             .map_err(OrmPublicError::from)?
@@ -2361,7 +2363,7 @@ mod service {
                                 ..Default::default()
                             })
                             .default_order()
-                            .limit(limit)
+                            .internal_limit(limit)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
@@ -2381,7 +2383,7 @@ mod service {
                                 ..Default::default()
                             })
                             .default_order()
-                            .limit(limit)
+                            .internal_limit(limit)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
@@ -2398,7 +2400,7 @@ mod service {
                                 ..Default::default()
                             })
                             .default_order()
-                            .limit(limit)
+                            .internal_limit(limit)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
@@ -2413,7 +2415,7 @@ mod service {
                                 ..Default::default()
                             })
                             .default_order()
-                            .limit(limit)
+                            .internal_limit(limit)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
@@ -2438,7 +2440,7 @@ mod service {
                                 ..Default::default()
                             })
                             .default_order()
-                            .limit(limit)
+                            .internal_limit(limit)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
@@ -2914,7 +2916,7 @@ mod service {
                 }),
                 ..Default::default()
             })
-            .limit(1)
+            .internal_limit(1)
             .fetch_all()
             .await
             .map_err(OrmPublicError::from)?;
@@ -2930,7 +2932,7 @@ mod service {
                 }),
                 ..Default::default()
             })
-            .limit(1)
+            .internal_limit(1)
             .fetch_all()
             .await
             .map_err(OrmPublicError::from)?;
@@ -2951,7 +2953,7 @@ mod service {
                 }),
                 ..Default::default()
             })
-            .limit(2)
+            .internal_limit(2)
             .fetch_all()
             .await
             .map_err(OrmPublicError::from)?;
@@ -3022,7 +3024,7 @@ mod service {
                     }),
                     ..Default::default()
                 })
-                .limit(2)
+                .internal_limit(2)
                 .fetch_all()
                 .await
                 .map_err(OrmPublicError::from)?;
@@ -3244,7 +3246,7 @@ mod service {
                         }),
                         ..Default::default()
                     })
-                    .limit(1)
+                    .internal_limit(1)
                     .fetch_one()
                     .await
                     .map_err(OrmPublicError::from)?
@@ -3351,7 +3353,7 @@ mod service {
                 }),
                 ..Default::default()
             })
-            .limit(1)
+            .internal_limit(1)
             .fetch_one()
             .await
             .map_err(OrmPublicError::from)?;
@@ -3364,7 +3366,7 @@ mod service {
                 }),
                 ..Default::default()
             })
-            .limit(1)
+            .internal_limit(1)
             .fetch_one()
             .await
             .map_err(OrmPublicError::from)?;
@@ -3490,7 +3492,7 @@ mod service {
                         }),
                         ..Default::default()
                     })
-                    .limit(2)
+                    .internal_limit(2)
                     .fetch_all()
                     .await
                     .map_err(OrmPublicError::from)?;

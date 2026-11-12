@@ -16,6 +16,15 @@ that same tag and refresh their locks to one source; matching the commit alone
 does not unify revision and tag selectors. See the
 [Auth 0.26.0 migration](../../MIGRATION.md#agql-auth-0260).
 
+Version 0.13.0 accepts outbound `http` URLs only for loopback hosts unless
+`allowPlaintextHttp` is set, and its schema and JWKS clients ignore proxy
+environment variables unless `useEnvironmentProxy` is set. The admin listener
+needs its own `admin.authentication` provider whose audience public tokens do
+not carry, and its removal endpoint no longer removes static subgraphs. Schema
+refresh no longer blocks execution while it fetches, and JWKS handling skips
+unusable keys and refreshes on an unknown key ID. See
+[MIGRATION.md](MIGRATION.md#0120-to-0130-outbound-transport-and-admin-authentication).
+
 Version 0.11.0 builds the optional `auth-agql` feature on published Auth
 `v0.26.0`; hosts passing Auth types to `AgqlAuthenticationProvider::new` or
 `AgqlScopeMatcher::new` must select the same tag. It also turns introspection

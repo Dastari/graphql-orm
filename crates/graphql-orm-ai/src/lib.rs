@@ -76,6 +76,8 @@ mod orm_proposals;
 mod orm_provider_output;
 mod orm_provider_session;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod orm_read_bounds;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_restore;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_rules;
