@@ -462,6 +462,13 @@ async fn later_preparation_failure_reports_prior_stages_without_applying_failed_
         .put_blob(&entry.content_key, malformed)
         .await
         .expect("malformed owned payload");
+    // write_manifest never overwrites; replace the fixture's manifest explicitly.
+    repository
+        .delete_blob(&graphql_orm_backup::snapshot_manifest_key(
+            manifest.snapshot_id,
+        ))
+        .await
+        .expect("remove fixture manifest");
     write_manifest(&repository, &mut manifest)
         .await
         .expect("valid checksum for malformed payload");
@@ -652,6 +659,13 @@ async fn uncompressed_stage_lengths(repository: &LocalBackupRepository, id: Uuid
             .expect("uncompressed fixture");
     }
     manifest.database.compression = BackupCompression::None;
+    // write_manifest never overwrites; replace the fixture's manifest explicitly.
+    repository
+        .delete_blob(&graphql_orm_backup::snapshot_manifest_key(
+            manifest.snapshot_id,
+        ))
+        .await
+        .expect("remove fixture manifest");
     write_manifest(repository, &mut manifest)
         .await
         .expect("valid uncompressed manifest");

@@ -9,6 +9,8 @@ pub const REPOSITORY_LOCK_KEY: &str = "locks/repository.lock";
 /// Largest lock record that is read; a larger blob is not an owner record.
 const LOCK_RECORD_LIMIT: u64 = 64 * 1024;
 const MAX_HOST_NAME_CHARS: usize = 255;
+/// Longest accepted [`RepositoryLockOptions::owner_label`], in bytes.
+pub const MAX_LOCK_OWNER_LABEL_BYTES: usize = 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// Advisory repository lock settings.
@@ -17,6 +19,8 @@ pub struct RepositoryLockOptions {
     /// Elapsed time never grants ownership; see [`break_repository_lock`].
     pub stale_after_seconds: i64,
     /// Host-supplied label recorded in the owner record, such as a job id.
+    /// At most [`MAX_LOCK_OWNER_LABEL_BYTES`] bytes without control
+    /// characters; acquisition refuses a longer one before writing.
     pub owner_label: Option<String>,
 }
 
@@ -29,12 +33,38 @@ impl Default for RepositoryLockOptions {
     }
 }
 
+/// Whether restore or verification takes the repository lock.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RepositoryLockMode {
+    /// Hold the exclusive repository lock while reading (default). This
+    /// needs write access for the lock blob, and it fails with
+    /// [`BackupError::RepositoryLocked`] while any other operation runs.
+    #[default]
+    Exclusive,
+    /// Read without taking the lock, for read-only credentials, replicas or
+    /// mounts.
+    ///
+    /// The caller asserts that no [`crate::prune`], [`crate::delete_snapshot`]
+    /// or [`crate::compact_chain`] runs against the repository while the
+    /// operation reads. Nothing checks that assertion. If one does run, it can
+    /// delete payloads, objects or manifests mid-read. Every byte is still
+    /// checked against the sealed manifest's digests, so restore never applies
+    /// substituted data. The operation then fails, for example with
+    /// [`BackupError::MissingBlob`], after a database restore may already have
+    /// applied earlier stages and an object restore may already have written
+    /// earlier objects to its sink. Treat that target as failed staging, as
+    /// for any restore failure.
+    AssumeNoConcurrentWriters,
+}
+
 /// Owner record stored in the repository lock blob.
 ///
 /// The record identifies a holder for operators. It is not authenticated: a
 /// party that can write the repository can also write or remove locks.
+///
+/// Every field is required. Unknown fields are ignored, so a record written
+/// by a later release that adds fields is still identified and can be broken.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RepositoryLockOwner {
     /// Random id of the run that holds the lock.
     pub run_id: Uuid,
@@ -216,9 +246,11 @@ impl<'a> RepositoryLock<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`BackupError::RepositoryLocked`] with the holder's owner record
-    /// if any lock exists, or another [`BackupError`] if the repository cannot
-    /// be written.
+    /// Returns [`BackupError::InvalidRepositoryLockOptions`] before writing if
+    /// the owner label is too long or contains control characters,
+    /// [`BackupError::RepositoryLocked`] with the holder's owner record if any
+    /// lock exists, or another [`BackupError`] if the repository cannot be
+    /// written.
     pub async fn acquire(
         repository: &'a dyn BackupRepository,
         options: &RepositoryLockOptions,
@@ -231,6 +263,16 @@ impl<'a> RepositoryLock<'a> {
         options: &RepositoryLockOptions,
         operation: &str,
     ) -> Result<Self, BackupError> {
+        if let Some(label) = &options.owner_label
+            && (label.len() > MAX_LOCK_OWNER_LABEL_BYTES || label.chars().any(char::is_control))
+        {
+            return Err(BackupError::InvalidRepositoryLockOptions {
+                reason: format!(
+                    "owner_label must be at most {MAX_LOCK_OWNER_LABEL_BYTES} bytes without \
+                     control characters"
+                ),
+            });
+        }
         let owner = RepositoryLockOwner {
             run_id: Uuid::new_v4(),
             host: local_host_name(),
@@ -239,7 +281,15 @@ impl<'a> RepositoryLock<'a> {
             label: options.owner_label.clone(),
             acquired_at: unix_seconds(),
         };
-        let body = Bytes::from(serde_json::to_vec(&owner)?);
+        let body = serde_json::to_vec(&owner)?;
+        // A record that read_repository_lock cannot read back would make the
+        // lock unreleasable and unbreakable; refuse it before the write.
+        if u64::try_from(body.len()).unwrap_or(u64::MAX) > LOCK_RECORD_LIMIT {
+            return Err(BackupError::InvalidRepositoryLockOptions {
+                reason: format!("the lock owner record exceeds {LOCK_RECORD_LIMIT} bytes"),
+            });
+        }
+        let body = Bytes::from(body);
         if repository
             .put_blob_if_absent(REPOSITORY_LOCK_KEY, body)
             .await?
@@ -270,8 +320,12 @@ impl<'a> RepositoryLock<'a> {
     /// Releases the repository lock through single-attempt deletion.
     ///
     /// Release first reads the lock and leaves it in place unless it still
-    /// names this run, so a holder whose lock an operator broke cannot remove
-    /// a later holder's lock.
+    /// names this run. The read and the deletion are separate requests, so
+    /// this narrows, but does not close, the window in which a holder whose
+    /// lock an operator broke could remove a later holder's lock: another run
+    /// acquiring between the two requests would lose its lock. That is why
+    /// [`break_repository_lock`] may only be used after every writer has
+    /// stopped.
     ///
     /// A failed or cancelled release leaves its outcome unknown. Do not retry
     /// deletion by key or reclaim the lock while writers or requests can remain

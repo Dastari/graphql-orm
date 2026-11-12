@@ -4,7 +4,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use futures::{StreamExt, TryStreamExt, stream};
+use futures::{StreamExt, stream};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -46,14 +46,18 @@ impl Default for BackupExecutionOptions {
     }
 }
 
-/// Cooperative cancellation for backup, incremental backup and compaction.
+/// Cooperative cancellation for backup, incremental backup, compaction,
+/// restore and verification.
 ///
-/// Clones share one signal. After [`BackupCancellation::cancel`], the
-/// operation stops at its next safe point: before a payload, object or
-/// manifest write, never during one. It then removes the snapshot payloads it
-/// wrote, releases the repository lock and returns
-/// [`BackupError::Cancelled`]. Once the manifest is written the snapshot is
-/// committed and cancellation no longer applies.
+/// Clones share one signal. After [`BackupCancellation::cancel`], a writer
+/// stops at its next safe point: before a payload, object or manifest write,
+/// never during one. Object uploads already in flight run to completion and
+/// no new one starts. It then removes the snapshot payloads it wrote,
+/// releases the repository lock and returns [`BackupError::Cancelled`]. Once
+/// the manifest is written the snapshot is committed and cancellation no
+/// longer applies. Restore stops before its next manifest, payload, apply call
+/// or object, and verification before its next checksum read; both release
+/// the lock.
 ///
 /// Dropping the operation's future instead cannot release the lock, because
 /// release is asynchronous. The lock then keeps its owner record; see
@@ -83,7 +87,7 @@ impl BackupCancellation {
     }
 
     /// A safe point: fails with [`BackupError::Cancelled`] once cancelled.
-    fn check(&self) -> Result<(), BackupError> {
+    pub(crate) fn check(&self) -> Result<(), BackupError> {
         if self.is_cancelled() {
             Err(BackupError::Cancelled)
         } else {
@@ -694,9 +698,16 @@ async fn compact_chain_inner(
 /// Seals a manifest with the repository's host key and writes it as the final
 /// snapshot blob.
 ///
+/// This is a low-level building block: it takes no repository lock, so the
+/// caller must coordinate with other operations. It never overwrites: the
+/// manifest is created with an atomic conditional write and an existing
+/// snapshot id fails with [`BackupError::SnapshotExists`]. A sealed manifest
+/// is immutable; write a new snapshot instead of rewriting one.
+///
 /// # Errors
 ///
-/// Returns [`BackupError::ManifestAuthenticationRequired`] if the repository
+/// Returns [`BackupError::SnapshotExists`] if the snapshot already has a
+/// manifest, [`BackupError::ManifestAuthenticationRequired`] if the repository
 /// has no authenticator, [`BackupError::UnsupportedManifestFormat`] unless the
 /// manifest uses [`crate::BACKUP_FORMAT_VERSION`],
 /// [`BackupError::InvalidManifestEntry`] for an entry outside its namespace,
@@ -728,7 +739,16 @@ async fn write_manifest_tracked(
     // From here the manifest may reach storage even if the write reports an
     // error, so a failed run must not remove the payloads it would reference.
     write.manifest_attempted = true;
-    repository.put_blob(&key, Bytes::from(body)).await
+    if repository
+        .put_blob_if_absent(&key, Bytes::from(body))
+        .await?
+    {
+        Ok(())
+    } else {
+        Err(BackupError::SnapshotExists {
+            snapshot_id: manifest.snapshot_id,
+        })
+    }
 }
 
 /// What a snapshot writer has done, so a failed run removes only its own
@@ -1053,18 +1073,40 @@ async fn write_object_entries(
     // backup creation.
     let owned_refs = object_refs.to_vec();
     let cancellation = options.cancellation.clone();
-    let mut object_entries = stream::iter(owned_refs.into_iter().enumerate())
+    // Set by the first failure. Uploads already in flight are awaited rather
+    // than dropped mid-request, so none can land after the lock is released.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let outcomes = stream::iter(owned_refs.into_iter().enumerate())
         .map(|(index, object)| {
             let cancellation = cancellation.clone();
+            let stop = std::sync::Arc::clone(&stop);
             async move {
                 // A safe point: an object that has not started is never begun.
-                cancellation.check()?;
-                write_object_entry(repository, objects, index, object, limit).await
+                if cancellation.is_cancelled() || stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    return None;
+                }
+                let outcome = write_object_entry(repository, objects, index, object, limit).await;
+                if outcome.is_err() {
+                    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                Some(outcome)
             }
         })
         .buffer_unordered(concurrency)
-        .try_collect::<Vec<_>>()
-        .await?;
+        .collect::<Vec<_>>()
+        .await;
+    let mut object_entries = Vec::with_capacity(outcomes.len());
+    let mut skipped = false;
+    for outcome in outcomes {
+        match outcome {
+            Some(Ok(entry)) => object_entries.push(entry),
+            Some(Err(error)) => return Err(error),
+            None => skipped = true,
+        }
+    }
+    if skipped {
+        return Err(BackupError::Cancelled);
+    }
     object_entries.sort_by_key(|(index, _)| *index);
     let object_entries = object_entries.into_iter().map(|(_, entry)| entry).collect();
     Ok(object_entries)

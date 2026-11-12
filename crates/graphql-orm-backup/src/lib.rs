@@ -123,9 +123,9 @@ pub use graphql_orm::graphql::orm::ColumnBackupPolicy;
 #[cfg(feature = "local")]
 pub use local_repository::LocalBackupRepository;
 pub use lock::{
-    BreakRepositoryLockRequest, DEFAULT_LOCK_STALE_AFTER_SECONDS, REPOSITORY_LOCK_KEY,
-    RepositoryLock, RepositoryLockOptions, RepositoryLockOwner, RepositoryLockStatus,
-    break_repository_lock, read_repository_lock,
+    BreakRepositoryLockRequest, DEFAULT_LOCK_STALE_AFTER_SECONDS, MAX_LOCK_OWNER_LABEL_BYTES,
+    REPOSITORY_LOCK_KEY, RepositoryLock, RepositoryLockMode, RepositoryLockOptions,
+    RepositoryLockOwner, RepositoryLockStatus, break_repository_lock, read_repository_lock,
 };
 pub use manifest::{
     BACKUP_FORMAT_VERSION, BackupCompression, BackupKind, BackupSnapshotManifest, BackupTombstone,
@@ -143,8 +143,9 @@ pub use prune::{DeleteSnapshotResult, KeepPolicy, PruneResult, delete_snapshot, 
 pub use repository::{BackupRepository, BlobStoreBackupRepository};
 pub use restore::{
     BlobStoreRestoreObjectSink, RestoreContext, RestoreFailurePhase, RestoreFailureProgress,
-    RestoreKeyScope, RestoreMode, RestoreObjectSink, RestoreResult, ensure_empty_restore_target,
-    restore_objects, restore_snapshot,
+    RestoreKeyScope, RestoreMode, RestoreObjectSink, RestoreOptions, RestoreResult,
+    ensure_empty_restore_target, restore_objects, restore_objects_with_options, restore_snapshot,
+    restore_snapshot_with_options,
 };
 pub use verify::{
     VerificationOptions, verify_manifest_and_objects, verify_manifest_and_objects_with_options,

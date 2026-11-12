@@ -131,6 +131,10 @@ pub enum BackupError {
         found: Option<Box<crate::RepositoryLockOwner>>,
     },
 
+    /// Lock options were rejected before any repository write.
+    #[error("invalid repository lock options: {reason}")]
+    InvalidRepositoryLockOptions { reason: String },
+
     /// [`crate::break_repository_lock`] refused to remove a lock.
     #[error("refusing to break repository lock {lock_key}: {reason}")]
     BreakLockRefused { lock_key: String, reason: String },

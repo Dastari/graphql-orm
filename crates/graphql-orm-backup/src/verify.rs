@@ -14,6 +14,14 @@ pub struct VerificationOptions {
     /// Repository lock settings. Verification holds the repository lock so
     /// that no prune, deletion or compaction removes blobs while it reads.
     pub lock: RepositoryLockOptions,
+    /// Whether verification takes the repository lock; see
+    /// [`crate::RepositoryLockMode::AssumeNoConcurrentWriters`] for read-only
+    /// repositories and its risk.
+    pub lock_mode: crate::RepositoryLockMode,
+    /// Cooperative cancellation, checked before each checksum read. A
+    /// cancelled verification releases the lock and fails with
+    /// [`BackupError::Cancelled`].
+    pub cancellation: crate::BackupCancellation,
 }
 
 impl Default for VerificationOptions {
@@ -21,6 +29,8 @@ impl Default for VerificationOptions {
         Self {
             blob_concurrency: DEFAULT_OBJECT_CONCURRENCY,
             lock: RepositoryLockOptions::default(),
+            lock_mode: crate::RepositoryLockMode::default(),
+            cancellation: crate::BackupCancellation::default(),
         }
     }
 }
@@ -63,6 +73,9 @@ pub async fn verify_manifest_and_objects_with_options(
     options: &VerificationOptions,
 ) -> Result<(), BackupError> {
     required_authenticator(repository)?;
+    if options.lock_mode == crate::RepositoryLockMode::AssumeNoConcurrentWriters {
+        return verify_manifest_and_objects_unlocked(repository, manifest, options).await;
+    }
     let lock = RepositoryLock::acquire_for(repository, &options.lock, "verify").await?;
     let result = verify_manifest_and_objects_unlocked(repository, manifest, options).await;
     lock.finish(result, |()| None).await
@@ -108,6 +121,9 @@ pub async fn verify_object_checksums_with_options(
     manifest: &BackupSnapshotManifest,
     options: &VerificationOptions,
 ) -> Result<(), BackupError> {
+    if options.lock_mode == crate::RepositoryLockMode::AssumeNoConcurrentWriters {
+        return verify_object_checksums_unlocked(repository, manifest, options).await;
+    }
     let lock = RepositoryLock::acquire_for(repository, &options.lock, "verify").await?;
     let result = verify_object_checksums_unlocked(repository, manifest, options).await;
     lock.finish(result, |()| None).await
@@ -119,8 +135,10 @@ async fn verify_object_checksums_unlocked(
     options: &VerificationOptions,
 ) -> Result<(), BackupError> {
     crate::validate_manifest_entries(manifest)?;
+    options.cancellation.check()?;
     let concurrency = options.blob_concurrency.max(1);
     let object_limit = repository.capacity_limits().object_bytes;
+    let cancellation = &options.cancellation;
 
     // Owned (key, checksum) pairs keep the streams free of higher-ranked
     // borrows, which otherwise break `Send` future inference in async
@@ -130,8 +148,10 @@ async fn verify_object_checksums_unlocked(
         object_checks.push((object.content_key.clone(), object.sha256_hex.clone()));
     }
     stream::iter(object_checks)
-        .map(|(content_key, sha256)| {
-            verify_blob_checksum(repository, content_key, sha256, object_limit)
+        .map(|(content_key, sha256)| async move {
+            // Reads only: dropping an in-flight read on cancellation is harmless.
+            cancellation.check()?;
+            verify_blob_checksum(repository, content_key, sha256, object_limit).await
         })
         .buffer_unordered(concurrency)
         .try_collect::<Vec<_>>()
@@ -148,8 +168,9 @@ async fn verify_object_checksums_unlocked(
         entry_checks.push((entry.content_key.clone(), entry.sha256_hex.clone()));
     }
     stream::iter(entry_checks)
-        .map(|(content_key, sha256)| {
-            verify_blob_checksum(repository, content_key, sha256, BackupByteLimit::Unbounded)
+        .map(|(content_key, sha256)| async move {
+            cancellation.check()?;
+            verify_blob_checksum(repository, content_key, sha256, BackupByteLimit::Unbounded).await
         })
         .buffer_unordered(concurrency)
         .try_collect::<Vec<_>>()

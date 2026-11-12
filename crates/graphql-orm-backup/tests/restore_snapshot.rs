@@ -480,6 +480,13 @@ async fn object_sizes_are_observed_for_new_deduplicated_and_historical_restores(
     // Historical valid-content manifests remain readable without rewriting them.
     let mut historical = first.manifest;
     historical.objects[0].size_bytes = u64::MAX;
+    // write_manifest never overwrites; replace the fixture's manifest explicitly.
+    repository
+        .delete_blob(&graphql_orm_backup::snapshot_manifest_key(
+            historical.snapshot_id,
+        ))
+        .await
+        .expect("remove fixture manifest");
     write_manifest(&repository, &mut historical)
         .await
         .expect("historical advisory size fixture");

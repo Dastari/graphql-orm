@@ -17,8 +17,8 @@ are unchanged; existing snapshots restore as before.
 
 1. **Construct the new fields.** `RepositoryLockOptions` gains `owner_label`,
    `BackupExecutionOptions` gains `cancellation`, `VerificationOptions` gains
-   `lock`, `BackupCapacityLimits` gains `object_bytes` and `PruneResult` gains
-   `deleted_orphan_blobs`. Struct literals need `..Default::default()` or the
+   `lock`, `lock_mode` and `cancellation`, `BackupCapacityLimits` gains
+   `object_bytes` and `PruneResult` gains `deleted_orphan_blobs`. Struct literals need `..Default::default()` or the
    new fields. `BackupError::RepositoryLocked` gains an `owner` field, so
    patterns must use `{ lock_key, .. }`.
 2. **Handle the new errors.** Match `SnapshotExists`,
@@ -40,12 +40,32 @@ are unchanged; existing snapshots restore as before.
    Custom `BackupRepository` wrappers used for restore or verification must
    now forward `put_blob_if_absent` and `delete_blob_once`, because those
    operations acquire and release the lock.
-6. **Check limits before upgrading large repositories.** Backups now refuse
+6. **Read-only repositories need the explicit opt-in.** Read credentials are
+   no longer enough by default, because taking the lock writes
+   `locks/repository.lock`. For read-only credentials, replicas or mounts,
+   call `restore_snapshot_with_options` and `restore_objects_with_options`
+   with `RestoreOptions { lock_mode: RepositoryLockMode::AssumeNoConcurrentWriters, .. }`,
+   and set `VerificationOptions::lock_mode` the same way. Only do this when no
+   prune, `delete_snapshot` or `compact_chain` can run against the repository
+   meanwhile: one that does can delete blobs mid-read and leave a partly
+   applied restore target.
+7. **Cancel instead of dropping.** Wrap host-side timeouts around a
+   `BackupCancellation` (`BackupExecutionOptions`, `RestoreOptions` or
+   `VerificationOptions`) and call `cancel()`. The operation then stops at a
+   safe point and releases the lock. Dropping a backup, restore or
+   verification future leaves the lock in place until it is broken.
+8. **Do not rewrite manifests.** `write_manifest` now refuses an existing
+   snapshot id with `SnapshotExists`. Write a new snapshot instead; tooling
+   that deliberately replaces a manifest must delete it first, with every
+   other operation stopped.
+9. **Keep owner labels short.** `RepositoryLockOptions::owner_label` is
+   limited to 1024 bytes without control characters.
+10. **Check limits before upgrading large repositories.** Backups now refuse
    payloads that restore with the same handle would refuse. If a backup
    fails with `BackupCapacityExceeded`, raise the reported limit on the
    repository handle used for both backup and restore after reviewing the
    memory budget.
-7. **Recover stuck locks explicitly.** A crashed or dropped run leaves
+11. **Recover stuck locks explicitly.** A crashed or dropped run leaves
    `locks/repository.lock` with an owner record. Read it with
    `read_repository_lock`, confirm that run and every other writer have
    stopped, then call `break_repository_lock` with its `run_id` and a minimum

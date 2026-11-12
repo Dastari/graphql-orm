@@ -1,24 +1,27 @@
 //! Snapshot lifecycle, locking and capacity regressions (#476, #477, #480, #481).
 
 use std::sync::{
-    Mutex,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures::StreamExt;
 use graphql_orm_backup::{
     BackupByteLimit, BackupCancellation, BackupCapacityLimitKind, BackupCapacityLimits,
     BackupChangeAction, BackupChangeExport, BackupError, BackupExecutionOptions, BackupObjectIndex,
     BackupObjectRef, BackupRepository, BackupRow, BackupTableExport, BreakRepositoryLockRequest,
     CompactChainRequest, FullBackupRequest, GraphqlOrmBackupAdapter, GraphqlOrmBackupSchema,
     IncrementalBackupRequest, KeepPolicy, LocalBackupRepository, ManifestAuthenticator,
-    ManifestKey, PruneResult, REPOSITORY_LOCK_KEY, RepositoryLock, RepositoryLockOptions,
-    RepositoryLockStatus, RestoreContext, RestoreObjectSink, break_repository_lock,
-    bytes_sha256_hex, compact_chain, create_full_backup, create_full_backup_with_options,
-    create_incremental_backup, load_manifest, object_content_key, prune, read_repository_lock,
-    restore_objects, restore_snapshot, snapshot_manifest_key, verify_manifest_and_objects,
-    verify_object_checksums,
+    ManifestKey, PruneResult, REPOSITORY_LOCK_KEY, RepositoryLock, RepositoryLockMode,
+    RepositoryLockOptions, RepositoryLockStatus, RestoreContext, RestoreObjectSink, RestoreOptions,
+    VerificationOptions, break_repository_lock, bytes_sha256_hex, compact_chain,
+    create_full_backup, create_full_backup_with_options, create_incremental_backup, load_manifest,
+    object_content_key, prune, read_repository_lock, restore_objects, restore_objects_with_options,
+    restore_snapshot, restore_snapshot_with_options, snapshot_manifest_key,
+    verify_manifest_and_objects, verify_manifest_and_objects_with_options, verify_object_checksums,
+    write_manifest,
 };
 use graphql_orm_storage::StorageByteStream;
 use serde_json::{Map, Value};
@@ -566,7 +569,7 @@ async fn cancelled_backup_releases_the_lock_and_removes_its_payloads() {
     let cancellation = BackupCancellation::new();
     let objects = Objects::with_object(b"first object")
         .and_object(b"second object")
-        .cancel_on_load(cancellation.clone());
+        .cancel_on_load(cancellation.clone(), 1);
     let options = BackupExecutionOptions {
         object_concurrency: 1,
         cancellation,
@@ -643,6 +646,321 @@ async fn failed_release_after_a_committed_backup_names_the_snapshot() {
     )
     .await
     .expect_err("verification waits for the stuck lock");
+}
+
+#[tokio::test]
+async fn cancelled_backup_lets_in_flight_uploads_finish() {
+    let temp = TempDir::new().expect("temp dir");
+    let repository = repository(&temp);
+    let cancellation = BackupCancellation::new();
+    let objects = Objects::with_object(b"object zero")
+        .and_object(b"object one")
+        .and_object(b"object two")
+        .and_object(b"object three")
+        .slow_streams()
+        .cancel_on_load(cancellation.clone(), 2);
+    let options = BackupExecutionOptions {
+        object_concurrency: 2,
+        cancellation,
+        ..BackupExecutionOptions::default()
+    };
+
+    let error = create_full_backup_with_options(
+        &repository,
+        &Database::with_rows("users", 1),
+        &objects,
+        full_request(id(1), 1),
+        &options,
+    )
+    .await
+    .expect_err("cancelled while two uploads are in flight");
+
+    assert!(matches!(error, BackupError::Cancelled), "{error:?}");
+    assert_eq!(objects.loads(), 2, "no upload starts after cancellation");
+    for (index, (object, bytes)) in objects.objects.iter().enumerate() {
+        let key = object_content_key(&object.sha256_hex);
+        if index < 2 {
+            assert_eq!(
+                repository
+                    .get_blob(&key)
+                    .await
+                    .expect("in-flight upload finished"),
+                *bytes,
+                "upload {index} ran to completion"
+            );
+        } else {
+            assert!(!repository.blob_exists(&key).await.expect("exists"));
+        }
+    }
+    assert!(snapshot_blobs(&repository, id(1)).await.is_empty());
+    assert_unlocked(&repository).await;
+}
+
+#[tokio::test]
+async fn oversized_owner_label_is_refused_before_locking() {
+    let temp = TempDir::new().expect("temp dir");
+    let repository = repository(&temp);
+    let lock = RepositoryLockOptions {
+        owner_label: Some("x".repeat(100 * 1024)),
+        ..RepositoryLockOptions::default()
+    };
+
+    let error = RepositoryLock::acquire(&repository, &lock)
+        .await
+        .expect_err("label too long for a readable owner record");
+    assert!(
+        matches!(error, BackupError::InvalidRepositoryLockOptions { .. }),
+        "{error:?}"
+    );
+    assert_unlocked(&repository).await;
+
+    let error = create_full_backup_with_options(
+        &repository,
+        &Database::with_rows("users", 1),
+        &Objects::default(),
+        full_request(id(1), 1),
+        &BackupExecutionOptions {
+            lock,
+            ..BackupExecutionOptions::default()
+        },
+    )
+    .await
+    .expect_err("refused before the lock write");
+    assert!(matches!(
+        error,
+        BackupError::InvalidRepositoryLockOptions { .. }
+    ));
+    assert!(all_blobs(&repository).await.is_empty());
+}
+
+#[tokio::test]
+async fn owner_records_with_unknown_fields_stay_identified() {
+    let temp = TempDir::new().expect("temp dir");
+    let repository = repository(&temp);
+    let run_id = Uuid::new_v4();
+    let record = serde_json::json!({
+        "run_id": run_id,
+        "host": "builder",
+        "process_id": 7,
+        "operation": "full_backup",
+        "label": null,
+        "acquired_at": 0,
+        "fencing_token": 3,
+    });
+    repository
+        .put_blob(
+            REPOSITORY_LOCK_KEY,
+            Bytes::from(serde_json::to_vec(&record).expect("json")),
+        )
+        .await
+        .expect("lock from a later release");
+
+    let RepositoryLockStatus::Owned(owner) = read_repository_lock(&repository).await.expect("read")
+    else {
+        panic!("a later release's record is still an owner record");
+    };
+    assert_eq!(owner.run_id, run_id);
+    break_repository_lock(
+        &repository,
+        &BreakRepositoryLockRequest {
+            expected_run_id: run_id,
+            min_age_seconds: 0,
+        },
+    )
+    .await
+    .expect("break the confirmed lock");
+    assert_unlocked(&repository).await;
+}
+
+#[tokio::test]
+async fn read_only_repositories_need_the_explicit_unlocked_mode() {
+    let temp = TempDir::new().expect("temp dir");
+    let local = repository(&temp);
+    create_full_backup(
+        &local,
+        &Database::with_rows("users", 2),
+        &Objects::with_object(b"read only object"),
+        full_request(id(1), 1),
+    )
+    .await
+    .expect("snapshot");
+    let manifest = load_manifest(&local, id(1)).await.expect("manifest");
+    let read_only = ReadOnly(local);
+    let database = Database::with_rows("users", 2);
+
+    let error = restore_snapshot(&read_only, &database, id(1), RestoreContext::dry_run())
+        .await
+        .expect_err("the default takes the lock");
+    let BackupError::RestoreStageFailed { source, .. } = error else {
+        panic!("validation-stage failure: {error:?}");
+    };
+    assert!(matches!(*source, BackupError::UnsupportedOperation { .. }));
+    assert!(matches!(
+        verify_manifest_and_objects(&read_only, &manifest).await,
+        Err(BackupError::UnsupportedOperation { .. })
+    ));
+    assert!(matches!(
+        restore_objects(&read_only, &manifest, &CollectingSink::default()).await,
+        Err(BackupError::UnsupportedOperation { .. })
+    ));
+
+    let unlocked = RestoreOptions {
+        lock_mode: RepositoryLockMode::AssumeNoConcurrentWriters,
+        ..RestoreOptions::default()
+    };
+    restore_snapshot_with_options(
+        &read_only,
+        &database,
+        id(1),
+        RestoreContext::dry_run(),
+        &unlocked,
+    )
+    .await
+    .expect("explicit unlocked restore");
+    let sink = CollectingSink::default();
+    restore_objects_with_options(&read_only, &manifest, &sink, &unlocked)
+        .await
+        .expect("explicit unlocked object restore");
+    assert_eq!(sink.restored.lock().expect("sink").len(), 1);
+    verify_manifest_and_objects_with_options(
+        &read_only,
+        &manifest,
+        &VerificationOptions {
+            lock_mode: RepositoryLockMode::AssumeNoConcurrentWriters,
+            ..VerificationOptions::default()
+        },
+    )
+    .await
+    .expect("explicit unlocked verification");
+}
+
+#[tokio::test]
+async fn cancelled_restore_and_verification_release_the_lock() {
+    let temp = TempDir::new().expect("temp dir");
+    let repository = repository(&temp);
+    create_full_backup(
+        &repository,
+        &Database::with_rows("users", 1),
+        &Objects::with_object(b"cancelled restore object"),
+        full_request(id(1), 1),
+    )
+    .await
+    .expect("full");
+    let changes = Database::with_rows("users", 1).with_changes(changes("users", 2));
+    incremental(&repository, id(2), id(1), 2, &changes).await;
+    let manifest = load_manifest(&repository, id(1)).await.expect("manifest");
+
+    let cancellation = BackupCancellation::new();
+    let target = Database::with_rows("users", 1).cancel_on_restore(cancellation.clone());
+    let error = restore_snapshot_with_options(
+        &repository,
+        &target,
+        id(2),
+        RestoreContext::empty_database(),
+        &RestoreOptions {
+            cancellation,
+            ..RestoreOptions::default()
+        },
+    )
+    .await
+    .expect_err("cancelled after the full stage");
+    let BackupError::RestoreStageFailed { progress, source } = error else {
+        panic!("typed progress: {error:?}");
+    };
+    assert!(matches!(*source, BackupError::Cancelled), "{source:?}");
+    assert_eq!(progress.completed_manifest_ids, vec![id(1)]);
+    assert_eq!(
+        target.incremental_applies(),
+        0,
+        "no stage starts after cancel"
+    );
+    assert_unlocked(&repository).await;
+
+    let cancelled = BackupCancellation::new();
+    cancelled.cancel();
+    let error = verify_manifest_and_objects_with_options(
+        &repository,
+        &manifest,
+        &VerificationOptions {
+            cancellation: cancelled.clone(),
+            ..VerificationOptions::default()
+        },
+    )
+    .await
+    .expect_err("cancelled verification");
+    assert!(matches!(error, BackupError::Cancelled), "{error:?}");
+    assert_unlocked(&repository).await;
+
+    let sink = CollectingSink::default();
+    let error = restore_objects_with_options(
+        &repository,
+        &manifest,
+        &sink,
+        &RestoreOptions {
+            cancellation: cancelled,
+            ..RestoreOptions::default()
+        },
+    )
+    .await
+    .expect_err("cancelled object restore");
+    assert!(matches!(error, BackupError::Cancelled), "{error:?}");
+    assert!(sink.restored.lock().expect("sink").is_empty());
+    assert_unlocked(&repository).await;
+}
+
+#[tokio::test]
+async fn object_restore_caps_the_streamed_read_at_the_object_limit() {
+    let temp = TempDir::new().expect("temp dir");
+    let local = repository(&temp).with_capacity_limits(BackupCapacityLimits {
+        object_bytes: BackupByteLimit::Bytes(8),
+        ..BackupCapacityLimits::default()
+    });
+    create_full_backup(
+        &local,
+        &Database::with_rows("users", 1),
+        &Objects::with_object(b"12345"),
+        full_request(id(1), 1),
+    )
+    .await
+    .expect("snapshot");
+    let manifest = load_manifest(&local, id(1)).await.expect("manifest");
+    let repository = Hooked::new(local);
+    repository.grow_on_second_read(
+        manifest.objects[0].content_key.clone(),
+        Bytes::from(vec![b'x'; 4096]),
+    );
+    let sink = CollectingSink::default();
+
+    let error = restore_objects(&repository, &manifest, &sink)
+        .await
+        .expect_err("the second read grew past the limit");
+
+    assert!(
+        matches!(error, BackupError::CapacityExceeded { limit_bytes: 8 }),
+        "{error:?}"
+    );
+    assert!(sink.restored.lock().expect("sink").is_empty());
+}
+
+#[tokio::test]
+async fn write_manifest_never_overwrites_a_snapshot() {
+    let temp = TempDir::new().expect("temp dir");
+    let repository = repository(&temp);
+    full(&repository, id(1), 1, &Database::with_rows("users", 1)).await;
+    let key = snapshot_manifest_key(id(1));
+    let before = repository.get_blob(&key).await.expect("manifest");
+    let mut manifest = load_manifest(&repository, id(1)).await.expect("manifest");
+    manifest.app_version = "rewritten".to_string();
+
+    let error = write_manifest(&repository, &mut manifest)
+        .await
+        .expect_err("existing manifest");
+
+    assert!(
+        matches!(error, BackupError::SnapshotExists { snapshot_id } if snapshot_id == id(1)),
+        "{error:?}"
+    );
+    assert_eq!(repository.get_blob(&key).await.expect("manifest"), before);
 }
 
 // ---------------------------------------------------------------------------
@@ -1023,6 +1341,8 @@ struct Database {
     tables: Vec<BackupTableExport>,
     changes: Vec<BackupChangeExport>,
     schema_hash: String,
+    cancel_on_restore: Option<BackupCancellation>,
+    incremental_applies: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Database {
@@ -1036,7 +1356,18 @@ impl Database {
             }],
             changes: Vec::new(),
             schema_hash: "schema-hash".to_string(),
+            cancel_on_restore: None,
+            incremental_applies: Arc::default(),
         }
+    }
+
+    fn cancel_on_restore(mut self, cancellation: BackupCancellation) -> Self {
+        self.cancel_on_restore = Some(cancellation);
+        self
+    }
+
+    fn incremental_applies(&self) -> usize {
+        self.incremental_applies.load(Ordering::SeqCst)
     }
 
     fn with_incompressible_rows(table: &str, count: usize) -> Self {
@@ -1099,6 +1430,9 @@ impl GraphqlOrmBackupAdapter for Database {
         _export: Vec<BackupTableExport>,
         _context: RestoreContext,
     ) -> Result<(), BackupError> {
+        if let Some(cancellation) = &self.cancel_on_restore {
+            cancellation.cancel();
+        }
         Ok(())
     }
 
@@ -1107,6 +1441,7 @@ impl GraphqlOrmBackupAdapter for Database {
         _changes: Vec<BackupChangeExport>,
         _context: RestoreContext,
     ) -> Result<(), BackupError> {
+        self.incremental_applies.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 }
@@ -1115,7 +1450,9 @@ impl GraphqlOrmBackupAdapter for Database {
 struct Objects {
     objects: Vec<(BackupObjectRef, Bytes)>,
     fail_loads: bool,
-    cancel_on_load: Option<BackupCancellation>,
+    /// Cancels when this many loads have started.
+    cancel_on_load: Option<(BackupCancellation, usize)>,
+    slow_streams: bool,
     loads: std::sync::atomic::AtomicUsize,
 }
 
@@ -1151,8 +1488,14 @@ impl Objects {
         self
     }
 
-    fn cancel_on_load(mut self, cancellation: BackupCancellation) -> Self {
-        self.cancel_on_load = Some(cancellation);
+    fn cancel_on_load(mut self, cancellation: BackupCancellation, on_load: usize) -> Self {
+        self.cancel_on_load = Some((cancellation, on_load));
+        self
+    }
+
+    /// Streams that stay pending for a while, so uploads overlap.
+    fn slow_streams(mut self) -> Self {
+        self.slow_streams = true;
         self
     }
 
@@ -1179,8 +1522,10 @@ impl BackupObjectIndex for Objects {
     }
 
     async fn load_object(&self, object: &BackupObjectRef) -> Result<Bytes, BackupError> {
-        self.loads.fetch_add(1, Ordering::SeqCst);
-        if let Some(cancellation) = &self.cancel_on_load {
+        let started = self.loads.fetch_add(1, Ordering::SeqCst) + 1;
+        if let Some((cancellation, on_load)) = &self.cancel_on_load
+            && started >= *on_load
+        {
             cancellation.cancel();
         }
         if self.fail_loads {
@@ -1201,9 +1546,29 @@ impl BackupObjectIndex for Objects {
         &self,
         object: &BackupObjectRef,
     ) -> Result<StorageByteStream, BackupError> {
-        Ok(StorageByteStream::from_bytes(
-            self.load_object(object).await?,
-        ))
+        let bytes = self.load_object(object).await?;
+        if !self.slow_streams {
+            return Ok(StorageByteStream::from_bytes(bytes));
+        }
+        // Later objects stream far more slowly, so an earlier upload finishes
+        // and frees a slot while a later one is still in flight.
+        let position = self
+            .objects
+            .iter()
+            .position(|(candidate, _)| candidate.object_id == object.object_id)
+            .unwrap_or_default();
+        let yields = 20 + position * 2_000;
+        let chunks = bytes
+            .chunks(2)
+            .map(Bytes::copy_from_slice)
+            .collect::<Vec<_>>();
+        let stream = futures::stream::iter(chunks).then(move |chunk| async move {
+            for _ in 0..yields {
+                tokio::task::yield_now().await;
+            }
+            Ok(chunk)
+        });
+        Ok(StorageByteStream::new(Box::pin(stream)))
     }
 }
 
@@ -1232,6 +1597,8 @@ struct Hooked {
     prune_outcome: Mutex<Option<Result<PruneResult, BackupError>>>,
     hidden: Mutex<Option<String>>,
     fail_lock_release: AtomicBool,
+    /// Serves these bytes for a key from its second read on.
+    grown: Mutex<Option<(String, Bytes, usize)>>,
 }
 
 impl Hooked {
@@ -1242,7 +1609,12 @@ impl Hooked {
             prune_outcome: Mutex::new(None),
             hidden: Mutex::new(None),
             fail_lock_release: AtomicBool::new(false),
+            grown: Mutex::new(None),
         }
+    }
+
+    fn grow_on_second_read(&self, key: String, bytes: Bytes) {
+        *self.grown.lock().expect("hook") = Some((key, bytes, 0));
     }
 
     fn prune_on_read(&self, prefix: String) {
@@ -1306,6 +1678,14 @@ impl BackupRepository for Hooked {
 
     async fn get_blob_stream(&self, key: &str) -> Result<StorageByteStream, BackupError> {
         self.before_read(key).await;
+        if let Some((grown_key, bytes, reads)) = self.grown.lock().expect("hook").as_mut()
+            && grown_key == key
+        {
+            *reads += 1;
+            if *reads > 1 {
+                return Ok(StorageByteStream::from_bytes(bytes.clone()));
+            }
+        }
         self.inner.get_blob_stream(key).await
     }
 
@@ -1331,5 +1711,57 @@ impl BackupRepository for Hooked {
 
     async fn delete_blob(&self, key: &str) -> Result<(), BackupError> {
         self.inner.delete_blob(key).await
+    }
+}
+
+/// A repository the caller may only read, as with read-only credentials.
+struct ReadOnly(LocalBackupRepository);
+
+fn read_only_error() -> BackupError {
+    BackupError::UnsupportedOperation {
+        operation: "write to a read-only repository".to_string(),
+    }
+}
+
+#[async_trait]
+impl BackupRepository for ReadOnly {
+    fn capacity_limits(&self) -> BackupCapacityLimits {
+        self.0.capacity_limits()
+    }
+
+    fn manifest_authenticator(&self) -> Option<&ManifestAuthenticator> {
+        self.0.manifest_authenticator()
+    }
+
+    async fn put_blob(&self, _key: &str, _body: Bytes) -> Result<(), BackupError> {
+        Err(read_only_error())
+    }
+
+    async fn put_blob_if_absent(&self, _key: &str, _body: Bytes) -> Result<bool, BackupError> {
+        Err(read_only_error())
+    }
+
+    async fn get_blob(&self, key: &str) -> Result<Bytes, BackupError> {
+        self.0.get_blob(key).await
+    }
+
+    async fn get_blob_stream(&self, key: &str) -> Result<StorageByteStream, BackupError> {
+        self.0.get_blob_stream(key).await
+    }
+
+    async fn blob_exists(&self, key: &str) -> Result<bool, BackupError> {
+        self.0.blob_exists(key).await
+    }
+
+    async fn list_blobs(&self, prefix: &str) -> Result<Vec<String>, BackupError> {
+        self.0.list_blobs(prefix).await
+    }
+
+    async fn delete_blob_once(&self, _key: &str) -> Result<(), BackupError> {
+        Err(read_only_error())
+    }
+
+    async fn delete_blob(&self, _key: &str) -> Result<(), BackupError> {
+        Err(read_only_error())
     }
 }

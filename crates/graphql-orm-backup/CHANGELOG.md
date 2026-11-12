@@ -38,6 +38,16 @@ limits and stricter snapshot lifecycle checks. See [MIGRATION.md](MIGRATION.md).
   `RepositoryLocked` while another operation holds the lock; restore reports
   it as a validation-stage failure. The lock is exclusive, so these operations
   no longer run concurrently with each other or with backups.
+- Read credentials are no longer enough by default: taking the lock writes
+  `locks/repository.lock`. Read-only repositories opt out explicitly with
+  `RepositoryLockMode::AssumeNoConcurrentWriters` in the new `RestoreOptions`
+  (`restore_snapshot_with_options`, `restore_objects_with_options`) or in
+  `VerificationOptions::lock_mode`. The caller then guarantees that no prune,
+  deletion or compaction runs concurrently.
+- Restore and verification accept a `BackupCancellation`
+  (`RestoreOptions::cancellation`, `VerificationOptions::cancellation`); a
+  cancelled run stops at its next read or apply call and releases the lock.
+  Dropping a restore or verification future leaves the lock in place.
 - Lock owner records and recovery (#477): the lock blob now holds a
   `RepositoryLockOwner` record (random run id, best-effort host, process id,
   operation, optional `RepositoryLockOptions::owner_label`, acquisition time).
@@ -47,12 +57,22 @@ limits and stricter snapshot lifecycle checks. See [MIGRATION.md](MIGRATION.md).
   `min_age_seconds` old; locks without an owner record still need offline
   removal. Nothing expires automatically. `RepositoryLock::release` leaves a
   lock that no longer names its run in place and returns
-  `RepositoryLockNotHeld`.
+  `RepositoryLockNotHeld`; this narrows, but cannot close, the window after an
+  operator breaks a live run's lock, so break a lock only after stopping every
+  writer. `owner_label` is limited to `MAX_LOCK_OWNER_LABEL_BYTES` (1024)
+  bytes without control characters and refused with
+  `InvalidRepositoryLockOptions` before any write. Owner records ignore
+  unknown fields, so later releases can add fields.
 - Cancellation (#477): `BackupExecutionOptions::cancellation` takes a
   `BackupCancellation`. Cancelling it stops a backup, incremental backup or
-  compaction at its next safe point, removes its payloads, releases the lock
+  compaction at its next safe point, lets object uploads already in flight
+  finish without starting new ones, removes its payloads, releases the lock
   and returns `Cancelled`. Dropping the future still leaves the lock, now with
-  its owner record.
+  its owner record. An object upload failure likewise lets the other
+  in-flight uploads finish before the error is returned.
+- `write_manifest` never overwrites: it creates the manifest with an atomic
+  conditional write and fails with `SnapshotExists` for an existing id.
+  `write_manifest`, `load_manifest` and `load_manifest_chain` take no lock.
 - A completed operation whose lock release fails now returns
   `LockReleaseFailed`, naming the run still holding the lock and, for backups
   and compaction, the committed snapshot, instead of the bare release error.
@@ -69,7 +89,8 @@ limits and stricter snapshot lifecycle checks. See [MIGRATION.md](MIGRATION.md).
 - New `BackupCapacityLimits::object_bytes` per-object limit, unbounded by
   default. Backups enforce it on declared and streamed sizes, aborting the
   conditional create; object restore, verification and compaction refuse
-  stored objects over it.
+  stored objects over it. Object restore also caps its second, sink-facing
+  read at the limit.
 
 ## 0.13.0 (unreleased)
 

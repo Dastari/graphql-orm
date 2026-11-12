@@ -381,6 +381,9 @@ pub fn validate_manifest_entries(manifest: &BackupSnapshotManifest) -> Result<()
 /// contain no unknown fields, pass [`verify_manifest_authenticity`], and keep
 /// every entry inside its namespace.
 ///
+/// This is a low-level read that takes no repository lock; callers that need
+/// a consistent view coordinate with other operations themselves.
+///
 /// # Errors
 ///
 /// Returns [`BackupError::ManifestAuthenticationRequired`] without reading
@@ -456,6 +459,10 @@ fn canonical_manifest_bytes(manifest: &BackupSnapshotManifest) -> Result<Vec<u8>
 }
 
 /// Loads a manifest and all of its parents in restore order.
+///
+/// Like [`load_manifest`], this is a low-level read that takes no repository
+/// lock; a concurrent prune or deletion can remove a manifest between reads.
+/// Use [`crate::restore_snapshot`] or verification for locked reads.
 ///
 /// # Errors
 ///

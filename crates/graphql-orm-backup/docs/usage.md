@@ -410,17 +410,33 @@ async fn delete(
 
 ## Locking and recovery
 
-Every operation that reads or writes snapshot data takes one exclusive
-repository lock, `locks/repository.lock`: backups, compaction, `prune`,
-`delete_snapshot`, `restore_snapshot`, `restore_objects` and verification.
-A concurrent operation fails with `BackupError::RepositoryLocked`, which
-carries the holder's `RepositoryLockOwner` record: run id, host, process id,
-operation, optional label and acquisition time. Retry after the holder ends.
+The orchestration functions take one exclusive repository lock,
+`locks/repository.lock`: backups, compaction, `prune`, `delete_snapshot`,
+`restore_snapshot`, `restore_objects` and verification. A concurrent one
+fails with `BackupError::RepositoryLocked`, which carries the holder's
+`RepositoryLockOwner` record: run id, host, process id, operation, optional
+label and acquisition time. Retry after the holder ends.
 
-Cancel a backup, incremental backup or compaction with the
-`BackupCancellation` in `BackupExecutionOptions`. The run stops at its next
-safe point, removes its payloads, releases the lock and returns `Cancelled`.
-Dropping the future cannot release the lock. A crashed or dropped run leaves
+The low-level `load_manifest`, `load_manifest_chain` and `write_manifest`
+take no lock; callers coordinate them. `write_manifest` never overwrites: an
+existing snapshot id fails with `SnapshotExists`.
+
+Taking the lock needs write access. For read-only credentials, replicas or
+mounts, pass `RepositoryLockMode::AssumeNoConcurrentWriters` in
+`RestoreOptions` (`restore_snapshot_with_options`,
+`restore_objects_with_options`) or `VerificationOptions`. This asserts that no
+prune, snapshot deletion or compaction runs meanwhile; nothing checks it. If
+one does, it can delete blobs mid-read: digests still stop substituted data,
+but the operation fails part-way, after a database restore may have applied
+earlier stages or an object restore may have written earlier objects.
+
+Cancel with a `BackupCancellation`: in `BackupExecutionOptions` for backups,
+incremental backups and compaction, in `RestoreOptions` for restores, and in
+`VerificationOptions` for verification. A writer stops at its next safe point,
+lets object uploads already in flight finish, removes its payloads, releases
+the lock and returns `Cancelled`. Restore and verification stop before their
+next read or apply call and release the lock. Use cancellation for host-side
+timeouts: dropping the future cannot release the lock. A crashed or dropped run leaves
 the lock and its owner record. Nothing expires automatically, because a slow
 holder could still be writing. To recover:
 
