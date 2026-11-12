@@ -309,7 +309,6 @@ fn grant_key() -> HookGrantKey {
 fn grant_update() -> UpdateHookGrantInput {
     UpdateHookGrantInput {
         status: Some("after".to_string()),
-        ..Default::default()
     }
 }
 
