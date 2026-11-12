@@ -24,6 +24,13 @@ for historical context.
 
 - AI 0.128.0: **breaking:** enforce AI runtime closure after a snapshot restore. The runtime start gate opens only with a proof minted from a store's live recovery epoch (AI schema module `0.77.0`), and leases are bound to that epoch. Worker claims, lease-fenced writes and approval consumption refuse while the epoch is not live. A restored store stays closed until `OrmAiRuntimeRecoveryService::reconcile_restore` expires its approvals, revokes its egress consents and moves unfinished runs to `RecoveryRequired`, and an operator acknowledges the reviewed result. An existing deployment upgraded in place opens once the operator calls `acknowledge_in_place_upgrade`, which leaves its work unchanged. Restore facts now decode strictly. See the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01270-to-01280-enforced-runtime-closure-after-restore).
 
+## 0.126.0
+
+ORM runtime/macros **0.126.0**.
+
+- **Feature:** a `#[graphql(complex)]` `SimpleObject` entity with typed computed fields and no relation fields can declare `node_id` and a managed version. Mark it `#[graphql_orm(compose_complex_object)]` and put the handwritten fields under `#[graphql_complex_object]`; `GraphQLEntity` then mounts the generated `NodeId` and `RecordVersion` beside them, with the same encoding, `@key(fields: "NodeId")` and `Changed` snapshot rules as a generated object; `RecordVersion` checks the managed column's read policy. The `SimpleObject` scalar fields of this shape apply column read policies only with `#[graphql_policy_object]`, as before. `GraphQLRelations` is no longer needed for this, and deriving it on such an entity adds nothing. `node_id` on a plain `#[ComplexObject]` entity is still refused, now with a diagnostic that names the composed declaration instead of a missing hidden constant; a `compose_complex_object` entity with `node_id` but no `#[graphql_complex_object]` impl is refused too, so the `NodeId` key is never declared without its field. Fixes #395.
+- **Breaking:** a `#[graphql_complex_object]` resolver or derived field named `NodeId`, or `RecordVersion` on an entity with a managed version, is a compile error; it was served in place of the generated field. Remove it. Struct and derived struct fields with these names are refused the same way, and `name` and `rename_fields` values in a composed impl must be string literals. The generated fields are now mounted ahead of handwritten composed fields, including flattened ones, and remain the advertised definitions. A `compose_complex_object` entity with relations and `node_id` whose impl uses plain `#[ComplexObject]` is also a compile error now; use `#[graphql_complex_object]`. See the 0.126.0 migration guide.
+
 ## 0.125.0
 
 ORM runtime/macros **0.125.0**.

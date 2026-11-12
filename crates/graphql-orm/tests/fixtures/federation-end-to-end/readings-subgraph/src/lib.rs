@@ -99,9 +99,21 @@ impl Reading {
 
 /// A sensor whose `id` deliberately collides with a `Zone` id in the zones
 /// subgraph: the type in the `NodeId` keeps the two records apart.
+///
+/// It is a complex `SimpleObject` with a typed computed field and no
+/// relations: the composed object still serves the generated `NodeId`.
 #[derive(
-    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
+    GraphQLEntity,
+    GraphQLOperations,
+    SimpleObject,
+    serde::Serialize,
+    serde::Deserialize,
+    Clone,
+    Debug,
+    PartialEq,
 )]
+#[graphql(complex)]
+#[graphql_orm(compose_complex_object)]
 #[cfg_attr(
     feature = "sqlite",
     graphql_entity(backend = "sqlite", table = "sensors", plural = "Sensors", node_id)
@@ -127,6 +139,22 @@ pub struct Sensor {
     pub id: String,
 
     pub name: String,
+}
+
+/// A typed value computed from a `Sensor` column.
+#[derive(SimpleObject, Clone, Debug)]
+pub struct SensorLabel {
+    pub words: Vec<String>,
+}
+
+#[graphql_complex_object]
+impl Sensor {
+    /// A typed computed field beside the generated `NodeId`.
+    async fn name_words(&self) -> SensorLabel {
+        SensorLabel {
+            words: self.name.split_whitespace().map(str::to_string).collect(),
+        }
+    }
 }
 
 /// A composite-key entity: its `NodeId` encodes both key parts in order.

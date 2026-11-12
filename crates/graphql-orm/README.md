@@ -10,6 +10,12 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.126.0 serves the generated `NodeId` and `RecordVersion` on a
+`#[graphql(complex)]` entity with typed computed fields and no relations,
+through `compose_complex_object` and `#[graphql_complex_object]`. A handwritten
+composed resolver that would shadow either field is now a compile error; see the
+[root migration guide](../../MIGRATION.md#01250-to-01260-nodeid-on-complex-objects-with-computed-fields).
+
 Version 0.125.0 records PostgreSQL change-journal entries in the database
 instead of the runtime role, and journaled writes require the recorder
 trigger. Upgrade ORM/macros together; see the

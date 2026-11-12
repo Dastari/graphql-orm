@@ -2206,6 +2206,18 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                                 .iter()
                                 .any(|name| option.path().is_ident(name))
                         });
+                        // Read `name` wherever it appears; the nested parse
+                        // below stops at the first option it does not consume.
+                        for option in &options {
+                            if let syn::Meta::NameValue(value) = option
+                                && value.path.is_ident("name")
+                            {
+                                meta.graphql_name = Some(crate::composed_identity::string_literal(
+                                    &value.value,
+                                    "name",
+                                )?);
+                            }
+                        }
                     }
                     let _ = attr.parse_nested_meta(|nested| {
                         if nested.path.is_ident("name") {
@@ -3238,11 +3250,15 @@ pub(crate) fn generate_graphql_entity(
     generate_entity_impl(input, false, false)
 }
 
-/// Reuse the generated identity resolvers inside the relation-owned complex object.
+/// Reuse the generated identity resolvers inside a composed complex object.
+///
+/// Returns the resolvers and the GraphQL names of the fields they serve.
 pub(crate) fn generate_complex_identity_fields(
     input: &DeriveInput,
-) -> syn::Result<proc_macro2::TokenStream> {
-    generate_entity_impl(input, false, true)
+) -> syn::Result<(proc_macro2::TokenStream, Vec<&'static str>)> {
+    let mut names = Vec::new();
+    let fields = generate_entity_tokens(input, false, Some(&mut names))?;
+    Ok((fields, names))
 }
 
 /// Require the operations derive whenever a Federation key is declared.
@@ -3288,6 +3304,21 @@ fn generate_entity_impl(
     schema_only_override: bool,
     identity_only: bool,
 ) -> syn::Result<proc_macro2::TokenStream> {
+    let mut names = Vec::new();
+    generate_entity_tokens(
+        input,
+        schema_only_override,
+        identity_only.then_some(&mut names),
+    )
+}
+
+/// With `identity_names`, return only the identity resolvers and record their names.
+fn generate_entity_tokens(
+    input: &DeriveInput,
+    schema_only_override: bool,
+    identity_names: Option<&mut Vec<&'static str>>,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let identity_only = identity_names.is_some();
     let struct_name = &input.ident;
     let entity_meta = parse_entity_metadata(&input.attrs)?;
     let backend = resolve_backend(
@@ -3751,6 +3782,7 @@ fn generate_entity_impl(
     let mut order_by_rust_names = std::collections::BTreeSet::new();
     let mut object_field_methods = Vec::new();
     let mut identity_field_methods = Vec::new();
+    let mut identity_field_names = Vec::new();
     // GraphQL name of the managed record version field, also served as
     // `RecordVersion`; none for CAS-only versions and unversioned entities.
     let mut managed_version_api_name: Option<String> = None;
@@ -5236,6 +5268,7 @@ fn generate_entity_impl(
                 };
                 object_field_methods.push(method.clone());
                 identity_field_methods.push(method);
+                identity_field_names.push(RECORD_VERSION_FIELD);
             }
         }
 
@@ -5528,12 +5561,14 @@ fn generate_entity_impl(
         let method = crate::federation::node_id_field_tokens(&struct_name_str, &parts);
         object_field_methods.push(method.clone());
         identity_field_methods.push(method);
+        identity_field_names.push("NodeId");
         subscription_field_policy_arms.push(quote! {
             "NodeId" => Some(("__gom_node_id", true, None)),
         });
     }
 
-    if identity_only {
+    if let Some(names) = identity_names {
+        names.extend(identity_field_names);
         return Ok(quote! { #(#identity_field_methods)* });
     }
 
@@ -5541,10 +5576,100 @@ fn generate_entity_impl(
         Some(name) if !schema_only => quote! { Some(#name) },
         _ => quote! { None },
     };
-    let object_impl = if legacy_graphql_complex && entity_meta.node_id.is_some() {
+    // Reported beside the expansion so one misnamed field is the only error.
+    let identity_field_error = crate::composed_identity::check_struct_fields(
+        &parsed_fields,
+        externally_owned_object,
+        graphql_rename_fields,
+        serde_rename_all,
+        entity_meta.node_id.is_some(),
+        managed_version_api_name.is_some(),
+    )
+    .err()
+    .map(|error| error.to_compile_error());
+    // `GraphQLSchemaEntity` has no generated object, but a relation-less composed
+    // entity still needs its composed object, which `GraphQLRelations` leaves to
+    // the entity derive.
+    let schema_entity_composed = if schema_only_override
+        && !entity_meta.schema_only
+        && crate::relations::entity_owns_composed_object(
+            legacy_graphql_complex,
+            &entity_meta,
+            &parsed_fields,
+        ) {
+        let (identity_fields, identity_names) = generate_complex_identity_fields(input)?;
+        if identity_names.is_empty() {
+            quote! {}
+        } else {
+            let composed =
+                crate::relations::composed_object_tokens(input, identity_fields, &identity_names);
+            quote! {
+                #composed
+
+                impl #struct_name {
+                    #[doc(hidden)]
+                    pub fn __gom_generated_relation_fields() -> &'static [&'static str] {
+                        &[]
+                    }
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+    // A composed object reaches the schema only through `#[graphql_complex_object]`,
+    // whichever derive emits it, so a declared key needs that impl too.
+    let composed_mounted = if !schema_only
+        && legacy_graphql_complex
+        && entity_meta.compose_complex_object
+        && entity_meta.node_id.is_some()
+    {
+        quote! {
+            const _: () = {
+                const fn assert_mounted<
+                    T: ::graphql_orm::graphql::orm::GeneratedComplexObjectMounted,
+                >() {}
+                assert_mounted::<#struct_name>();
+            };
+        }
+    } else {
+        quote! {}
+    };
+    let object_impl = if !schema_only
+        && !identity_field_methods.is_empty()
+        && crate::relations::entity_owns_composed_object(
+            legacy_graphql_complex,
+            &entity_meta,
+            &parsed_fields,
+        ) {
+        // No relation resolvers exist, so mount the identity fields here for
+        // `#[graphql_complex_object]` to flatten beside the handwritten ones.
+        let (identity_fields, identity_names) = generate_complex_identity_fields(input)?;
+        let composed =
+            crate::relations::composed_object_tokens(input, identity_fields, &identity_names);
+        quote! {
+            #composed
+            #composed_mounted
+
+            impl #struct_name {
+                #[doc(hidden)]
+                pub fn __gom_generated_relation_fields() -> &'static [&'static str] {
+                    &[]
+                }
+            }
+        }
+    } else if legacy_graphql_complex && entity_meta.node_id.is_some() {
         // The relation derive owns the ComplexObject implementation. Require it
         // rather than accepting a resolvable key whose field was never emitted.
-        quote! { const _: () = #struct_name::__GOM_COMPLEX_IDENTITY_FIELDS; }
+        quote! {
+            const _: () = {
+                const fn assert_mounted<
+                    T: ::graphql_orm::graphql::orm::GeneratedComplexIdentityFields,
+                >() {}
+                assert_mounted::<#struct_name>();
+            };
+            #composed_mounted
+        }
     } else if schema_only || legacy_graphql_complex {
         quote! {}
     } else {
@@ -5559,6 +5684,8 @@ fn generate_entity_impl(
 
     if schema_only {
         return Ok(quote! {
+            #schema_entity_composed
+            #identity_field_error
             #relation_readability_impl
             #(#relation_target_checks)*
             #rls_impl
@@ -5804,6 +5931,7 @@ fn generate_entity_impl(
         }
 
         #object_impl
+        #identity_field_error
 
         impl ::graphql_orm::graphql::orm::DatabaseOrderBy for #order_by_name {
             fn to_sql_order(&self) -> Option<String> {

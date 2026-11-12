@@ -24,7 +24,7 @@ does not.
 | `GraphQLSchemaEntity` | schema/entity metadata for validation and planning | you need GraphQL or repository operations |
 | `RepositoryEntity` | typed repository CRUD, filters, ordering, projections, and Rust write inputs | you need generated `async-graphql` types or resolvers |
 | `GraphQLRelations` | relation resolver/loading implementations | the struct has no relation fields |
-| `graphql_complex_object` | handwritten `ComplexObject` fields composed with generated relation fields | the entity does not opt into complex-object composition |
+| `graphql_complex_object` | handwritten `ComplexObject` fields composed with generated relation, `NodeId` and `RecordVersion` fields | the entity does not opt into complex-object composition |
 | `GraphQLOperations` | generated query, mutation, and subscription operation types plus discovery descriptors | the entity uses `#[repository_entity(...)]` |
 | `schema_roots!` | `QueryRoot`, `MutationRoot`, `SubscriptionRoot`, `AppSchema`, schema builders, schema metadata helpers, and operation/semantic catalogs | no generated operation types participate in the schema |
 | `graphql_orm_custom_operations` | canonical semantic metadata beside one handwritten `async-graphql` root impl | the impl is not actually composed into the finished schema |
@@ -88,7 +88,7 @@ schema/search metadata.
 | --- | --- | --- |
 | `search` | `(index = bool, language = "…", tokenizer = "…", min_token_len = integer, fallback = "enabled" | "disabled")` | defaults are supplied by the runtime; only these keys are accepted |
 | `order_expression` | `(name = "GraphQLField", expression = "trusted SQL expression", parameters = "server_function_path")` | repeatable; `parameters` is required only when the expression contains `:named` binds; the client supplies only `ASC` or `DESC`; raw placeholders, comments, and statement separators are rejected |
-| `compose_complex_object` | marker | use with `GraphQLRelations`, `#[graphql(complex)]`, and `#[graphql_complex_object]` on the handwritten inherent impl |
+| `compose_complex_object` | marker | use with `#[graphql(complex)]` and `#[graphql_complex_object]` on the handwritten inherent impl; `GraphQLRelations` is needed only for relation fields |
 | `conditional_index` | `(name = "…", columns = ["…"], unique = bool, predicate_field = "…", predicate_values = ["…"])` | `columns`, `predicate_field`, and nonempty `predicate_values` are required |
 | `projection` | `(name = "TypeName", fields = [field, …], private = true)` | all three facts are required; public projections are rejected |
 | `operation_authorization` | described below | consumed by `GraphQLOperations` |
@@ -447,9 +447,63 @@ relations through an internal flattened object, so handwritten fields and
 batched relation resolvers share the one `async_graphql::ComplexObject` trait
 implementation required by `SimpleObject`.
 
-Composed objects also include the generated identity fields. Existing handwritten
-`RecordVersion` resolvers remain compatible, but equivalent resolvers can be removed.
-The declared managed column controls subscription preflight policy.
+Composed objects also include the generated identity fields, and these always
+win: `graphql_complex_object` mounts the generated object ahead of the handwritten
+fields, so it resolves first, and again after them, so its definitions are the
+advertised ones. A handwritten field that names a generated identity field
+(`NodeId`, or `RecordVersion` for a managed version) is a compile error, and so is
+a struct field or derived struct field with such a name, because `SimpleObject`
+resolves its own fields before complex ones. The published name follows
+async-graphql: an explicit `#[graphql(name = "…")]` is used as written and also
+names every `derived(...)` copy. Otherwise the identifier, or a derived copy's
+`derived(name = "…")`, is renamed by `rename_fields` (the impl's for methods, the
+struct's for struct fields, camelCase by default); the `field-case-*` features do
+not apply. Derived copies of a skipped struct field are still published. Names
+must be string literals, also when passed through `macro_rules!`. Remove such
+fields. The declared managed column controls subscription preflight
+policy.
+
+An entity whose handwritten fields are typed computed values, with no relation
+fields, uses the same layout without `GraphQLRelations`. `GraphQLEntity` then
+mounts `NodeId` and `RecordVersion` itself, with the same encoding,
+`@key(fields: "NodeId")` and `Changed` snapshot rules as a generated object.
+`RecordVersion` checks the managed column's read policy. Deriving
+`GraphQLRelations` on it as well is accepted and adds nothing.
+
+The scalar fields of this shape come from `SimpleObject`, which applies no ORM
+column read policy. When any column declares `read_policy`, or the database has a
+field policy, place `#[graphql_orm::graphql_policy_object]` before the derives so
+every scalar field is checked too. Skipping the managed version column with
+`#[graphql(skip)]` instead also removes `RecordVersion`.
+
+```rust,ignore
+#[graphql_orm::graphql_policy_object]
+#[derive(GraphQLEntity, GraphQLOperations, SimpleObject, Clone)]
+#[graphql(complex)]
+#[graphql_orm(compose_complex_object)]
+#[graphql_entity(table = "records", plural = "Records", node_id)]
+struct Record {
+    #[primary_key]
+    id: String,
+    scope_json: String,
+    #[graphql_orm(version = "managed", default = "0", read_policy = "version.read")]
+    version: i64,
+}
+
+#[graphql_complex_object]
+impl Record {
+    async fn scope(&self) -> async_graphql::Result<TypedScope> {
+        Ok(serde_json::from_str(&self.scope_json)?)
+    }
+}
+```
+
+A plain `#[ComplexObject]` impl is the entire complex object, so nothing can add
+`NodeId` to it: `node_id` on such an entity is a compile error that names this
+composed declaration. `compose_complex_object` with `node_id` is also a compile
+error when no `#[graphql_complex_object]` impl mounts the composed object, whether
+`GraphQLEntity` or `GraphQLRelations` emits it. `tests/node_id_complex_object.rs`
+covers the layout.
 
 Polymorphic references can add one fixed discriminator condition:
 
@@ -919,8 +973,9 @@ type Ticket {
   availability. Generated `Changed` payloads may select it.
 - It has no column and no input, filter, order or aggregate entry.
 - CAS-only `version` fields and repository-only and schema-only entities do not get it.
-  Complex entities deriving `GraphQLRelations` receive it through their relation object;
-  standalone handwritten complex objects still need their own resolver.
+  Complex entities deriving `GraphQLRelations`, and `compose_complex_object` entities, receive it
+  through their composed object, where a handwritten `RecordVersion` resolver is a compile error.
+  A plain handwritten `#[ComplexObject]` without `GraphQLRelations` still needs its own resolver.
 - A field whose GraphQL name is `RecordVersion` on an entity with a managed version is a compile
   error.
 

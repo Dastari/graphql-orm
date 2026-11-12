@@ -187,6 +187,7 @@ use syn::{
 };
 
 mod backend;
+mod composed_identity;
 mod custom_operations;
 mod entity;
 mod federation;
@@ -527,11 +528,13 @@ pub fn derive_graphql_relations(input: TokenStream) -> TokenStream {
 }
 
 #[proc_macro_attribute]
-/// Compose handwritten complex fields with resolvers emitted by `GraphQLRelations`.
+/// Compose handwritten complex fields with generated relation and identity fields.
 ///
 /// Apply this to the handwritten inherent `impl` in place of
 /// `async_graphql::ComplexObject`, and mark the entity with
-/// `#[graphql_orm(compose_complex_object)]`.
+/// `#[graphql_orm(compose_complex_object)]`. Relation fields come from
+/// `GraphQLRelations`; on an entity without relation fields, `GraphQLEntity`
+/// supplies the generated `NodeId` and `RecordVersion` instead.
 pub fn graphql_complex_object(args: TokenStream, input: TokenStream) -> TokenStream {
     let args = proc_macro2::TokenStream::from(args);
     let mut item_impl = parse_macro_input!(input as syn::ItemImpl);
@@ -552,20 +555,42 @@ pub fn graphql_complex_object(args: TokenStream, input: TokenStream) -> TokenStr
         .into();
     }
     if item_impl.items.iter().any(|item| {
-        matches!(item, syn::ImplItem::Fn(method) if method.sig.ident == "__graphql_orm_generated_relations")
+        matches!(item, syn::ImplItem::Fn(method) if method.sig.ident == "__graphql_orm_generated_relations" || method.sig.ident == "__graphql_orm_generated_registration")
     }) {
         return syn::Error::new_spanned(
             &item_impl,
-            "graphql_complex_object reserves __graphql_orm_generated_relations",
+            "graphql_complex_object reserves __graphql_orm_generated_relations and __graphql_orm_generated_registration",
         )
         .to_compile_error()
         .into();
     }
 
     let self_ty = item_impl.self_ty.clone();
+    // Report an unreadable name beside the expansion, so it is the only error.
+    let shadow_checks = match composed_identity::shadow_checks(&args, &item_impl, &self_ty) {
+        Ok(checks) => checks,
+        Err(error) => vec![error.to_compile_error()],
+    };
+    // async-graphql resolves complex fields in declaration order and registers
+    // them by extending one field map, so a later definition replaces an earlier
+    // one. Mount the generated object first, so its policy-checked fields always
+    // resolve before any handwritten one, and again last, so its definitions are
+    // the advertised ones. The trailing copy only runs for unmatched fields.
+    item_impl.items.insert(
+        0,
+        syn::parse_quote! {
+            #[graphql(flatten)]
+            async fn __graphql_orm_generated_relations(
+                &self,
+            ) -> <#self_ty as ::graphql_orm::graphql::orm::GeneratedRelationsObject>::Object<'_> {
+                <#self_ty as ::graphql_orm::graphql::orm::GeneratedRelationsObject>
+                    ::generated_relations_object(self)
+            }
+        },
+    );
     item_impl.items.push(syn::parse_quote! {
         #[graphql(flatten)]
-        async fn __graphql_orm_generated_relations(
+        async fn __graphql_orm_generated_registration(
             &self,
         ) -> <#self_ty as ::graphql_orm::graphql::orm::GeneratedRelationsObject>::Object<'_> {
             <#self_ty as ::graphql_orm::graphql::orm::GeneratedRelationsObject>
@@ -600,6 +625,9 @@ pub fn graphql_complex_object(args: TokenStream, input: TokenStream) -> TokenStr
         #attribute
         #item_impl
         #output_witness
+        #(#shadow_checks)*
+
+        impl ::graphql_orm::graphql::orm::GeneratedComplexObjectMounted for #self_ty {}
     }
     .into()
 }

@@ -1,0 +1,81 @@
+error: Unexpected type `path`
+  --> tests/ui/node_id_complex_object_invalid_attrs.rs:28:22
+   |
+28 |     #[graphql(name = FIELD)]
+   |                      ^^^^^
+
+error: `name` requires a string literal
+  --> tests/ui/node_id_complex_object_invalid_attrs.rs:28:22
+   |
+28 |     #[graphql(name = FIELD)]
+   |                      ^^^^^
+
+error: expected `,`
+  --> tests/ui/node_id_complex_object_invalid_attrs.rs:36:30
+   |
+36 |     #[graphql(name = "label" "extra")]
+   |                              ^^^^^^^
+
+error: graphql_complex_object could not read this #[graphql(...)] attribute: expected `,`
+  --> tests/ui/node_id_complex_object_invalid_attrs.rs:36:30
+   |
+36 |     #[graphql(name = "label" "extra")]
+   |                              ^^^^^^^
+
+error[E0277]: the trait bound `Constant: async_graphql::ComplexObject` is not satisfied
+  --> tests/ui/node_id_complex_object_invalid_attrs.rs:8:52
+   |
+ 8 |         #[derive(GraphQLEntity, GraphQLOperations, SimpleObject, Clone, Debug, serde::Serialize, serde::Deserialize)]
+   |                                                    ^^^^^^^^^^^^ unsatisfied trait bound
+...
+21 | entity!(Constant, "constant_records", "ConstantRows");
+   | ----------------------------------------------------- in this macro invocation
+   |
+help: the trait `async_graphql::ComplexObject` is not implemented for `Constant`
+  --> tests/ui/node_id_complex_object_invalid_attrs.rs:12:9
+   |
+12 | /         struct $name {
+13 | |             #[primary_key]
+14 | |             #[sortable]
+15 | |             id: String,
+16 | |             name: String,
+17 | |         }
+   | |_________^
+...
+21 |   entity!(Constant, "constant_records", "ConstantRows");
+   |   ----------------------------------------------------- in this macro invocation
+help: the trait `async_graphql::ComplexObject` is implemented for `async_graphql::connection::Edge<Cursor, Node, EdgeFields, Name>`
+  --> $CARGO/async-graphql-$VERSION/src/types/connection/edge.rs
+   |
+   | #[ComplexObject(internal)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: this error originates in the derive macro `SimpleObject` which comes from the expansion of the attribute macro `ComplexObject` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `Malformed: async_graphql::ComplexObject` is not satisfied
+  --> tests/ui/node_id_complex_object_invalid_attrs.rs:8:52
+   |
+ 8 |         #[derive(GraphQLEntity, GraphQLOperations, SimpleObject, Clone, Debug, serde::Serialize, serde::Deserialize)]
+   |                                                    ^^^^^^^^^^^^ unsatisfied trait bound
+...
+22 | entity!(Malformed, "malformed_records", "MalformedRows");
+   | -------------------------------------------------------- in this macro invocation
+   |
+help: the trait `async_graphql::ComplexObject` is not implemented for `Malformed`
+  --> tests/ui/node_id_complex_object_invalid_attrs.rs:12:9
+   |
+12 | /         struct $name {
+13 | |             #[primary_key]
+14 | |             #[sortable]
+15 | |             id: String,
+16 | |             name: String,
+17 | |         }
+   | |_________^
+...
+22 |   entity!(Malformed, "malformed_records", "MalformedRows");
+   |   -------------------------------------------------------- in this macro invocation
+help: the trait `async_graphql::ComplexObject` is implemented for `async_graphql::connection::Edge<Cursor, Node, EdgeFields, Name>`
+  --> $CARGO/async-graphql-$VERSION/src/types/connection/edge.rs
+   |
+   | #[ComplexObject(internal)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: this error originates in the derive macro `SimpleObject` which comes from the expansion of the attribute macro `ComplexObject` (in Nightly builds, run with -Z macro-backtrace for more info)
