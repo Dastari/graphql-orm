@@ -161,6 +161,7 @@ fn router_child_entrypoint() {
                     )
                     .with_admin(
                         AdminConfig::new(admin_address, network)
+                            .with_authentication_provider(Arc::new(TestAuthenticationProvider))
                             .trust_subgraph(trusted)
                             .with_max_request_body_bytes(256),
                     );
@@ -1001,6 +1002,24 @@ fn authenticated_admin_registration_binds_identity_destinations_and_restart_stat
     )
     .unwrap();
     assert_eq!(duplicate.status, 403);
+
+    // Static configuration belongs to the operator; the administrative
+    // surface may remove only process-local dynamic registrations.
+    let static_removal = raw_http(
+        admin_address,
+        "DELETE",
+        "/_router/subgraphs/products",
+        &[("authorization", "Bearer admin")],
+        None,
+    )
+    .unwrap();
+    assert_eq!(static_removal.status, 409);
+    let static_still_served = router.graphql_at(
+        "/api/graphql",
+        json!({"query": "query { product(id: \"p1\") { id reviews { body } } }"}),
+        &[("authorization", "Bearer product-events")],
+    );
+    assert_eq!(static_still_served["data"]["product"]["id"], "p1");
 
     let removed = raw_http(
         admin_address,

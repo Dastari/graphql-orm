@@ -9,7 +9,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, jwk::Jwk};
+use jsonwebtoken::{
+    Algorithm, EncodingKey, Header, encode,
+    jwk::{Jwk, JwkSet},
+};
 use serde_json::{Value as JsonValue, json};
 
 #[cfg(feature = "auth-agql")]
@@ -953,4 +956,142 @@ fn complete_signed_catalogue_over_one_mib_is_verified_with_finite_body_limits() 
         AuthenticationErrorKind::Unavailable
     );
     assert!(invalid.authenticate_bearer(&credential).is_err());
+}
+
+fn rsa_jwk(kid: &str) -> JsonValue {
+    serde_json::from_str::<JsonValue>(&jwks(kid)).unwrap()["keys"][0].clone()
+}
+
+/// Waits inside a runtime so a background JWKS refresh can run to completion.
+fn authenticate_then_settle(
+    provider: &JwksAuthenticationProvider,
+    fixture: &JwksFixture,
+    token: &str,
+    expected_requests: usize,
+) -> Result<AuthenticatedPrincipal, AuthenticationError> {
+    let provider = provider.clone();
+    let token = token.to_owned();
+    let requests = fixture.requests.clone();
+    ntex::rt::System::build()
+        .name("jwks-unknown-key-test")
+        .build(ntex::rt::DefaultRuntime)
+        .block_on(async move {
+            let result = provider.authenticate_bearer(&token);
+            for _ in 0..250 {
+                if requests.load(Ordering::Relaxed) >= expected_requests {
+                    break;
+                }
+                hive_router::tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            // Let the refresh publish its keys, or an unrequested one show up.
+            hive_router::tokio::time::sleep(Duration::from_millis(50)).await;
+            result
+        })
+}
+
+#[test]
+fn jwks_document_with_unusable_keys_keeps_its_usable_rs256_keys() {
+    let mut encryption = rsa_jwk("encryption-key");
+    encryption["use"] = json!("enc");
+    let mut without_id = rsa_jwk("unused");
+    without_id.as_object_mut().unwrap().remove("kid");
+    let document = json!({
+        "keys": [
+            // RFC 7517 appendix A.1 elliptic-curve public key.
+            {
+                "kty": "EC", "crv": "P-256", "use": "sig", "kid": "ec-key",
+                "x": "MKBCTNIcKUSDii11ySs3526iDZ8AiTo7Tu6KPAqv7D4",
+                "y": "4Etl6SRW2YiLUrN5vfvVHuhp7x8PxltmWWlbbM4IFyM"
+            },
+            encryption,
+            without_id,
+            { "kty": "future-key-type", "kid": "future-key" },
+            rsa_jwk("key-a"),
+        ]
+    });
+    let fixture = JwksFixture::start(document.to_string());
+    let clock = Arc::new(TestClock::at(1_000));
+    let provider = provider(&fixture, clock, LegacyScopeClaims::Reject);
+    initialize(&provider).unwrap();
+    provider
+        .authenticate_bearer(&token("key-a", claims(1_100)))
+        .unwrap();
+    assert_eq!(
+        provider
+            .authenticate_bearer(&token("encryption-key", claims(1_100)))
+            .unwrap_err()
+            .kind(),
+        AuthenticationErrorKind::InvalidCredential
+    );
+
+    // A document with no usable key still fails closed, preserving the
+    // previous complete key set.
+    fixture.replace(
+        json!({"keys": [{
+            "kty": "EC", "crv": "P-256", "kid": "ec-key",
+            "x": "MKBCTNIcKUSDii11ySs3526iDZ8AiTo7Tu6KPAqv7D4",
+            "y": "4Etl6SRW2YiLUrN5vfvVHuhp7x8PxltmWWlbbM4IFyM"
+        }]})
+        .to_string(),
+    );
+    assert_eq!(
+        refresh(&provider).unwrap_err().kind(),
+        AuthenticationErrorKind::Unavailable
+    );
+    provider
+        .authenticate_bearer(&token("key-a", claims(1_100)))
+        .unwrap();
+
+    // Two usable keys under one ID stay ambiguous and fail closed.
+    fixture.replace(json!({"keys": [rsa_jwk("key-a"), rsa_jwk("key-a")]}).to_string());
+    assert_eq!(
+        refresh(&provider).unwrap_err().kind(),
+        AuthenticationErrorKind::Unavailable
+    );
+}
+
+#[test]
+fn unknown_key_id_requests_a_rate_limited_jwks_refresh() {
+    let fixture = JwksFixture::start(jwks("key-a"));
+    let clock = Arc::new(TestClock::at(2_000));
+    let config =
+        JwksAuthenticationConfig::new(fixture.url(), "https://issuer.test", ["graphql-router"])
+            .unwrap()
+            .with_cache_ttl(Duration::from_secs(600))
+            .with_refresh_interval(Duration::from_secs(300))
+            .with_clock(clock.clone())
+            .allow_insecure_loopback_http_for_development(true);
+    let provider = JwksAuthenticationProvider::new(config).unwrap();
+    initialize(&provider).unwrap();
+    assert_eq!(fixture.requests.load(Ordering::Relaxed), 1);
+
+    // The issuer rotates before the scheduled refresh. The first bearer that
+    // names the new key is refused, and asks for one background refresh.
+    fixture.replace(json!({"keys": [rsa_jwk("key-a"), rsa_jwk("key-b")]}).to_string());
+    let rotated = token("key-b", claims(3_000));
+    assert_eq!(
+        authenticate_then_settle(&provider, &fixture, &rotated, 2)
+            .unwrap_err()
+            .kind(),
+        AuthenticationErrorKind::InvalidCredential
+    );
+    assert_eq!(fixture.requests.load(Ordering::Relaxed), 2);
+    provider.authenticate_bearer(&rotated).unwrap();
+
+    // Unknown IDs inside the cooldown do not reach the issuer again.
+    let forged = token("forged-key", claims(3_000));
+    for _ in 0..3 {
+        assert_eq!(
+            authenticate_then_settle(&provider, &fixture, &forged, 2)
+                .unwrap_err()
+                .kind(),
+            AuthenticationErrorKind::InvalidCredential
+        );
+    }
+    assert_eq!(fixture.requests.load(Ordering::Relaxed), 2);
+
+    // After the default 30-second cooldown one more unknown ID may refresh.
+    clock.set(2_030);
+    assert!(authenticate_then_settle(&provider, &fixture, &forged, 3).is_err());
+    assert_eq!(fixture.requests.load(Ordering::Relaxed), 3);
 }

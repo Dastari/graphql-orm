@@ -11,7 +11,7 @@ use agql_auth::{HierarchicalScopeMatch, HierarchicalScopeOptions};
 #[cfg(feature = "auth-agql")]
 use crate::AgqlScopeMatcher;
 use crate::{
-    AdminConfig, ByteRoute, ExactScopeMatcher, JwksAuthenticationConfig,
+    AdminConfig, AuthenticationProvider, ByteRoute, ExactScopeMatcher, JwksAuthenticationConfig,
     JwksAuthenticationProvider, LegacyScopeClaims, NetworkCidr, NetworkPolicy, NodeLookupConfig,
     RequestLimits, RoleScopeCatalogueConfig, RouterConfig, RouterError, RouterErrorKind,
     RouterLogLevel, RouterTelemetryConfig, StaticSubgraph, SubscriptionConfig, TrustedSubgraph,
@@ -35,6 +35,10 @@ pub struct RouterFileConfig {
     anonymous_development: bool,
     #[serde(default)]
     introspection: bool,
+    #[serde(default)]
+    allow_plaintext_http: bool,
+    #[serde(default)]
+    use_environment_proxy: bool,
     authentication: Option<FileAuthentication>,
     scope_matcher: Option<FileScopeMatcher>,
     subgraphs: Vec<FileSubgraph>,
@@ -101,89 +105,14 @@ impl RouterFileConfig {
         let mut config = RouterConfig::builder(listener)
             .with_graphql_path(self.graphql_path)
             .allow_anonymous_development(self.anonymous_development)
-            .with_introspection(self.introspection);
+            .with_introspection(self.introspection)
+            .allow_plaintext_http(self.allow_plaintext_http)
+            .use_environment_proxy(self.use_environment_proxy);
         if let Some(scope_matcher) = self.scope_matcher {
             config = scope_matcher.apply(config)?;
         }
         if let Some(authentication) = self.authentication {
-            let mut jwks = JwksAuthenticationConfig::new(
-                authentication.jwks_url,
-                authentication.issuer,
-                authentication.audiences,
-            )?;
-            if let Some(seconds) = authentication.cache_ttl_seconds {
-                jwks = jwks.with_cache_ttl(Duration::from_secs(seconds));
-            }
-            if let Some(seconds) = authentication.refresh_interval_seconds {
-                jwks = jwks.with_refresh_interval(Duration::from_secs(seconds));
-            }
-            if let Some(milliseconds) = authentication.request_timeout_ms {
-                jwks = jwks.with_request_timeout(Duration::from_millis(milliseconds));
-            }
-            if let Some(bytes) = authentication.max_jwks_bytes {
-                jwks = jwks.with_max_jwks_bytes(bytes);
-            }
-            if let Some(seconds) = authentication.leeway_seconds {
-                jwks = jwks.with_leeway(Duration::from_secs(seconds));
-            }
-            jwks = jwks
-                .with_legacy_scope_claims(if authentication.accept_legacy_scopes {
-                    LegacyScopeClaims::Accept
-                } else {
-                    LegacyScopeClaims::Reject
-                })
-                .allow_insecure_loopback_http_for_development(
-                    authentication.allow_insecure_loopback_jwks,
-                );
-            if let Some(catalogue) = authentication.role_scope_catalogue {
-                let catalogue_url = resolve_configured_value(
-                    catalogue.url,
-                    catalogue.url_from_env,
-                    "role-scope catalogue URL",
-                    &environment,
-                )?;
-                let mut role_scope =
-                    RoleScopeCatalogueConfig::new(catalogue_url, catalogue.audience)?;
-                if let Some(seconds) = catalogue.cache_ttl_seconds {
-                    role_scope = role_scope.with_cache_ttl(Duration::from_secs(seconds));
-                }
-                if let Some(seconds) = catalogue.maximum_signed_lifetime_seconds {
-                    role_scope =
-                        role_scope.with_maximum_signed_lifetime(Duration::from_secs(seconds));
-                }
-                if let Some(seconds) = catalogue.clock_skew_leeway_seconds {
-                    role_scope = role_scope.with_clock_skew_leeway(Duration::from_secs(seconds));
-                }
-                if catalogue.retry_backoff_seconds.is_some()
-                    || catalogue.maximum_retry_backoff_seconds.is_some()
-                {
-                    role_scope = role_scope.with_retry_backoff(
-                        Duration::from_secs(catalogue.retry_backoff_seconds.unwrap_or(1)),
-                        Duration::from_secs(catalogue.maximum_retry_backoff_seconds.unwrap_or(60)),
-                    );
-                }
-                if let Some(bytes) = catalogue.max_body_bytes {
-                    role_scope = role_scope.with_max_body_bytes(bytes);
-                }
-                for (name, value) in resolve_headers_for(
-                    catalogue.request_headers_from_env,
-                    &environment,
-                    "role-scope catalogue request header",
-                )? {
-                    role_scope = role_scope.with_request_header(name, value)?;
-                }
-                let allow_insecure_loopback_http = resolve_optional_bool(
-                    catalogue.allow_insecure_loopback_http,
-                    catalogue.allow_insecure_loopback_http_from_env,
-                    "role-scope catalogue insecure-loopback policy",
-                    &environment,
-                )?;
-                role_scope = role_scope
-                    .allow_insecure_loopback_http_for_development(allow_insecure_loopback_http);
-                jwks = jwks.with_role_scope_catalogue(role_scope);
-            }
-            config = config
-                .with_authentication_provider(Arc::new(JwksAuthenticationProvider::new(jwks)?));
+            config = config.with_authentication_provider(authentication.build(&environment)?);
         }
         for subgraph in self.subgraphs {
             let mut value =
@@ -279,6 +208,9 @@ impl RouterFileConfig {
                 network = network.with_max_resolved_addresses(maximum);
             }
             let mut value = AdminConfig::new(listener, network);
+            if let Some(authentication) = admin.authentication {
+                value = value.with_authentication_provider(authentication.build(&environment)?);
+            }
             if let Some(scope) = admin.status_scope {
                 value = value.with_status_scope(scope);
             }
@@ -334,7 +266,98 @@ struct FileAuthentication {
     accept_legacy_scopes: bool,
     #[serde(default)]
     allow_insecure_loopback_jwks: bool,
+    #[serde(default)]
+    use_environment_proxy: bool,
+    unknown_key_refresh_cooldown_seconds: Option<u64>,
     role_scope_catalogue: Option<FileRoleScopeCatalogue>,
+}
+
+impl FileAuthentication {
+    fn build(
+        self,
+        environment: &impl Fn(&str) -> Result<Option<String>, RouterError>,
+    ) -> Result<Arc<dyn AuthenticationProvider>, RouterError> {
+        let authentication = self;
+        let mut jwks = JwksAuthenticationConfig::new(
+            authentication.jwks_url,
+            authentication.issuer,
+            authentication.audiences,
+        )?;
+        if let Some(seconds) = authentication.cache_ttl_seconds {
+            jwks = jwks.with_cache_ttl(Duration::from_secs(seconds));
+        }
+        if let Some(seconds) = authentication.refresh_interval_seconds {
+            jwks = jwks.with_refresh_interval(Duration::from_secs(seconds));
+        }
+        if let Some(milliseconds) = authentication.request_timeout_ms {
+            jwks = jwks.with_request_timeout(Duration::from_millis(milliseconds));
+        }
+        if let Some(bytes) = authentication.max_jwks_bytes {
+            jwks = jwks.with_max_jwks_bytes(bytes);
+        }
+        if let Some(seconds) = authentication.leeway_seconds {
+            jwks = jwks.with_leeway(Duration::from_secs(seconds));
+        }
+        if let Some(seconds) = authentication.unknown_key_refresh_cooldown_seconds {
+            jwks = jwks.with_unknown_key_refresh_cooldown(Duration::from_secs(seconds));
+        }
+        jwks = jwks.use_environment_proxy(authentication.use_environment_proxy);
+        jwks = jwks
+            .with_legacy_scope_claims(if authentication.accept_legacy_scopes {
+                LegacyScopeClaims::Accept
+            } else {
+                LegacyScopeClaims::Reject
+            })
+            .allow_insecure_loopback_http_for_development(
+                authentication.allow_insecure_loopback_jwks,
+            );
+        if let Some(catalogue) = authentication.role_scope_catalogue {
+            let catalogue_url = resolve_configured_value(
+                catalogue.url,
+                catalogue.url_from_env,
+                "role-scope catalogue URL",
+                environment,
+            )?;
+            let mut role_scope = RoleScopeCatalogueConfig::new(catalogue_url, catalogue.audience)?;
+            if let Some(seconds) = catalogue.cache_ttl_seconds {
+                role_scope = role_scope.with_cache_ttl(Duration::from_secs(seconds));
+            }
+            if let Some(seconds) = catalogue.maximum_signed_lifetime_seconds {
+                role_scope = role_scope.with_maximum_signed_lifetime(Duration::from_secs(seconds));
+            }
+            if let Some(seconds) = catalogue.clock_skew_leeway_seconds {
+                role_scope = role_scope.with_clock_skew_leeway(Duration::from_secs(seconds));
+            }
+            if catalogue.retry_backoff_seconds.is_some()
+                || catalogue.maximum_retry_backoff_seconds.is_some()
+            {
+                role_scope = role_scope.with_retry_backoff(
+                    Duration::from_secs(catalogue.retry_backoff_seconds.unwrap_or(1)),
+                    Duration::from_secs(catalogue.maximum_retry_backoff_seconds.unwrap_or(60)),
+                );
+            }
+            if let Some(bytes) = catalogue.max_body_bytes {
+                role_scope = role_scope.with_max_body_bytes(bytes);
+            }
+            for (name, value) in resolve_headers_for(
+                catalogue.request_headers_from_env,
+                environment,
+                "role-scope catalogue request header",
+            )? {
+                role_scope = role_scope.with_request_header(name, value)?;
+            }
+            let allow_insecure_loopback_http = resolve_optional_bool(
+                catalogue.allow_insecure_loopback_http,
+                catalogue.allow_insecure_loopback_http_from_env,
+                "role-scope catalogue insecure-loopback policy",
+                environment,
+            )?;
+            role_scope = role_scope
+                .allow_insecure_loopback_http_for_development(allow_insecure_loopback_http);
+            jwks = jwks.with_role_scope_catalogue(role_scope);
+        }
+        Ok(Arc::new(JwksAuthenticationProvider::new(jwks)?))
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -691,6 +714,7 @@ impl FileSubscriptions {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct FileAdmin {
     listener: SocketAddr,
+    authentication: Option<FileAuthentication>,
     network: FileNetworkPolicy,
     #[serde(default)]
     trusted_subgraphs: Vec<FileTrustedSubgraph>,
@@ -916,6 +940,60 @@ mod tests {
         "subscriptions": {"maxConnectionAttemptsPerSecond": 55, "maxPendingConnections": 7},
         "telemetry": {"logLevel": "warn", "prometheus": {"port": 4900}}
     }"#;
+
+    #[test]
+    fn admin_authentication_and_outbound_transport_settings_are_loaded() {
+        let file = |admin_audience: &str| {
+            RouterFileConfig::from_json(&format!(
+                r#"{{
+                    "listener": "127.0.0.1:4000",
+                    "allowPlaintextHttp": true,
+                    "useEnvironmentProxy": true,
+                    "authentication": {{
+                        "jwksUrl": "https://identity.example/jwks.json",
+                        "issuer": "https://identity.example",
+                        "audiences": ["router"],
+                        "useEnvironmentProxy": true,
+                        "unknownKeyRefreshCooldownSeconds": 60
+                    }},
+                    "subgraphs": [{{
+                        "name": "products",
+                        "graphqlUrl": "http://products.internal/graphql",
+                        "sdlUrl": "http://products.internal/sdl",
+                        "protocolUrl": "http://products.internal/.well-known/graphql-router"
+                    }}],
+                    "admin": {{
+                        "listener": "127.0.0.1:4001",
+                        "authentication": {{
+                            "jwksUrl": "https://identity.example/jwks.json",
+                            "issuer": "https://identity.example",
+                            "audiences": ["{admin_audience}"]
+                        }},
+                        "network": {{}}
+                    }}
+                }}"#
+            ))
+            .unwrap()
+            .into_router_config_with(|_| Ok(None))
+            .unwrap()
+        };
+        let config = file("router-admin").validate().unwrap();
+        assert!(config.allow_plaintext_http);
+        assert!(config.use_environment_proxy);
+        assert_eq!(
+            config
+                .admin
+                .as_ref()
+                .and_then(|admin| admin.authentication.as_ref())
+                .and_then(|provider| provider.accepted_audiences()),
+            Some(&["router-admin".to_owned()][..])
+        );
+        let error = file("router").validate().unwrap_err();
+        assert!(
+            error.to_string().contains("public token audience"),
+            "{error}"
+        );
+    }
 
     #[test]
     fn strict_file_configuration_resolves_only_named_environment_values() {

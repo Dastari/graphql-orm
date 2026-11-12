@@ -2,12 +2,15 @@ use std::{
     collections::BTreeMap,
     fmt,
     net::IpAddr,
-    sync::{Arc, RwLock},
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(feature = "auth-agql")]
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 
 #[cfg(feature = "auth-agql")]
 use agql_auth::{
@@ -18,7 +21,7 @@ use agql_auth::{
 use futures::{StreamExt, future::BoxFuture};
 use jsonwebtoken::{
     Algorithm, DecodingKey, Validation, decode, decode_header,
-    jwk::{AlgorithmParameters, JwkSet, KeyAlgorithm, KeyOperations, PublicKeyUse},
+    jwk::{AlgorithmParameters, Jwk, KeyAlgorithm, KeyOperations, PublicKeyUse},
 };
 use reqwest::{
     Client,
@@ -38,6 +41,7 @@ const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 const DEFAULT_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_MAX_JWKS_BYTES: usize = 1024 * 1024;
+const DEFAULT_UNKNOWN_KEY_REFRESH_COOLDOWN: Duration = Duration::from_secs(30);
 const DEFAULT_MAX_ROLE_SCOPE_CATALOGUE_BYTES: usize = 2 * 1024 * 1024;
 const DEFAULT_ROLE_SCOPE_SIGNED_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
 const DEFAULT_ROLE_SCOPE_CLOCK_LEEWAY: Duration = Duration::from_secs(30);
@@ -244,6 +248,8 @@ pub struct JwksAuthenticationConfig {
     leeway: Duration,
     legacy_scope_claims: LegacyScopeClaims,
     allow_insecure_loopback_http: bool,
+    use_environment_proxy: bool,
+    unknown_key_refresh_cooldown: Duration,
     clock: Arc<dyn AuthenticationClock>,
     role_scope_catalogue: Option<RoleScopeCatalogueConfig>,
 }
@@ -269,6 +275,8 @@ impl JwksAuthenticationConfig {
             leeway: Duration::ZERO,
             legacy_scope_claims: LegacyScopeClaims::Reject,
             allow_insecure_loopback_http: false,
+            use_environment_proxy: false,
+            unknown_key_refresh_cooldown: DEFAULT_UNKNOWN_KEY_REFRESH_COOLDOWN,
             clock: Arc::new(SystemAuthenticationClock),
             role_scope_catalogue: None,
         })
@@ -315,6 +323,28 @@ impl JwksAuthenticationConfig {
     /// This exists solely for test-owned and local-development issuers.
     pub fn allow_insecure_loopback_http_for_development(mut self, allow: bool) -> Self {
         self.allow_insecure_loopback_http = allow;
+        self
+    }
+
+    /// Routes JWKS and role-scope catalogue requests through the proxy named
+    /// by the standard proxy environment variables.
+    ///
+    /// Off by default: the verification-key client connects directly and
+    /// ignores `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY`.
+    pub fn use_environment_proxy(mut self, enabled: bool) -> Self {
+        self.use_environment_proxy = enabled;
+        self
+    }
+
+    /// Sets the minimum time between JWKS refreshes requested by bearers that
+    /// name an unknown key ID. The default is 30 seconds.
+    ///
+    /// A bearer naming an unknown key is still refused, but it asks for one
+    /// background refresh so a key the issuer has just rotated in becomes
+    /// usable without waiting for the scheduled refresh. The cooldown bounds
+    /// how often forged key IDs can make the router contact the issuer.
+    pub fn with_unknown_key_refresh_cooldown(mut self, cooldown: Duration) -> Self {
+        self.unknown_key_refresh_cooldown = cooldown;
         self
     }
 
@@ -371,6 +401,11 @@ impl JwksAuthenticationConfig {
                 "authentication clock leeway must not exceed 300 seconds",
             ));
         }
+        if self.unknown_key_refresh_cooldown.is_zero() {
+            return Err(invalid_configuration(
+                "authentication unknown-key refresh cooldown must be greater than zero",
+            ));
+        }
         validate_public_resource_url(
             &self.jwks_url,
             self.allow_insecure_loopback_http,
@@ -408,6 +443,11 @@ impl fmt::Debug for JwksAuthenticationConfig {
                 "allow_insecure_loopback_http",
                 &self.allow_insecure_loopback_http,
             )
+            .field("use_environment_proxy", &self.use_environment_proxy)
+            .field(
+                "unknown_key_refresh_cooldown",
+                &self.unknown_key_refresh_cooldown,
+            )
             .finish_non_exhaustive()
     }
 }
@@ -418,6 +458,8 @@ pub struct JwksAuthenticationProvider {
     config: JwksAuthenticationConfig,
     client: Client,
     cache: Arc<RwLock<Option<JwksCache>>>,
+    key_refresh_in_flight: Arc<AtomicBool>,
+    last_unknown_key_refresh: Arc<RwLock<Option<SystemTime>>>,
     #[cfg(feature = "auth-agql")]
     role_scope_cache: Arc<RwLock<Option<Arc<RoleScopeCache>>>>,
     #[cfg(feature = "auth-agql")]
@@ -435,17 +477,21 @@ impl JwksAuthenticationProvider {
     /// performs the mandatory initial JWKS load before readiness.
     pub fn new(config: JwksAuthenticationConfig) -> Result<Self, RouterError> {
         config.validate()?;
-        let client = Client::builder()
+        let mut client = Client::builder()
             .redirect(Policy::none())
-            .timeout(config.request_timeout)
-            .build()
-            .map_err(|_| {
-                invalid_configuration("failed to construct the authentication JWKS client")
-            })?;
+            .timeout(config.request_timeout);
+        if !config.use_environment_proxy {
+            client = client.no_proxy();
+        }
+        let client = client.build().map_err(|_| {
+            invalid_configuration("failed to construct the authentication JWKS client")
+        })?;
         Ok(Self {
             config,
             client,
             cache: Arc::new(RwLock::new(None)),
+            key_refresh_in_flight: Arc::new(AtomicBool::new(false)),
+            last_unknown_key_refresh: Arc::new(RwLock::new(None)),
             #[cfg(feature = "auth-agql")]
             role_scope_cache: Arc::new(RwLock::new(None)),
             #[cfg(feature = "auth-agql")]
@@ -468,7 +514,7 @@ impl JwksAuthenticationProvider {
                 None,
             )
             .await?;
-        let document = serde_json::from_slice::<JwkSet>(&body)
+        let document = serde_json::from_slice::<RawJwkSet>(&body)
             .map_err(|_| AuthenticationError::unavailable("JWKS document is malformed"))?;
         let keys = validate_jwks(document)?;
         let loaded_at = self.config.clock.now();
@@ -686,6 +732,14 @@ impl JwksAuthenticationProvider {
     }
 
     fn decoding_key(&self, kid: &str) -> Result<DecodingKey, AuthenticationError> {
+        let key = self.cached_decoding_key(kid)?;
+        key.ok_or_else(|| {
+            self.request_unknown_key_refresh();
+            AuthenticationError::invalid_credential("bearer credential references an unknown key")
+        })
+    }
+
+    fn cached_decoding_key(&self, kid: &str) -> Result<Option<DecodingKey>, AuthenticationError> {
         let now = self.config.clock.now();
         let cache = self
             .cache
@@ -700,9 +754,53 @@ impl JwksAuthenticationProvider {
         if age >= self.config.cache_ttl {
             return Err(AuthenticationError::unavailable("JWKS cache is stale"));
         }
-        cache.keys.get(kid).cloned().ok_or_else(|| {
-            AuthenticationError::invalid_credential("bearer credential references an unknown key")
-        })
+        Ok(cache.keys.get(kid).cloned())
+    }
+
+    /// Starts one background JWKS refresh after a bearer names an unknown key
+    /// ID, at most once per configured cooldown. The refused request is not
+    /// retried; later requests see the refreshed key set.
+    fn request_unknown_key_refresh(&self) {
+        if self
+            .key_refresh_in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let now = self.config.clock.now();
+        let due = self
+            .last_unknown_key_refresh
+            .write()
+            .ok()
+            .is_some_and(|mut last| {
+                let due = last.is_none_or(|previous| {
+                    previous
+                        .checked_add(self.config.unknown_key_refresh_cooldown)
+                        .is_none_or(|next| now >= next)
+                });
+                if due {
+                    *last = Some(now);
+                }
+                due
+            });
+        let handle = hive_router::tokio::runtime::Handle::try_current();
+        let (true, Ok(handle)) = (due, handle) else {
+            self.key_refresh_in_flight.store(false, Ordering::Release);
+            return;
+        };
+        let provider = self.clone();
+        handle.spawn(async move {
+            if let Err(error) = provider.refresh_keys().await {
+                tracing::warn!(
+                    error = %error,
+                    "unknown-key JWKS refresh failed; preserving last-known-good verification keys"
+                );
+            }
+            provider
+                .key_refresh_in_flight
+                .store(false, Ordering::Release);
+        });
     }
 
     #[cfg(feature = "auth-agql")]
@@ -829,6 +927,10 @@ impl AuthenticationProvider for JwksAuthenticationProvider {
         Some(self.config.refresh_interval)
     }
 
+    fn accepted_audiences(&self) -> Option<&[String]> {
+        Some(&self.config.audiences)
+    }
+
     fn refresh(&self) -> BoxFuture<'_, Result<(), AuthenticationError>> {
         Box::pin(async move {
             let result = self.refresh_verification_state().await;
@@ -841,6 +943,13 @@ impl AuthenticationProvider for JwksAuthenticationProvider {
             result
         })
     }
+}
+
+/// A JWKS document whose keys are parsed one at a time, so one key of an
+/// unsupported or future type does not invalidate the rest.
+#[derive(Deserialize)]
+struct RawJwkSet {
+    keys: Vec<JsonValue>,
 }
 
 struct JwksCache {
@@ -892,14 +1001,26 @@ where
     Ok(roles)
 }
 
-fn validate_jwks(document: JwkSet) -> Result<BTreeMap<String, DecodingKey>, AuthenticationError> {
+/// Keeps every RS256 verification key with an ID and skips every other key.
+///
+/// Issuers publish encryption keys, keys of other types, and keys of types
+/// this router does not know beside their signing keys. Those keys are never
+/// usable here, so they are ignored rather than rejecting the whole document.
+/// A document with no usable key, or with two usable keys under one ID, still
+/// fails closed and preserves the previous key set.
+fn validate_jwks(
+    document: RawJwkSet,
+) -> Result<BTreeMap<String, DecodingKey>, AuthenticationError> {
     if document.keys.is_empty() || document.keys.len() > MAX_JWKS_KEYS {
         return Err(AuthenticationError::unavailable(
             "JWKS document contains an invalid number of keys",
         ));
     }
     let mut keys = BTreeMap::new();
-    for jwk in document.keys {
+    for value in document.keys {
+        let Ok(jwk) = serde_json::from_value::<Jwk>(value) else {
+            continue;
+        };
         if !matches!(jwk.algorithm, AlgorithmParameters::RSA(_))
             || !matches!(jwk.common.key_algorithm, None | Some(KeyAlgorithm::RS256))
             || matches!(
@@ -913,26 +1034,24 @@ fn validate_jwks(document: JwkSet) -> Result<BTreeMap<String, DecodingKey>, Auth
                 .is_some_and(|operations| !operations.contains(&KeyOperations::Verify))
             || (jwk.common.public_key_use.is_some() && jwk.common.key_operations.is_some())
         {
-            return Err(AuthenticationError::unavailable(
-                "JWKS document contains a key that is not an RS256 verification key",
-            ));
+            continue;
         }
-        let kid = jwk
-            .common
-            .key_id
-            .as_deref()
-            .filter(|kid| !kid.is_empty())
-            .ok_or_else(|| {
-                AuthenticationError::unavailable("JWKS document contains a key without an ID")
-            })?;
-        let decoding_key = DecodingKey::from_jwk(&jwk).map_err(|_| {
-            AuthenticationError::unavailable("JWKS document contains invalid key material")
-        })?;
+        let Some(kid) = jwk.common.key_id.as_deref().filter(|kid| !kid.is_empty()) else {
+            continue;
+        };
+        let Ok(decoding_key) = DecodingKey::from_jwk(&jwk) else {
+            continue;
+        };
         if keys.insert(kid.to_owned(), decoding_key).is_some() {
             return Err(AuthenticationError::unavailable(
                 "JWKS document contains duplicate key IDs",
             ));
         }
+    }
+    if keys.is_empty() {
+        return Err(AuthenticationError::unavailable(
+            "JWKS document contains no RS256 verification key",
+        ));
     }
     Ok(keys)
 }
