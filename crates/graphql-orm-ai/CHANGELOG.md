@@ -10,6 +10,16 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.132.0
+
+- **Breaking (public Auth dependency types):** select published Auth `v0.26.0`
+  (commit `7d016f6a6bc3e697382e2e05865f596862189240`) instead of `v0.24.0`, and
+  ORM 0.126.0. Hosts that pass Auth types, principals or services into AI must
+  select the same tag. AI does not use Auth 0.25's fixed-audience delegation or
+  0.26's refresh-reuse grace window, and no other locked dependency changes.
+  No GraphQL SDL, persistent schema or data migration change;
+  `AI_SCHEMA_MODULE_VERSION` is unchanged. See the migration guide.
+
 ## Unreleased - 0.131.0
 
 - **Security:** fail closed on work queued before 0.130.0 with a delegated or sessionless stored principal reference. Such a reference has a grant kind of `SessionBoundDelegation` or `Sessionless`, or no grant kind and an actor subject or exact operation binding. Workers resolved it to the parent user session and acted with the full user's authority until the reference expired. Every resolution of a principal reference now goes through one shared check that refuses this shape before the host `CurrentPrincipalResolver` is called, with the same `ReauthorizationFailed` an expired or revoked reference produces. This covers run execution, provider egress, tools, rules, checkpoints, context compaction, provider output and sessions, UI intents, proposals, approvals, capability delivery, OpenAI background reconciliation, subscription waits and title work.

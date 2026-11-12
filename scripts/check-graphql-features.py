@@ -11,8 +11,8 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / 'crates/graphql-orm/tests/fixtures/graphql-features/Cargo.toml'
-AUTH_REV = '1f4b4bfb6d052d04e6c80b80cb7aa3d0c2ebaacd'
-AUTH_TAG = 'v0.24.0'
+AUTH_REV = '7d016f6a6bc3e697382e2e05865f596862189240'
+AUTH_TAG = 'v0.26.0'
 AUTH_SOURCE = f'https://github.com/Dastari/agql-auth.git?tag={AUTH_TAG}'
 FORBIDDEN = {'default', 'email-validator', 'graphiql', 'playground', 'tempfile'}
 
@@ -88,7 +88,7 @@ def main() -> None:
             assert auth, (name, 'missing Auth')
             for version, source in auth:
                 url, _, short = source.partition('#')
-                assert version == '0.24.0' and url == AUTH_SOURCE, (name, auth)
+                assert version == '0.26.0' and url == AUTH_SOURCE, (name, auth)
                 assert len(short) >= 7 and AUTH_REV.startswith(short), (name, auth)
         else:
             assert not auth, (name, 'unexpected Auth', auth)
@@ -128,7 +128,7 @@ def main() -> None:
         auth = [p for p in packages if p['name'] == 'agql-auth']
         if not auth:
             continue
-        assert len(auth) == 1 and auth[0]['version'] == '0.24.0', (lock, auth)
+        assert len(auth) == 1 and auth[0]['version'] == '0.26.0', (lock, auth)
         assert auth[0]['source'] == f'git+{AUTH_SOURCE}#{AUTH_REV}', (lock, auth)
     if args.output:
         (args.output / 'results.json').write_text(json.dumps(results, indent=2) + '\n')

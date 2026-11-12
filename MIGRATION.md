@@ -10,6 +10,38 @@ supersedes: []
 
 # Migration Guide
 
+## 0.125.0 to 0.126.0: agql-auth 0.26.0
+
+ORM/macros 0.126.0, AI 0.132.0 and router 0.11.0 select published Auth
+`v0.26.0` instead of `v0.24.0`. The annotated tag
+`04c514280d685a8975d63a8a6b9a1e0db11f503f` peels to commit
+`7d016f6a6bc3e697382e2e05865f596862189240`. Every direct Auth host must select:
+
+```toml
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", tag = "v0.26.0", version = "0.26.0" }
+```
+
+Cargo treats each tag as a separate source, so Auth types from a `v0.24.0`
+selector no longer match the types that ORM `auth-agql`, AI and router
+`auth-agql` accept. Change the host selector, run `cargo update -p agql-auth`,
+and check that `cargo tree -i agql-auth` shows one `0.26.0` source locked to the
+commit above. Upgrade ORM/macros, AI and router together.
+
+Auth 0.25.0 and 0.26.0 only add opt-in APIs: the fixed-audience delegation
+facade and the refresh-reuse grace window, which is off by default. The ORM,
+AI and router do not use either, and their behavior is unchanged. A host that
+wants them opts in on its own `AuthService`. Auth's own dependencies are
+unchanged, so no other locked package moves. No data, schema or wire migration
+is needed.
+
+The [official release](https://github.com/Dastari/agql-auth/releases/tag/v0.26.0)
+was published on 2026-11-08. Its `v0.26.0.json` records version `0.26.0`, the
+commit above and Auth Cargo.lock SHA-256
+`95588a5ad25f2df4068fa2e44e17f28c67f9e97457d9dc7dd8da7da1e3b98a58`. The JSON
+SHA-256 is `c62b84823b125183db6824cbd69866b5f97c9b7c5273efd3bdb1a200f87af7d2`,
+matching the release's `SHA256SUMS`. The workspace release manifest retains
+the tag and full locked commit together.
+
 ## AI 0.130.0 to 0.131.0: legacy delegated stored principal references
 
 Runs and session-title work queued before 0.130.0 with a delegated or
