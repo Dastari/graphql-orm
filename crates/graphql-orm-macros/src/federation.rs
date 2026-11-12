@@ -406,7 +406,7 @@ pub(crate) fn federation_entity_resolver_tokens(
                         <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
                         ::graphql_orm::graphql::orm::EntityAccessKind::Read,
                         ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
-                    ).await?;
+                    ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
 
                     let mut __gom_federation_values = Vec::new();
                     let mut __gom_federation_parts = Vec::new();
@@ -443,7 +443,7 @@ pub(crate) fn federation_entity_resolver_tokens(
                             <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
                             ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
                             loaded as &(dyn ::std::any::Any + Send + Sync),
-                        ).await? {
+                        ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)? {
                             return Ok(None);
                         }
                     }
@@ -596,7 +596,7 @@ pub(crate) fn node_id_entity_resolver_tokens(
                 <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
                 ::graphql_orm::graphql::orm::EntityAccessKind::Read,
                 ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
-            ).await?;
+            ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
 
             let mut __gom_federation_values = Vec::new();
             let mut __gom_federation_parts = Vec::new();
@@ -633,7 +633,7 @@ pub(crate) fn node_id_entity_resolver_tokens(
                     <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
                     ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
                     loaded as &(dyn ::std::any::Any + Send + Sync),
-                ).await? {
+                ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)? {
                     return Ok(None);
                 }
             }

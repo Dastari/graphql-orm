@@ -416,7 +416,6 @@ pub(crate) fn strip_operations_graphql_surface(
             if impl_self_ident(item_impl).is_some_and(|ident| ident == entity_name) =>
         {
             remove_pool_bound_public_methods(item_impl);
-            rewrite_repository_search_method(item_impl, &where_ident, &backend_marker);
             true
         }
         _ => true,
@@ -448,32 +447,6 @@ pub(crate) fn strip_operations_graphql_surface(
         ));
     }
     Ok(output)
-}
-
-fn rewrite_repository_search_method(
-    item: &mut syn::ItemImpl,
-    where_input: &syn::Ident,
-    backend_marker: &TokenStream,
-) {
-    for member in &mut item.items {
-        let syn::ImplItem::Fn(function) = member else {
-            continue;
-        };
-        if function.sig.ident != "search_db" {
-            continue;
-        }
-        let attributes = std::mem::take(&mut function.attrs);
-        let mut replacement: syn::ImplItemFn = parse_quote! {
-            pub fn search_db<'a>(
-                db: &'a ::graphql_orm::db::Database<#backend_marker>,
-                search: ::graphql_orm::graphql::filters::SearchInput,
-            ) -> ::graphql_orm::graphql::orm::RepositorySearchQuery<'a, Self, #where_input, #backend_marker> {
-                ::graphql_orm::graphql::orm::RepositorySearchQuery::new(db, search)
-            }
-        };
-        replacement.attrs = attributes;
-        *function = replacement;
-    }
 }
 
 fn impl_self_ident(item: &syn::ItemImpl) -> Option<String> {

@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: search_relation field `missing_label` is not a persisted field of `UiLabel`
+  --> tests/ui/search_relation_unknown_field.rs:24:5
+   |
+24 |     labels: Vec<UiLabel>,
+   |     ^^^^^^ evaluation of `_` failed here

@@ -217,12 +217,15 @@ pub async fn prepare_static_relation_filter<B, S, T, F>(
 where
     B: OrmBackend,
     S: Entity + 'static,
-    T: Entity + 'static,
+    T: Entity + super::RelationTraversalAuthorization + 'static,
     F: ReadVisibilityFilter,
 {
     if F::entity_type_id() != TypeId::of::<T>() || F::backend() != B::DIALECT {
         return Err(invalid());
     }
+    // Related-row predicates and counts traverse the relation: the target's
+    // own auth mode and `list` operation scopes apply.
+    super::authorize_relation_target::<T>(ctx, true)?;
     let db = ctx.data::<Database<B>>()?;
     let surface = EntityAccessSurface::GraphqlRelation;
     db.ensure_entity_access(
@@ -232,8 +235,12 @@ where
         EntityAccessKind::Read,
         surface,
     )
-    .await?;
-    let visibility = db.read_visibility::<T>(Some(ctx), surface).await?;
+    .await
+    .map_err(crate::graphql::errors::graphql_error_from_callback)?;
+    let visibility = db
+        .read_visibility::<T>(Some(ctx), surface)
+        .await
+        .map_err(crate::graphql::errors::graphql_error_from_callback)?;
     if visibility.requires_residual_checks() {
         return Err(invalid());
     }
@@ -243,20 +250,7 @@ where
         if filter.requires_in_memory_filtering(B::DIALECT) {
             return Err(input_error());
         }
-        for name in filter.referenced_fields() {
-            let field = T::repository_field_policies()
-                .iter()
-                .find(|f| f.api_name == name)
-                .ok_or_else(invalid)?;
-            db.ensure_readable_field(
-                ctx,
-                T::entity_name(),
-                field.api_name,
-                field.read_policy,
-                None,
-            )
-            .await?;
-        }
+        super::authorize_read_fields::<T, B>(db, ctx, filter.referenced_fields()).await?;
         expressions.push(
             filter.to_filter_expression().unwrap_or_else(|| {
                 FilterExpression::trusted_fragment("1 = 1".to_owned(), Vec::new())
@@ -314,8 +308,11 @@ pub async fn prepare_relation_count_order<B, T>(
 ) -> async_graphql::Result<(String, Vec<SqlValue>)>
 where
     B: OrmBackend,
-    T: Entity + 'static,
+    T: Entity + super::RelationTraversalAuthorization + 'static,
 {
+    // Related-row predicates and counts traverse the relation: the target's
+    // own auth mode and `list` operation scopes apply.
+    super::authorize_relation_target::<T>(ctx, true)?;
     let db = ctx.data::<Database<B>>()?;
     let surface = EntityAccessSurface::GraphqlRelation;
     db.ensure_entity_access(
@@ -325,8 +322,12 @@ where
         EntityAccessKind::Read,
         surface,
     )
-    .await?;
-    let visibility = db.read_visibility::<T>(Some(ctx), surface).await?;
+    .await
+    .map_err(crate::graphql::errors::graphql_error_from_callback)?;
+    let visibility = db
+        .read_visibility::<T>(Some(ctx), surface)
+        .await
+        .map_err(crate::graphql::errors::graphql_error_from_callback)?;
     if visibility.requires_residual_checks() {
         return Err(invalid());
     }
@@ -858,8 +859,11 @@ where
             EntityAccessKind::Read,
             surface,
         )
-        .await?;
-        db.read_visibility::<T>(ctx, surface).await
+        .await
+        .map_err(crate::graphql::errors::graphql_error_from_callback)?;
+        db.read_visibility::<T>(ctx, surface)
+            .await
+            .map_err(crate::graphql::errors::graphql_error_from_callback)
     }
 
     async fn authorize_page_fields(
@@ -919,7 +923,8 @@ where
                     return Err(OrmPublicError::forbidden().into_graphql_error());
                 }
                 db.ensure_readable_field(ctx, T::entity_name(), api_name, policy, record)
-                    .await?;
+                    .await
+                    .map_err(crate::graphql::errors::graphql_error_from_callback)?;
             } else {
                 db.ensure_repository_readable_field(
                     None,
@@ -1007,7 +1012,8 @@ where
                         EntityAccessSurface::Repository,
                         row,
                     )
-                    .await?
+                    .await
+                    .map_err(crate::graphql::errors::graphql_error_from_callback)?
                 {
                     return Err(OrmPublicError::forbidden().into_graphql_error());
                 }
@@ -1296,7 +1302,8 @@ where
                             },
                             &row,
                         )
-                        .await?
+                        .await
+                        .map_err(crate::graphql::errors::graphql_error_from_callback)?
                 {
                     nodes.push(row);
                 }

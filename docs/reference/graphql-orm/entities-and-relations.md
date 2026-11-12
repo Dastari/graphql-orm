@@ -148,6 +148,29 @@ read policy require an explicit search policy:
 pub body: Option<String>,
 ```
 
+Every search source is authorized before any search SQL, on the generated `…Search` root and on
+`Entity::search_db(&database, …)`, which every searchable entity provides and which also applies
+entity access and row and field policies to each hit. A local field or JSON path needs its field read policy and, when
+declared, its search policy key; both are checked through the field policy provider
+(`FieldPolicy::can_read_field` for GraphQL, `can_read_repository_field` for repository search) with
+the search key as `policy_key`. A `search_relation` source needs the relation field's read policy,
+its declared search policy, read access to the target entity and the read policy of every copied
+target field. On the GraphQL search root it also needs the target's relation traversal requirement
+(its `auth` mode and operation scopes, as for the relation field itself). The search document combines all sources, so denying any one refuses the whole search
+with `FORBIDDEN`; it is never answered from the remaining sources. The pool-bound
+`Entity::search(pool, …)` builder has no request and no policy provider: it is a trusted, unchecked
+host API that applies none of these checks. See
+[Field authority for read arguments](#field-authority-for-read-arguments).
+
+Search source checks run before any row is read, so the field policy receives no record (`record`
+is `None`). A matching hit reveals that the row's protected text contains the query, so a policy
+that grants a field only for particular rows must deny the record-less case. Allowing `None` there
+allows searching that field's text in every visible row.
+
+`search_relation(fields = [...])` names Rust fields of the target. Each name is checked at compile
+time against the target's persisted fields; an unknown or non-persisted name is a compile error
+that names the field and the target.
+
 Persisted JSON fields can contribute selected string paths to the same search document with
 `search_json(...)`. Extraction happens in Rust from the entity value, so Postgres and SQLite keep the
 same public API and continue to use their existing managed search storage:
@@ -322,6 +345,65 @@ pub city: Option<Box<City>>;
 The first implementation records relation search metadata and keeps local searchable fields current
 through generated writes. For relation-heavy documents, run an explicit search rebuild after large
 related-data changes until deeper propagation is enabled.
+
+## Field authority for read arguments
+
+A `where` predicate, an `orderBy` term and a full-text search source reveal a
+field's value even when the response never selects that field: a count, a
+page boundary or a bulk-write `affectedCount` is enough. Generated resolvers
+therefore authorize every field a read argument names with the same field read
+policy as a selected field, before any SQL runs:
+
+- root list, keyset, scan, aggregate and search `where` filters, including the
+  fields inside related-row filter alternatives;
+- `orderBy` on root lists and to-many relation fields (keyset orders were
+  already authorized);
+- to-many relation `where` arguments;
+- `updateMany` and `deleteMany` filters, which report the refusal in the
+  mutation payload and write nothing;
+- every search source, as described under [Full-Text Search](#full-text-search).
+
+A denied field returns `FORBIDDEN`. A field missing from the entity's policy
+metadata is refused the same way. `order_expression` terms are trusted SQL
+declared by the entity author and are not checked field by field; do not
+declare one over a field that callers may be denied.
+
+The shared runtime helper is the public
+`graphql_orm::graphql::orm::authorize_read_fields`. Generated code calls it,
+and host resolvers that accept generated filter or order inputs should call it
+with `DatabaseFilter::referenced_fields` and `DatabaseOrderBy::referenced_fields`
+before running any SQL. It checks each field with the field's read policy and
+no record, refuses with `FORBIDDEN` on any denial or unknown field, and
+sanitizes callback failures. As with selected-field checks before rows are
+read, a policy that grants a field only for particular records must decide the
+record-less case.
+
+Host callback failures on these paths, and on generated federation `_entities`,
+list visibility and scalar field reads, pass through the same sanitizer as the
+rest of the generated surface: an authored refusal keeps its public code, and
+any other failure is reported as `INTERNAL_ERROR` without its text.
+
+## Relation target auth mode and operation scopes
+
+Traversing a relation applies the target entity's own `auth` mode and its
+fixed `operation_authorization` scopes, as its root read would. A to-many
+relation field, a related-row filter and an `order_aggregate` count use the
+target's `list` category; a to-one relation field uses its `single_read`
+category. The source entity's mode still applies to the relation field itself.
+
+When the mapped category is not declared but the target declares any other
+read category (`list`, `single_read`, `keyset_list`, `search` or
+`subscription`), traversal fails closed: it requires every declared read
+category's requirement together. For example, a target that declares only
+`single_read` and `keyset_list` scopes needs both of those for a to-many
+traversal, even though it has no `list` category. Declare the mapped category
+explicitly to require exactly its scopes. A target that declares no read
+category applies only its `auth` mode.
+A category declared with scope templates (`all_scope_templates` or
+`any_scope_templates`) refuses traversal with `FORBIDDEN`, because a
+traversal has no root arguments to bind. `GraphQLEntity` and
+`RepositoryEntity` emit this requirement for every entity, so an entity without
+generated operations still applies its `auth` mode to traversal.
 
 ## Denied and absent relation targets
 
