@@ -2,6 +2,7 @@
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
+use crate::orm_read_bounds::InternalReadBound as _;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -192,7 +193,7 @@ impl OrmAiBudgetService {
                             }),
                             ..Default::default()
                         })
-                        .limit(2)
+                        .internal_limit(2)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -226,7 +227,7 @@ impl OrmAiBudgetService {
                             }),
                             ..Default::default()
                         })
-                        .limit((limits.maximum_applicable_policies + 1) as i64)
+                        .internal_limit((limits.maximum_applicable_policies + 1) as i64)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -277,7 +278,7 @@ impl OrmAiBudgetService {
                                 }),
                                 ..Default::default()
                             })
-                            .limit(2)
+                            .internal_limit(2)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;

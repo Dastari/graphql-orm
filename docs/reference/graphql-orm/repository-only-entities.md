@@ -3,7 +3,7 @@ title: "Repository-only entities"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-15
+last_reviewed: 2026-11-12
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -204,9 +204,13 @@ let credential = Credential::query(&database)
     .await?;
 ```
 
-`fetch_all` and generated `find_all`/`find_many` apply the database default and
-maximum page limits before execution. `fetch_optional_one` uses at most one
-look-ahead row and fails if the predicate is not unique. Primary-key, complete
+`fetch_all` and generated `find_all`/`find_many` read at most the database's
+maximum page limit and fail with `PAGE_LIMIT_EXCEEDED` when more rows match;
+they never return a silently truncated subset. An explicit `limit(n)` is exact,
+and a limit above the maximum fails the same way. See
+[Rust repository limits never truncate](runtime-and-writes.md#rust-repository-limits-never-truncate).
+`fetch_optional_one` uses at most one look-ahead row and fails if the predicate
+is not unique. Primary-key, complete
 composite-key, unique-field, projection, bounded bulk mutation, insert,
 insert-if-absent, upsert, CAS, append-only, retention, and keyset helpers are
 generated under the same opt-in/backend rules as the existing operation

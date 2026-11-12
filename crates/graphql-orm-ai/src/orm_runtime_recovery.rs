@@ -7,6 +7,7 @@
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
+use crate::orm_read_bounds::InternalReadBound as _;
 use std::sync::Arc;
 
 use agql_auth::Clock;
@@ -758,19 +759,19 @@ async fn holds_prior_ai_state(
 ) -> Result<bool, OrmPublicError> {
     let runs = tx
         .query::<AiRunRecord>()
-        .limit(1)
+        .internal_limit(1)
         .fetch_all()
         .await
         .map_err(OrmPublicError::from)?;
     let approvals = tx
         .query::<AiApprovalRecord>()
-        .limit(1)
+        .internal_limit(1)
         .fetch_all()
         .await
         .map_err(OrmPublicError::from)?;
     let consents = tx
         .query::<AiEgressConsentRecord>()
-        .limit(1)
+        .internal_limit(1)
         .fetch_all()
         .await
         .map_err(OrmPublicError::from)?;
@@ -785,7 +786,7 @@ async fn current_epoch(
             epoch_sequence: Some(OrderDirection::Desc),
             ..Default::default()
         })
-        .limit(1)
+        .internal_limit(1)
         .fetch_one()
         .await
         .map_err(OrmPublicError::from)
@@ -848,7 +849,7 @@ async fn expire_reusable_approvals(
         let approvals = tx
             .query::<AiApprovalRecord>()
             .filter(approval_state(state))
-            .limit(bounded_limit(maximum))
+            .internal_limit(bounded_limit(maximum))
             .fetch_all()
             .await
             .map_err(OrmPublicError::from)?;
@@ -902,7 +903,7 @@ async fn revoke_egress_consents(
         .order_by(AiEgressConsentRecordOrderByInput {
             granted_at: Some(OrderDirection::Asc),
         })
-        .limit(bounded_limit(maximum))
+        .internal_limit(bounded_limit(maximum))
         .fetch_all()
         .await
         .map_err(OrmPublicError::from)?;
@@ -960,7 +961,7 @@ async fn fence_epochless_leases(
         let mut runs = tx
             .query::<AiRunRecord>()
             .filter(exact_state(state.as_str()))
-            .limit(bounded_limit(maximum))
+            .internal_limit(bounded_limit(maximum))
             .fetch_all()
             .await
             .map_err(OrmPublicError::from)?;
@@ -1012,7 +1013,7 @@ async fn close_restored_runs(
         let mut runs = tx
             .query::<AiRunRecord>()
             .filter(exact_state(state.as_str()))
-            .limit(bounded_limit(maximum))
+            .internal_limit(bounded_limit(maximum))
             .fetch_all()
             .await
             .map_err(OrmPublicError::from)?;
@@ -1089,7 +1090,7 @@ async fn verify_closure(
         let remaining = tx
             .query::<AiApprovalRecord>()
             .filter(approval_state(state))
-            .limit(1)
+            .internal_limit(1)
             .fetch_all()
             .await
             .map_err(OrmPublicError::from)?;
@@ -1101,7 +1102,7 @@ async fn verify_closure(
         let remaining = tx
             .query::<AiRunRecord>()
             .filter(exact_state(state.as_str()))
-            .limit(bounded_limit(limits.maximum_runs()))
+            .internal_limit(bounded_limit(limits.maximum_runs()))
             .fetch_all()
             .await
             .map_err(OrmPublicError::from)?;
@@ -1120,7 +1121,7 @@ async fn verify_closure(
             .order_by(AiEgressConsentRecordOrderByInput {
                 granted_at: Some(OrderDirection::Asc),
             })
-            .limit(bounded_limit(limits.maximum_egress_consents()))
+            .internal_limit(bounded_limit(limits.maximum_egress_consents()))
             .fetch_all()
             .await
             .map_err(OrmPublicError::from)?;

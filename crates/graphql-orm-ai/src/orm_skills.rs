@@ -2,6 +2,7 @@
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
+use crate::orm_read_bounds::InternalReadBound as _;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -463,7 +464,7 @@ impl AiSkillCatalogService for OrmAiSkillCatalogService {
                             }),
                             ..Default::default()
                         })
-                        .limit(1_001)
+                        .internal_limit(1_001)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -694,7 +695,7 @@ async fn load_scope_skills(
                     .query::<AiSkillRecord>()
                     .filter(skill_scope_filter(&scope))
                     .default_order()
-                    .limit((MAXIMUM_SKILLS_PER_SCOPE + 1) as i64)
+                    .internal_limit((MAXIMUM_SKILLS_PER_SCOPE + 1) as i64)
                     .fetch_all()
                     .await
                     .map_err(OrmPublicError::from)?;
@@ -738,7 +739,7 @@ async fn load_current_version(
             }),
             ..Default::default()
         })
-        .limit(2)
+        .internal_limit(2)
         .fetch_all()
         .await
         .map_err(OrmPublicError::from)?;

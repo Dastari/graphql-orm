@@ -2,6 +2,7 @@
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
+use crate::orm_read_bounds::InternalReadBound as _;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -347,6 +348,13 @@ impl AiSessionService for OrmAiSessionService {
                 "invalid conversation bootstrap limits".to_owned(),
             ));
         }
+        // Client windows follow the host's page maximum. The tool-call
+        // look-ahead row is added after clamping, so truncation is reported.
+        let pagination = self.database.pagination_config();
+        let terminal_run_limit =
+            crate::orm_read_bounds::client_page_limit(pagination, terminal_run_limit);
+        let tool_call_limit =
+            crate::orm_read_bounds::client_page_limit(pagination, tool_call_limit);
         for _ in 0..3 {
             let first = self
                 .visible_session(principal, session_id, AiSessionAction::Read)
@@ -389,7 +397,7 @@ impl AiSessionService for OrmAiSessionService {
                             .order_by(AiRunRecordOrderByInput {
                                 created_at: Some(OrderDirection::Asc),
                             })
-                            .limit(101)
+                            .internal_limit(101)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)
@@ -426,7 +434,7 @@ impl AiSessionService for OrmAiSessionService {
                             .order_by(AiRunRecordOrderByInput {
                                 created_at: Some(OrderDirection::Desc),
                             })
-                            .limit(terminal_run_limit)
+                            .internal_limit(terminal_run_limit)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)
@@ -458,7 +466,7 @@ impl AiSessionService for OrmAiSessionService {
                                     ..Default::default()
                                 })
                                 .default_order()
-                                .limit(terminal_run_limit)
+                                .internal_limit(terminal_run_limit)
                                 .fetch_all()
                                 .await
                                 .map_err(OrmPublicError::from)
@@ -500,7 +508,7 @@ impl AiSessionService for OrmAiSessionService {
                                     ..Default::default()
                                 })
                                 .default_order()
-                                .limit(query_limit)
+                                .internal_limit(query_limit)
                                 .fetch_all()
                                 .await
                                 .map_err(OrmPublicError::from)
@@ -749,6 +757,9 @@ impl AiSessionService for OrmAiSessionService {
                 "invalid message-block window".to_owned(),
             ));
         }
+        // A client page follows the host's page maximum.
+        let first =
+            crate::orm_read_bounds::client_page_limit(self.database.pagination_config(), first);
         let message = AiMessageRecord::find_by_id(&self.database, &message_id)
             .await
             .map_err(|error| map_orm(OrmPublicError::from(error)))?
@@ -790,7 +801,7 @@ impl AiSessionService for OrmAiSessionService {
                             ..Default::default()
                         })
                         .default_order()
-                        .limit(first)
+                        .internal_limit(first)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)
@@ -838,6 +849,9 @@ impl AiSessionService for OrmAiSessionService {
         {
             return Err(AiError::InvalidInput("invalid event window".to_owned()));
         }
+        // A client page follows the host's page maximum; `has_more` reports the rest.
+        let first =
+            crate::orm_read_bounds::client_page_limit(self.database.pagination_config(), first);
         let session = self
             .visible_session(principal, session_id, AiSessionAction::Read)
             .await?
@@ -865,7 +879,7 @@ impl AiSessionService for OrmAiSessionService {
                             ..Default::default()
                         })
                         .default_order()
-                        .limit(first)
+                        .internal_limit(first)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)
@@ -1691,7 +1705,7 @@ impl AiSessionService for OrmAiSessionService {
                             }),
                             ..Default::default()
                         })
-                        .limit(1)
+                        .internal_limit(1)
                         .fetch_one()
                         .await
                         .map_err(OrmPublicError::from)?;

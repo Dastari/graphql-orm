@@ -2,6 +2,7 @@
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
+use crate::orm_read_bounds::InternalReadBound as _;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
@@ -834,7 +835,7 @@ impl OrmAiContextCompactionService {
                             ..Default::default()
                         })
                         .default_order()
-                        .limit(limit)
+                        .internal_limit(limit)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)
@@ -870,7 +871,7 @@ impl OrmAiContextCompactionService {
                             ..Default::default()
                         })
                         .default_order()
-                        .limit(limit)
+                        .internal_limit(limit)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)
@@ -899,7 +900,7 @@ impl OrmAiContextCompactionService {
                             ..Default::default()
                         })
                         .default_order()
-                        .limit(limit)
+                        .internal_limit(limit)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)

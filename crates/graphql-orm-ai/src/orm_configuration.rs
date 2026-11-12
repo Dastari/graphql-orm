@@ -2,6 +2,7 @@
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
+use crate::orm_read_bounds::InternalReadBound as _;
 use std::sync::Arc;
 
 use agql_auth::{AuthPrincipal, Clock, RecentMfaPolicy};
@@ -289,7 +290,7 @@ impl AiConfigurationService for OrmAiConfigurationService {
                             ..Default::default()
                         })
                         .default_order()
-                        .limit(101)
+                        .internal_limit(101)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)
@@ -356,7 +357,7 @@ impl AiConfigurationService for OrmAiConfigurationService {
                             ..Default::default()
                         })
                         .default_order()
-                        .limit(101)
+                        .internal_limit(101)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)
@@ -789,7 +790,7 @@ impl AiConfigurationService for OrmAiConfigurationService {
                             }),
                             ..Default::default()
                         })
-                        .limit(2)
+                        .internal_limit(2)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -893,7 +894,7 @@ impl AiConfigurationService for OrmAiConfigurationService {
                             }),
                             ..Default::default()
                         })
-                        .limit(2)
+                        .internal_limit(2)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -1180,7 +1181,7 @@ impl AiConfigurationService for OrmAiConfigurationService {
                             ..Default::default()
                         })
                         .default_order()
-                        .limit(101)
+                        .internal_limit(101)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -1214,7 +1215,7 @@ impl AiConfigurationService for OrmAiConfigurationService {
                                 }),
                                 ..Default::default()
                             })
-                            .limit(1)
+                            .internal_limit(1)
                             .fetch_one()
                             .await
                             .map_err(OrmPublicError::from)?;
@@ -1257,7 +1258,7 @@ impl AiConfigurationService for OrmAiConfigurationService {
                         .order_by(AiBudgetReservationRecordOrderByInput {
                             created_at: Some(OrderDirection::Asc),
                         })
-                        .limit(scan_limit)
+                        .internal_limit(scan_limit)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -1485,7 +1486,7 @@ async fn load_content_policy(
                         }),
                         ..Default::default()
                     })
-                    .limit(2)
+                    .internal_limit(2)
                     .fetch_all()
                     .await
                     .map_err(OrmPublicError::from)
@@ -1517,7 +1518,7 @@ async fn load_retention_policy(
                         }),
                         ..Default::default()
                     })
-                    .limit(2)
+                    .internal_limit(2)
                     .fetch_all()
                     .await
                     .map_err(OrmPublicError::from)

@@ -2,6 +2,7 @@
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
+use crate::orm_read_bounds::InternalReadBound as _;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -1117,7 +1118,7 @@ impl OrmAiRunService {
                         let mut rows = tx
                             .query::<AiRunRecord>()
                             .filter(exact_state(state.as_str()))
-                            .limit(limits.maximum_candidate_scan as i64)
+                            .internal_limit(limits.maximum_candidate_scan as i64)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
@@ -1148,7 +1149,7 @@ impl OrmAiRunService {
                                     }),
                                     ..Default::default()
                                 })
-                                .limit(1)
+                                .internal_limit(1)
                                 .fetch_one()
                                 .await
                                 .map_err(OrmPublicError::from)?
@@ -1225,7 +1226,7 @@ impl OrmAiRunService {
                                         }),
                                         ..Default::default()
                                     })
-                                    .limit(message.block_count + 1)
+                                    .internal_limit(message.block_count + 1)
                                     .fetch_all()
                                     .await
                                     .map_err(OrmPublicError::from)?;
@@ -1321,7 +1322,7 @@ impl OrmAiRunService {
                                         }),
                                         ..Default::default()
                                     })
-                                    .limit(4_097)
+                                    .internal_limit(4_097)
                                     .fetch_all()
                                     .await
                                     .map_err(OrmPublicError::from)?;
@@ -1791,7 +1792,7 @@ impl OrmAiRunService {
                             ..Default::default()
                         })
                         .default_order()
-                        .limit(checkpoint_limit)
+                        .internal_limit(checkpoint_limit)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -1841,7 +1842,7 @@ impl OrmAiRunService {
                             ..Default::default()
                         })
                         .default_order()
-                        .limit(message_limit)
+                        .internal_limit(message_limit)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -1875,7 +1876,7 @@ impl OrmAiRunService {
                                 ..Default::default()
                             })
                             .default_order()
-                            .limit(block_limit)
+                            .internal_limit(block_limit)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
@@ -2219,7 +2220,7 @@ impl OrmAiRunService {
                                 }),
                                 ..Default::default()
                             })
-                            .limit(4_097)
+                            .internal_limit(4_097)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
@@ -2327,7 +2328,7 @@ impl OrmAiRunService {
                             }),
                             ..Default::default()
                         })
-                        .limit(1)
+                        .internal_limit(1)
                         .fetch_one()
                         .await
                         .map_err(OrmPublicError::from)?
@@ -2692,7 +2693,7 @@ impl OrmAiRunService {
                             }),
                             ..Default::default()
                         })
-                        .limit(1)
+                        .internal_limit(1)
                         .fetch_one()
                         .await
                         .map_err(OrmPublicError::from)?
@@ -3036,7 +3037,7 @@ impl OrmAiRunService {
                                 }),
                                 ..Default::default()
                             })
-                            .limit(2)
+                            .internal_limit(2)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
@@ -3606,7 +3607,7 @@ impl OrmAiRunService {
                                 }),
                                 ..Default::default()
                             })
-                            .limit(1)
+                            .internal_limit(1)
                             .fetch_one()
                             .await
                             .map_err(OrmPublicError::from)?
@@ -3687,7 +3688,7 @@ impl OrmAiRunService {
                                 }),
                                 ..Default::default()
                             })
-                            .limit(1)
+                            .internal_limit(1)
                             .fetch_one()
                             .await
                             .map_err(OrmPublicError::from)?
@@ -4367,7 +4368,7 @@ impl OrmAiRunService {
                         let mut rows = tx
                             .query::<AiRunRecord>()
                             .filter(exact_state(state.as_str()))
-                            .limit(limits.maximum_candidate_scan as i64)
+                            .internal_limit(limits.maximum_candidate_scan as i64)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
@@ -4485,7 +4486,7 @@ impl OrmAiRunService {
                             }),
                             ..Default::default()
                         })
-                        .limit(limits.maximum_candidate_scan as i64)
+                        .internal_limit(limits.maximum_candidate_scan as i64)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -4621,7 +4622,7 @@ impl OrmAiRunService {
                                             }),
                                             ..Default::default()
                                         })
-                                        .limit(1)
+                                        .internal_limit(1)
                                         .fetch_one()
                                         .await
                                         .map_err(OrmPublicError::from)?
@@ -4684,7 +4685,7 @@ impl OrmAiRunService {
                                     }),
                                     ..Default::default()
                                 })
-                                .limit(1)
+                                .internal_limit(1)
                                 .fetch_one()
                                 .await
                                 .map_err(OrmPublicError::from)?
@@ -4720,7 +4721,7 @@ impl OrmAiRunService {
                                         ..Default::default()
                                     },
                                 )
-                                .limit(2)
+                                .internal_limit(2)
                                 .fetch_all()
                                 .await
                                 .map_err(OrmPublicError::from)?;
@@ -5006,7 +5007,7 @@ impl OrmAiRunService {
                                     }),
                                     ..Default::default()
                                 })
-                                .limit(1)
+                                .internal_limit(1)
                                 .fetch_one()
                                 .await
                                 .map_err(OrmPublicError::from)?
@@ -5021,7 +5022,7 @@ impl OrmAiRunService {
                                             }),
                                             ..Default::default()
                                         })
-                                        .limit(1)
+                                        .internal_limit(1)
                                         .fetch_one()
                                         .await
                                         .map_err(OrmPublicError::from)?
@@ -5039,7 +5040,7 @@ impl OrmAiRunService {
                                             }),
                                             ..Default::default()
                                         })
-                                        .limit(1)
+                                        .internal_limit(1)
                                         .fetch_one()
                                         .await
                                         .map_err(OrmPublicError::from)?
@@ -5109,7 +5110,7 @@ impl OrmAiRunService {
                                     }),
                                     ..Default::default()
                                 })
-                                .limit(4_097)
+                                .internal_limit(4_097)
                                 .fetch_all()
                                 .await
                                 .map_err(OrmPublicError::from)?;
@@ -5558,7 +5559,7 @@ pub(crate) async fn abandon_native_approval_candidates(
             }),
             ..Default::default()
         })
-        .limit(2)
+        .internal_limit(2)
         .fetch_all()
         .await
         .map_err(OrmPublicError::from)?;
@@ -8453,7 +8454,7 @@ pub(crate) async fn run_produced_assistant_output(
             }),
             ..Default::default()
         })
-        .limit(1)
+        .internal_limit(1)
         .fetch_all()
         .await
         .map_err(OrmPublicError::from)?;
@@ -8482,7 +8483,7 @@ pub(crate) async fn run_provider_dispatch_possible(
             }),
             ..Default::default()
         })
-        .limit(1)
+        .internal_limit(1)
         .fetch_all()
         .await
         .map_err(OrmPublicError::from)?;
