@@ -338,9 +338,11 @@ public refusal: an error whose `code` extension is an ORM public code, such as
 `OrmPublicError::with_message(OrmErrorCode::Conflict, "...").into_graphql_error()`,
 or an `OrmPublicError` returned with `?`. Any other hook error, including one
 with an application-defined code, reads as `INTERNAL_ERROR` with the default
-message, and its text stays a server-side diagnostic. Generated GraphQL
-mutations, and `into_graphql_error()` on the repository error, still render an
-application-defined refusal as the hook wrote it. Entity and row policy refusals
+message, and its text stays a server-side diagnostic. GraphQL clients of
+generated mutations see a deliberate public refusal with the same code and
+message. They still see an application-defined refusal as the hook wrote it,
+as does `into_graphql_error()` on the repository error. `INTERNAL_ERROR`
+always has the default message, on every surface. Entity and row policy refusals
 on repository paths keep their public code in the same way, so an entity write
 denial reads as `FORBIDDEN`.
 

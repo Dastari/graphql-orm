@@ -398,11 +398,13 @@ pub fn graphql_error_from_loader(error: String) -> async_graphql::Error {
 /// Preserve an application callback's explicit message and extensions through SQLx.
 /// Only call this at a trusted GraphQL callback boundary; never with driver text.
 ///
-/// Repository callers see the callback's code and message only when it carries an
-/// allow-listed ORM public `code` extension, or is a typed [`OrmPublicError`]
-/// propagated with `?`. Any other authored error reads as `INTERNAL_ERROR` with
-/// the default message; [`OrmPublicError::into_graphql_error`] still renders it
-/// as the callback wrote it, matching generated GraphQL mutations.
+/// A callback's code and message are kept when it carries an allow-listed ORM
+/// public `code` extension, or is a typed [`OrmPublicError`] propagated with `?`,
+/// on both repository and GraphQL surfaces. `INTERNAL_ERROR`, by either route,
+/// always has the default message. Any other authored error reads as
+/// `INTERNAL_ERROR` with the default message for repository callers, while
+/// [`OrmPublicError::into_graphql_error`] still renders it as the callback wrote
+/// it, matching generated GraphQL mutations.
 #[doc(hidden)]
 pub fn sqlx_error_from_graphql(error: async_graphql::Error) -> sqlx::Error {
     let category = error
@@ -419,7 +421,18 @@ pub fn sqlx_error_from_graphql(error: async_graphql::Error) -> sqlx::Error {
     if error.source.is_some() && category.is_none() {
         let source = error.source.as_ref();
         if let Some(public) = source.and_then(|source| source.downcast_ref::<OrmPublicError>()) {
-            return sqlx_error_from_public(public.clone());
+            let mut public = public.clone();
+            if public.code == OrmErrorCode::InternalError {
+                // As for a code extension, `INTERNAL_ERROR` never marks its text as safe.
+                let message = std::mem::replace(
+                    &mut public.message,
+                    OrmErrorCode::InternalError.default_message().to_string(),
+                );
+                if public.internal.is_none() {
+                    public.internal = Some(message);
+                }
+            }
+            return sqlx_error_from_public(public);
         }
         return sqlx_error_from_public(
             source
@@ -428,18 +441,21 @@ pub fn sqlx_error_from_graphql(error: async_graphql::Error) -> sqlx::Error {
                 .unwrap_or_else(|| OrmPublicError::internal(error.message.clone())),
         );
     }
-    let code = category
-        .and_then(public_code)
-        .unwrap_or(OrmErrorCode::InternalError);
+    let known = category.and_then(public_code);
+    let code = known.unwrap_or(OrmErrorCode::InternalError);
     let mut public = OrmPublicError::new(code);
     if code == OrmErrorCode::InternalError {
         // Only an allow-listed public code marks the message as safe for
         // repository callers; any other message stays a server-side diagnostic.
         public.internal = Some(error.message.clone());
+        if known.is_some() {
+            // An explicit `INTERNAL_ERROR` is internal on every surface.
+            return sqlx_error_from_public(public);
+        }
     } else {
         public.message = error.message.clone();
     }
-    // The GraphQL boundary still renders the authored refusal as written.
+    // The GraphQL boundary still renders an authored refusal as written.
     public.application_refusal = Some(Box::new(ApplicationRefusal {
         message: error.message,
         extensions: error.extensions,

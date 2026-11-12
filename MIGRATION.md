@@ -415,6 +415,16 @@ generated GraphQL mutations still render such a refusal as the hook wrote it.
 Hosts that read `OrmPublicError::message` for an application-defined refusal
 should give it an ORM public code, or render it with `into_graphql_error()`.
 
+A typed `OrmPublicError` that a hook, row policy or input transform returns
+with `?` now keeps its code and message for GraphQL clients too, in generated
+single-row and bulk mutations and in `notificationErrors`. For example,
+`Err(OrmPublicError::with_message(OrmErrorCode::Conflict, "seat taken"))?`
+now renders `"seat taken"` with code `CONFLICT` instead of `"internal error"`
+with `INTERNAL_ERROR`. Review callbacks that build an `OrmPublicError` from
+text that is not safe for clients. `INTERNAL_ERROR`, from a string `code` or a
+typed error, now always renders the default message; previously an explicit
+`code: "INTERNAL_ERROR"` rendered the callback's own message.
+
 Entity-access and retention row-write refusals on repository reads and writes
 now keep their public code, so a denied entity write reads as `FORBIDDEN`
 instead of `INTERNAL_ERROR`.

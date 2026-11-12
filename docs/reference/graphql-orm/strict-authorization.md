@@ -3,7 +3,7 @@ title: "Strict Authorization Guide"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-12
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -208,8 +208,10 @@ Single-row generated mutations, generated entity/field policy checks, residual
 single-row read checks and default propagating `notify_with` errors use
 that same classifier. An error whose own `async_graphql::Error.source` field is
 `Some` without a string `code` is masked; the wrapped error need not have a nested
-`std::error::Error::source()`. Use `Error::new` or set a string `code` for an authored
-refusal. Custom `From` conversions leaving that field empty preserve their text
+`std::error::Error::source()`. The exception is a typed `OrmPublicError` returned
+with `?`, which keeps its code and message. Use `Error::new` or set a string `code`
+for an authored refusal. `INTERNAL_ERROR`, whether set as a string `code` or on a
+typed `OrmPublicError`, always renders the default message. Custom `From` conversions leaving that field empty preserve their text
 and extensions. Direct SQLx sources retain their safe bulk category; other
 sources become `INTERNAL_ERROR`. Internal details use the existing opt-in
 `GRAPHQL_ORM_LOG_INTERNAL_ERRORS` server path. No data migration is needed.

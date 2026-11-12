@@ -497,7 +497,9 @@ async fn assert_unchanged(db: &Database, existing: &HookRecord) {
 
 fn assert_failure(error: &OrmPublicError, failure: Failure, label: &str) {
     match failure {
-        Failure::Public(code) | Failure::PublicPropagated(code) => {
+        Failure::Public(code) | Failure::PublicPropagated(code)
+            if code != OrmErrorCode::InternalError =>
+        {
             assert_eq!(error.code, code, "{label}: {error:?}");
             assert_eq!(error.message, "refused by hook policy", "{label}");
         }
@@ -528,6 +530,10 @@ fn assert_failure(error: &OrmPublicError, failure: Failure, label: &str) {
 /// callers see it sanitized.
 fn graphql_rendering(failure: Failure) -> (Option<&'static str>, &'static str) {
     match failure {
+        Failure::Public(OrmErrorCode::InternalError)
+        | Failure::PublicPropagated(OrmErrorCode::InternalError) => {
+            (Some("INTERNAL_ERROR"), "internal error")
+        }
         Failure::Public(code) | Failure::PublicPropagated(code) => {
             (Some(code.as_str()), "refused by hook policy")
         }
@@ -537,12 +543,14 @@ fn graphql_rendering(failure: Failure) -> (Option<&'static str>, &'static str) {
     }
 }
 
-const FAILURES: [Failure; 8] = [
+const FAILURES: [Failure; 10] = [
     Failure::Public(OrmErrorCode::Conflict),
     Failure::Public(OrmErrorCode::Forbidden),
     Failure::Public(OrmErrorCode::InvalidInput),
     Failure::Public(OrmErrorCode::NotFound),
+    Failure::Public(OrmErrorCode::InternalError),
     Failure::PublicPropagated(OrmErrorCode::Conflict),
+    Failure::PublicPropagated(OrmErrorCode::InternalError),
     Failure::Uncoded,
     Failure::UnknownCode,
     Failure::Propagated,
@@ -768,6 +776,47 @@ async fn nested_hook_write_refusals_keep_their_code_and_safe_text() {
     }
 }
 
+/// Entity-level write denial on retention purge keeps its public code.
+async fn retention_purge_entity_denial_reports_forbidden() {
+    let (mut db, mut owner, _hook) = fixture().await;
+    HookRetained::insert(
+        &db,
+        CreateHookRetainedInput {
+            kind: "expired".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    db.set_entity_policy(DenyWrites);
+    let result = db
+        .retention_transaction(|maintenance| {
+            Box::pin(async move {
+                maintenance
+                    .purge::<HookRetained>(
+                        HookRetainedWhereInput {
+                            kind: Some(StringFilter {
+                                eq: Some("expired".to_string()),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        },
+                        MutationLimit::new(10)?,
+                    )
+                    .await
+                    .map_err(OrmPublicError::from)
+            })
+        })
+        .await;
+    let error = match result {
+        Err(TransactionError::Rejected(error)) => error,
+        other => panic!("expected a rejected purge, got {other:?}"),
+    };
+    assert_eq!(error.code, OrmErrorCode::Forbidden, "{error:?}");
+    let rows = HookRetained::query(db.pool()).fetch_all().await.unwrap();
+    assert_eq!(rows.len(), 1, "the refused purge must not delete");
+    owner.cleanup().unwrap();
+}
+
 /// Generated GraphQL mutations return the same public code and message.
 async fn graphql_refusals_match_repository_refusals() {
     let (db, mut owner, hook) = fixture().await;
@@ -825,6 +874,7 @@ mod cases {
     case!(standalone_refusals_preserve_only_public_codes);
     case!(retention_purge_refusals_preserve_only_public_codes);
     case!(entity_write_denial_reports_forbidden);
+    case!(retention_purge_entity_denial_reports_forbidden);
     case!(nested_hook_write_refusals_keep_their_code_and_safe_text);
     case!(graphql_refusals_match_repository_refusals);
 }
