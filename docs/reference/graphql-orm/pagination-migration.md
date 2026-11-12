@@ -210,6 +210,9 @@ Caller filters, counts, and both pagination probes use the same decision.
 Counts remain opt-in with `includeTotalCount`; omission executes no COUNT.
 The standalone Rust helpers now use the same policy-aware executor as GraphQL.
 GraphQL callback-only or partial policies must use scans or exact list offsets.
+Such a request is refused with a distinct reason. Schema registration refuses a
+Keyset root whose row policy explicitly declares residual-only visibility; see
+[Keyset roots and residual-only read policies](macros-and-attributes.md#keyset-roots-and-residual-only-read-policies).
 Standalone repository keyset helpers preserve bounded fail-closed callback
 reads: every page candidate, lookahead, and opposite probe must pass the
 callback, or the request fails. These legacy reads do not advance through

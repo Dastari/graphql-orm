@@ -394,6 +394,176 @@ impl ReadVisibility {
     }
 }
 
+/// What a [`RowPolicy`] declares `read_visibility` can return for one entity.
+///
+/// Schema registration reads this static declaration because `read_visibility`
+/// is asynchronous and request-dependent. It describes the policy; it never
+/// grants access or replaces runtime checks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ReadVisibilityCapability {
+    /// Not declared. This is the default, and keeps generated Keyset roots
+    /// registered. [`crate::db::Database::keyset_read_policy_diagnostics`]
+    /// reports these roots.
+    #[default]
+    Unknown,
+    /// Every GraphQL request gets `CallbackOnly` or `Prefilter`. Generated
+    /// schema builders refuse an exposed Keyset root for such an entity.
+    ResidualOnly,
+    /// At least some GraphQL requests get `Complete` or `Unrestricted`.
+    Complete,
+}
+
+/// Why a generated Keyset root was reported by the read-policy check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum KeysetReadPolicyReason {
+    /// The row policy declares [`ReadVisibilityCapability::ResidualOnly`] for
+    /// an entity whose Keyset root is exposed. Refused at registration.
+    DeclaredResidualOnly,
+    /// The row policy leaves the entity [`ReadVisibilityCapability::Unknown`].
+    /// Reported as a diagnostic only.
+    UndeclaredCapability,
+    /// The entity metadata passed to the check has no entry for the root's
+    /// entity. Refused, since the check cannot read its policy key.
+    MissingEntityMetadata,
+}
+
+/// A generated Keyset root reported by the Keyset read-policy check.
+///
+/// A GraphQL Keyset request is served only when `RowPolicy::read_visibility`
+/// returns `Complete` or `Unrestricted`. See
+/// [`crate::db::Database::validate_keyset_read_policies`] and
+/// [`crate::db::Database::keyset_read_policy_diagnostics`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeysetReadPolicyError {
+    field_name: &'static str,
+    entity_name: &'static str,
+    policy_key: Option<&'static str>,
+    reason: KeysetReadPolicyReason,
+}
+
+impl KeysetReadPolicyError {
+    /// The reported GraphQL root field.
+    pub const fn field_name(&self) -> &'static str {
+        self.field_name
+    }
+    /// The entity the root pages through.
+    pub const fn entity_name(&self) -> &'static str {
+        self.entity_name
+    }
+    /// The entity's read policy key, if it declares one.
+    pub const fn policy_key(&self) -> Option<&'static str> {
+        self.policy_key
+    }
+    /// Why the root was reported.
+    pub const fn reason(&self) -> KeysetReadPolicyReason {
+        self.reason
+    }
+    /// Whether generated schema builders refuse the root for this reason.
+    pub const fn refuses_registration(&self) -> bool {
+        !matches!(self.reason, KeysetReadPolicyReason::UndeclaredCapability)
+    }
+}
+
+impl std::fmt::Display for KeysetReadPolicyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let policy = match self.policy_key {
+            Some(key) => format!("read policy `{key}`"),
+            None => "no read policy key".to_string(),
+        };
+        let (root, entity) = (self.field_name, self.entity_name);
+        const FIXES: &str = "Leave `keyset` out of the entity's `query_shapes` (for example \
+             `query_shapes = \"single,list,scan\"` with finite scan bounds) and page with the \
+             bounded scan root, or return `ReadVisibilityCapability::Complete` from \
+             `RowPolicy::read_visibility_capability` if `read_visibility` returns `Complete` or \
+             `Unrestricted` for this entity on some GraphQL requests";
+        match self.reason {
+            KeysetReadPolicyReason::DeclaredResidualOnly => write!(
+                f,
+                "generated Keyset root `{root}` for entity `{entity}` ({policy}) is refused: the \
+                 installed RowPolicy declares `ReadVisibilityCapability::ResidualOnly` for this \
+                 entity, and Keyset pagination serves GraphQL requests only with `Complete` or \
+                 `Unrestricted` read visibility. {FIXES}"
+            ),
+            KeysetReadPolicyReason::UndeclaredCapability => write!(
+                f,
+                "generated Keyset root `{root}` for entity `{entity}` ({policy}) may be unusable: \
+                 the installed RowPolicy does not declare `read_visibility_capability` for this \
+                 entity, and Keyset pagination refuses GraphQL requests that get `CallbackOnly` \
+                 or `Prefilter` read visibility. Declare `Complete` or `ResidualOnly`. {FIXES}"
+            ),
+            KeysetReadPolicyReason::MissingEntityMetadata => write!(
+                f,
+                "generated Keyset root `{root}` names entity `{entity}`, which is missing from the \
+                 entity metadata passed to the Keyset read-policy check; pass the metadata of \
+                 every entity in the operation catalog"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for KeysetReadPolicyError {}
+
+/// Every exposed generated Keyset root the row policy cannot be shown to serve.
+pub(crate) fn keyset_read_policy_findings<B: OrmBackend>(
+    policy: Option<&dyn RowPolicy<B>>,
+    catalog: &GraphqlOperationCatalog,
+    entities: &[&EntityMetadata],
+) -> Vec<KeysetReadPolicyError> {
+    let mut findings = Vec::new();
+    for operation in catalog.exposed_operations() {
+        if operation.query_shape() != Some(GeneratedGraphqlQueryShape::Keyset) {
+            continue;
+        }
+        let entity_name = operation.entity_name();
+        let finding = |policy_key, reason| KeysetReadPolicyError {
+            field_name: operation.field_name(),
+            entity_name,
+            policy_key,
+            reason,
+        };
+        let Some(entity) = entities.iter().find(|e| e.entity_name == entity_name) else {
+            findings.push(finding(None, KeysetReadPolicyReason::MissingEntityMetadata));
+            continue;
+        };
+        // Without a row policy, reads are `Unrestricted`.
+        let Some(policy) = policy else {
+            continue;
+        };
+        let reason = match policy.read_visibility_capability(entity_name, entity.read_policy) {
+            ReadVisibilityCapability::Complete => continue,
+            ReadVisibilityCapability::ResidualOnly => KeysetReadPolicyReason::DeclaredResidualOnly,
+            ReadVisibilityCapability::Unknown => KeysetReadPolicyReason::UndeclaredCapability,
+        };
+        findings.push(finding(entity.read_policy, reason));
+    }
+    findings
+}
+
+/// Public reason carried by a refused GraphQL Keyset request.
+///
+/// A GraphQL Keyset request whose read visibility is `CallbackOnly` or
+/// `Prefilter` fails with code `AUTHORIZATION_MISCONFIGURED`, the message
+/// [`KEYSET_READ_VISIBILITY_REFUSAL_MESSAGE`] and this value in the `reason`
+/// extension. Neither says anything about the policy's contents.
+pub const KEYSET_READ_VISIBILITY_REFUSAL_REASON: &str = "KEYSET_REQUIRES_COMPLETE_READ_VISIBILITY";
+
+/// Public message carried by a refused GraphQL Keyset request.
+pub const KEYSET_READ_VISIBILITY_REFUSAL_MESSAGE: &str = "keyset pagination is not configured \
+    for this root under its read policy; use the bounded scan root, or declare complete read \
+    visibility for this entity";
+
+fn keyset_read_visibility_refusal() -> async_graphql::Error {
+    use async_graphql::ErrorExtensions;
+    OrmPublicError::with_message(
+        OrmErrorCode::AuthorizationMisconfigured,
+        KEYSET_READ_VISIBILITY_REFUSAL_MESSAGE,
+    )
+    .into_graphql_error()
+    .extend_with(|_, extensions| extensions.set("reason", KEYSET_READ_VISIBILITY_REFUSAL_REASON))
+}
+
 /// A generated stable keyset order, including its unique final primary key.
 /// The values must match the order columns and preserve their scalar types.
 pub trait AuthorizedKeysetEntity: Entity {
@@ -940,8 +1110,14 @@ where
         let backward = page.direction == KeysetWindowDirection::Backward;
         let visibility = self.authorize_pagination(db, ctx).await?;
         Self::authorize_keyset_order_fields(db, ctx, order, runtime.is_some(), None).await?;
-        if visibility.requires_residual_checks() && (ctx.is_some() || page.include_total_count) {
-            return Err(invalid());
+        if visibility.requires_residual_checks() {
+            // A GraphQL Keyset root cannot advance through rows a callback rejects.
+            if ctx.is_some() {
+                return Err(keyset_read_visibility_refusal());
+            }
+            if page.include_total_count {
+                return Err(invalid());
+            }
         }
         if self.requires_in_memory_filtering() {
             return Err(input_error());

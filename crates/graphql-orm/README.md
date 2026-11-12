@@ -10,6 +10,14 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.126.0 adds `RowPolicy::read_visibility_capability`. Generated schema
+builders refuse an exposed Keyset root when the row policy explicitly declares
+its entity `ResidualOnly`, and the new `try_schema_builder` returns that error.
+The default, `Unknown`, keeps existing roots; `Database::keyset_read_policy_diagnostics`
+reports them. Refused GraphQL Keyset requests carry a distinct `reason`.
+Upgrade ORM/macros together; see the
+[root migration guide](../../MIGRATION.md#01260-keyset-read-visibility-declarations-and-diagnostics).
+
 Version 0.125.0 records PostgreSQL change-journal entries in the database
 instead of the runtime role, and journaled writes require the recorder
 trigger. Upgrade ORM/macros together; see the

@@ -543,6 +543,56 @@ impl<B: OrmBackend> Database<B> {
         self.row_policy = Some(Arc::new(policy));
     }
 
+    /// Refuse exposed generated Keyset roots the installed row policy declares
+    /// it cannot serve.
+    ///
+    /// Generated `schema_roots!` builders run this check: `try_schema_builder`
+    /// returns the error and `schema_builder` panics with it. A schema built
+    /// directly with `Schema::build` skips it, so hand-built schemas should
+    /// call this with their operation catalog and entity metadata. Roots left
+    /// [`crate::graphql::orm::ReadVisibilityCapability::Unknown`] pass; see
+    /// [`Self::keyset_read_policy_diagnostics`].
+    ///
+    /// # Errors
+    /// Returns the first exposed Keyset root whose entity the row policy
+    /// declares [`crate::graphql::orm::ReadVisibilityCapability::ResidualOnly`],
+    /// or whose entity is missing from `entities`.
+    pub fn validate_keyset_read_policies(
+        &self,
+        catalog: &crate::graphql::orm::GraphqlOperationCatalog,
+        entities: &[&crate::graphql::orm::EntityMetadata],
+    ) -> std::result::Result<(), crate::graphql::orm::KeysetReadPolicyError> {
+        match self
+            .keyset_read_policy_diagnostics(catalog, entities)
+            .into_iter()
+            .find(crate::graphql::orm::KeysetReadPolicyError::refuses_registration)
+        {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// Report every exposed generated Keyset root the installed row policy has
+    /// not declared it can serve.
+    ///
+    /// This includes roots refused by [`Self::validate_keyset_read_policies`]
+    /// and roots whose entity the policy leaves
+    /// [`crate::graphql::orm::ReadVisibilityCapability::Unknown`], which may
+    /// refuse every GraphQL request. Hosts can log these at startup, or treat
+    /// a non-empty result as an error for a strict check. With no row policy
+    /// installed, only missing entity metadata is reported.
+    pub fn keyset_read_policy_diagnostics(
+        &self,
+        catalog: &crate::graphql::orm::GraphqlOperationCatalog,
+        entities: &[&crate::graphql::orm::EntityMetadata],
+    ) -> Vec<crate::graphql::orm::KeysetReadPolicyError> {
+        crate::graphql::orm::keyset_read_policy_findings(
+            self.row_policy.as_deref(),
+            catalog,
+            entities,
+        )
+    }
+
     pub fn row_policy(&self) -> Option<&Arc<dyn crate::graphql::orm::RowPolicy<B>>> {
         self.row_policy.as_ref()
     }

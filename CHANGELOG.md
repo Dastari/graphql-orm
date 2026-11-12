@@ -24,6 +24,14 @@ for historical context.
 
 - AI 0.128.0: **breaking:** enforce AI runtime closure after a snapshot restore. The runtime start gate opens only with a proof minted from a store's live recovery epoch (AI schema module `0.77.0`), and leases are bound to that epoch. Worker claims, lease-fenced writes and approval consumption refuse while the epoch is not live. A restored store stays closed until `OrmAiRuntimeRecoveryService::reconcile_restore` expires its approvals, revokes its egress consents and moves unfinished runs to `RecoveryRequired`, and an operator acknowledges the reviewed result. An existing deployment upgraded in place opens once the operator calls `acknowledge_in_place_upgrade`, which leaves its work unchanged. Restore facts now decode strictly. See the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01270-to-01280-enforced-runtime-closure-after-restore).
 
+## 0.126.0
+
+ORM runtime/macros **0.126.0**, operation catalog **0.7.3**.
+
+- **Fixed:** a generated Keyset root no longer stays registered when the host has explicitly declared that its entity's read policy is residual-only. New `RowPolicy::read_visibility_capability` declares, per entity and policy key, whether `read_visibility` can return `Complete` or `Unrestricted`. The default, `Unknown`, keeps today's behaviour. When a policy declares `ResidualOnly` for an entity whose Keyset root is exposed, the new generated `try_schema_builder` and `try_schema_builder_with_limits` return a `KeysetReadPolicyError` naming the root, entity and policy key with both fixes, and `schema_builder` and `schema_builder_with_limits` panic with it. They also refuse a Keyset root whose entity metadata is missing. Fixes #396.
+- **API:** `Database::keyset_read_policy_diagnostics` reports exposed Keyset roots whose entity is still `Unknown`, so hosts can log them or make the check strict. `Database::validate_keyset_read_policies` runs the registration check for schemas built directly with `Schema::build`, which skip it. Operation catalog descriptors record `GeneratedGraphqlQueryShape` through `query_shape()`, so Keyset roots are told apart from bounded Scan roots structurally. Catalogue fingerprints are unchanged.
+- **Behaviour change:** a GraphQL Keyset request refused for `CallbackOnly` or `Prefilter` read visibility keeps code `AUTHORIZATION_MISCONFIGURED`, but now carries `KEYSET_READ_VISIBILITY_REFUSAL_MESSAGE` and the `reason` extension `KEYSET_REQUIRES_COMPLETE_READ_VISIBILITY`, pointing to the bounded scan root. Neither says anything about the policy itself. See the [0.126.0 migration guide](MIGRATION.md#01260-keyset-read-visibility-declarations-and-diagnostics).
+
 ## 0.125.0
 
 ORM runtime/macros **0.125.0**.

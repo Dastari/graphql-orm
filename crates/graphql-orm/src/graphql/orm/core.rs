@@ -2702,6 +2702,26 @@ pub trait FieldPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
 }
 
 pub trait RowPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
+    /// Declare what `read_visibility` can return for this entity and policy key.
+    ///
+    /// Keyset pagination serves a GraphQL request only with `Complete` or
+    /// `Unrestricted` visibility. Generated schema builders refuse an exposed
+    /// Keyset root for an entity declared
+    /// [`super::ReadVisibilityCapability::ResidualOnly`], a contradiction the
+    /// host wrote. The default, `Unknown`, keeps the root registered;
+    /// `Database::keyset_read_policy_diagnostics` reports it. Return `Complete`
+    /// when `read_visibility` returns `Complete` or `Unrestricted` for this
+    /// entity on at least some GraphQL requests. The declaration never grants
+    /// access or bypasses runtime checks: a GraphQL Keyset request that still
+    /// gets residual visibility is refused with `AUTHORIZATION_MISCONFIGURED`.
+    fn read_visibility_capability(
+        &self,
+        _entity_name: &'static str,
+        _policy_key: Option<&'static str>,
+    ) -> super::ReadVisibilityCapability {
+        super::ReadVisibilityCapability::Unknown
+    }
+
     /// Describe read visibility for this request, entity, and access surface.
     /// The default preserves callback-only authorization. A complete predicate
     /// (or `Unrestricted`) replaces row callbacks only on read paths that
