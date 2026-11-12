@@ -4513,6 +4513,9 @@ fn generate_graphql_operations_unfiltered(
                 // enabled trigger. Read the row back in the same batch instead:
                 // the update holds its exclusive lock until the transaction
                 // ends, and `@@ROWCOUNT` excludes statements run by triggers.
+                // The read-back also requires the version this swap writes, so
+                // an `INSTEAD OF` trigger that suppresses or rewrites the update
+                // yields a conflict rather than an unchanged row.
                 let output_columns = <Self as ::graphql_orm::graphql::orm::DatabaseSchema>::columns()
                     .iter()
                     .map(|column| {
@@ -4526,15 +4529,26 @@ fn generate_graphql_operations_unfiltered(
                     .collect::<Vec<_>>()
                     .join(", ");
                 let quoted_table = dialect.quote_identifier_path(#table_name);
-                // The read-back binds the key again: placeholders are numbered in order.
-                values.push(#pk_bind_value_ref);
-                format!(
-                    "UPDATE {quoted_table} SET {} WHERE {}; \
-                     IF @@ROWCOUNT = 1 SELECT {output_columns} FROM {quoted_table} WHERE {} = ?",
+                let update = format!(
+                    "UPDATE {quoted_table} SET {} WHERE {}",
                     set_clauses.join(", "),
                     predicates.join(" AND "),
-                    dialect.quote_identifier_path(Self::PRIMARY_KEY),
-                )
+                );
+                match expected_version.checked_add(1) {
+                    Some(written_version) => {
+                        // Placeholders are numbered in order, so the read-back
+                        // binds the key and the written version after the update's.
+                        values.push(#pk_bind_value_ref);
+                        values.push(SqlValue::Int(written_version));
+                        format!(
+                            "{update}; IF @@ROWCOUNT = 1 SELECT {output_columns} FROM {quoted_table} \
+                             WHERE {} = ? AND {quoted_version_column} = ?",
+                            dialect.quote_identifier_path(Self::PRIMARY_KEY),
+                        )
+                    }
+                    // `version < i64::MAX` already makes the update match nothing.
+                    None => update,
+                }
             }
         }
     } else {

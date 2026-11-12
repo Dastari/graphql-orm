@@ -38,6 +38,38 @@ struct TriggeredRecord {
 #[derive(RepositoryEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[repository_entity(
     backend = "mssql",
+    table = "dbo.GraphqlOrmReplacedRecords",
+    plural = "ReplacedRecords",
+    schema_policy = "external_writable"
+)]
+struct ReplacedRecord {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    id: String,
+    value: i64,
+    #[graphql_orm(version, default = "0")]
+    version: i64,
+}
+
+#[derive(RepositoryEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[repository_entity(
+    backend = "mssql",
+    table = "dbo.GraphqlOrmSuppressedRecords",
+    plural = "SuppressedRecords",
+    schema_policy = "external_writable"
+)]
+struct SuppressedRecord {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    id: String,
+    value: i64,
+    #[graphql_orm(version, default = "0")]
+    version: i64,
+}
+
+#[derive(RepositoryEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[repository_entity(
+    backend = "mssql",
     table = "dbo.GraphqlOrmTriggeredComposites",
     plural = "TriggeredComposites",
     schema_policy = "external_writable",
@@ -493,6 +525,114 @@ async fn generated_writes_succeed_on_tables_with_counting_after_triggers()
     );
     assert!(audit_rows(&database, "records").await? > 0);
     assert!(audit_rows(&database, "composites").await? > 0);
+
+    server.cleanup()?;
+    Ok(())
+}
+
+/// `INSTEAD OF UPDATE` triggers replace the compare-and-swap statement. One
+/// performs the update and ends with a one-row audit insert; the other writes
+/// only the audit row and suppresses the update. The read-back must report
+/// the version the swap wrote, or the outcome is a conflict.
+const REPLACED_TABLES: &str = r#"
+CREATE TABLE dbo.GraphqlOrmReplacedAudit (
+    audit_id BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+    row_key NVARCHAR(64) NULL
+);
+CREATE TABLE dbo.GraphqlOrmReplacedRecords (
+    id NVARCHAR(64) NOT NULL PRIMARY KEY,
+    value BIGINT NOT NULL,
+    version BIGINT NOT NULL DEFAULT (0)
+);
+CREATE TABLE dbo.GraphqlOrmSuppressedRecords (
+    id NVARCHAR(64) NOT NULL PRIMARY KEY,
+    value BIGINT NOT NULL,
+    version BIGINT NOT NULL DEFAULT (0)
+);
+INSERT INTO dbo.GraphqlOrmReplacedRecords (id, value, version) VALUES ('replaced', 1, 0);
+INSERT INTO dbo.GraphqlOrmSuppressedRecords (id, value, version) VALUES ('suppressed', 1, 0);
+"#;
+
+const REPLACING_TRIGGERS: [&str; 2] = [
+    r#"CREATE TRIGGER dbo.GraphqlOrmReplacedRecordsUpdate ON dbo.GraphqlOrmReplacedRecords
+INSTEAD OF UPDATE AS
+BEGIN
+    UPDATE target SET value = source.value, version = source.version
+    FROM dbo.GraphqlOrmReplacedRecords AS target
+    JOIN inserted AS source ON source.id = target.id;
+    INSERT INTO dbo.GraphqlOrmReplacedAudit (row_key) VALUES ('replaced');
+END"#,
+    r#"CREATE TRIGGER dbo.GraphqlOrmSuppressedRecordsUpdate ON dbo.GraphqlOrmSuppressedRecords
+INSTEAD OF UPDATE AS
+BEGIN
+    INSERT INTO dbo.GraphqlOrmReplacedAudit (row_key) VALUES ('suppressed');
+END"#,
+];
+
+#[tokio::test]
+#[ignore = "starts a test-owned SQL Server 2022 container"]
+async fn compare_and_swap_reports_only_the_version_it_wrote_under_instead_of_triggers()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut server = OwnedSqlServer::start().await?;
+    execute_batch(&server.connection_string, REPLACED_TABLES).await?;
+    for trigger in REPLACING_TRIGGERS {
+        execute_batch(&server.connection_string, trigger).await?;
+    }
+    let database = writable_database(&server.connection_string)?;
+    let replaced_id = "replaced".to_owned();
+    let suppressed_id = "suppressed".to_owned();
+
+    // A trigger that performs the update: the swap reports the new version.
+    let swapped = ReplacedRecord::compare_and_swap(
+        &database,
+        &replaced_id,
+        0,
+        ReplacedRecordWhereInput::default(),
+        UpdateReplacedRecordInput { value: Some(2) },
+    )
+    .await?;
+    let ConditionalUpdateOutcome::Updated(swapped) = swapped else {
+        panic!("matching compare-and-swap should update through the trigger: {swapped:?}");
+    };
+    assert_eq!(swapped.version, 1);
+    assert_eq!(swapped.value, 2);
+
+    // One step stale: the stored version is exactly the one this swap would
+    // have written, and the trigger still ends with a one-row insert.
+    assert!(matches!(
+        ReplacedRecord::compare_and_swap(
+            &database,
+            &replaced_id,
+            0,
+            ReplacedRecordWhereInput::default(),
+            UpdateReplacedRecordInput { value: Some(3) },
+        )
+        .await?,
+        ConditionalUpdateOutcome::Conflict
+    ));
+    let stored = ReplacedRecord::find_by_id(&database, &replaced_id)
+        .await?
+        .expect("replaced row should remain");
+    assert_eq!((stored.version, stored.value), (1, 2));
+
+    // A trigger that suppresses the update: the swap matched, but nothing was
+    // written, so it must not report the unchanged row as updated.
+    let suppressed = SuppressedRecord::compare_and_swap(
+        &database,
+        &suppressed_id,
+        0,
+        SuppressedRecordWhereInput::default(),
+        UpdateSuppressedRecordInput { value: Some(2) },
+    )
+    .await?;
+    assert!(
+        matches!(suppressed, ConditionalUpdateOutcome::Conflict),
+        "a suppressed update must not report Updated: {suppressed:?}"
+    );
+    let stored = SuppressedRecord::find_by_id(&database, &suppressed_id)
+        .await?
+        .expect("suppressed row should remain");
+    assert_eq!((stored.version, stored.value), (0, 1));
 
     server.cleanup()?;
     Ok(())
