@@ -2,9 +2,9 @@
 //!
 //! This connection is separate from entity pools. It never provisions schema or
 //! enables business DML. SQL permissions remain the authoritative boundary.
-use super::{MssqlClient, MssqlRow, map_tiberius_error};
+use super::{MssqlClient, MssqlRow, MssqlTransportPolicy, map_tiberius_error};
 use quick_xml::{Reader, events::Event};
-use tiberius::{Config, QueryNotification};
+use tiberius::QueryNotification;
 use tokio::net::TcpStream;
 use tokio_util::compat::TokioAsyncWriteCompatExt;
 
@@ -75,11 +75,23 @@ impl MssqlQueryNotificationConnection {
     /// Connect using a principal with SELECT, SUBSCRIBE QUERY NOTIFICATIONS,
     /// RECEIVE on this queue and dbo.QueryNotificationErrorsQueue, and
     /// permission to end its conversations.
+    ///
+    /// The connection string must meet [`MssqlTransportPolicy::verified`].
     pub async fn connect_ado(
         connection_string: &str,
         queue: MssqlBrokerQueue,
     ) -> crate::Result<Self> {
-        let config = Config::from_ado_string(connection_string).map_err(map_tiberius_error)?;
+        Self::connect_ado_with_transport(connection_string, queue, MssqlTransportPolicy::verified())
+            .await
+    }
+
+    /// Connect under an explicit transport policy.
+    pub async fn connect_ado_with_transport(
+        connection_string: &str,
+        queue: MssqlBrokerQueue,
+        transport: MssqlTransportPolicy,
+    ) -> crate::Result<Self> {
+        let config = super::transport::config_from_ado(connection_string, transport)?;
         let tcp = TcpStream::connect(config.get_addr()).await?;
         tcp.set_nodelay(true)?;
         let mut client = MssqlClient::connect(config, tcp.compat_write())

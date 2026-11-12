@@ -10,6 +10,74 @@ supersedes: []
 
 # Migration Guide
 
+## 0.127.0 to 0.128.0: SQL Server encryption and pool defaults
+
+Upgrade runtime and macros together. No schema or data migration is needed.
+Only the `mssql` feature changes.
+
+SQL Server connections now require TLS for the whole session and validate the
+server certificate. A connection string without `Encrypt` previously gave
+login-only TLS; it now behaves like `Encrypt=true`. A server whose certificate
+does not chain to a trusted root, or does not match the host name in `server=`,
+now fails to connect. Install its root in the platform store, or add
+`TrustServerCertificateCA=/absolute/path/ca.pem`, and connect with the name on
+the certificate.
+
+`MssqlPool::connect_ado*`, `Database::connect_ado*` and
+`MssqlQueryNotificationConnection::connect_ado` now return
+`sqlx::Error::Configuration` for:
+
+- `Encrypt=false` or `no`, and `TrustServerCertificate=true` or `yes`, unless
+  the matching opt-in is set in code (below);
+- `Encrypt=DANGER_PLAINTEXT`, `strict`, `mandatory` or `optional`;
+- `TrustServerCertificate=true` together with `TrustServerCertificateCA`;
+- `Integrated Security` set to `true`, `yes` or `SSPI`;
+- keys the driver would ignore that name a security setting, such as
+  `Encryption`, `Trust Server Certificate`, `HostNameInCertificate` or
+  `Authentication`.
+
+To keep a weaker mode deliberately, for example against a disposable local
+server, opt in through `MssqlPoolOptions`:
+
+```rust
+use graphql_orm::db::mssql::{MssqlPool, MssqlPoolOptions, MssqlTransportPolicy};
+
+let options = MssqlPoolOptions::new().transport(
+    MssqlTransportPolicy::verified().insecure_allow_unverified_certificate(),
+);
+let pool = MssqlPool::connect_ado_external_writable_with(connection_string, options).await?;
+let database = graphql_orm::db::Database::<graphql_orm::MssqlBackend>::builder(pool)
+    .schema_policy(graphql_orm::graphql::orm::SchemaPolicy::ExternalWritable)
+    .build();
+```
+
+`insecure_allow_login_only_encryption()` admits `Encrypt=false`. For the
+notification connection, use
+`MssqlQueryNotificationConnection::connect_ado_with_transport`.
+
+Pools built with `MssqlPool::new` and the other `tiberius::Config`
+constructors now raise the configuration's encryption level to `Required`. A
+`Config` from `tiberius::Config::from_ado_string` without `Encrypt` was
+login-only before. Pass `MssqlPoolOptions` with
+`insecure_allow_login_only_encryption()` to `with_options` to keep the level
+you set.
+
+The pool now has bounds. Acquiring a connection fails with
+`sqlx::Error::PoolTimedOut` after 30 seconds, and opening one fails after 15
+seconds. Idle connections close after 10 minutes and all connections after 30
+minutes. Change them with `MssqlPoolOptions` and `connect_ado_with`,
+`connect_ado_external_writable_with`, `with_options` or
+`with_options_external_writable`. There is no statement timeout unless you set
+`query_timeout`.
+
+Each pooled connection now starts at `READ COMMITTED` with `NOCOUNT OFF` and
+`IMPLICIT_TRANSACTIONS OFF`, and is reset the same way after every transaction.
+Reads that ran after a state-machine transaction on the same connection were
+previously `SERIALIZABLE`. Raw SQL that relied on a server default of
+`NOCOUNT ON` now receives row counts.
+
+See the [SQL Server reference](docs/reference/graphql-orm/mssql.md#connections).
+
 ## 0.126.0 to 0.127.0: repository callers keep public hook refusal codes
 
 Upgrade runtime and macros together. No schema or data migration is needed.
