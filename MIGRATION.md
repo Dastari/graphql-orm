@@ -239,6 +239,44 @@ transaction writes are generated as for any entity. If you worked around the
 failure with a placeholder writable column or argument, you can remove it.
 See [read-only and zero-input entities](docs/reference/graphql-orm/macros-and-attributes.md#read-only-and-zero-input-entities).
 
+## 0.126.0: Keyset read-visibility declarations and diagnostics
+
+Upgrade ORM/macros together, with operation catalog 0.7.3. No data migration is
+needed, and existing schemas build unchanged unless a row policy opts in to the
+new declaration.
+
+- `RowPolicy::read_visibility_capability(entity_name, policy_key)` is a new
+  defaulted method. Its default, `ReadVisibilityCapability::Unknown`, keeps
+  every Keyset root registered, as before. Declare `Complete` when
+  `read_visibility` returns `Complete` or `Unrestricted` for the entity on some
+  GraphQL requests, or `ResidualOnly` when it never does.
+- With `ResidualOnly` declared, the generated builders refuse an exposed Keyset
+  root for that entity. `try_schema_builder` and
+  `try_schema_builder_with_limits` return the `KeysetReadPolicyError`, and
+  `schema_builder` and `schema_builder_with_limits` panic with it. Leave
+  `keyset` out of the entity's `query_shapes` (for example
+  `query_shapes = "single,list,scan"`), install finite scan bounds and page with
+  the scan root.
+- `Database::keyset_read_policy_diagnostics` lists Keyset roots whose entity is
+  still `Unknown`. Such a root works only on requests where `read_visibility`
+  returns `Complete` or `Unrestricted`. Log the list at startup, or treat a
+  non-empty list as an error to make the check strict.
+- A schema built directly with `Schema::build` skips the check. Call
+  `Database::validate_keyset_read_policies` with the catalog and entity
+  metadata. It also refuses a Keyset root whose entity is missing from that
+  metadata.
+- A GraphQL Keyset request refused for `CallbackOnly` or `Prefilter` visibility
+  keeps code `AUTHORIZATION_MISCONFIGURED`. Its message is now
+  `KEYSET_READ_VISIBILITY_REFUSAL_MESSAGE`, and it carries the `reason`
+  extension `KEYSET_REQUIRES_COMPLETE_READ_VISIBILITY`. Clients that match the
+  previous message, "authorization is misconfigured", should match the code or
+  reason instead.
+- A `schema_roots!` module now also defines `try_schema_builder` and
+  `try_schema_builder_with_limits`. Rename any host function with those names
+  in the same module.
+
+See [Keyset roots and residual-only read policies](docs/reference/graphql-orm/macros-and-attributes.md#keyset-roots-and-residual-only-read-policies).
+
 ## 0.125.0: PostgreSQL records change-journal entries in the database
 
 Upgrade runtime and macros together. This affects PostgreSQL deployments that

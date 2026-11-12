@@ -7463,6 +7463,10 @@ fn generate_graphql_operations_unfiltered(
             )
         }
     };
+    let with_query_shape = |descriptor: proc_macro2::TokenStream,
+                            shape: proc_macro2::TokenStream| {
+        quote! { #descriptor.with_query_shape(#shape) }
+    };
     let ai_mutation_policy =
         |category: &str| match entity_meta.ai_mutations.get(category).map(String::as_str) {
             Some("automatic") => quote! {
@@ -7532,9 +7536,11 @@ fn generate_graphql_operations_unfiltered(
             #resolver_schema_signature,
             #list_operation_authorization,
         )
+        .with_query_shape(::graphql_orm::graphql::orm::GeneratedGraphqlQueryShape::List)
     });
     if entity_meta.aggregate {
-        operation_descriptors.push(descriptor(
+        operation_descriptors.push(with_query_shape(
+            descriptor(
             quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Query },
             quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::Aggregate },
             &aggregate_query_name,
@@ -7547,27 +7553,32 @@ fn generate_graphql_operations_unfiltered(
             ],
             quote! { Vec<::graphql_orm::graphql::orm::GraphqlAggregateResultRow> },
             &aggregate_operation_authorization,
+        ),
+            quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlQueryShape::Aggregate },
         ));
     }
     if has_search {
-        operation_descriptors.push(descriptor(
-            quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Query },
-            quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::Search },
-            &search_query_name,
-            &search_operation_description,
-            vec![
-                argument_descriptor(
-                    &search_arg_name,
-                    quote! { ::graphql_orm::graphql::filters::SearchInput },
-                ),
-                argument_descriptor(&where_arg_name, quote! { Option<#where_input> }),
-                argument_descriptor(
-                    &page_arg_name,
-                    quote! { Option<::graphql_orm::graphql::orm::PageInput> },
-                ),
-            ],
-            quote! { #search_connection_type },
-            &search_operation_authorization,
+        operation_descriptors.push(with_query_shape(
+            descriptor(
+                quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Query },
+                quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::Search },
+                &search_query_name,
+                &search_operation_description,
+                vec![
+                    argument_descriptor(
+                        &search_arg_name,
+                        quote! { ::graphql_orm::graphql::filters::SearchInput },
+                    ),
+                    argument_descriptor(&where_arg_name, quote! { Option<#where_input> }),
+                    argument_descriptor(
+                        &page_arg_name,
+                        quote! { Option<::graphql_orm::graphql::orm::PageInput> },
+                    ),
+                ],
+                quote! { #search_connection_type },
+                &search_operation_authorization,
+            ),
+            quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlQueryShape::Search },
         ));
     }
     if keyset_parts.is_some() {
@@ -7585,7 +7596,8 @@ fn generate_graphql_operations_unfiltered(
             &page_arg_name,
             quote! { ::graphql_orm::graphql::pagination::KeysetPageInput },
         ));
-        operation_descriptors.push(descriptor(
+        operation_descriptors.push(with_query_shape(
+            descriptor(
             quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Query },
             quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::KeysetList },
             &keyset_query_name,
@@ -7593,10 +7605,13 @@ fn generate_graphql_operations_unfiltered(
             arguments,
             quote! { #connection_type },
             &keyset_list_operation_authorization,
+        ),
+            quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlQueryShape::Keyset },
         ));
     }
     if keyset_parts.is_some() {
-        operation_descriptors.push(descriptor(
+        operation_descriptors.push(with_query_shape(
+            descriptor(
             quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Query },
             quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::KeysetList },
             &scan_query_name,
@@ -7610,6 +7625,8 @@ fn generate_graphql_operations_unfiltered(
             ],
             quote! { #scan_connection_type },
             &keyset_list_operation_authorization,
+        ),
+            quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlQueryShape::Scan },
         ));
     }
     let single_metadata_arguments = single_query_argument_specs
@@ -7635,6 +7652,7 @@ fn generate_graphql_operations_unfiltered(
             #resolver_schema_signature,
             #single_read_operation_authorization,
         )
+        .with_query_shape(::graphql_orm::graphql::orm::GeneratedGraphqlQueryShape::Single)
     });
 
     let create_descriptor = || {

@@ -365,10 +365,43 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 )
             }
 
+            /// Build the schema, panicking if an exposed Keyset root's entity is
+            /// declared `ReadVisibilityCapability::ResidualOnly` by the row policy.
             pub fn schema_builder_with_limits(
                 database: ::graphql_orm::db::Database<#backend_marker>,
                 limits: ::graphql_orm::graphql::orm::SchemaLimits,
             ) -> ::graphql_orm::async_graphql::SchemaBuilder<QueryRoot, MutationRoot, SubscriptionRoot> {
+                match try_schema_builder_with_limits(database, limits) {
+                    Ok(builder) => builder,
+                    Err(error) => panic!("{error}"),
+                }
+            }
+
+            /// Build the schema, or return the Keyset read-policy contradiction.
+            pub fn try_schema_builder(
+                database: ::graphql_orm::db::Database<#backend_marker>,
+            ) -> ::std::result::Result<
+                ::graphql_orm::async_graphql::SchemaBuilder<QueryRoot, MutationRoot, SubscriptionRoot>,
+                ::graphql_orm::graphql::orm::KeysetReadPolicyError,
+            > {
+                try_schema_builder_with_limits(
+                    database,
+                    ::graphql_orm::graphql::orm::SchemaLimits::default(),
+                )
+            }
+
+            /// Build the schema with limits, or return the Keyset read-policy contradiction.
+            pub fn try_schema_builder_with_limits(
+                database: ::graphql_orm::db::Database<#backend_marker>,
+                limits: ::graphql_orm::graphql::orm::SchemaLimits,
+            ) -> ::std::result::Result<
+                ::graphql_orm::async_graphql::SchemaBuilder<QueryRoot, MutationRoot, SubscriptionRoot>,
+                ::graphql_orm::graphql::orm::KeysetReadPolicyError,
+            > {
+                database.validate_keyset_read_policies(
+                    graphql_orm_operation_catalog(),
+                    &graphql_orm_entity_metadata(),
+                )?;
                 let builder = ::graphql_orm::async_graphql::Schema::build(
                     QueryRoot::default(),
                     ::graphql_orm::async_graphql::EmptyMutation,
@@ -382,7 +415,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 #federation_enable
                 #schema_auth_data
                 #(#schema_loader_data)*
-                builder
+                Ok(builder)
             }
 
             pub fn graphql_orm_entity_metadata(
@@ -526,10 +559,43 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             )
         }
 
+        /// Build the schema, panicking if an exposed Keyset root's entity is
+        /// declared `ReadVisibilityCapability::ResidualOnly` by the row policy.
         pub fn schema_builder_with_limits(
             database: ::graphql_orm::db::Database<#backend_marker>,
             limits: ::graphql_orm::graphql::orm::SchemaLimits,
         ) -> ::graphql_orm::async_graphql::SchemaBuilder<QueryRoot, MutationRoot, SubscriptionRoot> {
+            match try_schema_builder_with_limits(database, limits) {
+                Ok(builder) => builder,
+                Err(error) => panic!("{error}"),
+            }
+        }
+
+        /// Build the schema, or return the Keyset read-policy contradiction.
+        pub fn try_schema_builder(
+            database: ::graphql_orm::db::Database<#backend_marker>,
+        ) -> ::std::result::Result<
+            ::graphql_orm::async_graphql::SchemaBuilder<QueryRoot, MutationRoot, SubscriptionRoot>,
+            ::graphql_orm::graphql::orm::KeysetReadPolicyError,
+        > {
+            try_schema_builder_with_limits(
+                database,
+                ::graphql_orm::graphql::orm::SchemaLimits::default(),
+            )
+        }
+
+        /// Build the schema with limits, or return the Keyset read-policy contradiction.
+        pub fn try_schema_builder_with_limits(
+            database: ::graphql_orm::db::Database<#backend_marker>,
+            limits: ::graphql_orm::graphql::orm::SchemaLimits,
+        ) -> ::std::result::Result<
+            ::graphql_orm::async_graphql::SchemaBuilder<QueryRoot, MutationRoot, SubscriptionRoot>,
+            ::graphql_orm::graphql::orm::KeysetReadPolicyError,
+        > {
+            database.validate_keyset_read_policies(
+                graphql_orm_operation_catalog(),
+                &graphql_orm_entity_metadata(),
+            )?;
             let builder = ::graphql_orm::async_graphql::Schema::build(
                 QueryRoot::default(),
                 #mutation_root_value,
@@ -543,7 +609,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             #federation_enable
             #schema_auth_data
             #(#schema_loader_data)*
-            builder
+            Ok(builder)
         }
 
         pub fn graphql_orm_entity_metadata(

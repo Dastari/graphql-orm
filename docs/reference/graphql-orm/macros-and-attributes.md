@@ -777,17 +777,75 @@ Enable at most one in each group:
 `#[graphql_entity(query_shapes = "list,keyset,scan")]` selects generated query
 shapes for the entity. The available selectors are `single`, `list`, `keyset`,
 `scan`, `search`, and `aggregate`; optional capabilities must be configured.
-Omission preserves all current generated queries.
-If a row policy can only return `Prefilter` or `CallbackOnly`, omit `keyset`,
-for example `query_shapes = "single,list,scan"`, and install finite scan bounds.
-Keyset requires `Complete` or `Unrestricted`; residual-only policies otherwise
-fail every keyset request with `AUTHORIZATION_MISCONFIGURED`. This is explicit
-shape guidance rather than a registration diagnostic because policy decisions
-are request-dependent; working keyset entities keep their existing behavior. Disabled shapes are absent
+Omission preserves all current generated queries. Disabled shapes are absent
 from both SDL and operation metadata. This selection does not alter repository
 APIs, relations, mutations, subscriptions or authorization. See the
 [migration guide](../../../MIGRATION.md#0590-to-0600-generated-query-shape-selection).
 Mutations have their own selector, [`mutation_shapes`](#generated-mutation-shapes).
+
+### Keyset roots and residual-only read policies
+
+A generated Keyset root (`recordsKeyset`) serves a GraphQL request only when
+`RowPolicy::read_visibility` returns `Complete` or `Unrestricted` for it. With
+`CallbackOnly` or `Prefilter`, the request fails with code
+`AUTHORIZATION_MISCONFIGURED`, the message
+`KEYSET_READ_VISIBILITY_REFUSAL_MESSAGE` and the `reason` extension
+`KEYSET_REQUIRES_COMPLETE_READ_VISIBILITY`
+(`KEYSET_READ_VISIBILITY_REFUSAL_REASON`). The refusal suggests a bounded scan
+or a `Complete` declaration, and says nothing about the policy itself. Keyset cannot advance
+through rows a callback rejects.
+
+`read_visibility` is asynchronous and request-dependent, so a row policy
+declares what it can return, per entity and policy key, with
+`RowPolicy::read_visibility_capability`:
+
+| Declaration | Meaning | Exposed Keyset root |
+| --- | --- | --- |
+| `Unknown` (default) | Not declared | Kept; reported by `keyset_read_policy_diagnostics` |
+| `ResidualOnly` | Every GraphQL request gets `CallbackOnly` or `Prefilter` | Refused at registration |
+| `Complete` | Some GraphQL requests get `Complete` or `Unrestricted` | Kept |
+
+The default keeps existing Keyset roots, including those whose policy returns
+`Complete` without declaring it. Declaring `ResidualOnly` for an entity whose
+Keyset root is exposed is a contradiction, so the generated builders refuse it:
+
+- `try_schema_builder` and `try_schema_builder_with_limits` return a
+  `KeysetReadPolicyError` naming the root, entity, policy key and fixes.
+- `schema_builder` and `schema_builder_with_limits` panic with the same message.
+
+They also refuse a Keyset root whose entity is missing from the entity
+metadata. With no row policy installed, reads are `Unrestricted` and nothing
+else is refused. A schema built directly with `Schema::build` skips this check;
+call `Database::validate_keyset_read_policies(catalog, &entity_metadata)` for it.
+
+`Database::keyset_read_policy_diagnostics(catalog, &entity_metadata)` lists every
+exposed Keyset root the policy has not declared `Complete`, with a
+`KeysetReadPolicyReason`. Log it at startup, or treat a non-empty result as an
+error for a strict check that also refuses `Unknown`. The catalog identifies
+Keyset roots by `query_shape() == Some(GeneratedGraphqlQueryShape::Keyset)`, not
+by category, since bounded Scan roots share the `KeysetList` category.
+
+For an entity whose policy needs residual checks, leave `keyset` out of its
+shapes and page with the bounded scan, which supports residual checks:
+
+```rust
+#[derive(GraphQLEntity, GraphQLOperations)]
+#[graphql_entity(
+    table = "records",
+    plural = "Records",
+    read_policy = "record.read",
+    keyset = "id asc",
+    query_shapes = "single,list,scan"
+)]
+struct Record { /* ... */ }
+```
+
+Install finite scan bounds for that root. If the policy returns `Complete` or
+`Unrestricted` for the entity on some requests, declare `Complete` instead. A
+declaration never grants access or bypasses runtime checks: a request that
+still gets residual visibility is refused as above. Standalone repository Keyset
+helpers, which run without a request, keep their residual checks. See the
+[0.126.0 migration guide](../../../MIGRATION.md#01260-keyset-read-visibility-declarations-and-diagnostics).
 
 ## Generated mutation shapes
 

@@ -3236,7 +3236,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-operation-catalog"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "graphql-orm-router-protocol",
  "serde",

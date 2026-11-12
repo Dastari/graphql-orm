@@ -132,6 +132,42 @@ impl GeneratedGraphqlOperationCategory {
     }
 }
 
+/// Generated query shape of a root field, matching the `query_shapes` selectors.
+///
+/// Structural metadata for adapters that must tell shapes apart where they
+/// share a category, such as Keyset and bounded Scan roots. It does not
+/// participate in any fingerprint.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[non_exhaustive]
+pub enum GeneratedGraphqlQueryShape {
+    /// Single entity lookup (`single`).
+    Single,
+    /// Offset-paginated connection (`list`).
+    List,
+    /// Keyset-paginated connection (`keyset`).
+    Keyset,
+    /// Bounded authorized scan (`scan`).
+    Scan,
+    /// Full-text search connection (`search`).
+    Search,
+    /// Bounded aggregate query (`aggregate`).
+    Aggregate,
+}
+
+impl GeneratedGraphqlQueryShape {
+    /// Returns the `query_shapes` selector for this shape.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Single => "single",
+            Self::List => "list",
+            Self::Keyset => "keyset",
+            Self::Scan => "scan",
+            Self::Search => "search",
+            Self::Aggregate => "aggregate",
+        }
+    }
+}
+
 fn default_operation_description(
     category: GeneratedGraphqlOperationCategory,
     entity_name: &str,
@@ -408,6 +444,7 @@ pub struct GeneratedGraphqlOperationDescriptor {
     backend: &'static str,
     kind: GraphqlOperationKind,
     category: GeneratedGraphqlOperationCategory,
+    query_shape: Option<GeneratedGraphqlQueryShape>,
     field_name: &'static str,
     description: String,
     arguments: Box<[GraphqlOperationArgumentDescriptor]>,
@@ -609,6 +646,7 @@ impl GeneratedGraphqlOperationDescriptor {
             backend,
             kind,
             category,
+            query_shape: None,
             field_name,
             description: description.into(),
             arguments: arguments.into_boxed_slice(),
@@ -629,6 +667,25 @@ impl GeneratedGraphqlOperationDescriptor {
         descriptor.authorization_fingerprint = descriptor.compute_authorization_fingerprint();
         descriptor.router_export_fingerprint = descriptor.compute_router_export_fingerprint();
         descriptor
+    }
+
+    /// Records the generated query shape of a query root.
+    ///
+    /// This builder is public only for derive output. It has no effect on
+    /// mutations or subscriptions, and changes no fingerprint.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_query_shape(mut self, shape: GeneratedGraphqlQueryShape) -> Self {
+        if self.kind == GraphqlOperationKind::Query {
+            self.query_shape = Some(shape);
+        }
+        self
+    }
+
+    /// Returns the generated query shape, or `None` for mutations,
+    /// subscriptions and descriptors that do not record one.
+    pub const fn query_shape(&self) -> Option<GeneratedGraphqlQueryShape> {
+        self.query_shape
     }
 
     /// Returns the fully qualified Rust entity type emitted with `module_path!`.
@@ -885,6 +942,11 @@ impl GraphqlResolverOperationDescriptor {
     /// Returns the stable generated resolver category.
     pub const fn category(&self) -> GeneratedGraphqlOperationCategory {
         self.generated.category()
+    }
+
+    /// Returns the generated query shape, when the derive recorded one.
+    pub const fn query_shape(&self) -> Option<GeneratedGraphqlQueryShape> {
+        self.generated.query_shape()
     }
 
     /// Returns the conventional root type name.
