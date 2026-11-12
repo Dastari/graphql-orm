@@ -419,18 +419,29 @@ mod conditional_write_tests {
             BackupError::CapacityExceeded { limit_bytes: 2 }
         ));
     }
-    struct CreateWithoutRelease;
+    #[derive(Default)]
+    struct CreateWithoutRelease {
+        lock: std::sync::Mutex<Option<Bytes>>,
+    }
 
     #[async_trait]
     impl BackupRepository for CreateWithoutRelease {
-        async fn put_blob_if_absent(&self, _: &str, _: Bytes) -> Result<bool, BackupError> {
+        async fn put_blob_if_absent(&self, _: &str, body: Bytes) -> Result<bool, BackupError> {
+            *self.lock.lock().expect("lock record") = Some(body);
             Ok(true)
         }
         async fn put_blob(&self, key: &str, body: Bytes) -> Result<(), BackupError> {
             NoConditionalWrite.put_blob(key, body).await
         }
         async fn get_blob(&self, key: &str) -> Result<Bytes, BackupError> {
-            NoConditionalWrite.get_blob(key).await
+            // Release reads the owner record before its single-attempt delete.
+            assert_eq!(key, crate::REPOSITORY_LOCK_KEY);
+            Ok(self
+                .lock
+                .lock()
+                .expect("lock record")
+                .clone()
+                .expect("acquired"))
         }
         async fn blob_exists(&self, key: &str) -> Result<bool, BackupError> {
             NoConditionalWrite.blob_exists(key).await
@@ -445,7 +456,7 @@ mod conditional_write_tests {
 
     #[tokio::test]
     async fn release_never_falls_back_to_ordinary_provider_delete() {
-        let repository = CreateWithoutRelease;
+        let repository = CreateWithoutRelease::default();
         let lock =
             crate::RepositoryLock::acquire(&repository, &crate::RepositoryLockOptions::default())
                 .await

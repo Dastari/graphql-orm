@@ -3,7 +3,7 @@ title: "graphql-orm-backup"
 kind: reference
 status: active
 owner: graphql-orm-backup-maintainers
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-12
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -17,6 +17,13 @@ unless the host opts in, and `BlobStoreRestoreObjectSink` writes only inside an
 explicit key scope without overwriting. Follow the migration steps in
 [MIGRATION.md](MIGRATION.md) and read the
 [trust model](docs/architecture.md#trust-model).
+
+Version 0.14.0 locks restore and verification against concurrent pruning,
+records an owner in the repository lock with an explicit `break_repository_lock`
+recovery path and cooperative `BackupCancellation`, enforces restore-side
+capacity limits while backing up, refuses reused snapshot ids, invalid
+incremental parents and `keep_last: 0`, and removes orphaned payloads. See
+[MIGRATION.md](MIGRATION.md).
 
 Version 0.12.1 makes `prune` and `delete_snapshot` refuse to delete snapshots
 or objects when the snapshot listing is incomplete ([GHSA-439h-2cx8-xwgx](https://github.com/Dastari/graphql-orm/security/advisories/GHSA-439h-2cx8-xwgx)). Use it with storage 0.8.1;
@@ -110,8 +117,10 @@ refused when the seal, format or any content key is wrong. Object restore
 writes only valid live-store keys that the sink permits. See the
 [trust model](docs/architecture.md#trust-model).
 
-All repository writes use an advisory lock backed by atomic conditional create.
-Never replace it with exists-then-write. Credentials are owned by the storage
+All repository writes, restores and verification hold one exclusive advisory
+lock backed by atomic conditional create. Never replace it with
+exists-then-write. The lock records its owner; a crashed holder's lock is
+removed only through the explicit, owner-checked `break_repository_lock`. Credentials are owned by the storage
 provider; backup manifests and diagnostics must not contain them. Client-side
 encryption and content-defined chunking are out of scope.
 

@@ -3,7 +3,7 @@ title: "Backup configuration and limits"
 kind: reference
 status: active
 owner: graphql-orm-backup-maintainers
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-12
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -35,14 +35,16 @@ configuration of its own; adapt a configured `graphql-orm-storage::BlobStore`.
 | [`ManifestAuthenticator`](../src/authentication.rs) | Seals new manifests with its current key and verifies seals from it or from keys added with `with_previous_key`. Attach with `LocalBackupRepository::with_manifest_authenticator` or `BlobStoreBackupRepository::with_manifest_authenticator`, or return it from `BackupRepository::manifest_authenticator`. | Required. Without it every manifest read or write fails with `ManifestAuthenticationRequired`. |
 | [`LegacyManifestPolicy`](../src/authentication.rs) | `Refuse`, `TrustPinned(snapshot id -> checksum)` or `TrustUnauthenticated` for format-1 manifests. | `Refuse`. Trusting legacy manifests is a migration step; see [MIGRATION.md](../MIGRATION.md). |
 | [`RestoreKeyScope`](../src/restore.rs) | Live-store key prefixes that `BlobStoreRestoreObjectSink` may write, or `entire_store()`. | No default; prefixes must be valid blob keys and match whole segments. |
-| [`BackupExecutionOptions`](../src/backup.rs) | `object_concurrency` and `lock` for full, incremental, and compaction writes. | Default concurrency 8 and default lock options. |
-| [`RepositoryLockOptions`](../src/lock.rs) | `stale_after_seconds` is a legacy ignored setting. | Existing locks never expire automatically; offline recovery requires quiescing all writers and handles. Atomic conditional create remains mandatory. |
+| [`BackupExecutionOptions`](../src/backup.rs) | `object_concurrency`, `lock` and `cancellation` for full, incremental, and compaction writes. | Default concurrency 8, default lock options and a `BackupCancellation` that is never cancelled. Cancelling stops at the next safe point, removes the run's payloads and releases the lock. |
+| [`RepositoryLockOptions`](../src/lock.rs) | `owner_label` is recorded in the lock's `RepositoryLockOwner` record; `stale_after_seconds` is a legacy ignored setting. | No label; a label is at most 1024 bytes (`MAX_LOCK_OWNER_LABEL_BYTES`) without control characters. Existing locks never expire automatically; recover a crashed run's lock with `break_repository_lock` (owner run id and minimum age) after stopping every writer, or offline for a lock without an owner record. Atomic conditional create remains mandatory. |
+| [`BackupCapacityLimits`](../src/capacity.rs) | `buffered_bytes`, `decompressed_bytes`, `stage_bytes` and `object_bytes` on the repository handle. | 64 MiB stored payload or manifest, 256 MiB decoded payload, 512 MiB decoded stage, unbounded object. Backups, compaction, restore and verification enforce the same values, so use one configuration for backup and restore. |
 | [`FullBackupRequest`](../src/backup.rs) | `snapshot_id`, UTC `created_at`, stable `app_id`, and `app_version`. | No default. |
 | [`IncrementalBackupRequest`](../src/backup.rs) | Full-request fields plus `parent_snapshot_id`. | No default; parent must be a valid chain member. |
 | [`CompactChainRequest`](../src/backup.rs) | New `snapshot_id`, `source_snapshot_id`, time, app ID, and version. | No default; source chain is validated before publication. |
-| [`VerificationOptions`](../src/verify.rs) | `blob_concurrency` for object/table/change checksum reads. | Defaults to 8; an explicit value below one is normalized to one. |
+| [`VerificationOptions`](../src/verify.rs) | `blob_concurrency` for object/table/change checksum reads, `lock`, `lock_mode` and `cancellation`. | Defaults to 8; an explicit value below one is normalized to one. Verification holds the exclusive repository lock unless `lock_mode` is `AssumeNoConcurrentWriters`. |
+| [`RestoreOptions`](../src/restore.rs) | `lock_mode`, `lock` and `cancellation` for `restore_snapshot_with_options` and `restore_objects_with_options`. | `RepositoryLockMode::Exclusive`, which needs write access. `AssumeNoConcurrentWriters` reads without the lock for read-only repositories; the caller guarantees no concurrent prune, deletion or compaction. |
 | [`RestoreMode`](../src/restore.rs) and [`RestoreContext`](../src/restore.rs) | `EmptyDatabase`/`DryRun`; `disable_policies` and `disable_change_journal`. | `RestoreContext::empty_database()` is the safe applying-mode constructor; dry run never calls adapter import. |
-| [`KeepPolicy`](../src/prune.rs) | `keep_last` newest chains and `lock`. | Defaults to keeping one chain and default lock settings. It does not bypass verification or locking. |
+| [`KeepPolicy`](../src/prune.rs) | `keep_last` newest chains and `lock`. | Defaults to keeping one chain and default lock settings. `keep_last: 0` is refused with `InvalidRetentionPolicy`. It does not bypass verification or locking. |
 
 ## Operational boundary
 

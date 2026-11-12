@@ -4,7 +4,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use futures::{StreamExt, TryStreamExt, stream};
+use futures::{StreamExt, stream};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -12,13 +12,13 @@ use uuid::Uuid;
 use graphql_orm_storage::StorageByteStream;
 
 use crate::{
-    BACKUP_FORMAT_VERSION, BackupChangeAction, BackupChangeExport, BackupError, BackupKind,
-    BackupObjectIndex, BackupRepository, BackupRow, BackupSnapshotManifest, BackupTableExport,
-    BackupTombstone, DatabaseBackupManifest, GraphqlOrmBackupAdapter, ObjectBackupEntry,
-    RepositoryLock, RepositoryLockOptions, TableBackupEntry, authenticate_manifest,
-    load_manifest_chain,
+    BACKUP_FORMAT_VERSION, BackupByteLimit, BackupCapacityLimitKind, BackupCapacityLimits,
+    BackupChangeAction, BackupChangeExport, BackupError, BackupKind, BackupObjectIndex,
+    BackupRepository, BackupRow, BackupSnapshotManifest, BackupTombstone, DatabaseBackupManifest,
+    GraphqlOrmBackupAdapter, GraphqlOrmBackupSchema, ObjectBackupEntry, RepositoryLock,
+    RepositoryLockOptions, TableBackupEntry, authenticate_manifest, load_manifest_chain,
     manifest::{required_authenticator, sha256_hex, validate_sha256_hex, validate_table_name},
-    plan_full_backup, verify_manifest_and_objects,
+    plan_full_backup,
 };
 
 pub const DATABASE_EXPORT_FORMAT: &str = "jsonl";
@@ -32,6 +32,8 @@ pub struct BackupExecutionOptions {
     pub object_concurrency: usize,
     /// Advisory repository lock settings.
     pub lock: RepositoryLockOptions,
+    /// Cooperative cancellation signal, checked at safe points.
+    pub cancellation: BackupCancellation,
 }
 
 impl Default for BackupExecutionOptions {
@@ -39,9 +41,70 @@ impl Default for BackupExecutionOptions {
         Self {
             object_concurrency: DEFAULT_OBJECT_CONCURRENCY,
             lock: RepositoryLockOptions::default(),
+            cancellation: BackupCancellation::default(),
         }
     }
 }
+
+/// Cooperative cancellation for backup, incremental backup, compaction,
+/// restore and verification.
+///
+/// Clones share one signal. After [`BackupCancellation::cancel`], a writer
+/// stops at its next safe point: before a payload, object or manifest write,
+/// never during one. Object uploads already in flight run to completion and
+/// no new one starts. It then removes the snapshot payloads it wrote,
+/// releases the repository lock and returns [`BackupError::Cancelled`]. Once
+/// the manifest is written the snapshot is committed and cancellation no
+/// longer applies. Restore stops before its next manifest, payload, apply call
+/// or object, and verification before its next checksum read; both release
+/// the lock. If releasing the lock fails, the operation instead returns
+/// [`BackupError::LockNotReleased`] with the cancellation as its `operation`
+/// and the run that still holds the lock.
+///
+/// Dropping the operation's future instead cannot release the lock, because
+/// release is asynchronous. The lock then keeps its owner record; see
+/// [`crate::break_repository_lock`].
+#[derive(Clone, Debug, Default)]
+pub struct BackupCancellation {
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl BackupCancellation {
+    /// Creates a signal that is not cancelled.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Requests cancellation of every operation that uses this signal.
+    pub fn cancel(&self) {
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether cancellation was requested.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// A safe point: fails with [`BackupError::Cancelled`] once cancelled.
+    pub(crate) fn check(&self) -> Result<(), BackupError> {
+        if self.is_cancelled() {
+            Err(BackupError::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl PartialEq for BackupCancellation {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.cancelled, &other.cancelled)
+    }
+}
+
+impl Eq for BackupCancellation {}
 
 /// Request metadata for a full backup.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -135,11 +198,22 @@ pub fn object_content_key(sha256_hex: &str) -> String {
 
 /// Creates a full snapshot in the repository.
 ///
+/// Under the repository lock it refuses a snapshot id that already has a
+/// manifest or payloads, and checks every payload against the repository
+/// handle's [`crate::BackupCapacityLimits`] before writing it, so the snapshot
+/// can be restored with the same limits. A run that fails or is cancelled
+/// before its manifest write removes the snapshot payloads it wrote; object
+/// blobs it added stay content-addressed and unreferenced until [`crate::prune`].
+///
 /// # Errors
 ///
-/// Returns [`BackupError`] if planning fails, table serialization or
-/// compression fails, object loading/checksum validation fails, or any
-/// repository write fails.
+/// Returns [`BackupError::SnapshotExists`] for a used snapshot id,
+/// [`BackupError::BackupCapacityExceeded`] for a payload over a limit,
+/// [`BackupError::Cancelled`], [`BackupError::LockReleaseFailed`] if the
+/// snapshot was committed but the lock was not released, or another
+/// [`BackupError`] if planning fails, table serialization or compression
+/// fails, object loading/checksum validation fails, or any repository write
+/// fails.
 pub async fn create_full_backup(
     repository: &dyn BackupRepository,
     database: &dyn GraphqlOrmBackupAdapter,
@@ -172,9 +246,14 @@ pub async fn create_full_backup_with_options(
 ) -> Result<FullBackupResult, BackupError> {
     // Refuse before writing payloads that no sealed manifest would reference.
     required_authenticator(repository)?;
-    let lock = RepositoryLock::acquire(repository, &options.lock).await?;
-    let result = create_full_backup_inner(repository, database, objects, request, options).await;
-    release_lock(lock, result).await
+    let lock = RepositoryLock::acquire_for(repository, &options.lock, "full_backup").await?;
+    let snapshot_id = request.snapshot_id;
+    let mut write = SnapshotWrite::default();
+    let result =
+        create_full_backup_inner(repository, database, objects, request, options, &mut write).await;
+    let result = remove_failed_snapshot(repository, snapshot_id, &write, result).await;
+    lock.finish(result, |result| Some(result.manifest.snapshot_id))
+        .await
 }
 
 async fn create_full_backup_inner(
@@ -183,18 +262,37 @@ async fn create_full_backup_inner(
     objects: &dyn BackupObjectIndex,
     request: FullBackupRequest,
     options: &BackupExecutionOptions,
+    write: &mut SnapshotWrite,
 ) -> Result<FullBackupResult, BackupError> {
+    claim_snapshot_id(repository, request.snapshot_id, write).await?;
+    options.cancellation.check()?;
+    let limits = repository.capacity_limits();
     let plan = plan_full_backup(database, objects).await?;
     for table in &plan.tables {
         ensure_table_name(request.snapshot_id, &table.table_name)?;
     }
     validate_object_refs(request.snapshot_id, &plan.objects)?;
+    check_declared_object_sizes(limits, &plan.objects)?;
+    let mut stage = Vec::with_capacity(plan.tables.len());
+    for table in &plan.tables {
+        stage.push((
+            database_table_key(request.snapshot_id, &table.table_name),
+            decoded_jsonl_len(&table.rows)?,
+        ));
+    }
+    let decode_limits = check_database_stage(limits, request.snapshot_id, &stage)?;
 
     let mut table_entries = Vec::with_capacity(plan.tables.len());
     let mut row_count = 0_u64;
-    for table in &plan.tables {
-        let bytes = serialize_table_export(table)?;
+    for (table, decode_limit) in plan.tables.iter().zip(decode_limits) {
+        options.cancellation.check()?;
         let content_key = database_table_key(request.snapshot_id, &table.table_name);
+        let bytes = serialize_jsonl_entries(
+            &table.rows,
+            &content_key,
+            limits.buffered_bytes,
+            decode_limit,
+        )?;
         let sha256_hex = sha256_hex(&bytes);
         repository
             .put_blob(&content_key, Bytes::from(bytes))
@@ -210,13 +308,8 @@ async fn create_full_backup_inner(
         });
     }
 
-    let object_entries = write_object_entries(
-        repository,
-        objects,
-        &plan.objects,
-        options.object_concurrency,
-    )
-    .await?;
+    let object_entries = write_object_entries(repository, objects, &plan.objects, options).await?;
+    options.cancellation.check()?;
 
     let mut manifest = BackupSnapshotManifest {
         format_version: BACKUP_FORMAT_VERSION,
@@ -243,12 +336,19 @@ async fn create_full_backup_inner(
         authentication: None,
     };
 
-    write_manifest(repository, &mut manifest).await?;
+    write_manifest_tracked(repository, &mut manifest, write).await?;
 
     Ok(FullBackupResult { manifest })
 }
 
 /// Creates an incremental snapshot in the repository.
+///
+/// Under the repository lock it refuses a snapshot id already in use and
+/// loads and authenticates the parent's whole chain, refusing a parent that is
+/// missing, invalid or recorded for another application, backend or schema,
+/// all before exporting or writing anything. Payloads are checked against the
+/// same limits as [`create_full_backup`], and a failed or cancelled run removes
+/// the payloads it wrote.
 ///
 /// # Errors
 ///
@@ -286,10 +386,16 @@ pub async fn create_incremental_backup_with_options(
     options: &BackupExecutionOptions,
 ) -> Result<IncrementalBackupResult, BackupError> {
     required_authenticator(repository)?;
-    let lock = RepositoryLock::acquire(repository, &options.lock).await?;
-    let result =
-        create_incremental_backup_inner(repository, database, objects, request, options).await;
-    release_lock(lock, result).await
+    let lock = RepositoryLock::acquire_for(repository, &options.lock, "incremental_backup").await?;
+    let snapshot_id = request.snapshot_id;
+    let mut write = SnapshotWrite::default();
+    let result = create_incremental_backup_inner(
+        repository, database, objects, request, options, &mut write,
+    )
+    .await;
+    let result = remove_failed_snapshot(repository, snapshot_id, &write, result).await;
+    lock.finish(result, |result| Some(result.manifest.snapshot_id))
+        .await
 }
 
 async fn create_incremental_backup_inner(
@@ -298,8 +404,22 @@ async fn create_incremental_backup_inner(
     objects: &dyn BackupObjectIndex,
     request: IncrementalBackupRequest,
     options: &BackupExecutionOptions,
+    write: &mut SnapshotWrite,
 ) -> Result<IncrementalBackupResult, BackupError> {
+    claim_snapshot_id(repository, request.snapshot_id, write).await?;
+    if request.parent_snapshot_id == request.snapshot_id {
+        return Err(BackupError::InvalidManifestEntry {
+            snapshot_id: request.snapshot_id,
+            reason: "snapshot is its own parent".to_string(),
+        });
+    }
+    options.cancellation.check()?;
+    let limits = repository.capacity_limits();
+    // Restore rejects a chain whose members disagree, so refuse to extend a
+    // parent the new snapshot could not be restored on top of.
+    let parent_chain = load_manifest_chain(repository, request.parent_snapshot_id).await?;
     let schema = database.schema_snapshot().await?;
+    ensure_extends_parent(&parent_chain, &request, &schema)?;
     let changes = database
         .export_incremental(request.parent_snapshot_id)
         .await?;
@@ -307,23 +427,33 @@ async fn create_incremental_backup_inner(
         .list_objects_for_incremental_backup(request.parent_snapshot_id)
         .await?;
 
-    if request.parent_snapshot_id == request.snapshot_id {
-        return Err(BackupError::InvalidManifestEntry {
-            snapshot_id: request.snapshot_id,
-            reason: "snapshot is its own parent".to_string(),
-        });
-    }
     for change in &changes {
         ensure_table_name(request.snapshot_id, &change.table_name)?;
     }
     validate_object_refs(request.snapshot_id, &object_refs)?;
+    check_declared_object_sizes(limits, &object_refs)?;
 
     let mut change_entries = Vec::new();
     let mut change_count = 0_u64;
     let tombstones = changes_to_tombstones(&changes);
-    for group in group_changes_by_table(changes) {
-        let bytes = serialize_jsonl_entries(&group.changes)?;
+    let groups = group_changes_by_table(changes);
+    let mut stage = Vec::with_capacity(groups.len());
+    for group in &groups {
+        stage.push((
+            database_changes_key(request.snapshot_id, &group.table_name),
+            decoded_jsonl_len(&group.changes)?,
+        ));
+    }
+    let decode_limits = check_database_stage(limits, request.snapshot_id, &stage)?;
+    for (group, decode_limit) in groups.into_iter().zip(decode_limits) {
+        options.cancellation.check()?;
         let content_key = database_changes_key(request.snapshot_id, &group.table_name);
+        let bytes = serialize_jsonl_entries(
+            &group.changes,
+            &content_key,
+            limits.buffered_bytes,
+            decode_limit,
+        )?;
         let sha256_hex = sha256_hex(&bytes);
         repository
             .put_blob(&content_key, Bytes::from(bytes))
@@ -339,13 +469,8 @@ async fn create_incremental_backup_inner(
         });
     }
 
-    let object_entries = write_object_entries(
-        repository,
-        objects,
-        &object_refs,
-        options.object_concurrency,
-    )
-    .await?;
+    let object_entries = write_object_entries(repository, objects, &object_refs, options).await?;
+    options.cancellation.check()?;
 
     let mut manifest = BackupSnapshotManifest {
         format_version: BACKUP_FORMAT_VERSION,
@@ -372,12 +497,17 @@ async fn create_incremental_backup_inner(
         authentication: None,
     };
 
-    write_manifest(repository, &mut manifest).await?;
+    write_manifest_tracked(repository, &mut manifest, write).await?;
 
     Ok(IncrementalBackupResult { manifest })
 }
 
 /// Compacts a full-plus-incremental chain into a synthetic full snapshot.
+///
+/// Like [`create_full_backup`], it refuses a snapshot id already in use, checks
+/// the merged synthetic full against the repository's capacity limits before
+/// writing it, and removes its payloads if it fails or is cancelled before the
+/// manifest write.
 ///
 /// # Errors
 ///
@@ -404,30 +534,33 @@ pub async fn compact_chain_with_options(
     options: &BackupExecutionOptions,
 ) -> Result<CompactChainResult, BackupError> {
     required_authenticator(repository)?;
-    let lock = RepositoryLock::acquire(repository, &options.lock).await?;
-    let result = compact_chain_inner(repository, request).await;
-    release_lock(lock, result).await
+    let lock = RepositoryLock::acquire_for(repository, &options.lock, "compaction").await?;
+    let snapshot_id = request.snapshot_id;
+    let mut write = SnapshotWrite::default();
+    let result = compact_chain_inner(repository, request, options, &mut write).await;
+    let result = remove_failed_snapshot(repository, snapshot_id, &write, result).await;
+    lock.finish(result, |result| Some(result.manifest.snapshot_id))
+        .await
 }
 
 async fn compact_chain_inner(
     repository: &dyn BackupRepository,
     request: CompactChainRequest,
+    options: &BackupExecutionOptions,
+    write: &mut SnapshotWrite,
 ) -> Result<CompactChainResult, BackupError> {
     // Checked under the repository lock, before any payload is written.
-    if repository
-        .blob_exists(&snapshot_manifest_key(request.snapshot_id))
-        .await?
-    {
-        return Err(BackupError::InvalidManifestChain {
-            reason: format!(
-                "snapshot {} already exists; compaction never overwrites a snapshot",
-                request.snapshot_id
-            ),
-        });
-    }
+    claim_snapshot_id(repository, request.snapshot_id, write).await?;
+    options.cancellation.check()?;
+    let limits = repository.capacity_limits();
     let chain = load_manifest_chain(repository, request.source_snapshot_id).await?;
     for manifest in &chain {
-        verify_manifest_and_objects(repository, manifest).await?;
+        crate::verify::verify_manifest_and_objects_unlocked(
+            repository,
+            manifest,
+            &crate::VerificationOptions::default(),
+        )
+        .await?;
     }
 
     let mut table_rows = BTreeMap::<String, BTreeMap<String, BackupRow>>::new();
@@ -483,12 +616,26 @@ async fn compact_chain_inner(
         }
     }
 
+    let table_rows = table_rows
+        .into_iter()
+        .map(|(table_name, rows)| (table_name, rows.into_values().collect::<Vec<_>>()))
+        .collect::<Vec<_>>();
+    let mut stage = Vec::with_capacity(table_rows.len());
+    for (table_name, rows) in &table_rows {
+        stage.push((
+            database_table_key(request.snapshot_id, table_name),
+            decoded_jsonl_len(rows)?,
+        ));
+    }
+    let decode_limits = check_database_stage(limits, request.snapshot_id, &stage)?;
+
     let mut table_entries = Vec::with_capacity(table_rows.len());
     let mut row_count = 0_u64;
-    for (table_name, rows) in table_rows {
-        let rows = rows.into_values().collect::<Vec<_>>();
-        let bytes = serialize_jsonl_entries(&rows)?;
+    for ((table_name, rows), decode_limit) in table_rows.into_iter().zip(decode_limits) {
+        options.cancellation.check()?;
         let content_key = database_table_key(request.snapshot_id, &table_name);
+        let bytes =
+            serialize_jsonl_entries(&rows, &content_key, limits.buffered_bytes, decode_limit)?;
         let sha256_hex = sha256_hex(&bytes);
         repository
             .put_blob(&content_key, Bytes::from(bytes))
@@ -510,9 +657,11 @@ async fn compact_chain_inner(
             repository,
             object.content_key.clone(),
             object.sha256_hex.clone(),
+            limits.object_bytes,
         )
         .await?;
     }
+    options.cancellation.check()?;
     let latest = chain
         .last()
         .ok_or_else(|| BackupError::InvalidManifestChain {
@@ -543,7 +692,7 @@ async fn compact_chain_inner(
         authentication: None,
     };
 
-    write_manifest(repository, &mut manifest).await?;
+    write_manifest_tracked(repository, &mut manifest, write).await?;
 
     Ok(CompactChainResult { manifest })
 }
@@ -551,25 +700,243 @@ async fn compact_chain_inner(
 /// Seals a manifest with the repository's host key and writes it as the final
 /// snapshot blob.
 ///
+/// This is a low-level building block: it takes no repository lock, so the
+/// caller must coordinate with other operations. It never overwrites: the
+/// manifest is created with an atomic conditional write and an existing
+/// snapshot id fails with [`BackupError::SnapshotExists`]. A sealed manifest
+/// is immutable; write a new snapshot instead of rewriting one.
+///
 /// # Errors
 ///
-/// Returns [`BackupError::ManifestAuthenticationRequired`] if the repository
+/// Returns [`BackupError::SnapshotExists`] if the snapshot already has a
+/// manifest, [`BackupError::ManifestAuthenticationRequired`] if the repository
 /// has no authenticator, [`BackupError::UnsupportedManifestFormat`] unless the
 /// manifest uses [`crate::BACKUP_FORMAT_VERSION`],
 /// [`BackupError::InvalidManifestEntry`] for an entry outside its namespace,
-/// or another [`BackupError`] if the manifest cannot be serialized or written.
+/// [`BackupError::BackupCapacityExceeded`] if the manifest is larger than
+/// [`crate::BackupCapacityLimits::buffered_bytes`], which manifest loading
+/// enforces, or another [`BackupError`] if the manifest cannot be serialized or
+/// written.
 pub async fn write_manifest(
     repository: &dyn BackupRepository,
     manifest: &mut BackupSnapshotManifest,
 ) -> Result<(), BackupError> {
+    write_manifest_tracked(repository, manifest, &mut SnapshotWrite::default()).await
+}
+
+async fn write_manifest_tracked(
+    repository: &dyn BackupRepository,
+    manifest: &mut BackupSnapshotManifest,
+    write: &mut SnapshotWrite,
+) -> Result<(), BackupError> {
     authenticate_manifest(required_authenticator(repository)?, manifest)?;
     let body = serde_json::to_vec_pretty(manifest)?;
-    repository
-        .put_blob(
-            &snapshot_manifest_key(manifest.snapshot_id),
-            Bytes::from(body),
-        )
-        .await
+    let key = snapshot_manifest_key(manifest.snapshot_id);
+    check_backup_limit(
+        repository.capacity_limits().buffered_bytes,
+        u64::try_from(body.len()).unwrap_or(u64::MAX),
+        &key,
+        BackupCapacityLimitKind::StoredPayload,
+    )?;
+    // From here the manifest may reach storage even if the write reports an
+    // error, so a failed run must not remove the payloads it would reference.
+    write.manifest_attempted = true;
+    if repository
+        .put_blob_if_absent(&key, Bytes::from(body))
+        .await?
+    {
+        Ok(())
+    } else {
+        Err(BackupError::SnapshotExists {
+            snapshot_id: manifest.snapshot_id,
+        })
+    }
+}
+
+/// What a snapshot writer has done, so a failed run removes only its own
+/// payloads.
+#[derive(Default)]
+struct SnapshotWrite {
+    /// The id was verified unused under the lock: payloads below it are ours.
+    claimed: bool,
+    /// The manifest write was attempted, so the outcome may be committed.
+    manifest_attempted: bool,
+}
+
+fn snapshot_prefix(snapshot_id: Uuid) -> String {
+    format!("snapshots/{snapshot_id}/")
+}
+
+/// Every stored blob below a snapshot's directory, including its manifest.
+pub(crate) async fn snapshot_blob_keys(
+    repository: &dyn BackupRepository,
+    snapshot_id: Uuid,
+) -> Result<Vec<String>, BackupError> {
+    let prefix = snapshot_prefix(snapshot_id);
+    let mut keys = repository
+        .list_blobs(&format!("snapshots/{snapshot_id}"))
+        .await?;
+    keys.retain(|key| key.starts_with(&prefix));
+    Ok(keys)
+}
+
+/// Refuses a snapshot id that has a manifest or any payload, before any write.
+async fn claim_snapshot_id(
+    repository: &dyn BackupRepository,
+    snapshot_id: Uuid,
+    write: &mut SnapshotWrite,
+) -> Result<(), BackupError> {
+    if repository
+        .blob_exists(&snapshot_manifest_key(snapshot_id))
+        .await?
+        || !snapshot_blob_keys(repository, snapshot_id)
+            .await?
+            .is_empty()
+    {
+        return Err(BackupError::SnapshotExists { snapshot_id });
+    }
+    write.claimed = true;
+    Ok(())
+}
+
+/// Removes the payloads a failed run wrote below its claimed snapshot id.
+///
+/// Nothing is removed once the manifest write was attempted: its outcome is
+/// unknown, and if it landed the payloads belong to a committed snapshot.
+/// Removal is best effort; [`crate::prune`] removes whatever remains.
+async fn remove_failed_snapshot<T>(
+    repository: &dyn BackupRepository,
+    snapshot_id: Uuid,
+    write: &SnapshotWrite,
+    result: Result<T, BackupError>,
+) -> Result<T, BackupError> {
+    if result.is_err()
+        && write.claimed
+        && !write.manifest_attempted
+        && let Ok(keys) = snapshot_blob_keys(repository, snapshot_id).await
+    {
+        for key in keys {
+            let _ = repository.delete_blob(&key).await;
+        }
+    }
+    result
+}
+
+/// Refuses an incremental whose parent chain restore would not accept it on.
+fn ensure_extends_parent(
+    parent_chain: &[BackupSnapshotManifest],
+    request: &IncrementalBackupRequest,
+    schema: &GraphqlOrmBackupSchema,
+) -> Result<(), BackupError> {
+    let parent = parent_chain
+        .last()
+        .ok_or_else(|| BackupError::InvalidManifestChain {
+            reason: "manifest chain is empty".to_string(),
+        })?;
+    let mismatch = if parent.app_id != request.app_id {
+        Some("app_id")
+    } else if parent.database_backend != schema.backend {
+        Some("database backend")
+    } else if parent.graphql_orm_schema_hash != schema.schema_hash {
+        Some("schema hash")
+    } else {
+        None
+    };
+    match mismatch {
+        Some(field) => Err(BackupError::InvalidManifestChain {
+            reason: format!(
+                "incremental snapshot {} {field} does not match parent {}",
+                request.snapshot_id, parent.snapshot_id
+            ),
+        }),
+        None => Ok(()),
+    }
+}
+
+fn check_backup_limit(
+    limit: BackupByteLimit,
+    observed_bytes: u64,
+    payload: &str,
+    kind: BackupCapacityLimitKind,
+) -> Result<(), BackupError> {
+    match limit {
+        BackupByteLimit::Bytes(limit_bytes) if observed_bytes > limit_bytes => {
+            Err(BackupError::BackupCapacityExceeded {
+                payload: payload.to_string(),
+                limit: kind,
+                limit_bytes,
+                observed_bytes,
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Applies restore's decoded per-payload and per-stage limits to a stage, in
+/// restore order, before any of it is written.
+///
+/// Returns the decode limit restore applies to each payload: the per-payload
+/// limit, or the stage budget remaining when it reaches that payload if lower.
+fn check_database_stage(
+    limits: BackupCapacityLimits,
+    snapshot_id: Uuid,
+    payloads: &[(String, u64)],
+) -> Result<Vec<BackupByteLimit>, BackupError> {
+    let mut total = 0_u64;
+    let mut decode_limits = Vec::with_capacity(payloads.len());
+    for (content_key, decoded) in payloads {
+        check_backup_limit(
+            limits.decompressed_bytes,
+            *decoded,
+            content_key,
+            BackupCapacityLimitKind::DecodedPayload,
+        )?;
+        let remaining = match limits.stage_bytes {
+            BackupByteLimit::Bytes(stage) => BackupByteLimit::Bytes(stage.saturating_sub(total)),
+            BackupByteLimit::Unbounded => BackupByteLimit::Unbounded,
+        };
+        decode_limits.push(limits.decompressed_bytes.min(remaining));
+        total = total.saturating_add(*decoded);
+    }
+    check_backup_limit(
+        limits.stage_bytes,
+        total,
+        &format!("snapshots/{snapshot_id}/database"),
+        BackupCapacityLimitKind::Stage,
+    )?;
+    Ok(decode_limits)
+}
+
+/// zstd window log of the default compression level for large inputs.
+const DEFAULT_ZSTD_WINDOW_LOG: u32 = 21;
+
+/// Window log no larger than [`crate::decompress_payload_with_limit`] accepts
+/// for `decode_limit`, or `None` to keep the level default.
+fn compatible_window_log(decode_limit: BackupByteLimit) -> Option<u32> {
+    match decode_limit {
+        BackupByteLimit::Bytes(limit) => {
+            let accepted = crate::manifest::decode_window_log(limit);
+            (accepted < DEFAULT_ZSTD_WINDOW_LOG).then_some(accepted)
+        }
+        BackupByteLimit::Unbounded => None,
+    }
+}
+
+/// Refuses objects whose declared size is over the object limit, before any
+/// write. Streamed sizes are checked again while writing.
+fn check_declared_object_sizes(
+    limits: BackupCapacityLimits,
+    object_refs: &[crate::BackupObjectRef],
+) -> Result<(), BackupError> {
+    for object in object_refs {
+        check_backup_limit(
+            limits.object_bytes,
+            object.size_bytes,
+            &object.storage_key,
+            BackupCapacityLimitKind::Object,
+        )?;
+    }
+    Ok(())
 }
 
 #[must_use]
@@ -601,114 +968,270 @@ fn validate_object_refs(
     Ok(())
 }
 
-fn serialize_table_export(table: &BackupTableExport) -> Result<Vec<u8>, BackupError> {
-    serialize_jsonl_entries(&table.rows)
-}
-
-fn serialize_jsonl_entries<T>(entries: &[T]) -> Result<Vec<u8>, BackupError>
+/// Exact size of the JSON Lines payload that restore decodes for `entries`.
+fn decoded_jsonl_len<T>(entries: &[T]) -> Result<u64, BackupError>
 where
     T: Serialize,
 {
-    let mut encoder =
-        zstd::stream::Encoder::new(Vec::new(), 0).map_err(BackupError::compression)?;
-    for entry in entries {
-        serde_json::to_writer(&mut encoder, entry)?;
-        encoder.write_all(b"\n").map_err(BackupError::compression)?;
+    struct Counter(u64);
+    impl Write for Counter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 = self
+                .0
+                .saturating_add(u64::try_from(buf.len()).unwrap_or(u64::MAX));
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
-    encoder.finish().map_err(BackupError::compression)
+    let mut counter = Counter(0);
+    for entry in entries {
+        serde_json::to_writer(&mut counter, entry)?;
+        counter.write_all(b"\n").map_err(BackupError::compression)?;
+    }
+    Ok(counter.0)
+}
+
+/// Compressed output that stops growing at the stored-payload limit.
+struct LimitedBuffer<'a> {
+    bytes: Vec<u8>,
+    limit: BackupByteLimit,
+    exceeded: &'a std::cell::Cell<Option<u64>>,
+}
+
+impl Write for LimitedBuffer<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let next = u64::try_from(self.bytes.len().saturating_add(buf.len())).unwrap_or(u64::MAX);
+        if let BackupByteLimit::Bytes(limit) = self.limit
+            && next > limit
+        {
+            self.exceeded.set(Some(next));
+            return Err(std::io::Error::other("stored payload limit exceeded"));
+        }
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Serializes and compresses entries, failing as soon as the compressed
+/// payload would exceed `limit`, so it is never buffered beyond it.
+///
+/// The zstd window is kept within what restore's decoder accepts for
+/// `decode_limit`, which bounds the window by the decoded-size limit.
+fn serialize_jsonl_entries<T>(
+    entries: &[T],
+    content_key: &str,
+    limit: BackupByteLimit,
+    decode_limit: BackupByteLimit,
+) -> Result<Vec<u8>, BackupError>
+where
+    T: Serialize,
+{
+    let exceeded = std::cell::Cell::new(None);
+    let output = LimitedBuffer {
+        bytes: Vec::new(),
+        limit,
+        exceeded: &exceeded,
+    };
+    let encoded = (move || {
+        let mut encoder =
+            zstd::stream::Encoder::new(output, 0).map_err(BackupError::compression)?;
+        if let Some(window_log) = compatible_window_log(decode_limit) {
+            encoder
+                .window_log(window_log)
+                .map_err(BackupError::compression)?;
+        }
+        for entry in entries {
+            serde_json::to_writer(&mut encoder, entry)?;
+            encoder.write_all(b"\n").map_err(BackupError::compression)?;
+        }
+        encoder.finish().map_err(BackupError::compression)
+    })();
+    if let Some(observed) = exceeded.get() {
+        check_backup_limit(
+            limit,
+            observed,
+            content_key,
+            BackupCapacityLimitKind::StoredPayload,
+        )?;
+    }
+    Ok(encoded?.bytes)
 }
 
 async fn write_object_entries(
     repository: &dyn BackupRepository,
     objects: &dyn BackupObjectIndex,
     object_refs: &[crate::BackupObjectRef],
-    object_concurrency: usize,
+    options: &BackupExecutionOptions,
 ) -> Result<Vec<ObjectBackupEntry>, BackupError> {
-    let concurrency = object_concurrency.max(1);
+    let concurrency = options.object_concurrency.max(1);
+    let limit = repository.capacity_limits().object_bytes;
     // Owned refs keep the stream free of higher-ranked borrows, which
     // otherwise break `Send` future inference in async resolvers that await
     // backup creation.
     let owned_refs = object_refs.to_vec();
-    let mut object_entries = stream::iter(owned_refs.into_iter().enumerate())
-        .map(|(index, object)| async move {
-            let content_key = object_content_key(&object.sha256_hex);
-            let source = objects.load_object_stream(&object).await?;
-            let hash_state = std::sync::Arc::new(std::sync::Mutex::new((Sha256::new(), 0_u64)));
-            let stream_state = std::sync::Arc::clone(&hash_state);
-            let stream = source.into_inner().map(move |chunk| {
-                let chunk = chunk?;
-                let mut hasher = match stream_state.lock() {
-                    Ok(hasher) => hasher,
-                    Err(poisoned) => poisoned.into_inner(),
-                };
-                hasher.1 = hasher.1.checked_add(chunk.len() as u64).ok_or_else(|| {
-                    graphql_orm_storage::StorageError::PreconditionFailed {
-                        key: "object stream".to_string(),
-                        condition: "byte count overflow".to_string(),
-                    }
-                })?;
-                hasher.0.update(&chunk);
-                Ok(chunk)
-            });
-            let written = repository
-                .put_blob_stream_if_absent(&content_key, StorageByteStream::new(Box::pin(stream)))
-                .await?;
-            let (actual, observed_size) = if written {
-                let hasher = match hash_state.lock() {
-                    Ok(hasher) => hasher.clone(),
-                    Err(poisoned) => poisoned.into_inner().clone(),
-                };
-                (format!("{:x}", hasher.0.finalize()), hasher.1)
-            } else {
-                // A matching stored blob does not establish that current source
-                // bytes still match the index checksum. Preserve independent
-                // source validation before reusing verified repository content.
-                let (source_checksum, _) =
-                    hash_object_source(objects.load_object_stream(&object).await?).await?;
-                if source_checksum != object.sha256_hex {
-                    return Err(BackupError::ChecksumMismatch {
-                        key: content_key,
-                        expected: object.sha256_hex.clone(),
-                        actual: source_checksum,
-                    });
+    let cancellation = options.cancellation.clone();
+    // Set by the first failure. Uploads already in flight are awaited rather
+    // than dropped mid-request, so none can land after the lock is released.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let outcomes = stream::iter(owned_refs.into_iter().enumerate())
+        .map(|(index, object)| {
+            let cancellation = cancellation.clone();
+            let stop = std::sync::Arc::clone(&stop);
+            async move {
+                // A safe point: an object that has not started is never begun.
+                if cancellation.is_cancelled() || stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    return None;
                 }
-                let size = crate::verify::verify_blob_checksum(
-                    repository,
-                    content_key.clone(),
-                    object.sha256_hex.clone(),
-                )
-                .await?;
-                (object.sha256_hex.clone(), size)
-            };
-            if actual != object.sha256_hex {
-                if written {
-                    repository.delete_blob(&content_key).await?;
+                let outcome = write_object_entry(repository, objects, index, object, limit).await;
+                if outcome.is_err() {
+                    stop.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
-                return Err(BackupError::ChecksumMismatch {
-                    key: content_key,
-                    expected: object.sha256_hex.clone(),
-                    actual,
-                });
+                Some(outcome)
             }
-
-            Ok((
-                index,
-                ObjectBackupEntry {
-                    object_id: object.object_id,
-                    storage_key: object.storage_key.clone(),
-                    content_key,
-                    sha256_hex: object.sha256_hex.clone(),
-                    size_bytes: observed_size,
-                    mime_type: object.mime_type.clone(),
-                },
-            ))
         })
         .buffer_unordered(concurrency)
-        .try_collect::<Vec<_>>()
-        .await?;
+        .collect::<Vec<_>>()
+        .await;
+    let mut object_entries = Vec::with_capacity(outcomes.len());
+    let mut skipped = false;
+    for outcome in outcomes {
+        match outcome {
+            Some(Ok(entry)) => object_entries.push(entry),
+            Some(Err(error)) => return Err(error),
+            None => skipped = true,
+        }
+    }
+    if skipped {
+        return Err(BackupError::Cancelled);
+    }
     object_entries.sort_by_key(|(index, _)| *index);
     let object_entries = object_entries.into_iter().map(|(_, entry)| entry).collect();
     Ok(object_entries)
+}
+
+/// Streamed hash, byte count and whether the object limit stopped the stream.
+type ObjectStreamState = (Sha256, u64, bool);
+
+async fn write_object_entry(
+    repository: &dyn BackupRepository,
+    objects: &dyn BackupObjectIndex,
+    index: usize,
+    object: crate::BackupObjectRef,
+    limit: BackupByteLimit,
+) -> Result<(usize, ObjectBackupEntry), BackupError> {
+    let content_key = object_content_key(&object.sha256_hex);
+    let source = objects.load_object_stream(&object).await?;
+    let initial: ObjectStreamState = (Sha256::new(), 0_u64, false);
+    let hash_state = std::sync::Arc::new(std::sync::Mutex::new(initial));
+    let stream_state = std::sync::Arc::clone(&hash_state);
+    let stream = source.into_inner().map(move |chunk| {
+        let chunk = chunk?;
+        let mut state = match stream_state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.1 = state.1.checked_add(chunk.len() as u64).ok_or_else(|| {
+            graphql_orm_storage::StorageError::PreconditionFailed {
+                key: "object stream".to_string(),
+                condition: "byte count overflow".to_string(),
+            }
+        })?;
+        if let BackupByteLimit::Bytes(limit_bytes) = limit
+            && state.1 > limit_bytes
+        {
+            // Failing the body before its end aborts the conditional create.
+            state.2 = true;
+            return Err(graphql_orm_storage::StorageError::PreconditionFailed {
+                key: "object stream".to_string(),
+                condition: "object exceeds the configured object limit".to_string(),
+            });
+        }
+        state.0.update(&chunk);
+        Ok(chunk)
+    });
+    let written = repository
+        .put_blob_stream_if_absent(&content_key, StorageByteStream::new(Box::pin(stream)))
+        .await;
+    let (limit_hit, streamed) = {
+        let state = match hash_state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        (state.2, state.1)
+    };
+    if limit_hit {
+        if matches!(written, Ok(true)) {
+            repository.delete_blob(&content_key).await?;
+        }
+        check_backup_limit(
+            limit,
+            streamed,
+            &object.storage_key,
+            BackupCapacityLimitKind::Object,
+        )?;
+    }
+    let written = written?;
+    let (actual, observed_size) = if written {
+        let hasher = match hash_state.lock() {
+            Ok(hasher) => hasher.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        (format!("{:x}", hasher.0.finalize()), hasher.1)
+    } else {
+        // A matching stored blob does not establish that current source
+        // bytes still match the index checksum. Preserve independent
+        // source validation before reusing verified repository content.
+        let (source_checksum, source_size) =
+            hash_object_source(objects.load_object_stream(&object).await?).await?;
+        if source_checksum != object.sha256_hex {
+            return Err(BackupError::ChecksumMismatch {
+                key: content_key,
+                expected: object.sha256_hex.clone(),
+                actual: source_checksum,
+            });
+        }
+        check_backup_limit(
+            limit,
+            source_size,
+            &object.storage_key,
+            BackupCapacityLimitKind::Object,
+        )?;
+        let size = crate::verify::verify_blob_checksum(
+            repository,
+            content_key.clone(),
+            object.sha256_hex.clone(),
+            limit,
+        )
+        .await?;
+        (object.sha256_hex.clone(), size)
+    };
+    if actual != object.sha256_hex {
+        if written {
+            repository.delete_blob(&content_key).await?;
+        }
+        return Err(BackupError::ChecksumMismatch {
+            key: content_key,
+            expected: object.sha256_hex.clone(),
+            actual,
+        });
+    }
+
+    Ok((
+        index,
+        ObjectBackupEntry {
+            object_id: object.object_id,
+            storage_key: object.storage_key.clone(),
+            content_key,
+            sha256_hex: object.sha256_hex.clone(),
+            size_bytes: observed_size,
+            mime_type: object.mime_type.clone(),
+        },
+    ))
 }
 
 async fn hash_object_source(source: StorageByteStream) -> Result<(String, u64), BackupError> {
@@ -725,18 +1248,6 @@ async fn hash_object_source(source: StorageByteStream) -> Result<(String, u64), 
         hasher.update(&chunk);
     }
     Ok((format!("{:x}", hasher.finalize()), size))
-}
-
-async fn release_lock<T>(
-    lock: RepositoryLock<'_>,
-    result: Result<T, BackupError>,
-) -> Result<T, BackupError> {
-    let release_result = lock.release().await;
-    match (result, release_result) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Err(err), _) => Err(err),
-        (Ok(_), Err(err)) => Err(err),
-    }
 }
 
 struct ChangeGroup {

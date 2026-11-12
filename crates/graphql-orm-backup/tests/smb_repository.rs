@@ -220,6 +220,13 @@ impl BackupRepository for SwappingRepository {
     async fn put_blob(&self, key: &str, body: Bytes) -> Result<(), BackupError> {
         self.inner.put_blob(key, body).await
     }
+    // Object restore holds the repository lock.
+    async fn put_blob_if_absent(&self, key: &str, body: Bytes) -> Result<bool, BackupError> {
+        self.inner.put_blob_if_absent(key, body).await
+    }
+    async fn delete_blob_once(&self, key: &str) -> Result<(), BackupError> {
+        self.inner.delete_blob_once(key).await
+    }
     async fn blob_exists(&self, key: &str) -> Result<bool, BackupError> {
         self.inner.blob_exists(key).await
     }
