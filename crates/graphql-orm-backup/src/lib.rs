@@ -103,14 +103,16 @@ pub use authentication::{
     LegacyManifestPolicy, MIN_MANIFEST_KEY_BYTES, ManifestAuthenticator, ManifestKey,
 };
 pub use backup::{
-    BackupExecutionOptions, CompactChainRequest, CompactChainResult, DATABASE_EXPORT_FORMAT,
-    DEFAULT_OBJECT_CONCURRENCY, FullBackupRequest, FullBackupResult, IncrementalBackupRequest,
-    IncrementalBackupResult, bytes_sha256_hex, compact_chain, compact_chain_with_options,
-    create_full_backup, create_full_backup_with_options, create_incremental_backup,
-    create_incremental_backup_with_options, database_changes_key, database_table_key,
-    object_content_key, snapshot_manifest_key, write_manifest,
+    BackupCancellation, BackupExecutionOptions, CompactChainRequest, CompactChainResult,
+    DATABASE_EXPORT_FORMAT, DEFAULT_OBJECT_CONCURRENCY, FullBackupRequest, FullBackupResult,
+    IncrementalBackupRequest, IncrementalBackupResult, bytes_sha256_hex, compact_chain,
+    compact_chain_with_options, create_full_backup, create_full_backup_with_options,
+    create_incremental_backup, create_incremental_backup_with_options, database_changes_key,
+    database_table_key, object_content_key, snapshot_manifest_key, write_manifest,
 };
-pub use capacity::{BackupByteLimit, BackupCapacityLimits, collect_backup_stream};
+pub use capacity::{
+    BackupByteLimit, BackupCapacityLimitKind, BackupCapacityLimits, collect_backup_stream,
+};
 pub use database::{
     BackupChangeAction, BackupChangeExport, BackupRow, BackupTableExport, GraphqlOrmBackupAdapter,
     GraphqlOrmBackupSchema,
@@ -120,7 +122,11 @@ pub use error::BackupError;
 pub use graphql_orm::graphql::orm::ColumnBackupPolicy;
 #[cfg(feature = "local")]
 pub use local_repository::LocalBackupRepository;
-pub use lock::{DEFAULT_LOCK_STALE_AFTER_SECONDS, RepositoryLock, RepositoryLockOptions};
+pub use lock::{
+    BreakRepositoryLockRequest, DEFAULT_LOCK_STALE_AFTER_SECONDS, REPOSITORY_LOCK_KEY,
+    RepositoryLock, RepositoryLockOptions, RepositoryLockOwner, RepositoryLockStatus,
+    break_repository_lock, read_repository_lock,
+};
 pub use manifest::{
     BACKUP_FORMAT_VERSION, BackupCompression, BackupKind, BackupSnapshotManifest, BackupTombstone,
     DatabaseBackupManifest, LEGACY_BACKUP_FORMAT_VERSION, ManifestMac, ManifestMacAlgorithm,

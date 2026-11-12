@@ -3,12 +3,55 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-backup-maintainers
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-12
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.13.0 to 0.14.0: lock records, locked reads and write-side limits
+
+Storage stays on its current version. Repository layout and manifest format
+are unchanged; existing snapshots restore as before.
+
+1. **Construct the new fields.** `RepositoryLockOptions` gains `owner_label`,
+   `BackupExecutionOptions` gains `cancellation`, `VerificationOptions` gains
+   `lock`, `BackupCapacityLimits` gains `object_bytes` and `PruneResult` gains
+   `deleted_orphan_blobs`. Struct literals need `..Default::default()` or the
+   new fields. `BackupError::RepositoryLocked` gains an `owner` field, so
+   patterns must use `{ lock_key, .. }`.
+2. **Handle the new errors.** Match `SnapshotExists`,
+   `InvalidRetentionPolicy`, `BackupCapacityExceeded`, `Cancelled`,
+   `LockReleaseFailed`, `RepositoryLockNotHeld` and `BreakLockRefused`.
+   Compaction onto a used id now reports `SnapshotExists` instead of
+   `InvalidManifestChain`. A `LockReleaseFailed` after a backup means the
+   snapshot named in `committed_snapshot_id` is complete but the repository
+   is still locked.
+3. **Use a fresh id per snapshot.** Backups no longer overwrite an id that has
+   a manifest or payloads. Do not retry with the same id after an error whose
+   outcome is unknown; use a new id and let `prune` remove the leftovers.
+4. **Keep at least one snapshot.** `KeepPolicy { keep_last: 0 }` is refused.
+   Delete a repository's last snapshot explicitly with `delete_snapshot`.
+5. **Serialize restores and verification with writers.** Restore and
+   verification now take the exclusive repository lock and fail with
+   `RepositoryLocked` while a backup, prune or another restore holds it.
+   Schedule them so they do not overlap, or retry after the holder finishes.
+   Custom `BackupRepository` wrappers used for restore or verification must
+   now forward `put_blob_if_absent` and `delete_blob_once`, because those
+   operations acquire and release the lock.
+6. **Check limits before upgrading large repositories.** Backups now refuse
+   payloads that restore with the same handle would refuse. If a backup
+   fails with `BackupCapacityExceeded`, raise the reported limit on the
+   repository handle used for both backup and restore after reviewing the
+   memory budget.
+7. **Recover stuck locks explicitly.** A crashed or dropped run leaves
+   `locks/repository.lock` with an owner record. Read it with
+   `read_repository_lock`, confirm that run and every other writer have
+   stopped, then call `break_repository_lock` with its `run_id` and a minimum
+   age. Locks written by 0.13.0 or earlier have no owner record and still need
+   offline removal after quiescing every writer. Prefer
+   `BackupCancellation` over dropping a backup future: it releases the lock.
 
 ## 0.12.1 to 0.13.0: authenticated manifests and constrained restore targets
 

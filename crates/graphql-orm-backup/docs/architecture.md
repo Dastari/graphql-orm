@@ -3,7 +3,7 @@ title: "graphql-orm-backup Architecture"
 kind: architecture
 status: active
 owner: graphql-orm-backup-maintainers
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-12
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -138,11 +138,19 @@ object's live-store key before restoring any object.
 
 ## Operational Safety
 
-- `create_full_backup`, `create_incremental_backup`, `compact_chain`, and `prune` acquire the
-  repository advisory lock.
+- `create_full_backup`, `create_incremental_backup`, `compact_chain`, `prune`,
+  `delete_snapshot`, `restore_snapshot`, `restore_objects` and verification acquire one exclusive
+  repository lock, so no operation deletes blobs another is reading. The lock blob holds a
+  `RepositoryLockOwner` record; recovery from a crashed holder is the explicit, owner- and
+  age-checked `break_repository_lock`, never automatic expiry.
+- Snapshot writers refuse a used snapshot id and, for incrementals, an invalid or incompatible
+  parent chain before any write, and enforce the restore-side `BackupCapacityLimits` while
+  writing. A failed or cancelled run removes its payloads unless its manifest write was
+  attempted.
 - Object blob writes and checksum verification use bounded concurrency with configurable limits.
-- `prune` retains manifest chains selected by `KeepPolicy` and removes expired snapshot blobs plus
-  unreferenced content-addressed object blobs.
+- `prune` retains manifest chains selected by `KeepPolicy` (at least one) and removes expired
+  snapshot blobs, orphaned snapshot payloads without a manifest, and unreferenced
+  content-addressed object blobs.
 - `prune` and `delete_snapshot` fail closed on an incomplete snapshot listing: a stored but
   unlisted parent, or a different manifest set on re-listing, aborts before any snapshot or
   object is deleted, and the manifest set is checked again before the object sweep.

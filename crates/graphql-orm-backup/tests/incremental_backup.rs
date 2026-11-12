@@ -21,18 +21,22 @@ async fn create_incremental_backup_writes_change_files_and_tombstones() {
     let changes = sample_changes();
     let database = MockDatabase::with_incremental(changes.clone());
     let objects = MockObjectIndex;
+    // Incremental backups validate their parent chain before writing.
+    create_full_backup(&repository, &database, &objects, full_request())
+        .await
+        .expect("parent full backup");
 
     let result = create_incremental_backup(
         &repository,
         &database,
         &objects,
-        incremental_request(parent_id()),
+        incremental_request(full_id()),
     )
     .await
     .expect("create incremental backup");
 
     assert_eq!(result.manifest.backup_kind, BackupKind::Incremental);
-    assert_eq!(result.manifest.parent_snapshot_id, Some(parent_id()));
+    assert_eq!(result.manifest.parent_snapshot_id, Some(full_id()));
     assert_eq!(result.manifest.database.changes.len(), 1);
     assert_eq!(result.manifest.database.row_count, changes.len() as u64);
     assert_eq!(result.manifest.tombstones.len(), 1);
@@ -267,10 +271,6 @@ fn backup_row(table_name: &str, primary_key: &str, name: &str) -> BackupRow {
 
 fn full_id() -> Uuid {
     Uuid::parse_str("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa").expect("valid uuid")
-}
-
-fn parent_id() -> Uuid {
-    Uuid::parse_str("99999999-9999-4999-9999-999999999999").expect("valid uuid")
 }
 
 fn incremental_id() -> Uuid {

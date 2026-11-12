@@ -3,12 +3,73 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-backup-maintainers
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-12
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Changelog
+
+## 0.14.0 (unreleased)
+
+Breaking: lock records, locked restore and verification, write-side capacity
+limits and stricter snapshot lifecycle checks. See [MIGRATION.md](MIGRATION.md).
+
+- Snapshot lifecycle (#481): `prune` refuses `KeepPolicy { keep_last: 0 }`
+  with the new `InvalidRetentionPolicy` error before touching the repository;
+  previously it deleted every snapshot. Full and incremental backups now refuse
+  a snapshot id that already has a manifest or any payload with the new
+  `SnapshotExists` error, under the lock and before any write; previously a
+  reused id overwrote the existing snapshot's table payloads. Compaction
+  reports the same error instead of `InvalidManifestChain`. Incremental
+  backups load and authenticate the parent's whole chain before exporting or
+  writing, and refuse a missing parent or one recorded for another
+  application, backend or schema hash.
+- Orphaned payloads (#481): a backup, incremental backup or compaction that
+  fails or is cancelled before its manifest write removes the snapshot
+  payloads it wrote. `prune` removes blobs in `snapshots/{id}/` directories
+  that have no manifest, reported as `PruneResult::deleted_orphan_blobs`, and
+  aborts if such a directory's manifest is stored but was not listed.
+- Restore and verification are locked (#480): `restore_snapshot`,
+  `restore_objects`, `verify_manifest_and_objects` and
+  `verify_object_checksums` (and their `_with_options` forms) hold the
+  repository lock while they read, so a concurrent prune, snapshot deletion or
+  compaction can no longer delete the blobs they read. They fail with
+  `RepositoryLocked` while another operation holds the lock; restore reports
+  it as a validation-stage failure. The lock is exclusive, so these operations
+  no longer run concurrently with each other or with backups.
+- Lock owner records and recovery (#477): the lock blob now holds a
+  `RepositoryLockOwner` record (random run id, best-effort host, process id,
+  operation, optional `RepositoryLockOptions::owner_label`, acquisition time).
+  `RepositoryLocked` carries the holder's record. `read_repository_lock`
+  inspects the lock and `break_repository_lock` removes a lock left by a
+  crashed run only when it names the operator-confirmed run id and is at least
+  `min_age_seconds` old; locks without an owner record still need offline
+  removal. Nothing expires automatically. `RepositoryLock::release` leaves a
+  lock that no longer names its run in place and returns
+  `RepositoryLockNotHeld`.
+- Cancellation (#477): `BackupExecutionOptions::cancellation` takes a
+  `BackupCancellation`. Cancelling it stops a backup, incremental backup or
+  compaction at its next safe point, removes its payloads, releases the lock
+  and returns `Cancelled`. Dropping the future still leaves the lock, now with
+  its owner record.
+- A completed operation whose lock release fails now returns
+  `LockReleaseFailed`, naming the run still holding the lock and, for backups
+  and compaction, the committed snapshot, instead of the bare release error.
+- Write-side capacity limits (#476): backups, incremental backups and
+  compaction check every payload against the repository handle's
+  `BackupCapacityLimits` before writing, and fail with the new
+  `BackupCapacityExceeded` error naming the payload and the
+  `BackupCapacityLimitKind`. Decoded per-payload and per-stage sizes and
+  declared object sizes are checked before anything is written; compressed
+  payloads stop at `buffered_bytes` while they are encoded instead of being
+  buffered without bound; manifests larger than `buffered_bytes` are refused.
+  Previously a backup could succeed and then fail to restore with the same
+  limits.
+- New `BackupCapacityLimits::object_bytes` per-object limit, unbounded by
+  default. Backups enforce it on declared and streamed sizes, aborting the
+  conditional create; object restore, verification and compaction refuse
+  stored objects over it.
 
 ## 0.13.0 (unreleased)
 

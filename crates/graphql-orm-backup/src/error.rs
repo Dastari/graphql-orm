@@ -111,8 +111,74 @@ pub enum BackupError {
     #[error("invalid manifest chain: {reason}")]
     InvalidManifestChain { reason: String },
 
-    #[error("backup repository is locked by {lock_key}")]
-    RepositoryLocked { lock_key: String },
+    /// Another run holds the repository lock. `owner` is its owner record, or
+    /// `None` when the lock has no readable record (for example a lock written
+    /// by an older release). Elapsed time never releases a lock; see
+    /// [`crate::break_repository_lock`].
+    #[error("backup repository is locked by {lock_key}{}", describe_owner(.owner.as_deref()))]
+    RepositoryLocked {
+        lock_key: String,
+        owner: Option<Box<crate::RepositoryLockOwner>>,
+    },
+
+    /// Releasing a lock found that it no longer names this run, so it was left
+    /// in place. An operator broke the lock, or the record was replaced.
+    #[error("repository lock {lock_key} is not held by run {run_id}; it was left in place")]
+    RepositoryLockNotHeld {
+        lock_key: String,
+        run_id: uuid::Uuid,
+        /// Record found at the lock key, if one was readable.
+        found: Option<Box<crate::RepositoryLockOwner>>,
+    },
+
+    /// [`crate::break_repository_lock`] refused to remove a lock.
+    #[error("refusing to break repository lock {lock_key}: {reason}")]
+    BreakLockRefused { lock_key: String, reason: String },
+
+    /// The operation completed, but releasing the repository lock failed, so
+    /// the repository may still be locked by `run_id`.
+    ///
+    /// `committed_snapshot_id` names the snapshot a backup or compaction
+    /// sealed before the release failed; the snapshot is complete.
+    #[error(
+        "operation completed but repository lock {lock_key} held by run {run_id} was not released"
+    )]
+    LockReleaseFailed {
+        lock_key: String,
+        run_id: uuid::Uuid,
+        committed_snapshot_id: Option<uuid::Uuid>,
+        #[source]
+        source: Box<BackupError>,
+    },
+
+    /// A [`crate::BackupCancellation`] was triggered. The operation stopped at
+    /// a safe point, removed the payloads it had written and released the lock.
+    #[error("backup operation was cancelled")]
+    Cancelled,
+
+    /// A backup or compaction named a snapshot id that the repository already
+    /// uses. Nothing was written.
+    #[error("snapshot {snapshot_id} already exists; snapshots are never overwritten")]
+    SnapshotExists { snapshot_id: uuid::Uuid },
+
+    /// A retention policy would delete every snapshot, or is otherwise unsafe.
+    #[error("invalid retention policy: {reason}")]
+    InvalidRetentionPolicy { reason: String },
+
+    /// A backup payload would exceed a limit that restoring it enforces.
+    /// The snapshot was not sealed.
+    #[error(
+        "backup {payload} would exceed the {limit} limit of {limit_bytes} bytes ({observed_bytes} bytes)"
+    )]
+    BackupCapacityExceeded {
+        /// Repository key, table name or object storage key concerned.
+        payload: String,
+        /// Limit that would be exceeded.
+        limit: crate::BackupCapacityLimitKind,
+        limit_bytes: u64,
+        /// Bytes observed when the limit was hit; may stop short of the full size.
+        observed_bytes: u64,
+    },
 
     #[error("backup payload compression error")]
     Compression {
@@ -141,6 +207,13 @@ pub enum BackupError {
         #[source]
         source: std::io::Error,
     },
+}
+
+fn describe_owner(owner: Option<&crate::RepositoryLockOwner>) -> String {
+    owner.map_or_else(
+        || " (no owner record)".to_string(),
+        |owner| format!(" ({owner})"),
+    )
 }
 
 impl BackupError {

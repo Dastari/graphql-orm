@@ -44,14 +44,22 @@ impl BackupByteLimit {
 
 /// Repository limits for each payload and database manifest stage.
 /// These are not a process RSS or whole-snapshot allocation guarantee.
+///
+/// Backup, incremental backup and compaction enforce the same limits that
+/// restore and verification enforce, using the repository handle's
+/// [`crate::BackupRepository::capacity_limits`], so a snapshot that a handle
+/// writes is one the same configuration can restore.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BackupCapacityLimits {
     /// Buffered repository bodies and compatibility stream fallbacks (default 64 MiB).
+    /// Every stored table or change payload and every manifest must fit.
     pub buffered_bytes: BackupByteLimit,
     /// Decoded database payload bytes (default 256 MiB).
     pub decompressed_bytes: BackupByteLimit,
     /// Aggregate decoded bytes in one full/incremental database stage (default 512 MiB).
     pub stage_bytes: BackupByteLimit,
+    /// Bytes of one stored object (default unbounded, because objects stream).
+    pub object_bytes: BackupByteLimit,
 }
 impl Default for BackupCapacityLimits {
     fn default() -> Self {
@@ -59,7 +67,32 @@ impl Default for BackupCapacityLimits {
             buffered_bytes: BackupByteLimit::default(),
             decompressed_bytes: BackupByteLimit::Bytes(256 * 1024 * 1024),
             stage_bytes: BackupByteLimit::Bytes(512 * 1024 * 1024),
+            object_bytes: BackupByteLimit::Unbounded,
         }
+    }
+}
+
+/// Which [`BackupCapacityLimits`] field a backup payload would exceed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BackupCapacityLimitKind {
+    /// [`BackupCapacityLimits::buffered_bytes`]: a stored payload or manifest.
+    StoredPayload,
+    /// [`BackupCapacityLimits::decompressed_bytes`]: one decoded payload.
+    DecodedPayload,
+    /// [`BackupCapacityLimits::stage_bytes`]: all decoded payloads of a stage.
+    Stage,
+    /// [`BackupCapacityLimits::object_bytes`]: one object.
+    Object,
+}
+
+impl std::fmt::Display for BackupCapacityLimitKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::StoredPayload => "stored payload",
+            Self::DecodedPayload => "decoded payload",
+            Self::Stage => "database stage",
+            Self::Object => "object",
+        })
     }
 }
 

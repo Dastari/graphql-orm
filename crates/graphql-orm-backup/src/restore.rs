@@ -11,8 +11,9 @@ use uuid::Uuid;
 use crate::{
     BackupByteLimit, BackupChangeExport, BackupCompression, BackupError, BackupObjectRef,
     BackupRepository, BackupSnapshotManifest, BackupTableExport, GraphqlOrmBackupAdapter,
-    ObjectBackupEntry, TableBackupEntry, collect_backup_stream, load_manifest_chain,
-    manifest::required_authenticator, verify_manifest_and_objects, verify_manifest_authenticity,
+    ObjectBackupEntry, RepositoryLock, RepositoryLockOptions, TableBackupEntry,
+    collect_backup_stream, load_manifest_chain, manifest::required_authenticator,
+    verify_manifest_authenticity,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -418,14 +419,48 @@ async fn verify_restore_schema(
 /// dropping this future cannot return progress or roll back an active adapter
 /// call; treat cancellation during apply as an unknown target outcome.
 ///
+/// Restore holds the repository lock for its whole run, so a concurrent prune,
+/// snapshot deletion or compaction cannot remove the payloads it reads. While
+/// another operation holds the lock it fails in the validation phase with
+/// [`BackupError::RepositoryLocked`] as the source. Dropping the future leaves
+/// the lock in place with its owner record; see
+/// [`crate::break_repository_lock`].
+///
 /// # Errors
 ///
 /// Returns [`BackupError::RestoreStageFailed`] with phase/progress metadata and
-/// the original cause when validation, payload preparation or adapter apply fails.
+/// the original cause when locking, validation, payload preparation or adapter
+/// apply fails, and [`BackupError::LockReleaseFailed`] if the restore completed
+/// but the lock was not released.
 /// Validation and preparation never apply their failing stage. Earlier completed
 /// stages may remain after later preparation failure; failed apply may be partial.
 /// The primary display does not interpolate adapter/provider error details.
 pub async fn restore_snapshot(
+    repository: &dyn BackupRepository,
+    database: &dyn GraphqlOrmBackupAdapter,
+    snapshot_id: Uuid,
+    context: RestoreContext,
+) -> Result<RestoreResult, BackupError> {
+    let validation_error = |source| {
+        restore_stage_error(
+            snapshot_id,
+            None,
+            RestoreFailurePhase::Validation,
+            &[],
+            source,
+        )
+    };
+    // Refuse before the lock write: without a key no manifest can be trusted.
+    required_authenticator(repository).map_err(validation_error)?;
+    let lock =
+        RepositoryLock::acquire_for(repository, &RepositoryLockOptions::default(), "restore")
+            .await
+            .map_err(validation_error)?;
+    let result = restore_snapshot_locked(repository, database, snapshot_id, context).await;
+    lock.finish(result, |_| None).await
+}
+
+async fn restore_snapshot_locked(
     repository: &dyn BackupRepository,
     database: &dyn GraphqlOrmBackupAdapter,
     snapshot_id: Uuid,
@@ -443,17 +478,21 @@ pub async fn restore_snapshot(
             )
         })?;
     for manifest in &chain {
-        verify_manifest_and_objects(repository, manifest)
-            .await
-            .map_err(|source| {
-                restore_stage_error(
-                    snapshot_id,
-                    Some(manifest.snapshot_id),
-                    RestoreFailurePhase::Validation,
-                    &[],
-                    source,
-                )
-            })?;
+        crate::verify::verify_manifest_and_objects_unlocked(
+            repository,
+            manifest,
+            &crate::VerificationOptions::default(),
+        )
+        .await
+        .map_err(|source| {
+            restore_stage_error(
+                snapshot_id,
+                Some(manifest.snapshot_id),
+                RestoreFailurePhase::Validation,
+                &[],
+                source,
+            )
+        })?;
     }
 
     let full_manifest = chain.first().ok_or_else(|| {
@@ -613,11 +652,17 @@ fn restore_stage_error(
 /// staging object namespace and publish only after all required verification and
 /// database/object work succeeds; no cross-store rollback is provided.
 ///
+/// Object restore holds the repository lock while it reads, like
+/// [`restore_snapshot`]; the two calls take it separately. Objects larger than
+/// [`crate::BackupCapacityLimits::object_bytes`] are refused before the sink
+/// receives them.
+///
 /// # Errors
 ///
 /// Returns [`BackupError::ManifestAuthenticationRequired`] or an
-/// authentication error before reading any object, or
-/// [`BackupError::RestoreTargetRejected`] before restoring any object.
+/// authentication error before reading any object,
+/// [`BackupError::RepositoryLocked`] while another operation holds the lock,
+/// or [`BackupError::RestoreTargetRejected`] before restoring any object.
 /// Otherwise returns [`BackupError`] if an object blob is missing, checksum
 /// verification fails, or the sink rejects an object.
 pub async fn restore_objects(
@@ -630,6 +675,22 @@ pub async fn restore_objects(
         validate_storage_key(&object.storage_key)?;
         sink.check_restore_target(&object_ref_from_entry(object))?;
     }
+    let lock = RepositoryLock::acquire_for(
+        repository,
+        &RepositoryLockOptions::default(),
+        "restore_objects",
+    )
+    .await?;
+    let result = restore_objects_locked(repository, manifest, sink).await;
+    lock.finish(result, |()| None).await
+}
+
+async fn restore_objects_locked(
+    repository: &dyn BackupRepository,
+    manifest: &BackupSnapshotManifest,
+    sink: &dyn RestoreObjectSink,
+) -> Result<(), BackupError> {
+    let object_limit = repository.capacity_limits().object_bytes;
     for object in &manifest.objects {
         // Historical size metadata was advisory. Verify/count without collection
         // before calling the sink, then retain the streamed checksum guard below.
@@ -637,6 +698,7 @@ pub async fn restore_objects(
             repository,
             object.content_key.clone(),
             object.sha256_hex.clone(),
+            object_limit,
         )
         .await?;
         let mut reference = object_ref_from_entry(object);

@@ -411,6 +411,12 @@ pub async fn load_manifest(
     Ok(manifest)
 }
 
+/// Largest zstd window log that decoding accepts under a decoded-size limit.
+/// Backups encode within it so they never write a frame restore refuses.
+pub(crate) fn decode_window_log(limit_bytes: u64) -> u32 {
+    (63 - limit_bytes.max(1).leading_zeros()).clamp(10, 30)
+}
+
 pub(crate) fn required_authenticator(
     repository: &dyn BackupRepository,
 ) -> Result<&ManifestAuthenticator, BackupError> {
@@ -650,9 +656,8 @@ pub fn decompress_payload_with_limit(
     let mut decoder =
         zstd::stream::read::Decoder::with_buffer(bytes).map_err(BackupError::compression)?;
     if let crate::BackupByteLimit::Bytes(limit_bytes) = limit {
-        let window_log = (63 - limit_bytes.max(1).leading_zeros()).clamp(10, 30);
         decoder
-            .window_log_max(window_log)
+            .window_log_max(decode_window_log(limit_bytes))
             .map_err(BackupError::compression)?;
     }
     let mut result = Vec::new();

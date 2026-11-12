@@ -801,7 +801,10 @@ async fn compaction_refuses_an_existing_snapshot_id() {
     let error = compact_chain(&repository, request)
         .await
         .expect_err("existing snapshot id refused");
-    assert!(matches!(error, BackupError::InvalidManifestChain { .. }));
+    assert!(matches!(
+        error,
+        BackupError::SnapshotExists { snapshot_id } if snapshot_id == second.snapshot_id
+    ));
     assert_eq!(
         repository.get_blob(&manifest_key).await.expect("manifest"),
         before,
