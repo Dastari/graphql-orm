@@ -45,6 +45,7 @@ use crate::{
     AuthenticatedPrincipal, AuthenticationProvider, RouterConfig, RouterError, RouterErrorKind,
     ScopeMatcher,
     admin::{AdminRuntime, build_admin_server},
+    byte_route::{ByteRouteMiddleware, ByteRouteRuntime},
     federation::ActiveGraph,
     lifecycle::{GraphLifecycle, RouterHandle, fetch_initial},
     subscriptions::{
@@ -214,6 +215,7 @@ impl From<&ActiveGraph> for ActiveGraphIdentity {
 pub struct PreparedRouter {
     config: RouterConfig,
     lifecycle: Arc<GraphLifecycle>,
+    byte_routes: Option<Arc<ByteRouteRuntime>>,
     identity: ActiveGraphIdentity,
     composition_warnings: Vec<String>,
 }
@@ -267,6 +269,11 @@ impl PreparedRouter {
             build_graph_options(&config)?,
             config.node_lookup.clone(),
         )?;
+        let byte_routes = ByteRouteRuntime::new(
+            &config.byte_routes,
+            config.authentication.clone(),
+            &lifecycle.metrics(),
+        )?;
         let active = lifecycle.load();
         let graph = &active.graph;
         let identity = ActiveGraphIdentity::from(graph.as_ref());
@@ -278,6 +285,7 @@ impl PreparedRouter {
         Ok(Self {
             config,
             lifecycle,
+            byte_routes,
             identity,
             composition_warnings,
         })
@@ -368,6 +376,9 @@ impl PreparedRouter {
         if let Some(internal) = &internal_subscription {
             internal.continuity.install(&mut telemetry.context);
         }
+        if let Some(warning) = crate::byte_route::public_route_warning(&self.config.byte_routes) {
+            tracing::warn!("{warning}");
+        }
         let mut background_tasks = background_tasks::BackgroundTasksManager::new();
         let configured = hive_router::configure_app_from_config(
             hive_config,
@@ -417,6 +428,7 @@ impl PreparedRouter {
             )
         });
         let public_graphql_path = self.config.graphql_path.clone();
+        let byte_routes = self.byte_routes.clone();
         let admin_runtime = self.config.admin.clone().map(|admin| {
             AdminRuntime::new(
                 self.lifecycle.clone(),
@@ -444,6 +456,9 @@ impl PreparedRouter {
                 web::App::new()
                     .middleware(PluginService::new(plugin_paths.clone(), None))
                     .middleware(RequestIdentifiersService)
+                    // Registered last, so outermost: byte routes never enter
+                    // Hive's plugin chain, and unclaimed paths pass through.
+                    .middleware(ByteRouteMiddleware(byte_routes.clone()))
                     .state(server_shared_state.clone())
                     .state(server_schema_state.clone())
                     .state(telemetry_context.clone())

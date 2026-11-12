@@ -202,6 +202,7 @@ composition warnings before serving.
 | Dynamic registration | Disabled unless authenticated administration and exact network policy are configured. |
 | Subscriptions | Disabled by default; require authentication and a declared owner. |
 | Prometheus | Disabled by default; deployment network policy protects its listener. |
+| Byte routes | Disabled by default; each streams `GET`/`HEAD` from one static prefix to one upstream, authenticated unless explicitly public. |
 
 The [configuration reference](docs/configuration.md) is the complete field,
 secret-loading, default, and hard-limit source. Never put secret header values

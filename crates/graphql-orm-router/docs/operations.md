@@ -54,10 +54,22 @@ than merely raising defaults.
 | Client WebSocket message | 64 KiB | close code 4400 below the hard codec ceiling; transport disconnect at the ceiling |
 | Connection-init deadline | 3 s | close code 4408 |
 | Graceful drain | 10 s | shutdown duration and listener release |
+| Byte route response size | 64 MiB per route | 502 `BYTE_ROUTE_RESPONSE_TOO_LARGE` and `router_byte_route_aborted_total` |
+| Byte route concurrency / rate | 16 / 32 per second per route | 503 `BYTE_ROUTE_BUSY`, 429 `BYTE_ROUTE_RATE_LIMITED`, `router_byte_route_active_requests` |
+| Byte route connect / idle / total | 5 s / 30 s / 15 min | 502, 504, and `router_byte_route_aborted_total` |
 
 The authenticated router snapshot exposes request/error, cumulative downstream
 latency, active graph version, WebSocket/subscription gauges, refresh,
-composition, rejection, authorization-denial, and health values. The optional
+composition, rejection, authorization-denial, and health values.
+When byte routes are configured, `GET /_router/metrics` also reports six
+objects keyed by route prefix: `router_byte_route_requests_total` (every
+request a route claims), `router_byte_route_rejected_total` (refused before
+contacting the upstream), `router_byte_route_upstream_errors_total` (router
+error after contacting it: unreachable, timed out, invalid, or declared too
+large), `router_byte_route_aborted_total` (body ended before completion),
+`router_byte_route_bytes_total` (body bytes handed to clients), and the gauge
+`router_byte_route_active_requests`. A router with no byte routes omits all
+six keys rather than reporting empty objects or zeros. The optional
 Hive Prometheus exporter adds execution histograms and the pinned subscription
 counters
 `hive.router.subscriptions.clients.lagged_messages_total` and
@@ -211,6 +223,13 @@ deployment grace period exceeds the router drain deadline.
   the guard.
 - **Subscription gaps:** inspect lag/drop metrics, reduce event rate or fan-out,
   increase bounded buffers only with memory evidence, and refetch state.
+- **Byte route download fails:** a `graphql-orm-router-error` response header
+  means the router refused or failed the request; its absence means the status
+  and body came from the upstream. Compare `router_byte_route_upstream_errors_total`
+  (unreachable, timed out, or declared too large) with
+  `router_byte_route_aborted_total` (ended mid-body by the size limit, a
+  timeout, or a client that stopped reading). Raise a limit only from observed
+  file sizes and transfer times.
 - **Metrics route unavailable:** admin JSON needs its exact bearer scope;
   Prometheus needs an explicitly configured distinct port and network access.
 - **SIGTERM exceeds budget:** inspect long-running requests and exporter

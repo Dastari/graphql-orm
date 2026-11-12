@@ -193,7 +193,8 @@ impl SubscriptionGateway {
     }
 }
 
-struct ConnectionAttemptLimiter {
+/// Token-bucket admission limiter shared by WebSocket upgrades and byte routes.
+pub(crate) struct ConnectionAttemptLimiter {
     maximum_per_second: usize,
     state: Mutex<ConnectionAttemptState>,
 }
@@ -204,7 +205,7 @@ struct ConnectionAttemptState {
 }
 
 impl ConnectionAttemptLimiter {
-    fn new(maximum_per_second: usize) -> Self {
+    pub(crate) fn new(maximum_per_second: usize) -> Self {
         Self::new_at(maximum_per_second, Instant::now())
     }
 
@@ -218,7 +219,7 @@ impl ConnectionAttemptLimiter {
         }
     }
 
-    fn try_acquire(&self) -> bool {
+    pub(crate) fn try_acquire(&self) -> bool {
         self.try_acquire_at(Instant::now())
     }
 

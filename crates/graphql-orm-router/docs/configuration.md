@@ -52,6 +52,7 @@ The public field-level source contracts are:
 | [`RequestLimits`](../src/config.rs) | HTTP body/header/parser/depth/alias/directive/cost ceilings. |
 | [`RouterTelemetryConfig`](../src/config.rs) | Log and optional Prometheus listener settings. |
 | [`AdminConfig`](../src/config.rs) | Separate authenticated administration listener and scopes. |
+| [`ByteRoute`](../src/byte_route.rs) | One opt-in streamed `GET`/`HEAD` path prefix mapped to one static upstream. |
 | [`JwksAuthenticationConfig`](../src/jwt.rs) | RS256 public-key verification, issuer/audience, cache, and bounded JWKS fetch. |
 | [`RoleScopeCatalogueConfig`](../src/jwt.rs) | Optional signed role-to-scope catalogue retrieval and cache bounds. |
 | [`NetworkPolicy`](../src/network.rs) | Dynamic destination host/port/CIDR/DNS policy. |
@@ -87,6 +88,7 @@ an unbounded value.
 | `admin` | Disabled; enabling it requires authentication and a listener port distinct from the public port. |
 | `telemetry` | JSON/info logs; metrics exporter disabled. |
 | `nodeLookup` | Disabled. `{}` enables the router-hosted node lookup; `maxNodes` defaults to 100, valid range 1–10000. |
+| `byteRoutes` | Empty, so no byte route is served. See [Byte routes](#byte-routes). |
 
 Durations must be nonzero. Values over their hard safety ceilings fail before
 binding.
@@ -269,6 +271,168 @@ The message limit applies to the complete serialized
 `graphql-transport-ws` message, including variables and base64 expansion. Bulk
 uploads belong on a bounded HTTP endpoint or an application chunk protocol,
 not in one WebSocket operation.
+
+## Byte routes
+
+A byte route serves a service's file download through the public listener, for
+example an installer or an export too large to send as GraphQL. Byte routes
+are off by default and fixed at startup; dynamic registration never adds one.
+Each route maps one exact path prefix to one upstream base URL. Programmatic
+hosts use `RouterConfig::with_byte_route(ByteRoute::new(prefix, upstream))`.
+
+```json
+"byteRoutes": [
+  {
+    "prefix": "/files",
+    "upstream": "http://10.10.0.12:8080/downloads",
+    "maxResponseBytes": 134217728
+  },
+  {
+    "prefix": "/shared-files",
+    "upstream": "http://10.10.0.12:8080/shared",
+    "public": true,
+    "allowRange": true
+  }
+]
+```
+
+A request for `/files/reports/q3.csv?v=2` goes to
+`http://10.10.0.12:8080/downloads/reports/q3.csv?v=2`. Only the path below the
+prefix and the query are copied; the upstream scheme, host, and port come from
+configuration alone.
+
+| Field | Default or rule |
+| --- | --- |
+| `prefix` | Required. An absolute path of non-empty segments using only letters, digits, `-`, `.`, `_` or `~`, with no dot segments and no trailing slash. It must not overlap the GraphQL path, `/health`, `/readiness`, the reserved `/_graphql-orm-router` path, or another byte route. |
+| `upstream` | Required `http` or `https` URL with no credentials, query, fragment, dot segments, or empty or percent-encoded path segments. |
+| `public` | `false`. When `false`, the route needs a valid bearer and the router must have an authentication provider. |
+| `allowRange` | `false`. When `false`, a `Range` request is refused with 416. |
+| `allowSetCookie` | `false`. When `false`, upstream `Set-Cookie` headers are dropped. |
+| `forwardRequestHeaders` | Empty. Extra request headers to forward. Credentials, cookies, range, transport, forwarding, and common caller-identity headers are refused. |
+| `passResponseHeaders` | Empty. Extra upstream response headers to pass back. `Set-Cookie`, range, transport, and router-owned headers are refused. |
+| `maxResponseBytes` | 67108864 (64 MiB); valid range 1 byte to 1 TiB. |
+| `maxConcurrentRequests` | 16; valid range 1–10000. |
+| `maxRequestsPerSecond` | 32; valid range 1–10000. The same token bucket as WebSocket attempts, with one second of burst capacity, shared by all clients of the route. Only authenticated requests (or any request on a public route) spend it. |
+| `connectTimeoutMs` | 5000; valid through 60000. |
+| `idleTimeoutMs` | 30000; valid through 300000. Bounds the wait for response headers after connecting, for each upstream body chunk, and for the client to accept each chunk. |
+| `maxDurationMs` | 900000 (15 minutes); at least the idle timeout and at most 24 hours. Bounds the whole request. |
+
+### Matching
+
+A route claims a request whose raw, still percent-encoded path is exactly its
+prefix or starts with the prefix followed by `/`. `/files` claims `/files` and
+`/files/a.bin`, but not `/files-admin` or `/FILES/a.bin`, which continue to the
+GraphQL server and get its 404. Matching is case-sensitive.
+
+Every path a route claims is either relayed or refused with 400
+`BYTE_ROUTE_INVALID_PATH`; it never falls through to another handler. A
+claimed path is refused when it has an empty segment (`//` or a trailing `/`),
+a `.` or `..` segment or any segment made only of dots, a `;` or `\`, a raw
+character outside RFC 3986's unreserved characters and `! $ & ' ( ) * + , = :
+@`, or an encoded `/`, `\`, `.`, `%`, `;`, or control byte. That refuses
+`%2e%2e`, `%2f`, and double-encoding such as `%252e`. A segment that becomes
+empty once leading spaces and trailing spaces and dots are removed, such as
+`..%20` or `.%20.`, is refused because some servers normalize it to `..`, and
+so are the overlong UTF-8 bytes `%C0` and `%C1`. Queries must be
+printable ASCII up to 4096 bytes. Other percent-encoded bytes, such as UTF-8
+file names, are relayed unchanged.
+
+### Requests
+
+Only `GET` and `HEAD` over HTTP/1.1 or later are accepted. Other methods get
+405 with `Allow: GET, HEAD`, and HTTP/1.0 gets 505
+`BYTE_ROUTE_HTTP_VERSION_NOT_SUPPORTED`, because HTTP/1.0 marks the end of an
+unknown-length body by closing the connection and could not tell an abort from
+a complete transfer. A request with `Content-Length` other than 0, or with any
+`Transfer-Encoding`, gets 400 `BYTE_ROUTE_REQUEST_BODY_NOT_ALLOWED`. `HEAD`
+is forwarded as `HEAD`.
+
+Authentication follows the GraphQL endpoint. A route that is not public needs
+`Authorization: Bearer <token>`; a missing bearer gets 401, and an invalid,
+non-bearer, or repeated `Authorization` gets 401 `UNAUTHENTICATED` with the
+GraphQL error shape. An unavailable provider gets 503. A verified bearer is
+forwarded upstream unchanged, as GraphQL forwards it to subgraphs, so the
+service still makes its own authorization decision. A public route needs no
+bearer and forwards none. If a client sends one anyway, it is verified and
+forwarded, and an invalid one is refused exactly as on GraphQL. At startup,
+the router logs one warning naming every public route.
+
+Upstream requests carry only these client headers: `Accept`,
+`Accept-Encoding`, `Accept-Language`, `If-Match`, `If-None-Match`,
+`If-Modified-Since`, and `If-Unmodified-Since`. They also carry `Range` and
+`If-Range` when `allowRange` is set, the verified `Authorization`, and the
+route's `forwardRequestHeaders`. Cookies, `Forwarded`, `X-Forwarded-*`,
+client-supplied identity and client-address headers, method-override and
+URL-rewrite headers, router internal headers, and hop-by-hop headers are never
+forwarded. Do not list an identity header in
+`forwardRequestHeaders`: a client can set any header it sends. The upstream
+client ignores ambient proxy settings and does not follow redirects.
+
+### Responses
+
+The upstream status and body pass through, including errors. `Content-Length`
+is preserved, and a response without one is relayed chunked. Only these
+response headers pass: `Content-Type`, `Content-Disposition`,
+`Content-Encoding`, `Content-Language`, `Cache-Control`, `Expires`, `ETag`,
+`Last-Modified`, `Vary`, `Age`, and `Retry-After`. With `allowRange`,
+`Content-Range` and `Accept-Ranges` also pass, and with `allowSetCookie`,
+`Set-Cookie` does. The route's `passResponseHeaders` are added to the list. Headers that would
+apply to the router's whole origin (`Strict-Transport-Security`, `Alt-Svc`,
+`Clear-Site-Data`, `Public-Key-Pins`, and `Access-Control-*`) cannot be
+added.
+Every relayed response also gets `X-Content-Type-Options: nosniff`, and, unless
+an allowed upstream header supplies one,
+`Content-Security-Policy: default-src 'none'; sandbox`. A route without
+`allowRange` sends `Accept-Ranges: none`. These stop a relayed file from
+running as active content on the router's origin.
+
+The body is streamed with at most one chunk queued between the upstream and the
+client. An HTTP/1 upstream response with a body but neither `Content-Length`
+nor chunked framing gets 502 `BYTE_ROUTE_UPSTREAM_UNAVAILABLE`, because a body
+ended only by the upstream closing its connection cannot show truncation. A declared `Content-Length` above `maxResponseBytes` is refused before
+any body is sent. A body without a declared length that grows past the limit,
+an idle timeout, the request deadline, an upstream read error, and a client
+that stops reading all abort the transfer. On HTTP/1 the router closes the
+client connection, so a client never sees a truncated body as complete. On
+HTTP/2 the router ends the stream with an error when the server next polls the
+body; a stalled HTTP/2 stream keeps its connection until the client or a
+fronting proxy closes it. An abort also releases the upstream connection and
+the route's concurrency slot.
+
+There is no minimum transfer rate. A client that accepts one chunk just inside
+every idle timeout keeps a concurrency slot until `maxDurationMs`, and a client
+that never reads a small response keeps its socket after the router has
+finished with it. Set `maxConcurrentRequests` and `maxDurationMs` from real
+transfer times, and use a fronting proxy's per-client connection and send
+timeouts for public routes.
+
+Router-generated errors use the GraphQL error JSON shape and carry a
+`graphql-orm-router-error` header with the code. That header is never copied
+from an upstream, so it tells a router refusal apart from a relayed upstream
+error:
+
+| Status | Code | Cause |
+| --- | --- | --- |
+| 400 | `BYTE_ROUTE_INVALID_PATH` | Unsafe path or query under a prefix. |
+| 400 | `BYTE_ROUTE_REQUEST_BODY_NOT_ALLOWED` | The request declared a body. |
+| 401 / 503 | `UNAUTHENTICATED` | Missing or invalid bearer, or unavailable provider. |
+| 405 | `BYTE_ROUTE_METHOD_NOT_ALLOWED` | Not `GET` or `HEAD`. |
+| 416 | `BYTE_ROUTE_RANGE_NOT_ALLOWED` | `Range` on a route without `allowRange`. |
+| 429 | `BYTE_ROUTE_RATE_LIMITED` | Route admission rate exceeded; `Retry-After: 1`. |
+| 502 | `BYTE_ROUTE_UPSTREAM_UNAVAILABLE` | Connection refused, failed, or timed out; an informational or unframed HTTP/1 response; or a protocol error. |
+| 502 | `BYTE_ROUTE_RESPONSE_TOO_LARGE` | Declared length over `maxResponseBytes`. |
+| 503 | `BYTE_ROUTE_BUSY` | All `maxConcurrentRequests` slots in use. |
+| 504 | `BYTE_ROUTE_UPSTREAM_TIMEOUT` | Connected, but no response headers within the idle timeout. |
+| 505 | `BYTE_ROUTE_HTTP_VERSION_NOT_SUPPORTED` | HTTP/1.0 request. |
+
+Per-route counters appear in `GET /_router/metrics` as
+`router_byte_route_requests_total`, `router_byte_route_rejected_total`,
+`router_byte_route_upstream_errors_total`, `router_byte_route_aborted_total`,
+`router_byte_route_bytes_total`, and `router_byte_route_active_requests`, each
+an object keyed by prefix. The keys are absent when no byte route is
+configured; the [operations runbook](operations.md#resource-budgets) defines
+each counter. Embedding hosts read the same values from
+`RouterHandle::byte_route_metrics`.
 
 ## Administration and dynamic destinations
 
