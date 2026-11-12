@@ -2,6 +2,7 @@
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
+use crate::orm_read_bounds::InternalReadBound as _;
 use std::sync::Arc;
 
 use agql_auth::{
@@ -304,7 +305,7 @@ impl OrmAiSessionTitleWorkService {
                             ..Default::default()
                         })
                         .default_order()
-                        .limit(limit)
+                        .internal_limit(limit)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -322,7 +323,7 @@ impl OrmAiSessionTitleWorkService {
                             ..Default::default()
                         })
                         .default_order()
-                        .limit(limit)
+                        .internal_limit(limit)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -539,7 +540,7 @@ impl AiSessionTitleWorkService for OrmAiSessionTitleWorkService {
                             }),
                             ..Default::default()
                         })
-                        .limit(2)
+                        .internal_limit(2)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)

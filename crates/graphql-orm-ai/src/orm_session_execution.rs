@@ -1,5 +1,6 @@
 //! Durable session-selection reads and exact legacy evidence checks.
 
+use crate::orm_read_bounds::InternalReadBound as _;
 use agql_auth::{Clock, CurrentPrincipalResolver};
 use async_trait::async_trait;
 use graphql_orm::db::Database;
@@ -163,7 +164,7 @@ pub(crate) async fn prove_legacy_selection(
             }),
             ..Default::default()
         })
-        .limit(1)
+        .internal_limit(1)
         .fetch_one()
         .await
         .map_err(OrmPublicError::from)?;
@@ -179,7 +180,7 @@ pub(crate) async fn prove_legacy_selection(
             }),
             ..Default::default()
         })
-        .limit(1)
+        .internal_limit(1)
         .fetch_one()
         .await
         .map_err(OrmPublicError::from)?;
@@ -228,7 +229,7 @@ pub(crate) async fn prove_legacy_selection(
             }),
             ..Default::default()
         })
-        .limit(257)
+        .internal_limit(257)
         .fetch_all()
         .await
         .map_err(OrmPublicError::from)?;
@@ -267,7 +268,7 @@ pub(crate) async fn legacy_binding(
                         }),
                         ..Default::default()
                     })
-                    .limit(1)
+                    .internal_limit(1)
                     .fetch_one()
                     .await
                     .map_err(OrmPublicError::from)

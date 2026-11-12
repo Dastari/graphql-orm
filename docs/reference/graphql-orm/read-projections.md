@@ -3,7 +3,7 @@ title: "Typed Read Projections"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-01
+last_reviewed: 2026-11-12
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -97,8 +97,10 @@ let public = PublicCertificateInventory::query(&database)
 
 Generated primary-key and single-column `#[unique]` helpers return `Option<Projection>`. The typed
 builder provides `filter`, `order_by`, `limit`, `fetch_all`, `fetch_first`, and
-`fetch_optional_one`. Lists always apply the database's configured default and maximum page bounds
-before execution. Ordering appends every primary-key column as a deterministic tiebreaker.
+`fetch_optional_one`. An explicit `limit(n)` is exact and fails with `PAGE_LIMIT_EXCEEDED` above the
+database's maximum page limit. Without a limit, `fetch_all` reads at most that maximum and fails the
+same way when more rows match, so a list is never silently truncated. See
+[Rust repository limits never truncate](runtime-and-writes.md#rust-repository-limits-never-truncate). Ordering appends every primary-key column as a deterministic tiebreaker.
 
 ## Transaction-bound reads
 

@@ -10713,7 +10713,11 @@ fn generate_graphql_operations_unfiltered(
             /// * `query` - The search query text
             /// * `threshold` - Minimum similarity score (0.0-1.0, recommended: 0.5-0.7)
             /// * `filter` - Optional additional filter to apply
-            /// * `limit` - Maximum number of results to return
+            /// * `limit` - Maximum number of results to return, at most
+            ///   `graphql_orm::graphql::orm::SIMILAR_SEARCH_MAX_LIMIT` (1,000). The
+            ///   helper scores up to five candidates per requested result. A
+            ///   larger limit fails with `PAGE_LIMIT_EXCEEDED` and a negative one
+            ///   with `INVALID_INPUT`; without a limit every matching row is scored.
             ///
             /// # Returns
             /// Vector of (entity, score) tuples, sorted by score descending
@@ -10751,9 +10755,12 @@ fn generate_graphql_operations_unfiltered(
                 if let Some(f) = filter {
                     q = q.filter(f);
                 }
-                // Fetch more than limit to account for fuzzy filtering
+                // Fetch more than limit to account for fuzzy filtering. The
+                // candidate bound is this read's own maximum, so it is honoured
+                // exactly rather than reduced to the page maximum.
                 if let Some(l) = limit {
-                    q = q.limit(l * 5);
+                    let candidates = ::graphql_orm::graphql::orm::similar_search_candidate_limit(l)?;
+                    q = q.with_max_limit(candidates).limit(candidates);
                 }
                 let candidates = q.fetch_all().await?;
 

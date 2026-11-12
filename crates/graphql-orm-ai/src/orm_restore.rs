@@ -2,6 +2,7 @@
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
+use crate::orm_read_bounds::InternalReadBound as _;
 use std::collections::{BTreeMap, BTreeSet};
 
 use graphql_orm::db::Database;
@@ -359,7 +360,7 @@ impl OrmAiRestoreFactCollector {
                         .order_by(AiRunRecordOrderByInput {
                             created_at: Some(OrderDirection::Asc),
                         })
-                        .limit(query_limit(limits.maximum_runs))
+                        .internal_limit(query_limit(limits.maximum_runs))
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -368,7 +369,7 @@ impl OrmAiRestoreFactCollector {
                         .order_by(AiApprovalRecordOrderByInput {
                             created_at: Some(OrderDirection::Asc),
                         })
-                        .limit(query_limit(limits.maximum_approvals))
+                        .internal_limit(query_limit(limits.maximum_approvals))
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -377,7 +378,7 @@ impl OrmAiRestoreFactCollector {
                         .order_by(AiEgressConsentRecordOrderByInput {
                             granted_at: Some(OrderDirection::Asc),
                         })
-                        .limit(query_limit(limits.maximum_egress_consents))
+                        .internal_limit(query_limit(limits.maximum_egress_consents))
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -388,7 +389,7 @@ impl OrmAiRestoreFactCollector {
                     let provider_sessions = tx
                         .query::<AiProviderSessionBindingRecord>()
                         .default_order()
-                        .limit(1)
+                        .internal_limit(1)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -398,14 +399,14 @@ impl OrmAiRestoreFactCollector {
                     let subscription_waiters = tx
                         .query::<AiSubscriptionWaiterRecord>()
                         .default_order()
-                        .limit(query_limit(limits.maximum_runs))
+                        .internal_limit(query_limit(limits.maximum_runs))
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
                     let subscription_wait_adoptions = tx
                         .query::<AiSubscriptionWaitAdoptionRecord>()
                         .default_order()
-                        .limit(query_limit(limits.maximum_runs))
+                        .internal_limit(query_limit(limits.maximum_runs))
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -415,7 +416,7 @@ impl OrmAiRestoreFactCollector {
                             .order_by(AiBudgetPolicyRecordOrderByInput {
                                 updated_at: Some(OrderDirection::Asc),
                             })
-                            .limit(query_limit(policy_limits.maximum_budget_policies))
+                            .internal_limit(query_limit(policy_limits.maximum_budget_policies))
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
@@ -424,7 +425,7 @@ impl OrmAiRestoreFactCollector {
                             .order_by(AiPricingPolicyRecordOrderByInput {
                                 created_at: Some(OrderDirection::Asc),
                             })
-                            .limit(query_limit(policy_limits.maximum_pricing_policies))
+                            .internal_limit(query_limit(policy_limits.maximum_pricing_policies))
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
@@ -433,7 +434,7 @@ impl OrmAiRestoreFactCollector {
                             .order_by(AiAuditEventRecordOrderByInput {
                                 created_at: Some(OrderDirection::Asc),
                             })
-                            .limit(query_limit(policy_limits.maximum_audit_events))
+                            .internal_limit(query_limit(policy_limits.maximum_audit_events))
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
@@ -452,7 +453,7 @@ impl OrmAiRestoreFactCollector {
                             .order_by(AiAuditEventRecordOrderByInput {
                                 created_at: Some(OrderDirection::Asc),
                             })
-                            .limit(query_limit(policy_limits.maximum_budget_policies))
+                            .internal_limit(query_limit(policy_limits.maximum_budget_policies))
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
@@ -473,7 +474,7 @@ impl OrmAiRestoreFactCollector {
                                 .order_by(AiAttachmentRecordOrderByInput {
                                     created_at: Some(OrderDirection::Asc),
                                 })
-                                .limit(query_limit(attachment_limits.maximum_attachments))
+                                .internal_limit(query_limit(attachment_limits.maximum_attachments))
                                 .fetch_all()
                                 .await
                                 .map_err(OrmPublicError::from)?;
@@ -482,7 +483,7 @@ impl OrmAiRestoreFactCollector {
                                 .order_by(AiAttachmentArtifactRecordOrderByInput {
                                     created_at: Some(OrderDirection::Asc),
                                 })
-                                .limit(query_limit(attachment_limits.maximum_artifacts))
+                                .internal_limit(query_limit(attachment_limits.maximum_artifacts))
                                 .fetch_all()
                                 .await
                                 .map_err(OrmPublicError::from)?;

@@ -3,12 +3,69 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-12
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.127.0 to 0.128.0: repository limits are exact or refused
+
+Upgrade runtime and macros together. No schema or data migration is needed.
+
+Rust repository builders no longer reduce a limit to the database's maximum
+page limit (`PaginationConfig::max_limit`, `100` by default). This covers
+`Entity::query(&db)`, `tx.query::<T>()`, `tx.project::<P>()`,
+`P::query(&db)`, `search_db`, `write_ctx.query::<T>()`, the pool-bound
+`Entity::query(pool)` and `EntitySearchQuery::limit`:
+
+- `limit(n)` with `n` above the maximum now fails with `PAGE_LIMIT_EXCEEDED`
+  instead of returning `max_limit` rows. A negative `n` fails with
+  `INVALID_INPUT` instead of returning no rows. The pool-bound builder checks
+  against `PaginationConfig::DEFAULT_MAX_LIMIT`.
+- `fetch_all` without a limit on `Entity::query(&db)`, `tx.query::<T>()` and
+  the projection builders, and repository-only `find_all` and `find_many`,
+  now read up to `max_limit` rows instead of `default_limit` (50), and fail
+  with `PAGE_LIMIT_EXCEEDED` when more rows match.
+- `paginate(PageInput)` on `tx.query::<T>()` and `write_ctx.query::<T>()` no
+  longer clamps `page.limit`.
+
+Find affected reads by running the application's tests: each one now fails
+instead of truncating. Then fix each read in one of these ways:
+
+- Page through the set with `limit` and `offset`, at most `max_limit` rows a
+  page.
+- Give one trusted read its own maximum, without changing GraphQL limits:
+  `.with_max_limit(bound + 1).limit(bound + 1)`. This works on every builder
+  listed above.
+- Raise the maximum for every read on one handle:
+  `database.clone().with_pagination_config(database.pagination_config().with_max_limit(Some(n)))`.
+- Raise `DatabaseBuilder::max_page_limit` if GraphQL clients may also request
+  larger pages.
+
+The pool-bound `Entity::query(pool)` cannot see a `Database`, so only the
+first two remedies apply to it. Either add `.with_max_limit(n)` to the read,
+or move it to the `Database`-bound `Entity::query(&db)` (a `RepositoryEntity`)
+or to `tx.query::<T>()`, where all four apply.
+
+The generated `search_similar` helper now refuses a `limit` above
+`SIMILAR_SEARCH_MAX_LIMIT` (`1_000`) with `PAGE_LIMIT_EXCEEDED`, and a negative
+`limit` with `INVALID_INPUT`. It now scores all of its five-per-result
+candidates; it previously stopped at 100 candidates.
+
+An unlimited `fetch_all` that matches more rows than the maximum fails before
+row policy is applied, so rows the caller cannot see can cause the refusal.
+The error message names no row count.
+
+Code that reads `bound + 1` rows to detect an overflow needs no change beyond
+that: it now sees the extra row or gets an error. To apply GraphQL page
+semantics to a client-supplied `PageInput` in a custom resolver, resolve it
+first with `database.pagination_config().resolve_page(Some(&page), true)`.
+
+GraphQL connections still clamp `page.limit`, and still report the remaining
+rows through `pageInfo`. Transaction reads now honour a raised
+`max_page_limit`; they previously stopped at 100 rows.
 
 ## 0.126.0 to 0.127.0: repository callers keep public hook refusal codes
 

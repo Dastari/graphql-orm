@@ -265,21 +265,33 @@ async fn projections_are_typed_bounded_transaction_visible_and_authorized()
         projected
     );
 
-    let bounded = PublicCertificateProjection::query(&database)
-        .filter(ProjectionCertificateWhereInput {
-            role: Some(StringFilter {
-                eq: Some("intermediate".to_string()),
+    let intermediate = || {
+        PublicCertificateProjection::query(&database)
+            .filter(ProjectionCertificateWhereInput {
+                role: Some(StringFilter {
+                    eq: Some("intermediate".to_string()),
+                    ..Default::default()
+                }),
                 ..Default::default()
-            }),
-            ..Default::default()
-        })
-        .order_by(ProjectionCertificateOrderByInput {
-            issued_at: Some(OrderDirection::Desc),
-            ..Default::default()
-        })
-        .limit(999)
-        .fetch_all()
-        .await?;
+            })
+            .order_by(ProjectionCertificateOrderByInput {
+                issued_at: Some(OrderDirection::Desc),
+                ..Default::default()
+            })
+    };
+    // A limit above the configured maximum is refused rather than reduced, and
+    // an unlimited list that matches more rows than the maximum fails closed.
+    for refused in [
+        intermediate().limit(999).fetch_all().await,
+        intermediate().fetch_all().await,
+    ] {
+        let refused = refused.expect_err("projection lists never truncate silently");
+        assert_eq!(
+            OrmPublicError::from_sqlx(&refused).code,
+            OrmErrorCode::PageLimitExceeded
+        );
+    }
+    let bounded = intermediate().limit(2).fetch_all().await?;
     assert_eq!(bounded.len(), 2, "projection lists use configured bounds");
     assert_eq!(bounded[0].serial, "serial-3");
 

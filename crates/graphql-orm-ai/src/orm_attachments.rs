@@ -2,6 +2,7 @@
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
+use crate::orm_read_bounds::InternalReadBound as _;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -650,7 +651,7 @@ impl OrmAiAttachmentService {
                             }),
                             ..Default::default()
                         })
-                        .limit(2)
+                        .internal_limit(2)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -959,7 +960,7 @@ impl OrmAiAttachmentService {
                                 }),
                                 ..Default::default()
                             })
-                            .limit(2)
+                            .internal_limit(2)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;

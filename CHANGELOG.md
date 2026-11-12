@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-12
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -27,6 +27,21 @@ for historical context.
 - AI 0.129.0: **breaking:** refuse delegated and sessionless principals on approval and proposal decisions. Approval list, read, decide and revoke, proposal list, read, review and applied-outcome linking, run cancellation, failure retry and acknowledgement, tool-result previews, and session-event and inbox streams now return `AI_REAUTHORIZATION_FAILED` for a `SessionBoundDelegation` or `Sessionless` request credential, as run issuance already does, and for one with no grant kind that carries an actor or exact operation binding. They previously resolved a delegation to its parent user session and acted as the full user. No persistent schema or data migration change. See the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01280-to-01290-delegated-and-sessionless-request-credentials).
 
 - AI 0.128.0: **breaking:** enforce AI runtime closure after a snapshot restore. The runtime start gate opens only with a proof minted from a store's live recovery epoch (AI schema module `0.77.0`), and leases are bound to that epoch. Worker claims, lease-fenced writes and approval consumption refuse while the epoch is not live. A restored store stays closed until `OrmAiRuntimeRecoveryService::reconcile_restore` expires its approvals, revokes its egress consents and moves unfinished runs to `RecoveryRequired`, and an operator acknowledges the reviewed result. An existing deployment upgraded in place opens once the operator calls `acknowledge_in_place_upgrade`, which leaves its work unchanged. Restore facts now decode strictly. See the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01270-to-01280-enforced-runtime-closure-after-restore).
+
+## 0.128.0
+
+ORM runtime/macros **0.128.0**, AI **0.134.0**.
+
+- **AI 0.134.0 (fix, data safety):** the runtime's internal reads honour their own bounds through the per-read `with_max_limit`, so lease recovery, approval-wait reconciliation, native checkpoints, session retention and inbox pruning no longer stop at 100 rows on a default database. Client page sizes still follow the host page maximum. See the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01330-to-01340-internal-reads-honour-their-own-bounds).
+
+- **Fix (data safety)/breaking:** Rust repository builders no longer reduce an explicit `limit(n)` to the database's maximum page limit. `RepositoryQuery`, transaction `tx.query::<T>()` and `tx.project::<P>()`, projection `P::query(&db)`, `search_db`, write-input `write_ctx.query::<T>()`, the pool-bound `FindQuery` and `EntitySearchQuery::limit` read exactly `n` rows, and fail with `PAGE_LIMIT_EXCEEDED` when `n` exceeds `max_limit` (default `100`) or with `INVALID_INPUT` when `n` is negative. Previously `limit(bound + 1)` returned at most 100 rows with no error, so an overflow check with a bound of 100 or more could never fire and callers worked on a truncated set ([#644](https://github.com/Dastari/graphql-orm/issues/644)).
+- **Fix (data safety)/breaking:** without a limit, `RepositoryQuery::fetch_all`, `tx.query::<T>().fetch_all()`, projection `fetch_all` and repository-only `find_all`/`find_many` read at most `max_limit` rows and fail with `PAGE_LIMIT_EXCEEDED` when more rows match. They previously returned the first `default_limit` (50) rows silently. `default_limit` no longer applies to these reads.
+- **Fix:** transaction reads apply the page their caller resolved. They previously re-applied the built-in maximum of 100 whatever the database was configured with, so the transaction keyset page (`MutationContext::keyset_page`, `keyset_connection_page`) reported no next page when the page size was 100 or more, a raised `max_page_limit` was ignored inside transactions, and the subscription propagation fan-out budget (256 targets) stopped detecting overflow at 100 targets.
+- **Fix:** projection `fetch_optional_one` keeps its two-row uniqueness look-ahead when `max_limit` is `1`.
+- **API:** `with_max_limit(maximum)` on `RepositoryQuery`, `tx.query::<T>()`, `ProjectionQuery`, `tx.project::<P>()`, `write_ctx.query::<T>()` and `FindQuery` raises the maximum page limit for one trusted read only. The read stays bounded by `maximum`, and the database-wide maximum that GraphQL clients see is unchanged.
+- **Fix/breaking:** generated `search_similar` scores all of its five-per-result candidates instead of stopping at 100, and refuses a `limit` above `SIMILAR_SEARCH_MAX_LIMIT` (`1_000`) with `PAGE_LIMIT_EXCEEDED`, or a negative one with `INVALID_INPUT`.
+- **Note:** the fail-closed check of an unlimited `fetch_all` counts rows before row policy, so it can refuse because of rows the caller cannot see. Its message names no row count.
+- **API:** `PaginationConfig::checked_explicit_limit` checks a trusted limit without changing it. `paginate(PageInput)` on `tx.query::<T>()` and `write_ctx.query::<T>()` is now `limit` plus `offset`, without clamping. GraphQL connections, `EntityQuery::paginate` and `EntitySearchQuery::paginate` keep clamping, and report the remaining rows through `pageInfo`. Bounded mutations, retention purge and dependent deletes are unchanged; they already used an uncapped `MutationLimit` look-ahead. See the [0.128.0 migration guide](MIGRATION.md#01270-to-01280-repository-limits-are-exact-or-refused) and [Rust repository limits never truncate](docs/reference/graphql-orm/runtime-and-writes.md#rust-repository-limits-never-truncate).
 
 ## 0.127.0
 

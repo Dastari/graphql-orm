@@ -976,12 +976,21 @@ pub struct RetentionContext<'tx, B: WriteBackend = DefaultWriteBackend> {
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+/// Policy-aware read inside a [`MutationContext`] transaction.
+///
+/// It follows the [`RepositoryQuery`](super::query::RepositoryQuery) row-bound
+/// contract: an explicit [`Self::limit`] is exact or refused with
+/// `PAGE_LIMIT_EXCEEDED`, and an unlimited [`Self::fetch_all`] fails closed
+/// when more rows than the database's maximum page limit match.
 pub struct MutationQuery<'ctx, 'tx, T, B: WriteBackend = DefaultWriteBackend>
 where
     T: Entity + FromSqlRow<B> + Clone + Send + Sync + 'static,
 {
     hook_ctx: &'ctx mut MutationContext<'tx, B>,
     query: EntityQuery<T, B>,
+    limit: Option<i64>,
+    offset: i64,
+    max_limit: Option<i64>,
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
@@ -991,16 +1000,12 @@ where
     T: Entity + FromSqlRow<B> + Clone + Send + Sync + 'static,
 {
     fn new(hook_ctx: &'ctx mut MutationContext<'tx, B>) -> Self {
-        let resolved = hook_ctx
-            .database()
-            .pagination_config()
-            .resolve_page(None, true);
         Self {
             hook_ctx,
-            query: EntityQuery::new().paginate(&super::query::PageInput {
-                limit: resolved.limit,
-                offset: Some(resolved.offset),
-            }),
+            query: EntityQuery::new(),
+            limit: None,
+            offset: 0,
+            max_limit: None,
         }
     }
 
@@ -1025,41 +1030,50 @@ where
         self
     }
 
+    /// Read at most `limit` rows, exactly. A limit above the database's
+    /// maximum page limit fails with `PAGE_LIMIT_EXCEEDED` instead of being
+    /// reduced; see [`PaginationConfig::checked_explicit_limit`](super::query::PaginationConfig::checked_explicit_limit).
     pub fn limit(mut self, limit: i64) -> Self {
-        let mut page = self.query.page.unwrap_or_default();
-        page.limit = self
-            .hook_ctx
-            .database()
-            .pagination_config()
-            .clamp_explicit_limit(Some(limit));
-        self.query.page = Some(page);
+        self.limit = Some(limit);
         self
     }
 
+    /// Override the database's maximum page limit for this read only.
+    ///
+    /// Trusted internal reads that carry their own bound use this instead of
+    /// raising the maximum for every caller of the database. The read stays
+    /// bounded: a [`Self::limit`] above `maximum` still fails with
+    /// `PAGE_LIMIT_EXCEEDED`, and an unlimited `fetch_all` fails closed when
+    /// more than `maximum` rows match. Never pass a value a client chose
+    /// without validating it first. A negative `maximum` is treated as `0`.
+    pub fn with_max_limit(mut self, maximum: i64) -> Self {
+        self.max_limit = Some(maximum.max(0));
+        self
+    }
+
+    /// Skip `offset` matching rows. A negative offset is treated as `0`.
     pub fn offset(mut self, offset: i64) -> Self {
-        let mut page = self.query.page.unwrap_or_default();
-        page.offset = Some(offset.max(0));
-        self.query.page = Some(page);
+        self.offset = offset.max(0);
         self
     }
 
+    /// Apply `page.limit` with [`Self::limit`] and `page.offset` with
+    /// [`Self::offset`].
+    ///
+    /// The page limit is not clamped. To apply GraphQL page semantics to a
+    /// client-supplied page, resolve it first with
+    /// [`PaginationConfig::resolve_page`](super::query::PaginationConfig::resolve_page).
     pub fn paginate(mut self, page: super::query::PageInput) -> Self {
-        let resolved = self
-            .hook_ctx
-            .database()
-            .pagination_config()
-            .resolve_page(Some(&page), true);
-        self.query = self.query.paginate(&super::query::PageInput {
-            limit: resolved.limit,
-            offset: Some(resolved.offset),
-        });
+        self.offset = page.offset();
+        if let Some(limit) = page.limit {
+            self.limit = Some(limit);
+        }
         self
     }
 
-    pub async fn fetch_all(self) -> crate::Result<Vec<T>> {
+    async fn ensure_read_access(database: &crate::db::Database<B>) -> crate::Result<()> {
         let metadata = T::metadata();
-        self.hook_ctx
-            .database()
+        database
             .ensure_entity_access(
                 None,
                 metadata.entity_name,
@@ -1068,27 +1082,55 @@ where
                 EntityAccessSurface::Repository,
             )
             .await
-            .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
-        let query = self.query;
-        let rows = query.fetch_all_in_transaction(self.hook_ctx).await?;
+            // Keep a refusal's public code (#617).
+            .map_err(crate::graphql::errors::sqlx_error_from_graphql)
+    }
+
+    fn bounded(
+        query: EntityQuery<T, B>,
+        bound: super::query::RepositoryBound,
+        offset: i64,
+    ) -> EntityQuery<T, B> {
+        query.paginate(&super::query::PageInput {
+            limit: bound.sql_limit(),
+            offset: Some(offset),
+        })
+    }
+
+    /// Fetch every visible matching row, never a silently truncated subset.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PAGE_LIMIT_EXCEEDED` for an explicit limit above the maximum,
+    /// or when no limit is set and more rows than the maximum match, plus the
+    /// usual safe authorization and backend errors.
+    pub async fn fetch_all(self) -> crate::Result<Vec<T>> {
+        Self::ensure_read_access(self.hook_ctx.database()).await?;
+        let bound = self
+            .hook_ctx
+            .database()
+            .pagination_config()
+            .with_read_maximum(self.max_limit)
+            .repository_bound(self.limit)?;
+        let rows = Self::bounded(self.query, bound, self.offset)
+            .fetch_all_in_transaction(self.hook_ctx)
+            .await?;
+        bound.check_overflow(rows.len())?;
         authorize_repository_rows::<T, B>(self.hook_ctx.database(), rows).await
     }
 
     pub async fn fetch_one(self) -> crate::Result<Option<T>> {
-        let metadata = T::metadata();
-        self.hook_ctx
+        Self::ensure_read_access(self.hook_ctx.database()).await?;
+        let bound = self
+            .hook_ctx
             .database()
-            .ensure_entity_access(
-                None,
-                metadata.entity_name,
-                metadata.read_policy,
-                EntityAccessKind::Read,
-                EntityAccessSurface::Repository,
-            )
-            .await
-            .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
-        let query = self.query;
-        let row = query.fetch_one_in_transaction(self.hook_ctx).await?;
+            .pagination_config()
+            .with_read_maximum(self.max_limit)
+            .repository_bound(self.limit)?
+            .capped(1);
+        let row = Self::bounded(self.query, bound, self.offset)
+            .fetch_one_in_transaction(self.hook_ctx)
+            .await?;
         let Some(row) = row else {
             return Ok(None);
         };
@@ -1151,6 +1193,9 @@ where
 {
     write_ctx: &'ctx mut WriteInputContext<'write, 'tx, B>,
     query: EntityQuery<T, B>,
+    limit: Option<i64>,
+    offset: i64,
+    max_limit: Option<i64>,
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
@@ -1287,6 +1332,9 @@ where
         WriteQuery {
             write_ctx: self,
             query: EntityQuery::new(),
+            limit: None,
+            offset: 0,
+            max_limit: None,
         }
     }
 }
@@ -1318,40 +1366,96 @@ where
         self
     }
 
+    /// Read at most `limit` rows, exactly. A limit above the database's
+    /// maximum page limit fails with `PAGE_LIMIT_EXCEEDED` instead of being
+    /// reduced; see [`PaginationConfig::checked_explicit_limit`](super::query::PaginationConfig::checked_explicit_limit).
+    /// Without a limit the read is unbounded.
     pub fn limit(mut self, limit: i64) -> Self {
-        let mut page = self.query.page.unwrap_or_default();
-        page.limit = Some(limit);
-        self.query.page = Some(page);
+        self.limit = Some(limit);
         self
     }
 
+    /// Override the database's maximum page limit for this read only.
+    ///
+    /// Trusted internal reads that carry their own bound use this instead of
+    /// raising the maximum for every caller of the database. The read stays
+    /// bounded: a [`Self::limit`] above `maximum` still fails with
+    /// `PAGE_LIMIT_EXCEEDED`, and an unlimited `fetch_all` fails closed when
+    /// more than `maximum` rows match. Never pass a value a client chose
+    /// without validating it first. A negative `maximum` is treated as `0`.
+    pub fn with_max_limit(mut self, maximum: i64) -> Self {
+        self.max_limit = Some(maximum.max(0));
+        self
+    }
+
+    /// Skip `offset` matching rows. A negative offset is treated as `0`.
     pub fn offset(mut self, offset: i64) -> Self {
-        let mut page = self.query.page.unwrap_or_default();
-        page.offset = Some(offset);
-        self.query.page = Some(page);
+        self.offset = offset.max(0);
         self
     }
 
+    /// Apply `page.limit` with [`Self::limit`] and `page.offset` with
+    /// [`Self::offset`]. The page limit is not clamped.
     pub fn paginate(mut self, page: super::query::PageInput) -> Self {
-        self.query = self.query.paginate(&page);
+        self.offset = page.offset();
+        if let Some(limit) = page.limit {
+            self.limit = Some(limit);
+        }
         self
+    }
+
+    fn bounded_query(&self, cap: Option<i64>) -> crate::Result<EntityQuery<T, B>> {
+        let limit = match self.limit {
+            Some(limit) => Some(
+                self.write_ctx
+                    .database()
+                    .pagination_config()
+                    .with_read_maximum(self.max_limit)
+                    .checked_explicit_limit(limit)
+                    .map_err(crate::graphql::errors::sqlx_error_from_public)?,
+            ),
+            None => None,
+        };
+        let limit = match (limit, cap) {
+            (Some(limit), Some(cap)) => Some(limit.min(cap)),
+            (limit, cap) => limit.or(cap),
+        };
+        // The limit is checked above, so both read paths apply it exactly.
+        Ok(self.query.clone().paginate(&super::query::PageInput {
+            limit,
+            offset: Some(self.offset),
+        }))
     }
 
     pub async fn fetch_all(self) -> crate::Result<Vec<T>> {
-        let query = self.query;
+        let query = self.bounded_query(None)?;
         if let Some(hook_ctx) = self.write_ctx.mutation_ctx.as_deref_mut() {
             query.fetch_all_in_transaction(hook_ctx).await
         } else {
-            query.fetch_all(self.write_ctx.database()).await
+            query
+                .fetch_all_with_auth_and_pagination(
+                    self.write_ctx.database(),
+                    None,
+                    super::query::PaginationConfig::unbounded(),
+                )
+                .await
         }
     }
 
     pub async fn fetch_one(self) -> crate::Result<Option<T>> {
-        let query = self.query;
+        let query = self.bounded_query(Some(1))?;
         if let Some(hook_ctx) = self.write_ctx.mutation_ctx.as_deref_mut() {
             query.fetch_one_in_transaction(hook_ctx).await
         } else {
-            query.fetch_one(self.write_ctx.database()).await
+            Ok(query
+                .fetch_all_with_auth_and_pagination(
+                    self.write_ctx.database(),
+                    None,
+                    super::query::PaginationConfig::unbounded(),
+                )
+                .await?
+                .into_iter()
+                .next())
         }
     }
 

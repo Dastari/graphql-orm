@@ -3,7 +3,7 @@ title: "Runtime, Writes, And Policies"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-12
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -507,11 +507,15 @@ context where the backend supports it.
 `PageInput` clamps negative offsets to `0`. Generated GraphQL list, search, and relation connection
 resolvers use `Database` pagination config to resolve limits:
 
-- default `default_limit`: `Some(1000)`
-- default `max_limit`: `Some(1000)`
+- default `default_limit`: `Some(50)` (`PaginationConfig::SECURE_DEFAULT_LIMIT`)
+- default `max_limit`: `Some(100)` (`PaginationConfig::SECURE_MAX_LIMIT`)
 - omitted `page.limit`: uses `default_limit`
 - explicit limits above `max_limit`: clamp to `max_limit`
 - explicit negative limits: clamp to `0`
+
+GraphQL clamping is visible to the client: every connection reports the remaining rows through
+`pageInfo.hasNextPage` (and `totalCount` when selected), so a client that asked for more than the
+maximum can page on. `PaginationConfig::legacy()` restores the former `1000`/`1000` limits.
 
 Configure this per runtime handle:
 
@@ -530,12 +534,69 @@ let database = Database::builder(pool)
     .build();
 ```
 
-Repository-style `fetch_all` paths remain intentionally unbounded unless the caller supplies
-pagination. The default limit is applied to connection-style APIs, not to every low-level helper.
+### Rust repository limits never truncate
+
+Rust repository builders return `Vec`s with no page info, so they never reduce a limit silently.
+This applies to `Entity::query(&db)` (`RepositoryQuery`), transaction `tx.query::<T>()` and
+`tx.project::<P>()`, projection `P::query(&db)`, `search_db`, write-input `write_ctx.query::<T>()`,
+the pool-bound `Entity::query(pool)` (`FindQuery`) and `EntitySearchQuery::limit`:
+
+- `limit(n)` is exact. A limit above `max_limit` fails with `PAGE_LIMIT_EXCEEDED`, and a negative
+  limit with `INVALID_INPUT`, when the query runs. `PaginationConfig::checked_explicit_limit`
+  applies the same check in host code. The pool-bound builder checks against
+  `PaginationConfig::DEFAULT_MAX_LIMIT`, because it cannot see a `Database` configuration.
+- Without a limit, `fetch_all` on `RepositoryQuery`, `tx.query::<T>()`, and the projection
+  builders reads at most `max_limit` rows and fails with `PAGE_LIMIT_EXCEEDED` when more rows
+  match. `default_limit` does not apply to these reads. Repository-only `find_all` and
+  `find_many` use this path. `RepositoryQuery::fetch_first` scans at most `max_limit` rows and
+  does not fail on more matches; `fetch_optional_one` always reads two rows to prove uniqueness.
+- Without a limit, the write-input, pool-bound and search builders stay unbounded, as before.
+  GraphQL-enabled `find_all` and `find_many` also stay unbounded.
+- `paginate(PageInput)` on `tx.query::<T>()` and `write_ctx.query::<T>()` is shorthand for
+  `limit` plus `offset` and is not clamped. `EntityQuery::paginate` and
+  `EntitySearchQuery::paginate` keep the GraphQL page semantics above.
+
+So a `limit(bound + 1)` overflow check either sees the extra row or gets an error. When trusted
+code needs a bound above the maximum, raise the maximum for that one read with `with_max_limit`.
+It is available on `Entity::query(&db)`, `tx.query::<T>()`, `P::query(&db)`, `tx.project::<P>()`,
+`write_ctx.query::<T>()` and the pool-bound `Entity::query(pool)`:
+
+```rust
+let rows = tx
+    .query::<Membership>()
+    .filter(filter)
+    .with_max_limit(bound + 1)
+    .limit(bound + 1)
+    .fetch_all()
+    .await?;
+if rows.len() as i64 > bound {
+    return Err(too_many());
+}
+```
+
+The read stays bounded: a `limit` above the override still fails with `PAGE_LIMIT_EXCEEDED`, and an
+unlimited `fetch_all` fails closed above it. The database-wide maximum that GraphQL clients see is
+unchanged. Pass only a constant or a value the application has validated, never an unchecked
+client value. To raise the maximum for every read on a handle instead, use
+`database.clone().with_pagination_config(database.pagination_config().with_max_limit(Some(n)))`.
+Or read page by page with `limit` and `offset`.
+
+The fail-closed check of an unlimited `fetch_all` counts matching rows before row policy is applied.
+It fails safe: a caller can be refused because of rows it cannot see. Its `PAGE_LIMIT_EXCEEDED`
+message therefore names no row count.
+
+The generated `search_similar(pool, field, query, threshold, filter, limit)` helper scores five
+candidates per requested result. The candidate bound is that read's own maximum, so it is not
+reduced to the page maximum. `limit` may be at most `SIMILAR_SEARCH_MAX_LIMIT` (`1_000`); a larger
+limit fails with `PAGE_LIMIT_EXCEEDED` and a negative one with `INVALID_INPUT`. Without a limit,
+every matching row is scored, as before. Bounded `update_where`/`delete_where`, retention
+purges and dependent deletes use their own `MutationLimit` look-ahead and are not capped by
+`max_limit`. Keyset helpers clamp the requested page size and report more rows through
+`pageInfo.hasNextPage`.
 
 Host code that handles `PageInput` directly should call `limit_with_config(database.pagination_config())`
 or `database.pagination_config().resolve_page(...)`. The compatibility helper `PageInput::limit()` is
-deprecated because it only has access to the default `1000` cap and cannot observe per-application
+deprecated because it only has access to the default `100` cap and cannot observe per-application
 settings such as `.max_page_limit(Some(5_000))`.
 
 When a query includes predicates that must run in Rust, such as SQLite spatial topology checks, the

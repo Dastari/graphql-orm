@@ -2,6 +2,7 @@
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
+use crate::orm_read_bounds::InternalReadBound as _;
 use std::sync::Arc;
 
 use agql_auth::{
@@ -367,7 +368,7 @@ impl OrmAiRunDispositionService {
                             }),
                             ..Default::default()
                         })
-                        .limit(1)
+                        .internal_limit(1)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;

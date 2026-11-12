@@ -3,12 +3,29 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-12
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Changelog
+
+## Unreleased - 0.134.0
+
+- **Fixed (data safety):** the runtime's internal ORM reads honour their own bounds instead of the host's GraphQL page maximum. ORM 0.128.0 refuses a repository limit above `PaginationConfig::max_limit` (default `100`) where 0.127.0 silently reduced it. Every internal read here carries its own bound: a constant, a `bound + 1` look-ahead, or a validated deployment limit. Each read now raises the maximum for itself only, through the ORM's per-read `with_max_limit`. The host's database-wide maximum is unchanged.
+- **Fixed:** on a default database these reads were previously cut to 100 rows with no error, so their overflow checks could not fire:
+  - lease recovery, coordinator checkpoints and approval-wait reconciliation (`4_097`-row tool-call look-aheads);
+  - native checkpoint graphs, and approval snapshots;
+  - session-retention native checkpoint pairs (`8_193`) and title-mutation deletes (`5_000` per pass);
+  - inbox pruning (`maximum_events_per_stream`, default `500`);
+  - the active-run guard in conversation bootstrap (`101`);
+  - every scan sized by a deployment limit above 100, such as `maximum_candidate_scan` and the retention checkpoint and message limits.
+
+  They now read their full bound or fail closed as designed.
+- **Behaviour change:** client-supplied page sizes still follow the host's page maximum, and the page reports the remaining rows. This covers `inbox_event_page`, `session_event_page` and `message_blocks` (`first`), and the conversation-bootstrap terminal-run and tool-call windows. The bootstrap tool-call look-ahead row is now added after that cap, so a bootstrap whose tool calls exceed the window reports `reset_required`. It previously missed this when the look-ahead was clamped away.
+- Adopt ORM 0.128.0.
+
+No GraphQL SDL, persistent schema or data migration change; `AI_SCHEMA_MODULE_VERSION` is unchanged. See the migration guide.
 
 ## Unreleased - 0.133.0
 
