@@ -27,14 +27,84 @@ compile_error!(
      provider-tls-aws-lc, provider-tls-ring or provider-tls-native"
 );
 
-/// Returns a client builder using the compiled provider TLS stack.
+/// Whether a provider client may use proxies from the process environment.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ProviderProxy {
+    /// Ignore `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and platform proxy
+    /// settings. The default.
+    #[default]
+    Disabled,
+    /// Host opt-in: use the process proxy environment.
+    Environment,
+}
+
+/// Returns a client builder using the compiled provider TLS stack, with the
+/// process proxy environment ignored.
 ///
 /// Callers add their own redirect policy, timeouts and limits.
+#[cfg(test)]
 pub(crate) fn client_builder() -> Result<reqwest::ClientBuilder, ProviderError> {
+    client_builder_with_proxy(ProviderProxy::Disabled)
+}
+
+/// Returns a client builder using the compiled provider TLS stack and the
+/// given proxy mode.
+pub(crate) fn client_builder_with_proxy(
+    proxy: ProviderProxy,
+) -> Result<reqwest::ClientBuilder, ProviderError> {
     let builder = reqwest::Client::builder();
+    let builder = match proxy {
+        ProviderProxy::Disabled => builder.no_proxy(),
+        ProviderProxy::Environment => builder,
+    };
     #[cfg(feature = "provider-tls-ring")]
     let builder = builder.tls_backend_preconfigured(ring_client_config()?);
     Ok(builder)
+}
+
+/// Builds one provider client: redirects disabled, an overall timeout, and
+/// the requested proxy mode.
+///
+/// A loopback endpoint never goes through a proxy, and `localhost` is pinned
+/// to the loopback addresses rather than resolved through the system
+/// resolver.
+///
+/// # Errors
+///
+/// Returns [`ProviderError::InvalidConfiguration`] naming `provider` when the
+/// client cannot be built.
+pub(crate) fn provider_client(
+    provider: &str,
+    timeout: std::time::Duration,
+    endpoint: Option<&url::Url>,
+    proxy: ProviderProxy,
+) -> Result<reqwest::Client, ProviderError> {
+    let loopback = endpoint.is_some_and(crate::configuration::provider_endpoint_is_loopback);
+    let proxy = if loopback {
+        ProviderProxy::Disabled
+    } else {
+        proxy
+    };
+    let mut builder = client_builder_with_proxy(proxy)?
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(timeout);
+    if endpoint
+        .and_then(url::Url::host_str)
+        .is_some_and(|host| host.eq_ignore_ascii_case("localhost"))
+    {
+        builder = builder.resolve_to_addrs(
+            "localhost",
+            &[
+                std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)),
+                std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, 0)),
+            ],
+        );
+    }
+    builder.build().map_err(|_| {
+        ProviderError::InvalidConfiguration(format!(
+            "{provider} HTTP client could not be constructed"
+        ))
+    })
 }
 
 #[cfg(feature = "provider-tls-ring")]
@@ -130,5 +200,79 @@ mod tests {
         let offered = server.join().expect("server thread");
         assert!(offered.contains(&b"h2".to_vec()), "{offered:?}");
         assert!(offered.contains(&b"http/1.1".to_vec()), "{offered:?}");
+    }
+}
+
+/// Proxy environment variables are process-wide, so the probe runs in a child
+/// copy of this test binary instead of mutating the parent environment.
+#[cfg(test)]
+mod proxy_environment_tests {
+    const CHILD_MODE: &str = "GRAPHQL_ORM_AI_PROXY_PROBE";
+    const CHILD_TEST: &str = "providers::http::proxy_environment_tests::proxy_environment_probe";
+
+    /// Sends one request through a provider client. Runs only when spawned by
+    /// [`run_probe`].
+    #[tokio::test]
+    #[ignore = "spawned by the proxy environment tests"]
+    async fn proxy_environment_probe() {
+        let Some(mode) = std::env::var_os(CHILD_MODE) else {
+            return;
+        };
+        let builder = if mode == "environment" {
+            super::client_builder_with_proxy(super::ProviderProxy::Environment)
+        } else {
+            super::client_builder()
+        };
+        let client = builder
+            .expect("builder")
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .expect("client");
+        let _ = client.get("http://proxy-probe.invalid/").send().await;
+    }
+
+    /// Returns whether the child's request reached the proxy named in its
+    /// environment.
+    fn run_probe(mode: &str) -> bool {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("proxy listener");
+        let proxy = format!("http://{}", listener.local_addr().expect("proxy address"));
+        let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                CHILD_TEST,
+                "--exact",
+                "--ignored",
+                "--test-threads=1",
+                "--quiet",
+            ])
+            .env(CHILD_MODE, mode)
+            .env("HTTP_PROXY", &proxy)
+            .env("http_proxy", &proxy)
+            .env("ALL_PROXY", &proxy)
+            .env("all_proxy", &proxy)
+            .env_remove("NO_PROXY")
+            .env_remove("no_proxy")
+            .status()
+            .expect("probe child should run");
+        assert!(status.success(), "probe child failed: {status}");
+        listener
+            .set_nonblocking(true)
+            .expect("non-blocking listener");
+        listener.accept().is_ok()
+    }
+
+    #[test]
+    fn provider_clients_ignore_proxy_environment_by_default() {
+        assert!(
+            !run_probe("default"),
+            "a provider client followed the proxy environment"
+        );
+    }
+
+    #[test]
+    fn provider_clients_follow_proxy_environment_only_when_opted_in() {
+        assert!(
+            run_probe("environment"),
+            "an opted-in provider client should use the proxy environment"
+        );
     }
 }

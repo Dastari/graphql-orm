@@ -10,6 +10,7 @@ use agql_auth::{
     SystemClock,
 };
 use async_trait::async_trait;
+use futures::StreamExt;
 use graphql_orm::graphql::orm::{ApplyOptions, OrmSchemaModule};
 use graphql_orm::graphql::pagination::KeysetConnectionInput;
 use graphql_orm::prelude::{Database, SqliteBackend};
@@ -160,11 +161,26 @@ impl AiAttachmentScanner for TestScanner {
 struct MemoryBlobStore {
     blobs: Mutex<BTreeMap<String, Vec<u8>>>,
     fail_deletes: Mutex<bool>,
+    consumed_bytes: Mutex<u64>,
+    body_errors_as_conflict: Mutex<bool>,
 }
 
 impl MemoryBlobStore {
     fn count(&self) -> usize {
         self.blobs.lock().expect("blob lock").len()
+    }
+
+    fn consumed_bytes(&self) -> u64 {
+        *self.consumed_bytes.lock().expect("consumed byte lock")
+    }
+
+    /// Makes conditional writes report a body error as an existing key, as a
+    /// store that maps every precondition failure to `Ok(None)` would.
+    fn set_body_errors_as_conflict(&self, enabled: bool) {
+        *self
+            .body_errors_as_conflict
+            .lock()
+            .expect("conflict mapping lock") = enabled;
     }
 
     fn set_fail_deletes(&self, fail: bool) {
@@ -184,7 +200,25 @@ impl BlobStore for MemoryBlobStore {
         body: StorageByteStream,
         _options: BlobPutOptions,
     ) -> Result<BlobWriteOutcome, StorageError> {
-        let bytes = collect_storage_stream(body).await?;
+        // Consume the body incrementally and, like a provider that streams to
+        // its destination, leave a partial object behind on a body error.
+        let mut stream = body.into_inner();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(chunk) => {
+                    *self.consumed_bytes.lock().expect("consumed byte lock") += chunk.len() as u64;
+                    bytes.extend_from_slice(&chunk);
+                }
+                Err(error) => {
+                    self.blobs
+                        .lock()
+                        .expect("blob lock")
+                        .insert(key.to_owned(), bytes);
+                    return Err(error);
+                }
+            }
+        }
         let outcome = BlobWriteOutcome {
             size_bytes: bytes.len() as u64,
             sha256_hex: sha256_hex(&bytes),
@@ -205,7 +239,18 @@ impl BlobStore for MemoryBlobStore {
         if self.blobs.lock().expect("blob lock").contains_key(key) {
             return Ok(None);
         }
-        self.put_blob(key, body, options).await.map(Some)
+        match self.put_blob(key, body, options).await {
+            Ok(outcome) => Ok(Some(outcome)),
+            Err(_)
+                if *self
+                    .body_errors_as_conflict
+                    .lock()
+                    .expect("conflict mapping lock") =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     async fn get_blob(&self, key: &str) -> Result<BlobBody, StorageError> {
@@ -700,6 +745,156 @@ async fn scanner_rejection_never_promotes_or_releases_bytes() {
             .await,
         Err(AiError::Conflict)
     ));
+}
+
+/// A body without a size hint that runs past its ticket is cut off as soon as
+/// it exceeds the ticket, and the partial quarantine object is removed.
+#[tokio::test]
+async fn upload_body_is_bounded_by_the_ticket_while_streaming() {
+    let fixture = fixture().await;
+    let owner = principal("owner");
+    let session = create_session(&fixture, &owner).await;
+    let expected = 16_u64;
+    let ticket = fixture
+        .attachment_service
+        .create_upload(
+            &owner,
+            CreateAiAttachmentUploadInput {
+                session_id: session.id,
+                filename: "oversized.png".to_owned(),
+                declared_mime: Some("image/png".to_owned()),
+                expected_byte_count: expected as i64,
+            },
+        )
+        .await
+        .expect("ticket should create");
+    // 4 KiB in 8-byte chunks with no size hint: 256 times the ticket size.
+    let chunks = futures::stream::iter(0..512)
+        .flat_map(|_| StorageByteStream::from_bytes(vec![0x5a_u8; 8]).into_inner());
+    let result = fixture
+        .attachment_service
+        .upload(
+            &owner,
+            ticket.attachment().id,
+            SecretString::from(ticket.secret().expose_secret().to_owned()),
+            StorageByteStream::new(Box::pin(chunks)),
+        )
+        .await;
+    assert!(
+        matches!(result, Err(AiError::InvalidInput(_))),
+        "{result:?}"
+    );
+    assert!(
+        fixture.blobs.consumed_bytes() <= expected,
+        "storage consumed {} bytes for a {expected}-byte ticket",
+        fixture.blobs.consumed_bytes()
+    );
+    assert_eq!(
+        fixture.blobs.count(),
+        0,
+        "the partial object must be removed"
+    );
+    let attachments = fixture
+        .attachment_service
+        .attachments(&owner, AiSessionId(session.id), page())
+        .await
+        .expect("rejected metadata remains inspectable");
+    assert_eq!(attachments.edges[0].node.quarantine_state, "rejected");
+    assert_eq!(
+        attachments.edges[0].node.rejection_code.as_deref(),
+        Some("upload_size_exceeded")
+    );
+}
+
+/// A store that reports the size-limit body error as an existing key still
+/// gets the size rejection and the partial-object cleanup, not a conflict.
+#[tokio::test]
+async fn oversized_body_is_rejected_when_the_store_reports_a_key_conflict() {
+    let fixture = fixture().await;
+    fixture.blobs.set_body_errors_as_conflict(true);
+    let owner = principal("owner");
+    let session = create_session(&fixture, &owner).await;
+    let ticket = fixture
+        .attachment_service
+        .create_upload(
+            &owner,
+            CreateAiAttachmentUploadInput {
+                session_id: session.id,
+                filename: "oversized.png".to_owned(),
+                declared_mime: Some("image/png".to_owned()),
+                expected_byte_count: 16,
+            },
+        )
+        .await
+        .expect("ticket should create");
+    let chunks = futures::stream::iter(0..64)
+        .flat_map(|_| StorageByteStream::from_bytes(vec![0x5a_u8; 8]).into_inner());
+    let result = fixture
+        .attachment_service
+        .upload(
+            &owner,
+            ticket.attachment().id,
+            SecretString::from(ticket.secret().expose_secret().to_owned()),
+            StorageByteStream::new(Box::pin(chunks)),
+        )
+        .await;
+    assert!(
+        matches!(result, Err(AiError::InvalidInput(_))),
+        "{result:?}"
+    );
+    assert_eq!(
+        fixture.blobs.count(),
+        0,
+        "the partial object must be removed"
+    );
+    let attachments = fixture
+        .attachment_service
+        .attachments(&owner, AiSessionId(session.id), page())
+        .await
+        .expect("rejected metadata remains inspectable");
+    assert_eq!(attachments.edges[0].node.quarantine_state, "rejected");
+    assert_eq!(
+        attachments.edges[0].node.rejection_code.as_deref(),
+        Some("upload_size_exceeded")
+    );
+}
+
+/// A body that is exactly the ticket size still uploads when it arrives in
+/// several chunks without a size hint.
+#[tokio::test]
+async fn chunked_upload_body_of_the_ticket_size_is_accepted() {
+    let fixture = fixture().await;
+    let owner = principal("owner");
+    let session = create_session(&fixture, &owner).await;
+    let bytes = b"\x89PNG\r\n\x1a\nclean-test-image".to_vec();
+    let ticket = fixture
+        .attachment_service
+        .create_upload(
+            &owner,
+            CreateAiAttachmentUploadInput {
+                session_id: session.id,
+                filename: "chunked.png".to_owned(),
+                declared_mime: Some("image/png".to_owned()),
+                expected_byte_count: bytes.len() as i64,
+            },
+        )
+        .await
+        .expect("ticket should create");
+    let parts = bytes.chunks(5).map(<[u8]>::to_vec).collect::<Vec<_>>();
+    let chunks = futures::stream::iter(parts)
+        .flat_map(|part| StorageByteStream::from_bytes(part).into_inner());
+    let ready = fixture
+        .attachment_service
+        .upload(
+            &owner,
+            ticket.attachment().id,
+            SecretString::from(ticket.secret().expose_secret().to_owned()),
+            StorageByteStream::new(Box::pin(chunks)),
+        )
+        .await
+        .expect("an exact chunked body should upload");
+    assert_eq!(ready.scan_state, "clean");
+    assert_eq!(fixture.blobs.count(), 1);
 }
 
 #[tokio::test]

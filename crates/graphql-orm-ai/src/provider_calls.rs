@@ -8303,7 +8303,8 @@ mod tests {
             fixture.database.clone(),
             Arc::new(clock.clone()),
             limits,
-        );
+        )
+        .with_entity_fallback(crate::AiTrustedWorkerEntityFallback::AllowRepository);
         BackgroundReconciliationFixture {
             fixture,
             accepted,
@@ -8332,36 +8333,40 @@ mod tests {
         let provider_event_kind = provider_event_kind.to_owned();
         let provider_response_id = provider_response_id.to_owned();
         let now = test.clock.now().unix_timestamp();
-        test.service
-            .database()
-            .transaction(TransactionMode::StateMachine, move |tx| {
-                Box::pin(async move {
-                    tx.insert::<AiProviderWebhookReceiptRecord>(
-                        CreateAiProviderWebhookReceiptRecordInput {
-                            id: create_key.id,
-                            receipt_key,
-                            provider_kind: create_key.provider_kind,
-                            provider_profile_id,
-                            provider_event_id,
-                            provider_event_kind,
-                            provider_created_at: now,
-                            provider_response_id: Some(provider_response_id),
-                            run_id: None,
-                            attempt_id: None,
-                            signature_verified: true,
-                            state: "pending_reconciliation".to_owned(),
-                            safe_error_code: None,
-                            received_at: now,
-                            processed_at: None,
-                        },
-                    )
-                    .await
-                    .map(|_| ())
-                    .map_err(OrmPublicError::from)
-                })
+        // Intake writes receipts through the worker grant; the service's
+        // public handle deliberately does not carry it.
+        crate::orm_webhooks::with_provider_webhook_receipt_policy(
+            test.service.database().clone(),
+            crate::AiTrustedWorkerEntityFallback::Deny,
+        )
+        .transaction(TransactionMode::StateMachine, move |tx| {
+            Box::pin(async move {
+                tx.insert::<AiProviderWebhookReceiptRecord>(
+                    CreateAiProviderWebhookReceiptRecordInput {
+                        id: create_key.id,
+                        receipt_key,
+                        provider_kind: create_key.provider_kind,
+                        provider_profile_id,
+                        provider_event_id,
+                        provider_event_kind,
+                        provider_created_at: now,
+                        provider_response_id: Some(provider_response_id),
+                        run_id: None,
+                        attempt_id: None,
+                        signature_verified: true,
+                        state: "pending_reconciliation".to_owned(),
+                        safe_error_code: None,
+                        received_at: now,
+                        processed_at: None,
+                    },
+                )
+                .await
+                .map(|_| ())
+                .map_err(OrmPublicError::from)
             })
-            .await
-            .expect("verified background receipt should insert");
+        })
+        .await
+        .expect("verified background receipt should insert");
         key
     }
 
@@ -9258,7 +9263,8 @@ mod tests {
             AiProviderOutputLimits::default(),
             Duration::minutes(5),
         )
-        .expect("terminal service limits should validate");
+        .expect("terminal service limits should validate")
+        .with_entity_fallback(crate::AiTrustedWorkerEntityFallback::AllowRepository);
 
         // The gate stays open in memory; only the store's epoch closes.
         crate::orm_runtime_recovery::close_test_epoch(&test.fixture.database).await;
@@ -9280,6 +9286,88 @@ mod tests {
             test.service.heartbeat(&claim).await,
             Err(AiError::RuntimeNotReady)
         ));
+    }
+
+    /// A default-built terminal service on a database without an entity
+    /// policy refuses to commit and leaves nothing behind: the same
+    /// observation still commits in full once the host opts in.
+    #[cfg(feature = "provider-openai-core")]
+    #[tokio::test]
+    async fn default_terminal_service_without_host_policy_fails_closed() {
+        let test = background_reconciliation_fixture_with_observation(
+            AiOpenAiBackgroundReconciliationWindows::default(),
+            AiOpenAiBackgroundReconciliationLimits::default(),
+            Arc::new(AllowAccess),
+            ProviderBackgroundObservation::new(
+                ProviderBackgroundStatus::Completed,
+                vec![ProviderEvent::TextDelta {
+                    text: "terminal background output".to_owned(),
+                }],
+                Some(ProviderBackgroundUsage::new(12, 5, 3)),
+            )
+            .expect("terminal observation should validate"),
+        )
+        .await;
+        assert!(test.fixture.database.entity_policy().is_none());
+        insert_background_receipt(
+            &test,
+            test.accepted.provider_profile_id(),
+            "evt_000_terminal_closed",
+            "response_completed",
+            test.accepted.provider_response_id(),
+        )
+        .await;
+        test.clock.advance_seconds(10);
+        let claim = test
+            .service
+            .claim_next("reconciler-terminal-closed")
+            .await
+            .expect("claim should not fail")
+            .expect("submission should be eligible");
+        let retrieval = OrmAiOpenAiBackgroundRetrievalService::new(
+            test.fixture.database.clone(),
+            test.fixture.runtime.clone(),
+            test.fixture.audit.clone(),
+            Arc::new(test.clock.clone()),
+            AiOpenAiBackgroundRetrievalRoute::new("mock-profile", "local-mock", "retrieval-v1")
+                .expect("retrieval route should validate"),
+            AiOpenAiBackgroundRetrievalLimits::default(),
+        );
+        let observation = retrieval
+            .retrieve(&claim)
+            .await
+            .expect("terminal response should retrieve");
+        let terminal = OrmAiOpenAiBackgroundTerminalService::new(
+            test.fixture.database.clone(),
+            test.fixture.runtime.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(test.clock.clone()),
+            AiProviderOutputLimits::default(),
+            Duration::minutes(5),
+        )
+        .expect("terminal service limits should validate");
+        terminal
+            .commit(&observation)
+            .await
+            .expect_err("commit must fail without a host policy or opt-in");
+        let submission = AiProviderBackgroundSubmissionRecord::find_by_id(
+            &test.fixture.database,
+            &test.accepted.submission_id(),
+        )
+        .await
+        .expect("submission lookup should succeed")
+        .expect("submission should exist");
+        assert_ne!(submission.state, "completed");
+        assert!(submission.reconciled_at.is_none());
+        let outcome = terminal
+            .with_entity_fallback(crate::AiTrustedWorkerEntityFallback::AllowRepository)
+            .commit(&observation)
+            .await
+            .expect("the opted-in service should commit");
+        assert!(
+            matches!(outcome, AiOpenAiBackgroundTerminalOutcome::Completed { .. }),
+            "{outcome:?}"
+        );
     }
 
     #[cfg(feature = "provider-openai-core")]
@@ -9344,7 +9432,8 @@ mod tests {
             AiProviderOutputLimits::default(),
             Duration::minutes(5),
         )
-        .expect("terminal service limits should validate");
+        .expect("terminal service limits should validate")
+        .with_entity_fallback(crate::AiTrustedWorkerEntityFallback::AllowRepository);
         let outcome = terminal
             .commit(&observation)
             .await
@@ -9509,7 +9598,8 @@ mod tests {
             AiProviderOutputLimits::default(),
             Duration::minutes(5),
         )
-        .expect("terminal service limits should validate");
+        .expect("terminal service limits should validate")
+        .with_entity_fallback(crate::AiTrustedWorkerEntityFallback::AllowRepository);
         assert_eq!(
             terminal
                 .commit(&observation)
@@ -9621,7 +9711,8 @@ mod tests {
                 AiProviderOutputLimits::default(),
                 Duration::minutes(5),
             )
-            .expect("terminal service limits should validate");
+            .expect("terminal service limits should validate")
+            .with_entity_fallback(crate::AiTrustedWorkerEntityFallback::AllowRepository);
             let outcome = terminal
                 .commit(&observation)
                 .await

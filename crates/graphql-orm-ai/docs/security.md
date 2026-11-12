@@ -32,6 +32,33 @@ built-ins, and remote MCP data as untrusted input.
   where its credential is sent, requires both actions and fails with
   `Forbidden` otherwise. Credential administrators should check a profile's
   current endpoint before attaching a credential to it.
+- Approval and proposal lookups apply a crate-level tenant predicate before
+  the host access policy. When the principal's token carries a tenant claim,
+  an approval or proposal is visible, decidable or reviewable only when its
+  session scope names that exact tenant; anything else is `NotFound`. A
+  principal without a tenant claim, such as an API token, gets no crate-level
+  tenant check: the host access policy alone decides its access. Pricing and
+  usage reads already applied the same rule.
+- Provider endpoints are checked where requests are made. A configurable
+  provider keeps its `AiProviderEndpointPolicy` and asks it again before every
+  request, so withdrawing an endpoint takes effect without rebuilding the
+  provider; a refused request fails with `EgressDenied` before credentials are
+  sent. Plain `http` is accepted only for loopback hosts (`127.0.0.0/8`,
+  `::1`, and `localhost`, which provider clients pin to loopback) unless the
+  policy opts in through `authorize_plaintext_endpoint`. Provider HTTP clients
+  ignore the proxy environment (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`)
+  unless the host calls the provider's `with_environment_proxy`, and a
+  loopback endpoint never uses a proxy. String policy still cannot stop DNS
+  rebinding for other hosts; enforce outbound network policy as well.
+- Trusted provider-reconciliation workers (webhook receipts, OpenAI
+  background reconciliation and terminal commit) grant themselves only
+  repository access to webhook receipt rows. Everything else uses the host
+  entity policy; without one, access is refused unless the host opts in with
+  `with_entity_fallback(AiTrustedWorkerEntityFallback::AllowRepository)`. Their
+  `database()` accessors return the host handle, not the worker handle. The
+  session retention worker, whose handle is never exposed, allows only the
+  repository surface (and its exact retention-maintenance grant) when the host
+  has no entity policy.
 
 Hierarchical rules are negative constraints, never cached authority. The host
 derives the complete application-defined lineage from the current principal;

@@ -63,6 +63,8 @@ pub struct AnthropicProvider {
     endpoint: String,
     /// Set for a policy-checked endpoint; every egress manifest must name it.
     bound_destination: Option<String>,
+    /// Set for a policy-checked endpoint; rechecked before every request.
+    endpoint_guard: Option<super::endpoint::ProviderEndpointGuard>,
 }
 
 impl std::fmt::Debug for AnthropicProvider {
@@ -124,13 +126,18 @@ impl AnthropicProvider {
         endpoint: &str,
     ) -> Result<Self, ProviderError> {
         let endpoint = super::endpoint::normalized_provider_endpoint(endpoint)?;
-        if !endpoint_policy.authorize_endpoint(AiProviderKindInput::Anthropic, endpoint.as_str()) {
-            return Err(ProviderError::InvalidConfiguration(
-                "Anthropic endpoint was not authorized".to_owned(),
-            ));
-        }
-        let endpoint = endpoint.as_str().to_owned();
-        Self::build(config, secrets, endpoint.clone(), Some(endpoint))
+        let guard = super::endpoint::ProviderEndpointGuard::authorize(
+            endpoint_policy,
+            AiProviderKindInput::Anthropic,
+            endpoint,
+        )
+        .ok_or_else(|| {
+            ProviderError::InvalidConfiguration("Anthropic endpoint was not authorized".to_owned())
+        })?;
+        let endpoint = guard.endpoint().as_str().to_owned();
+        let mut provider = Self::build(config, secrets, endpoint.clone(), Some(endpoint))?;
+        provider.endpoint_guard = Some(guard);
+        Ok(provider)
     }
 
     fn build(
@@ -144,22 +151,43 @@ impl AnthropicProvider {
                 "Anthropic timeout must be between one millisecond and ten minutes".to_owned(),
             ));
         }
-        let client = super::http::client_builder()?
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(config.timeout)
-            .build()
-            .map_err(|_| {
-                ProviderError::InvalidConfiguration(
-                    "Anthropic HTTP client could not be constructed".to_owned(),
-                )
-            })?;
+        let client = Self::client(&config, &endpoint, super::http::ProviderProxy::Disabled)?;
         Ok(Self {
             config,
             secrets,
             client,
             endpoint,
             bound_destination,
+            endpoint_guard: None,
         })
+    }
+
+    fn client(
+        config: &AnthropicProviderConfig,
+        endpoint: &str,
+        proxy: super::http::ProviderProxy,
+    ) -> Result<reqwest::Client, ProviderError> {
+        let endpoint = url::Url::parse(endpoint).ok();
+        super::http::provider_client("Anthropic", config.timeout, endpoint.as_ref(), proxy)
+    }
+
+    /// Lets this provider's client use the process proxy environment
+    /// (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`).
+    ///
+    /// By default provider clients ignore it. A loopback endpoint never uses a
+    /// proxy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::InvalidConfiguration`] when the HTTP client
+    /// cannot be rebuilt.
+    pub fn with_environment_proxy(mut self) -> Result<Self, ProviderError> {
+        self.client = Self::client(
+            &self.config,
+            &self.endpoint,
+            super::http::ProviderProxy::Environment,
+        )?;
+        Ok(self)
     }
 
     fn request_body(&self, request: &ModelRequest) -> Result<Value, ProviderError> {
@@ -296,6 +324,9 @@ impl AiProvider for AnthropicProvider {
             return Err(ProviderError::Unsupported);
         }
         let body = self.request_body(&request)?;
+        if let Some(guard) = &self.endpoint_guard {
+            guard.recheck()?;
+        }
         let secret = self
             .secrets
             .resolve(&self.config.credential)

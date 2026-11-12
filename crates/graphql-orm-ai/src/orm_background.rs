@@ -641,6 +641,7 @@ impl std::fmt::Debug for AiOpenAiBackgroundReconciliationClaim {
 #[derive(Clone)]
 pub struct OrmAiOpenAiBackgroundReconciliationService {
     database: Database<DefaultWriteBackend>,
+    worker_database: Database<DefaultWriteBackend>,
     clock: Arc<dyn Clock>,
     limits: AiOpenAiBackgroundReconciliationLimits,
 }
@@ -774,6 +775,7 @@ impl std::fmt::Debug for AiOpenAiBackgroundRetrievalFailure {
 /// terminal graph in one generated-ORM state-machine transaction.
 pub struct OrmAiOpenAiBackgroundTerminalService {
     database: Database<DefaultWriteBackend>,
+    worker_database: Database<DefaultWriteBackend>,
     runtime: Arc<AiRuntime>,
     usage_accounting: Arc<dyn AiProviderUsageAccounting>,
     clock: Arc<dyn Clock>,
@@ -1593,19 +1595,42 @@ impl OrmAiOpenAiBackgroundSubmissionService {
 
 impl OrmAiOpenAiBackgroundReconciliationService {
     /// Creates a bounded background reconciliation claim service.
+    ///
+    /// The service grants itself repository access to webhook receipt rows.
+    /// Every other access uses the host entity policy, or is refused when the
+    /// database has none; see [`Self::with_entity_fallback`].
     pub fn new(
         database: Database<DefaultWriteBackend>,
         clock: Arc<dyn Clock>,
         limits: AiOpenAiBackgroundReconciliationLimits,
     ) -> Self {
         Self {
-            database: crate::orm_webhooks::with_provider_webhook_receipt_policy(database),
+            worker_database: crate::orm_webhooks::with_provider_webhook_receipt_policy(
+                database.clone(),
+                crate::AiTrustedWorkerEntityFallback::Deny,
+            ),
+            database,
             clock,
             limits,
         }
     }
 
-    /// Returns the ORM database handle for host composition.
+    /// Chooses the access allowed outside the receipt grant when the host
+    /// database has no entity policy. Ignored when one is installed.
+    #[must_use]
+    pub fn with_entity_fallback(mut self, fallback: crate::AiTrustedWorkerEntityFallback) -> Self {
+        self.worker_database = crate::orm_webhooks::with_provider_webhook_receipt_policy(
+            self.database.clone(),
+            fallback,
+        );
+        self
+    }
+
+    /// Returns the host database handle this service was built from, for
+    /// host composition.
+    ///
+    /// The handle carries the host's own entity policy, not the service's
+    /// internal receipt grant.
     pub const fn database(&self) -> &Database<DefaultWriteBackend> {
         &self.database
     }
@@ -1868,7 +1893,7 @@ impl OrmAiOpenAiBackgroundReconciliationService {
         now: OffsetDateTime,
         filter_time: i32,
     ) -> Result<Option<AiOpenAiBackgroundReconciliationClaim>, TransactionError> {
-        let database = self.database.clone();
+        let database = self.worker_database.clone();
         let limits = self.limits;
         database
             .transaction(TransactionMode::StateMachine, move |tx| {
@@ -2010,7 +2035,7 @@ impl OrmAiOpenAiBackgroundReconciliationService {
         claim: AiOpenAiBackgroundReconciliationClaim,
         now: OffsetDateTime,
     ) -> Result<AiOpenAiBackgroundReconciliationClaim, TransactionError> {
-        let database = self.database.clone();
+        let database = self.worker_database.clone();
         let lease_ttl = self.limits.lease_ttl;
         database
             .transaction(TransactionMode::StateMachine, move |tx| {
@@ -2073,7 +2098,7 @@ impl OrmAiOpenAiBackgroundReconciliationService {
         now: OffsetDateTime,
         filter_time: i32,
     ) -> Result<usize, TransactionError> {
-        let database = self.database.clone();
+        let database = self.worker_database.clone();
         let limits = self.limits;
         database
             .transaction(TransactionMode::StateMachine, move |tx| {
@@ -2134,7 +2159,7 @@ impl OrmAiOpenAiBackgroundReconciliationService {
         now: OffsetDateTime,
         eligible_at: OffsetDateTime,
     ) -> Result<(), TransactionError> {
-        let database = self.database.clone();
+        let database = self.worker_database.clone();
         let maximum_retries = self.limits.maximum_retries;
         database
             .transaction(TransactionMode::StateMachine, move |tx| {
@@ -2225,7 +2250,7 @@ impl OrmAiOpenAiBackgroundReconciliationService {
         now: OffsetDateTime,
         eligible_at: OffsetDateTime,
     ) -> Result<(), TransactionError> {
-        let database = self.database.clone();
+        let database = self.worker_database.clone();
         let maximum_retries = self.limits.maximum_retries;
         database
             .transaction(TransactionMode::StateMachine, move |tx| {
@@ -2330,7 +2355,7 @@ impl OrmAiOpenAiBackgroundReconciliationService {
         now: OffsetDateTime,
         eligible_at: Option<OffsetDateTime>,
     ) -> Result<(), TransactionError> {
-        let database = self.database.clone();
+        let database = self.worker_database.clone();
         let maximum_retries = self.limits.maximum_retries;
         database
             .transaction(TransactionMode::StateMachine, move |tx| {
@@ -2834,7 +2859,11 @@ impl OrmAiOpenAiBackgroundTerminalService {
             ));
         }
         Ok(Self {
-            database: crate::orm_webhooks::with_provider_webhook_receipt_policy(database),
+            worker_database: crate::orm_webhooks::with_provider_webhook_receipt_policy(
+                database.clone(),
+                crate::AiTrustedWorkerEntityFallback::Deny,
+            ),
+            database,
             runtime,
             usage_accounting,
             clock,
@@ -2842,6 +2871,20 @@ impl OrmAiOpenAiBackgroundTerminalService {
             maximum_principal_age,
             maximum_transaction_retries: 8,
         })
+    }
+
+    /// Chooses the access allowed outside the receipt grant when the host
+    /// database has no entity policy. Ignored when one is installed.
+    ///
+    /// The terminal service otherwise grants itself only webhook receipt rows,
+    /// so a host without an entity policy must opt in for it to commit.
+    #[must_use]
+    pub fn with_entity_fallback(mut self, fallback: crate::AiTrustedWorkerEntityFallback) -> Self {
+        self.worker_database = crate::orm_webhooks::with_provider_webhook_receipt_policy(
+            self.database.clone(),
+            fallback,
+        );
+        self
     }
 
     /// Commits one authoritative terminal observation as a complete local
@@ -2872,7 +2915,7 @@ impl OrmAiOpenAiBackgroundTerminalService {
         }
         let usage = observation.usage().ok_or(AiError::ProviderFailed)?;
         let submission = AiProviderBackgroundSubmissionRecord::find_by_id(
-            &self.database,
+            &self.worker_database,
             &observation.claim.submission_id,
         )
         .await
@@ -2880,7 +2923,7 @@ impl OrmAiOpenAiBackgroundTerminalService {
         .ok_or(AiError::NotFound)?;
         validate_observation_submission_binding(&submission, &observation.claim)?;
         let budget = AiBudgetReservationRecord::find_by_id(
-            &self.database,
+            &self.worker_database,
             &observation.claim.budget_reservation_id.0,
         )
         .await
@@ -3032,7 +3075,7 @@ impl OrmAiOpenAiBackgroundTerminalService {
         actual: AiBudgetAmounts,
         now: OffsetDateTime,
     ) -> Result<AiOpenAiBackgroundTerminalOutcome, TransactionError> {
-        let database = self.database.clone();
+        let database = self.worker_database.clone();
         let gate_epoch = self.runtime.start_gate().epoch_id();
         database
             .transaction(TransactionMode::StateMachine, move |tx| {
@@ -3099,7 +3142,7 @@ impl OrmAiOpenAiBackgroundTerminalService {
         observation: &AiOpenAiBackgroundRetrievalObservation,
         actual: AiBudgetAmounts,
     ) -> Result<(), AiError> {
-        validate_existing_background_terminal(&self.database, observation, actual)
+        validate_existing_background_terminal(&self.worker_database, observation, actual)
             .await
             .map_err(map_transaction)
     }

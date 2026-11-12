@@ -71,12 +71,116 @@ pub trait AiConfigurationAccessPolicy: Send + Sync {
 
 /// Deployment-owned validation for configurable provider endpoints.
 ///
-/// The library performs basic URL safety validation first. This policy then
-/// enforces network zones, allowed hosts/ports, local-provider rules, and any
-/// SSRF protections specific to the deployment.
+/// The library performs basic URL safety validation first: an `http` or
+/// `https` URL with a host and no user information, query or fragment. Plain
+/// `http` is accepted only for a loopback host (`127.0.0.0/8`, `::1` or
+/// `localhost`, which provider clients resolve to loopback only) unless
+/// [`Self::authorize_plaintext_endpoint`] opts in. This policy then enforces
+/// network zones, allowed hosts/ports, local-provider rules, and any SSRF
+/// protections specific to the deployment.
+///
+/// Providers ask the policy again immediately before every request, so a
+/// policy can withdraw an endpoint without rebuilding the provider. String
+/// authorization alone cannot prevent DNS rebinding; enforce outbound network
+/// policy at the transport or network layer as well.
 pub trait AiProviderEndpointPolicy: Send + Sync {
     /// Authorizes a normalized endpoint for a provider kind.
     fn authorize_endpoint(&self, provider_kind: AiProviderKindInput, normalized_url: &str) -> bool;
+
+    /// Explicitly allows a plaintext `http` endpoint whose host is not
+    /// loopback, such as a local-network model server.
+    ///
+    /// Requests, including any credential and all prompt content, then cross
+    /// the network unencrypted. The default refuses every such endpoint.
+    /// [`Self::authorize_endpoint`] must still approve the endpoint.
+    fn authorize_plaintext_endpoint(
+        &self,
+        provider_kind: AiProviderKindInput,
+        normalized_url: &str,
+    ) -> bool {
+        let _ = (provider_kind, normalized_url);
+        false
+    }
+}
+
+/// Parses the endpoint shape shared by every configurable provider: `http`
+/// or `https`, a host, and no user information, query or fragment. Path rules
+/// stay with each caller.
+#[cfg(any(
+    feature = "sqlite",
+    feature = "postgres",
+    feature = "provider-anthropic-core",
+    feature = "provider-ollama-core",
+    feature = "provider-openai-compatible-core",
+    feature = "provider-chat-completions-core"
+))]
+pub(crate) fn parse_provider_endpoint(value: &str) -> Option<url::Url> {
+    let mut url = url::Url::parse(value).ok()?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    url.set_query(None);
+    url.set_fragment(None);
+    Some(url)
+}
+
+/// Returns whether an endpoint names a loopback host.
+#[cfg(any(
+    feature = "sqlite",
+    feature = "postgres",
+    feature = "provider-anthropic-core",
+    feature = "provider-ollama-core",
+    feature = "provider-openai-compatible-core",
+    feature = "provider-chat-completions-core",
+    feature = "provider-openai-core",
+    feature = "provider-xai-core"
+))]
+pub(crate) fn provider_endpoint_is_loopback(url: &url::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => {
+            address.is_loopback()
+                || address
+                    .to_ipv4_mapped()
+                    .is_some_and(|address| address.is_loopback())
+        }
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        None => false,
+    }
+}
+
+/// Applies the transport rule and then the deployment policy to one parsed
+/// endpoint. Used at configuration time, at provider construction and
+/// before every provider request.
+#[cfg(any(
+    feature = "sqlite",
+    feature = "postgres",
+    feature = "provider-anthropic-core",
+    feature = "provider-ollama-core",
+    feature = "provider-openai-compatible-core",
+    feature = "provider-chat-completions-core"
+))]
+pub(crate) fn provider_endpoint_permitted(
+    policy: &dyn AiProviderEndpointPolicy,
+    provider_kind: AiProviderKindInput,
+    url: &url::Url,
+) -> bool {
+    let normalized = url.as_str();
+    let transport = match url.scheme() {
+        "https" => true,
+        "http" => {
+            provider_endpoint_is_loopback(url)
+                || policy.authorize_plaintext_endpoint(provider_kind, normalized)
+        }
+        _ => false,
+    };
+    transport && policy.authorize_endpoint(provider_kind, normalized)
 }
 
 /// Provider family accepted by GraphQL configuration.

@@ -199,6 +199,7 @@ pub struct ChatCompletionsProvider {
     secrets: Arc<dyn AiSecretStore>,
     client: reqwest::Client,
     endpoint: Url,
+    endpoint_guard: super::endpoint::ProviderEndpointGuard,
     capabilities: ProviderCapabilities,
 }
 
@@ -231,30 +232,51 @@ impl ChatCompletionsProvider {
     ) -> Result<Self, ProviderError> {
         validate_config(&config)?;
         let endpoint = super::endpoint::normalized_provider_endpoint(&config.endpoint)?;
-        if !endpoint_policy
-            .authorize_endpoint(AiProviderKindInput::ChatCompletions, endpoint.as_str())
-        {
-            return Err(ProviderError::InvalidConfiguration(
+        let endpoint_guard = super::endpoint::ProviderEndpointGuard::authorize(
+            endpoint_policy,
+            AiProviderKindInput::ChatCompletions,
+            endpoint.clone(),
+        )
+        .ok_or_else(|| {
+            ProviderError::InvalidConfiguration(
                 "Chat Completions endpoint was not authorized".to_owned(),
-            ));
-        }
-        let client = super::http::client_builder()?
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(config.timeout)
-            .build()
-            .map_err(|_| {
-                ProviderError::InvalidConfiguration(
-                    "Chat Completions HTTP client could not be constructed".to_owned(),
-                )
-            })?;
+            )
+        })?;
+        let client = super::http::provider_client(
+            "Chat Completions",
+            config.timeout,
+            Some(&endpoint),
+            super::http::ProviderProxy::Disabled,
+        )?;
         let capabilities = config.capabilities.provider_capabilities();
         Ok(Self {
             config,
             secrets,
             client,
             endpoint,
+            endpoint_guard,
             capabilities,
         })
+    }
+
+    /// Lets this provider's client use the process proxy environment
+    /// (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`).
+    ///
+    /// By default provider clients ignore it. A loopback endpoint never uses a
+    /// proxy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::InvalidConfiguration`] when the HTTP client
+    /// cannot be rebuilt.
+    pub fn with_environment_proxy(mut self) -> Result<Self, ProviderError> {
+        self.client = super::http::provider_client(
+            "Chat Completions",
+            self.config.timeout,
+            Some(&self.endpoint),
+            super::http::ProviderProxy::Environment,
+        )?;
+        Ok(self)
     }
 
     fn request_body(&self, request: &ModelRequest) -> Result<Value, ProviderError> {
@@ -402,6 +424,7 @@ impl AiProvider for ChatCompletionsProvider {
     ) -> Result<ProviderEventStream, ProviderError> {
         self.authorize(&request, &context)?;
         let body = self.request_body(&request)?;
+        self.endpoint_guard.recheck()?;
         let mut post = self.client.post(self.endpoint.clone()).json(&body);
         if let Some(credential) = &self.config.credential {
             let secret = self
@@ -1414,6 +1437,95 @@ mod tests {
             assert!(!format!("{error:?}").contains("secret detail"));
             server_task.await.expect("server should finish");
         }
+    }
+
+    /// Endpoint policy whose decision the test can change after construction.
+    struct RevocablePolicy {
+        endpoint: String,
+        allowed: std::sync::atomic::AtomicBool,
+    }
+
+    impl AiProviderEndpointPolicy for RevocablePolicy {
+        fn authorize_endpoint(&self, kind: AiProviderKindInput, normalized_url: &str) -> bool {
+            kind == AiProviderKindInput::ChatCompletions
+                && normalized_url == self.endpoint
+                && self.allowed.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[test]
+    fn plaintext_endpoints_are_limited_to_loopback_hosts() {
+        for endpoint in [
+            "http://provider.example/v1/chat/completions",
+            "http://203.0.113.7:8080/v1/chat/completions",
+            "http://[2001:db8::7]/v1/chat/completions",
+        ] {
+            let config =
+                ChatCompletionsProviderConfig::new("chat-profile", endpoint, None, "local-none");
+            assert!(
+                matches!(
+                    ChatCompletionsProvider::new(
+                        config,
+                        Arc::new(Policy(endpoint.to_owned(), true)),
+                        Arc::new(Secrets(reference()))
+                    ),
+                    Err(ProviderError::InvalidConfiguration(_))
+                ),
+                "{endpoint}"
+            );
+        }
+        for endpoint in [
+            "http://127.0.0.1:8080/v1/chat/completions",
+            "http://[::1]:8080/v1/chat/completions",
+            "http://localhost:8080/v1/chat/completions",
+            "https://provider.example/v1/chat/completions",
+        ] {
+            let config =
+                ChatCompletionsProviderConfig::new("chat-profile", endpoint, None, "local-none");
+            assert!(
+                ChatCompletionsProvider::new(
+                    config,
+                    Arc::new(Policy(endpoint.to_owned(), true)),
+                    Arc::new(Secrets(reference()))
+                )
+                .is_ok(),
+                "{endpoint}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn endpoint_policy_is_rechecked_before_each_request() {
+        let (endpoint, request_rx, server) = serve("200 OK", String::new()).await;
+        let policy = Arc::new(RevocablePolicy {
+            endpoint: endpoint.clone(),
+            allowed: std::sync::atomic::AtomicBool::new(true),
+        });
+        let provider = ChatCompletionsProvider::new(
+            ChatCompletionsProviderConfig::new("chat-profile", &endpoint, None, "local-none"),
+            policy.clone(),
+            Arc::new(Secrets(reference())),
+        )
+        .expect("an authorized loopback endpoint should construct");
+        policy
+            .allowed
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let model_request = request();
+        let result = provider
+            .stream(model_request.clone(), context(&model_request, &endpoint, 0))
+            .await;
+        assert!(
+            matches!(result, Err(ProviderError::EgressDenied)),
+            "{:?}",
+            result.err()
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), request_rx)
+                .await
+                .is_err(),
+            "no request may reach a revoked endpoint"
+        );
+        server.abort();
     }
 
     #[tokio::test]

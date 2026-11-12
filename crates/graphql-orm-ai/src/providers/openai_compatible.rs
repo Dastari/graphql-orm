@@ -213,13 +213,16 @@ impl OpenAiCompatibleProvider {
     ) -> Result<Self, ProviderError> {
         validate_config(&config)?;
         let endpoint = super::endpoint::normalized_provider_endpoint(&config.responses_endpoint)?;
-        if !endpoint_policy
-            .authorize_endpoint(AiProviderKindInput::OpenAiCompatible, endpoint.as_str())
-        {
-            return Err(ProviderError::InvalidConfiguration(
+        let guard = super::endpoint::ProviderEndpointGuard::authorize(
+            endpoint_policy,
+            AiProviderKindInput::OpenAiCompatible,
+            endpoint.clone(),
+        )
+        .ok_or_else(|| {
+            ProviderError::InvalidConfiguration(
                 "OpenAI-compatible endpoint was not authorized".to_owned(),
-            ));
-        }
+            )
+        })?;
         let capabilities = config.capabilities.provider_capabilities();
         let core = OpenAiProviderConfig {
             credential: config.credential.clone(),
@@ -235,14 +238,23 @@ impl OpenAiCompatibleProvider {
             destination: endpoint.as_str().to_owned(),
             retention: config.retention.clone(),
         };
-        let inner = OpenAiProvider::new_compatible(
-            core,
-            secrets,
-            endpoint.as_str().to_owned(),
-            capabilities,
-            binding,
-        )?;
+        let inner = OpenAiProvider::new_compatible(core, secrets, guard, capabilities, binding)?;
         Ok(Self { config, inner })
+    }
+
+    /// Lets this provider's client use the process proxy environment
+    /// (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`).
+    ///
+    /// By default provider clients ignore it. A loopback endpoint never uses a
+    /// proxy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::InvalidConfiguration`] when the HTTP client
+    /// cannot be rebuilt.
+    pub fn with_environment_proxy(mut self) -> Result<Self, ProviderError> {
+        self.inner = self.inner.with_environment_proxy()?;
+        Ok(self)
     }
 }
 

@@ -1233,10 +1233,11 @@ impl OrmAiApprovalService {
             return Err(AiError::NotFound);
         }
         let scope = record_scope(&session);
-        if !self
-            .access_policy
-            .can_access_approval(principal, &scope, AiSessionId(session.id), action)
-            .await
+        if !principal_tenant_permits(principal, &scope)
+            || !self
+                .access_policy
+                .can_access_approval(principal, &scope, AiSessionId(session.id), action)
+                .await
         {
             return Err(AiError::NotFound);
         }
@@ -1452,10 +1453,11 @@ impl AiApprovalService for OrmAiApprovalService {
             return Err(AiError::NotFound);
         }
         let scope = record_scope(&session);
-        if !self
-            .access_policy
-            .can_access_approval(&principal, &scope, session_id, AiApprovalAction::Read)
-            .await
+        if !principal_tenant_permits(&principal, &scope)
+            || !self
+                .access_policy
+                .can_access_approval(&principal, &scope, session_id, AiApprovalAction::Read)
+                .await
         {
             return Err(AiError::NotFound);
         }
@@ -2523,6 +2525,19 @@ fn principal_identity(principal: &AuthPrincipal) -> (String, &str) {
         AuthPrincipal::ApiToken(token) => format!("api_token:{}", token.principal_kind.as_str()),
     };
     (kind, principal.subject())
+}
+
+/// Crate-level tenant predicate for approval and proposal lookups.
+///
+/// A principal whose token carries a tenant claim may reach only records whose
+/// session scope names that exact tenant, whatever the host access policy
+/// decides. A principal without a tenant claim, such as an API token, is left
+/// to the host policy alone. This is the same rule the pricing and usage
+/// services apply to their scopes.
+pub(crate) fn principal_tenant_permits(principal: &AuthPrincipal, scope: &AiScope) -> bool {
+    principal
+        .tenant_id()
+        .is_none_or(|tenant_id| scope.tenant_id.as_deref() == Some(tenant_id))
 }
 
 fn record_scope(session: &AiSessionRecord) -> AiScope {
@@ -4381,6 +4396,78 @@ mod tests {
                 .expect_err("a delegated or sessionless credential must not list approvals");
             assert!(matches!(error, AiError::ReauthorizationFailed), "{error:?}");
         }
+    }
+
+    /// Returns the fixture principal with a different tenant claim.
+    fn other_tenant_principal(principal: &AuthPrincipal) -> AuthPrincipal {
+        let AuthPrincipal::User(mut user) = principal.clone() else {
+            unreachable!("approval fixture principal is a user session")
+        };
+        user.token_claims.tenant_id = Some("tenant-other".to_owned());
+        AuthPrincipal::User(user)
+    }
+
+    #[tokio::test]
+    async fn approvals_are_confined_to_the_principal_tenant_claim() {
+        let fixture = fixture().await;
+        let (requested, _) = request_wait(&fixture, fixture.now + Duration::minutes(10)).await;
+        let id = requested.approval_id();
+        let session_id = requested.lease().session_id();
+        let view = fixture
+            .approval_service
+            .approval(&fixture.principal, id)
+            .await
+            .unwrap()
+            .expect("the same-tenant principal reads the approval");
+        // The host access policy allows everything; only the crate-level
+        // tenant predicate separates the two principals.
+        let other = fixture_on(
+            fixture.database.clone(),
+            true,
+            Some(other_tenant_principal(&fixture.principal)),
+        )
+        .await;
+        let page = KeysetConnectionInput {
+            first: Some(10),
+            ..Default::default()
+        }
+        .validate(10, 20)
+        .unwrap();
+        assert!(
+            other
+                .approval_service
+                .approval(&other.principal, id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let error = other
+            .approval_service
+            .approvals(&other.principal, session_id, page)
+            .await
+            .expect_err("another tenant must not list approvals");
+        assert!(matches!(error, AiError::NotFound), "{error:?}");
+        for decision in [AiApprovalDecision::Approve, AiApprovalDecision::Deny] {
+            let error = other
+                .approval_service
+                .decide_approval(
+                    &other.principal,
+                    DecideAiApprovalInput {
+                        id: id.0,
+                        decision,
+                        expected_version: view.row_version,
+                    },
+                )
+                .await
+                .expect_err("another tenant must not decide");
+            assert!(matches!(error, AiError::NotFound), "{error:?}");
+        }
+        let record = AiApprovalRecord::find_by_id(&fixture.database, &id.0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.state, "pending");
+        assert_eq!(record.row_version, view.row_version);
     }
 
     /// Rewrites a parked wait as a pre-0.130.0 release would have stored it

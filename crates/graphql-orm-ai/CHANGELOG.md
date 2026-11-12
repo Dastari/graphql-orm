@@ -10,6 +10,20 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.135.0
+
+- **Security:** attachment uploads are bounded while they stream. `AiAttachmentUploadService::upload` checked only the optional size hint before storage and compared the stored size afterwards, so a body without a hint was stored in full whatever its ticket said. The body is now counted as storage reads it, and the chunk that would pass the ticket's expected byte count is never handed to storage. The write fails, any partial quarantine object is deleted, the call returns `InvalidInput`, and the attachment is rejected with reason code `upload_size_exceeded`.
+- **Breaking (security):** approval and proposal lookups apply a crate-level tenant predicate. When the principal's token carries a tenant claim, `approvals`, `approval`, `decideApproval`, `revokeApproval`, `proposals`, `proposal`, `reviewProposal` and `record_applied_outcome` refuse records whose session scope names another tenant, or none, with `NotFound`, whatever the host access policy decides. A principal without a tenant claim, such as an API token, gets no crate-level tenant check and is decided by the host access policy alone. This matches the existing pricing and usage rule.
+- **Breaking (security):** the trusted provider-reconciliation workers (`OrmAiProviderWebhookReceiptService`, `OrmAiOpenAiBackgroundReconciliationService`, `OrmAiOpenAiBackgroundTerminalService`) no longer allow every entity access when the host database has no entity policy. They keep their repository grant for webhook receipt rows; everything else is refused unless the host opts in with the new `with_entity_fallback(AiTrustedWorkerEntityFallback::AllowRepository)`, which allows repository-surface access only. With a host entity policy installed, behaviour is unchanged.
+- **Security:** when the host database has no entity policy, the session retention worker's internal handle now allows only the repository surface, plus its exact retention-maintenance grant, instead of every surface. GraphQL query, mutation, subscription and relation access through it is refused. The worker itself uses only the repository surface, so hosts need no change.
+- **Breaking (security):** `database()` on the webhook receipt and background reconciliation services now returns the host database handle the service was built from, not the internal handle carrying the worker grant.
+- **Breaking (security):** provider endpoints accept plain `http` only for loopback hosts (`127.0.0.0/8`, `::1`, `localhost`) unless the new provided method `AiProviderEndpointPolicy::authorize_plaintext_endpoint` returns `true`. This applies to GraphQL provider-profile configuration and to the Ollama, OpenAI-compatible, Chat Completions and custom-endpoint Anthropic adapters. Provider clients pin `localhost` to the loopback addresses.
+- **Security:** configurable providers keep their endpoint policy and ask it again immediately before every request. A request to an endpoint the policy no longer approves fails with `EgressDenied` before any credential is sent.
+- **Breaking (security):** provider HTTP clients ignore the process proxy environment (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`) and platform proxy settings. Hosts that route provider traffic through such a proxy call the new `with_environment_proxy` on `OpenAiProvider`, `XAiProvider`, `AnthropicProvider`, `OllamaProvider`, `OpenAiCompatibleProvider`, `ChatCompletionsProvider` or `OpenAiFileDeletionService`. A loopback endpoint never uses a proxy.
+- **Changed:** the configuration service and the provider adapters share one endpoint-shape check instead of three separate normalizers. Path rules stay per adapter.
+
+No GraphQL SDL, persistent schema or data migration change; `AI_SCHEMA_MODULE_VERSION` is unchanged. See the migration guide.
+
 ## Unreleased - 0.133.0
 
 - **Breaking (public Auth dependency types):** select published Auth `v0.26.0`

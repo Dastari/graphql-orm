@@ -28,6 +28,28 @@ pub enum AiProviderWebhookReceiptOutcome {
     AlreadyRecorded,
 }
 
+/// Entity access a trusted provider-reconciliation worker allows outside its
+/// own grant when the host database has no entity policy.
+///
+/// The webhook receipt service and the OpenAI background reconciliation and
+/// terminal services always grant themselves repository access to their own
+/// webhook receipt rows. Every other entity access goes to the host
+/// [`EntityPolicy`] when one is installed. This value decides only what
+/// happens when there is none.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AiTrustedWorkerEntityFallback {
+    /// Refuse every access outside the worker's own grant. This is the
+    /// default, so a database without an entity policy fails closed.
+    #[default]
+    Deny,
+    /// Explicit opt-in: allow repository-surface access outside the grant.
+    /// GraphQL query, mutation, subscription and relation surfaces stay
+    /// refused. Use it only for a worker database that the host trusts with
+    /// unrestricted repository access.
+    AllowRepository,
+}
+
 /// ORM-backed content-free intake for verified OpenAI webhook envelopes.
 ///
 /// Intake is deliberately separate from background response reconciliation.
@@ -37,14 +59,21 @@ pub enum AiProviderWebhookReceiptOutcome {
 /// ignored. A later worker must independently prove the exact original
 /// run/attempt/fence/provider/profile/response/budget/egress bindings before
 /// retrieving provider state or changing a run.
+///
+/// The service writes through an internal handle that grants it its receipt
+/// rows (see [`AiTrustedWorkerEntityFallback`]). Recording also appends a
+/// redacted audit row, which the host entity policy must allow; a host without
+/// an entity policy opts in with [`Self::with_entity_fallback`].
 #[derive(Clone)]
 pub struct OrmAiProviderWebhookReceiptService {
     database: Database<DefaultWriteBackend>,
+    worker_database: Database<DefaultWriteBackend>,
 }
 
 #[derive(Clone)]
 struct ProviderWebhookReceiptEntityPolicy {
     delegate: Option<Arc<dyn EntityPolicy<DefaultWriteBackend>>>,
+    fallback: AiTrustedWorkerEntityFallback,
 }
 
 impl EntityPolicy<DefaultWriteBackend> for ProviderWebhookReceiptEntityPolicy {
@@ -73,19 +102,41 @@ impl EntityPolicy<DefaultWriteBackend> for ProviderWebhookReceiptEntityPolicy {
                 surface,
             );
         }
-        Box::pin(async { Ok(true) })
+        let allowed = self.fallback == AiTrustedWorkerEntityFallback::AllowRepository
+            && surface == EntityAccessSurface::Repository;
+        Box::pin(async move { Ok(allowed) })
     }
 }
 
 impl OrmAiProviderWebhookReceiptService {
     /// Creates a receipt service over the AI schema database.
+    ///
+    /// Outside its receipt rows the service uses the host entity policy, or
+    /// refuses access when the database has none.
     pub fn new(database: Database<DefaultWriteBackend>) -> Self {
         Self {
-            database: with_provider_webhook_receipt_policy(database),
+            worker_database: with_provider_webhook_receipt_policy(
+                database.clone(),
+                AiTrustedWorkerEntityFallback::Deny,
+            ),
+            database,
         }
     }
 
-    /// Returns the ORM database handle for host composition.
+    /// Chooses the access allowed outside the receipt grant when the host
+    /// database has no entity policy. Ignored when one is installed.
+    #[must_use]
+    pub fn with_entity_fallback(mut self, fallback: AiTrustedWorkerEntityFallback) -> Self {
+        self.worker_database =
+            with_provider_webhook_receipt_policy(self.database.clone(), fallback);
+        self
+    }
+
+    /// Returns the host database handle this service was built from, for
+    /// host composition.
+    ///
+    /// The handle carries the host's own entity policy, not the service's
+    /// internal receipt grant.
     pub const fn database(&self) -> &Database<DefaultWriteBackend> {
         &self.database
     }
@@ -139,7 +190,7 @@ impl OrmAiProviderWebhookReceiptService {
             ),
             _ => ("pending_reconciliation".to_owned(), None, None),
         };
-        self.database
+        self.worker_database
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
                     let outcome = tx
@@ -233,9 +284,10 @@ impl OrmAiProviderWebhookReceiptService {
 
 pub(crate) fn with_provider_webhook_receipt_policy(
     mut database: Database<DefaultWriteBackend>,
+    fallback: AiTrustedWorkerEntityFallback,
 ) -> Database<DefaultWriteBackend> {
     let delegate = database.entity_policy().cloned();
-    database.set_entity_policy(ProviderWebhookReceiptEntityPolicy { delegate });
+    database.set_entity_policy(ProviderWebhookReceiptEntityPolicy { delegate, fallback });
     database
 }
 
@@ -386,6 +438,92 @@ mod tests {
         database
     }
 
+    async fn worker_access(
+        database: &Database<SqliteBackend>,
+        entity: &'static str,
+        kind: EntityAccessKind,
+        surface: EntityAccessSurface,
+    ) -> bool {
+        database
+            .can_access_entity(None, entity, None, kind, surface)
+            .await
+            .expect("access decision")
+    }
+
+    /// Without a host entity policy the worker handle grants its own receipt
+    /// entity on the repository surface and nothing else, and the public
+    /// handle carries no worker grant at all.
+    #[tokio::test]
+    async fn worker_policy_without_host_policy_grants_only_its_own_receipts() {
+        let database = database().await;
+        assert!(database.entity_policy().is_none());
+        let service = OrmAiProviderWebhookReceiptService::new(database.clone());
+        assert!(
+            service.database().entity_policy().is_none(),
+            "the public handle must not carry the worker grant"
+        );
+        let worker = with_provider_webhook_receipt_policy(
+            database.clone(),
+            AiTrustedWorkerEntityFallback::Deny,
+        );
+        assert!(
+            worker_access(
+                &worker,
+                "AiProviderWebhookReceiptRecord",
+                EntityAccessKind::Write,
+                EntityAccessSurface::Repository,
+            )
+            .await
+        );
+        for (entity, kind, surface) in [
+            (
+                "AiRunRecord",
+                EntityAccessKind::Write,
+                EntityAccessSurface::Repository,
+            ),
+            (
+                "AiSessionRecord",
+                EntityAccessKind::Read,
+                EntityAccessSurface::GraphqlQuery,
+            ),
+            (
+                "AiProviderWebhookReceiptRecord",
+                EntityAccessKind::Read,
+                EntityAccessSurface::GraphqlQuery,
+            ),
+        ] {
+            assert!(
+                !worker_access(&worker, entity, kind, surface).await,
+                "{entity} {kind:?} {surface:?}"
+            );
+        }
+        // The explicit opt-in widens only the repository surface.
+        let opted_in = with_provider_webhook_receipt_policy(
+            database.clone(),
+            AiTrustedWorkerEntityFallback::AllowRepository,
+        );
+        assert!(
+            worker_access(
+                &opted_in,
+                "AiRunRecord",
+                EntityAccessKind::Write,
+                EntityAccessSurface::Repository,
+            )
+            .await
+        );
+        assert!(
+            !worker_access(
+                &opted_in,
+                "AiSessionRecord",
+                EntityAccessKind::Read,
+                EntityAccessSurface::GraphqlQuery,
+            )
+            .await
+        );
+        let service = service.with_entity_fallback(AiTrustedWorkerEntityFallback::AllowRepository);
+        assert!(service.database().entity_policy().is_none());
+    }
+
     #[tokio::test]
     async fn empty_legacy_webhook_placeholder_migrates_to_current_schema() {
         let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
@@ -470,10 +608,51 @@ mod tests {
         verified_event_at(event_type, event_id, 2_000_000_000).await
     }
 
+    /// A default-built service on a database without an entity policy cannot
+    /// append its audit row, so recording fails and commits nothing.
+    #[tokio::test]
+    async fn default_receipt_service_without_host_policy_fails_closed() {
+        let database = database().await;
+        assert!(database.entity_policy().is_none());
+        let service = OrmAiProviderWebhookReceiptService::new(database.clone());
+        let event = verified_event("response.completed", "evt_receipt_closed").await;
+        let error = service
+            .record(&event)
+            .await
+            .expect_err("recording must fail without a host policy or opt-in");
+        assert!(
+            matches!(error, AiError::Forbidden | AiError::PersistenceFailed),
+            "{error:?}"
+        );
+        let (receipts, audits) = database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    let receipts = tx
+                        .query::<AiProviderWebhookReceiptRecord>()
+                        .limit(2)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    let audits = tx
+                        .query::<AiAuditEventRecord>()
+                        .limit(2)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    Ok((receipts, audits))
+                })
+            })
+            .await
+            .expect("receipt facts should load");
+        assert!(receipts.is_empty(), "the receipt insert must roll back");
+        assert!(audits.is_empty());
+    }
+
     #[tokio::test]
     async fn concurrent_exact_replay_inserts_one_receipt_and_audit() {
         let database = database().await;
-        let service = OrmAiProviderWebhookReceiptService::new(database.clone());
+        let service = OrmAiProviderWebhookReceiptService::new(database.clone())
+            .with_entity_fallback(AiTrustedWorkerEntityFallback::AllowRepository);
         let event = verified_event("response.completed", "evt_receipt_1").await;
         let first_service = service.clone();
         let first_event = event.clone();
@@ -537,7 +716,8 @@ mod tests {
     #[tokio::test]
     async fn unsupported_signed_event_is_durably_ignored_without_provider_reference() {
         let database = database().await;
-        let service = OrmAiProviderWebhookReceiptService::new(database.clone());
+        let service = OrmAiProviderWebhookReceiptService::new(database.clone())
+            .with_entity_fallback(AiTrustedWorkerEntityFallback::AllowRepository);
         let event = verified_event("batch.completed", "evt_receipt_ignored").await;
         assert_eq!(
             service.record(&event).await.expect("intake should succeed"),
@@ -570,7 +750,8 @@ mod tests {
     #[tokio::test]
     async fn later_exact_redelivery_preserves_first_receipt_and_conflicts_on_changed_facts() {
         let database = database().await;
-        let service = OrmAiProviderWebhookReceiptService::new(database.clone());
+        let service = OrmAiProviderWebhookReceiptService::new(database.clone())
+            .with_entity_fallback(AiTrustedWorkerEntityFallback::AllowRepository);
         let first =
             verified_event_at("response.completed", "evt_receipt_replay", 2_000_000_000).await;
         let later =

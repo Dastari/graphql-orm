@@ -538,7 +538,8 @@ async fn verify_webhook_receipt_parity(database: &Database<PostgresBackend>, now
         .verify(&headers, body.as_bytes())
         .await
         .expect("PostgreSQL webhook signature should verify");
-    let receipts = OrmAiProviderWebhookReceiptService::new(database.clone());
+    let receipts = OrmAiProviderWebhookReceiptService::new(database.clone())
+        .with_entity_fallback(AiTrustedWorkerEntityFallback::AllowRepository);
     let first_receipts = receipts.clone();
     let first_event = event.clone();
     let second_receipts = receipts.clone();

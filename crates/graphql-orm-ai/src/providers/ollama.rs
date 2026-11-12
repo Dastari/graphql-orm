@@ -72,6 +72,7 @@ pub struct OllamaProvider {
     config: OllamaProviderConfig,
     client: reqwest::Client,
     endpoint: Url,
+    endpoint_guard: super::endpoint::ProviderEndpointGuard,
 }
 
 impl std::fmt::Debug for OllamaProvider {
@@ -108,29 +109,50 @@ impl OllamaProvider {
                 "invalid Ollama timeout or keep-alive".to_owned(),
             ));
         }
-        let base_url = normalized_base_url(&config.base_url)?;
-        if !endpoint_policy.authorize_endpoint(AiProviderKindInput::Ollama, base_url.as_str()) {
-            return Err(ProviderError::InvalidConfiguration(
-                "Ollama endpoint was not authorized".to_owned(),
-            ));
-        }
-        let endpoint = base_url.join("api/chat").map_err(|_| {
+        let base_url = super::endpoint::normalized_provider_origin(&config.base_url)?;
+        let endpoint_guard = super::endpoint::ProviderEndpointGuard::authorize(
+            endpoint_policy,
+            AiProviderKindInput::Ollama,
+            base_url,
+        )
+        .ok_or_else(|| {
+            ProviderError::InvalidConfiguration("Ollama endpoint was not authorized".to_owned())
+        })?;
+        let endpoint = endpoint_guard.endpoint().join("api/chat").map_err(|_| {
             ProviderError::InvalidConfiguration("invalid Ollama endpoint".to_owned())
         })?;
-        let client = super::http::client_builder()?
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(config.timeout)
-            .build()
-            .map_err(|_| {
-                ProviderError::InvalidConfiguration(
-                    "Ollama HTTP client could not be constructed".to_owned(),
-                )
-            })?;
+        let client = super::http::provider_client(
+            "Ollama",
+            config.timeout,
+            Some(&endpoint),
+            super::http::ProviderProxy::Disabled,
+        )?;
         Ok(Self {
             config,
             client,
             endpoint,
+            endpoint_guard,
         })
+    }
+
+    /// Lets this provider's client use the process proxy environment
+    /// (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`).
+    ///
+    /// By default provider clients ignore it. A loopback endpoint never uses a
+    /// proxy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::InvalidConfiguration`] when the HTTP client
+    /// cannot be rebuilt.
+    pub fn with_environment_proxy(mut self) -> Result<Self, ProviderError> {
+        self.client = super::http::provider_client(
+            "Ollama",
+            self.config.timeout,
+            Some(&self.endpoint),
+            super::http::ProviderProxy::Environment,
+        )?;
+        Ok(self)
     }
 
     fn request_body(
@@ -299,6 +321,7 @@ impl AiProvider for OllamaProvider {
             .into_iter()
             .map(|tool| (tool.provider_name, tool.tool_id))
             .collect();
+        self.endpoint_guard.recheck()?;
         let response = self
             .client
             .post(self.endpoint.clone())
@@ -590,25 +613,6 @@ fn normalize_chunk(
     Ok(events)
 }
 
-fn normalized_base_url(value: &str) -> Result<Url, ProviderError> {
-    let mut url = Url::parse(value)
-        .map_err(|_| ProviderError::InvalidConfiguration("invalid Ollama endpoint".to_owned()))?;
-    if !matches!(url.scheme(), "http" | "https")
-        || url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-        || !matches!(url.path(), "" | "/")
-    {
-        return Err(ProviderError::InvalidConfiguration(
-            "unsafe Ollama endpoint".to_owned(),
-        ));
-    }
-    url.set_path("/");
-    Ok(url)
-}
-
 fn classify_status(status: reqwest::StatusCode) -> ProviderError {
     match status.as_u16() {
         408 | 425 | 429 => ProviderError::RateLimited,
@@ -651,7 +655,7 @@ mod tests {
         OllamaProvider::new(
             OllamaProviderConfig::new(base_url),
             Arc::new(ExactEndpointPolicy(
-                normalized_base_url(base_url)
+                super::super::endpoint::normalized_provider_origin(base_url)
                     .expect("test endpoint should normalize")
                     .to_string(),
             )),

@@ -74,7 +74,10 @@ The endpoint must pass `AiProviderEndpointPolicy`; that policy owns the actual
 host/port/TLS/network-zone and local-container rules. Library URL validation,
 normalization, and redirect denial do not prevent DNS rebinding on their own.
 Deployments should enforce DNS and outbound-network policy at the transport or
-network boundary as well.
+network boundary as well. The adapter asks the policy again before every
+request. Plain `http` is accepted only for a loopback host unless
+`authorize_plaintext_endpoint` opts in, and the client ignores the proxy
+environment unless the host calls `with_environment_proxy`.
 
 Credentials are set through the separate credential mutation and remain in an
 `AiSecretStore`. They never appear in the profile view or adapter debug output.

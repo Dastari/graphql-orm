@@ -10,6 +10,73 @@ supersedes: []
 
 # Migration Guide
 
+## 0.134.0 to 0.135.0
+
+No GraphQL SDL, persistent schema or data migration change, and
+`AI_SCHEMA_MODULE_VERSION` is unchanged.
+
+### Attachment upload bodies are bounded while streaming
+
+No code change is needed. An upload body longer than its ticket's expected
+byte count now fails as soon as it passes that count, instead of after it has
+been stored. The partial quarantine object is deleted, `upload` returns
+`InvalidInput`, and the attachment is rejected with reason code
+`upload_size_exceeded`. Keep a body cap in the host upload route as well.
+
+### Tenant predicate on approval and proposal lookups
+
+Approval and proposal reads, decisions, reviews and outcome links now refuse a
+principal whose token tenant claim does not equal the session scope's
+`tenant_id`, with `NotFound`. A principal without a tenant claim, such as an
+API token, gets no crate-level tenant check: the host `AiApprovalAccessPolicy`
+or `AiProposalAccessPolicy` alone decides its access, as before. A host that let one tenant's users act on another
+tenant's approvals through its `AiApprovalAccessPolicy` or
+`AiProposalAccessPolicy` must issue those operators tokens without a tenant
+claim, or for the target tenant.
+
+### Trusted-worker entity access without a host entity policy
+
+`OrmAiProviderWebhookReceiptService`,
+`OrmAiOpenAiBackgroundReconciliationService` and
+`OrmAiOpenAiBackgroundTerminalService` used to allow every entity access when
+the database had no entity policy. They now refuse everything except their
+repository grant for webhook receipt rows. A host with an entity policy needs
+no change. A host without one either installs an entity policy that allows the
+workers' repository access, or opts in explicitly:
+
+```rust,ignore
+let receipts = OrmAiProviderWebhookReceiptService::new(database.clone())
+    .with_entity_fallback(AiTrustedWorkerEntityFallback::AllowRepository);
+```
+
+`AllowRepository` allows repository-surface access only; GraphQL surfaces stay
+refused.
+
+`OrmAiSessionRetentionService` keeps working without an entity policy, but its
+internal handle now allows only the repository surface (plus its exact
+retention-maintenance grant) instead of every surface. The worker uses no
+GraphQL surface, so no code change is needed. `database()` on the receipt and reconciliation services now returns
+the host handle the service was built from. Code that relied on that handle
+carrying the receipt grant must use the service methods instead.
+
+### Provider endpoints: plaintext, request-time checks and proxies
+
+- Plain `http` endpoints are accepted only for loopback hosts. For another
+  `http` host, such as a model server on a private network, implement the new
+  provided method `AiProviderEndpointPolicy::authorize_plaintext_endpoint` and
+  return `true` for that exact normalized endpoint. `authorize_endpoint` must
+  still approve it. Existing stored profiles with such endpoints keep their
+  rows, but provider construction and profile updates refuse them until the
+  policy opts in.
+- Configurable providers ask `authorize_endpoint` again before every request.
+  A policy whose answer changes over time now affects running providers; a
+  refused request fails with `EgressDenied`.
+- Provider HTTP clients no longer read `HTTP_PROXY`, `HTTPS_PROXY`,
+  `ALL_PROXY` or platform proxy settings. To keep using them, call
+  `with_environment_proxy()` on the constructed provider, for example
+  `OpenAiProvider::new(config, secrets)?.with_environment_proxy()?`. Loopback
+  endpoints never use a proxy.
+
 ## 0.132.0 to 0.133.0
 
 ### agql-auth 0.26.0
