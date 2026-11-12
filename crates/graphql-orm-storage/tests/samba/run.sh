@@ -232,9 +232,9 @@ SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP
   run_test samba_refuses_a_dialect_below_the_minimum "$SMB_TEST_CARGO" test --locked --features smb --test smb_integration \
   samba_refuses_a_dialect_below_the_minimum -- --ignored --exact --nocapture
 
-# Conditional creates publish whole objects, and a stalled transfer holds no
-# transfer permit.
-for case in samba_conditional_create_is_invisible_until_published samba_stalled_transfers_release_their_permits; do
+# Conditional creates publish whole objects with exactly one winner, and a
+# stalled transfer holds no transfer permit.
+for case in samba_conditional_create_is_invisible_until_published samba_stalled_transfers_release_their_permits samba_racing_conditional_creates_have_exactly_one_winner; do
   SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
   SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
     run_test "$case" "$SMB_TEST_CARGO" test --locked --features smb --test smb_integration \

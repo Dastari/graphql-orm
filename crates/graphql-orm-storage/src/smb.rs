@@ -18,8 +18,8 @@ use sha2::{Digest, Sha256};
 use smb::{
     Client, ClientConfig, ConnectionConfig, CreateOptions, Dialect, DirAccessMask, Directory, File,
     FileAccessMask, FileAttributes, FileCreateArgs, FileDispositionInformation,
-    FileFullDirectoryInformation, FileRenameInformation, FileStandardInformation, Resource, Status,
-    UncPath, connection::EncryptionMode,
+    FileFullDirectoryInformation, FileLinkInformation, FileRenameInformation,
+    FileStandardInformation, Resource, Status, UncPath, connection::EncryptionMode,
 };
 use smb_dtyp::binrw_util::sized_wide_string::SizedWideString;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
@@ -1173,6 +1173,43 @@ impl SmbStorageBackend {
         combined
     }
 
+    /// Makes the complete temporary file `temp` also reachable at `key`
+    /// with `FileLinkInformation { ReplaceIfExists: FALSE }`. The server
+    /// refuses atomically when `key` exists (Samba's `link(2)` fails with
+    /// `EEXIST`), with `STATUS_OBJECT_NAME_COLLISION`. Returns the link
+    /// request's outcome and the result of closing the handle that sent it;
+    /// an error means no link was requested. The request is never replayed.
+    async fn link_without_replace(&self, temp: &str, key: &str) -> PublishAttempt {
+        self.ensure_parent_directories(key).await?;
+        let info = link_information(&self.mapped_key(key)?.replace('/', "\\"))?;
+        let file = self
+            .open_file(temp, FileAccessMask::new().with_generic_read(true))
+            .await?;
+        let generation = self.client_snapshot().await.generation;
+        let linked =
+            match tokio::time::timeout(self.inner.config.operation_timeout, file.set_info(info))
+                .await
+            {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => Err(classify_link_error(error)),
+                Err(_) => Err(LinkFailure::Unknown(remote_error(
+                    StorageProviderErrorKind::Timeout,
+                    "link",
+                    "operation timed out",
+                    true,
+                ))),
+            };
+        // The handle never had delete-on-close set, so closing it, or
+        // failing to, cannot remove the file now linked at the key.
+        let closed = self.with_timeout("close", file.close()).await;
+        let connection_lost = matches!(&linked, Err(LinkFailure::Unknown(error)) if error.is_retryable())
+            || closed.as_ref().is_err_and(StorageError::is_retryable);
+        if connection_lost {
+            let _ = self.reconnect_after(generation).await;
+        }
+        Ok((linked, closed))
+    }
+
     async fn remove_file_once(&self, key: &str) -> Result<(), StorageError> {
         remove_file_without_replay(
             self.open_file(key, FileAccessMask::new().with_delete(true)),
@@ -2155,9 +2192,9 @@ impl BlobStore for SmbStorageBackend {
         _options: BlobPutOptions,
     ) -> Result<Option<BlobWriteOutcome>, StorageError> {
         // The body is written to a unique temporary file, so the key never
-        // holds a partial object, then published by a rename that the server
-        // refuses when the key exists. Checks the caller's key, not the
-        // longer temporary key.
+        // holds a partial object, then published as a hard link at the key
+        // that the server refuses atomically when the key exists. Checks the
+        // caller's key, not the longer temporary key.
         let temp = temp_key(key)?;
         let outcome = match self.write_file(&temp, body).await {
             Ok(outcome) => outcome,
@@ -2166,27 +2203,20 @@ impl BlobStore for SmbStorageBackend {
                 return Err(error);
             }
         };
+        // Cancellation removes the temporary name only; a link the server
+        // already made at the key keeps the object there.
         let mut cleanup = TempObjectCleanupGuard::new(self.clone(), temp.clone());
-        match self.rename(&temp, key, false).await {
-            Ok(()) => {
-                cleanup.disarm();
-                Ok(Some(outcome))
-            }
-            Err(error) if is_collision(&error) => {
-                cleanup.cleanup().await;
-                Ok(None)
-            }
-            Err(error) => {
-                cleanup.cleanup().await;
-                if error.is_retryable() {
-                    // The rename may have published this object even though
-                    // its response was lost. A replay would fail against it,
-                    // so the outcome is unknown and must not be retried.
-                    Err(StorageError::single_attempt(error))
-                } else {
-                    Err(error)
-                }
-            }
+        let decision = decide_publish(self.link_without_replace(&temp, key).await);
+        if decision.removes_temp() {
+            cleanup.cleanup().await;
+        } else {
+            cleanup.disarm();
+        }
+        match decision {
+            PublishDecision::Created => Ok(Some(outcome)),
+            PublishDecision::Taken => Ok(None),
+            PublishDecision::Failed(error) => Err(error),
+            PublishDecision::Unknown(error) => Err(StorageError::single_attempt(error)),
         }
     }
 
@@ -2410,6 +2440,112 @@ impl BlobStore for SmbStorageBackend {
         validate_blob_key(key)?;
         self.remove_file(key).await
     }
+}
+
+/// Why a link request did not create the link.
+#[derive(Debug)]
+enum LinkFailure {
+    /// The server refused it with a verified status, so no link was made.
+    Refused(StorageError),
+    /// The response was lost, timed out or could not be verified, so the
+    /// server may have made the link.
+    Unknown(StorageError),
+}
+
+/// Classifies a failed link request. Only a status in a response the client
+/// verified, other than a transient one, shows that the server did not link.
+fn classify_link_error(error: smb::Error) -> LinkFailure {
+    let verified_status = matches!(
+        error,
+        smb::Error::UnexpectedMessageStatus(_) | smb::Error::ReceivedErrorMessage(_, _)
+    );
+    let mapped = map_smb_error("link", error);
+    if verified_status && !mapped.is_retryable() {
+        LinkFailure::Refused(mapped)
+    } else {
+        LinkFailure::Unknown(mapped)
+    }
+}
+
+/// A publishing link's outcome and the result of closing the handle that
+/// sent it; an error means the temporary file did not open, so no link was
+/// requested.
+type PublishAttempt = Result<(Result<(), LinkFailure>, Result<(), StorageError>), StorageError>;
+
+/// The outcome of a conditional write's publishing link.
+#[derive(Debug)]
+enum PublishDecision {
+    /// The key now holds this writer's object.
+    Created,
+    /// Another writer's object holds the key.
+    Taken,
+    /// Nothing was published.
+    Failed(StorageError),
+    /// The link may or may not have been made.
+    Unknown(StorageError),
+}
+
+impl PublishDecision {
+    /// Whether the temporary name may be removed. After an unknown outcome
+    /// it is left alone, as an orphan that listings hide: nothing about it
+    /// is certain, so nothing touches it.
+    fn removes_temp(&self) -> bool {
+        !matches!(self, Self::Unknown(_))
+    }
+}
+
+/// Decides a conditional write from its publishing link. The close of the
+/// handle that sent the link does not change the outcome: a link the server
+/// made, or refused, stays so whatever the close reports.
+fn decide_publish(published: PublishAttempt) -> PublishDecision {
+    let linked = match published {
+        Ok((linked, _closed)) => linked,
+        // The temporary file was not opened, so no link was requested.
+        Err(error) => return PublishDecision::Failed(error),
+    };
+    match linked {
+        Ok(()) => PublishDecision::Created,
+        Err(LinkFailure::Refused(error)) if is_collision(&error) => PublishDecision::Taken,
+        Err(LinkFailure::Refused(error)) => PublishDecision::Failed(error),
+        Err(LinkFailure::Unknown(error)) => PublishDecision::Unknown(error),
+    }
+}
+
+/// `FileLinkInformation` naming `destination`, a share-relative path with
+/// `\` separators, that never replaces an existing file. The type keeps its
+/// root-directory field private, so it is decoded from its MS-FSCC 2.4.8.2
+/// wire form: `ReplaceIfExists` (1 byte), 7 reserved bytes, `RootDirectory`
+/// (8 bytes, zero for network operations), `FileNameLength` (4 bytes) and the
+/// UTF-16LE name.
+fn link_information(destination: &str) -> Result<FileLinkInformation, StorageError> {
+    use binrw::BinRead;
+
+    let name: Vec<u8> = destination
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let name_length = u32::try_from(name.len()).map_err(|_| {
+        remote_error(
+            StorageProviderErrorKind::Protocol,
+            "link",
+            "link target name is too long",
+            false,
+        )
+    })?;
+    let mut wire = Vec::with_capacity(20 + name.len());
+    wire.push(0);
+    wire.extend_from_slice(&[0; 7]);
+    wire.extend_from_slice(&0_u64.to_le_bytes());
+    wire.extend_from_slice(&name_length.to_le_bytes());
+    wire.extend_from_slice(&name);
+    FileLinkInformation::read_le(&mut std::io::Cursor::new(wire)).map_err(|error| {
+        remote_error(
+            StorageProviderErrorKind::Protocol,
+            "link",
+            format!("link information could not be encoded: {error}"),
+            false,
+        )
+    })
 }
 
 async fn remove_file_without_replay<H, O, D, F>(open: O, dispose: D) -> Result<(), StorageError>
@@ -3889,6 +4025,124 @@ mod tests {
             4_096
         );
         assert!(write_request_payload_limit(0).is_err());
+    }
+
+    #[test]
+    fn link_information_never_replaces_and_names_the_key() {
+        use binrw::BinWrite;
+
+        let info = link_information("root\\dir\\key.bin").expect("link information");
+        let mut written = std::io::Cursor::new(Vec::new());
+        info.write_le(&mut written).expect("encode");
+        let name: Vec<u8> = "root\\dir\\key.bin"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let mut expected = vec![0_u8; 16];
+        expected.extend_from_slice(&u32::try_from(name.len()).unwrap().to_le_bytes());
+        expected.extend_from_slice(&name);
+        // ReplaceIfExists is FALSE and RootDirectory is zero.
+        assert_eq!(written.into_inner(), expected);
+    }
+
+    #[test]
+    fn only_a_verified_refusal_shows_that_no_link_was_made() {
+        assert!(matches!(
+            classify_link_error(smb::Error::UnexpectedMessageStatus(
+                Status::ObjectNameCollision as u32
+            )),
+            LinkFailure::Refused(error) if is_collision(&error)
+        ));
+        assert!(matches!(
+            classify_link_error(smb::Error::UnexpectedMessageStatus(
+                Status::AccessDenied as u32
+            )),
+            LinkFailure::Refused(_)
+        ));
+        // A transient status, a lost connection or an unverifiable response
+        // leaves the outcome unknown.
+        assert!(matches!(
+            classify_link_error(smb::Error::UnexpectedMessageStatus(
+                Status::IoTimeout as u32
+            )),
+            LinkFailure::Unknown(_)
+        ));
+        assert!(matches!(
+            classify_link_error(smb::Error::ConnectionStopped),
+            LinkFailure::Unknown(_)
+        ));
+        assert!(matches!(
+            classify_link_error(smb::Error::SignatureVerificationFailed),
+            LinkFailure::Unknown(_)
+        ));
+    }
+
+    #[test]
+    fn a_lost_publish_response_is_a_single_attempt_failure_that_keeps_the_temp_file() {
+        let lost = || {
+            remote_error(
+                StorageProviderErrorKind::ConnectionLost,
+                "link",
+                "connection lost",
+                true,
+            )
+        };
+        let closed_ok = || Ok(());
+        let close_failed = || {
+            Err(remote_error(
+                StorageProviderErrorKind::Timeout,
+                "close",
+                "operation timed out",
+                true,
+            ))
+        };
+        let collision = || {
+            remote_error(
+                StorageProviderErrorKind::ConditionalCreateConflict,
+                "link",
+                "object name collision",
+                false,
+            )
+        };
+
+        // A lost or timed-out link response: unknown, and the temporary file
+        // is not touched, whatever the close reports.
+        for closed in [closed_ok(), close_failed()] {
+            let decision = decide_publish(Ok((Err(LinkFailure::Unknown(lost())), closed)));
+            assert!(!decision.removes_temp());
+            assert!(matches!(decision, PublishDecision::Unknown(_)));
+        }
+        // put_blob_if_not_exists reports that as non-retryable.
+        let reported = StorageError::single_attempt(lost());
+        assert!(!reported.is_retryable());
+        assert!(matches!(reported, StorageError::SingleAttemptFailed { .. }));
+
+        // A link the server made stays made when its close fails.
+        for closed in [closed_ok(), close_failed()] {
+            let decision = decide_publish(Ok((Ok(()), closed)));
+            assert!(matches!(decision, PublishDecision::Created));
+            assert!(decision.removes_temp());
+        }
+        // So does a refusal because the key exists.
+        for closed in [closed_ok(), close_failed()] {
+            let decision = decide_publish(Ok((Err(LinkFailure::Refused(collision())), closed)));
+            assert!(matches!(decision, PublishDecision::Taken));
+            assert!(decision.removes_temp());
+        }
+        // Any other refusal, or a temporary file that did not open, published
+        // nothing.
+        let denied = remote_error(
+            StorageProviderErrorKind::PermissionDenied,
+            "link",
+            "access denied",
+            false,
+        );
+        let decision = decide_publish(Ok((Err(LinkFailure::Refused(denied)), closed_ok())));
+        assert!(matches!(decision, PublishDecision::Failed(_)));
+        assert!(decision.removes_temp());
+        let decision = decide_publish(Err(lost()));
+        assert!(matches!(decision, PublishDecision::Failed(ref error) if error.is_retryable()));
+        assert!(decision.removes_temp());
     }
 
     #[test]

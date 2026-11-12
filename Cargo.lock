@@ -3292,6 +3292,7 @@ dependencies = [
  "aws-credential-types",
  "aws-sdk-s3",
  "base64",
+ "binrw",
  "bytes",
  "futures-core",
  "futures-util",

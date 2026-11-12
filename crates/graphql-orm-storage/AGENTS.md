@@ -54,11 +54,13 @@ This crate is a reusable storage companion for applications that use `graphql-or
   `graphql-orm-backup::BlobStoreBackupRepository`. Do not duplicate SMB
   transport, manifest, retention, or locking code.
 - `put_blob_if_not_exists` on SMB writes a unique temporary file and
-  publishes it with a server-side rename that never replaces an existing
-  file. That rename is the required atomic primitive for repository locking.
-  Never write a conditional object in place at its final key, and never
-  replace the rename with an exists-then-put sequence. A publishing rename
-  whose outcome is unknown is never replayed.
+  publishes it with a server-side hard link (`FileLinkInformation`,
+  `ReplaceIfExists` false) at the key. That link is the required atomic
+  primitive for repository locking. Never write a conditional object in place
+  at its final key, never publish it with a non-replacing rename (older Samba
+  checks, then replaces), and never use an exists-then-put sequence. A link
+  whose outcome is unknown is never replayed, and its temporary file is left
+  alone.
 - Hold an SMB transfer permit only while a READ or WRITE request is in
   flight, never while waiting for a caller's body or stream consumer.
 - Use `SmbStorageBackend::probe` for redaction-safe connection and read/write

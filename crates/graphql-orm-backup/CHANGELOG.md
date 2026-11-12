@@ -20,8 +20,8 @@ Requires `graphql-orm-storage` 0.11.0. See [MIGRATION.md](MIGRATION.md).
   the second backup found the key taken while the first was still writing
   it, and could fail if it then read the object, or if the first write failed
   and removed it. ([#475](https://github.com/Dastari/graphql-orm/issues/475))
-- The SMB guide describes the lock primitive as a non-replacing rename of a
-  complete temporary file instead of `FILE_CREATE`.
+- The SMB guide describes the lock primitive as a non-replacing hard link of
+  a complete temporary file instead of `FILE_CREATE`.
 
 ## 0.15.0 (unreleased)
 

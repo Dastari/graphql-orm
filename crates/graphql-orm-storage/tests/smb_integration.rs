@@ -1209,3 +1209,78 @@ async fn samba_stalled_transfers_release_their_permits() {
         Bytes::from_static(b"stalled upload, resumed")
     );
 }
+
+/// Writers on separate connections, as separate hosts would be, race to
+/// publish the same key. Their bodies finish together, so the publishes
+/// meet at the server. Exactly one may create the key, and it must hold that
+/// writer's complete content.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the managed Samba container harness"]
+async fn samba_racing_conditional_creates_have_exactly_one_winner() {
+    const WRITERS: usize = 4;
+    const ROUNDS: usize = 25;
+    let root = format!("graphql-orm-storage-tests/{}", Uuid::new_v4());
+    let mut stores = Vec::new();
+    for _ in 0..WRITERS {
+        stores.push(Arc::new(
+            SmbStorageBackend::connect(test_config(root.clone()))
+                .await
+                .expect("connect writer"),
+        ));
+    }
+    for round in 0..ROUNDS {
+        let key = format!("race/lock-{round}.bin");
+        let ready = Arc::new(tokio::sync::Barrier::new(WRITERS));
+        let mut writers = Vec::new();
+        for (writer, store) in stores.iter().enumerate() {
+            let store = Arc::clone(store);
+            let ready = Arc::clone(&ready);
+            let key = key.clone();
+            let content = Bytes::from(
+                format!("round {round} writer {writer} ")
+                    .repeat(2_048)
+                    .into_bytes(),
+            );
+            writers.push(tokio::spawn(async move {
+                let head = content.slice(..content.len() / 2);
+                let tail = content.slice(content.len() / 2..);
+                let body = stream::once(async move { Ok(head) }).chain(stream::once(async move {
+                    // Every writer has started before any finishes its body.
+                    ready.wait().await;
+                    Ok(tail)
+                }));
+                let created = store
+                    .put_blob_if_not_exists(
+                        &key,
+                        StorageByteStream::new(Box::pin(body)),
+                        BlobPutOptions::default(),
+                    )
+                    .await
+                    .expect("conditional create");
+                (created.is_some(), content)
+            }));
+        }
+        let mut winners = Vec::new();
+        for writer in writers {
+            let (created, content) = writer.await.expect("writer task");
+            if created {
+                winners.push(content);
+            }
+        }
+        assert_eq!(
+            winners.len(),
+            1,
+            "round {round}: exactly one writer creates the key"
+        );
+        let stored = stores[0].get_blob(&key).await.expect("get");
+        assert_eq!(
+            collect_storage_stream(stored.body).await.expect("collect"),
+            winners[0],
+            "round {round}: the key holds the winner's complete content"
+        );
+    }
+    assert_eq!(
+        stores[0].list_blobs("race/").await.expect("list").len(),
+        ROUNDS
+    );
+}

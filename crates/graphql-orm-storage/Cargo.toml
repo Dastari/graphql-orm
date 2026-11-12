@@ -12,6 +12,7 @@ default = ["local"]
 local = ["dep:same-file", "dep:serde_json", "dep:tokio", "dep:tokio-util"]
 s3 = ["dep:aws-credential-types", "dep:aws-sdk-s3", "dep:base64", "dep:md-5", "dep:tokio", "dep:tokio-util"]
 smb = [
+    "dep:binrw",
     "dep:picky",
     "dep:picky-krb",
     "dep:secrecy",
@@ -43,6 +44,7 @@ serde_json = { version = "1", optional = true }
 secrecy = { version = "0.10", optional = true }
 sha2 = "0.10"
 smb = { path = "vendor/smb", version = "=0.10.2", optional = true, default-features = false, features = ["async", "encrypt", "sign", "netbios-transport"] }
+binrw = { version = "0.15.0", optional = true }
 smb-dtyp = { version = "=0.10.2", optional = true }
 smb-fscc = { version = "=0.10.2", optional = true }
 smb-msg = { version = "=0.10.2", optional = true }

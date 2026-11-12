@@ -1051,8 +1051,10 @@ impl Drop for TempFile {
             return;
         }
         self.abandoned.store(true, Ordering::SeqCst);
-        // One unlink of a unique name; a write still in flight keeps its
-        // descriptor and finishes harmlessly.
+        // Blocking on purpose: `Drop` cannot await, and a spawned removal
+        // may never run if the runtime is shutting down. It is one unlink of a
+        // unique name; a write still in flight keeps its descriptor and
+        // finishes harmlessly.
         let _ = std::fs::remove_file(&self.path);
     }
 }

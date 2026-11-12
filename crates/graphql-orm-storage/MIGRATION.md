@@ -20,10 +20,13 @@ Update the storage requirement to 0.11.0 and refresh the consumer lockfile.
    sessions, and the setting never turned signing off. Use
    `require_encryption` for a stronger guarantee.
 2. **Unknown SMB conditional-create outcomes.** `put_blob_if_not_exists` now
-   publishes a complete temporary file with a rename that never replaces the
-   key. If the rename's response is lost, it fails with
+   publishes a complete temporary file as a hard link at the key that never
+   replaces an existing file. The server must support `FileLinkInformation`
+   (hard links) on the share; Samba and NTFS shares do. If the link's response
+   is lost, times out or cannot be verified, it fails with
    `StorageError::SingleAttemptFailed`, which is not retryable: the key may
-   hold this call's complete object. Treat it as an unknown outcome, as for
+   hold this call's complete object. Its temporary file is left in place and
+   hidden from listings. Treat it as an unknown outcome, as for
    local storage. Do not report it as a collision and do not retry the same
    call blindly; a retry would find the key taken. `Ok(Some(_))` and
    `Ok(None)` keep their meanings, and the key is never visible while
@@ -41,6 +44,18 @@ Update the storage requirement to 0.11.0 and refresh the consumer lockfile.
    `MissingBlob`, or `Ok(None)` from the conditional writes instead. Some
    errors change retryability: a client error is no longer retryable because
    the response had a `Connection` header or its message mentioned a timeout.
+5. **S3 missing bucket.** `get_blob`, `get_blob_range` and `copy_blob`
+   against a missing bucket (`NoSuchBucket`, HTTP 404) always fail with a
+   non-retryable `StorageError::Provider` error, never with
+   `StorageError::MissingBlob`. Only `NoSuchKey`, `NotFound` and a 404
+   without an error code mean a missing key. Before, the result depended on
+   the SDK's debug text: a missing bucket was `MissingBlob` when that text
+   contained `NotFound`, `Not Found` or `status: 404`, and otherwise a
+   provider error, retryable whenever the response had a `Connection`
+   header. Treat this error as a configuration fault, not as an absent
+   object. `head_blob` and `blob_exists` still report a missing bucket as a
+   missing key, because a HEAD response carries no error code to tell them
+   apart.
 
 ## 0.9.3 to 0.10.0: SMB 3.1.1 minimum, reserved namespace, string prefixes
 

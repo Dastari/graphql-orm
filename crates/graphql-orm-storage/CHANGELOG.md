@@ -17,16 +17,23 @@ whose outcome is unknown fail as single-attempt errors, and S3 provider error
 messages have a new form. See [MIGRATION.md](MIGRATION.md).
 
 - SMB: `put_blob_if_not_exists` writes the body to a unique temporary file
-  and publishes it with a rename that never replaces an existing file. It
-  used to create the final key with `FILE_CREATE` and stream the body into
-  it, so the key existed, partly written, until the write finished, and a
+  and publishes it as a hard link at the key, with `FileLinkInformation`
+  and `ReplaceIfExists` false, then removes the temporary name. It used to
+  create the final key with `FILE_CREATE` and stream the body into it, so
+  the key existed, partly written, until the write finished, and a
   concurrent writer of the same key got `Ok(None)` for an object that was
   incomplete and was deleted again if that write failed. Now the key appears
   only with its complete content, and `Ok(None)` means another writer's
-  complete object holds it. The server refuses the rename atomically when
-  the key exists, so this is still no existence-check race. A rename whose
-  response is lost fails with non-retryable `StorageError::SingleAttemptFailed`,
-  because the key may hold this writer's complete object.
+  complete object holds it. Creating a link fails atomically when the name
+  exists (`link(2)` fails with `EEXIST` on Samba), so concurrent writers on
+  separate connections get exactly one `Ok(Some(_))`; the managed Samba
+  suite races four such writers over 25 keys. A rename without replacement
+  was not used, because older Samba releases implement it as a check
+  followed by a replacing rename. A link whose outcome is unknown, because
+  its response was lost, timed out or could not be verified, fails with
+  non-retryable `StorageError::SingleAttemptFailed`, and the temporary file
+  is left in place, hidden from listings, because the key may hold this
+  writer's complete object.
   ([#475](https://github.com/Dastari/graphql-orm/issues/475))
 - SMB: a transfer permit is held only while one READ or WRITE request is in
   flight. A download held a permit from `get_blob` until its stream ended or
