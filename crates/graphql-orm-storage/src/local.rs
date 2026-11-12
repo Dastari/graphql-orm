@@ -792,14 +792,19 @@ impl LocalStorageBackend {
     /// root, durable before returning.
     ///
     /// Each directory from `dir` upward has its entry synced in its parent
-    /// until the walk reaches the root or a directory this backend already
-    /// made durable. A directory that existed is synced too, because another
-    /// writer may have created it and not synced it yet. A directory that was
-    /// missing at the start of the call is always synced, even if remembered,
-    /// because it was removed and recreated. The root's own entry is synced
-    /// only when this call created the root. Directories are remembered only
-    /// after their whole chain synced, so a failed sync is retried by the next
-    /// write.
+    /// until the walk reaches the root or a directory this backend remembers
+    /// as durable. A directory that existed is synced too, because another
+    /// writer may have created it and not synced it yet. A directory found
+    /// missing is forgotten before it is created, so a concurrent call cannot
+    /// trust it before this call has synced its entry. The root's own entry is
+    /// synced only when this call created the root. Directories are remembered
+    /// only after their whole chain synced, so a failed sync is retried by the
+    /// next write.
+    ///
+    /// The memory assumes nothing outside this backend removes directories
+    /// under the root while it runs, as the trusted-root contract requires: a
+    /// remembered directory removed and recreated elsewhere, and still present
+    /// when checked, remains trusted.
     pub(crate) fn create_dir_durably(&self, dir: &Path) -> Result<(), StorageError> {
         let mut missing = Vec::new();
         let mut ancestor = dir;
@@ -820,6 +825,17 @@ impl LocalStorageBackend {
         }
         if missing.is_empty() && (dir == self.root || self.is_durable_dir(dir)) {
             return Ok(());
+        }
+        if !missing.is_empty() {
+            // Forget the missing directories before recreating them, so that a
+            // concurrent call that finds them present syncs their entries too.
+            let mut durable = self
+                .durable_dirs
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            for directory in &missing {
+                durable.remove(directory);
+            }
         }
 
         std::fs::create_dir_all(dir).map_err(|source| StorageError::io(dir, source))?;
@@ -1046,14 +1062,32 @@ pub(crate) fn sync_dir_blocking(dir: &Path) -> Result<(), StorageError> {
     Ok(())
 }
 
+/// Whether `EBADF` is 9 and `EINVAL` is 22 on this target. Only the targets
+/// listed are confirmed; on any other Unix target no directory sync error is
+/// tolerated.
+#[cfg(unix)]
+const KNOWN_DIRECTORY_SYNC_ERRNOS: bool = cfg!(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly",
+    target_os = "illumos",
+    target_os = "solaris",
+    target_os = "aix"
+));
+
 /// Whether a directory fsync failed because the file system does not support
-/// syncing directories. `EBADF` (9) and `EINVAL` (22) have these values on
-/// every Unix platform Rust supports.
+/// syncing directories, reported as `EBADF` (9) or `EINVAL` (22). This holds
+/// only on the targets in [`KNOWN_DIRECTORY_SYNC_ERRNOS`]; elsewhere it is
+/// always false, so a directory sync failure fails the operation.
 #[cfg(unix)]
 fn directory_sync_unsupported(err: &std::io::Error) -> bool {
     const EBADF: i32 = 9;
     const EINVAL: i32 = 22;
-    matches!(err.raw_os_error(), Some(EBADF | EINVAL))
+    KNOWN_DIRECTORY_SYNC_ERRNOS && matches!(err.raw_os_error(), Some(EBADF | EINVAL))
 }
 
 /// Opens a file that was written by another call, such as a copy, and syncs it.
@@ -1187,8 +1221,8 @@ mod durability_tests {
     use tempfile::TempDir;
 
     use super::{
-        DurabilityStep, LocalStorageBackend, directory_sync_unsupported, durability_log,
-        is_uploading_temp_file,
+        DurabilityStep, KNOWN_DIRECTORY_SYNC_ERRNOS, LocalStorageBackend,
+        directory_sync_unsupported, durability_log, is_uploading_temp_file,
     };
     use crate::{
         BlobPutOptions, BlobStore, MultipartBlobStore, MultipartStartOptions, ObjectMetadata,
@@ -1520,6 +1554,47 @@ mod durability_tests {
     }
 
     #[tokio::test]
+    async fn a_remembered_directory_is_forgotten_before_it_is_recreated() {
+        let temp = TempDir::new().expect("temp dir");
+        let backend = LocalStorageBackend::new(temp.path());
+        backend
+            .put_blob("a/b/one", body(), BlobPutOptions::default())
+            .await
+            .expect("put blob");
+        std::fs::remove_dir_all(temp.path().join("a/b")).expect("remove directory");
+        let _ = durability_log::take_under(temp.path());
+
+        // Writer X finds the remembered `a/b` missing and recreates it, but
+        // has not made its entry durable yet when writer Y arrives. The
+        // injected failure stops X at that point.
+        durability_log::fail_next_dir_sync(&temp.path().join("a"));
+        backend
+            .put_blob("a/b/two", body(), BlobPutOptions::default())
+            .await
+            .expect_err("writer X stops before syncing the entry");
+        assert!(temp.path().join("a/b").is_dir());
+        let _ = durability_log::take_under(temp.path());
+
+        // Writer Y finds `a/b` present and must not trust it.
+        backend
+            .put_blob("a/b/three", body(), BlobPutOptions::default())
+            .await
+            .expect("writer Y");
+        let steps = durability_log::take_under(temp.path());
+        let target = temp.path().join("a/b/three");
+        let published = position(&steps, DurabilityStep::Published, &target).expect("published");
+        assert!(
+            position(
+                &steps[..published],
+                DurabilityStep::DirSynced,
+                &temp.path().join("a")
+            )
+            .is_some(),
+            "writer Y trusted the recreated directory: {steps:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn a_failed_directory_sync_is_retried_by_the_next_write() {
         let temp = TempDir::new().expect("temp dir");
         let backend = LocalStorageBackend::new(temp.path());
@@ -1545,17 +1620,20 @@ mod durability_tests {
 
     #[test]
     fn only_unsupported_directory_sync_errors_are_tolerated() {
-        assert!(directory_sync_unsupported(
-            &std::io::Error::from_raw_os_error(22)
-        ));
-        assert!(directory_sync_unsupported(
-            &std::io::Error::from_raw_os_error(9)
-        ));
-        assert_eq!(
-            std::io::Error::from_raw_os_error(22).kind(),
-            std::io::ErrorKind::InvalidInput,
-            "EINVAL has the expected value"
-        );
+        // Tolerated only where the errno values are confirmed.
+        for code in [9, 22] {
+            assert_eq!(
+                directory_sync_unsupported(&std::io::Error::from_raw_os_error(code)),
+                KNOWN_DIRECTORY_SYNC_ERRNOS
+            );
+        }
+        if KNOWN_DIRECTORY_SYNC_ERRNOS {
+            assert_eq!(
+                std::io::Error::from_raw_os_error(22).kind(),
+                std::io::ErrorKind::InvalidInput,
+                "EINVAL has the expected value"
+            );
+        }
         for code in [1, 5, 13, 28, 30] {
             assert!(!directory_sync_unsupported(
                 &std::io::Error::from_raw_os_error(code)

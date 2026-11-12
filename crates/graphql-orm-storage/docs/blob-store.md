@@ -133,12 +133,20 @@ A successful local write is durable once it returns:
   directory's entry durable, until it reaches the root or a directory the
   backend has already made durable. A directory that already existed is
   included, because another writer may have created it and not synced it yet.
-  A directory that was missing when the call started is always synced, even
-  if the backend had made it durable earlier. The root's own entry is synced
-  only when the write created the root. Each backend instance remembers up to
-  4,096 durable directories, shared by its clones, and records them only after
-  the whole chain has synced, so a failed sync is repeated by the next write.
+  The root's own entry is synced only when the write created the root.
   Multipart staging makes its upload directories durable the same way.
+- Each backend instance remembers up to 4,096 directories it has made durable,
+  shared by its clones. It records a directory only after the whole chain has
+  synced, so a failed sync is repeated by the next write. When a write finds a
+  remembered directory missing, it forgets that directory before recreating
+  it, then syncs the entry itself, so no concurrent write trusts the
+  recreated directory before its entry is durable.
+- This memory assumes that nothing outside the backend removes directories
+  under its root while the backend runs, as the
+  [trust boundary](#local-filesystem-trust-boundary) requires. A remembered
+  directory that another process removes and recreates, while this backend's
+  writes still find it present, stays trusted until the backend instance is
+  recreated, and a crash can then lose its entry.
 - `delete_blob`, `delete_blob_once` and `StreamingObjectStore::delete_object`
   fsync the parent directory after removing the file. A deletion of a key that
   is already missing still syncs its directory when the directory exists.
@@ -150,11 +158,14 @@ A successful local write is durable once it returns:
   `StorageError::Io`, and repeating them is safe.
 
 File fsync errors always fail the operation. Directory syncs run on Unix only;
-other platforms rely on the file system to persist directory entries. On Unix,
-a directory fsync that fails with `EINVAL` or `EBADF`, which file systems
-without directory sync report (some CIFS mounts and VM shared folders, for
-example), is accepted without syncing, as PostgreSQL does. Any other directory
-sync error, including failing to open the directory, fails the operation.
+other platforms rely on the file system to persist directory entries. On
+Linux, Android, Apple platforms, FreeBSD, NetBSD, OpenBSD, DragonFly BSD,
+illumos, Solaris and AIX, a directory fsync that fails with `EINVAL` or
+`EBADF`, which file systems without directory sync report (some CIFS mounts
+and VM shared folders, for example), is accepted without syncing, as
+PostgreSQL does. Other Unix targets accept no directory sync error. Any other
+directory sync error, including failing to open the directory, fails the
+operation.
 Network file systems mounted under a local root may not honour these syncs.
 
 ## Key Safety

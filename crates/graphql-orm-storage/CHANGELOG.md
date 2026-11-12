@@ -26,7 +26,9 @@ supersedes: []
   place, then fsync the parent directory. Before publishing, each write,
   multipart staging and multipart completion fsyncs the target's directory
   chain up to the root or to a directory already made durable, including
-  directories that another writer created. The removals made by `delete_blob`,
+  directories that another writer created. Each backend instance remembers the
+  directories it made durable, assuming nothing outside it removes directories
+  under its root while it runs. The removals made by `delete_blob`,
   `delete_blob_once` and `StreamingObjectStore::delete_object` are synced as
   well. Before this, a crash could leave a truncated or missing object behind
   a successful write, such as a truncated backup manifest or content blob.
@@ -37,7 +39,8 @@ supersedes: []
   syncs the directory before returning `Ok(None)`.
 - Directory syncs run on Unix only. A directory fsync that fails with `EINVAL`
   or `EBADF` from a file system without directory sync is accepted, as
-  PostgreSQL does. File fsync errors always fail the operation. The multipart
+  PostgreSQL does, on Linux, Android, Apple platforms, the BSDs, illumos,
+  Solaris and AIX; other Unix targets accept no directory sync error. File fsync errors always fail the operation. The multipart
   staging directory syncs follow the same rule.
 - Writes are slower on the local backend, because each one now waits for the
   file system to reach stable storage.

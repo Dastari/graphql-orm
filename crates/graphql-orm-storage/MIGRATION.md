@@ -26,8 +26,9 @@ API, configuration or object format change is required.
   systems with slow syncs. Data written by earlier versions has not been
   synced. Run any verification you depend on, such as a backup verify, after
   an unclean shutdown that happened before the upgrade.
-- A file system that cannot sync directories keeps working: on Unix, `EINVAL`
-  and `EBADF` from a directory fsync are accepted. A file system that rejects
+- A file system that cannot sync directories keeps working: on Linux,
+  Android, Apple platforms, the BSDs, illumos, Solaris and AIX, `EINVAL` and
+  `EBADF` from a directory fsync are accepted. A file system that rejects
   file fsync now fails local writes. Use a root on a file system that supports
   it.
 - `put_blob_if_not_exists` can now return non-retryable
