@@ -10,6 +10,57 @@ supersedes: []
 
 # Changelog
 
+## 0.11.0 (unreleased)
+
+Breaking: SMB `require_signing = false` is refused, SMB conditional creates
+whose outcome is unknown fail as single-attempt errors, and S3 provider error
+messages have a new form. See [MIGRATION.md](MIGRATION.md).
+
+- SMB: `put_blob_if_not_exists` writes the body to a unique temporary file
+  and publishes it with a rename that never replaces an existing file. It
+  used to create the final key with `FILE_CREATE` and stream the body into
+  it, so the key existed, partly written, until the write finished, and a
+  concurrent writer of the same key got `Ok(None)` for an object that was
+  incomplete and was deleted again if that write failed. Now the key appears
+  only with its complete content, and `Ok(None)` means another writer's
+  complete object holds it. The server refuses the rename atomically when
+  the key exists, so this is still no existence-check race. A rename whose
+  response is lost fails with non-retryable `StorageError::SingleAttemptFailed`,
+  because the key may hold this writer's complete object.
+  ([#475](https://github.com/Dastari/graphql-orm/issues/475))
+- SMB: a transfer permit is held only while one READ or WRITE request is in
+  flight. A download held a permit from `get_blob` until its stream ended or
+  was dropped, and an upload held one for the whole write, so a consumer that
+  stopped reading, or a body that stopped yielding, blocked every other
+  transfer once `max_transfer_concurrency` such streams stalled.
+  `max_transfer_concurrency` now bounds concurrent READ and WRITE requests.
+  ([#483](https://github.com/Dastari/graphql-orm/issues/483))
+- SMB: listings enter only directories that can hold keys with the listing
+  prefix, instead of walking the whole tree below `root_prefix` for every
+  listing and page. Listing limits count only the entries enumerated.
+  ([#483](https://github.com/Dastari/graphql-orm/issues/483))
+- SMB: `SmbStorageConfig::validate`, and so `connect` and `probe`, refuse
+  `require_signing = false` with a non-retryable configuration error. The
+  client signs every authenticated session and refuses guest sessions, so the
+  setting never had an effect.
+  ([#483](https://github.com/Dastari/graphql-orm/issues/483))
+- S3: errors are classified from the SDK's error kind, the service error code
+  and the HTTP status, not by searching the SDK's debug text. Before, text
+  anywhere in that text, such as a `Connection: close` response header or the
+  server's message, could make a client error retryable. Provider error
+  messages are a short summary: the error code, HTTP status, request id and
+  the server's message, at most 256 characters of it, or the transport
+  failure. They no longer contain the SDK's debug output with the raw
+  response headers and body. Retryable errors are timeouts, transport and
+  response failures, HTTP 5xx and 429, and throttling and timeout error codes.
+  A failed `If-None-Match` condition is recognised by its code or status 412.
+  ([#479](https://github.com/Dastari/graphql-orm/issues/479))
+- Local: a write that is cancelled or dropped before it publishes removes its
+  temporary file, as S3 aborts its multipart upload. This covers `put_blob`,
+  `put_blob_if_not_exists`, `copy_blob`, `put_object_stream` and a multipart
+  object writer dropped without `complete` or `abort`. Before, the abandoned
+  `.<uuid>.uploading` file stayed until `sweep_temp_files` removed it.
+
 ## 0.10.0 (unreleased)
 
 Breaking: the SMB default minimum dialect, the reserved internal key

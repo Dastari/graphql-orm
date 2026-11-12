@@ -137,7 +137,10 @@ pub struct SmbStorageConfig {
     /// lower dialect fails. SMB1 is never offered. See [`SmbDialect`] before
     /// lowering it.
     pub min_dialect: SmbDialect,
-    /// Require signed authenticated SMB messages.
+    /// Require signed authenticated SMB messages. Must be `true`, the
+    /// default: the client signs every authenticated session and refuses
+    /// guest sessions, so it cannot turn signing off, and
+    /// [`SmbStorageConfig::validate`] refuses `false`.
     pub require_signing: bool,
     /// Require SMB3 encryption for the session.
     pub require_encryption: bool,
@@ -145,7 +148,9 @@ pub struct SmbStorageConfig {
     pub connect_timeout: Duration,
     /// Deadline for each storage operation.
     pub operation_timeout: Duration,
-    /// Maximum number of simultaneous streaming transfers.
+    /// Maximum number of SMB READ and WRITE requests in flight at once. A
+    /// request holds its permit only until its response arrives, so an open
+    /// download or an upload waiting for its body holds none.
     pub max_transfer_concurrency: usize,
     /// Server GUID the server must report during negotiation. When `None`, the
     /// GUID reported by the first successful connection is pinned instead.
@@ -226,6 +231,11 @@ impl SmbStorageConfig {
         }
         if self.port == 0 {
             return Err(invalid_config("port must be greater than zero"));
+        }
+        if !self.require_signing {
+            return Err(invalid_config(
+                "unsigned SMB sessions are not supported; require_signing must be true",
+            ));
         }
         if self.connect_timeout.is_zero()
             || self.operation_timeout.is_zero()
@@ -338,7 +348,7 @@ pub struct SmbBackendDiagnostics {
     pub connection_generation: u64,
     /// Conservative payload limit currently used for each SMB WRITE request.
     pub write_request_payload_limit: usize,
-    /// Upload operations currently running or waiting for a transfer permit.
+    /// Upload operations currently running.
     pub active_uploads: u64,
     /// Upload operations started since this backend was connected.
     pub uploads_started: u64,
@@ -971,23 +981,18 @@ impl SmbStorageBackend {
         }
     }
 
+    /// Writes `body` to the unique temporary key `key`, which the caller then
+    /// publishes. Each WRITE request takes a transfer permit while it is in
+    /// flight; waiting for the body holds none.
     async fn write_file(
         &self,
         key: &str,
         body: StorageByteStream,
-        exclusive: bool,
     ) -> Result<BlobWriteOutcome, StorageError> {
         let mut upload = UploadDiagnosticGuard::new(Arc::clone(&self.inner));
-        let _permit = self.transfer_permit().await?;
-        let args = write_create_args(exclusive);
         let (file, generation, request_limit) =
-            self.create_write_file(key, &args, !exclusive).await?;
-        let target = if exclusive {
-            WriteCleanupTarget::ExclusiveHandle
-        } else {
-            WriteCleanupTarget::TemporaryPath(key.to_string())
-        };
-        let mut cleanup = WriteCleanupGuard::new(self.clone(), target, file, generation);
+            self.create_write_file(key, &temp_create_args()).await?;
+        let mut cleanup = WriteCleanupGuard::new(self.clone(), key.to_string(), file, generation);
 
         // Delete-on-close makes cancellation safe after CREATE succeeds. The flag
         // is cleared only after the complete stream has been flushed.
@@ -1011,13 +1016,13 @@ impl SmbStorageBackend {
             target: "graphql_orm_storage::smb",
             event = "upload_started",
             key,
-            conditional = exclusive,
             size_hint = body.size_hint(),
             write_request_payload_limit = request_limit,
         );
         let writer = TimedSmbBlockWriter {
             file: cleanup.file(),
             timeout: self.inner.config.operation_timeout,
+            transfer_limit: &self.inner.transfer_limit,
         };
         let outcome = match write_stream_to_writer(
             &writer,
@@ -1038,7 +1043,6 @@ impl SmbStorageBackend {
                     target: "graphql_orm_storage::smb",
                     event = "upload_failed",
                     key,
-                    conditional = exclusive,
                     error_kind = ?provider_error_kind(&error),
                 );
                 return Err(error);
@@ -1080,17 +1084,17 @@ impl SmbStorageBackend {
             target: "graphql_orm_storage::smb",
             event = "upload_completed",
             key,
-            conditional = exclusive,
             size_bytes = outcome.size_bytes,
         );
         Ok(outcome)
     }
 
+    /// Creates the unique temporary key `key`. Its name is never reused, so
+    /// a CREATE whose response was lost may be replayed.
     async fn create_write_file(
         &self,
         key: &str,
         args: &FileCreateArgs,
-        replay_safe: bool,
     ) -> Result<(File, u64, usize), StorageError> {
         for path_attempt in 0..2 {
             self.ensure_parent_directories(key).await?;
@@ -1121,12 +1125,9 @@ impl SmbStorageBackend {
                 }
                 Err(error) if error.is_retryable() => {
                     self.reconnect_after(snapshot.generation).await?;
-                    if replay_safe && path_attempt == 0 {
+                    if path_attempt == 0 {
                         continue;
                     }
-                    // An exclusive CREATE may have reached the server even when
-                    // its response was lost. Replaying it could turn our own
-                    // partial object into a false collision.
                     return Err(error);
                 }
                 Err(error) => return Err(error),
@@ -1224,27 +1225,23 @@ impl SmbStorageBackend {
         Ok(())
     }
 
+    /// A permit for one READ or WRITE request. Hold it only while that
+    /// request is in flight, never while waiting for a caller's body or for
+    /// a stream's consumer, so a stalled transfer cannot block others.
     async fn transfer_permit(&self) -> Result<OwnedSemaphorePermit, StorageError> {
         Arc::clone(&self.inner.transfer_limit)
             .acquire_owned()
             .await
-            .map_err(|_| {
-                remote_error(
-                    StorageProviderErrorKind::Protocol,
-                    "transfer",
-                    "transfer limiter is closed",
-                    false,
-                )
-            })
+            .map_err(|_| transfer_limiter_closed())
     }
 
     /// Lists every key once. One `listing_timeout` deadline covers both
     /// attempts and the reconnect between them.
-    async fn collect_keys(&self) -> Result<Vec<String>, StorageError> {
+    async fn collect_keys(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
         let limits = ListingLimits::from_config(&self.inner.config);
         within_listing_deadline(
             limits.timeout,
-            retry_listing_once(|| self.collect_keys_attempt(limits)),
+            retry_listing_once(|| self.collect_keys_attempt(limits, prefix)),
         )
         .await
     }
@@ -1252,9 +1249,13 @@ impl SmbStorageBackend {
     async fn collect_keys_attempt(
         &self,
         limits: ListingLimits,
+        prefix: &str,
     ) -> Result<Vec<String>, StorageError> {
         let snapshot = self.client_snapshot().await;
-        match self.collect_keys_once(&snapshot.client, limits).await {
+        match self
+            .collect_keys_once(&snapshot.client, limits, prefix)
+            .await
+        {
             Err(error) if error.is_retryable() => {
                 self.reconnect_after(snapshot.generation).await?;
                 Err(error)
@@ -1267,6 +1268,7 @@ impl SmbStorageBackend {
         &self,
         client: &Client,
         limits: ListingLimits,
+        prefix: &str,
     ) -> Result<Vec<String>, StorageError> {
         let source = SmbListingSource {
             backend: self,
@@ -1274,7 +1276,7 @@ impl SmbStorageBackend {
             base: self.share_path()?,
         };
         let root = self.inner.config.root_prefix.clone().unwrap_or_default();
-        let mut keys = walk_listing(&source, root, limits).await?;
+        let mut keys = walk_listing(&source, root, prefix, limits).await?;
         keys.retain(|key| !is_temp_key(key));
         keys.sort();
         Ok(keys)
@@ -1406,10 +1408,12 @@ where
 }
 
 /// Walks the tree under the share-relative `root` within `limits`, returning
-/// file keys relative to `root`.
+/// file keys relative to `root`. Only directories that can hold a key
+/// starting with `prefix` are entered, and only such files are returned.
 async fn walk_listing<S: ListingSource>(
     source: &S,
     root: String,
+    prefix: &str,
     limits: ListingLimits,
 ) -> Result<Vec<String>, StorageError> {
     let mut budget = ListingBudget::new(limits);
@@ -1438,6 +1442,9 @@ async fn walk_listing<S: ListingSource>(
             };
             // The name was charged when enumerated; charge the parent path.
             budget.charge(child.len() - name_len)?;
+            if !may_hold_prefix(&child, entry.directory, prefix) {
+                continue;
+            }
             // A name no key can address, such as the reserved internal
             // namespace at the root or a name with the stream separator `:`,
             // is skipped. Every key below such a directory contains the same
@@ -1468,6 +1475,18 @@ async fn walk_listing<S: ListingSource>(
         }
     }
     Ok(files)
+}
+
+/// Whether the root-relative `path` can hold keys starting with `prefix`: a
+/// file whose key starts with it, or a directory whose keys can. A directory
+/// can when its path with a trailing `/` and the prefix agree up to the
+/// shorter of the two.
+fn may_hold_prefix(path: &str, directory: bool, prefix: &str) -> bool {
+    if !directory {
+        return path.starts_with(prefix);
+    }
+    let directory = format!("{path}/");
+    directory.starts_with(prefix) || prefix.starts_with(&directory)
 }
 
 /// Validates a caller's key: a safe relative key no longer than
@@ -1781,29 +1800,22 @@ impl Drop for UploadDiagnosticGuard {
     }
 }
 
-#[derive(Clone)]
-enum WriteCleanupTarget {
-    // Conditional creation uses a shared key. Never retain it for fallback
-    // cleanup: closing the original handle can allow a new owner to create it.
-    ExclusiveHandle,
-    TemporaryPath(String),
-}
-
-async fn cleanup_write_target<'a, C, R, F>(target: &'a WriteCleanupTarget, close: C, remove: R)
+/// Closes a write's handle, then removes its unique temporary file. Only a
+/// temporary name is ever written, so removing it never touches a published
+/// key or another writer's object.
+async fn cleanup_write_target<'a, C, R, F>(temp_key: &'a str, close: C, remove: R)
 where
     C: std::future::Future<Output = ()>,
     R: FnOnce(&'a str) -> F,
     F: std::future::Future<Output = Result<(), StorageError>>,
 {
     close.await;
-    if let WriteCleanupTarget::TemporaryPath(key) = target {
-        let _ = remove(key).await;
-    }
+    let _ = remove(temp_key).await;
 }
 
 struct WriteCleanupGuard {
     backend: SmbStorageBackend,
-    target: WriteCleanupTarget,
+    target: String,
     file: Option<File>,
     generation: u64,
     armed: bool,
@@ -1852,12 +1864,7 @@ impl Drop for TempObjectCleanupGuard {
 }
 
 impl WriteCleanupGuard {
-    fn new(
-        backend: SmbStorageBackend,
-        target: WriteCleanupTarget,
-        file: File,
-        generation: u64,
-    ) -> Self {
+    fn new(backend: SmbStorageBackend, target: String, file: File, generation: u64) -> Self {
         Self {
             backend,
             target,
@@ -1941,11 +1948,18 @@ trait SmbBlockWriter: Send + Sync {
 struct TimedSmbBlockWriter<'a> {
     file: &'a File,
     timeout: Duration,
+    transfer_limit: &'a Semaphore,
 }
 
 #[async_trait]
 impl SmbBlockWriter for TimedSmbBlockWriter<'_> {
     async fn write_block(&self, bytes: &[u8], offset: u64) -> Result<usize, StorageError> {
+        // Held for this request only, never while the body is awaited.
+        let _permit = self
+            .transfer_limit
+            .acquire()
+            .await
+            .map_err(|_| transfer_limiter_closed())?;
         tokio::time::timeout(self.timeout, self.file.write_block(bytes, offset, None))
             .await
             .map_err(|_| {
@@ -2083,12 +2097,19 @@ fn write_request_payload_limit(max_write_size: u32) -> Result<usize, StorageErro
     })
 }
 
-fn write_create_args(exclusive: bool) -> FileCreateArgs {
-    if exclusive {
-        FileCreateArgs::make_create_new(FileAttributes::new(), CreateOptions::new())
-    } else {
-        FileCreateArgs::make_overwrite(FileAttributes::new(), CreateOptions::new())
-    }
+/// Create arguments for a unique temporary file. Overwriting makes a replayed
+/// CREATE, after a lost response, open the same new file.
+fn temp_create_args() -> FileCreateArgs {
+    FileCreateArgs::make_overwrite(FileAttributes::new(), CreateOptions::new())
+}
+
+fn transfer_limiter_closed() -> StorageError {
+    remote_error(
+        StorageProviderErrorKind::Protocol,
+        "transfer",
+        "transfer limiter is closed",
+        false,
+    )
 }
 
 #[async_trait]
@@ -2110,7 +2131,7 @@ impl BlobStore for SmbStorageBackend {
     ) -> Result<BlobWriteOutcome, StorageError> {
         // Checks the caller's key, not the longer temporary key.
         let temp = temp_key(key)?;
-        let result = self.write_file(&temp, body, false).await;
+        let result = self.write_file(&temp, body).await;
         let outcome = match result {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -2133,17 +2154,44 @@ impl BlobStore for SmbStorageBackend {
         body: StorageByteStream,
         _options: BlobPutOptions,
     ) -> Result<Option<BlobWriteOutcome>, StorageError> {
-        check_key(key)?;
-        match self.write_file(key, body, true).await {
-            Ok(outcome) => Ok(Some(outcome)),
-            Err(error) if is_collision(&error) => Ok(None),
-            Err(error) => Err(error),
+        // The body is written to a unique temporary file, so the key never
+        // holds a partial object, then published by a rename that the server
+        // refuses when the key exists. Checks the caller's key, not the
+        // longer temporary key.
+        let temp = temp_key(key)?;
+        let outcome = match self.write_file(&temp, body).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let _ = self.remove_file(&temp).await;
+                return Err(error);
+            }
+        };
+        let mut cleanup = TempObjectCleanupGuard::new(self.clone(), temp.clone());
+        match self.rename(&temp, key, false).await {
+            Ok(()) => {
+                cleanup.disarm();
+                Ok(Some(outcome))
+            }
+            Err(error) if is_collision(&error) => {
+                cleanup.cleanup().await;
+                Ok(None)
+            }
+            Err(error) => {
+                cleanup.cleanup().await;
+                if error.is_retryable() {
+                    // The rename may have published this object even though
+                    // its response was lost. A replay would fail against it,
+                    // so the outcome is unknown and must not be retried.
+                    Err(StorageError::single_attempt(error))
+                } else {
+                    Err(error)
+                }
+            }
         }
     }
 
     async fn get_blob(&self, key: &str) -> Result<BlobBody, StorageError> {
         validate_blob_key(key)?;
-        let permit = self.transfer_permit().await?;
         let file = self
             .open_file(key, FileAccessMask::new().with_generic_read(true))
             .await?;
@@ -2163,8 +2211,8 @@ impl BlobStore for SmbStorageBackend {
         let stream_key = key.to_string();
         let backend = self.clone();
         let body = stream::try_unfold(
-            (Some(file), 0_u64, size, permit, stream_key.clone()),
-            move |(file, offset, size, permit, key)| {
+            (Some(file), 0_u64, size, stream_key.clone()),
+            move |(file, offset, size, key)| {
                 let backend = backend.clone();
                 async move {
                     let Some(file) = file else {
@@ -2192,6 +2240,9 @@ impl BlobStore for SmbStorageBackend {
                     let chunk_len = usize::try_from((size - offset).min(READ_CHUNK_SIZE as u64))
                         .unwrap_or(READ_CHUNK_SIZE);
                     let mut buffer = vec![0_u8; chunk_len];
+                    // Held for this READ only: a consumer that stops polling
+                    // the stream holds the open handle but no permit.
+                    let permit = backend.transfer_permit().await?;
                     let read = match tokio::time::timeout(
                         operation_timeout,
                         file.read_block(&mut buffer, offset, None, false),
@@ -2206,6 +2257,7 @@ impl BlobStore for SmbStorageBackend {
                             true,
                         )),
                     };
+                    drop(permit);
                     let read = match read {
                         Ok(read) => read,
                         Err(error) => {
@@ -2241,10 +2293,7 @@ impl BlobStore for SmbStorageBackend {
                                 false,
                             )
                         })?;
-                    Ok(Some((
-                        Bytes::from(buffer),
-                        (Some(file), next, size, permit, key),
-                    )))
+                    Ok(Some((Bytes::from(buffer), (Some(file), next, size, key))))
                 }
             },
         );
@@ -2338,7 +2387,7 @@ impl BlobStore for SmbStorageBackend {
         if let Some(token) = continuation.as_deref() {
             ListingContinuation::parse(token)?.next_page()?;
         }
-        let keys = self.collect_keys().await?;
+        let keys = self.collect_keys(prefix).await?;
         listing_page(
             keys,
             prefix,
@@ -2352,7 +2401,7 @@ impl BlobStore for SmbStorageBackend {
     /// instead of re-listing it for every page.
     async fn list_blobs(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
         check_listing_prefix(prefix)?;
-        let mut keys = self.collect_keys().await?;
+        let mut keys = self.collect_keys(prefix).await?;
         keys.retain(|key| key.starts_with(prefix));
         Ok(keys)
     }
@@ -3037,6 +3086,7 @@ mod tests {
         entries: fn(&str) -> Vec<(String, bool)>,
         delay: Duration,
         directories_listed: AtomicU64,
+        paths_listed: std::sync::Mutex<Vec<String>>,
     }
 
     impl FakeListing {
@@ -3045,7 +3095,14 @@ mod tests {
                 entries,
                 delay: Duration::ZERO,
                 directories_listed: AtomicU64::new(0),
+                paths_listed: std::sync::Mutex::new(Vec::new()),
             }
+        }
+
+        fn paths_listed(&self) -> Vec<String> {
+            let mut paths = self.paths_listed.lock().expect("paths").clone();
+            paths.sort();
+            paths
         }
     }
 
@@ -3058,6 +3115,10 @@ mod tests {
             budget: &mut ListingBudget,
         ) -> Result<Option<Vec<ListedEntry>>, StorageError> {
             self.directories_listed.fetch_add(1, Ordering::SeqCst);
+            self.paths_listed
+                .lock()
+                .expect("paths")
+                .push(path.to_string());
             if !self.delay.is_zero() {
                 tokio::time::sleep(self.delay).await;
             }
@@ -3085,7 +3146,7 @@ mod tests {
         root: String,
         limits: ListingLimits,
     ) -> Result<Vec<String>, StorageError> {
-        within_listing_deadline(limits.timeout, walk_listing(source, root, limits)).await
+        within_listing_deadline(limits.timeout, walk_listing(source, root, "", limits)).await
     }
 
     fn assert_partial_listing_refused(error: &StorageError, reason: &str) {
@@ -3455,6 +3516,93 @@ mod tests {
         assert_eq!(files, ["a/b/two.bin", "a/one.bin", "top.bin"]);
     }
 
+    /// A tree with siblings that share and do not share a prefix.
+    fn prefix_tree(path: &str) -> Vec<(String, bool)> {
+        let entries: &[(&str, bool)] = match path {
+            "root" => &[("a", true), ("ab", true), ("b", true), ("a.bin", false)],
+            "root/a" => &[("x", true), ("y", true), ("one.bin", false)],
+            "root/a/x" => &[("two.bin", false)],
+            "root/a/y" => &[("three.bin", false)],
+            "root/ab" => &[("four.bin", false)],
+            "root/b" => &[("five.bin", false)],
+            other => panic!("unexpected directory {other}"),
+        };
+        entries
+            .iter()
+            .map(|(name, directory)| ((*name).to_string(), *directory))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_prefixed_listing_enters_only_directories_that_can_hold_the_prefix() {
+        let limits = limits(8, 64, Duration::from_secs(30));
+        for (prefix, directories, keys) in [
+            (
+                "a/x",
+                &["root", "root/a", "root/a/x"][..],
+                &["a/x/two.bin"][..],
+            ),
+            (
+                "a/",
+                &["root", "root/a", "root/a/x", "root/a/y"][..],
+                &["a/one.bin", "a/x/two.bin", "a/y/three.bin"][..],
+            ),
+            (
+                "a",
+                &["root", "root/a", "root/a/x", "root/a/y", "root/ab"][..],
+                &[
+                    "a.bin",
+                    "a/one.bin",
+                    "a/x/two.bin",
+                    "a/y/three.bin",
+                    "ab/four.bin",
+                ][..],
+            ),
+            ("c", &["root"][..], &[][..]),
+            (
+                "",
+                &[
+                    "root", "root/a", "root/a/x", "root/a/y", "root/ab", "root/b",
+                ][..],
+                &[
+                    "a.bin",
+                    "a/one.bin",
+                    "a/x/two.bin",
+                    "a/y/three.bin",
+                    "ab/four.bin",
+                    "b/five.bin",
+                ][..],
+            ),
+        ] {
+            let source = FakeListing::new(prefix_tree);
+            let mut files = within_listing_deadline(
+                limits.timeout,
+                walk_listing(&source, "root".to_string(), prefix, limits),
+            )
+            .await
+            .expect("prefixed listing");
+            files.sort();
+            assert_eq!(files, keys, "keys for prefix {prefix:?}");
+            assert_eq!(
+                source.paths_listed(),
+                directories,
+                "directories listed for prefix {prefix:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unsigned_sessions_are_refused_by_configuration() {
+        // The client signs every authenticated session; unsigned is not an option.
+        let mut config = config();
+        config.require_signing = false;
+        let error = config
+            .validate()
+            .expect_err("require_signing = false must be refused");
+        assert!(!error.is_retryable());
+        assert!(error.to_string().contains("signing"), "{error}");
+    }
+
     #[tokio::test]
     async fn probe_read_is_bounded_whatever_size_the_server_declares() {
         let pulled = Arc::new(AtomicU64::new(0));
@@ -3744,13 +3892,9 @@ mod tests {
     }
 
     #[test]
-    fn conditional_and_overwrite_paths_use_distinct_create_dispositions() {
+    fn temporary_files_are_created_so_a_replayed_create_opens_them() {
         assert_eq!(
-            write_create_args(true).disposition,
-            smb::CreateDisposition::Create
-        );
-        assert_eq!(
-            write_create_args(false).disposition,
+            temp_create_args().disposition,
             smb::CreateDisposition::OverwriteIf
         );
     }
@@ -3951,32 +4095,6 @@ mod tests {
         assert_eq!(opens.load(Ordering::SeqCst), 1);
         assert!(replacement_alive.load(Ordering::SeqCst));
     }
-    #[tokio::test]
-    async fn exclusive_write_cleanup_preserves_replacement_after_original_handle_closes() {
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-        let original_closed = AtomicBool::new(false);
-        let replacement_alive = AtomicBool::new(false);
-        let path_deletes = AtomicUsize::new(0);
-        cleanup_write_target(
-            &WriteCleanupTarget::ExclusiveHandle,
-            async {
-                original_closed.store(true, Ordering::SeqCst);
-                // Closing the delete-on-close handle removes the old object;
-                // another writer can now atomically acquire the shared key.
-                replacement_alive.store(true, Ordering::SeqCst);
-            },
-            |_| async {
-                path_deletes.fetch_add(1, Ordering::SeqCst);
-                replacement_alive.store(false, Ordering::SeqCst);
-                Ok(())
-            },
-        )
-        .await;
-        assert!(original_closed.load(Ordering::SeqCst));
-        assert_eq!(path_deletes.load(Ordering::SeqCst), 0);
-        assert!(replacement_alive.load(Ordering::SeqCst));
-    }
-
     #[test]
     fn a_negotiated_dialect_below_the_minimum_fails_the_connection() {
         for (minimum, negotiated) in [

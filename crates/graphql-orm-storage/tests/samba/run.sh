@@ -231,3 +231,24 @@ SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$CONSTRAINED_PORT" SMB_TEST_SHARE=backu
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
   run_test samba_refuses_a_dialect_below_the_minimum "$SMB_TEST_CARGO" test --locked --features smb --test smb_integration \
   samba_refuses_a_dialect_below_the_minimum -- --ignored --exact --nocapture
+
+# Conditional creates publish whole objects, and a stalled transfer holds no
+# transfer permit.
+for case in samba_conditional_create_is_invisible_until_published samba_stalled_transfers_release_their_permits; do
+  SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
+  SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
+    run_test "$case" "$SMB_TEST_CARGO" test --locked --features smb --test smb_integration \
+    "$case" -- --ignored --exact --nocapture
+done
+
+# The losing conditional writer and the resumed writes leave no temporary file.
+if uploading=$(docker exec "$NORMAL_ID" find /share -path /share/.deleted -prune -o -type f -name '*.uploading' -print -quit); then
+  if [[ -n $uploading ]]; then
+    echo "a conditional or stalled upload left an SMB temporary file" >&2
+    exit 1
+  fi
+else
+  status=$?
+  echo "could not inspect owned Samba temporary-file cleanup" >&2
+  exit "$status"
+fi

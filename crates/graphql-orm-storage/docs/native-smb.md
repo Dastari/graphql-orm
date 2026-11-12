@@ -87,8 +87,8 @@ upstream release contains the fix and passes the owned consumer and Samba lanes;
 do not silently substitute an unpatched registry dependency.
 
 It supplies SMB 2.0.2 through 3.1.1 (never SMB1), pure-Rust NTLM credentials
-with optional domain/workgroup, signing, SMB3 encryption, explicit
-`FILE_CREATE`, flush/close, rename, recursive enumeration, delete, async
+with optional domain/workgroup, signing, SMB3 encryption, flush/close,
+replacing and non-replacing rename, recursive enumeration, delete, async
 requests, and SMB credit concurrency. Kerberos, SMB1, guest/anonymous sessions,
 QUIC, RDMA, and application-managed DFS namespaces are outside this backend's
 supported contract. Optional Kerberos support is tracked in
@@ -121,8 +121,11 @@ let store = SmbStorageBackend::connect(config).await?;
 # }
 ```
 
-Port 445, SMB 3.1.1 minimum, and required signing are defaults. Encryption may
-be required. Guest fallback is refused. Server/share fields are names, not local
+Port 445 and the SMB 3.1.1 minimum are defaults. Every authenticated session
+is signed, and `require_signing` must stay `true`: `validate`, `connect` and
+`probe` refuse `false` with a non-retryable configuration error, because the
+client cannot turn signing off. Encryption may be required. Guest fallback is
+refused. Server/share fields are names, not local
 paths, UNC paths, or SMB URLs.
 
 `root_prefix` and blob keys are `/`-separated relative keys. Empty segments,
@@ -318,9 +321,13 @@ error.
 with a retryable error, the backend reconnects and lists once more, and the
 reconnect and the second attempt share the same deadline.
 
-`list_blobs` lists the tree once and filters it by prefix. `list_blobs_page`
-must list the whole tree for every page, because SMB has no ordered,
-resumable enumeration, so prefer `list_blobs`. Its continuation tokens are
+A listing enters only the directories that can hold keys with its prefix:
+for the prefix `a/b`, it enumerates the root, `a`, and every directory whose
+path starts with `a/b`, such as `a/b/` and `a/bc/`, but no other subtree. The
+limits above apply to what it enumerates. `list_blobs` lists those
+directories once and filters the names by prefix. `list_blobs_page` must list
+them again for every page, because SMB has no ordered, resumable
+enumeration, so prefer `list_blobs`. Its continuation tokens are
 opaque, begin with `smb1:`, and carry the page and key counts of their chain:
 a chain fails after 1,024 pages or after returning more than
 `max_listing_entries` keys in total, so a server that adds names between
@@ -354,11 +361,16 @@ Normal writes create parents, stream to a UUID temporary file in the same
 remote directory, flush, close, and rename over the final key. Failures attempt
 to remove that unique temporary file, and listings filter its strict name form.
 
-Conditional writes issue SMB CREATE with `FILE_CREATE` directly;
-`STATUS_OBJECT_NAME_COLLISION` becomes `Ok(None)`. There is no existence-check
-race. This primitive backs repository locks and content-addressed deduplication.
-Rename atomicity ultimately depends on the server filesystem, but the Samba
-suite exercises same-directory overwrite rename and concurrent CREATE.
+Conditional writes stream to a UUID temporary file in the same way, then
+rename it to the final key without replacing an existing file. The server
+refuses that rename with `STATUS_OBJECT_NAME_COLLISION` when the key exists,
+which becomes `Ok(None)`, and the temporary file is removed. The key appears
+only with its complete content, so `Ok(None)` means another writer's
+complete object holds it, and there is no existence-check race. This
+primitive backs repository locks and content-addressed deduplication. Rename
+atomicity ultimately depends on the server filesystem, but the Samba suite
+exercises same-directory overwrite rename, non-replacing rename against a
+concurrent writer, and readers during a conditional write.
 
 Uploads consume `StorageByteStream` incrementally and hash while writing.
 An input item may be arbitrarily large: the backend splits it without collecting
@@ -370,11 +382,10 @@ acknowledgements by advancing both the slice and file offset, and rejects a
 zero-byte acknowledgement for a non-empty request.
 
 New files are marked delete-on-close until the complete body is hashed and
-flushed. Cancellation guards close and remove owned direct or temporary files.
-Cleanup ownership starts only after a successful CREATE response, so a
-conditional-create collision can never delete the pre-existing object. A
+flushed. Cancellation guards close and remove owned temporary files. A
 temporary file remains guarded through publication; cancellation during rename
-removes only the unique temporary name, never a successfully published target.
+removes only the unique temporary name, never a published target or another
+writer's object.
 
 Parent directories use a bounded 4,096-entry per-backend cache and a per-path
 single-flight coordinator. The first object opens or creates each ancestor;
@@ -382,27 +393,33 @@ later objects under a known parent issue no directory CREATE requests. A
 successful reconnect or path-not-found response clears cached directory facts
 before safe reconstruction.
 
-Downloads use fixed chunks and retain a bounded transfer permit. Connection and
+Downloads use fixed chunks. `max_transfer_concurrency` bounds the READ and
+WRITE requests in flight: each request takes a transfer permit and releases
+it when the response arrives, so a download whose consumer stops reading, or
+an upload whose body stops yielding, holds an open handle but no permit and
+never blocks other transfers. Connection and
 operation deadlines are separate. Retryable timeouts and connection failures
 replace the shared client by generation, so later operations do not inherit a
 poisoned smb-rs worker. Directory creation, opens, listings, deletion, and the
 CREATE of a unique temporary name may be retried because they are idempotent.
-Stream writes are not replayed. An exclusive `FILE_CREATE` is not replayed after
-an ambiguous response because the server may already have created that exact
-target. Callers retry failed uploads with a fresh stream.
+Stream writes are not replayed. A publishing rename is not replayed after an
+ambiguous response: a non-replacing rename that already succeeded would fail
+against its own object, so `put_blob_if_not_exists` reports the unknown
+outcome as non-retryable `SingleAttemptFailed`. Callers retry failed uploads
+with a fresh stream.
 
 Opening an existing key whose file another handle is deleting returns
 `STATUS_DELETE_PENDING`. For `get_blob`, `blob_exists`, `head_blob` and
 deletion the backend reports that key as missing: the file disappears once its
 last handle closes, so it is already gone for readers, and deleting it again
 succeeds as it would once the delete completes. This happens, for example,
-right after a cancelled `put_blob_if_not_exists` cleans up through
+while a cancelled upload's temporary file is cleaned up through
 delete-on-close. Creating such a key keeps reporting the status as a
 non-retryable `Protocol` error, never as a conditional-create conflict.
 
-If a response is lost after conditional CREATE, the server may hold a partial
-or complete target. Cleanup is best effort, so completed snapshots must still
-be verified. Backup manifests are written last and do not advertise incomplete
+If the response to a conditional write's rename is lost, the key may hold
+this writer's complete object or none. Cleanup of temporary files is best
+effort, so completed snapshots must still be verified. Backup manifests are written last and do not advertise incomplete
 payload sets.
 
 ## Probe and troubleshooting

@@ -18,6 +18,10 @@ explicit key scope without overwriting. Follow the migration steps in
 [MIGRATION.md](MIGRATION.md) and read the
 [trust model](docs/architecture.md#trust-model).
 
+Version 0.16.0 requires storage 0.11.0, whose SMB conditional creates publish
+only complete objects, so concurrent backups storing the same content no
+longer race on a partly written object. See [MIGRATION.md](MIGRATION.md).
+
 Version 0.15.0 requires storage 0.10.0, whose listing prefixes are plain
 string prefixes on every provider. A prefixed repository lists only keys below
 its prefix, and `prune` and `delete_snapshot` delete only inside the snapshot
@@ -61,7 +65,7 @@ restore before replacing a production pin.
 
 ```toml
 [dependencies]
-graphql-orm-backup = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.15.0" }
+graphql-orm-backup = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.16.0" }
 ```
 
 The default `local` feature provides `LocalBackupRepository`. To supply only a

@@ -10,6 +10,38 @@ supersedes: []
 
 # Migration Guide
 
+## 0.10.0 to 0.11.0: SMB signing, conditional-create outcomes, S3 messages
+
+Update the storage requirement to 0.11.0 and refresh the consumer lockfile.
+
+1. **`require_signing = false`.** SMB configurations that set it now fail
+   validation, so `connect` and `probe` return a non-retryable configuration
+   error. Remove the assignment: the client always signs authenticated
+   sessions, and the setting never turned signing off. Use
+   `require_encryption` for a stronger guarantee.
+2. **Unknown SMB conditional-create outcomes.** `put_blob_if_not_exists` now
+   publishes a complete temporary file with a rename that never replaces the
+   key. If the rename's response is lost, it fails with
+   `StorageError::SingleAttemptFailed`, which is not retryable: the key may
+   hold this call's complete object. Treat it as an unknown outcome, as for
+   local storage. Do not report it as a collision and do not retry the same
+   call blindly; a retry would find the key taken. `Ok(Some(_))` and
+   `Ok(None)` keep their meanings, and the key is never visible while
+   partly written.
+3. **SMB transfer concurrency.** `max_transfer_concurrency` bounds concurrent
+   SMB READ and WRITE requests. An open download stream or a write waiting
+   for its body no longer holds a permit, so more transfers than the limit
+   can be open at once. Bound the number of open streams in the caller if
+   that matters.
+4. **S3 error messages.** `StorageError::Provider` messages from the S3
+   backend are now a short summary, such as
+   `S3 service error AccessDenied (HTTP 403, request id …): Access Denied`,
+   instead of the SDK's debug output. Code that searched the message for
+   status codes or SDK type names must use `StorageError::is_retryable`,
+   `MissingBlob`, or `Ok(None)` from the conditional writes instead. Some
+   errors change retryability: a client error is no longer retryable because
+   the response had a `Connection` header or its message mentioned a timeout.
+
 ## 0.9.3 to 0.10.0: SMB 3.1.1 minimum, reserved namespace, string prefixes
 
 Update the storage requirement to 0.10.0 and refresh the consumer lockfile.

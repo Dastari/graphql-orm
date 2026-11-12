@@ -78,7 +78,7 @@ fn sha256_hex_from_base64(encoded: &str) -> Option<String> {
 /// anything else to the backend's ordinary provider error.
 fn multipart_s3_error<E>(key: &str, error: SdkError<E>) -> StorageError
 where
-    E: ProvideErrorMetadata + std::fmt::Debug,
+    E: ProvideErrorMetadata + std::error::Error + 'static,
 {
     let code = error
         .as_service_error()
