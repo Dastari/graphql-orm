@@ -281,9 +281,36 @@ async fn zero_input_entities_omit_only_the_mutations_that_need_the_input() {
         ["accountChanged"]
     );
     // An append-only entity without a public create field has no public
-    // mutation; its root keeps only an introspection-hidden placeholder.
-    assert!(named("Heartbeat").is_empty(), "{fields:?}");
-    assert!(operations::<entities::Heartbeat>(GraphqlOperationKind::Mutation).is_empty());
+    // mutation; its root keeps only the hidden, described placeholder, which
+    // no caller can be authorized for.
+    assert_eq!(
+        named("Heartbeat"),
+        ["gomHeartbeatWritesUnavailable"],
+        "{fields:?}"
+    );
+    assert_eq!(
+        operations::<entities::Heartbeat>(GraphqlOperationKind::Mutation),
+        ["gomHeartbeatWritesUnavailable"]
+    );
+    let placeholder = entities::Heartbeat::generated_graphql_operations()
+        .iter()
+        .find(|operation| operation.kind() == GraphqlOperationKind::Mutation)
+        .expect("the placeholder is described");
+    assert_eq!(
+        placeholder.category(),
+        graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::Unavailable
+    );
+    assert_eq!(
+        placeholder.authorization(),
+        &graphql_orm::graphql::orm::GraphqlAuthorizationRequirement::unsatisfiable()
+    );
+    let response = entities::schema_builder(entities::database().await)
+        .finish()
+        .execute("mutation { gomHeartbeatWritesUnavailable }")
+        .await;
+    assert_eq!(response.errors.len(), 1, "the placeholder is refused");
+    let error = serde_json::to_value(&response.errors[0]).expect("error serializes");
+    assert_eq!(error["extensions"]["code"], "FORBIDDEN", "{error}");
     assert_eq!(
         operations::<entities::Heartbeat>(GraphqlOperationKind::Subscription),
         ["heartbeatChanged"]

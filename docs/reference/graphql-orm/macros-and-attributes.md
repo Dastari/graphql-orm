@@ -983,9 +983,12 @@ to `append_only` entities:
   `update_by_id`, `upsert`, transaction writes, hooks and the `Changed` events
   they emit behave as for any other entity.
 - **Append-only.** An `append_only` entity without a public create field has
-  no public mutation. Its `<Entity>Mutations` object holds only an
-  introspection-hidden placeholder, as composite-key and read-only entities
-  already do, so `schema_roots!` can still merge it.
+  no public mutation. Its `<Entity>Mutations` object holds only the
+  introspection-hidden `gom{Entity}WritesUnavailable` placeholder that
+  composite-key and read-only entities also carry, so `schema_roots!` can
+  still merge it. The placeholder is described in the operation catalogue with
+  category `Unavailable` and an unsatisfiable requirement, and refuses every
+  request with `FORBIDDEN`.
 - **Compile-time checks.** `mutation_shapes`, `operation_authorization` or
   `ai_mutations` naming `create`, `upsert`, `update` or `update_many` on an
   entity with no input for it is a compile error that names the missing

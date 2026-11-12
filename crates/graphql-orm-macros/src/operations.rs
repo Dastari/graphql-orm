@@ -4047,6 +4047,9 @@ fn generate_graphql_operations_unfiltered(
     // without sharing a coordinate. No leading underscore: some routers drop
     // underscore root fields from the contract they bind descriptors to, and
     // would then refuse this field's descriptor as describing an absent field.
+    // An append-only entity without a public create field has no generated
+    // write either; its mutation object carries the same placeholder.
+    let emits_append_only_write_placeholder = entity_meta.append_only && !generates_public_create;
     let write_placeholder_field = format!("gom{struct_name}WritesUnavailable");
     let write_placeholder_description = "Unavailable placeholder: this entity serves no generated writes, and every request is refused";
     let composite_write_stubs = if emits_write_placeholder {
@@ -5943,15 +5946,20 @@ fn generate_graphql_operations_unfiltered(
         // An object type needs one field. Without a public create field the
         // root keeps an introspection-hidden placeholder, like the composite
         // and read-only stubs, so schema_roots! can still merge it.
-        let append_only_mutation_placeholder = if generates_public_create {
-            quote! {}
-        } else {
+        // It is the same described, unsatisfiable placeholder as the
+        // write-less roots above, so routers and the catalogue see it.
+        let append_only_mutation_placeholder = if emits_append_only_write_placeholder {
             quote! {
-                #[graphql(visible = false)]
-                async fn __gom_public_create_unavailable(&self) -> bool {
-                    false
+                #[doc = #write_placeholder_description]
+                #[graphql(name = #write_placeholder_field, visible = false)]
+                async fn __gom_public_create_unavailable(
+                    &self,
+                ) -> ::graphql_orm::async_graphql::Result<bool> {
+                    Err(::graphql_orm::graphql::errors::OrmPublicError::forbidden().into_graphql_error())
                 }
             }
+        } else {
+            quote! {}
         };
         let append_event_source_id = if has_composite_primary_key {
             quote! { ::graphql_orm::graphql::orm::composite_key_id(&Self::__gom_key_values(&id)) }
@@ -7674,7 +7682,7 @@ fn generate_graphql_operations_unfiltered(
     } else {
         operation_descriptors.push(subscription_descriptor());
     }
-    if emits_write_placeholder {
+    if emits_write_placeholder || emits_append_only_write_placeholder {
         operation_descriptors.push(mutation_descriptor(
             quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::Unavailable },
             "unavailable",
