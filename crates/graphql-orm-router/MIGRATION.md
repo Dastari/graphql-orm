@@ -10,6 +10,20 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.10.0 to 0.11.0: agql-auth 0.26.0
+
+The `auth-agql` public constructors take types from published Auth 0.26.0.
+Replace a host's `v0.24.0` selector with:
+
+```toml
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", tag = "v0.26.0", version = "0.26.0" }
+```
+
+Use exactly that source for the host, ORM, AI and router, refresh locks, and
+rebuild hosts. The tag peels to `7d016f6a6bc3e697382e2e05865f596862189240`.
+Hosts built without `auth-agql` are unaffected. Router behavior is unchanged
+and no data migration is required.
+
 ## 0.9.1 to 0.10.0: subscriptions are WebSocket-only
 
 Public HTTP subscription requests are refused. This covers SSE

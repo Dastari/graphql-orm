@@ -10,6 +10,17 @@ supersedes: []
 
 # Changelog
 
+## 0.11.0 (unreleased)
+
+- **Breaking (public Auth dependency types):** optional `auth-agql` now uses
+  published Auth `v0.26.0`, peeled to full revision
+  `7d016f6a6bc3e697382e2e05865f596862189240`, instead of `v0.24.0`. Host values
+  passed to `AgqlAuthenticationProvider::new` and `AgqlScopeMatcher::new` must
+  come from that tag source. The router does not use Auth 0.25's fixed-audience
+  delegation or 0.26's refresh-reuse grace window, and no other locked
+  dependency changes. Router behavior is unchanged. No data migration is
+  required. See [MIGRATION.md](MIGRATION.md).
+
 ## 0.10.0 (unreleased)
 
 - Security (GHSA-3qf7-j9r6-6qv3): refuse GraphQL subscriptions on the public

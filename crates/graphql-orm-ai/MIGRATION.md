@@ -10,6 +10,22 @@ supersedes: []
 
 # Migration Guide
 
+## 0.131.0 to 0.132.0: agql-auth 0.26.0
+
+AI 0.132.0 depends on published Auth `v0.26.0`, locked to commit
+`7d016f6a6bc3e697382e2e05865f596862189240`, and ORM 0.126.0. Replace a host's
+`v0.24.0` selector with:
+
+```toml
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", tag = "v0.26.0", version = "0.26.0" }
+```
+
+Refresh the host lockfile and check that `cargo tree -i agql-auth` shows one
+`0.26.0` source. Auth types from the old tag do not match the types AI accepts.
+AI behavior, GraphQL SDL and persistent schema are unchanged, and no data
+migration is needed. See the
+[workspace migration](../../MIGRATION.md#01250-to-01260-agql-auth-0260).
+
 ## 0.130.0 to 0.131.0: legacy delegated stored principal references
 
 0.130.0 stopped new submissions from persisting a delegated or sessionless

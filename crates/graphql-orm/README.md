@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.126.0 selects published Auth `v0.26.0` for the `auth-agql` feature.
+Hosts that pass Auth types must select the same tag. ORM behavior is unchanged
+and no data migration is needed. Upgrade ORM/macros together; see the
+[root migration guide](../../MIGRATION.md#01250-to-01260-agql-auth-0260).
+
 Version 0.125.0 records PostgreSQL change-journal entries in the database
 instead of the runtime role, and journaled writes require the recorder
 trigger. Upgrade ORM/macros together; see the
@@ -353,11 +358,11 @@ resource ownership, deleted-preimage and commit fences remain host-owned. No
 generated code, SDL or schema migration is added. See
 [the bridge guide](../../docs/reference/graphql-orm/agql-auth-bridge.md).
 
-The current workspace selects published Auth `v0.24.0`, peeled to
-`1f4b4bfb6d052d04e6c80b80cb7aa3d0c2ebaacd`. Direct Auth consumers must select
+The current workspace selects published Auth `v0.26.0`, peeled to
+`7d016f6a6bc3e697382e2e05865f596862189240`. Direct Auth consumers must select
 that same tag and refresh their locks to one source; matching the commit alone
 does not unify revision and tag selectors. See the
-[published Auth selection](../../MIGRATION.md#published-agql-auth-0240-selection).
+[Auth 0.26.0 migration](../../MIGRATION.md#01250-to-01260-agql-auth-0260).
 
 
 Version 0.52.0 adds explicitly selected native Rust 1.98.1 owned replay evidence.

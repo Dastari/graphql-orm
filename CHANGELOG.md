@@ -24,6 +24,20 @@ for historical context.
 
 - AI 0.128.0: **breaking:** enforce AI runtime closure after a snapshot restore. The runtime start gate opens only with a proof minted from a store's live recovery epoch (AI schema module `0.77.0`), and leases are bound to that epoch. Worker claims, lease-fenced writes and approval consumption refuse while the epoch is not live. A restored store stays closed until `OrmAiRuntimeRecoveryService::reconcile_restore` expires its approvals, revokes its egress consents and moves unfinished runs to `RecoveryRequired`, and an operator acknowledges the reviewed result. An existing deployment upgraded in place opens once the operator calls `acknowledge_in_place_upgrade`, which leaves its work unchanged. Restore facts now decode strictly. See the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01270-to-01280-enforced-runtime-closure-after-restore).
 
+## 0.126.0
+
+ORM runtime/macros **0.126.0**, AI **0.132.0**, router **0.11.0**.
+
+- **Breaking (public Auth dependency types):** select published Auth `v0.26.0`
+  (tag `04c514280d685a8975d63a8a6b9a1e0db11f503f`, commit
+  `7d016f6a6bc3e697382e2e05865f596862189240`) instead of `v0.24.0` for ORM
+  `auth-agql`, AI and router `auth-agql`. Hosts that pass Auth types must move
+  their own selector to the same tag. No other locked dependency changes. The
+  workspace does not use Auth 0.25's fixed-audience delegation or 0.26's
+  refresh-reuse grace window, so ORM, AI and router behavior is unchanged. No
+  data migration. Fixes #443. See the
+  [migration guide](MIGRATION.md#01250-to-01260-agql-auth-0260).
+
 ## 0.125.0
 
 ORM runtime/macros **0.125.0**.
