@@ -473,7 +473,7 @@ search documents through generated ORM writes once the managed search structures
 
 - create/update/upsert refresh the entity document
 - delete removes the entity document
-- `Entity::search_db(&database, search_input)` builds a search query without exposing the raw pool type
+- `Entity::search_db(&database, search_input)` builds a policy-aware search: entity access, every search source, and row and field policies on each hit (`Entity::search(pool, …)` is the trusted, unchecked builder)
 - `Entity::rebuild_search_index(&database)` refreshes all documents for that entity
 - `Entity::rebuild_search_document(&database, &id)` refreshes one entity
 

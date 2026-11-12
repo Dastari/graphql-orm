@@ -60,7 +60,8 @@ where
                 EntityAccessKind::Read,
                 surface,
             )
-            .await?;
+            .await
+            .map_err(crate::graphql::errors::graphql_error_from_callback)?;
         if !database
             .can_read_row(
                 Some(context),
@@ -69,7 +70,8 @@ where
                 surface,
                 self.record,
             )
-            .await?
+            .await
+            .map_err(crate::graphql::errors::graphql_error_from_callback)?
         {
             return Err(denied());
         }

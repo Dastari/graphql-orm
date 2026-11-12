@@ -114,6 +114,32 @@ pub trait SearchableEntity: DatabaseSearchSchema {
     fn search_key_json(&self) -> serde_json::Value;
     /// Build the current denormalized search document for this entity value.
     fn search_document(&self) -> SearchDocument;
+
+    /// Authorization requirements of the entity's relation search sources.
+    ///
+    /// Generated entities report the relation field, the target entity and
+    /// every copied target field. `None` means the requirements are unknown;
+    /// searching an entity with relation sources then fails closed.
+    #[doc(hidden)]
+    fn search_relation_source_policies() -> Option<Vec<super::SearchSourcePolicy>> {
+        None
+    }
+
+    /// Apply each relation search source's target traversal requirement
+    /// (auth mode and operation scopes) to a GraphQL search request.
+    ///
+    /// Generated entities check every `search_relation` target. The default
+    /// refuses an entity that has relation search sources.
+    #[doc(hidden)]
+    fn authorize_search_relation_targets(
+        _ctx: &async_graphql::Context<'_>,
+    ) -> async_graphql::Result<()> {
+        if Self::search_index().is_some_and(|index| !index.relations.is_empty()) {
+            Err(crate::graphql::errors::OrmPublicError::forbidden().into_graphql_error())
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// Return the managed PostgreSQL/fallback search table name for a base table.
@@ -491,6 +517,7 @@ where
             )
             .await
             .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
+        super::read_authorization::authorize_repository_search_sources::<T, B>(self.db).await?;
 
         let hits = self.query.fetch_all_with_auth(self.auth.as_ref()).await?;
         let mut visible = Vec::with_capacity(hits.len());
@@ -663,6 +690,9 @@ where
         observer: Option<&crate::db::Database<B>>,
     ) -> Option<crate::Result<Vec<SearchHit<T>>>> {
         let index = T::search_index()?;
+        if let Err(error) = self.query.ensure_filter_valid() {
+            return Some(Err(error));
+        }
         if !index.enabled || self.query.requires_in_memory_filtering() {
             return None;
         }
@@ -700,6 +730,9 @@ where
         auth: Option<&DbAuthContext>,
     ) -> Option<crate::Result<SearchConnection<T>>> {
         let index = T::search_index()?;
+        if let Err(error) = self.query.ensure_filter_valid() {
+            return Some(Err(error));
+        }
         if !index.enabled || self.query.requires_in_memory_filtering() {
             return None;
         }
@@ -986,9 +1019,14 @@ where
         use crate::graphql::errors::{OrmErrorCode, OrmPublicError, graphql_error_from_sqlx};
         let invalid =
             || OrmPublicError::new(OrmErrorCode::AuthorizationMisconfigured).into_graphql_error();
+        self.query
+            .ensure_filter_valid()
+            .map_err(graphql_error_from_sqlx)?;
+        super::authorize_search_sources::<T, B>(db, super::SearchAccess::Graphql(ctx)).await?;
         let visibility = db
             .read_visibility::<T>(Some(ctx), EntityAccessSurface::GraphqlQuery)
-            .await?;
+            .await
+            .map_err(crate::graphql::errors::graphql_error_from_callback)?;
         self.query = self.query.with_read_visibility(&visibility)?;
         if self.query.requires_in_memory_filtering() {
             return Err(invalid());
