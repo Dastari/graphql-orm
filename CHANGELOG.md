@@ -24,6 +24,17 @@ for historical context.
 
 - AI 0.128.0: **breaking:** enforce AI runtime closure after a snapshot restore. The runtime start gate opens only with a proof minted from a store's live recovery epoch (AI schema module `0.77.0`), and leases are bound to that epoch. Worker claims, lease-fenced writes and approval consumption refuse while the epoch is not live. A restored store stays closed until `OrmAiRuntimeRecoveryService::reconcile_restore` expires its approvals, revokes its egress consents and moves unfinished runs to `RecoveryRequired`, and an operator acknowledges the reviewed result. An existing deployment upgraded in place opens once the operator calls `acknowledge_in_place_upgrade`, which leaves its work unchanged. Restore facts now decode strictly. See the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01270-to-01280-enforced-runtime-closure-after-restore).
 
+## 0.127.0
+
+ORM runtime/macros **0.127.0**.
+
+- **Fix:** a mutation hook's deliberate public refusal reaches repository callers with its code and message. Retention purge hooks, and a hook that returns an `OrmPublicError` with `?`, previously surfaced as `INTERNAL_ERROR` with "internal error". A refusal whose `code` extension is an ORM public code was already kept by the other repository writes; tests now pin it for every `MutationContext` write method, both hook phases, standalone repository writes, retention purge and generated GraphQL mutations, on SQLite and owned PostgreSQL ([#565](https://github.com/Dastari/graphql-orm/issues/565)).
+- **Breaking:** any other hook error, including one with an application-defined code, has the default `INTERNAL_ERROR` message on repository paths. Its text stays a server-side diagnostic. `into_graphql_error()` and generated GraphQL mutations still render it as authored.
+- **Breaking (GraphQL clients):** a callback's typed `OrmPublicError` returned with `?` from a hook, row policy or input transform now reaches GraphQL clients with its code and message in generated single-row and bulk mutations and in `notificationErrors`. For example, `Err(OrmPublicError::with_message(OrmErrorCode::Conflict, "seat taken"))?` renders `"seat taken"` with code `CONFLICT`, where 0.126.0 rendered `"internal error"` with `INTERNAL_ERROR`. Only construct such an error with a message that is safe for clients.
+- **Breaking (GraphQL clients):** `INTERNAL_ERROR` always renders its default message, whether it comes from a string `code` extension or a typed `OrmPublicError`. A callback error with an explicit `code: "INTERNAL_ERROR"` previously rendered its own message.
+- **Fix:** entity-access and retention row-write refusals on repository reads and writes keep their public code, so a denied entity write reads as `FORBIDDEN`. They were previously wrapped as `INTERNAL_ERROR`.
+- **Breaking:** the text of a carried public refusal (`sqlx::Error::to_string()`) is the code's default message and code, for example `error occurred while decoding: forbidden (FORBIDDEN)`, instead of the internal `graphql-orm-public:<CODE>` token. A hook that returns `async_graphql::Error::new(error.to_string())` for a refused nested write no longer shows that token to GraphQL clients. Return the error with `?` to keep its `code` extension. Read refusals with `OrmPublicError::from_sqlx`, not by matching text.
+
 ## 0.126.0
 
 ORM runtime/macros **0.126.0**, operation catalogue **0.7.3**, AI **0.133.0**,
