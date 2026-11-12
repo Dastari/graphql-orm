@@ -284,10 +284,21 @@ pub(crate) fn search_key_encoding(search: &RlsSearchTable) -> &'static str {
 /// index serves the correlated lookup. Drift validation compares
 /// PostgreSQL's rendering of this text with its rendering of the live policy.
 pub(crate) fn render_search_document_predicate(search: &RlsSearchTable) -> String {
-    let backend = DatabaseBackend::Postgres;
-    let base = backend.render_identifier_path(&search.base_table);
+    render_search_document_predicate_on(
+        &DatabaseBackend::Postgres.render_identifier_path(&search.base_table),
+        &search_document_probe(search),
+    )
+}
+
+/// [`render_search_document_predicate`] with the base table written as
+/// `base_sql`. Validation passes the resolved, schema-qualified base table.
+pub(crate) fn render_search_document_predicate_on(
+    base_sql: &str,
+    search: &RlsSearchDocumentProbe,
+) -> String {
+    let base = base_sql;
     let key = format!("b.{}", quote_policy_column(&search.primary_key));
-    let document_key = format!("{}.entity_pk", search_table_sql(search));
+    let document_key = format!("{}.entity_pk", search.search_table_sql);
     let normalized = search.primary_key_sql_type.trim().to_ascii_lowercase();
     let condition = match normalized.as_str() {
         "text" => format!("{key} = {document_key}"),
@@ -853,9 +864,13 @@ pub fn render_policy_predicate(
 }
 
 /// Render a policy column as exactly one PostgreSQL identifier naming the
-/// column the ORM's DDL creates: a plain name bare, as the DDL writes it, and
-/// anything else quoted in full, so the text cannot change the predicate.
+/// column the ORM's DDL creates. As the DDL does, a plain name stays bare and
+/// exactly one well-formed quoted identifier is kept; anything else is quoted
+/// in full, so the text cannot change the predicate.
 fn quote_policy_column(column: &str) -> String {
+    if super::dialect::postgres_delimited_identifier(column).is_some() {
+        return column.to_string();
+    }
     let rendered = DatabaseBackend::Postgres.render_identifier(column);
     if rendered == column && !column.starts_with('"') {
         rendered.into_owned()
@@ -974,10 +989,48 @@ pub struct RlsTableProbe {
     /// Table path exactly as the plan's statements render it.
     pub table_sql: String,
     /// Declared policy expressions on the table, without duplicates.
-    pub expressions: Vec<String>,
+    pub expressions: Vec<RlsProbeExpression>,
     /// Whether to render the declared and live policy expressions. Without
     /// it only the table and its policies' other attributes are read.
     pub render: bool,
+}
+
+/// One declared policy expression of an [`RlsTableProbe`].
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RlsProbeExpression {
+    /// The predicate exactly as the plan writes it; the key of
+    /// [`LiveRlsTableState::expected`].
+    pub declared: String,
+    /// For a search-document predicate, its parts. Its base table is resolved
+    /// like the probe's table and the predicate rendered with the resolved,
+    /// schema-qualified base, so it compares under a pinned `search_path`.
+    pub search_document: Option<RlsSearchDocumentProbe>,
+}
+
+/// The parts of a search-document predicate, see [`RlsProbeExpression`].
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RlsSearchDocumentProbe {
+    /// Base table path as the plan's SQL writes it.
+    pub base_table_sql: String,
+    /// Search table as the plan's SQL writes it; also the column qualifier.
+    pub search_table_sql: String,
+    /// Base primary-key column.
+    pub primary_key: String,
+    /// Declared base primary-key SQL type.
+    pub primary_key_sql_type: String,
+}
+
+fn search_document_probe(search: &RlsSearchTable) -> RlsSearchDocumentProbe {
+    RlsSearchDocumentProbe {
+        base_table_sql: DatabaseBackend::Postgres
+            .render_identifier_path(&search.base_table)
+            .into_owned(),
+        search_table_sql: search_table_sql(search),
+        primary_key: search.primary_key.clone(),
+        primary_key_sql_type: search.primary_key_sql_type.clone(),
+    }
 }
 
 /// A policy command as `pg_policy.polcmd` records it.
@@ -1111,7 +1164,7 @@ struct DeclaredPolicy {
 /// expressions.
 pub(crate) fn rls_table_probes(target: &SchemaTarget) -> Vec<RlsTableProbe> {
     let mut probes: Vec<RlsTableProbe> = Vec::new();
-    let mut add = |table_sql: String, expressions: Vec<String>| {
+    let mut add = |table_sql: String, expressions: Vec<RlsProbeExpression>| {
         let index = match probes.iter().position(|probe| probe.table_sql == table_sql) {
             Some(index) => index,
             None => {
@@ -1124,7 +1177,11 @@ pub(crate) fn rls_table_probes(target: &SchemaTarget) -> Vec<RlsTableProbe> {
             }
         };
         for expression in expressions {
-            if !probes[index].expressions.contains(&expression) {
+            if !probes[index]
+                .expressions
+                .iter()
+                .any(|known| known.declared == expression.declared)
+            {
                 probes[index].expressions.push(expression);
             }
         }
@@ -1134,14 +1191,20 @@ pub(crate) fn rls_table_probes(target: &SchemaTarget) -> Vec<RlsTableProbe> {
             entity_table_sql(entity),
             declared_entity_policies(entity)
                 .into_iter()
-                .map(|policy| policy.predicate)
+                .map(|policy| RlsProbeExpression {
+                    declared: policy.predicate,
+                    search_document: None,
+                })
                 .collect(),
         );
     }
     for search in rls_search_tables(target) {
         add(
             search_table_sql(&search),
-            vec![render_search_document_predicate(&search)],
+            vec![RlsProbeExpression {
+                declared: render_search_document_predicate(&search),
+                search_document: Some(search_document_probe(&search)),
+            }],
         );
     }
     probes
@@ -1191,7 +1254,8 @@ fn declared_entity_policies(entity: &RlsEntityMetadata) -> Vec<DeclaredPolicy> {
 /// Each declared policy must exist under its generated name as a
 /// `PERMISSIVE` policy for `PUBLIC` with the declared command, and
 /// PostgreSQL's rendering of its live expressions must equal its rendering of
-/// the declared predicate, parsed against the same table in the same session.
+/// the declared predicate, both parsed against the same table with
+/// `search_path` pinned to `pg_catalog, pg_temp`.
 /// Any other policy on the table is an error. An expression PostgreSQL could
 /// not render is reported as an error, never treated as matching.
 pub(crate) fn validate_rls_models(
@@ -2166,6 +2230,32 @@ mod drift_tests {
     }
 
     #[test]
+    fn quoted_columns_render_as_the_ddl_writes_them() {
+        for (column, rendered) in [
+            ("tenant_id", "tenant_id"),
+            ("TenantId", "TenantId"),
+            ("\"TenantId\"", "\"TenantId\""),
+            ("\"a\"\"b\"", "\"a\"\"b\""),
+            ("order", "\"order\""),
+            (
+                "\"a\" OR true OR \"b\"",
+                "\"\"\"a\"\" OR true OR \"\"b\"\"\"",
+            ),
+            ("\"\"", "\"\"\"\"\"\""),
+        ] {
+            assert_eq!(quote_policy_column(column), rendered, "{column}");
+        }
+        assert_eq!(
+            super::super::dialect::postgres_resolved_identifier("\"TenantId\""),
+            "TenantId"
+        );
+        assert_eq!(
+            super::super::dialect::postgres_resolved_identifier("\"a\" OR \"b\""),
+            "\"a\" OR \"b\""
+        );
+    }
+
+    #[test]
     fn matching_renderings_validate_clean() {
         assert_eq!(messages(&healthy()), Vec::<String>::new());
     }
@@ -2272,7 +2362,11 @@ mod drift_tests {
         assert_eq!(probes.len(), 1, "{probes:#?}");
         assert_eq!(probes[0].table_sql, "docs");
         assert_eq!(
-            probes[0].expressions,
+            probes[0]
+                .expressions
+                .iter()
+                .map(|expression| expression.declared.clone())
+                .collect::<Vec<_>>(),
             vec![select_predicate(), "status IN ('a', 'b')".to_string()]
         );
     }

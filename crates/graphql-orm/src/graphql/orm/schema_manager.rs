@@ -91,9 +91,10 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
     /// pool connects as.
     ///
     /// RLS policy expressions are compared in the form PostgreSQL renders
-    /// them: the declared predicate and the live expression are each parsed
-    /// against the table in a temporary view, inside a transaction that is
-    /// rolled back. Any other policy on an RLS or search document table, and
+    /// them: with `search_path` pinned to `pg_catalog, pg_temp`, the declared
+    /// predicate and the live expression are each parsed against the table in
+    /// a temporary view, inside a transaction that is rolled back. Custom
+    /// predicates must schema-qualify names outside `pg_catalog`. Any other policy on an RLS or search document table, and
     /// a policy whose command, `PERMISSIVE` mode or roles differ, is an error,
     /// as is an expression PostgreSQL could not render. Rendering needs the
     /// `TEMP` privilege, which PostgreSQL grants to `PUBLIC` by default.

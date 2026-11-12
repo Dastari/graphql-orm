@@ -73,11 +73,17 @@ so a freshly applied target validates clean. It is stricter elsewhere:
   re-apply the target if validation reports one as differing.
 - The validating role needs the `TEMP` privilege on the database (PostgreSQL
   grants it to `PUBLIC` by default). Without it, or on a read-only standby,
-  policies are reported as "could not be compared".
+  policies are reported as "could not be compared". The temporary views are
+  rolled back, but DDL event triggers and `log_statement = 'ddl'` see them.
+- Expressions are compared with `search_path` pinned to `pg_catalog, pg_temp`.
+  Custom `predicate = "..."` text must schema-qualify every function, operator,
+  table and type outside `pg_catalog`: write `app.is_member(tenant_id)`, not
+  `is_member(tenant_id)`. Unqualified names are reported as "could not be
+  compared". Re-apply the target after qualifying them.
 
 `#[graphql_rls]` `tenant` and `owner` must name a stored column of the entity,
-by field name or renamed column. Pre-quoted or qualified values no longer
-compile. Generated predicates now wrap each condition in parentheses; the
+by field name or `db_column`, written exactly as declared (a quoted
+`db_column` keeps its quotes). Qualified or other values no longer compile. Generated predicates now wrap each condition in parentheses; the
 policies PostgreSQL stores are unchanged, so re-applying is not required for
 validation to pass.
 

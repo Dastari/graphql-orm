@@ -4815,29 +4815,51 @@ async fn postgres_rls_target(
         LiveRlsCommand, LiveRlsHelperFunction, LiveRlsPolicyState, LiveRlsTableState,
     };
 
-    let mut target = LiveRlsTarget::default();
+    // Resolve each declared path as the ORM's own SQL resolves it, under the
+    // session's `search_path`: that is the table the runtime reads and writes.
+    let mut tables = Vec::with_capacity(probes.len());
+    let mut bases = Vec::with_capacity(probes.len());
     for probe in probes {
+        tables.push(resolve_postgres_table(conn, &probe.table_sql).await?);
+        let mut resolved = Vec::new();
+        for expression in &probe.expressions {
+            resolved.push(match &expression.search_document {
+                Some(search) => resolve_postgres_table(conn, &search.base_table_sql).await?,
+                None => None,
+            });
+        }
+        bases.push(resolved);
+    }
+    // Everything after this reads and renders with only the catalog on the
+    // path, so every other object renders schema-qualified and neither the
+    // session's `search_path` nor a lookalike in a writable schema can make a
+    // live expression and a declared predicate render alike.
+    sqlx::raw_sql("SET LOCAL search_path = pg_catalog, pg_temp")
+        .execute(&mut *conn)
+        .await?;
+
+    let mut target = LiveRlsTarget::default();
+    for ((probe, table), bases) in probes.iter().zip(tables).zip(bases) {
         let mut state = LiveRlsTableState {
             table_sql: probe.table_sql.clone(),
             ..Default::default()
         };
-        let table = sqlx::query(
-            "SELECT c.oid AS oid, n.nspname::text AS schema_name, c.relname::text AS table_name,
-                    c.oid::regclass::text AS relation_sql,
-                    c.relrowsecurity AS enabled, c.relforcerowsecurity AS forced,
-                    row_security_active(c.oid) AS active
-             FROM pg_catalog.pg_class c
-             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-             WHERE c.oid = pg_catalog.to_regclass($1) AND c.relkind IN ('r', 'p')",
-        )
-        .bind(&probe.table_sql)
-        .fetch_optional(&mut *conn)
-        .await?;
-        let Some(table) = table else {
+        let Some(oid) = table else {
             target.tables.push(state);
             continue;
         };
-        let oid: sqlx::postgres::types::Oid = table.try_get("oid")?;
+        let table = sqlx::query(
+            "SELECT n.nspname::text AS schema_name, c.relname::text AS table_name,
+                    c.oid::pg_catalog.regclass::text AS relation_sql,
+                    c.relrowsecurity AS enabled, c.relforcerowsecurity AS forced,
+                    pg_catalog.row_security_active(c.oid) AS active
+             FROM pg_catalog.pg_class c
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+             WHERE c.oid = $1",
+        )
+        .bind(oid)
+        .fetch_one(&mut *conn)
+        .await?;
         let relation_sql: String = table.try_get("relation_sql")?;
         state.relation = Some((table.try_get("schema_name")?, table.try_get("table_name")?));
         state.enabled = table.try_get("enabled")?;
@@ -4879,10 +4901,31 @@ async fn postgres_rls_target(
                 check,
             });
         }
-        for expression in probe.expressions.iter().filter(|_| probe.render) {
-            let rendered =
-                render_postgres_policy_expression(conn, &relation_sql, expression).await?;
-            state.expected.push((expression.clone(), rendered));
+        for (expression, base) in probe.expressions.iter().zip(bases) {
+            if !probe.render {
+                break;
+            }
+            let rendered = match (&expression.search_document, base) {
+                (None, _) => {
+                    render_postgres_policy_expression(conn, &relation_sql, &expression.declared)
+                        .await?
+                }
+                (Some(search), Some(base)) => {
+                    let base_sql: String =
+                        sqlx::query_scalar("SELECT $1::pg_catalog.regclass::text")
+                            .bind(base)
+                            .fetch_one(&mut *conn)
+                            .await?;
+                    let predicate =
+                        super::rls::render_search_document_predicate_on(&base_sql, search);
+                    render_postgres_policy_expression(conn, &relation_sql, &predicate).await?
+                }
+                (Some(search), None) => Err(format!(
+                    "base table {} does not resolve",
+                    search.base_table_sql
+                )),
+            };
+            state.expected.push((expression.declared.clone(), rendered));
         }
         target.tables.push(state);
     }
@@ -4927,6 +4970,22 @@ async fn postgres_rls_target(
     Ok(target)
 }
 
+/// The ordinary or partitioned table `path` resolves to under the session's
+/// `search_path`, as the ORM's SQL resolves it.
+#[cfg(feature = "postgres")]
+async fn resolve_postgres_table(
+    conn: &mut sqlx::PgConnection,
+    path: &str,
+) -> crate::Result<Option<sqlx::postgres::types::Oid>> {
+    sqlx::query_scalar(
+        "SELECT c.oid FROM pg_catalog.pg_class c
+         WHERE c.oid = pg_catalog.to_regclass($1) AND c.relkind IN ('r', 'p')",
+    )
+    .bind(path)
+    .fetch_optional(&mut *conn)
+    .await
+}
+
 /// Render one live policy clause, when it exists and `render` is set.
 #[cfg(feature = "postgres")]
 async fn render_policy_clause(
@@ -4948,10 +5007,15 @@ async fn render_policy_clause(
 /// `relation_sql`, or why it could not render it.
 ///
 /// The expression is parsed as the `WHERE` clause of a temporary view over the
-/// table, so its names resolve and its result is coerced to `boolean` as in a
-/// policy, and the view's definition is read back. Rendering a declared
-/// predicate and a live policy expression this way gives equal text exactly
-/// when they parse to the same expression. The view is created under a
+/// table, so its result is coerced to `boolean` as in a policy, and the view's
+/// definition is read back. The caller has pinned `search_path` to
+/// `pg_catalog, pg_temp`, so names outside the catalog resolve only when
+/// schema-qualified, and the rendering qualifies every object outside the
+/// catalog. A declared predicate and a live expression therefore render alike
+/// only when they name the same tables, columns, functions, operators and
+/// types and have the same structure, as far as PostgreSQL's deparser shows
+/// them; it never hides a difference in what a name resolves to. The view is
+/// created under a
 /// savepoint that is always rolled back. The statement is sent through the
 /// extended query protocol, which accepts exactly one command, so the text
 /// cannot add statements; creating the view executes nothing it names.

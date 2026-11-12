@@ -97,6 +97,39 @@ struct DriftNote {
     body: String,
 }
 
+/// RLS entity whose tenant column is declared as a quoted identifier.
+#[derive(GraphQLSchemaEntity, Clone, Debug)]
+#[graphql_entity(
+    backend = "postgres",
+    table = "rls_drift_quoted",
+    plural = "RlsDriftQuoteds"
+)]
+#[graphql_rls(select(tenant = "\"TenantId\""), insert(tenant = "\"TenantId\""))]
+#[allow(dead_code)]
+struct RlsDriftQuoted {
+    #[primary_key]
+    id: String,
+    #[graphql_orm(db_column = "\"TenantId\"")]
+    tenant: String,
+}
+
+/// RLS entity whose custom predicate calls a function without a schema.
+/// Validation cannot compare it: names outside the catalog must be
+/// schema-qualified.
+#[derive(GraphQLSchemaEntity, Clone, Debug)]
+#[graphql_entity(
+    backend = "postgres",
+    table = "rls_drift_members",
+    plural = "RlsDriftMembers"
+)]
+#[graphql_rls(select(predicate = "is_member(tenant_id)"))]
+#[allow(dead_code)]
+struct RlsDriftMember {
+    #[primary_key]
+    id: String,
+    tenant_id: String,
+}
+
 const DOCS: &str = "rls_drift_docs";
 const LOGS: &str = "drift_audit.logs";
 
@@ -107,13 +140,22 @@ fn target() -> SchemaTarget {
             <DriftAuditLog as Entity>::metadata(),
             <DriftAuditLogs as Entity>::metadata(),
             <DriftNote as Entity>::metadata(),
+            <RlsDriftQuoted as Entity>::metadata(),
         ],
         &[
             <RlsDriftDoc as DatabaseRls>::rls_metadata(),
             <DriftAuditLog as DatabaseRls>::rls_metadata(),
             <DriftAuditLogs as DatabaseRls>::rls_metadata(),
             <DriftNote as DatabaseRls>::rls_metadata(),
+            <RlsDriftQuoted as DatabaseRls>::rls_metadata(),
         ],
+    )
+}
+
+fn member_target() -> SchemaTarget {
+    SchemaTarget::from_entities(
+        &[<RlsDriftMember as Entity>::metadata()],
+        &[<RlsDriftMember as DatabaseRls>::rls_metadata()],
     )
 }
 
@@ -178,10 +220,38 @@ async fn provision() -> Result<(sqlx::PgPool, String, sqlx::PgPool), Box<dyn std
     Ok((owner, role, runtime))
 }
 
+/// A pool connecting as `role` whose sessions use `search_path`, as a runtime
+/// role can set for itself.
+async fn pool_with_search_path(
+    owner: &sqlx::PgPool,
+    role: &str,
+    search_path: &str,
+) -> Result<sqlx::PgPool, Box<dyn std::error::Error>> {
+    let token = role.trim_start_matches("rls_drift_runtime_");
+    let options = owner
+        .connect_options()
+        .as_ref()
+        .clone()
+        .username(role)
+        .password(&format!("synthetic_{token}"))
+        .options([("search_path", search_path)]);
+    Ok(sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(options)
+        .await?)
+}
+
 async fn rls_errors(pool: &sqlx::PgPool) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    rls_errors_for(pool, &target()).await
+}
+
+async fn rls_errors_for(
+    pool: &sqlx::PgPool,
+    target: &SchemaTarget,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let report = graphql_orm::db::Database::new(pool.clone())
         .schema()
-        .validate_target(&target())
+        .validate_target(target)
         .await?;
     Ok(report
         .rls_diagnostics
@@ -252,7 +322,7 @@ async fn assert_drift(
     );
     reapply_rls(owner).await?;
     sqlx::raw_sql(&format!(
-        "DROP POLICY IF EXISTS widen_reads ON {DOCS}; DROP POLICY IF EXISTS everything ON {DOCS}"
+        "DROP POLICY IF EXISTS widen_reads ON {DOCS}; DROP POLICY IF EXISTS everything ON {DOCS}; DROP POLICY IF EXISTS widen_search ON __graphql_orm_search_driftnotes"
     ))
     .execute(owner)
     .await?;
@@ -360,6 +430,20 @@ async fn real_rls_drift_is_still_reported() -> Result<(), Box<dyn std::error::Er
             format!("ALTER TABLE {LOGS} DISABLE ROW LEVEL SECURITY"),
             vec![format!("RLS is not enabled on {LOGS}")],
         ),
+        // An additional policy on a search-document table.
+        (
+            "CREATE POLICY widen_search ON __graphql_orm_search_driftnotes FOR SELECT USING (true)".to_string(),
+            vec!["Unexpected RLS policy widen_search".into()],
+        ),
+        // A helper function with another volatility or a SET option.
+        (
+            "ALTER FUNCTION graphql_orm.current_user_id() VOLATILE".to_string(),
+            vec!["graphql_orm.current_user_id".into(), "differs".into()],
+        ),
+        (
+            "ALTER FUNCTION graphql_orm.claims() SET search_path = public".to_string(),
+            vec!["graphql_orm.claims".into(), "differs".into()],
+        ),
         // A helper function that no longer reads the request context.
         (
             "CREATE OR REPLACE FUNCTION graphql_orm.current_tenant_id() RETURNS text LANGUAGE sql STABLE AS $$ SELECT 'tenant-a'::text $$".to_string(),
@@ -426,6 +510,83 @@ async fn row_level_security_refusals_are_forbidden() -> Result<(), Box<dyn std::
     assert_eq!(
         public.code,
         graphql_orm::graphql::errors::OrmErrorCode::Forbidden
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires test-owned PostgreSQL container"]
+async fn a_hostile_search_path_cannot_mask_a_lookalike_operator()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (owner, role, _runtime) = provision().await?;
+    // A lookalike `=` in the writable public schema, and the declared INSERT
+    // policy rebound to it.
+    sqlx::raw_sql(&format!(
+        "CREATE FUNCTION public.always_equal(text, text) RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT true'; \
+         CREATE OPERATOR public.= (LEFTARG = text, RIGHTARG = text, FUNCTION = public.always_equal); \
+         ALTER POLICY graphql_orm_rls_drift_docs_insert ON {DOCS} WITH CHECK (tenant_id OPERATOR(public.=) graphql_orm.current_tenant_id())"
+    ))
+    .execute(&owner)
+    .await?;
+    // A runtime session that searches public before the catalog resolves the
+    // declared `=` to the lookalike too.
+    let hostile = pool_with_search_path(&owner, &role, "public,pg_catalog").await?;
+    let errors = rls_errors(&hostile).await?;
+    assert!(
+        errors.iter().any(|error| {
+            error.contains("graphql_orm_rls_drift_docs_insert") && error.contains("differs")
+        }),
+        "{errors:#?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires test-owned PostgreSQL container"]
+async fn a_hostile_search_path_cannot_mask_a_lookalike_function()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (owner, role, runtime) = provision().await?;
+    let select = "graphql_orm_rls_drift_members_select";
+    sqlx::raw_sql(&format!(
+        "CREATE FUNCTION public.is_member(text) RETURNS boolean LANGUAGE sql STABLE AS 'SELECT $1 = graphql_orm.current_tenant_id()'; \
+         CREATE TABLE rls_drift_members (id text PRIMARY KEY, tenant_id text NOT NULL); \
+         GRANT SELECT ON rls_drift_members TO {role}"
+    ))
+    .execute(&owner)
+    .await?;
+    let plan = build_schema_target_rls_plan(
+        DatabaseBackend::Postgres,
+        SchemaPolicy::Managed,
+        &member_target(),
+    );
+    for statement in &plan.statements {
+        sqlx::raw_sql(statement).execute(&owner).await?;
+    }
+    // Rebound to a lookalike in another schema, and validated by a session
+    // whose search_path resolves the declared name to that lookalike, the
+    // policy is still reported.
+    sqlx::raw_sql(&format!(
+        "CREATE SCHEMA lookalike; GRANT USAGE ON SCHEMA lookalike TO {role}; \
+         CREATE FUNCTION lookalike.is_member(text) RETURNS boolean LANGUAGE sql STABLE AS 'SELECT true'; \
+         ALTER POLICY {select} ON rls_drift_members USING (lookalike.is_member(tenant_id))"
+    ))
+    .execute(&owner)
+    .await?;
+    let hostile = pool_with_search_path(&owner, &role, "lookalike,public").await?;
+    let errors = rls_errors_for(&hostile, &member_target()).await?;
+    assert!(
+        errors.iter().any(|error| error.contains(select)),
+        "{errors:#?}"
+    );
+    // With any search_path, a predicate naming a function outside the catalog
+    // without its schema cannot be compared, and is reported rather than
+    // accepted.
+    let errors = rls_errors_for(&runtime, &member_target()).await?;
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains(select) && error.contains("could not be compared")),
+        "{errors:#?}"
     );
     Ok(())
 }

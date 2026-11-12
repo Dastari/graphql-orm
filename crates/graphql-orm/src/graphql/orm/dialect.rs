@@ -920,14 +920,35 @@ pub(crate) fn postgres_resolved_identifier_parts(path: &str) -> Vec<String> {
 
 /// The name PostgreSQL resolves one identifier to when the ORM's SQL renders
 /// it with [`DatabaseBackend::render_identifier`].
+///
+/// Text that starts with `"` but is not exactly one well-formed quoted
+/// identifier names itself in full, as policy SQL quotes it.
 pub(crate) fn postgres_resolved_identifier(identifier: &str) -> String {
-    if identifier.len() >= 2 && identifier.starts_with('"') && identifier.ends_with('"') {
-        identifier[1..identifier.len() - 1].replace("\"\"", "\"")
-    } else if DatabaseBackend::Postgres.identifier_needs_quoting(identifier) {
+    if let Some(name) = postgres_delimited_identifier(identifier) {
+        name
+    } else if identifier.starts_with('"')
+        || DatabaseBackend::Postgres.identifier_needs_quoting(identifier)
+    {
         identifier.to_string()
     } else {
         identifier.to_ascii_lowercase()
     }
+}
+
+/// The name inside `identifier` when it is exactly one well-formed quoted
+/// PostgreSQL identifier: it starts and ends with `"`, is not empty inside,
+/// and every inner `"` is doubled.
+pub(crate) fn postgres_delimited_identifier(identifier: &str) -> Option<String> {
+    let inner = identifier.strip_prefix('"')?.strip_suffix('"')?;
+    let mut name = String::with_capacity(inner.len());
+    let mut characters = inner.chars();
+    while let Some(character) = characters.next() {
+        if character == '"' && characters.next() != Some('"') {
+            return None;
+        }
+        name.push(character);
+    }
+    (!name.is_empty()).then_some(name)
 }
 
 /// Whether a declared table path has a single part, with no schema.

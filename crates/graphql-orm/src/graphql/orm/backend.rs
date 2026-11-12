@@ -240,7 +240,8 @@ pub trait RlsIntrospectionBackend: OrmBackend {
     ///
     /// Each probe's path is resolved as the plan's SQL resolves it. The
     /// expressions are rendered by parsing each one against that table in a
-    /// temporary view, inside a transaction that is rolled back, so the
+    /// temporary view with `search_path` pinned to `pg_catalog, pg_temp`,
+    /// inside a transaction that is rolled back, so the
     /// declared and the live expressions are compared in the same form.
     async fn introspect_rls_target(
         _pool: &Self::Pool,

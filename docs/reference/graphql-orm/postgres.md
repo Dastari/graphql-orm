@@ -48,10 +48,10 @@ conditions in deterministic order, each in parentheses, with `AND`:
 - tenant: `(<tenant_column> = graphql_orm.current_tenant_id())`
 - owner: `(<owner_column> = graphql_orm.current_user_id())`
 
-`tenant` and `owner` must name a stored column of the entity (its field name, or its renamed
-column); anything else is a compile error. A plain column name is written bare, as the ORM's DDL
-writes it, so PostgreSQL folds it to the same column; any other name is quoted in full as exactly
-one identifier.
+`tenant` and `owner` must name a stored column of the entity exactly as declared (its field name,
+or its `db_column`, quotes included); anything else is a compile error. The column is written as
+the ORM's DDL writes it: a plain name bare, so PostgreSQL folds it to the same column, and exactly
+one well-formed quoted identifier unchanged. Any other value is quoted in full as one identifier.
 
 Entity, search document and trigger SQL render table paths as the ORM's own DDL and writes do:
 plain non-reserved names stay unquoted and fold, so `table = "Docs"` secures `docs` and
@@ -162,12 +162,23 @@ PostgreSQL stores policy expressions in its own form: it drops identifier quotes
 parentheses, so `"tenant_id" = graphql_orm.current_tenant_id()` reads back as
 `(tenant_id = graphql_orm.current_tenant_id())` and `status IN ('a', 'b')` as
 `(status = ANY (ARRAY['a'::text, 'b'::text]))`. Validation therefore never compares the declared
-text with `pg_policies`. It has PostgreSQL parse both the declared predicate and the live
-expression against the table, in the validating session, as the `WHERE` clause of a temporary view,
-and compares the two view definitions PostgreSQL renders. They are equal exactly when both parse to
-the same expression; any other change, including regrouped `AND` and `OR`, another literal or
-another cast, is reported. The views are created inside a transaction that is always rolled back,
-and creating them executes nothing.
+text with `pg_policies`. It resolves each table by the path the plan's SQL uses, under the
+validating session's `search_path`, as the runtime's own reads and writes resolve it. It then pins
+`search_path` to `pg_catalog, pg_temp` for the rest of the transaction, has PostgreSQL parse both
+the declared predicate and the live expression against the table as the `WHERE` clause of a
+temporary view, and compares the two view definitions PostgreSQL renders. With only the catalog on
+the path, every table, function, operator and type outside `pg_catalog` renders schema-qualified,
+so the renderings agree only when both name the same objects and have the same structure as far as
+PostgreSQL's deparser shows it. Neither the session's `search_path` nor a lookalike function or
+operator in a writable schema can make them agree. Any other change, including regrouped `AND`
+and `OR`, another literal or another cast, is reported. The views are created inside a
+transaction that is always rolled back, and creating them executes nothing. They are still DDL:
+DDL event triggers fire, and `log_statement = 'ddl'` logs them, during validation.
+
+Custom predicates must therefore schema-qualify every function, operator, table and type outside
+`pg_catalog`, for example `app.is_member(tenant_id)`, not `is_member(tenant_id)`. An unqualified
+one cannot be parsed under the pinned path, and validation reports its policy as "could not be
+compared". The generated predicates and helpers already qualify `graphql_orm.*`.
 
 Rendering needs the `TEMP` privilege on the database, which PostgreSQL grants to `PUBLIC` by
 default, and a primary rather than a read-only standby. When PostgreSQL cannot render an expression,
