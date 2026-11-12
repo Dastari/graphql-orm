@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use agql_auth::{Clock, CurrentPrincipalResolver, PrincipalReference, ResolvedPrincipal};
 use async_trait::async_trait;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -686,8 +687,49 @@ pub struct AiCapabilityAuthorityDecision {
     pub policy_fingerprint: String,
 }
 
+/// Number of per-entry [`AiCapabilityAuthorityPolicy::authorize`] calls the
+/// default [`AiCapabilityAuthorityPolicy::authorize_discovery`] keeps in flight.
+pub const AI_CAPABILITY_DISCOVERY_AUTHORIZATION_CONCURRENCY: usize = 16;
+
+/// Stable [`AiError::InvalidInput`] message returned when one discovery query
+/// matches more entries than the broker's configured
+/// [`AiCapabilityDiscoveryBroker::with_maximum_discovery_authorizations`].
+///
+/// The model should narrow the query. The refusal depends only on how many
+/// entries match, permitted or not, and is decided before any policy call.
+pub const AI_CAPABILITY_DISCOVERY_TOO_BROAD: &str =
+    "capability discovery query matches too many capabilities; narrow the query";
+
+/// Current host discovery decision bound to the exact ranked entry it decides.
+///
+/// The broker refuses a batch unless decision `i` names the capability of
+/// ranked match `i`, so a host cannot attach one entry's decision to another.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AiCapabilityDiscoveryDecision {
+    /// Exact capability this decision applies to.
+    pub capability_id: AiToolId,
+    /// Whether the current principal may see and load the capability.
+    pub allowed: bool,
+}
+
+impl AiCapabilityDiscoveryDecision {
+    /// Binds one decision to the exact ranked match it decides.
+    pub fn for_match(candidate: &AiCapabilityRankedMatch<'_>, allowed: bool) -> Self {
+        Self {
+            capability_id: candidate.entry().id.clone(),
+            allowed,
+        }
+    }
+}
+
 /// Fresh host policy applied after principal rehydration for every load and
 /// again for every execution.
+///
+/// A denial is `Ok` with `allowed: false`. Return `Err` only when policy
+/// cannot be evaluated, for example an unavailable store. Discovery fails the
+/// whole search on any `Err`, so returning `Err(Forbidden)` for an entry the
+/// principal may not see turns search success into a signal that a hidden
+/// entry matched the query.
 #[async_trait]
 pub trait AiCapabilityAuthorityPolicy: Send + Sync {
     /// Applies current scope, classification, capability-kind, provider,
@@ -705,32 +747,61 @@ pub trait AiCapabilityAuthorityPolicy: Send + Sync {
     /// The broker passes every entry that matches the query, in rank order and
     /// before the query's result ceiling, and truncates only after this
     /// returns. A restricted principal therefore receives its permitted
-    /// candidates even when unpermitted entries rank above them, and the
-    /// amount of policy work depends on the query and catalogue, never on
-    /// which candidates the principal may use.
+    /// candidates even when unpermitted entries rank above them. When every
+    /// policy call succeeds, the amount of policy work depends on the query
+    /// and catalogue, never on which candidates the principal may use.
     ///
-    /// The default calls [`Self::authorize`] once per match. Override it to
-    /// evaluate the batch from one current lookup. An override must apply the
-    /// same current decision [`Self::authorize`] would and must not cache an
+    /// One search can therefore evaluate up to the index set's
+    /// `maximum_entries` matches (16,384 by default). Bound it with
+    /// [`AiCapabilityDiscoveryBroker::with_maximum_discovery_authorizations`].
+    ///
+    /// The result must hold exactly one decision per match, in the same order,
+    /// and decision `i` must carry the `capability_id` of `matches[i]`; build
+    /// each with [`AiCapabilityDiscoveryDecision::for_match`]. The broker
+    /// refuses a missing, extra, duplicated or reordered decision with
+    /// [`AiError::Forbidden`] and returns no candidates.
+    ///
+    /// The default calls [`Self::authorize`] for each match, keeping up to
+    /// [`AI_CAPABILITY_DISCOVERY_AUTHORIZATION_CONCURRENCY`] calls in flight on
+    /// the calling task, and stops at the first error. Override it to decide
+    /// the batch from one current lookup. An override must apply the same
+    /// current decision [`Self::authorize`] would and must not cache an
     /// authority decision across searches.
     ///
     /// # Errors
     ///
-    /// Returns the first policy failure. The broker fails the search closed on
-    /// any error and on a result that does not hold exactly one decision per
-    /// match.
+    /// Returns the first policy failure. A denial is not a failure: report it
+    /// as `allowed: false`, because any `Err` fails the whole search and so
+    /// reveals that the failing entry matched.
     async fn authorize_discovery(
         &self,
         principal: &ResolvedPrincipal,
         matches: &[AiCapabilityRankedMatch<'_>],
         run: &AiCapabilityRunBinding,
-    ) -> Result<Vec<AiCapabilityAuthorityDecision>, AiError> {
+    ) -> Result<Vec<AiCapabilityDiscoveryDecision>, AiError> {
+        let mut pending = futures::stream::FuturesOrdered::new();
+        let mut remaining = matches.iter();
         let mut decisions = Vec::with_capacity(matches.len());
-        for candidate in matches {
-            decisions.push(
-                self.authorize(principal, candidate.index(), candidate.entry(), run)
-                    .await?,
-            );
+        loop {
+            while pending.len() < AI_CAPABILITY_DISCOVERY_AUTHORIZATION_CONCURRENCY {
+                let Some(candidate) = remaining.next() else {
+                    break;
+                };
+                pending.push_back(self.authorize(
+                    principal,
+                    candidate.index(),
+                    candidate.entry(),
+                    run,
+                ));
+            }
+            let Some(decision) = pending.next().await else {
+                break;
+            };
+            let candidate = &matches[decisions.len()];
+            decisions.push(AiCapabilityDiscoveryDecision::for_match(
+                candidate,
+                decision?.allowed,
+            ));
         }
         Ok(decisions)
     }
@@ -847,6 +918,7 @@ pub struct AiCapabilityDiscoveryBroker {
     clock: Arc<dyn Clock>,
     loaded_ttl: Duration,
     discovery_cache: Option<CapabilityDiscoveryCache>,
+    maximum_discovery_authorizations: Option<usize>,
 }
 
 impl AiCapabilityDiscoveryBroker {
@@ -874,6 +946,7 @@ impl AiCapabilityDiscoveryBroker {
             clock,
             loaded_ttl,
             discovery_cache: None,
+            maximum_discovery_authorizations: None,
         })
     }
 
@@ -910,6 +983,31 @@ impl AiCapabilityDiscoveryBroker {
             ttl,
             maximum_searches: usize::from(maximum_searches),
         });
+        Ok(self)
+    }
+
+    /// Caps how many ranked matches one discovery query may send to host
+    /// policy. Unset by default, so every match is evaluated.
+    ///
+    /// A query that matches more entries than `maximum` is refused before any
+    /// policy call with [`AiError::InvalidInput`] carrying
+    /// [`AI_CAPABILITY_DISCOVERY_TOO_BROAD`]. The refusal depends only on the
+    /// total number of matches, permitted or not, which search latency
+    /// already reflects; it never depends on a policy decision. The cap is
+    /// applied before truncation so a restricted principal still receives
+    /// every permitted candidate of an admitted query.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a maximum of zero.
+    pub fn with_maximum_discovery_authorizations(mut self, maximum: u32) -> Result<Self, AiError> {
+        if maximum == 0 {
+            return Err(AiError::InvalidConfiguration(
+                "capability discovery authorization bound is invalid".to_owned(),
+            ));
+        }
+        self.maximum_discovery_authorizations =
+            Some(usize::try_from(maximum).unwrap_or(usize::MAX));
         Ok(self)
     }
 
@@ -968,13 +1066,17 @@ impl AiCapabilityDiscoveryBroker {
     /// Policy runs over the complete ranking through
     /// [`AiCapabilityAuthorityPolicy::authorize_discovery`] and the result
     /// ceiling is applied afterwards, so the result holds the highest-ranked
-    /// candidates the principal may use. The result carries no score, count
-    /// or continuation that could reveal unpermitted entries.
+    /// candidates the principal may use. Each decision must name the exact
+    /// ranked entry it decides. The result carries no score, count or
+    /// continuation that could reveal unpermitted entries.
     ///
     /// # Errors
     ///
-    /// Fails closed on rehydration, index, or policy failure. Search grants no
-    /// load or execution authority.
+    /// Fails closed on rehydration, index, or policy failure, and with
+    /// [`AiError::Forbidden`] when the batch decisions do not match the
+    /// ranking one to one. Returns [`AiError::InvalidInput`] carrying
+    /// [`AI_CAPABILITY_DISCOVERY_TOO_BROAD`] when a configured authorization
+    /// bound is exceeded. Search grants no load or execution authority.
     pub async fn search(
         &self,
         principal_reference: &PrincipalReference,
@@ -984,11 +1086,24 @@ impl AiCapabilityDiscoveryBroker {
         let principal = self.rehydrate(principal_reference).await?;
         let indexes = self.current_indexes.current_index_set(run)?;
         let ranked = indexes.ranked_matches(query)?;
+        if self
+            .maximum_discovery_authorizations
+            .is_some_and(|maximum| ranked.len() > maximum)
+        {
+            return Err(AiError::InvalidInput(
+                AI_CAPABILITY_DISCOVERY_TOO_BROAD.to_owned(),
+            ));
+        }
         let decisions = self
             .authority
             .authorize_discovery(&principal, &ranked, run)
             .await?;
-        if decisions.len() != ranked.len() {
+        if decisions.len() != ranked.len()
+            || ranked
+                .iter()
+                .zip(&decisions)
+                .any(|(candidate, decision)| decision.capability_id != candidate.entry().id)
+        {
             return Err(AiError::Forbidden);
         }
         let candidates = ranked
@@ -3267,8 +3382,17 @@ mod tests {
         assert_eq!(denied_calls, ENTRIES);
     }
 
+    #[derive(Clone, Copy, Debug)]
+    enum BatchShape {
+        Aligned,
+        Short,
+        Reordered,
+        Extra,
+        Duplicate,
+    }
+
     struct BatchAuthority {
-        truncate: bool,
+        shape: BatchShape,
         batches: std::sync::atomic::AtomicUsize,
     }
 
@@ -3289,62 +3413,88 @@ mod tests {
             _principal: &ResolvedPrincipal,
             matches: &[AiCapabilityRankedMatch<'_>],
             _run: &AiCapabilityRunBinding,
-        ) -> Result<Vec<AiCapabilityAuthorityDecision>, AiError> {
+        ) -> Result<Vec<AiCapabilityDiscoveryDecision>, AiError> {
             self.batches.fetch_add(1, Ordering::SeqCst);
-            let count = if self.truncate {
-                matches.len().saturating_sub(1)
-            } else {
-                matches.len()
-            };
-            Ok(matches
+            // Every decision is individually correct for the entry it names;
+            // only its position relative to the ranking differs.
+            let mut decisions = matches
                 .iter()
-                .take(count)
-                .map(|candidate| AiCapabilityAuthorityDecision {
-                    allowed: candidate.entry().id.as_str().ends_with('7'),
-                    policy_fingerprint: "current-policy-v1".to_owned(),
+                .map(|candidate| {
+                    AiCapabilityDiscoveryDecision::for_match(
+                        candidate,
+                        candidate.entry().id.as_str().ends_with('7'),
+                    )
                 })
-                .collect())
+                .collect::<Vec<_>>();
+            match self.shape {
+                BatchShape::Aligned => {}
+                BatchShape::Short => {
+                    decisions.pop();
+                }
+                BatchShape::Reordered => {
+                    // Grouped and concatenated out of rank order, same length.
+                    // Position 0 would otherwise receive record_0007's allow.
+                    decisions.swap(0, 7);
+                }
+                BatchShape::Extra => {
+                    let last = decisions.last().cloned().expect("matches");
+                    decisions.push(last);
+                }
+                BatchShape::Duplicate => {
+                    decisions[1] = decisions[0].clone();
+                }
+            }
+            Ok(decisions)
+        }
+    }
+
+    fn batch_broker(
+        index: &Arc<AiCapabilityIndex>,
+        authority: Arc<dyn AiCapabilityAuthorityPolicy>,
+    ) -> AiCapabilityDiscoveryBroker {
+        AiCapabilityDiscoveryBroker::new(
+            Arc::new(Resolver(principal())),
+            Arc::new(CurrentIndex(RwLock::new(Arc::clone(index)))),
+            authority,
+            Arc::new(FixedClock::new(OffsetDateTime::UNIX_EPOCH)),
+            Duration::seconds(30),
+        )
+        .expect("broker")
+    }
+
+    fn catalogue_query(maximum_results: u16) -> AiCapabilitySearchQuery {
+        AiCapabilitySearchQuery {
+            text: "reviewed catalogue record".to_owned(),
+            namespace: None,
+            kind: Some(AiCapabilityKind::ReviewedStatic),
+            entity_or_operation: None,
+            maximum_results,
         }
     }
 
     #[tokio::test]
-    async fn batch_discovery_policy_is_used_once_and_fails_closed_on_a_short_result() {
+    async fn batch_discovery_decisions_must_name_each_ranked_entry_in_order() {
         let index = large_static_index(200);
-        for truncate in [false, true] {
-            let principal = principal();
-            let principal_reference = principal.reference();
+        let principal_reference = principal().reference();
+        for shape in [
+            BatchShape::Aligned,
+            BatchShape::Short,
+            BatchShape::Reordered,
+            BatchShape::Extra,
+            BatchShape::Duplicate,
+        ] {
             let authority = Arc::new(BatchAuthority {
-                truncate,
+                shape,
                 batches: std::sync::atomic::AtomicUsize::new(0),
             });
-            let broker = AiCapabilityDiscoveryBroker::new(
-                Arc::new(Resolver(principal)),
-                Arc::new(CurrentIndex(RwLock::new(Arc::clone(&index)))),
-                authority.clone(),
-                Arc::new(FixedClock::new(OffsetDateTime::UNIX_EPOCH)),
-                Duration::seconds(30),
-            )
-            .expect("broker");
-            let result = broker
-                .search(
-                    &principal_reference,
-                    &run_binding(),
-                    &AiCapabilitySearchQuery {
-                        text: "reviewed catalogue record".to_owned(),
-                        namespace: None,
-                        kind: Some(AiCapabilityKind::ReviewedStatic),
-                        entity_or_operation: None,
-                        maximum_results: 3,
-                    },
-                )
+            let result = batch_broker(&index, authority.clone())
+                .search(&principal_reference, &run_binding(), &catalogue_query(3))
                 .await;
             assert_eq!(authority.batches.load(Ordering::SeqCst), 1);
-            if truncate {
-                assert!(matches!(result, Err(AiError::Forbidden)));
-            } else {
-                assert_eq!(
+            match shape {
+                BatchShape::Aligned => assert_eq!(
                     result
-                        .expect("batch search")
+                        .expect("aligned batch search")
                         .candidates
                         .iter()
                         .map(|candidate| candidate.id.as_str())
@@ -3354,9 +3504,117 @@ mod tests {
                         "catalogue.record_0017",
                         "catalogue.record_0027"
                     ]
-                );
+                ),
+                _ => assert!(
+                    matches!(result, Err(AiError::Forbidden)),
+                    "{shape:?} batch must be refused"
+                ),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn discovery_authorization_bound_refuses_broad_queries_before_policy() {
+        let index = large_static_index(200);
+        let principal_reference = principal().reference();
+        let authority = Arc::new(PermittedSet::new(["catalogue.record_0199"]));
+        let bounded = batch_broker(&index, authority.clone())
+            .with_maximum_discovery_authorizations(199)
+            .expect("bound");
+        assert!(matches!(
+            bounded
+                .search(&principal_reference, &run_binding(), &catalogue_query(8))
+                .await,
+            Err(AiError::InvalidInput(message)) if message == AI_CAPABILITY_DISCOVERY_TOO_BROAD
+        ));
+        assert_eq!(authority.calls.load(Ordering::SeqCst), 0);
+
+        let admitted = batch_broker(&index, authority.clone())
+            .with_maximum_discovery_authorizations(200)
+            .expect("bound");
+        let result = admitted
+            .search(&principal_reference, &run_binding(), &catalogue_query(8))
+            .await
+            .expect("bounded search");
+        assert_eq!(result.candidates.len(), 1);
+        assert_eq!(result.candidates[0].id.as_str(), "catalogue.record_0199");
+        assert_eq!(authority.calls.load(Ordering::SeqCst), 200);
+
+        assert!(matches!(
+            batch_broker(&index, authority).with_maximum_discovery_authorizations(0),
+            Err(AiError::InvalidConfiguration(_))
+        ));
+    }
+
+    struct InFlightAuthority {
+        current: std::sync::atomic::AtomicUsize,
+        peak: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl AiCapabilityAuthorityPolicy for InFlightAuthority {
+        async fn authorize(
+            &self,
+            _principal: &ResolvedPrincipal,
+            _owning_index: &AiCapabilityIndex,
+            entry: &AiCapabilityIndexEntry,
+            _run: &AiCapabilityRunBinding,
+        ) -> Result<AiCapabilityAuthorityDecision, AiError> {
+            let now = self.current.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            // Later-ranked entries finish first, so ordering cannot rely on
+            // completion order.
+            let position = entry
+                .id
+                .as_str()
+                .rsplit('_')
+                .next()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or_default();
+            for _ in 0..(200 - position) % 7 {
+                tokio::task::yield_now().await;
+            }
+            self.current.fetch_sub(1, Ordering::SeqCst);
+            Ok(AiCapabilityAuthorityDecision {
+                allowed: entry.id.as_str().ends_with('3'),
+                policy_fingerprint: "current-policy-v1".to_owned(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn default_discovery_policy_is_concurrent_bounded_and_rank_ordered() {
+        let index = large_static_index(200);
+        let authority = Arc::new(InFlightAuthority {
+            current: std::sync::atomic::AtomicUsize::new(0),
+            peak: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let result = batch_broker(&index, authority.clone())
+            .search(
+                &principal().reference(),
+                &run_binding(),
+                &catalogue_query(4),
+            )
+            .await
+            .expect("concurrent search");
+        assert_eq!(
+            result
+                .candidates
+                .iter()
+                .map(|candidate| candidate.id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "catalogue.record_0003",
+                "catalogue.record_0013",
+                "catalogue.record_0023",
+                "catalogue.record_0033"
+            ]
+        );
+        let peak = authority.peak.load(Ordering::SeqCst);
+        assert!(
+            peak > 1 && peak <= AI_CAPABILITY_DISCOVERY_AUTHORIZATION_CONCURRENCY,
+            "peak in-flight policy calls was {peak}"
+        );
     }
 
     #[tokio::test]

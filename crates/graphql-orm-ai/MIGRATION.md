@@ -22,13 +22,32 @@ No data migration is needed, and no GraphQL SDL or persistent schema changes.
   candidates than it may use. Unrestricted principals see the same results as
   before.
 - Policy now runs once per matching entry rather than once per returned
-  candidate. `AiCapabilityAuthorityPolicy` gains a provided method,
-  `authorize_discovery`, which receives the complete ranked batch and calls
-  `authorize` per match by default. No implementation has to change. A host
-  whose per-entry check is expensive should override it to decide the batch
-  from one current lookup. It must return exactly one decision per match, in
-  order, apply the same decision `authorize` would, and not cache decisions
-  across searches; a wrong-length result fails the search with `Forbidden`.
+  candidate. A broad query can match every entry, so the worst case is the
+  index set's `maximum_entries` policy calls per search (16,384 by default;
+  at most 128 before).
+- `AiCapabilityAuthorityPolicy` gains a provided method,
+  `authorize_discovery`, which receives the complete ranked batch. By default
+  it calls `authorize` per match with up to 16
+  (`AI_CAPABILITY_DISCOVERY_AUTHORIZATION_CONCURRENCY`) calls in flight on the
+  calling task, in rank order. No implementation has to change.
+- A host whose per-entry check is expensive should override it to decide the
+  batch from one current lookup. It must return one
+  `AiCapabilityDiscoveryDecision` per match, in order, each naming the
+  capability of the match at its position (use
+  `AiCapabilityDiscoveryDecision::for_match`). It must apply the same decision
+  `authorize` would and must not cache decisions across searches. A missing,
+  extra, duplicated or reordered decision fails the search with `Forbidden`.
+- Report a denial from `authorize` or `authorize_discovery` as `Ok` with
+  `allowed: false`. Use `Err` only when policy cannot be evaluated. Any `Err`
+  fails the whole search, so returning `Err(Forbidden)` for an entry the
+  principal may not see would tell the model that a hidden entry matched.
+- Optionally call
+  `AiCapabilityDiscoveryBroker::with_maximum_discovery_authorizations(n)` to
+  refuse queries that match more than `n` entries before any policy call. The
+  refusal is `InvalidInput` with the stable message
+  `AI_CAPABILITY_DISCOVERY_TOO_BROAD`; the model should narrow its query. It
+  depends only on the total match count, permitted or not. The cap is unset by
+  default.
 - Load and execution still call `authorize` for the exact candidate, as before.
 
 ## 0.130.0 to 0.131.0: legacy delegated stored principal references
