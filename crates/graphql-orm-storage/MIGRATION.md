@@ -10,6 +10,18 @@ supersedes: []
 
 # Migration Guide
 
+## 0.9.2 to 0.9.3: digest-pinned managed Samba fixture
+
+Update the storage requirement to 0.9.3 and refresh the consumer lockfile. No
+API, configuration or object format change is required.
+
+The managed Samba runner now uses the image
+`dperson/samba@sha256:66088b78a19810dd1457a8f39340e95e663c728083efa5fe7dc0d40b2478e869`
+by default. Local runs keep the never-pull default, so pull that exact
+reference once before running `tests/samba/run.sh` if only the `latest` tag
+is cached. An `SMB_TEST_IMAGE` override must be a digest reference
+(`name@sha256:<64 hex digits>`); a tag-only override exits with status 64.
+
 ## 0.9.1 to 0.9.2: ordered and durable local storage
 
 Update the storage requirement to 0.9.2 and refresh the consumer lockfile. No

@@ -10,6 +10,17 @@ supersedes: []
 
 # Changelog
 
+## 0.9.3 (unreleased)
+
+- The managed Samba test runner (`tests/samba/run.sh`) now defaults to the
+  reviewed multi-platform index digest of `dperson/samba:latest`
+  (`sha256:66088b78a19810dd1457a8f39340e95e663c728083efa5fe7dc0d40b2478e869`)
+  instead of the floating `latest` tag, and refuses an `SMB_TEST_IMAGE`
+  override that is not pinned by digest before it inspects, pulls or starts
+  anything.
+- Test harness only: no library, public API, configuration or object format
+  change.
+
 ## 0.9.2
 
 - Local listings return keys in exact lexicographic key order. The local

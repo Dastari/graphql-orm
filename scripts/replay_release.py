@@ -33,6 +33,7 @@ EXCLUDED_JOBS = [
     "orm-runtime-graphql", "orm-backends", "orm-security-sqlite", "orm-security-portable", "sqlserver-security",
     "ai-provider-matrix", "ai-provider-lanes", "ai-graphql-naming",
     "ai-postgres-parity", "alternate-features", "router", "router-msrv",
+    "schema-export",
 ]
 UNEXECUTED = [
     "wrong-recipe/compiler/platform/wrapper and unsupported-capture refusal",

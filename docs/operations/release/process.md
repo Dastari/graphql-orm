@@ -209,18 +209,48 @@ gates the workflow's entry job, so no release lane runs before approval. The
 workflow then:
 
 1. proves the requested commit is current `main` and the workspace tag is new;
-2. for `full`, reruns documentation, dependency, package, backend, provider, Clippy, and
-   Rustdoc release lanes with the lockfile fixed, as parallel jobs that each
+2. for `full`, reruns documentation, dependency, package, macros/schema-export,
+   backend, provider, Clippy, and Rustdoc release lanes with the lockfile fixed, as parallel jobs that each
    own their `target/`, one per AI provider lane, all of which must succeed
    before anything is tagged or published; the explicitly scoped profile instead
    requires its own complete mandatory gates and attaches their evidence;
-3. generates the canonical JSON manifest and Markdown release notes;
-4. optionally builds the approved Linux router executable and its CycloneDX
-   inventory;
-5. hashes and attests every release asset;
+3. in the read-only `release-bundle` job, generates the canonical JSON
+   manifest and Markdown release notes;
+4. in the same job, optionally builds the approved Linux router executable and
+   its CycloneDX inventory, then checksums every asset and uploads the bundle;
+5. in the `release` publisher, verifies the bundle artifact's ID and digest
+   and every file against the checksum list digest reported by the bundle
+   job, then attests every release asset;
 6. creates package-qualified annotated tags only for versions not already
    tagged, plus the annotated workspace tag, in one atomic push; and
 7. publishes the GitHub Release from the existing workspace tag.
+
+### Publisher permission boundary
+
+Only the two publisher jobs, `release` and `release-scoped`, hold
+`contents: write`, `id-token: write` and `attestations: write`. Every job that
+compiles or interprets code, including the router build, `cargo install` of
+the SBOM tool and the manifest generator, runs with `contents: read` only. The
+bundle jobs restore no cache, so a published binary is built from a clean
+target directory. A publisher uses only the pinned checkout, artifact download
+and attestation actions plus `git`, `gh`, `jq` and coreutils. It consumes the
+bundle only by digest: the bundle job reports the artifact ID, the artifact
+digest and the SHA-256 of `SHA256SUMS` as job outputs, and the publisher
+refuses an artifact from another run, an expired artifact, a different
+digest, a changed checksum list, a file that fails its checksum, or any file
+not listed. The download action itself only warns on a digest mismatch, so
+these checks are the gate. `scripts/check-workflow-supply-chain.py` fails if a
+job with write permissions gains a build step, cache, repository script or
+unverified input; `scripts/check-replay-release-positive.py` requires every
+original publisher step to move byte-identically to the bundle or publisher
+job.
+
+The same script requires every remote action in every workflow to be pinned
+to a full commit SHA with a version comment, every Rust toolchain selection to
+be the reviewed baseline or an explicit numeric version, full release
+validation to run the macros crate tests and schema-export check
+(`scripts/check-schema-export.sh`) as CI does, and test container images and
+compose files to be digest-pinned with loopback-only ports.
 
 Enable GitHub immutable releases for the repository. Prepare every required
 asset before publication because neither a release tag nor an attached asset
@@ -254,8 +284,11 @@ before any compiler/backend job runs. It never silently selects a recipe.
 - `replay-scoped-validate`: require guard/integrity/matrix success, both complete
   compiler records, every expected command/count and all log digests. No absent,
   skipped, cancelled or failed mandatory scoped job can publish.
-- `release-scoped`: depends only on successful guard and scoped validator; it
-  revalidates the evidence and invokes the checksummed/attested immutable
+- `release-scoped-bundle`: depends only on successful guard and scoped
+  validator; with read-only permission it revalidates the evidence, generates
+  the manifest/notes and checksums the bundle.
+- `release-scoped`: depends on guard, scoped validator and the scoped bundle;
+  it verifies the bundle by digest and invokes the attested immutable
   publisher. The existing full validator and full publisher remain separate.
 
 The complete, literal command arrays and per-command environment/expected counts

@@ -3,7 +3,7 @@ title: "Postgres Test Coverage"
 kind: runbook
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-02
+last_reviewed: 2026-11-11
 review_by: 2026-12-02
 supersedes: []
 ---
@@ -58,6 +58,13 @@ options retain an explicit owner guard through their entire test scope.
 Docker failure is a test failure. Panics and early errors drop the guard; a
 process killed without destructors may leave a labelled container for explicit
 owner-verified recovery. Never clean unrelated containers by a name prefix.
+
+The repository-root `compose.yaml` is a local-test-only convenience for manual
+experiments and is never release or CI evidence. It publishes PostgreSQL on
+`127.0.0.1:55432` only, pins the image by digest, and has no default password:
+start it with a throwaway value, for example
+`GRAPHQL_ORM_TEST_POSTGRES_PASSWORD=$(openssl rand -hex 16) docker compose up -d`.
+Never point an application, staging or shared client at it.
 
 SQLite remains a separate, database-free lane:
 

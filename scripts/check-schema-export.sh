@@ -7,8 +7,8 @@ manifest=crates/graphql-orm-macros/fixtures/full-stack/Cargo.toml
 logs=$(mktemp -d)
 trap 'rm -rf "$logs"' EXIT
 cargo fmt --manifest-path "$manifest" --all -- --check
-cargo test -p graphql-orm-macros
-cargo test -p graphql-orm-macros --features schema-export-only
+cargo test -p graphql-orm-macros --locked
+cargo test -p graphql-orm-macros --locked --features schema-export-only
 cargo test --manifest-path "$manifest" --locked --features schema-export-only --lib
 for backend in sqlite postgres; do
   cargo run --manifest-path "$manifest" --locked --no-default-features \
