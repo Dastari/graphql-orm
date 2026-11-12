@@ -126,7 +126,10 @@ be required. Guest fallback is refused. Server/share fields are names, not local
 paths, UNC paths, or SMB URLs.
 
 `root_prefix` and blob keys are `/`-separated relative keys. Empty segments,
-`.`, `..`, absolute paths, backslashes, NUL, and platform prefixes are rejected.
+`.`, `..`, absolute paths, backslashes, NUL, platform prefixes, the reserved
+`.graphql-orm-storage` namespace and `:` are rejected. Windows servers, and
+Samba with `streams_xattr`, treat `:` as an alternate data stream separator,
+so `a:b` would open stream `b` of the file `a`; listings skip names with `:`.
 Passwords use `SecretString`, are redacted from `Debug`, and never enter errors
 or probe results. The backend moves the password straight into the SMB
 client's zeroizing secret, and no plain copy outlives the connection call.

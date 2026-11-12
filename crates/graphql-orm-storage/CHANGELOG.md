@@ -29,10 +29,13 @@ namespace and local listing prefixes. See [MIGRATION.md](MIGRATION.md).
   identity: a key, listing prefix or bucket whose first component resolves to
   the internal directory under another name (a case-insensitive or Unicode
   case fold, a Windows short name or a link) is refused, writes create the
-  internal directory first, and listings never enter such an entry. Local
-  keys, prefixes and buckets refuse `:` in any component. An S3 `key_prefix`
-  or SMB `root_prefix` in the reserved namespace makes the configuration
-  invalid; S3 now validates it for empty-prefix listings too.
+  internal directory first, and listings never enter such an entry. An S3
+  `key_prefix` or SMB `root_prefix` in the reserved namespace makes the
+  configuration invalid; S3 now validates it for empty-prefix listings too.
+- `:` is refused where it separates alternate data streams: SMB keys,
+  prefixes and `root_prefix` refuse it on every platform and listings skip
+  such names; local roots refuse it only on Windows. Elsewhere local keys may
+  contain `:` as before. S3 is unaffected.
 - Listing prefixes are plain string prefixes on every provider, as S3 and SMB
   already treated them: on local storage, `a` now also lists `ab` and
   `a-b/x`, not only `a` and keys under `a/`. A prefix may now end in one `/`

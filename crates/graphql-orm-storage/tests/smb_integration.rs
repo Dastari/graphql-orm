@@ -973,6 +973,26 @@ async fn samba_listing_follows_the_provider_prefix_contract() {
     let store = SmbStorageBackend::connect(config).await.expect("connect");
     listing_contract::prefixes_are_string_prefixes(&store, "contract").await;
     listing_contract::the_internal_namespace_is_reserved(&store).await;
+    // `:` separates an alternate data stream on SMB servers.
+    for key in ["contract/a:b", "contract/x::$DATA"] {
+        assert!(
+            matches!(
+                store
+                    .put_blob(
+                        key,
+                        StorageByteStream::from_bytes(Bytes::from_static(b"x")),
+                        BlobPutOptions::default(),
+                    )
+                    .await,
+                Err(graphql_orm_storage::StorageError::InvalidStorageKey { .. })
+            ),
+            "{key}"
+        );
+        assert!(matches!(
+            store.list_blobs(key).await,
+            Err(graphql_orm_storage::StorageError::InvalidStorageKey { .. })
+        ));
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -43,20 +43,28 @@ Update the storage requirement to 0.10.0 and refresh the consumer lockfile.
    and `probe`, refuse it, and every S3 operation, including an empty-prefix
    listing, fails with `InvalidStorageKey` before any request. Move such a
    repository to another prefix.
-3. **Local aliases and colons.** On local roots the reservation is by file
-   identity: a key, prefix or bucket whose first component resolves to
+3. **Local aliases.** On local roots the reservation is by file identity: a
+   key, prefix or bucket whose first component resolves to
    `<root>/.graphql-orm-storage` under another name, through case folding, a
    Windows short name or a link, is refused. Local writes now create that
-   directory up front. Local keys, prefixes and buckets also refuse `:` in any
-   component, and a stored file whose name contains `:` is no longer listed.
-   Keys such as ISO timestamps with `:` must be renamed, for example to use
-   `-`, before upgrading; S3 and SMB keys are not affected by the colon rule.
-4. **Local listing prefixes.** A local `list_blobs`, `list_blobs_page` or
+   directory up front.
+4. **`:` where it separates streams.** `:` names an alternate data stream on
+   Windows filesystems and on SMB servers (Windows, and Samba with
+   `streams_xattr`), where `a:b` opens stream `b` of the file `a`:
+   - Local roots on Windows refuse `:` in key, prefix and bucket components
+     and no longer list stored names containing it.
+   - Local roots elsewhere are unchanged: `:` is an ordinary character, and
+     keys such as ISO timestamps keep working.
+   - SMB refuses `:` in keys, prefixes and `root_prefix` on every platform,
+     and listings skip names containing it. Rename such keys, for example to
+     use `-`, with the server's own tools before upgrading.
+   - S3 is unaffected.
+5. **Local listing prefixes.** A local `list_blobs`, `list_blobs_page` or
    `list_objects` prefix is now a string prefix, as on S3 and SMB: `a` also
    lists `ab` and `a-b/x`. To list one directory only, end the prefix with `/`
    (`a/`), which every provider now accepts, or filter the result. A custom
    `BlobStore` must accept a trailing `/` and treat prefixes the same way.
-5. **Listings skip unaddressable names.** Names that are not valid keys,
+6. **Listings skip unaddressable names.** Names that are not valid keys,
    including SMB names that are not valid UTF-16, local names that are not
    valid UTF-8 or contain `\`, and S3 folder markers, are no longer listed.
    They could not be read back through their listed key.

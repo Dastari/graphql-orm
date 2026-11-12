@@ -974,10 +974,11 @@ async fn local_writes_create_the_internal_directory_first() {
     assert_eq!(backend.list_blobs("").await.expect("list"), ["a"]);
 }
 
-/// `:` would name an alternate data stream on Windows, as in
-/// `.graphql-orm-storage::$INDEX_ALLOCATION`; local keys refuse it everywhere.
+/// On Windows `:` names an alternate data stream, as in
+/// `.graphql-orm-storage::$INDEX_ALLOCATION`, so local keys refuse it there.
+#[cfg(windows)]
 #[tokio::test]
-async fn local_refuses_colons_in_keys_buckets_and_prefixes() {
+async fn local_refuses_colons_in_keys_buckets_and_prefixes_on_windows() {
     use graphql_orm_storage::{ObjectMetadata, StreamingObjectStore};
 
     let temp = TempDir::new().expect("temp dir");
@@ -1000,33 +1001,76 @@ async fn local_refuses_colons_in_keys_buckets_and_prefixes() {
         assert_refused_key(backend.get_blob(key).await, key);
         assert_refused_key(backend.list_blobs(key).await, key);
     }
-    assert_refused_key(
+    for (bucket, key) in [("bucket:x", "a"), ("bucket", "a:b")] {
+        assert_refused_key(
+            backend
+                .put_object_stream(
+                    bucket,
+                    key,
+                    None,
+                    ObjectMetadata::new(),
+                    StorageByteStream::from_bytes(Bytes::from_static(b"x")),
+                )
+                .await,
+            "object",
+        );
+    }
+}
+
+/// Elsewhere `:` is an ordinary filename character: keys such as ISO
+/// timestamps round-trip, and stored names with `:` stay listed in key order.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn local_keys_may_contain_colons_outside_windows() {
+    use graphql_orm_storage::{ObjectMetadata, StreamingObjectStore};
+
+    let temp = TempDir::new().expect("temp dir");
+    let backend = LocalStorageBackend::new(temp.path());
+    let stamped = "events/2026-11-12T10:00:00Z.json";
+    for key in [stamped, "order/a/x", "order/a:", "order/a;"] {
         backend
-            .put_object_stream(
-                "bucket:x",
-                "a",
-                None,
-                ObjectMetadata::new(),
+            .put_blob(
+                key,
                 StorageByteStream::from_bytes(Bytes::from_static(b"x")),
+                BlobPutOptions::default(),
             )
-            .await,
-        "bucket",
+            .await
+            .expect("put");
+    }
+    let body = backend.get_blob(stamped).await.expect("get");
+    assert_eq!(
+        collect_storage_stream(body.body).await.expect("collect"),
+        Bytes::from_static(b"x")
     );
-    assert_refused_key(
+    assert_eq!(
         backend
-            .put_object_stream(
-                "bucket",
-                "a:b",
-                None,
-                ObjectMetadata::new(),
-                StorageByteStream::from_bytes(Bytes::from_static(b"x")),
-            )
-            .await,
-        "object key",
+            .list_blobs("events/2026-11-12T10:")
+            .await
+            .expect("list"),
+        [stamped]
     );
-    // A stored name with a colon cannot be addressed, so it is not listed.
+    // `:` (0x3a) sorts between `/` and `;`.
+    assert_eq!(
+        backend.list_blobs("order/").await.expect("list"),
+        ["order/a/x", "order/a:", "order/a;"]
+    );
+    // A name with `:` stored by another writer is listed and readable.
     std::fs::create_dir_all(temp.path().join("dir")).expect("mkdir");
     std::fs::write(temp.path().join("dir/c:d"), b"x").expect("write");
-    std::fs::write(temp.path().join("dir/e"), b"x").expect("write");
-    assert_eq!(backend.list_blobs("").await.expect("list"), ["dir/e"]);
+    assert_eq!(backend.list_blobs("dir/").await.expect("list"), ["dir/c:d"]);
+    assert!(backend.blob_exists("dir/c:d").await.expect("exists"));
+
+    backend
+        .put_object_stream(
+            "bucket",
+            "a:b",
+            None,
+            ObjectMetadata::new(),
+            StorageByteStream::from_bytes(Bytes::from_static(b"x")),
+        )
+        .await
+        .expect("put object");
+    let objects = backend.list_objects("bucket", "a:").await.expect("list");
+    assert_eq!(objects.len(), 1);
+    assert_eq!(objects[0].key, "a:b");
 }

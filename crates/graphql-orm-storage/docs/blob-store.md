@@ -221,9 +221,17 @@ prefix or bucket whose first component resolves to the same filesystem object
 as `<root>/.graphql-orm-storage`, compared by device and file identity, and a
 listing never enters a root entry that does. Writes create the internal
 directory first, so an aliasing name can never claim it before the backend
-does. Local keys, prefixes and buckets also refuse `:` in any component, which
-names an alternate data stream on Windows (`name::$INDEX_ALLOCATION`), and a
-stored name containing `:` is not listed.
+does.
+
+`:` is refused only where servers or filesystems treat it as a stream
+separator:
+
+| Provider | `:` in keys, prefixes and buckets or root prefixes |
+| --- | --- |
+| Local on Windows | Refused, and stored names with `:` are not listed: `name::$INDEX_ALLOCATION` would alias a directory. |
+| Local elsewhere | Allowed: `:` is an ordinary filename character, so keys such as ISO timestamps work and are listed. |
+| SMB | Refused everywhere, and listed names with `:` are skipped: Windows servers, and Samba with `streams_xattr`, open stream `b` of file `a` for `a:b`. |
+| S3 | Allowed. |
 
 `list_blobs("")` is allowed and lists all blobs.
 

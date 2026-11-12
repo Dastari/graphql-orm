@@ -179,9 +179,9 @@ impl LocalStorageBackend {
     }
 
     /// Local checks for a caller's root-relative key, listing prefix or bucket,
-    /// after the shared lexical validation: no component contains `:`, which
-    /// names an alternate data stream on Windows, and the first component does
-    /// not resolve to the internal directory.
+    /// after the shared lexical validation: on Windows no component contains
+    /// `:`, which names an alternate data stream there, and the first
+    /// component does not resolve to the internal directory.
     pub(crate) fn check_root_name(&self, name: &str) -> Result<(), StorageError> {
         refuse_colon(name)?;
         let first = name.split('/').next().unwrap_or_default();
@@ -194,9 +194,11 @@ impl LocalStorageBackend {
     }
 }
 
-/// Refuses a local key or prefix containing `:`.
+/// On Windows, refuses a local key or prefix containing `:`, which separates
+/// an alternate data stream (`name::$INDEX_ALLOCATION` aliases a directory).
+/// Elsewhere `:` is an ordinary filename character.
 fn refuse_colon(name: &str) -> Result<(), StorageError> {
-    if name.contains(':') {
+    if cfg!(windows) && name.contains(':') {
         return Err(StorageError::InvalidStorageKey {
             key: name.to_string(),
         });
@@ -837,8 +839,8 @@ fn listing_start(base: &Path, prefix: &str) -> PathBuf {
 }
 
 /// The key `path` has below `base`, or `None` when no valid key names it: a
-/// name that is not valid UTF-8, contains `:`, or that [`validate_blob_key`]
-/// refuses, such as the reserved internal namespace. Every key below such a directory
+/// name that is not valid UTF-8, contains `:` on Windows, or that
+/// [`validate_blob_key`] refuses, such as the reserved internal namespace. Every key below such a directory
 /// would contain the same component, so its whole subtree is skipped. `base`
 /// itself has the empty key.
 fn listed_key(base: &Path, path: &Path) -> Option<String> {
@@ -852,7 +854,7 @@ fn listed_key(base: &Path, path: &Path) -> Option<String> {
             key.push('/');
         }
         let name = name.to_str()?;
-        if name.contains(':') {
+        if cfg!(windows) && name.contains(':') {
             return None;
         }
         key.push_str(name);

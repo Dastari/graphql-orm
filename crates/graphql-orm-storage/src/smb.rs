@@ -218,6 +218,11 @@ impl SmbStorageConfig {
         }
         if let Some(prefix) = &self.root_prefix {
             validate_blob_key(prefix)?;
+            if prefix.contains(':') {
+                return Err(invalid_config(
+                    "root prefix must not contain ':', an SMB stream separator",
+                ));
+            }
         }
         if self.port == 0 {
             return Err(invalid_config("port must be greater than zero"));
@@ -1434,9 +1439,10 @@ async fn walk_listing<S: ListingSource>(
             // The name was charged when enumerated; charge the parent path.
             budget.charge(child.len() - name_len)?;
             // A name no key can address, such as the reserved internal
-            // namespace at the root, is skipped. Every key below such a
-            // directory contains the same component, so it is not entered.
-            if validate_blob_key(&child).is_err() {
+            // namespace at the root or a name with the stream separator `:`,
+            // is skipped. Every key below such a directory contains the same
+            // component, so it is not entered.
+            if validate_blob_key(&child).is_err() || child.contains(':') {
                 continue;
             }
             // An interrupted upload's temporary file may be longer than its
@@ -1478,9 +1484,13 @@ fn check_key(key: &str) -> Result<(), StorageError> {
     Ok(())
 }
 
+/// Also refuses `:` in any component: Windows servers, and Samba with
+/// `streams_xattr`, treat it as an alternate data stream separator, so `a:b`
+/// would open stream `b` of the file `a`.
 fn check_key_within(key: &str, max_bytes: usize) -> Result<(), StorageError> {
     validate_blob_key(key)?;
-    if key.len() > max_bytes
+    if key.contains(':')
+        || key.len() > max_bytes
         || key
             .split('/')
             .any(|component| component.encode_utf16().count() > MAX_NAME_UTF16_UNITS)
@@ -2316,7 +2326,7 @@ impl BlobStore for SmbStorageBackend {
         continuation: Option<String>,
         limit: usize,
     ) -> Result<BlobListPage, StorageError> {
-        crate::blob::validate_blob_prefix(prefix)?;
+        check_listing_prefix(prefix)?;
         if limit == 0 {
             return Err(StorageError::PreconditionFailed {
                 key: prefix.to_string(),
@@ -2341,7 +2351,7 @@ impl BlobStore for SmbStorageBackend {
     /// Lists the tree once, within one deadline and one set of limits,
     /// instead of re-listing it for every page.
     async fn list_blobs(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
-        crate::blob::validate_blob_prefix(prefix)?;
+        check_listing_prefix(prefix)?;
         let mut keys = self.collect_keys().await?;
         keys.retain(|key| key.starts_with(prefix));
         Ok(keys)
@@ -2641,6 +2651,18 @@ fn is_legacy_temp_name(name: &str) -> bool {
         .and_then(|rest| rest.strip_suffix(TEMP_SUFFIX))
         .and_then(|stem| stem.rsplit_once('.'))
         .is_some_and(|(target, uuid)| !target.is_empty() && is_canonical_uuid(uuid))
+}
+
+/// Validates a listing prefix: the shared rules, and no `:` (see
+/// [`check_key_within`]).
+fn check_listing_prefix(prefix: &str) -> Result<(), StorageError> {
+    crate::blob::validate_blob_prefix(prefix)?;
+    if prefix.contains(':') {
+        return Err(StorageError::InvalidStorageKey {
+            key: prefix.to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// `STATUS_DELETE_PENDING`: the file has a pending delete and closes for good
@@ -4053,5 +4075,48 @@ mod tests {
             files,
             ["a/.graphql-orm-storage/nested.bin", "a/one.bin", "top.bin"]
         );
+    }
+
+    #[test]
+    fn colons_are_refused_in_keys_prefixes_and_the_root_prefix() {
+        // Windows servers, and Samba with `streams_xattr`, treat `:` as an
+        // alternate data stream separator, so `a:b` would open stream `b` of
+        // the file `a`.
+        for name in [
+            "a:b",
+            "dir/x::$DATA",
+            "x:",
+            ".graphql-orm-storage::$INDEX_ALLOCATION",
+        ] {
+            assert!(check_key(name).is_err(), "key {name}");
+            assert!(map_key(None, name).is_err(), "mapped key {name}");
+            assert!(check_listing_prefix(name).is_err(), "prefix {name}");
+            let mut config = config();
+            config.root_prefix = Some(name.to_string());
+            assert!(config.validate().is_err(), "root prefix {name}");
+        }
+        assert!(check_listing_prefix("").is_ok());
+        assert!(check_listing_prefix("dir/").is_ok());
+        assert!(check_key("dir/2026-11-12T10-00-00Z.json").is_ok());
+    }
+
+    #[tokio::test]
+    async fn listing_skips_names_with_a_stream_separator() {
+        let source = FakeListing::new(|path| match path {
+            "" => vec![
+                ("a:b".to_string(), false),
+                ("dir:x".to_string(), true),
+                ("kept.bin".to_string(), false),
+            ],
+            other => panic!("unexpected directory {other}"),
+        });
+        let files = bounded_listing(
+            &source,
+            String::new(),
+            limits(8, 100, Duration::from_secs(30)),
+        )
+        .await
+        .expect("listing");
+        assert_eq!(files, ["kept.bin"]);
     }
 }
