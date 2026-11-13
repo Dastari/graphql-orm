@@ -1,13 +1,5 @@
-error: field `value`: #[transform(write = ...)] is unsupported with generated entity APIs (GraphQL operations and repository writes); repository writes have no GraphQL context and write transforms must never be skipped
- --> tests/ui/transform_write_json.rs:9:5
-  |
-9 |     #[transform(write = "protect")]
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-error: cannot find attribute `json_field` in this scope
- --> tests/ui/transform_write_json.rs:8:7
-  |
-8 |     #[json_field]
-  |       ^^^^^^^^^^
-  |
-  = note: `json_field` is an attribute that can be used by the derive macros `GraphQLEntity`, `GraphQLSchemaEntity` and `RepositoryEntity`, you might be missing a `derive` attribute
+error: field `value`: #[transform(write = ...)] is unsupported with generated entity APIs; use a WriteInputTransform on Database instead. Existing rows were stored untransformed; #[transform(read = ...)] is still supported
+  --> tests/ui/transform_write_json.rs:10:17
+   |
+10 |     #[transform(write = "protect")]
+   |                 ^^^^^

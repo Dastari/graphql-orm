@@ -11,9 +11,10 @@ supersedes: []
 # `graphql-orm-macros`
 
 Version 0.141.0 (placeholder) rejects `#[transform(write = "path")]` on
-fields because generated repository writes have no GraphQL context and typed
-binds could silently bypass the transform. Upgrade runtime and macros together;
-see the [migration guide](../../MIGRATION.md).
+fields. If the entity compiled, that transform never ran and generated writes
+stored the field's supplied values. Replace it with `WriteInputTransform` on
+`Database` and remediate existing rows; upgrade runtime and macros together.
+See the [migration guide](../../MIGRATION.md#01390-to-01410-write-transforms-fail-closed).
 
 Version 0.139.0 (placeholder) adds optional
 `#[graphql_entity(stable_type_id = "old_crate::models::Record")]` to preserve

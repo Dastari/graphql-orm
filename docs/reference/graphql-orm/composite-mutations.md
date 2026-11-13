@@ -156,7 +156,7 @@ transaction fails closed.
 
 ## Authorization and transactions
 
-All new writes run through entity and row authorization, write transforms, mutation hooks, search
+All new writes run through entity and row authorization, `WriteInputTransform`, mutation hooks, search
 maintenance, queued change events, and ORM commit handling. `DeclaredPoliciesRequired` remains
 fail-closed. Opted-in composite repository mutations additionally require a registered
 `EntityPolicy` provider even under the legacy authorization mode, so the new surface is never

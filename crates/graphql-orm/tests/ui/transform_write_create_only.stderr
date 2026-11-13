@@ -1,5 +1,5 @@
-error: field `value`: #[transform(write = ...)] is unsupported with generated entity APIs (GraphQL operations and repository writes); repository writes have no GraphQL context and write transforms must never be skipped
- --> tests/ui/transform_write_create_only.rs:9:5
-  |
-9 |     #[transform(write = "protect")]
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+error: field `value`: #[transform(write = ...)] is unsupported with generated entity APIs; use a WriteInputTransform on Database instead. Existing rows were stored untransformed; #[transform(read = ...)] is still supported
+  --> tests/ui/transform_write_create_only.rs:10:17
+   |
+10 |     #[transform(write = "protect")]
+   |                 ^^^^^

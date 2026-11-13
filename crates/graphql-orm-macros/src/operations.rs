@@ -5,9 +5,9 @@ use crate::backend::{
 };
 use crate::entity::{
     FieldMetadata, decimal_definition_tokens, is_bool_type, is_byte_vec_type, is_option_type,
-    is_serde_json_value_or_option, is_string_type, is_uuid_type, is_vec_type,
-    maybe_wrap_write_transform, option_inner_type, parse_entity_metadata, parse_field_metadata,
-    resolver_auth_mode_tokens, spatial_geometry_type_tokens, type_path_last_ident,
+    is_serde_json_value_or_option, is_string_type, is_uuid_type, is_vec_type, option_inner_type,
+    parse_entity_metadata, parse_field_metadata, resolver_auth_mode_tokens,
+    spatial_geometry_type_tokens, type_path_last_ident,
 };
 use crate::naming::{
     apply_graphql_case, graphql_field_name, selected_argument_case, selected_field_case,
@@ -1207,42 +1207,19 @@ fn push_create_input_sql_value_tokens(
             }
         }
     } else if is_option_type(field_type) {
-        let value_expr =
-            maybe_wrap_write_transform(quote! { value.to_string() }, &meta.transform_write);
-        if meta.transform_write.is_some() {
-            quote! {
-                match &#field_access {
-                    Some(value) => {
-                        let __transformed = #value_expr;
-                        bind_values.push(::graphql_orm::graphql::orm::SqlValue::String(__transformed));
-                    }
-                    None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::StringNull),
-                }
-            }
-        } else {
-            quote! {
-                match &#field_access {
-                    Some(value) => bind_values.push(::graphql_orm::graphql::orm::SqlValue::String(#value_expr)),
-                    None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::StringNull),
-                }
+        let value_expr = quote! { value.to_string() };
+
+        quote! {
+            match &#field_access {
+                Some(value) => bind_values.push(::graphql_orm::graphql::orm::SqlValue::String(#value_expr)),
+                None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::StringNull),
             }
         }
     } else {
-        let value_expr = maybe_wrap_write_transform(
-            quote! { (#field_access).to_string() },
-            &meta.transform_write,
-        );
-        if meta.transform_write.is_some() {
-            quote! {
-                {
-                    let __transformed = #value_expr;
-                    bind_values.push(::graphql_orm::graphql::orm::SqlValue::String(__transformed));
-                }
-            }
-        } else {
-            quote! {
-                bind_values.push(::graphql_orm::graphql::orm::SqlValue::String(#value_expr));
-            }
+        let value_expr = quote! { (#field_access).to_string() };
+
+        quote! {
+            bind_values.push(::graphql_orm::graphql::orm::SqlValue::String(#value_expr));
         }
     }
 }
@@ -2714,10 +2691,8 @@ fn generate_graphql_operations_unfiltered(
             for (field, ty, metadata) in &relation.source_fields {
                 source_names.push(field.to_string());
                 if is_option_type(ty) { optional_checks.push(quote! { entity.#field.is_some() }); }
-                let mut metadata = metadata.clone();
-                metadata.transform_write = None;
                 value_tokens.push(push_create_input_sql_value_tokens(backend, struct_name,
-                    quote! { entity.#field.clone() }, ty, &metadata, quote! { ::graphql_orm::sqlx::Error }));
+                    quote! { entity.#field.clone() }, ty, metadata, quote! { ::graphql_orm::sqlx::Error }));
             }
             Ok(quote! {
                 if true #(&& #optional_checks)* {
@@ -3259,52 +3234,24 @@ fn generate_graphql_operations_unfiltered(
                 insert_binds_graphql.push(bind_tokens.clone());
                 insert_binds_repo.push(bind_tokens);
             } else if is_option_type(field_type) {
-                let value_expr =
-                    maybe_wrap_write_transform(quote! { v.to_string() }, &meta.transform_write);
-                if meta.transform_write.is_some() {
-                    // Async transform requires .await — use a block
-                    let bind_tokens = quote! {
-                        match &input.#field_name {
-                            Some(v) => {
-                                let __transformed = #value_expr;
-                                bind_values.push(::graphql_orm::graphql::orm::SqlValue::String(__transformed));
-                            }
-                            None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::StringNull),
-                        }
-                    };
-                    insert_binds_graphql.push(bind_tokens.clone());
-                    insert_binds_repo.push(bind_tokens);
-                } else {
-                    let bind_tokens = quote! {
-                        match &input.#field_name {
-                            Some(v) => bind_values.push(::graphql_orm::graphql::orm::SqlValue::String(#value_expr)),
-                            None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::StringNull),
-                        }
-                    };
-                    insert_binds_graphql.push(bind_tokens.clone());
-                    insert_binds_repo.push(bind_tokens);
-                }
+                let value_expr = quote! { v.to_string() };
+
+                let bind_tokens = quote! {
+                    match &input.#field_name {
+                        Some(v) => bind_values.push(::graphql_orm::graphql::orm::SqlValue::String(#value_expr)),
+                        None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::StringNull),
+                    }
+                };
+                insert_binds_graphql.push(bind_tokens.clone());
+                insert_binds_repo.push(bind_tokens);
             } else {
-                let value_expr = maybe_wrap_write_transform(
-                    quote! { input.#field_name.to_string() },
-                    &meta.transform_write,
-                );
-                if meta.transform_write.is_some() {
-                    let bind_tokens = quote! {
-                        {
-                            let __transformed = #value_expr;
-                            bind_values.push(::graphql_orm::graphql::orm::SqlValue::String(__transformed));
-                        }
-                    };
-                    insert_binds_graphql.push(bind_tokens.clone());
-                    insert_binds_repo.push(bind_tokens);
-                } else {
-                    let bind_tokens = quote! {
-                        bind_values.push(::graphql_orm::graphql::orm::SqlValue::String(#value_expr));
-                    };
-                    insert_binds_graphql.push(bind_tokens.clone());
-                    insert_binds_repo.push(bind_tokens);
-                }
+                let value_expr = quote! { input.#field_name.to_string() };
+
+                let bind_tokens = quote! {
+                    bind_values.push(::graphql_orm::graphql::orm::SqlValue::String(#value_expr));
+                };
+                insert_binds_graphql.push(bind_tokens.clone());
+                insert_binds_repo.push(bind_tokens);
             }
         } else if include_generated_default_in_create {
             insert_default_columns.push(db_col.clone());
@@ -3695,38 +3642,20 @@ fn generate_graphql_operations_unfiltered(
                 update_field_checks_repo.push(update_tokens);
             } else if is_already_optional {
                 // Field type is already Option<T>, update type is Option<Option<T>>
-                let value_expr =
-                    maybe_wrap_write_transform(quote! { v.to_string() }, &meta.transform_write);
-                if meta.transform_write.is_some() {
-                    let update_tokens = quote! {
-                        if let Some(ref val) = input.#field_name {
-                            changed_fields.push(#db_col);
-                            set_clauses.push(format!("{} = ?", #db_col_sql));
-                            match val {
-                                Some(v) => {
-                                    let __transformed = #value_expr;
-                                    values.push(::graphql_orm::graphql::orm::SqlValue::String(__transformed));
-                                }
-                                None => values.push(::graphql_orm::graphql::orm::SqlValue::StringNull),
-                            }
+                let value_expr = quote! { v.to_string() };
+
+                let update_tokens = quote! {
+                    if let Some(ref val) = input.#field_name {
+                        changed_fields.push(#db_col);
+                        set_clauses.push(format!("{} = ?", #db_col_sql));
+                        match val {
+                            Some(v) => values.push(::graphql_orm::graphql::orm::SqlValue::String(#value_expr)),
+                            None => values.push(::graphql_orm::graphql::orm::SqlValue::StringNull),
                         }
-                    };
-                    update_field_checks_graphql.push(update_tokens.clone());
-                    update_field_checks_repo.push(update_tokens);
-                } else {
-                    let update_tokens = quote! {
-                        if let Some(ref val) = input.#field_name {
-                            changed_fields.push(#db_col);
-                            set_clauses.push(format!("{} = ?", #db_col_sql));
-                            match val {
-                                Some(v) => values.push(::graphql_orm::graphql::orm::SqlValue::String(#value_expr)),
-                                None => values.push(::graphql_orm::graphql::orm::SqlValue::StringNull),
-                            }
-                        }
-                    };
-                    update_field_checks_graphql.push(update_tokens.clone());
-                    update_field_checks_repo.push(update_tokens);
-                }
+                    }
+                };
+                update_field_checks_graphql.push(update_tokens.clone());
+                update_field_checks_repo.push(update_tokens);
             } else if type_path_last_ident(field_type).is_some_and(|ident| {
                 matches!(
                     ident.to_string().as_str(),
@@ -3766,30 +3695,17 @@ fn generate_graphql_operations_unfiltered(
                 update_field_checks_repo.push(update_tokens);
             } else {
                 // Field type is T, update type is Option<T>
-                let value_expr =
-                    maybe_wrap_write_transform(quote! { val.to_string() }, &meta.transform_write);
-                if meta.transform_write.is_some() {
-                    let update_tokens = quote! {
-                        if let Some(ref val) = input.#field_name {
-                            changed_fields.push(#db_col);
-                            set_clauses.push(format!("{} = ?", #db_col_sql));
-                            let __transformed = #value_expr;
-                            values.push(::graphql_orm::graphql::orm::SqlValue::String(__transformed));
-                        }
-                    };
-                    update_field_checks_graphql.push(update_tokens.clone());
-                    update_field_checks_repo.push(update_tokens);
-                } else {
-                    let update_tokens = quote! {
-                        if let Some(ref val) = input.#field_name {
-                            changed_fields.push(#db_col);
-                            set_clauses.push(format!("{} = ?", #db_col_sql));
-                            values.push(::graphql_orm::graphql::orm::SqlValue::String(#value_expr));
-                        }
-                    };
-                    update_field_checks_graphql.push(update_tokens.clone());
-                    update_field_checks_repo.push(update_tokens);
-                }
+                let value_expr = quote! { val.to_string() };
+
+                let update_tokens = quote! {
+                    if let Some(ref val) = input.#field_name {
+                        changed_fields.push(#db_col);
+                        set_clauses.push(format!("{} = ?", #db_col_sql));
+                        values.push(::graphql_orm::graphql::orm::SqlValue::String(#value_expr));
+                    }
+                };
+                update_field_checks_graphql.push(update_tokens.clone());
+                update_field_checks_repo.push(update_tokens);
             }
         }
     }
@@ -5186,7 +5102,6 @@ fn generate_graphql_operations_unfiltered(
         field.meta.graphql_readable()
             && !field.meta.graphql_skip
             && field.meta.transform_read.is_none()
-            && field.meta.transform_write.is_none()
             && runtime_keyset_value(&field.field_type).is_some()
     });
     let keyset_generated = if let Some(parts) = &keyset_parts {
@@ -5206,7 +5121,6 @@ fn generate_graphql_operations_unfiltered(
                 || !meta.graphql_readable()
                 || meta.graphql_skip
                 || meta.transform_read.is_some()
-                || meta.transform_write.is_some()
                 || !(is_primary_key || (meta.sortable && meta.order))
             {
                 continue;
@@ -5264,10 +5178,8 @@ fn generate_graphql_operations_unfiltered(
                 graphql_rename_fields,
                 serde_rename_all,
             );
-            let graphql_readable = meta.graphql_readable()
-                && !meta.graphql_skip
-                && meta.transform_read.is_none()
-                && meta.transform_write.is_none();
+            let graphql_readable =
+                meta.graphql_readable() && !meta.graphql_skip && meta.transform_read.is_none();
             let policy = match meta.read_policy.as_deref() {
                 Some(policy) => quote! { Some(#policy) },
                 None => quote! { None },
