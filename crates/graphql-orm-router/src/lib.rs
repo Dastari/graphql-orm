@@ -20,6 +20,7 @@ mod lifecycle;
 mod metrics;
 mod network;
 mod node_lookup;
+mod persisted;
 mod server;
 mod subscription_continuity;
 mod subscriptions;
@@ -46,6 +47,8 @@ pub enum RouterErrorKind {
     Composition,
     /// The federation executor could not construct the candidate runtime.
     Runtime,
+    /// The private persisted-document snapshot failed verification.
+    PersistedDocuments,
     /// Protocol authorization metadata is missing, stale, or ambiguous.
     AuthorizationMetadata,
     /// A dynamic destination violated its outbound network trust policy.

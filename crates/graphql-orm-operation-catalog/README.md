@@ -10,7 +10,7 @@ supersedes: []
 
 # `graphql-orm-operation-catalog`
 
-Version `0.7.4` documents that `GraphqlSemanticOperationDescriptor::generated` asserts that trusted host code uses the ORM generated resolver. Canonical input identity and shape checks limit disclosure; they cannot prove how a host resolver interprets canonical arguments. Documentation only; no API, fingerprint or data migration change.
+Version `0.7.5` documents that `GraphqlSemanticOperationDescriptor::generated` asserts that trusted host code uses the ORM generated resolver. Canonical input identity and shape checks limit disclosure; they cannot prove how a host resolver interprets canonical arguments. Documentation only; no API, fingerprint or data migration change.
 
 Version `0.7.3` adds:
 

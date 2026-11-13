@@ -10,6 +10,108 @@ supersedes: []
 
 # Migration Guide
 
+## 0.16.0 to 0.17.0: snapshot consistency and repository identity
+
+1. Implement `BackupObjectIndex::objects_from_full_export` for custom indexes.
+   Derive the object set solely from its supplied rows. An objectless or
+   externally frozen index may return its fixed set explicitly; querying a
+   live metadata table is not valid. `export_full` must export all tables in
+   one consistent snapshot or fail. The ORM index requires a valid recorded
+   checksum for every exported object; backfill checksums before backup and
+   include those columns in backup policy. Implement the analogous
+   `objects_from_incremental_export(parent_snapshot_id, changes)` method for
+   incremental indexes. It must derive references and recorded digests solely
+   from that exact exported change set; its default also fails closed. Export
+   any required object metadata rows within the same database snapshot.
+2. Handle `BackupError::IncompleteRepositoryListing { reason }` in exhaustive
+   matches. Existing listing safety checks now return this variant rather than
+   `InvalidManifestChain`; do not match error strings.
+3. New writes use format 3; older readers cannot read them. `ManifestMac`
+   gains `repository_id`, so update struct literals. New seals require the
+   repository UUID; `None` represents an older unbound seal only. Call
+   `initialize_repository_identity` on an
+   authenticated repository, record the returned UUID outside storage, then
+   configure `ManifestAuthenticator::with_repository_identity` with that pin.
+   This pin is mandatory for format 3 sealing, verification and restore;
+   unpinned handles fail closed before a new backup exports or writes payloads.
+   Initialization uses atomic conditional creation and never replaces a record.
+   Initial enrollment without a pin must create a new record. An existing
+   record is refused until the host supplies its independently retained UUID;
+   the helper never adopts an identity from storage. It also refuses a record
+   replaced between atomic creation and its readback. Alternatively generate and
+   retain a UUID in host configuration first; a new backup run
+   stores that configured UUID atomically after acquiring the lock.
+   Preserve the record when moving the entire repository. A different repository
+   must keep its own record and unique host pin; never reuse an identity across
+   independent repositories. Copied format-3 manifests from a different repository identity will be refused.
+4. Existing backups are not rewritten. Format 2 cannot be bound to a
+   repository after the fact: its seal authenticates content with the key, but
+   does not bind it to this repository. `AcceptSealedLegacy` accepts valid
+   format-2 seals and refuses format 1. Use it only when the key was never
+   shared across repositories. Otherwise use `TrustPinned` with the checksums
+   you recorded independently; a copied format-2 manifest sealed with a shared
+   key is indistinguishable from this repository's own snapshots.
+
+   `TrustPinned` accepts format 1 and format 2 only when each snapshot's
+   checksum matches its host-held record. That independent checksum authenticates
+   format-1 content even though it has no seal. Format 2 must also pass its
+   original seal verification. A pin supplied by repository contents is not a
+   host-held record.
+
+   Choose legacy snapshot ids from host records. Do not compact or prune legacy
+   snapshots on the strength of `AcceptSealedLegacy` unless those ids are known
+   from host records: copied snapshots can affect retention's `keep_last`.
+   As an additional safeguard, compaction refuses every format-2 input unless
+   individually authenticated by `TrustPinned`, including every format-2 parent
+   in a mixed chain. Switch to that policy with all required checksum pins before
+   compacting. This permits explicit migration without silently promoting unbound
+   content to repository-bound trust.
+
+   A host without historical checksum records can still restore with its
+   exclusive old key. If that key was never shared and the snapshot ids are
+   known from host records, verify those sealed snapshots first, retain their
+   checksums outside the repository, then configure `TrustPinned` to compact.
+   Never enroll pins this way when the key was shared or the ids are unknown;
+   the repository cannot establish historical provenance in that case.
+
+   **Warning:** `TrustUnauthenticated` is the only policy that accepts format 1
+   without independent host-held authentication. A repository writer can forge
+   that content and recompute its plain checksum. Prefer `TrustPinned` when
+   historical checksum records exist. Do not enable unauthenticated trust to
+   migrate sealed format-2 backups.
+
+   The default `Refuse` policy rejects both older formats. Operation requirements
+   for existing legacy repositories are:
+
+   | Operation | `Refuse` | `AcceptSealedLegacy` | `TrustPinned` |
+   | --- | --- | --- | --- |
+   | Restore, object restore, load or verify format 1 | Refused | Refused | Requires that snapshot's independent checksum pin |
+   | Restore, object restore, load or verify format 2 | Refused | Requires the old sealing key; still unbound | Requires the old sealing key and that snapshot's checksum pin |
+   | Incremental from a chain containing format 2 | Refused | Works with the old sealing key; select parents from host records | Requires pins for every legacy chain member |
+   | Compact a chain containing format 2 | Refused | Refused | Requires pins for every legacy chain member |
+   | Prune or delete while any listed manifest is legacy | Refused, even if selecting format 3 | Format 2 only; use only with ids known from host records | Requires pins for every listed legacy manifest |
+   | New full backup or an independent all-format-3 chain | Works with a host UUID pin | Works with a host UUID pin | Works with a host UUID pin |
+
+   Legacy reads require no identity record or UUID pin. Every format-3 member of
+   a mixed chain or repository still requires the host UUID pin and matching
+   durable record, regardless of legacy policy. New incremental and compaction
+   writes require a host UUID pin and validate/create its durable record under
+   the lock before export or payload writes.
+
+   Compaction creates a repository-bound format-3 snapshot; it does not rewrite
+   or remove old manifests, or retroactively prove their repository of origin.
+   Keep an appropriate legacy policy while old manifests remain, or remove them
+   under that policy before switching back to `Refuse`.
+5. PostgreSQL roles subject to RLS now fail export, target emptiness checks,
+   and search rebuild. Use an administrative role exempt from RLS: a superuser,
+   a role with `BYPASSRLS`, or the table owner when RLS is not forced. A permissive
+   policy is still RLS and does not qualify. There is no policy-filtered export
+   option. ORM and macros move together to
+   placeholder 0.136.0 for this change; refresh consumer lockfiles together.
+
+See the [snapshot guarantees](docs/architecture.md#full-backup-flow) and
+[format reference](docs/snapshot-format.md#manifest-authentication).
+
 ## 0.15.0 to 0.16.0: storage 0.11.0
 
 Update the backup requirement to 0.16.0 and storage to 0.11.0 together, then

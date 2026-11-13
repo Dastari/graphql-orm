@@ -761,6 +761,7 @@ pub async fn restore_objects_with_options(
     options: &RestoreOptions,
 ) -> Result<(), BackupError> {
     verify_manifest_authenticity(required_authenticator(repository)?, manifest)?;
+    crate::manifest::verify_repository_binding(repository, manifest).await?;
     for object in &manifest.objects {
         validate_storage_key(&object.storage_key)?;
         sink.check_restore_target(&object_ref_from_entry(object))?;

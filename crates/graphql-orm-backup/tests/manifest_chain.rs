@@ -145,6 +145,9 @@ fn validate_manifest_chain_rejects_app_id_mismatch() {
 }
 
 async fn write_manifest_blob(repository: &RecordingRepository, manifest: &BackupSnapshotManifest) {
+    graphql_orm_backup::initialize_repository_identity(repository)
+        .await
+        .unwrap();
     repository
         .put_blob(
             &snapshot_manifest_key(manifest.snapshot_id),
@@ -199,6 +202,7 @@ static TEST_AUTHENTICATOR: std::sync::LazyLock<graphql_orm_backup::ManifestAuthe
         graphql_orm_backup::ManifestAuthenticator::new(
             graphql_orm_backup::ManifestKey::from_bytes(&[7; 32]).expect("test manifest key"),
         )
+        .with_repository_identity(Uuid::from_u128(1))
     });
 
 fn full_id() -> Uuid {

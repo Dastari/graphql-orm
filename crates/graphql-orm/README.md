@@ -3,18 +3,43 @@ title: "graphql-orm"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-13
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm`
 
-Version 0.134.0 changes no runtime or macro behaviour. One semantic-catalogue
-test now builds its stand-in for an entity's generated read with
-`GraphqlSemanticOperationDescriptor::generated`, as the AI tool-profile compiler
-treats a generated input as generated only when a generated root reaches it. No
-data migration is needed.
+Version 0.142.0 adds test coverage for complete AI capabilities compiled from
+macro-generated and runtime-generated input SDL, including supported field
+cases, search, links, projections and pagination. Runtime and macro behaviour,
+GraphQL SDL and stored data are unchanged. See the
+[root migration guide](../../MIGRATION.md#01370-to-01420-test-only-release).
+
+Version 0.137.0 changes nothing a host can observe. The derives emit the
+per-field UPDATE assignment list once per entity instead of once per generated
+update path, which removes about 2.5% of the expanded code of a 15-field
+entity ([#677](https://github.com/Dastari/graphql-orm/issues/677)).
+
+Version 0.136.0 (placeholder) keeps runtime and macros aligned. PostgreSQL
+backup export and search rebuild fail when RLS would filter rows. Use a role
+exempt from RLS; see the [migration guide](../../MIGRATION.md).
+
+Version 0.133.0 refuses reserved runtime schema physical table names (catalog,
+pragma, ORM and companion-package prefixes, and the exact names of SQLite
+table-valued functions and SQL Server compatibility views), adds `validate_with_reserved_tables` for trusted code
+that describes its own `graphql_orm_` tables, refuses NUL in string defaults,
+and makes PostgreSQL runtime literal defaults independent of
+`standard_conforming_strings`. See the
+[root migration guide](../../MIGRATION.md#01320-to-01330-reserved-runtime-table-names).
+
+Version 0.133.0 also makes Rust repository `limit` and `offset` count visible rows
+when the row policy decides rows in Rust. `RepositoryQuery`, `tx.query::<T>()`
+and `search_db` scan ordered batches until the page is complete, within
+`PaginationConfig::max_scanned_rows` (default `10_000`), and fail with
+`PAGE_LIMIT_EXCEEDED` instead of returning a short page. Reads without a
+per-row Rust check keep one SQL query. Upgrade ORM/macros together; see the
+[root migration guide](../../MIGRATION.md#01320-to-01330-repository-limits-and-offsets-count-visible-rows).
 
 Version 0.132.0 hardens PostgreSQL catalog reads: they use catalog-defined
 objects regardless of the session's `search_path`. RLS validation pins the

@@ -28,14 +28,25 @@ pub trait GraphqlOrmBackupAdapter: Send + Sync {
         })
     }
 
-    /// Exports all backup-enabled tables for a full snapshot.
+    /// Exports all backup-enabled tables in one consistent database snapshot.
+    /// Implementations must use a snapshot transaction (or equivalent host
+    /// quiescence) covering every table, and fail if that guarantee is unavailable.
+    /// Object metadata tables must be included in this same export. Reject
+    /// exports whose rows would be omitted by row-visibility policies; this
+    /// contract provides no policy-filtered full-export mode.
     ///
     /// # Errors
     ///
     /// Returns [`BackupError`] if the adapter cannot export table rows.
     async fn export_full(&self) -> Result<Vec<BackupTableExport>, BackupError>;
 
-    /// Exports changed rows and tombstones since a parent snapshot.
+    /// Exports changed rows and tombstones since a reliable parent checkpoint,
+    /// captured in one consistent database snapshot or under host quiescence.
+    /// Include sufficient object metadata from that same snapshot for every
+    /// new/changed reference, even when its metadata row otherwise did not change.
+    /// The object index derives references and recorded digests from this export;
+    /// a second live lookup cannot complete an incomplete export. Fail if these
+    /// guarantees or an unfiltered export cannot be provided.
     ///
     /// # Errors
     ///

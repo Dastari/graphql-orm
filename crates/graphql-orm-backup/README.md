@@ -10,6 +10,10 @@ supersedes: []
 
 # graphql-orm-backup
 
+Version 0.17.0 exports object references from the same rows as the table backup
+and writes repository-bound seals. Upgrade custom indexes and configure legacy
+restore trust as described in [MIGRATION.md](MIGRATION.md).
+
 Version 0.13.0 authenticates snapshot manifests with a host-held key and
 constrains restore targets. This is breaking: every repository handle needs a
 `ManifestAuthenticator`, manifests written by earlier versions are refused
@@ -86,9 +90,11 @@ host-provided traits. A full backup requires both:
 use graphql_orm_backup::{create_full_backup, BackupObjectIndex, FullBackupRequest, GraphqlOrmBackupAdapter, LocalBackupRepository, ManifestAuthenticator, ManifestKey};
 use uuid::Uuid;
 
-# async fn example(database: &dyn GraphqlOrmBackupAdapter, objects: &dyn BackupObjectIndex, key_material: &[u8]) -> Result<(), graphql_orm_backup::BackupError> {
+# async fn example(database: &dyn GraphqlOrmBackupAdapter, objects: &dyn BackupObjectIndex, key_material: &[u8], repository_id: Uuid) -> Result<(), graphql_orm_backup::BackupError> {
 // Host-held secret, at least 32 random bytes, never stored in the repository.
-let authenticator = ManifestAuthenticator::new(ManifestKey::from_bytes(key_material)?);
+// Stable UUID retained in host configuration, independent of repository contents.
+let authenticator = ManifestAuthenticator::new(ManifestKey::from_bytes(key_material)?)
+    .with_repository_identity(repository_id);
 let repository = LocalBackupRepository::new("./backups").with_manifest_authenticator(authenticator);
 let result = create_full_backup(&repository, database, objects, FullBackupRequest {
     snapshot_id: Uuid::new_v4(), created_at: 0,

@@ -271,6 +271,22 @@ impl MockObjectIndex {
 
 #[async_trait]
 impl BackupObjectIndex for MockObjectIndex {
+    async fn objects_from_incremental_export(
+        &self,
+        parent_snapshot_id: Uuid,
+        _changes: &[graphql_orm_backup::BackupChangeExport],
+    ) -> Result<Vec<BackupObjectRef>, BackupError> {
+        self.list_objects_for_incremental_backup(parent_snapshot_id)
+            .await
+    }
+
+    async fn objects_from_full_export(
+        &self,
+        _: &[graphql_orm_backup::BackupTableExport],
+    ) -> Result<Vec<BackupObjectRef>, BackupError> {
+        self.list_objects_for_full_backup().await
+    }
+
     async fn list_objects_for_full_backup(&self) -> Result<Vec<BackupObjectRef>, BackupError> {
         Ok(self.object.iter().cloned().collect())
     }
@@ -460,7 +476,7 @@ async fn prune_refuses_to_sweep_objects_after_a_truncated_snapshot_listing() {
     .expect_err("an incomplete listing must not drive the object sweep");
 
     assert!(
-        matches!(&error, BackupError::InvalidManifestChain { reason } if reason.contains("listing is incomplete")),
+        matches!(&error, BackupError::IncompleteRepositoryListing { reason } if reason.contains("listing is incomplete")),
         "unexpected error: {error:?}"
     );
     for key in [
@@ -513,7 +529,7 @@ async fn delete_snapshot_refuses_a_listing_that_omits_a_stored_parent() {
         .expect_err("a listing that omits a stored parent is incomplete");
 
     assert!(
-        matches!(&error, BackupError::InvalidManifestChain { reason } if reason.contains("stored but was not listed")),
+        matches!(&error, BackupError::IncompleteRepositoryListing { reason } if reason.contains("stored but was not listed")),
         "unexpected error: {error:?}"
     );
     assert!(
@@ -591,7 +607,7 @@ async fn delete_snapshot_refuses_a_parent_whose_child_was_transiently_unlisted()
         .expect_err("a hidden child must not let its parent be deleted");
 
     assert!(
-        matches!(&error, BackupError::InvalidManifestChain { reason } if reason.contains("listing is incomplete")),
+        matches!(&error, BackupError::IncompleteRepositoryListing { reason } if reason.contains("listing is incomplete")),
         "unexpected error: {error:?}"
     );
     assert_eq!(
@@ -646,7 +662,7 @@ async fn prune_refuses_to_expire_the_parent_of_a_transiently_unlisted_newest_chi
     .expect_err("a hidden newest child must not expire its parent");
 
     assert!(
-        matches!(&error, BackupError::InvalidManifestChain { reason } if reason.contains("listing is incomplete")),
+        matches!(&error, BackupError::IncompleteRepositoryListing { reason } if reason.contains("listing is incomplete")),
         "unexpected error: {error:?}"
     );
     assert_eq!(
@@ -666,4 +682,5 @@ fn test_manifest_authenticator() -> graphql_orm_backup::ManifestAuthenticator {
     graphql_orm_backup::ManifestAuthenticator::new(
         graphql_orm_backup::ManifestKey::from_bytes(&[7; 32]).expect("test manifest key"),
     )
+    .with_repository_identity(uuid::Uuid::from_u128(1))
 }

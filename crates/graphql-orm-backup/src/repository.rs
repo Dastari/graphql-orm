@@ -24,7 +24,8 @@ pub trait BackupRepository: Send + Sync {
     /// repository. The default returns `None`, so every operation that reads
     /// or writes a manifest fails closed with
     /// [`BackupError::ManifestAuthenticationRequired`]. Wrapping repositories
-    /// must forward it.
+    /// must forward it. Format 3 also requires a host repository identity pin
+    /// on this authenticator; see [`ManifestAuthenticator::with_repository_identity`].
     fn manifest_authenticator(&self) -> Option<&ManifestAuthenticator> {
         None
     }
