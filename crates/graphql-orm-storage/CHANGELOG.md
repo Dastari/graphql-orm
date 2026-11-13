@@ -30,7 +30,8 @@ messages have a new form. See [MIGRATION.md](MIGRATION.md).
   suite races four such writers over 25 keys. A rename without replacement
   was not used, because older Samba releases implement it as a check
   followed by a replacing rename. A link whose outcome is unknown, because
-  its response was lost, timed out or could not be verified, fails with
+  its response was lost, timed out or could not be verified, including an
+  unsigned `STATUS_PENDING` interim response, fails with
   non-retryable `StorageError::SingleAttemptFailed`, and the temporary file
   is left in place, hidden from listings, because the key may hold this
   writer's complete object.

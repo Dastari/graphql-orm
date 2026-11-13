@@ -2454,13 +2454,23 @@ enum LinkFailure {
 
 /// Classifies a failed link request. Only a status in a response the client
 /// verified, other than a transient one, shows that the server did not link.
+///
+/// A status-bearing error is not proof of verification on its own. On a ready
+/// session the vendored client accepts exactly one status without a
+/// signature or encryption: `STATUS_PENDING`, an interim answer that anyone
+/// on the path could forge. It may surface as either status variant, so it
+/// is an unknown outcome whatever its variant. The client's other unsigned
+/// exemptions cannot reach a link: SessionSetup responses before the session
+/// is ready, and guest or anonymous sessions, which this backend refuses.
 fn classify_link_error(error: smb::Error) -> LinkFailure {
-    let verified_status = matches!(
-        error,
-        smb::Error::UnexpectedMessageStatus(_) | smb::Error::ReceivedErrorMessage(_, _)
-    );
+    let status = match &error {
+        smb::Error::UnexpectedMessageStatus(status)
+        | smb::Error::ReceivedErrorMessage(status, _) => Some(*status),
+        _ => None,
+    };
+    let verified_refusal = status.is_some_and(|status| status != Status::Pending as u32);
     let mapped = map_smb_error("link", error);
-    if verified_status && !mapped.is_retryable() {
+    if verified_refusal && !mapped.is_retryable() {
         LinkFailure::Refused(mapped)
     } else {
         LinkFailure::Unknown(mapped)
@@ -4075,6 +4085,56 @@ mod tests {
             classify_link_error(smb::Error::SignatureVerificationFailed),
             LinkFailure::Unknown(_)
         ));
+        // A refusal arrives in either status variant.
+        assert!(matches!(
+            classify_link_error(smb::Error::ReceivedErrorMessage(
+                Status::ObjectNameCollision as u32,
+                smb_msg::ErrorResponse { error_data: vec![] },
+            )),
+            LinkFailure::Refused(error) if is_collision(&error)
+        ));
+    }
+
+    /// The client accepts an unsigned `STATUS_PENDING`, so it can be forged:
+    /// in either variant it proves nothing about the link.
+    fn pending_link_errors() -> [smb::Error; 2] {
+        [
+            smb::Error::UnexpectedMessageStatus(Status::Pending as u32),
+            smb::Error::ReceivedErrorMessage(
+                Status::Pending as u32,
+                smb_msg::ErrorResponse { error_data: vec![] },
+            ),
+        ]
+    }
+
+    #[test]
+    fn an_unsigned_pending_status_is_an_unknown_link_outcome() {
+        for error in pending_link_errors() {
+            let variant = format!("{error:?}");
+            assert!(
+                matches!(classify_link_error(error), LinkFailure::Unknown(_)),
+                "{variant}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pending_link_status_keeps_the_temp_file_and_fails_as_single_attempt() {
+        for error in pending_link_errors() {
+            let variant = format!("{error:?}");
+            let decision = decide_publish(Ok((Err(classify_link_error(error)), Ok(()))));
+            assert!(!decision.removes_temp(), "{variant}");
+            let PublishDecision::Unknown(error) = decision else {
+                panic!("{variant}: a pending status must leave the outcome unknown");
+            };
+            // put_blob_if_not_exists reports it as a single-attempt failure.
+            let reported = StorageError::single_attempt(error);
+            assert!(!reported.is_retryable(), "{variant}");
+            assert!(
+                matches!(reported, StorageError::SingleAttemptFailed { .. }),
+                "{variant}"
+            );
+        }
     }
 
     #[test]

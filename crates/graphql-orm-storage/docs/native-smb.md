@@ -369,8 +369,11 @@ atomically when the name exists: Samba calls `link(2)`, which fails with
 `Ok(None)`. The key appears only with its complete content, so `Ok(None)`
 means another writer's complete object holds it, and concurrent writers on
 separate connections get exactly one `Ok(Some(_))`. This primitive backs
-repository locks and content-addressed deduplication. The share must support
-hard links. A rename without replacement is not used: older Samba releases
+repository locks and content-addressed deduplication. The file system behind
+the share must support hard links: a server that refuses the link request,
+for example with `STATUS_NOT_SUPPORTED`, makes `put_blob_if_not_exists` fail
+with a non-retryable error, and there is no fallback to another publish
+method. A rename without replacement is not used: older Samba releases
 implement it as an existence check followed by a replacing rename, so two
 writers could both succeed. The managed Samba suite races four writers on
 separate connections over 25 keys and checks that exactly one wins each key
@@ -417,8 +420,9 @@ object. When the link's response is lost, times out or cannot be verified,
 `put_blob_if_not_exists` reports the unknown outcome as non-retryable
 `SingleAttemptFailed` and leaves the temporary file alone, hidden from
 listings. Only a verified, non-transient status shows that no link was made;
-the temporary file is then removed. Callers retry failed uploads with a fresh
-stream.
+the temporary file is then removed. An unsigned `STATUS_PENDING` interim
+response, which the client accepts without verification, counts as an
+unknown outcome. Callers retry failed uploads with a fresh stream.
 
 Opening an existing key whose file another handle is deleting returns
 `STATUS_DELETE_PENDING`. For `get_blob`, `blob_exists`, `head_blob` and
