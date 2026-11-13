@@ -3075,9 +3075,31 @@ fn generate_graphql_operations_unfiltered(
                             }
                         }
                     };
-                    if graphql_create_asks {
+                    // The conflict update sets every update candidate, also one
+                    // the client left out: an omitted optional field is written
+                    // as NULL and a field outside the GraphQL input type as its
+                    // default. On an existing row the decision is therefore
+                    // asked for every update candidate, with the current row
+                    // and the value about to be written. The insert branch
+                    // keeps the client-supplied rule. ORM-managed version
+                    // columns are not the client's to write.
+                    let existing_row_asks = upsert_update_candidate && !meta.managed_version;
+                    let supplied_is_constant = !(keyless && is_option_type(field_type));
+                    if graphql_create_asks && (supplied_is_constant || !existing_row_asks) {
                         upsert_policy_checks_graphql.push(quote! {
                             if #graphql_create_condition {
+                                #graphql_check
+                            }
+                        });
+                    } else if graphql_create_asks {
+                        upsert_policy_checks_graphql.push(quote! {
+                            if #graphql_create_condition || current_entity.is_some() {
+                                #graphql_check
+                            }
+                        });
+                    } else if existing_row_asks {
+                        upsert_policy_checks_graphql.push(quote! {
+                            if current_entity.is_some() {
                                 #graphql_check
                             }
                         });

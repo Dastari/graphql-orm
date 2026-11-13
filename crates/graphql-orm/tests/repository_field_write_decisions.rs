@@ -452,8 +452,20 @@ async fn graphql_writes_ask_only_the_graphql_decision_and_only_supplied_input_fi
         HashSet::from([("LedgerNote", "remark")])
     );
     run("mutation { upsertLedgerNote(input: {id: \"n9\", slug: \"first\", body: \"b\"}) { success } }").await;
+    // An upsert onto an existing row asks about every field its update
+    // sets: the omitted optional `remark` is written as NULL and the
+    // `skip_input` field as its default.
+    let asked = authority.graphql_asked();
+    for field in ["body", "remark", "internalTag"] {
+        assert!(asked.contains(&("LedgerNote", field)), "{field}");
+    }
+    assert!(!asked.contains(&("LedgerNote", "id")));
+    assert!(!asked.contains(&("LedgerNote", "slug")));
+    // An upsert that inserts asks only about what the client supplied.
+    run("mutation { upsertLedgerNote(input: {id: \"n8\", slug: \"eighth\", body: \"b\"}) { success } }").await;
     let asked = authority.graphql_asked();
     assert!(asked.contains(&("LedgerNote", "body")));
+    assert!(!asked.contains(&("LedgerNote", "remark")));
     assert!(!asked.contains(&("LedgerNote", "internalTag")));
 
     // No GraphQL write also asked the repository decision.
@@ -461,7 +473,7 @@ async fn graphql_writes_ask_only_the_graphql_decision_and_only_supplied_input_fi
 }
 
 #[tokio::test]
-async fn a_deny_list_on_a_field_the_client_cannot_supply_does_not_block_creates() {
+async fn a_deny_list_on_a_field_the_client_cannot_supply_blocks_only_writes_that_set_it() {
     let (db, authority) = database().await;
     // The host denies GraphQL writes to fields clients cannot send anyway.
     authority.deny(("LedgerNote", "internalTag"));
@@ -487,6 +499,19 @@ async fn a_deny_list_on_a_field_the_client_cannot_supply_does_not_block_creates(
             "{mutation}: {data}"
         );
     }
+    // An upsert onto an existing row resets the field to its default, so
+    // there the deny-list is obeyed.
+    let response = schema
+        .execute(Request::new(
+            "mutation { upsertLedgerNote(input: {id: \"n9\", slug: \"first\", body: \"b\"}) { success } }",
+        ))
+        .await;
+    let refusal = format!(
+        "{:?} {}",
+        response.errors,
+        response.data.into_json().unwrap()
+    );
+    assert!(refusal.contains("internalTag"), "{refusal}");
     // Host code that writes the field through the repository is still asked.
     let error = LedgerNote::insert(
         &db,

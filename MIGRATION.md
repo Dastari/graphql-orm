@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.142.0 to 0.143.0: one authorization contract
+## 0.141.0 to 0.143.0: one authorization contract
 
 Upgrade runtime and macros together. No schema or data migration is needed.
 Regenerate router descriptors and AI capability manifests if a handwritten
@@ -22,14 +22,17 @@ writes.** Generated scalar getters, `RecordVersion`, `NodeId`, relation fields,
 the selected fields of relation targets and `search_relation` sources now call
 `can_read_field` for fields without a `read_policy` too, with
 `policy_key = None`. Filters, ordering, aggregates, search sources and
-repository reads already did. Generated writes follow the same rule: GraphQL
-create, update, upsert and bulk update call `can_write_field` for every field
-they write, and the repository writes of a `GraphQLOperations` entity
+repository reads already did. Generated writes ask with the field's
+`write_policy` key or `None` as well, and the two surfaces differ in which
+fields they ask about. The repository writes of a `GraphQLOperations` entity
 (`insert`, `insert_many`, `insert_if_absent`, `update_by_id`, `update_by_key`,
-`update_where`, `update_if`, `compare_and_swap`, `upsert` and their
-transaction forms) call `can_write_repository_field` for every field they
-write, with the field's `write_policy` key or `None`. Check what your provider
-returns for `None`:
+`update_where`, `update_if`, `compare_and_swap`, `upsert`, `upsert_many` and
+their transaction forms) call `can_write_repository_field` for every field
+host code writes. GraphQL create, update, upsert and bulk update call
+`can_write_field` for a field with a `write_policy` as before, and for a
+key-less field when the client supplied it. One case goes further: an upsert
+that resolves to an existing row asks about every field its update writes,
+supplied or not (details below). Check what your provider returns for `None`:
 
 - A provider that allows key-less fields (`None => Ok(true)`) sees no change
   in results.
@@ -46,8 +49,8 @@ root list or get-by-key read asks once per selected field per row. A relation
 asks twice per selected target field per row: the relation loader checks the
 loaded targets before the relation resolves, and each target field's getter
 asks again. A `Changed` event also asks twice: once when the event is checked
-before release, and once in the getter. A write asks once per written field
-(per row for a bulk update).
+before release, and once in the getter. A write asks once per field it asks
+about (per row for a bulk update).
 
 **Repository writes ask about declared keys as well.** This is the larger
 change for hosts that write through the repository. Before 0.143.0 only
@@ -87,10 +90,23 @@ companion crates on entities it knows nothing about:
 GraphQL writes ask less than repository writes do. They ask `can_write_field`
 about a field that declares a `write_policy` exactly as before, and about a
 key-less field only when it is part of the GraphQL input type and the client
-supplied it (a required create input is always supplied). They never ask about
-a key-less field the client cannot send (`skip_input`, host-managed
-timestamps, managed versions) or about a value only an input transform or
-hook set, and they never also ask the repository decision.
+supplied it (a required create input is always supplied). With one exception
+they never ask about a key-less field the client cannot send (`skip_input`,
+host-managed timestamps, managed versions) or about a value only an input
+transform or hook set, and they never also ask the repository decision.
+
+The exception is an upsert that resolves to an existing row. Its update sets
+every column that is neither the primary key nor part of the upsert key, so an
+optional field the client left out is written as `NULL` and a `skip_input`
+field as its default. The statement is unchanged; the decision is now asked
+for each of those fields, with the current row and the value about to be
+written (`None` for an omitted optional field), whether or not the value
+differs from the stored one. A key-less field the client omitted was not asked
+before. An upsert that inserts keeps the client-supplied rule, and a managed
+version column is never asked about. A provider that denies a key-less field
+by name now refuses an upsert onto an existing row unless it allows that field
+for the caller; send the field's current value if the client means to keep it.
+
 `ignore_denied_field_write` and the optional-field rules for fields with a
 declared key are unchanged: such optional create and upsert fields are asked
 even when absent, and an update asks the keyed fields it supplies.

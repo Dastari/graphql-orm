@@ -192,22 +192,31 @@ Writes follow the same rule, with one difference between the two surfaces:
 > every field the host code writes, with the field's declared `write_policy`
 > key or `None`. GraphQL mutations ask `Database::can_write_field` about every
 > field that declares a key, and about a key-less field when the client could
-> and did supply it.
+> and did supply it. An upsert that resolves to an existing row also asks about
+> every field its update writes, supplied or not.
 
 | Path | How the write decision is asked |
 | --- | --- |
 | GraphQL create | a keyed field always (optional ones also when absent, as before); a key-less field when it is part of the GraphQL input type and the client supplied it (a required input always is) |
 | GraphQL update | a keyed field the input supplies; a key-less field the client supplied; with the current row |
-| GraphQL upsert | as create, with the current row for the fields an existing row's update would change |
+| GraphQL upsert, new row | as create |
+| GraphQL upsert, existing row | every field the conflict update sets (each column outside the primary key and the upsert key, except a managed version), keyed or key-less, supplied or omitted, with the current row and the value about to be written; a keyed field outside that set is not asked |
 | GraphQL `updateMany` | as update, per matched row |
 | Repository `insert`, `insert_many`, `insert_if_absent` and their transaction forms | every create field through the repository decision |
 | Repository `update_by_id`, `update_by_key`, `update_where`, `update_if`, `compare_and_swap` and their transaction forms | every supplied field through the repository decision, with the current row |
-| Repository `upsert` | every create field for a new row, every changed field for an existing one, through the repository decision |
+| Repository `upsert`, `upsert_many` | every create field for a new row, every changed field for an existing one, through the repository decision |
 | Repository-only entities | every create and supplied update field (unchanged) |
 
-A GraphQL write never asks about a key-less field the client cannot send
-(`skip_input`, host-managed timestamps, managed versions), about a value only
-a `WriteInputTransform` or hook set, or about the repository decision. Which
+The existing-row upsert asks more because its statement writes more: the
+conflict update sets an omitted optional field to `NULL` and a `skip_input`
+field to its default, so the decision is asked for those too (`None` is the
+value passed for an omitted optional field). It is asked whether or not the
+written value equals the stored one, as it always was for fields with a key.
+
+Apart from that case, a GraphQL write never asks about a key-less field the
+client cannot send (`skip_input`, host-managed timestamps, managed versions)
+or about a value only a `WriteInputTransform` or hook set. No GraphQL write
+asks the repository decision. Which
 fields the client supplied is recorded before input transforms run. A field
 with a declared key keeps its earlier contract, including being asked about
 the transformed value. Repository writes are not asked about ORM-managed

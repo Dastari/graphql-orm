@@ -9062,6 +9062,92 @@ mod tests {
         assert_eq!(recovered.skipped, 0, "{recovered:?}");
     }
 
+    async fn expired_reservation(
+        fixture: &Fixture,
+        run: &AiRunRecord,
+        session_id: Uuid,
+        key: &str,
+    ) -> AiBudgetReservationRecord {
+        AiBudgetReservationRecord::insert(
+            &fixture.database,
+            CreateAiBudgetReservationRecordInput {
+                budget_counter_ids: serde_json::json!([]),
+                scope_kind: "tenant".to_owned(),
+                scope_id: "tenant-run".to_owned(),
+                tenant_id: Some("tenant-run".to_owned()),
+                principal_kind: "user".to_owned(),
+                principal_subject: "run-user".to_owned(),
+                session_id,
+                run_id: run.id,
+                attempt_id: run.attempt_id.expect("a started run has an attempt"),
+                lease_generation: run.lease_generation,
+                provider_kind: "openai".to_owned(),
+                provider_model: "custody-test".to_owned(),
+                reasoning_effort: "unspecified".to_owned(),
+                pricing_policy_version: "pricing-v1".to_owned(),
+                reserved_input_tokens: 1,
+                reserved_output_tokens: 1,
+                reserved_tool_units: 0,
+                reserved_image_units: 0,
+                reserved_cost_microunits: 1,
+                reserved_runs: 1,
+                actual_input_tokens: None,
+                actual_cached_input_tokens: None,
+                actual_output_tokens: None,
+                actual_tool_units: None,
+                actual_image_units: None,
+                actual_cost_microunits: None,
+                actual_runs: None,
+                idempotency_key: key.to_owned(),
+                state: "reserved".to_owned(),
+                expires_at: fixture.clock.now().unix_timestamp(),
+                reconciled_at: None,
+                settlement_examined_at: 0,
+            },
+        )
+        .await
+        .expect("test reservation should insert")
+    }
+
+    /// The settlement sweep stamps a reservation it leaves behind, both when
+    /// a live attempt still owns it and when settling it fails. Both stamps
+    /// are ORM updates of the crate's own record and must be written under a
+    /// host field policy that refuses every repository field decision, or
+    /// the sweep could never rotate past such a reservation.
+    #[tokio::test]
+    async fn the_settlement_stamp_is_written_under_a_host_field_policy_that_denies_every_repository_field()
+     {
+        let fixture = fixture().await;
+        let run = started_run(&fixture, Uuid::new_v4()).await;
+        let record = run_record(&fixture, run).await;
+        // Owned: the run's lease is live, so the sweep stamps and moves on.
+        let owned = expired_reservation(&fixture, &record, record.session_id, "owned").await;
+        // Refused: the reservation names another session, so settlement
+        // fails and the sweep stamps it as skipped.
+        let refused = expired_reservation(&fixture, &record, Uuid::new_v4(), "refused").await;
+        let mut database = fixture.database.clone();
+        database.set_field_policy(DenyEveryRepositoryField);
+        fixture.clock.advance_seconds(1);
+        let report = service_on(&fixture, database, 16)
+            .recover_expired_leases()
+            .await
+            .expect("the pass runs under the denying field policy");
+        assert_eq!(report.skipped, 1, "{report:?}");
+        assert_eq!(report.budget_reservations_settled, 0, "{report:?}");
+        for reservation in [&owned, &refused] {
+            let stamped = AiBudgetReservationRecord::find_by_id(&fixture.database, &reservation.id)
+                .await
+                .expect("reservation lookup should succeed")
+                .expect("reservation should exist");
+            assert!(
+                stamped.settlement_examined_at > 0,
+                "{} was not stamped",
+                stamped.idempotency_key
+            );
+            assert_eq!(stamped.state, "reserved");
+        }
+    }
+
     #[tokio::test]
     async fn a_refusing_host_callback_never_quarantines_a_recoverable_run() {
         let fixture = fixture().await;

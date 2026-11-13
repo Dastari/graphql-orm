@@ -25,6 +25,14 @@ use graphql_orm::graphql::orm::{DefaultWriteBackend, FieldPolicy, OrmSchemaModul
 use crate::persistence::AiSchemaModule;
 
 /// Whether `entity_name` is one of this crate's own persisted entities.
+///
+/// Matching by entity name alone is safe because of where this policy can be
+/// reached: it is installed only on the crate-internal handle built by
+/// [`custody_database`], which services never hand out (`database()` returns
+/// the host's handle), and it answers only the repository-surface decisions,
+/// which carry no request. A host entity that happens to share a name with one
+/// of these records is written through the host's handle and stays under the
+/// host's policy.
 fn is_custody_entity(entity_name: &str) -> bool {
     static ENTITIES: OnceLock<HashSet<&'static str>> = OnceLock::new();
     ENTITIES
