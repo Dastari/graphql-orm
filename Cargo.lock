@@ -3247,7 +3247,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-router"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "agql-auth",
  "arc-swap",
@@ -3263,6 +3263,7 @@ dependencies = [
  "ntex",
  "opentelemetry",
  "reqwest 0.13.4",
+ "rustix",
  "serde",
  "serde_json",
  "sha1 0.10.6",

@@ -83,6 +83,7 @@ impl std::fmt::Debug for InternalSubscriptionEndpoint {
 }
 
 pub(crate) struct SubscriptionGateway {
+    persisted_documents: Option<crate::persisted::PersistedDocuments>,
     config: SubscriptionConfig,
     authentication: Arc<dyn AuthenticationProvider>,
     internal: InternalSubscriptionEndpoint,
@@ -106,6 +107,7 @@ impl SubscriptionGateway {
         internal: InternalSubscriptionEndpoint,
         bound_address: SocketAddr,
         metrics: Arc<RouterMetrics>,
+        persisted_documents: Option<crate::persisted::PersistedDocuments>,
     ) -> Arc<Self> {
         let connect_address = loopback_connect_address(bound_address);
         let internal_url = format!("ws://localhost:{}{}", connect_address.port(), internal.path);
@@ -113,6 +115,7 @@ impl SubscriptionGateway {
             ConnectionAttemptLimiter::new(config.max_connection_attempts_per_second);
         let max_pending_connections = config.pending_connection_limit();
         Arc::new(Self {
+            persisted_documents,
             config,
             authentication,
             internal,
@@ -754,7 +757,11 @@ async fn connect_internal(
     builder
         .address(gateway.connect_address)
         .protocols([GRAPHQL_TRANSPORT_WS])
-        .max_frame_size(gateway.config.max_client_message_bytes)
+        .max_frame_size(if gateway.persisted_documents.is_some() {
+            crate::persisted::INTERNAL_FRAME_BYTES
+        } else {
+            gateway.config.max_client_message_bytes
+        })
         .timeout(gateway.config.connection_init_timeout)
         .set_header(
             INTERNAL_SUBSCRIPTION_HEADER,
@@ -967,6 +974,17 @@ async fn forward_subscribe(
         if state.operations.contains_key(&id) {
             return state.terminate_with_public_close(4409, "Subscriber already exists");
         }
+        if let Some(documents) = &state.gateway.persisted_documents
+            && let Err(code) = documents.prepare_websocket_payload(&mut message)
+        {
+            return Some(ws::Message::Text(
+                json!({"id": id, "type": "error", "payload": [{
+                    "message": "Persisted document request refused", "extensions": {"code": code}
+                }]})
+                .to_string()
+                .into(),
+            ));
+        }
         let Some(subscription) = selected_subscription(&message) else {
             return Some(ws::Message::Text(
                 json!({"id": id, "type": "error", "payload": [{
@@ -1005,12 +1023,36 @@ async fn forward_subscribe(
         );
         state.gateway.add_operation();
     }
-    let internal_max_bytes = state.borrow().gateway.config.max_client_message_bytes;
-    inject_operation_variables(&mut message, internal_max_bytes);
+    let persisted = state.borrow().gateway.persisted_documents.is_some();
+    if persisted {
+        inject_operation_variables_inner(
+            &mut message,
+            crate::persisted::INTERNAL_FRAME_BYTES,
+            true,
+        );
+    } else {
+        let internal_max_bytes = state.borrow().gateway.config.max_client_message_bytes;
+        inject_operation_variables(&mut message, internal_max_bytes);
+    }
+    // Measure the exact JSON bytes sent to Hive, after document expansion,
+    // internal id assignment, and the complete bounded authorization projection.
+    // The codec limit counts the frame payload, excluding its header and mask.
+    let encoded = message.to_string();
+    if persisted && encoded.len() > crate::persisted::INTERNAL_FRAME_BYTES {
+        state.borrow_mut().remove_operation(&id);
+        return Some(ws::Message::Text(
+            json!({"id": id, "type": "error", "payload": [{
+                "message": "Persisted operation exceeds the internal WebSocket budget",
+                "extensions": {"code": "REQUEST_TOO_LARGE"}
+            }]})
+            .to_string()
+            .into(),
+        ));
+    }
     let internal = state.borrow().internal_sink.clone();
     if let Some(internal) = internal
         && internal
-            .send(ws::Message::Text(message.to_string().into()))
+            .send(ws::Message::Text(encoded.into()))
             .await
             .is_ok()
     {
@@ -1023,6 +1065,14 @@ async fn forward_subscribe(
 }
 
 fn inject_operation_variables(message: &mut Value, internal_max_bytes: usize) {
+    inject_operation_variables_inner(message, internal_max_bytes, false);
+}
+
+fn inject_operation_variables_inner(
+    message: &mut Value,
+    internal_max_bytes: usize,
+    exact_budget: bool,
+) {
     let Some(payload) = message.get_mut("payload").and_then(Value::as_object_mut) else {
         return;
     };
@@ -1036,14 +1086,23 @@ fn inject_operation_variables(message: &mut Value, internal_max_bytes: usize) {
         })
         .filter_map(|(name, value)| {
             let encoded = value.to_string();
+            let bytes = if exact_budget {
+                serde_json::to_string(name)
+                    .expect("JSON variable name")
+                    .len()
+                    + encoded.len()
+                    + 2
+            } else {
+                name.len() + encoded.len()
+            };
             (encoded.len() <= MAX_AUTHORIZATION_VARIABLE_VALUE_BYTES)
-                .then(|| (name.to_owned(), value.clone(), name.len() + encoded.len()))
+                .then(|| (name.to_owned(), value.clone(), bytes))
         })
         .collect::<Vec<_>>();
     candidates.sort_by(|left, right| left.0.cmp(&right.0));
 
     let mut projected = serde_json::Map::new();
-    let mut projected_bytes = 0_usize;
+    let mut projected_bytes = if exact_budget { 2_usize } else { 0_usize };
     for (name, value, encoded_bytes) in candidates {
         if projected_bytes.saturating_add(encoded_bytes) > MAX_AUTHORIZATION_VARIABLE_BYTES {
             break;
@@ -1064,6 +1123,12 @@ fn inject_operation_variables(message: &mut Value, internal_max_bytes: usize) {
         INTERNAL_SUBSCRIPTION_VARIABLES_EXTENSION.to_owned(),
         Value::Object(projected),
     );
+
+    if exact_budget {
+        // Persisted forwarding refuses an oversized operation as a whole. Never
+        // strip authorization projection to make room for the document.
+        return;
+    }
 
     while message.to_string().len() > internal_max_bytes {
         let Some(projected) = message
@@ -1267,6 +1332,7 @@ mod tests {
             InternalSubscriptionEndpoint::generate().unwrap(),
             "127.0.0.1:12345".parse().unwrap(),
             Arc::new(RouterMetrics::default()),
+            None,
         )
     }
 
@@ -1455,6 +1521,7 @@ mod tests {
             InternalSubscriptionEndpoint::generate().unwrap(),
             "127.0.0.1:12345".parse().unwrap(),
             Arc::new(RouterMetrics::default()),
+            None,
         );
         let state = Rc::new(RefCell::new(ConnectionState {
             gateway: gateway.clone(),

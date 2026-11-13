@@ -117,6 +117,16 @@ store, persistence layer, or application policy engine. Router authorization
 can deny early but never grants authority over subgraph resolver guards or data
 policy.
 
+Persisted operations are opt-in with `RouterConfig::with_persisted_allow_list(path)`
+or `RouterConfig::with_persisted_ids_or_text(path)` or the `persistedDocuments` configuration key with a required explicit `strict`
+boolean. A local JSON object maps
+bare lowercase SHA-256 ids to exact document text. Strict mode requires registered
+ids over HTTP and WebSocket; it limits documents and preserves all authorization
+checks. Documents may be up to 256 KiB; operations exceeding the 64 KiB internal
+WebSocket message budget are refused over WebSocket only. See
+[persisted documents](docs/configuration.md#persisted-documents) for wire forms, manifest bounds, Unix temporary-filesystem permissions, and restart
+requirements.
+
 ## Install
 
 This unpublished package is Git-only:

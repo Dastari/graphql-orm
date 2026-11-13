@@ -243,6 +243,13 @@ fn router_child_entrypoint() {
                 } else {
                     config.allow_anonymous_development(true)
                 };
+                if let Ok(path) = env::var("PERSISTED_MANIFEST") {
+                    config = if env::var("PERSISTED_STRICT").unwrap() == "true" {
+                        config.with_persisted_allow_list(path)
+                    } else {
+                        config.with_persisted_ids_or_text(path)
+                    };
+                }
                 let clock_seconds = match mode.to_str() {
                     Some("auth-subscriptions-clock-past") => Some(Some(1_600_000_000)),
                     Some("auth-subscriptions-clock-ahead") => Some(Some(4_102_444_800)),
@@ -271,8 +278,32 @@ fn router_child_entrypoint() {
                         .with_schema_poll_interval(Duration::from_millis(100))
                         .with_schema_refresh_attempts(1);
                 }
+                if env::var_os("PERSISTED_INTROSPECTION").is_some() {
+                    config = config.with_introspection(true);
+                }
+                let control = env::var("PERSISTED_CONTROL").ok();
+                if let Some(control) = &control {
+                    config = config.with_schema_poll_interval(Duration::from_secs(3600)).validate().unwrap();
+                    let hive = config.persisted_documents.as_ref().unwrap().hive_config();
+                    fs::write(format!("{control}.snapshot"), hive["storage"]["path"].as_str().unwrap()).unwrap();
+                }
                 let prepared = config.prepare().await.expect("static graph should prepare");
                 assert_eq!(prepared.active_graph().version(), 1);
+                if let Some(control) = control {
+                    let handle = prepared.handle();
+                    prepared.run_until_shutdown(async move {
+                        loop {
+                            if fs::remove_file(&control).is_ok() {
+                                let outcome = handle.refresh().await.unwrap();
+                                let status = handle.status().await;
+                                fs::write(format!("{control}.result"), serde_json::to_vec(&json!({"outcome": format!("{outcome:?}"), "error": status.last_persisted_documents_error().or_else(|| status.last_composition_error()), "snapshotError": status.last_persisted_documents_error(), "compositionError": status.last_composition_error(), "compositionFailures": handle.metrics().composition_failure_total(), "version": status.active_graph().version(), "observed": status.subgraphs().iter().map(|s| s.observed_fingerprint()).collect::<Vec<_>>()})).unwrap()).unwrap();
+                            }
+                            hive_router::tokio::time::sleep(Duration::from_millis(20)).await;
+                        }
+                    }).await.unwrap();
+                    return;
+                }
+
                 if mode == "graceful" {
                     prepared
                         .run_until_shutdown(async {
@@ -352,6 +383,7 @@ async fn run_wire_app() {
         internal,
         listener.local_addr().unwrap(),
         Arc::new(crate::metrics::RouterMetrics::default()),
+        None,
     );
     let public_path = config.websocket_path().unwrap().to_owned();
     web::HttpServer::new(async move || {
@@ -604,6 +636,713 @@ fn static_children_bind_their_own_ports_even_when_the_old_choice_is_occupied() {
     second.wait_until_ready();
     assert_ne!(first.address, second.address);
     assert_ne!(first.address, occupied.local_addr().unwrap());
+}
+
+fn persisted_documents_wire_case(case: &str) {
+    use sha2::{Digest, Sha256};
+    let products = LoopbackSubgraph::start(SubgraphKind::Products);
+    let reviews = LoopbackSubgraph::start(SubgraphKind::Reviews);
+    let products_sdl = LoopbackSdl::start(PRODUCTS_V1);
+    let reviews_sdl = LoopbackSdl::start(REVIEWS);
+    let mut operations = authenticated_product_operations(false);
+    operations[0].authorization = AuthorizationRequirement::AllScopes {
+        scopes: vec![scope("products.{id}.read")],
+    };
+    let products_protocol = LoopbackProtocol::start(protocol_descriptor(
+        "products",
+        products.endpoint(),
+        products_sdl.endpoint(),
+        operations,
+    ));
+    let reviews_protocol = LoopbackProtocol::start(protocol_descriptor(
+        "reviews",
+        reviews.endpoint(),
+        reviews_sdl.endpoint(),
+        Vec::new(),
+    ));
+    let temp = TemporaryConfig::new();
+    let manifest = temp.directory.join("manifest.json");
+    let query = "query { __typename }";
+    let mutation = "mutation { __typename }";
+    let subscription = r#"subscription { productChanged(id: "p1") { id } }"#;
+    let hash = |text: &str| format!("{:x}", Sha256::digest(text.as_bytes()));
+    let protected = r#"query { product(id: "p1") { id } }"#;
+    let introspection = "query { __schema { queryType { name } } }";
+    let padded_subscription = format!(
+        "{: <4096}",
+        "subscription Events($Id: ID!) { productChanged(id: $Id) { id } }"
+    );
+    let padded_subscription = &padded_subscription[..];
+    let large_query = "query Find($Id: ID!) { product(id: $Id) { id } }";
+    let sized_document = |size: usize, padding: char| {
+        format!(
+            "{large_query}\n#{}",
+            padding.to_string().repeat(size - large_query.len() - 2)
+        )
+    };
+    let sized_documents = [
+        ("20-kib", sized_document(20 * 1024, ' '), 0, true),
+        (
+            "20-kib-variables",
+            sized_document(20 * 1024, ' '),
+            33 * 1024,
+            true,
+        ),
+        ("20-kib-escaped", sized_document(20 * 1024, '\t'), 0, true),
+        ("36-kib", sized_document(36 * 1024, ' '), 0, true),
+        (
+            "36-kib-variables",
+            sized_document(36 * 1024, ' '),
+            33 * 1024,
+            false,
+        ),
+        ("36-kib-escaped", sized_document(36 * 1024, '\t'), 0, false),
+        ("70-kib", sized_document(70 * 1024, ' '), 0, false),
+    ];
+    let documents = [
+        query,
+        mutation,
+        subscription,
+        protected,
+        introspection,
+        padded_subscription,
+    ]
+    .into_iter()
+    .chain(
+        sized_documents
+            .iter()
+            .filter(|_| case == "document_sizes")
+            .map(|(_, document, _, _)| document.as_str()),
+    )
+    .map(|text| (hash(text), text))
+    .collect::<std::collections::BTreeMap<_, _>>();
+    fs::write(&manifest, serde_json::to_vec(&documents).unwrap()).unwrap();
+    let mut command = Command::new(env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "federation::wire_tests::router_child_entrypoint",
+            "--nocapture",
+        ])
+        .env(CHILD_ENV, "auth-subscriptions")
+        .env("TMPDIR", &temp.directory)
+        .env(PRODUCTS_ENDPOINT_ENV, products.endpoint())
+        .env(REVIEWS_ENDPOINT_ENV, reviews.endpoint())
+        .env(PRODUCTS_SDL_ENDPOINT_ENV, products_sdl.endpoint())
+        .env(REVIEWS_SDL_ENDPOINT_ENV, reviews_sdl.endpoint())
+        .env(PRODUCTS_PROTOCOL_ENDPOINT_ENV, products_protocol.endpoint())
+        .env(REVIEWS_PROTOCOL_ENDPOINT_ENV, reviews_protocol.endpoint());
+    if case != "disabled" {
+        command.env("PERSISTED_MANIFEST", &manifest).env(
+            "PERSISTED_STRICT",
+            (!case.starts_with("non_strict")).to_string(),
+        );
+    }
+    let control = temp.directory.join("refresh-control");
+    if case.starts_with("snapshot_") {
+        command.env("PERSISTED_CONTROL", &control);
+    }
+    if case.ends_with("authorization") {
+        command.env("PERSISTED_INTROSPECTION", "true");
+    }
+    let child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let mut router = TestRouter::from_child(child, false).0;
+    if case == "snapshot_cold_read" {
+        // A TCP-only probe cannot invoke the Hive plugin or pin a runtime.
+        wait_until("cold router TCP listener", || {
+            TcpStream::connect_timeout(&router.address, Duration::from_millis(100)).is_ok()
+        });
+    } else {
+        router.wait_until_ready();
+    }
+    let headers = [("authorization", "Bearer product-events")];
+    let graphql = |payload| {
+        router
+            .graphql_response_at("/api/graphql", payload, &headers)
+            .1
+    };
+    match case {
+        "document_sizes" => {
+            let mut socket = TestWebSocket::connect_at(router.address, "/api/graphql");
+            socket.connection_init_bearer("product-p1");
+            for (label, document, unused_bytes, fits_websocket) in &sized_documents {
+                let variables = json!({"Id": "p1", "Unused": "x".repeat(*unused_bytes)});
+                let result = router
+                    .graphql_response_at(
+                        "/api/graphql",
+                        json!({"documentId": hash(document), "variables": variables}),
+                        &[("authorization", "Bearer product-p1")],
+                    )
+                    .1;
+                assert_eq!(result["data"]["product"]["id"], "p1", "{label}: {result}");
+                let opens = products.opens();
+                socket.send_json(&json!({"id": label, "type": "subscribe", "payload": {
+                    "documentId": hash(document), "variables": variables
+                }}));
+                let result = socket.next_message();
+                assert_eq!(result["id"], *label, "{result}");
+                if *fits_websocket {
+                    assert_eq!(result["type"], "next", "{label}: {result}");
+                    // This scope requires the injected Id projection: a successful
+                    // response proves it was preserved alongside the large document.
+                    assert_eq!(
+                        result["payload"]["data"]["product"]["id"], "p1",
+                        "{label}: {result}"
+                    );
+                    let complete = socket.next_message();
+                    assert_eq!(complete["type"], "complete", "{complete}");
+                } else {
+                    assert_eq!(result["type"], "error", "{label}: {result}");
+                    assert_eq!(
+                        result["payload"][0]["extensions"]["code"], "REQUEST_TOO_LARGE",
+                        "{result}"
+                    );
+                    assert!(!result.to_string().contains("query Find"), "{result}");
+                    assert_eq!(
+                        products.opens(),
+                        opens,
+                        "oversized operation must not be forwarded"
+                    );
+                    // Reuse the same id immediately: the connection and operation
+                    // tracking must remain usable, without a trailing complete.
+                    socket.send_json(&json!({"id": label, "type": "subscribe", "payload": {"documentId": hash(query)}}));
+                    let next = socket.next_message();
+                    assert_eq!(next["type"], "next", "{next}");
+                    assert_eq!(next["payload"]["data"]["__typename"], "Query", "{next}");
+                    assert_eq!(socket.next_message()["type"], "complete");
+                }
+            }
+            socket.close();
+        }
+        "ws_budget" => {
+            let mut socket = TestWebSocket::connect_at(router.address, "/api/graphql");
+            socket.connection_init_bearer("product-events");
+            socket.send_json(&json!({"id": "large", "type": "subscribe", "payload": {"documentId": hash(query), "variables": {"Unused": "x".repeat(33 * 1024)}}}));
+            let result = socket.next_message();
+            assert_eq!(result["type"], "next", "{result}");
+            assert_eq!(result["payload"]["data"]["__typename"], "Query", "{result}");
+            assert_eq!(socket.next_message()["type"], "complete");
+            socket.send_json(&json!({"id": "still-open", "type": "subscribe", "payload": {"documentId": hash(padded_subscription), "variables": {"Id": "p1", "Unused": "x".repeat(28 * 1024)}}}));
+            let result = socket.next_message();
+            assert_eq!(
+                result["payload"]["data"]["productChanged"]["id"], "p1",
+                "{result}"
+            );
+            socket.close();
+        }
+        "snapshot_cold_read" => {
+            let snapshot = fs::read_to_string(format!("{}.snapshot", control.display())).unwrap();
+            let original = fs::read(&snapshot).unwrap();
+            let tampered = r#"mutation { renameProduct(id: "p1", name: "tampered") { id } }"#;
+            fs::write(
+                &snapshot,
+                serde_json::to_vec(&json!({hash(query): tampered})).unwrap(),
+            )
+            .unwrap();
+            let opens_before = products.opens();
+            for _ in 0..3 {
+                let (status, result) = router.graphql_response_at(
+                    "/api/graphql",
+                    json!({"documentId": hash(query)}),
+                    &headers,
+                );
+                assert_eq!(status, 503, "{result}");
+                assert_eq!(
+                    result["errors"][0]["extensions"]["code"], "SERVICE_UNAVAILABLE",
+                    "{result}"
+                );
+                assert!(result.get("data").is_none(), "{result}");
+                assert_eq!(
+                    products.opens(),
+                    opens_before,
+                    "no tampered document may execute"
+                );
+            }
+            // A pre-build check failure does not poison the generation.
+            fs::write(&snapshot, original).unwrap();
+            let original = graphql(json!({"documentId": hash(query)}));
+            assert_eq!(original["data"]["__typename"], "Query", "{original}");
+        }
+        "snapshot_retry" => {
+            let snapshot = fs::read_to_string(format!("{}.snapshot", control.display())).unwrap();
+            let original = fs::read(&snapshot).unwrap();
+            fs::remove_file(&snapshot).unwrap();
+            products_sdl.set(PRODUCTS_V2, "persisted-v2", 200);
+            products_protocol.set(
+                protocol_descriptor(
+                    "products",
+                    products.endpoint(),
+                    products_sdl.endpoint(),
+                    authenticated_product_operations(true),
+                ),
+                "persisted-policy-v2",
+                200,
+            );
+            let result_path = format!("{}.result", control.display());
+            let mut rounds = Vec::new();
+            for round in 0..2 {
+                if round == 1 {
+                    fs::write(&snapshot, &original).unwrap();
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        fs::set_permissions(&snapshot, fs::Permissions::from_mode(0o600)).unwrap();
+                    }
+                }
+                fs::write(&control, "refresh").unwrap();
+                wait_until("persisted refresh retry result", || {
+                    std::path::Path::new(&result_path).exists()
+                });
+                let result: Value =
+                    serde_json::from_slice(&fs::read(&result_path).unwrap()).unwrap();
+                fs::remove_file(&result_path).unwrap();
+                rounds.push(result);
+            }
+            assert_eq!(rounds[0]["outcome"], "Rejected", "{:?}", rounds);
+            assert_eq!(rounds[1]["outcome"], "Activated", "{:?}", rounds);
+            assert_eq!(rounds[1]["version"], 2);
+            assert!(rounds[0]["compositionError"].is_null(), "{:?}", rounds);
+            assert_eq!(rounds[0]["compositionFailures"], 0);
+            assert!(
+                rounds[0]["snapshotError"]
+                    .as_str()
+                    .unwrap()
+                    .contains("persisted documents snapshot")
+            );
+            assert!(rounds[1]["snapshotError"].is_null(), "{:?}", rounds);
+            assert!(
+                rounds[0]["observed"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(Value::is_null),
+                "{:?}",
+                rounds
+            );
+        }
+
+        "snapshot_rewrite" | "snapshot_delete" => {
+            let original = graphql(json!({"documentId": hash(query)}));
+            assert_eq!(original["data"]["__typename"], "Query", "{original}");
+            let snapshot = fs::read_to_string(format!("{}.snapshot", control.display())).unwrap();
+            if case == "snapshot_rewrite" {
+                fs::write(
+                    &snapshot,
+                    serde_json::to_vec(&json!({hash(query): mutation})).unwrap(),
+                )
+                .unwrap();
+            } else {
+                fs::remove_file(&snapshot).unwrap();
+            }
+            products_sdl.set(PRODUCTS_V2, "persisted-v2", 200);
+            products_protocol.set(
+                protocol_descriptor(
+                    "products",
+                    products.endpoint(),
+                    products_sdl.endpoint(),
+                    authenticated_product_operations(true),
+                ),
+                "persisted-policy-v2",
+                200,
+            );
+            fs::write(&control, "refresh").unwrap();
+            let result_path = format!("{}.result", control.display());
+            wait_until("explicit persisted refresh result", || {
+                std::path::Path::new(&result_path).exists()
+            });
+            let result: Value = serde_json::from_slice(&fs::read(result_path).unwrap()).unwrap();
+            assert_eq!(result["outcome"], "Rejected", "{result}");
+            assert!(
+                result["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("persisted documents snapshot"),
+                "{result}"
+            );
+            let result = graphql(json!({"documentId": hash(query)}));
+            assert_eq!(result["data"]["__typename"], "Query", "{result}");
+            let mut socket = TestWebSocket::connect_at(router.address, "/api/graphql");
+            socket.connection_init_bearer("product-events");
+            socket.send_json(&json!({"id": "original", "type": "subscribe", "payload": {"documentId": hash(query)}}));
+            let result = socket.next_message();
+            assert_eq!(result["payload"]["data"]["__typename"], "Query", "{result}");
+            socket.close();
+        }
+        "introspection_disabled" | "non_strict_introspection_disabled" => {
+            let result = graphql(json!({"documentId": hash(introspection)}));
+            assert_eq!(
+                result["errors"][0]["extensions"]["code"], "INTROSPECTION_DISABLED",
+                "{result}"
+            );
+            if case.starts_with("non_strict") {
+                let plain = graphql(json!({"query": introspection}));
+                assert_eq!(
+                    plain["errors"][0]["extensions"]["code"],
+                    result["errors"][0]["extensions"]["code"]
+                );
+            }
+        }
+        "authorization" | "non_strict_authorization" => {
+            for (text, expected, credentials) in [
+                (protected, "UNAUTHENTICATED", &[][..]),
+                (protected, "FORBIDDEN", &headers[..]),
+                (introspection, "UNAUTHENTICATED", &[][..]),
+            ] {
+                let opens = products.opens();
+                let result = router
+                    .graphql_response_at(
+                        "/api/graphql",
+                        json!({"documentId": hash(text)}),
+                        credentials,
+                    )
+                    .1;
+                assert_eq!(
+                    result["errors"][0]["extensions"]["code"], expected,
+                    "{result}"
+                );
+                assert_eq!(
+                    products.opens(),
+                    opens,
+                    "id denial must precede upstream execution"
+                );
+                if case == "authorization" {
+                    let both = router
+                        .graphql_response_at(
+                            "/api/graphql",
+                            json!({"documentId": hash(text), "query": query}),
+                            credentials,
+                        )
+                        .1;
+                    assert_eq!(both["errors"][0]["extensions"]["code"], expected, "{both}");
+                    assert_eq!(
+                        products.opens(),
+                        opens,
+                        "strict id-plus-text denial must precede upstream execution"
+                    );
+                }
+                if case == "non_strict_authorization" {
+                    let plain = router
+                        .graphql_response_at("/api/graphql", json!({"query": text}), credentials)
+                        .1;
+                    assert_eq!(
+                        plain["errors"][0]["extensions"]["code"],
+                        result["errors"][0]["extensions"]["code"]
+                    );
+                    assert_eq!(
+                        products.opens(),
+                        opens,
+                        "free-text denial must precede upstream execution"
+                    );
+                    let both = router
+                        .graphql_response_at(
+                            "/api/graphql",
+                            json!({"documentId": hash(text), "query": query}),
+                            credentials,
+                        )
+                        .1;
+                    assert_eq!(both["data"]["__typename"], "Query", "{both}");
+                }
+            }
+        }
+        "non_strict_ws" => {
+            for payload in [
+                json!({"documentId": hash(query)}),
+                json!({"query": query}),
+                json!({"documentId": hash(mutation), "query": query}),
+            ] {
+                let mut socket = TestWebSocket::connect_at(router.address, "/api/graphql");
+                socket.connection_init_bearer("product-events");
+                socket
+                    .send_json(&json!({"id": "ordinary", "type": "subscribe", "payload": payload}));
+                let result = socket.next_message();
+                assert_eq!(result["payload"]["data"]["__typename"], "Query", "{result}");
+                socket.close();
+            }
+        }
+        "apollo_unknown" => {
+            let result = graphql(
+                json!({"query": query, "extensions": {"persistedQuery": {"version": 1, "sha256Hash": hash("unknown")}}}),
+            );
+            assert_eq!(
+                result["errors"][0]["extensions"]["code"], "PERSISTED_DOCUMENT_NOT_FOUND",
+                "{result}"
+            );
+        }
+        "get_extensions" => {
+            let mut url = Url::parse("http://router/api/graphql").unwrap();
+            url.query_pairs_mut().append_pair(
+                "extensions",
+                &json!({"persistedQuery": {"version": 1, "sha256Hash": hash(query)}}).to_string(),
+            );
+            let result = raw_http_within(
+                router.address,
+                "GET",
+                &format!("{}?{}", url.path(), url.query().unwrap()),
+                &headers,
+                None,
+                HTTP_STREAM_PROBE,
+            )
+            .unwrap();
+            let result: Value = serde_json::from_slice(&result.body).unwrap();
+            assert_eq!(result["data"]["__typename"], "Query", "{result}");
+        }
+        "non_strict" | "disabled" => {
+            let plain = graphql(json!({"query": query}));
+            assert_eq!(plain["data"]["__typename"], "Query", "{plain}");
+            let result = graphql(json!({"documentId": hash(query)}));
+            if case == "disabled" {
+                assert!(result.get("errors").is_some(), "{result}");
+            } else {
+                assert_eq!(result["data"]["__typename"], "Query", "{result}");
+            }
+        }
+        "post" => {
+            let plain = graphql(json!({"query": query}));
+            assert_eq!(
+                plain["errors"][0]["extensions"]["code"], "PERSISTED_DOCUMENT_ID_REQUIRED",
+                "{plain}"
+            );
+            for payload in [
+                json!({"documentId": hash(query)}),
+                json!({"extensions": {"persistedQuery": {"version": 1, "sha256Hash": hash(query)}}}),
+            ] {
+                let result = graphql(payload);
+                assert_eq!(result["data"]["__typename"], "Query", "{result}");
+            }
+            let body = serde_json::to_vec(&json!({"documentId": hash(subscription)})).unwrap();
+            for path in ["/api/graphql", "/api/graphql/x", "/api/graphql/sha256:abc"] {
+                let result = raw_http_within(
+                    router.address,
+                    "POST",
+                    path,
+                    &headers,
+                    Some(&body),
+                    HTTP_STREAM_PROBE,
+                )
+                .unwrap();
+                assert_http_subscription_refused(path, &result);
+            }
+            // Rewriting the operator file cannot change the prepared allow-list.
+            fs::write(&manifest, b"{}").unwrap();
+            let result = graphql(json!({"documentId": hash(query)}));
+            assert_eq!(result["data"]["__typename"], "Query", "{result}");
+        }
+        "redaction" => {
+            let result = graphql(json!({"documentId": query, "query": query}));
+            assert_eq!(
+                result["errors"][0]["extensions"]["code"], "PERSISTED_DOCUMENT_NOT_FOUND",
+                "{result}"
+            );
+            assert!(
+                !result.to_string().contains(query),
+                "persisted errors must not echo document text: {result}"
+            );
+        }
+        "unknown" => {
+            let result = graphql(json!({"documentId": hash("unknown"), "query": query}));
+            assert_eq!(
+                result["errors"][0]["extensions"]["code"], "PERSISTED_DOCUMENT_NOT_FOUND",
+                "{result}"
+            );
+        }
+        "both" => {
+            let result = graphql(json!({"documentId": hash(query), "query": mutation}));
+            assert_eq!(result["data"]["__typename"], "Query", "{result}");
+        }
+        "batch" => {
+            let result = graphql(json!([{"documentId": hash(query)}, {"query": query}]));
+            assert_eq!(
+                result["errors"][0]["extensions"]["code"], "PERSISTED_DOCUMENT_EXTRACTION_FAILED",
+                "{result}"
+            );
+        }
+        "get" => {
+            let result = raw_http_within(
+                router.address,
+                "GET",
+                "/api/graphql?query=query%20%7B%20__typename%20%7D",
+                &headers,
+                None,
+                HTTP_STREAM_PROBE,
+            )
+            .unwrap();
+            assert!(
+                String::from_utf8_lossy(&result.body).contains("PERSISTED_DOCUMENT_ID_REQUIRED")
+            );
+            let path = format!("/api/graphql?documentId={}", hash(query));
+            let result = raw_http_within(
+                router.address,
+                "GET",
+                &path,
+                &headers,
+                None,
+                HTTP_STREAM_PROBE,
+            )
+            .unwrap();
+            let result: Value = serde_json::from_slice(&result.body).unwrap();
+            assert_eq!(result["data"]["__typename"], "Query", "{result}");
+        }
+        "ws_query" | "ws_mutation" | "ws_subscription" => {
+            let text = match case {
+                "ws_query" => query,
+                "ws_mutation" => mutation,
+                _ => subscription,
+            };
+            let mut socket = TestWebSocket::connect_at(router.address, "/api/graphql");
+            socket.connection_init_bearer("product-events");
+            socket.subscribe("denied", text);
+            let error = socket.next_message();
+            assert_eq!(error["type"], "error", "{error}");
+            assert_eq!(
+                error["payload"][0]["extensions"]["code"], "PERSISTED_DOCUMENT_ID_REQUIRED",
+                "{error}"
+            );
+            socket.send_json(&json!({"id": "unknown", "type": "subscribe", "payload": {"documentId": hash("unknown"), "query": text}}));
+            let error = socket.next_message();
+            assert_eq!(
+                error["payload"][0]["extensions"]["code"], "PERSISTED_DOCUMENT_NOT_FOUND",
+                "{error}"
+            );
+            socket.close();
+            for payload in [
+                json!({"documentId": hash(text), "query": "query { unregistered }"}),
+                json!({"extensions": {"persistedQuery": {"version": 1, "sha256Hash": hash(text)}}}),
+            ] {
+                let mut socket = TestWebSocket::connect_at(router.address, "/api/graphql");
+                socket.connection_init_bearer("product-events");
+                socket
+                    .send_json(&json!({"id": "allowed", "type": "subscribe", "payload": payload}));
+                let result = socket.next_message();
+                assert_eq!(result["type"], "next", "{result}");
+                assert!(result["payload"].get("data").is_some(), "{result}");
+                socket.close();
+            }
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn persisted_review_introspection_disabled() {
+    persisted_documents_wire_case("introspection_disabled");
+}
+#[test]
+fn persisted_review_non_strict_introspection_disabled() {
+    persisted_documents_wire_case("non_strict_introspection_disabled");
+}
+
+#[test]
+fn persisted_review_snapshot_retry() {
+    persisted_documents_wire_case("snapshot_retry");
+}
+
+#[test]
+fn persisted_review_snapshot_cold_read() {
+    persisted_documents_wire_case("snapshot_cold_read");
+}
+
+#[test]
+fn persisted_review_document_sizes() {
+    persisted_documents_wire_case("document_sizes");
+}
+
+#[test]
+fn persisted_review_ws_budget() {
+    persisted_documents_wire_case("ws_budget");
+}
+
+#[test]
+fn persisted_review_snapshot_rewrite() {
+    persisted_documents_wire_case("snapshot_rewrite");
+}
+
+#[test]
+fn persisted_review_snapshot_delete() {
+    persisted_documents_wire_case("snapshot_delete");
+}
+
+#[test]
+fn persisted_review_authorization() {
+    persisted_documents_wire_case("authorization");
+}
+
+#[test]
+fn persisted_review_non_strict_authorization() {
+    persisted_documents_wire_case("non_strict_authorization");
+}
+
+#[test]
+fn persisted_review_non_strict_ws() {
+    persisted_documents_wire_case("non_strict_ws");
+}
+
+#[test]
+fn persisted_review_apollo_unknown() {
+    persisted_documents_wire_case("apollo_unknown");
+}
+
+#[test]
+fn persisted_review_get_extensions() {
+    persisted_documents_wire_case("get_extensions");
+}
+
+#[test]
+fn persisted_wire_redaction() {
+    persisted_documents_wire_case("redaction");
+}
+
+#[test]
+fn persisted_wire_non_strict() {
+    persisted_documents_wire_case("non_strict");
+}
+
+#[test]
+fn persisted_wire_disabled() {
+    persisted_documents_wire_case("disabled");
+}
+
+#[test]
+fn persisted_wire_post() {
+    persisted_documents_wire_case("post");
+}
+
+#[test]
+fn persisted_wire_unknown() {
+    persisted_documents_wire_case("unknown");
+}
+
+#[test]
+fn persisted_wire_both() {
+    persisted_documents_wire_case("both");
+}
+
+#[test]
+fn persisted_wire_batch() {
+    persisted_documents_wire_case("batch");
+}
+
+#[test]
+fn persisted_wire_get() {
+    persisted_documents_wire_case("get");
+}
+
+#[test]
+fn persisted_wire_ws_query() {
+    persisted_documents_wire_case("ws_query");
+}
+
+#[test]
+fn persisted_wire_ws_mutation() {
+    persisted_documents_wire_case("ws_mutation");
+}
+
+#[test]
+fn persisted_wire_ws_subscription() {
+    persisted_documents_wire_case("ws_subscription");
 }
 
 #[test]

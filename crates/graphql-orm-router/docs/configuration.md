@@ -553,3 +553,97 @@ Prometheus is opt-in with a distinct `port` and absolute non-root `path`. That
 scrape listener has no application authentication; bind and protect it with
 deployment network policy. The authenticated administrative metrics route is
 `GET /_router/metrics`.
+
+## Persisted documents
+
+The default is off. Enable a local JSON manifest using
+`"persistedDocuments": {"path": "/etc/graphql-orm/operations.json", "strict": true}`
+with an explicit `strict: true` or `strict: false` (the key is required). Use
+`RouterConfig::with_persisted_allow_list(path)` for strict mode, or
+`RouterConfig::with_persisted_ids_or_text(path)` to permit ordinary text. Only local files are
+accepted; Hive CDN and remote storage are refused. The manifest is a JSON object
+mapping each id to its GraphQL document string, limited to 16 MiB and 10,000
+entries. Each document is limited to 256 KiB of UTF-8 text. Every key must be the
+bare 64-character lowercase hexadecimal SHA-256
+of the exact UTF-8 document bytes. Whitespace and line endings are not normalized.
+Invalid manifests fail startup without echoing document text.
+
+Send an id as `{"documentId":"<hash>"}` or
+`{"extensions":{"persistedQuery":{"version":1,"sha256Hash":"<hash>"}}}`.
+Both forms work in POST bodies and WebSocket subscribe payloads. GET accepts
+`documentId` and Apollo's JSON `extensions` parameters. Additional URL path
+and query-parameter selectors are disabled to keep one wire convention and avoid
+alternate selectors on guarded GraphQL sub-paths. Existing HTTP subscription guards still apply.
+
+Non-strict mode accepts registered ids and ordinary document text. When both an
+id and document text are supplied in non-strict mode, the text runs. Strict mode
+requires an id on every operation. The pinned Hive runtime does not support
+batches; strict mode refuses them with an extraction error. Registered text
+without an id is also refused. With both id and text, the registered document wins in strict
+mode. Missing ids, unknown ids, and failed extraction use Hive's stable
+`PERSISTED_DOCUMENT_ID_REQUIRED`, `PERSISTED_DOCUMENT_NOT_FOUND`, and
+`PERSISTED_DOCUMENT_EXTRACTION_FAILED` codes. Clients cannot register operations.
+The operator manifest is read and validated when the configuration is first
+validated. Changes to that file take effect only when a new configuration is
+loaded on restart. Startup creates a snapshot in a fresh private directory
+(mode 0700 on Unix) under the writable process temporary directory. The router
+retains that directory for its lifetime and uses `watch: false`. On Unix, the
+process temporary directory must be on a filesystem that honors Unix permissions.
+Startup reads back directory and open-file metadata, requiring ownership by the
+router's effective user and no group or other permission bits. A filesystem that
+does not preserve those protections refuses startup. Normal shutdown removes the
+snapshot. A crash or forced kill can leave a mode-0600 copy of the manifest in
+its private temporary directory; remove abandoned snapshot directories as part of
+process cleanup.
+
+Before and after constructing each candidate graph generation (startup,
+schema refresh, registration, or removal), the router checks that the snapshot
+still matches the bytes validated at startup. Hive reads the snapshot when it lazily initializes a selected generation's
+runtime. That read is checked too; a verified runtime is pinned to its live
+generation so runtime-cache eviction cannot reopen the file. A cold runtime
+with a missing or changed snapshot fails closed with `SERVICE_UNAVAILABLE`. A missing or changed snapshot refuses the candidate;
+the last-known-good generation and its original documents remain active for both
+HTTP and WebSocket. Candidate snapshot-check failures appear separately as
+`lastPersistedDocumentsError` in administrative status (or
+`RouterStatus::last_persisted_documents_error()`), rather than composition errors.
+They do not memoize the fetched schema as rejected: after the snapshot is restored,
+the next refresh retries that same schema candidate. Schema refresh never adopts
+changes to either manifest.
+
+If the snapshot check after a lazy runtime build fails, that live generation is
+poisoned and returns `SERVICE_UNAVAILABLE` until a new generation is admitted or
+the router restarts. Restoring the file alone does not clear a poisoned runtime.
+For a deployment with only static subgraphs, restart the router to recover. A
+failure before runtime construction is retried on a later request once the
+snapshot is valid.
+
+Each registered document is limited to 256 KiB of exact UTF-8 text, independently
+of transport. The manifest limits remain 16 MiB and 10,000 entries. HTTP requests
+remain subject to their configured request-body and execution limits; the default
+HTTP body limit is 1 MiB.
+
+The pinned internal WebSocket codec accepts message payloads up to 65,536 bytes
+(the WebSocket frame header and mask are outside this codec limit). Before
+forwarding an operation, the gateway measures its actual serialized JSON,
+including the escaped document, client variables, the complete bounded
+authorization-variable projection, id metadata, and GraphQL WebSocket envelope.
+It forwards only if that complete message fits. An oversized operation returns
+`REQUEST_TOO_LARGE` without document text, without closing the connection, and
+without removing authorization projection or forwarding a partial message.
+This restriction applies only to WebSocket; the same document can still run over
+HTTP. With little escaping and small variables and projection, the threshold is just
+under 64 KiB of document text. The envelope, metadata, client variables, up to
+4 KiB of authorization projection, and additional JSON escaping reduce the
+available document space. Configured public client-message limits still apply to the
+original incoming message.
+
+Documents are hash-checked at load, but are not parsed or validated against the
+supergraph then. An invalid registered document fails normal validation at first
+use.
+
+Strict mode limits which documents execute. It does not replace authentication,
+preflight checks, catalogue policy, resolver authorization, or variable-level
+validation. Possession of an id grants no authority. Strict mode does not cover
+subgraphs reached directly, or byte routes whose upstream is a GraphQL endpoint. The administrative service
+has no GraphQL execution endpoint, and the internal WebSocket endpoint requires
+its router-owned secret.
