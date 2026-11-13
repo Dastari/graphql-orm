@@ -32,12 +32,378 @@ fn authenticator() -> ManifestAuthenticator {
     ManifestAuthenticator::new(key(7))
 }
 
+#[tokio::test]
+async fn sealed_legacy_restore_accepts_copied_content_when_the_key_is_shared() {
+    let source_dir = TempDir::new().unwrap();
+    let target_dir = TempDir::new().unwrap();
+    let source = repository(&source_dir);
+    let target = repository(&target_dir);
+    let mut old = backup_with_object(&source, "media/source.txt").await;
+    seal_format_two(&mut old);
+    write_raw_manifest(&source, &mut old).await;
+    backup_with_object(&target, "media/target.txt").await;
+    for prefix in ["snapshots", "objects"] {
+        for key in source.list_blobs(prefix).await.unwrap() {
+            target
+                .put_blob(&key, source.get_blob(&key).await.unwrap())
+                .await
+                .unwrap();
+        }
+    }
+    // This is an unavoidable legacy limitation, not repository-bound trust.
+    // See docs/architecture.md#trust-model and MIGRATION.md step 4: use
+    // TrustPinned when the sealing key has been shared across repositories.
+    let accepting = legacy_repository(&target_dir, LegacyManifestPolicy::AcceptSealedLegacy);
+    load_manifest(&accepting, old.snapshot_id).await.unwrap();
+    verify_manifest_and_objects(&accepting, &old).await.unwrap();
+    let database = MockDatabase::default();
+    restore_snapshot(
+        &accepting,
+        &database,
+        old.snapshot_id,
+        RestoreContext::empty_database(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(database.restored()[0].rows[0].values["name"], "Ada");
+}
+
+#[tokio::test]
+async fn sealed_legacy_compaction_requires_every_legacy_input_to_be_pinned() {
+    let dir = TempDir::new().unwrap();
+    let repo = repository(&dir);
+    let mut old = backup_with_object(&repo, "media/legacy.txt").await;
+    seal_format_two(&mut old);
+    write_raw_manifest(&repo, &mut old).await;
+    let accepting = legacy_repository(&dir, LegacyManifestPolicy::AcceptSealedLegacy);
+    let mut child = create_incremental_backup(
+        &accepting,
+        &MockDatabase::default(),
+        &MockObjectIndex {
+            object: entry_ref(&old.objects[0]),
+            bytes: Bytes::from_static(b"object bytes"),
+        },
+        IncrementalBackupRequest {
+            snapshot_id: Uuid::new_v4(),
+            parent_snapshot_id: old.snapshot_id,
+            created_at: old.created_at + 1,
+            app_id: old.app_id.clone(),
+            app_version: old.app_version.clone(),
+        },
+    )
+    .await
+    .unwrap()
+    .manifest;
+    seal_format_two(&mut child);
+    write_raw_manifest(&repo, &mut child).await;
+    for policy in [
+        LegacyManifestPolicy::AcceptSealedLegacy,
+        LegacyManifestPolicy::TrustUnauthenticated,
+        LegacyManifestPolicy::TrustPinned(BTreeMap::from([(
+            child.snapshot_id,
+            child.checksum.clone(),
+        )])),
+    ] {
+        let accepting = legacy_repository(&dir, policy);
+        let before = accepting.list_blobs("").await.unwrap();
+        let error = compact_chain(&accepting, compact_request(child.snapshot_id))
+            .await
+            .expect_err("unbound legacy data must not be resealed without a host checksum pin");
+        assert!(
+            matches!(error, BackupError::LegacyManifestRefused { snapshot_id } if snapshot_id == old.snapshot_id)
+        );
+        assert_eq!(
+            accepting.list_blobs("").await.unwrap(),
+            before,
+            "no compaction writes and lock released"
+        );
+    }
+    let pinned = legacy_repository(
+        &dir,
+        LegacyManifestPolicy::TrustPinned(BTreeMap::from([
+            (old.snapshot_id, old.checksum.clone()),
+            (child.snapshot_id, child.checksum.clone()),
+        ])),
+    );
+    let compacted = compact_chain(&pinned, compact_request(child.snapshot_id))
+        .await
+        .unwrap();
+    assert_eq!(compacted.manifest.format_version, 3);
+    load_manifest(&repo, compacted.manifest.snapshot_id)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn incremental_and_compaction_identity_mismatch_write_nothing_and_release_the_lock() {
+    let dir = TempDir::new().unwrap();
+    let repo = repository(&dir);
+    let parent = backup_with_object(&repo, "media/parent.txt").await;
+    let foreign_pin = WriteCountingRepository::new(
+        LocalBackupRepository::new(dir.path())
+            .with_manifest_authenticator(authenticator().with_repository_identity(Uuid::new_v4())),
+    );
+    let before = repo.list_blobs("").await.unwrap();
+    let error = create_incremental_backup(
+        &foreign_pin,
+        &MockDatabase::default(),
+        &MockObjectIndex {
+            object: entry_ref(&parent.objects[0]),
+            bytes: Bytes::from_static(b"object bytes"),
+        },
+        IncrementalBackupRequest {
+            snapshot_id: Uuid::new_v4(),
+            parent_snapshot_id: parent.snapshot_id,
+            created_at: parent.created_at + 1,
+            app_id: parent.app_id.clone(),
+            app_version: parent.app_version.clone(),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        BackupError::ManifestAuthenticationFailed { .. }
+    ));
+    assert!(
+        !repo
+            .blob_exists(graphql_orm_backup::REPOSITORY_LOCK_KEY)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        repo.list_blobs("").await.unwrap(),
+        before,
+        "incremental wrote nothing"
+    );
+    assert_eq!(
+        foreign_pin
+            .payload_writes
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no payload writes, including cleaned-up ones"
+    );
+    let error = compact_chain(&foreign_pin, compact_request(parent.snapshot_id))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        BackupError::ManifestAuthenticationFailed { .. }
+    ));
+    assert!(
+        !repo
+            .blob_exists(graphql_orm_backup::REPOSITORY_LOCK_KEY)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        repo.list_blobs("").await.unwrap(),
+        before,
+        "compaction wrote nothing"
+    );
+    assert_eq!(
+        foreign_pin
+            .payload_writes
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no payload writes, including cleaned-up ones"
+    );
+}
+
+#[tokio::test]
+async fn sealed_legacy_policy_refuses_unsealed_bad_and_downgraded_manifests() {
+    let dir = TempDir::new().unwrap();
+    let repo = repository(&dir);
+    let modern = backup_with_object(&repo, "media/legacy.txt").await;
+    let accepting = legacy_repository(&dir, LegacyManifestPolicy::AcceptSealedLegacy);
+    let mut unsealed = legacy(&modern);
+    write_raw_manifest(&repo, &mut unsealed).await;
+    assert!(matches!(
+        load_manifest(&accepting, modern.snapshot_id).await,
+        Err(BackupError::LegacyManifestRefused { .. })
+    ));
+    let mut sealed = modern.clone();
+    seal_format_two(&mut sealed);
+    write_raw_manifest(&repo, &mut sealed).await;
+    load_manifest(&accepting, modern.snapshot_id).await.unwrap();
+    sealed.authentication.as_mut().unwrap().mac = "00".repeat(32);
+    write_raw_manifest(&repo, &mut sealed).await;
+    assert!(load_manifest(&accepting, modern.snapshot_id).await.is_err());
+    for (format, remove_identity) in [(2, false), (2, true), (3, true)] {
+        let mut downgraded = modern.clone();
+        downgraded.format_version = format;
+        if remove_identity {
+            downgraded.authentication.as_mut().unwrap().repository_id = None;
+        }
+        write_raw_manifest(&repo, &mut downgraded).await;
+        assert!(
+            load_manifest(&accepting, modern.snapshot_id).await.is_err(),
+            "relabelling a bound seal cannot turn it into an old seal"
+        );
+    }
+}
+
+#[tokio::test]
+async fn sealed_legacy_policy_supports_restore_incremental_compaction_and_retention() {
+    let dir = TempDir::new().unwrap();
+    let repo = repository(&dir);
+    let mut old = backup_with_object(&repo, "media/legacy.txt").await;
+    seal_format_two(&mut old);
+    write_raw_manifest(&repo, &mut old).await;
+    repo.delete_blob(graphql_orm_backup::REPOSITORY_ID_KEY)
+        .await
+        .unwrap();
+    let objects = MockObjectIndex {
+        object: entry_ref(&old.objects[0]),
+        bytes: Bytes::from_static(b"object bytes"),
+    };
+    let incremental = |parent_snapshot_id| IncrementalBackupRequest {
+        snapshot_id: Uuid::new_v4(),
+        parent_snapshot_id,
+        created_at: old.created_at + 1,
+        app_id: old.app_id.clone(),
+        app_version: old.app_version.clone(),
+    };
+    assert!(prune(&repo, &KeepPolicy::default()).await.is_err());
+    assert!(
+        delete_snapshot(&repo, old.snapshot_id, &RepositoryLockOptions::default())
+            .await
+            .is_err()
+    );
+    assert!(
+        create_incremental_backup(
+            &repo,
+            &MockDatabase::default(),
+            &objects,
+            incremental(old.snapshot_id)
+        )
+        .await
+        .is_err()
+    );
+    let accepting = legacy_repository(&dir, LegacyManifestPolicy::AcceptSealedLegacy);
+    verify_manifest_and_objects(&accepting, &old).await.unwrap();
+    restore_snapshot(
+        &accepting,
+        &MockDatabase::default(),
+        old.snapshot_id,
+        RestoreContext::dry_run(),
+    )
+    .await
+    .unwrap();
+    let child = create_incremental_backup(
+        &accepting,
+        &MockDatabase::default(),
+        &objects,
+        incremental(old.snapshot_id),
+    )
+    .await
+    .unwrap();
+    restore_snapshot(
+        &accepting,
+        &MockDatabase::default(),
+        child.manifest.snapshot_id,
+        RestoreContext::dry_run(),
+    )
+    .await
+    .unwrap();
+    let pinned = legacy_repository(
+        &dir,
+        LegacyManifestPolicy::TrustPinned(BTreeMap::from([(
+            old.snapshot_id,
+            old.checksum.clone(),
+        )])),
+    );
+    let compacted = compact_chain(&pinned, compact_request(child.manifest.snapshot_id))
+        .await
+        .unwrap();
+    assert_eq!(compacted.manifest.format_version, 3);
+    prune(
+        &accepting,
+        &KeepPolicy {
+            keep_last: 10,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    delete_snapshot(
+        &accepting,
+        child.manifest.snapshot_id,
+        &RepositoryLockOptions::default(),
+    )
+    .await
+    .unwrap();
+    delete_snapshot(
+        &accepting,
+        old.snapshot_id,
+        &RepositoryLockOptions::default(),
+    )
+    .await
+    .unwrap();
+    let strict = repository(&dir);
+    load_manifest(&strict, compacted.manifest.snapshot_id)
+        .await
+        .unwrap();
+    prune(&strict, &KeepPolicy::default()).await.unwrap();
+}
+
+#[tokio::test]
+async fn incremental_chain_refuses_a_parent_copied_from_another_repository() {
+    let source_dir = TempDir::new().unwrap();
+    let source = repository(&source_dir);
+    let parent = backup_with_object(&source, "media/parent.txt").await;
+    let target_dir = TempDir::new().unwrap();
+    let target = repository(&target_dir);
+    graphql_orm_backup::initialize_repository_identity(&target)
+        .await
+        .unwrap();
+    target
+        .put_blob(
+            &snapshot_manifest_key(parent.snapshot_id),
+            source
+                .get_blob(&snapshot_manifest_key(parent.snapshot_id))
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let before = without_locks(target.list_blobs("").await.unwrap());
+    let error = create_incremental_backup(
+        &target,
+        &MockDatabase::default(),
+        &MockObjectIndex {
+            object: entry_ref(&parent.objects[0]),
+            bytes: Bytes::from_static(b"object bytes"),
+        },
+        IncrementalBackupRequest {
+            snapshot_id: Uuid::new_v4(),
+            parent_snapshot_id: parent.snapshot_id,
+            created_at: parent.created_at + 1,
+            app_id: parent.app_id,
+            app_version: parent.app_version,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        BackupError::ManifestAuthenticationFailed { .. }
+    ));
+    assert_eq!(without_locks(target.list_blobs("").await.unwrap()), before);
+}
+
 fn repository(temp: &TempDir) -> LocalBackupRepository {
     repository_with(temp, authenticator())
 }
 
 fn repository_with(temp: &TempDir, authenticator: ManifestAuthenticator) -> LocalBackupRepository {
-    LocalBackupRepository::new(temp.path()).with_manifest_authenticator(authenticator)
+    // The host fixture retains its pin independently of repository contents.
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    temp.path().hash(&mut hasher);
+    let identity = Uuid::from_u128(u128::from(hasher.finish()));
+    LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(authenticator.with_repository_identity(identity))
 }
 
 fn legacy_repository(temp: &TempDir, policy: LegacyManifestPolicy) -> LocalBackupRepository {
@@ -154,10 +520,7 @@ async fn repository_without_authenticator_fails_closed_before_writing() {
     let manifest = backup_with_object(&sealed, "media/a.txt").await;
     let before = sealed.list_blobs("").await.expect("list");
 
-    let unkeyed = WriteCountingRepository {
-        inner: LocalBackupRepository::new(temp.path()),
-        writes: Arc::default(),
-    };
+    let unkeyed = WriteCountingRepository::new(LocalBackupRepository::new(temp.path()));
     let error = load_manifest(&unkeyed, manifest.snapshot_id)
         .await
         .expect_err("no authenticator");
@@ -210,28 +573,48 @@ async fn repository_without_authenticator_fails_closed_before_writing() {
     );
 }
 
-/// Repository handle without an authenticator that counts every mutation.
+/// Counts mutation attempts and actual non-lock writes, including failed-run cleanup.
 struct WriteCountingRepository {
     inner: LocalBackupRepository,
     writes: Arc<std::sync::atomic::AtomicUsize>,
+    payload_writes: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl WriteCountingRepository {
-    fn wrote(&self) {
-        self.writes
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    fn new(inner: LocalBackupRepository) -> Self {
+        Self {
+            inner,
+            writes: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            payload_writes: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+    fn wrote(&self, key: &str) {
+        if key != graphql_orm_backup::REPOSITORY_LOCK_KEY {
+            self.payload_writes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 }
 
 #[async_trait]
 impl BackupRepository for WriteCountingRepository {
+    fn manifest_authenticator(&self) -> Option<&ManifestAuthenticator> {
+        self.inner.manifest_authenticator()
+    }
     async fn put_blob(&self, key: &str, body: Bytes) -> Result<(), BackupError> {
-        self.wrote();
+        self.writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.wrote(key);
         self.inner.put_blob(key, body).await
     }
     async fn put_blob_if_absent(&self, key: &str, body: Bytes) -> Result<bool, BackupError> {
-        self.wrote();
-        self.inner.put_blob_if_absent(key, body).await
+        self.writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let created = self.inner.put_blob_if_absent(key, body).await?;
+        if created {
+            self.wrote(key);
+        }
+        Ok(created)
     }
     async fn get_blob(&self, key: &str) -> Result<Bytes, BackupError> {
         self.inner.get_blob(key).await
@@ -243,11 +626,15 @@ impl BackupRepository for WriteCountingRepository {
         self.inner.list_blobs(prefix).await
     }
     async fn delete_blob_once(&self, key: &str) -> Result<(), BackupError> {
-        self.wrote();
+        self.writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.wrote(key);
         self.inner.delete_blob_once(key).await
     }
     async fn delete_blob(&self, key: &str) -> Result<(), BackupError> {
-        self.wrote();
+        self.writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.wrote(key);
         self.inner.delete_blob(key).await
     }
 }
@@ -310,7 +697,8 @@ async fn unknown_fields_and_unsupported_formats_are_refused() {
     assert!(matches!(error, BackupError::Serialization(_)));
 
     let mut future = manifest.clone();
-    future.format_version = 3;
+    let future_version = graphql_orm_backup::BACKUP_FORMAT_VERSION + 1;
+    future.format_version = future_version;
     future.authentication = None;
     write_raw_manifest(&repository, &mut future).await;
     let error = load_manifest(&repository, manifest.snapshot_id)
@@ -318,10 +706,7 @@ async fn unknown_fields_and_unsupported_formats_are_refused() {
         .expect_err("unknown format refused");
     assert!(matches!(
         error,
-        BackupError::UnsupportedManifestFormat {
-            format_version: 3,
-            ..
-        }
+        BackupError::UnsupportedManifestFormat { format_version, .. } if format_version == future_version
     ));
 
     // A current-format manifest with its seal stripped is refused even when
@@ -510,14 +895,23 @@ async fn legacy_manifests_are_refused_unless_the_host_opts_in() {
         BackupError::LegacyManifestRefused { snapshot_id: id } if id == snapshot_id
     ));
 
-    // Pinned: accepted only with the recorded checksum.
+    // An independently retained checksum authenticates historical format 1.
     let pinned = BTreeMap::from([(snapshot_id, legacy_manifest.checksum.clone())]);
     restore(legacy_repository(
         &temp,
         LegacyManifestPolicy::TrustPinned(pinned.clone()),
     ))
     .await
-    .expect("pinned legacy manifest restores");
+    .expect("host checksum pin authenticates format 1");
+    for policy in [
+        LegacyManifestPolicy::TrustPinned(BTreeMap::new()),
+        LegacyManifestPolicy::AcceptSealedLegacy,
+    ] {
+        let error = restore(legacy_repository(&temp, policy))
+            .await
+            .expect_err("format 1 needs its own host-held checksum pin");
+        assert!(matches!(error, BackupError::LegacyManifestRefused { .. }));
+    }
     let mut altered = legacy_manifest.clone();
     altered.app_version = "altered".to_string();
     write_raw_manifest(&repository, &mut altered).await;
@@ -1027,6 +1421,22 @@ struct MockObjectIndex {
 
 #[async_trait]
 impl BackupObjectIndex for MockObjectIndex {
+    async fn objects_from_incremental_export(
+        &self,
+        parent_snapshot_id: Uuid,
+        _changes: &[graphql_orm_backup::BackupChangeExport],
+    ) -> Result<Vec<BackupObjectRef>, BackupError> {
+        self.list_objects_for_incremental_backup(parent_snapshot_id)
+            .await
+    }
+
+    async fn objects_from_full_export(
+        &self,
+        _: &[graphql_orm_backup::BackupTableExport],
+    ) -> Result<Vec<BackupObjectRef>, BackupError> {
+        self.list_objects_for_full_backup().await
+    }
+
     async fn list_objects_for_full_backup(&self) -> Result<Vec<BackupObjectRef>, BackupError> {
         Ok(vec![self.object.clone()])
     }
@@ -1120,4 +1530,219 @@ impl graphql_orm_backup::RestoreObjectSink for RecordingSink {
         self.restored.lock().expect("restored").push(object);
         Ok(())
     }
+}
+
+#[tokio::test]
+async fn copied_snapshot_is_refused_by_another_repository_with_the_same_key() {
+    let source_dir = TempDir::new().unwrap();
+    let target_dir = TempDir::new().unwrap();
+    let source = repository(&source_dir);
+    let target = repository(&target_dir);
+    let manifest = backup_with_object(&source, "media/source.txt").await;
+    // Initialize an independent destination with the same host key.
+    backup_with_object(&target, "media/target.txt").await;
+    for key in source.list_blobs("snapshots").await.unwrap() {
+        target
+            .put_blob(&key, source.get_blob(&key).await.unwrap())
+            .await
+            .unwrap();
+    }
+    for key in source.list_blobs("objects").await.unwrap() {
+        target
+            .put_blob(&key, source.get_blob(&key).await.unwrap())
+            .await
+            .unwrap();
+    }
+    assert!(load_manifest(&target, manifest.snapshot_id).await.is_err());
+    assert!(
+        verify_manifest_and_objects(&target, &manifest)
+            .await
+            .is_err()
+    );
+    assert!(
+        restore_snapshot(
+            &target,
+            &MockDatabase::default(),
+            manifest.snapshot_id,
+            RestoreContext::dry_run()
+        )
+        .await
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn pinned_format_two_backup_restores_without_an_identity_record() {
+    let dir = TempDir::new().unwrap();
+    let repo = repository(&dir);
+    let mut manifest = backup_with_object(&repo, "media/legacy.txt").await;
+    seal_format_two(&mut manifest);
+    repo.put_blob(
+        &snapshot_manifest_key(manifest.snapshot_id),
+        Bytes::from(serde_json::to_vec(&manifest).unwrap()),
+    )
+    .await
+    .unwrap();
+    repo.delete_blob("repository-id").await.unwrap();
+    let pinned = LocalBackupRepository::new(dir.path()).with_manifest_authenticator(
+        authenticator().with_legacy_manifest_policy(LegacyManifestPolicy::TrustPinned(
+            BTreeMap::from([(manifest.snapshot_id, manifest.checksum.clone())]),
+        )),
+    );
+    load_manifest(&pinned, manifest.snapshot_id).await.unwrap();
+    verify_manifest_and_objects(&pinned, &manifest)
+        .await
+        .unwrap();
+    restore_snapshot(
+        &pinned,
+        &MockDatabase::default(),
+        manifest.snapshot_id,
+        RestoreContext::dry_run(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !pinned
+            .blob_exists(graphql_orm_backup::REPOSITORY_ID_KEY)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn copying_an_identity_record_cannot_change_the_hosts_repository_binding() {
+    let source_dir = TempDir::new().unwrap();
+    let target_dir = TempDir::new().unwrap();
+    let source = repository(&source_dir);
+    let target = repository(&target_dir);
+    let manifest = backup_with_object(&source, "media/source.txt").await;
+    backup_with_object(&target, "media/target.txt").await;
+    for key in source.list_blobs("").await.unwrap() {
+        target
+            .put_blob(&key, source.get_blob(&key).await.unwrap())
+            .await
+            .unwrap();
+    }
+    assert!(load_manifest(&target, manifest.snapshot_id).await.is_err());
+    assert!(
+        verify_manifest_and_objects(&target, &manifest)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn identity_enrollment_refuses_an_existing_record_without_a_host_pin() {
+    let dir = TempDir::new().unwrap();
+    let repo = LocalBackupRepository::new(dir.path()).with_manifest_authenticator(authenticator());
+    repo.put_blob(
+        graphql_orm_backup::REPOSITORY_ID_KEY,
+        Bytes::from(Uuid::new_v4().to_string()),
+    )
+    .await
+    .unwrap();
+    assert!(
+        graphql_orm_backup::initialize_repository_identity(&repo)
+            .await
+            .is_err()
+    );
+}
+
+struct ReplacingIdentity<'a>(&'a LocalBackupRepository);
+
+#[async_trait]
+impl BackupRepository for ReplacingIdentity<'_> {
+    fn manifest_authenticator(&self) -> Option<&ManifestAuthenticator> {
+        self.0.manifest_authenticator()
+    }
+    async fn put_blob_if_absent(&self, key: &str, body: Bytes) -> Result<bool, BackupError> {
+        let created = self.0.put_blob_if_absent(key, body).await?;
+        if created && key == graphql_orm_backup::REPOSITORY_ID_KEY {
+            self.0
+                .put_blob(key, Bytes::from(Uuid::from_u128(1).to_string()))
+                .await?;
+        }
+        Ok(created)
+    }
+    async fn put_blob(&self, key: &str, body: Bytes) -> Result<(), BackupError> {
+        self.0.put_blob(key, body).await
+    }
+    async fn get_blob(&self, key: &str) -> Result<Bytes, BackupError> {
+        self.0.get_blob(key).await
+    }
+    async fn blob_exists(&self, key: &str) -> Result<bool, BackupError> {
+        self.0.blob_exists(key).await
+    }
+    async fn list_blobs(&self, prefix: &str) -> Result<Vec<String>, BackupError> {
+        self.0.list_blobs(prefix).await
+    }
+    async fn delete_blob(&self, key: &str) -> Result<(), BackupError> {
+        self.0.delete_blob(key).await
+    }
+}
+
+#[tokio::test]
+async fn identity_enrollment_refuses_a_record_replaced_during_creation() {
+    let dir = TempDir::new().unwrap();
+    let repo = LocalBackupRepository::new(dir.path()).with_manifest_authenticator(authenticator());
+    assert!(
+        graphql_orm_backup::initialize_repository_identity(&ReplacingIdentity(&repo))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn identity_enrollment_creates_once_then_reopens_with_the_host_pin() {
+    let dir = TempDir::new().unwrap();
+    let bootstrap =
+        LocalBackupRepository::new(dir.path()).with_manifest_authenticator(authenticator());
+    let identity = graphql_orm_backup::initialize_repository_identity(&bootstrap)
+        .await
+        .unwrap();
+    let pinned = LocalBackupRepository::new(dir.path())
+        .with_manifest_authenticator(authenticator().with_repository_identity(identity));
+    assert_eq!(
+        graphql_orm_backup::initialize_repository_identity(&pinned)
+            .await
+            .unwrap(),
+        identity
+    );
+    let manifest = backup_with_object(&pinned, "media/enrolled.txt").await;
+    assert_eq!(
+        manifest.authentication.as_ref().unwrap().repository_id,
+        Some(identity)
+    );
+    load_manifest(&pinned, manifest.snapshot_id).await.unwrap();
+}
+
+fn seal_format_two(manifest: &mut BackupSnapshotManifest) {
+    use hmac::{Hmac, Mac};
+    manifest.format_version = 2;
+    manifest.authentication = None;
+    manifest.checksum.clear();
+    let canonical = serde_json::to_vec(&*manifest).unwrap();
+    let mut mac_key = [0u8; 32];
+    hkdf::Hkdf::<sha2::Sha256>::new(
+        Some(b"graphql-orm-backup manifest authentication"),
+        &[7; 32],
+    )
+    .expand(b"manifest hmac-sha256 key v1", &mut mac_key)
+    .unwrap();
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(&mac_key).unwrap();
+    mac.update(b"graphql-orm-backup/manifest/hmac-sha256/v2\n");
+    mac.update(&canonical);
+    let tag: String = mac
+        .finalize()
+        .into_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    manifest.checksum = bytes_sha256_hex(&canonical);
+    manifest.authentication = Some(
+        serde_json::from_value(serde_json::json!({
+            "algorithm": "HmacSha256", "key_id": authenticator().key_id(), "mac": tag,
+        }))
+        .unwrap(),
+    );
 }

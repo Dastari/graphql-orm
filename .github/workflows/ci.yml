@@ -426,6 +426,8 @@ jobs:
       - run: cargo check -p graphql-orm-ai --no-default-features --features mssql
       - run: cargo check -p graphql-orm-ai -p graphql-orm --no-default-features --features graphql-orm-ai/sqlite,graphql-orm/mssql
       - run: cargo check -p graphql-orm-backup --no-default-features --features local,orm-postgres
+      - name: Backup round trip on a test-owned PostgreSQL container
+        run: cargo test -p graphql-orm-backup --locked --no-default-features --features local,orm-postgres --test orm_016_postgres_conformance -- --ignored --test-threads=1
       - run: cargo check -p graphql-orm-storage --no-default-features --features s3,azure --all-targets
       - run: cargo check -p graphql-orm-storage --no-default-features --features smb --all-targets
       - name: Run owner-local SMB vendor unit tests (GHSA-439h-2cx8-xwgx regression)

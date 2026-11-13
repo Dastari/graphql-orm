@@ -12,7 +12,10 @@ supersedes: []
 
 Native SMB uses `graphql-orm-storage::SmbStorageBackend` through
 `BlobStoreBackupRepository`. Backup orchestration contains no SMB transport
-code, and the snapshot layout is unchanged.
+code. Snapshot and repository-identity layouts are provider-independent.
+Format 3 requires a host-held repository UUID pin on the authenticator; retain
+it outside the share and preserve it when moving the whole repository. See
+[identity enrollment and legacy restore](../MIGRATION.md).
 
 ```rust,no_run
 use std::sync::Arc;

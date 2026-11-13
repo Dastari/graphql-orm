@@ -2642,3 +2642,68 @@ async fn privilege_revocation_uses_catalog_operators_under_any_search_path()
     assert!(!writes(owner.clone()).await?);
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires test-owned PostgreSQL container"]
+async fn backup_export_refuses_policy_filtered_rows() -> Result<(), Box<dyn std::error::Error>> {
+    use graphql_orm::graphql::orm::GraphqlOrmBackupRuntime;
+    let Provisioned { owner } = provision().await?;
+    sqlx::query("INSERT INTO rls_cov_docs (id, tenant_id, title) VALUES (pg_catalog.gen_random_uuid(), 'tenant-a', 'hidden row')").execute(&owner).await?;
+    let (_, runtime) = role_pool(&owner, "backup", "NOSUPERUSER NOBYPASSRLS").await?;
+    let database = graphql_orm::db::Database::new(runtime);
+    let mut snapshot = database.begin_consistent_snapshot().await?;
+    let descriptor = database
+        .list_backup_entities(&[RlsCovDoc::metadata()])
+        .remove(0);
+    let owner_database = graphql_orm::db::Database::new(owner.clone());
+    let mut complete = owner_database.begin_consistent_snapshot().await?;
+    assert_eq!(
+        owner_database
+            .export_table_rows(&mut complete, &descriptor)
+            .await?
+            .len(),
+        1
+    );
+    drop(complete);
+    let error = database
+        .export_table_rows(&mut snapshot, &descriptor)
+        .await
+        .expect_err("backup must refuse a policy-filtered table");
+    assert!(error.to_string().contains("row-level security"), "{error}");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires test-owned PostgreSQL container"]
+async fn search_rebuild_refuses_policy_filtered_rows() -> Result<(), Box<dyn std::error::Error>> {
+    let Provisioned { owner } = provision().await?;
+    sqlx::query("INSERT INTO rls_cov_docs (id, tenant_id, title) VALUES (pg_catalog.gen_random_uuid(), 'tenant-a', 'hidden row')").execute(&owner).await?;
+    let (_, runtime) = role_pool(&owner, "rebuild", "NOSUPERUSER NOBYPASSRLS").await?;
+    let database = graphql_orm::db::Database::new(runtime);
+    let error = RlsCovDoc::rebuild_search_index(&database)
+        .await
+        .expect_err("rebuild must refuse a policy-filtered table");
+    assert!(error.to_string().contains("row-level security"), "{error}");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires test-owned PostgreSQL container"]
+async fn single_document_rebuild_refuses_policy_filtered_rows()
+-> Result<(), Box<dyn std::error::Error>> {
+    let Provisioned { owner } = provision().await?;
+    let id = graphql_orm::uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO rls_cov_docs (id, tenant_id, title) VALUES ($1, 'tenant-a', 'hidden row')",
+    )
+    .bind(id)
+    .execute(&owner)
+    .await?;
+    let (_, runtime) = role_pool(&owner, "rebuild_document", "NOSUPERUSER NOBYPASSRLS").await?;
+    let database = graphql_orm::db::Database::new(runtime);
+    let error = RlsCovDoc::rebuild_search_document(&database, &id)
+        .await
+        .expect_err("single-document rebuild must refuse a policy-filtered read");
+    assert!(error.to_string().contains("row-level security"), "{error}");
+    Ok(())
+}

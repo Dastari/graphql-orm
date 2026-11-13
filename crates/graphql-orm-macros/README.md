@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.136.0 (placeholder) keeps runtime and macros aligned. PostgreSQL
+backup export and search rebuild fail when RLS would filter rows. Use a role
+exempt from RLS; see the [migration guide](../../MIGRATION.md).
+
 Version 0.133.0 stays aligned with ORM 0.133.0, which refuses reserved runtime
 schema table names and quotes PostgreSQL runtime literal defaults with escape
 strings. Generated code is unchanged. Upgrade ORM/macros together; see the
