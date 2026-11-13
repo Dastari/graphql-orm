@@ -1091,11 +1091,14 @@ impl GraphqlOperationCatalog {
     /// This method is public because `schema_roots!` expands in downstream
     /// crates; applications normally call its generated
     /// `graphql_orm_operation_catalog()` helper instead.
+    ///
     /// # Panics
     ///
     /// Panics when entity groups repeat a fingerprint identity. The diagnostic
     /// names both Rust types, including when an explicit identity collides with
-    /// a default module-path identity.
+    /// a default module-path identity. Generated `try_schema_builder*` helpers
+    /// compose the catalogue at schema build, so they also panic on a repeated
+    /// identity rather than returning it as a schema-builder error.
     #[doc(hidden)]
     pub fn compose<I>(groups: I) -> Self
     where

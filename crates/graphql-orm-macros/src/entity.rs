@@ -179,11 +179,11 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     }
                     let lit: syn::LitStr = meta.value()?.parse()?;
                     let value = lit.value();
-                    if value.is_empty() || value.len() > 256
+                    if value.is_empty() || value.len() > 1024
                         || !value.bytes().all(|byte| byte.is_ascii_graphic())
                     {
                         return Err(syn::Error::new(lit.span(),
-                            "stable_type_id must contain 1–256 printable ASCII bytes without whitespace or control characters"));
+                            "stable_type_id must contain 1–1024 printable ASCII bytes without whitespace or control characters"));
                     }
                     metadata.stable_type_id = Some(value);
                 } else if meta.path.is_ident("table") {

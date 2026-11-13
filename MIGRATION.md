@@ -17,13 +17,22 @@ Upgrade ORM and macros together; catalogue is 0.7.4.
 Declare `#[graphql_entity(stable_type_id = "old_crate::old_module::Record")]`
 (or `#[repository_entity(stable_type_id = "...")]`) before or when moving an
 entity. Use the exact previous descriptor's `entity_rust_type()` value, including
-the old crate, module and type name. Keep this value after the move, even across
-crates. The value must be a string literal of 1–256 printable ASCII bytes with
-no whitespace or control characters; duplicate declarations are rejected.
+the old crate, module and type name. Keep this value after the move. The value
+is an opaque token, normally the old Rust path: use a string literal of 1–1024
+printable ASCII bytes without whitespace or control characters. Duplicate
+declarations are rejected.
 
 Omitting the option preserves the module-path identity and all existing
 fingerprints byte for byte. Choosing a new identity intentionally invalidates
-persisted operation/catalogue bindings; using the old value preserves them.
+persisted operation/catalogue bindings. Using the old value preserves the entity
+identity input, but other fingerprint inputs must also stay unchanged. Field
+types, argument types and relation targets must be spelled identically in source
+before and after the move, including across crates: the schema signature records
+their Rust spelling. For example, changing `crate::types::Status` to
+`old_crate::types::Status` changes fingerprints even if both name the same type.
+Prefer imported bare names (such as `Status`) and retain those spellings after
+moving. Compare `catalog().fingerprint()` before and after the move (using the
+generated `graphql_orm_operation_catalog()` helper or your catalogue accessor).
 No database migration is required. The fingerprint algorithms, names, input
 order and default module path are unchanged.
 

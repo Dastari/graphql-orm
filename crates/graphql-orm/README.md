@@ -12,7 +12,8 @@ supersedes: []
 
 Version 0.139.0 (placeholder) adds optional
 `#[graphql_entity(stable_type_id = "old_crate::models::Record")]` to preserve
-operation fingerprints across Rust module/crate moves. Default identities and
+the entity identity across Rust module/crate moves. Type and relation-target
+spellings must also remain unchanged to preserve fingerprints. Default identities and
 fingerprint algorithms are unchanged. Upgrade ORM/macros together; see the
 [migration recipe](../../MIGRATION.md#01370-to-01390-optional-stable-entity-identity).
 

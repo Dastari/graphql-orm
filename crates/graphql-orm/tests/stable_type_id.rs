@@ -62,7 +62,8 @@ fn catalog(ops: &'static [GeneratedGraphqlOperationDescriptor]) -> GraphqlOperat
 }
 #[test]
 fn default_fingerprint_from_main() {
-    // Captured before implementation at origin/main 0c53b384, default SQLite profile.
+    // Captured at origin/main 0c53b384; rechecked after merging main 19e42ca4.
+    // Default SQLite profile; do not recapture from this branch.
     let ops = original::Record::generated_graphql_operations();
     assert_eq!(
         ops[0].entity_rust_type(),
@@ -186,4 +187,136 @@ fn declared_identity_cannot_collide_with_default_identity() {
     let message = error.downcast_ref::<String>().unwrap();
     assert!(message.contains("stable_type_id::original::Record"));
     assert!(message.contains("stable_type_id::stable_a::Record"));
+}
+
+// These aliases name the same Rust/GraphQL type; only their source paths differ.
+mod field_types {
+    pub type Status = String;
+}
+mod moved_field_types {
+    pub use super::field_types::Status;
+}
+mod qualified_before {
+    use graphql_orm::prelude::*;
+
+    #[derive(
+        GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug,
+    )]
+    #[graphql_entity(
+        table = "spelling_records",
+        plural = "SpellingRecords",
+        stable_type_id = "stable::SpellingRecord"
+    )]
+    pub struct Record {
+        #[primary_key]
+        #[sortable]
+        pub id: String,
+        pub status: crate::field_types::Status,
+    }
+}
+mod qualified_after {
+    use graphql_orm::prelude::*;
+
+    #[derive(
+        GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug,
+    )]
+    #[graphql_entity(
+        table = "spelling_records",
+        plural = "SpellingRecords",
+        stable_type_id = "stable::SpellingRecord"
+    )]
+    pub struct Record {
+        #[primary_key]
+        #[sortable]
+        pub id: String,
+        pub status: crate::moved_field_types::Status,
+    }
+}
+mod imported_before {
+    use crate::field_types::Status;
+    use graphql_orm::prelude::*;
+    #[derive(
+        GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug,
+    )]
+    #[graphql_entity(
+        table = "spelling_records",
+        plural = "SpellingRecords",
+        stable_type_id = "stable::SpellingRecord"
+    )]
+    pub struct Record {
+        #[primary_key]
+        #[sortable]
+        pub id: String,
+        pub status: Status,
+    }
+}
+mod imported_after {
+    use crate::moved_field_types::Status;
+    use graphql_orm::prelude::*;
+    #[derive(
+        GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug,
+    )]
+    #[graphql_entity(
+        table = "spelling_records",
+        plural = "SpellingRecords",
+        stable_type_id = "stable::SpellingRecord"
+    )]
+    pub struct Record {
+        #[primary_key]
+        #[sortable]
+        pub id: String,
+        pub status: Status,
+    }
+}
+
+#[test]
+fn stable_identity_still_requires_unchanged_type_spelling() {
+    let before = qualified_before::Record::generated_graphql_operations();
+    let after = qualified_after::Record::generated_graphql_operations();
+    assert_eq!(before.len(), after.len());
+    for (before, after) in before.iter().zip(after) {
+        assert_eq!(before.entity_rust_type(), after.entity_rust_type());
+        assert_eq!(before.graphql_result_type(), after.graphql_result_type());
+        assert_ne!(before.schema_signature(), after.schema_signature());
+        assert_ne!(before.fingerprint(), after.fingerprint());
+    }
+    assert_ne!(catalog(before).fingerprint(), catalog(after).fingerprint());
+
+    let before = imported_before::Record::generated_graphql_operations();
+    let after = imported_after::Record::generated_graphql_operations();
+    assert_eq!(before.len(), after.len());
+    for (before, after) in before.iter().zip(after) {
+        assert_eq!(before.schema_signature(), after.schema_signature());
+        assert_eq!(before.fingerprint(), after.fingerprint());
+    }
+    assert_eq!(catalog(before).fingerprint(), catalog(after).fingerprint());
+}
+mod maximum_identity {
+    use graphql_orm::prelude::*;
+
+    #[derive(
+        GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug,
+    )]
+    #[graphql_entity(
+        table = "spelling_records",
+        plural = "SpellingRecords",
+        stable_type_id = "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss"
+    )]
+    pub struct Record {
+        #[primary_key]
+        #[sortable]
+        pub id: String,
+        pub status: String,
+    }
+}
+
+#[test]
+fn stable_type_id_accepts_exactly_1024_bytes() {
+    let operations = maximum_identity::Record::generated_graphql_operations();
+    assert!(!operations.is_empty());
+    assert!(
+        operations
+            .iter()
+            .all(|operation| operation.entity_rust_type().len() == 1024)
+    );
 }
