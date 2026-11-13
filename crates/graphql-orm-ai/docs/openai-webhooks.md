@@ -78,6 +78,15 @@ credential, prompt, output, and provider error are never stored. Receipt and
 redacted audit insertion are one generated-ORM transaction; no application SQL
 or generic CRUD root is involved.
 
+The service grants itself repository access to receipt rows only. The audit
+insert, and any other access, goes through the host entity policy. A database
+without an entity policy refuses that access by default; a host that trusts
+the worker database with unrestricted repository access opts in with
+`OrmAiProviderWebhookReceiptService::new(database).with_entity_fallback(AiTrustedWorkerEntityFallback::AllowRepository)`.
+The background reconciliation and terminal services use the same grant and
+the same opt-in. `database()` on these services returns the host handle, which
+does not carry the worker grant.
+
 A verified event proves only possession of the configured signing secret for
 the exact delivered bytes within the replay window. It does not prove that the
 response belongs to a durable run. Supported events therefore remain

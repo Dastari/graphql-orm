@@ -23,7 +23,8 @@ mod sse;
 #[cfg(any(
     feature = "provider-openai-compatible-core",
     feature = "provider-chat-completions-core",
-    feature = "provider-anthropic-core"
+    feature = "provider-anthropic-core",
+    feature = "provider-ollama-core"
 ))]
 mod endpoint;
 

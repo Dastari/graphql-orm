@@ -5,6 +5,7 @@
 use crate::orm_read_bounds::InternalReadBound as _;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use agql_auth::{AuthPrincipal, Clock, ResolvedPrincipal};
 use async_trait::async_trait;
@@ -18,7 +19,7 @@ use graphql_orm::graphql::orm::{
 use graphql_orm::graphql::pagination::{
     KeysetConnectionInput, KeysetWindowDirection, ValidatedKeysetConnection,
 };
-use graphql_orm_storage::{BlobPutOptions, BlobStore, StorageByteStream};
+use graphql_orm_storage::{BlobPutOptions, BlobStore, StorageByteStream, StorageError};
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -1893,6 +1894,11 @@ impl AiAttachmentUploadService for OrmAiAttachmentService {
             .quarantine_blob_reference
             .as_deref()
             .ok_or(AiError::PersistenceFailed)?;
+        let (body, exceeded) = bounded_upload_body(
+            body,
+            expected_bytes.min(self.limits.maximum_attachment_bytes),
+            quarantine_key,
+        );
         let outcome = match self
             .blob_store
             .put_blob_if_not_exists(
@@ -1904,13 +1910,34 @@ impl AiAttachmentUploadService for OrmAiAttachmentService {
             )
             .await
         {
-            Ok(Some(outcome)) => outcome,
+            Ok(Some(outcome)) if !exceeded.load(Ordering::SeqCst) => outcome,
+            // Checked before the key-conflict arm: a store may report the
+            // size-limit body error as `Ok(None)`.
+            _ if exceeded.load(Ordering::SeqCst) => {
+                // `reject_upload` deletes whatever partial object the store
+                // kept under the quarantine key.
+                self.reject_upload(
+                    &claimed,
+                    RejectedUploadFacts {
+                        detected_mime: None,
+                        byte_count: None,
+                        sha256: None,
+                        scanner_version: None,
+                        policy_version: None,
+                        reason_code: "upload_size_exceeded".to_owned(),
+                    },
+                )
+                .await?;
+                return Err(AiError::InvalidInput(
+                    "attachment byte count does not match ticket".to_owned(),
+                ));
+            }
             Ok(None) => {
                 self.fail_upload(&claimed, false, "quarantine_key_conflict")
                     .await?;
                 return Err(AiError::Conflict);
             }
-            Err(_) => {
+            Ok(Some(_)) | Err(_) => {
                 self.fail_upload(&claimed, true, "quarantine_write_failed")
                     .await?;
                 return Err(AiError::PersistenceFailed);
@@ -2187,6 +2214,62 @@ fn cleanup_retry_facts(retry_count: Option<i64>, now: i64) -> Result<(i64, i64),
         .checked_add(retry_delay_seconds)
         .ok_or(AiError::PersistenceFailed)?;
     Ok((next_retry_count, next_attempt_at))
+}
+
+/// Counts upload bytes as storage pulls them and ends the body with an error,
+/// instead of the chunk that would pass `limit`, so storage never receives
+/// more than `limit` bytes. The returned flag records that the limit was hit,
+/// whatever error or outcome the store then reports.
+fn bounded_upload_body(
+    body: StorageByteStream,
+    limit: u64,
+    key: &str,
+) -> (StorageByteStream, Arc<AtomicBool>) {
+    let exceeded = Arc::new(AtomicBool::new(false));
+    let flag = exceeded.clone();
+    let key = key.to_owned();
+    let size_hint = body.size_hint();
+    let bounded = futures::stream::unfold(
+        (body.into_inner(), 0_u64, false),
+        move |(mut inner, seen, finished)| {
+            let flag = flag.clone();
+            let key = key.clone();
+            async move {
+                if finished {
+                    return None;
+                }
+                match inner.next().await? {
+                    Ok(chunk) => {
+                        let next = u64::try_from(chunk.len())
+                            .ok()
+                            .and_then(|length| seen.checked_add(length))
+                            .filter(|next| *next <= limit);
+                        match next {
+                            Some(next) => Some((Ok(chunk), (inner, next, false))),
+                            None => {
+                                flag.store(true, Ordering::SeqCst);
+                                Some((
+                                    Err(StorageError::PreconditionFailed {
+                                        key,
+                                        condition: "upload exceeds the ticket byte count"
+                                            .to_owned(),
+                                    }),
+                                    (inner, seen, true),
+                                ))
+                            }
+                        }
+                    }
+                    Err(error) => Some((Err(error), (inner, seen, true))),
+                }
+            }
+        },
+    );
+    let bounded = Box::pin(bounded);
+    let body = match size_hint {
+        Some(size_hint) => StorageByteStream::with_size_hint(bounded, size_hint),
+        None => StorageByteStream::new(bounded),
+    };
+    (body, exceeded)
 }
 
 async fn collect_exact_provider_attachment(

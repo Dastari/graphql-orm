@@ -2033,24 +2033,13 @@ fn normalize_endpoint(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| AiError::InvalidInput("provider endpoint is required".to_owned()))?;
-    let mut url = Url::parse(raw)
-        .map_err(|_| AiError::InvalidInput("invalid provider endpoint".to_owned()))?;
-    if !matches!(url.scheme(), "http" | "https")
-        || url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
-        return Err(AiError::InvalidInput("unsafe provider endpoint".to_owned()));
-    }
-    url.set_query(None);
-    url.set_fragment(None);
-    let normalized = url.to_string();
-    if !endpoint_policy.authorize_endpoint(kind, &normalized) {
+    Url::parse(raw).map_err(|_| AiError::InvalidInput("invalid provider endpoint".to_owned()))?;
+    let url = crate::configuration::parse_provider_endpoint(raw)
+        .ok_or_else(|| AiError::InvalidInput("unsafe provider endpoint".to_owned()))?;
+    if !crate::configuration::provider_endpoint_permitted(endpoint_policy, kind, &url) {
         return Err(AiError::Forbidden);
     }
-    Ok(Some(normalized))
+    Ok(Some(url.to_string()))
 }
 
 pub(crate) fn validate_scope(scope: &AiScope) -> Result<(), AiError> {

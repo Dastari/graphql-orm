@@ -160,6 +160,8 @@ pub struct OpenAiProvider {
     capabilities: ProviderCapabilities,
     #[cfg(feature = "provider-openai-compatible-core")]
     compatible_binding: Option<CompatibleRouteBinding>,
+    #[cfg(feature = "provider-openai-compatible-core")]
+    endpoint_guard: Option<super::endpoint::ProviderEndpointGuard>,
 }
 
 /// Native OpenAI exact-reference file deletion boundary.
@@ -238,15 +240,11 @@ impl OpenAiFileDeletionService {
                 "OpenAI file-deletion profile or timeout is invalid".to_owned(),
             ));
         }
-        let client = super::http::client_builder()?
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(config.timeout)
-            .build()
-            .map_err(|_| {
-                ProviderError::InvalidConfiguration(
-                    "OpenAI HTTP client could not be constructed".to_owned(),
-                )
-            })?;
+        let client = openai_client(
+            config.timeout,
+            &files_endpoint,
+            super::http::ProviderProxy::Disabled,
+        )?;
         Ok(Self {
             provider_profile_id,
             config,
@@ -254,6 +252,24 @@ impl OpenAiFileDeletionService {
             client,
             files_endpoint,
         })
+    }
+
+    /// Lets this service's client use the process proxy environment
+    /// (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`).
+    ///
+    /// By default provider clients ignore it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::InvalidConfiguration`] when the HTTP client
+    /// cannot be rebuilt.
+    pub fn with_environment_proxy(mut self) -> Result<Self, ProviderError> {
+        self.client = openai_client(
+            self.config.timeout,
+            &self.files_endpoint,
+            super::http::ProviderProxy::Environment,
+        )?;
+        Ok(self)
     }
 
     #[cfg(all(test, feature = "provider-openai-core"))]
@@ -443,15 +459,11 @@ impl OpenAiProvider {
                 "OpenAI native tool-search models are invalid".to_owned(),
             ));
         }
-        let client = super::http::client_builder()?
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(config.timeout)
-            .build()
-            .map_err(|_| {
-                ProviderError::InvalidConfiguration(
-                    "OpenAI HTTP client could not be constructed".to_owned(),
-                )
-            })?;
+        let client = openai_client(
+            config.timeout,
+            &endpoint,
+            super::http::ProviderProxy::Disabled,
+        )?;
         let provider_kind = match flavor {
             ResponsesFlavor::OpenAi => ProviderKind::OpenAi,
             ResponsesFlavor::XAi => ProviderKind::Xai,
@@ -523,7 +535,39 @@ impl OpenAiProvider {
             capabilities,
             #[cfg(feature = "provider-openai-compatible-core")]
             compatible_binding,
+            #[cfg(feature = "provider-openai-compatible-core")]
+            endpoint_guard: None,
         })
+    }
+
+    /// Lets this provider's client use the process proxy environment
+    /// (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`).
+    ///
+    /// By default provider clients ignore it. A loopback endpoint never uses a
+    /// proxy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::InvalidConfiguration`] when the HTTP client
+    /// cannot be rebuilt.
+    pub fn with_environment_proxy(mut self) -> Result<Self, ProviderError> {
+        self.client = openai_client(
+            self.config.timeout,
+            &self.endpoint,
+            super::http::ProviderProxy::Environment,
+        )?;
+        Ok(self)
+    }
+
+    /// Re-applies the deployment endpoint policy for a policy-checked
+    /// endpoint immediately before a request. Fixed official endpoints have
+    /// no policy to recheck.
+    fn recheck_endpoint(&self) -> Result<(), ProviderError> {
+        #[cfg(feature = "provider-openai-compatible-core")]
+        if let Some(guard) = &self.endpoint_guard {
+            guard.recheck()?;
+        }
+        Ok(())
     }
 
     #[cfg(feature = "provider-xai-core")]
@@ -548,19 +592,21 @@ impl OpenAiProvider {
     pub(super) fn new_compatible(
         config: OpenAiProviderConfig,
         secrets: Arc<dyn AiSecretStore>,
-        endpoint: String,
+        guard: super::endpoint::ProviderEndpointGuard,
         capabilities: ProviderCapabilities,
         binding: CompatibleRouteBinding,
     ) -> Result<Self, ProviderError> {
-        Self::build(
+        let mut provider = Self::build(
             config,
             secrets,
-            endpoint,
+            guard.endpoint().as_str().to_owned(),
             ResponsesFlavor::Compatible,
             false,
             Some(capabilities),
             Some(binding),
-        )
+        )?;
+        provider.endpoint_guard = Some(guard);
+        Ok(provider)
     }
 
     #[cfg(all(test, feature = "provider-openai-core"))]
@@ -928,6 +974,7 @@ impl AiProvider for OpenAiProvider {
             .resolve(&self.config.credential)
             .await
             .map_err(|_| ProviderError::CredentialUnavailable)?;
+        self.recheck_endpoint()?;
         let response = self
             .client
             .post(&self.endpoint)
@@ -1025,6 +1072,7 @@ impl AiProvider for OpenAiProvider {
             .resolve(&self.config.credential)
             .await
             .map_err(|_| ProviderError::CredentialUnavailable)?;
+        self.recheck_endpoint()?;
         let endpoint = format!("{}/{}", self.endpoint, binding.response_id());
         let response = self
             .client
@@ -1081,6 +1129,7 @@ impl AiProvider for OpenAiProvider {
             .resolve(&self.config.credential)
             .await
             .map_err(|_| ProviderError::CredentialUnavailable)?;
+        self.recheck_endpoint()?;
         let response = self
             .client
             .post(&self.endpoint)
@@ -1645,6 +1694,15 @@ async fn bounded_json(response: reqwest::Response) -> Result<Value, AiError> {
         body.extend_from_slice(&chunk);
     }
     serde_json::from_slice(&body).map_err(|_| AiError::ProviderFailed)
+}
+
+fn openai_client(
+    timeout: Duration,
+    endpoint: &str,
+    proxy: super::http::ProviderProxy,
+) -> Result<reqwest::Client, ProviderError> {
+    let endpoint = url::Url::parse(endpoint).ok();
+    super::http::provider_client("OpenAI", timeout, endpoint.as_ref(), proxy)
 }
 
 fn validate_optional_header(value: Option<&str>) -> Result<(), ProviderError> {

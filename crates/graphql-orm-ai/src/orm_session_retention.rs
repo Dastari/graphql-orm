@@ -472,7 +472,10 @@ impl EntityPolicy<DefaultWriteBackend> for SessionRetentionEntityPolicy {
                 surface,
             );
         }
-        Box::pin(async { Ok(true) })
+        // Without a host policy the worker keeps the repository access it
+        // uses; GraphQL surfaces through this handle stay refused.
+        let allowed = surface == EntityAccessSurface::Repository;
+        Box::pin(async move { Ok(allowed) })
     }
 }
 
@@ -4940,6 +4943,65 @@ mod tests {
                 ..AccessTokenMetadata::default()
             },
         })
+    }
+
+    /// Without a host entity policy the retention worker handle keeps its
+    /// repository access and its exact maintenance grant, and refuses every
+    /// GraphQL surface.
+    #[tokio::test]
+    async fn retention_worker_without_host_policy_refuses_graphql_surfaces() {
+        let database = database().await;
+        assert!(database.entity_policy().is_none());
+        let service = OrmAiSessionRetentionService::new(
+            database,
+            Arc::new(FixedClock::new(now())),
+            AiSessionRetentionLimits::default(),
+        );
+        let access = |entity: &'static str,
+                      policy_key: Option<&'static str>,
+                      kind: EntityAccessKind,
+                      surface: EntityAccessSurface| {
+            let database = service.database.clone();
+            async move {
+                database
+                    .can_access_entity(None, entity, policy_key, kind, surface)
+                    .await
+                    .expect("access decision")
+            }
+        };
+        for kind in [EntityAccessKind::Read, EntityAccessKind::Write] {
+            assert!(
+                access(
+                    "AiSessionRecord",
+                    None,
+                    kind,
+                    EntityAccessSurface::Repository
+                )
+                .await
+            );
+        }
+        assert!(
+            access(
+                "AiRunCheckpointRecord",
+                Some(RUN_CHECKPOINT_RETENTION_POLICY),
+                EntityAccessKind::Write,
+                EntityAccessSurface::RetentionMaintenance,
+            )
+            .await
+        );
+        for surface in [
+            EntityAccessSurface::GraphqlQuery,
+            EntityAccessSurface::GraphqlMutation,
+            EntityAccessSurface::GraphqlSubscription,
+            EntityAccessSurface::GraphqlRelation,
+        ] {
+            for kind in [EntityAccessKind::Read, EntityAccessKind::Write] {
+                assert!(
+                    !access("AiSessionRecord", None, kind, surface).await,
+                    "{kind:?} {surface:?}"
+                );
+            }
+        }
     }
 
     async fn database() -> Database<SqliteBackend> {

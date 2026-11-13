@@ -24,7 +24,10 @@ label, `custom_tools`, `parallel_tool_calls` and `structured_output`.
 `provider_retained_continuation` must be `false`; the configuration service
 refuses anything else. The exact endpoint is set as the profile `base_url` and
 must be approved by `AiProviderEndpointPolicy::authorize_endpoint` with kind
-`ChatCompletions`. A credential is optional: without one no `Authorization`
+`ChatCompletions`. The policy is asked again before every request. Plain
+`http` is accepted only for a loopback host unless
+`authorize_plaintext_endpoint` opts in, and the client ignores the proxy
+environment unless the host calls `with_environment_proxy`. A credential is optional: without one no `Authorization`
 header is sent, which suits local servers. Build the adapter with
 `ChatCompletionsProviderConfig::from_profile(view, credential)` and
 `ChatCompletionsProvider::new(config, endpoint_policy, secrets)`.

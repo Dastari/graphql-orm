@@ -373,10 +373,10 @@ pub mod prelude {
         AiOpenAiBackgroundRetrievalFailure, AiOpenAiBackgroundRetrievalLimits,
         AiOpenAiBackgroundRetrievalObservation, AiOpenAiBackgroundRetrievalRoute,
         AiOpenAiBackgroundSubmission, AiOpenAiBackgroundTerminalOutcome,
-        AiProviderWebhookReceiptOutcome, OrmAiOpenAiBackgroundReconciliationService,
-        OrmAiOpenAiBackgroundRetrievalService, OrmAiOpenAiBackgroundSubmissionService,
-        OrmAiOpenAiBackgroundTerminalService, OrmAiProviderWebhookReceiptService,
-        ProviderBackgroundStatus, ProviderBackgroundUsage,
+        AiProviderWebhookReceiptOutcome, AiTrustedWorkerEntityFallback,
+        OrmAiOpenAiBackgroundReconciliationService, OrmAiOpenAiBackgroundRetrievalService,
+        OrmAiOpenAiBackgroundSubmissionService, OrmAiOpenAiBackgroundTerminalService,
+        OrmAiProviderWebhookReceiptService, ProviderBackgroundStatus, ProviderBackgroundUsage,
     };
     #[cfg(feature = "provider-openai-core")]
     pub use crate::{

@@ -368,10 +368,11 @@ impl OrmAiProposalService {
             return Err(AiError::NotFound);
         }
         let scope = record_scope(&session);
-        if !self
-            .access_policy
-            .can_access_proposal(principal, &scope, AiSessionId(session.id), action)
-            .await
+        if !crate::orm_approvals::principal_tenant_permits(principal, &scope)
+            || !self
+                .access_policy
+                .can_access_proposal(principal, &scope, AiSessionId(session.id), action)
+                .await
         {
             return Err(AiError::NotFound);
         }
@@ -456,10 +457,11 @@ impl AiProposalService for OrmAiProposalService {
             return Err(AiError::NotFound);
         }
         let scope = record_scope(&session);
-        if !self
-            .access_policy
-            .can_access_proposal(&principal, &scope, session_id, AiProposalAction::Read)
-            .await
+        if !crate::orm_approvals::principal_tenant_permits(&principal, &scope)
+            || !self
+                .access_policy
+                .can_access_proposal(&principal, &scope, session_id, AiProposalAction::Read)
+                .await
         {
             return Err(AiError::NotFound);
         }
@@ -1313,6 +1315,99 @@ mod tests {
             .await
             .expect("proposal connection should load");
         assert_eq!(connection.edges.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn proposals_are_confined_to_the_principal_tenant_claim() {
+        let fixture = fixture().await;
+        let running = seed_running(&fixture).await;
+        let validated = fixture
+            .catalog
+            .validate(AiProposalDraft {
+                proposal_type: AiProposalTypeId::parse("application.summary.v1")
+                    .expect("proposal type should parse"),
+                session_id: running.session_id(),
+                run_id: running.run_id(),
+                scope: fixture.scope.clone(),
+                payload: serde_json::json!({"summary": "Initial suggestion"}),
+                sources: vec![AiDataSourceRef {
+                    kind: "record".to_owned(),
+                    reference: "record-54".to_owned(),
+                    classification: DataClassification::Confidential,
+                    trust: AiSourceTrust::ResolverResult,
+                }],
+                item_count: 1,
+            })
+            .expect("proposal should validate");
+        let persisted = fixture
+            .proposal_service
+            .persist_validated(&running, validated, Some(fixture.now + Duration::days(7)))
+            .await
+            .expect("proposal should persist through the current fence");
+        let view = fixture
+            .proposal_service
+            .proposal(&fixture.principal, persisted.proposal_id())
+            .await
+            .unwrap()
+            .expect("the same-tenant principal should see the proposal");
+        let AuthPrincipal::User(mut other) = fixture.principal.clone() else {
+            unreachable!("proposal fixture principal is a user session")
+        };
+        other.token_claims.tenant_id = Some("tenant-other".to_owned());
+        let other = AuthPrincipal::User(other);
+        // The host access policy allows everything; only the crate-level
+        // tenant predicate separates the two principals.
+        let other_service = OrmAiProposalService::new(
+            fixture.database.clone(),
+            fixture.run_service.clone(),
+            Arc::new(Resolver {
+                principal: other.clone(),
+                now: fixture.now,
+            }),
+            Arc::new(AllowProposals),
+            Arc::new(Protection(fixture.scope.clone())),
+            Arc::new(crate::DatabaseManagedContentProtector),
+            fixture.catalog.clone(),
+            Arc::new(FixedClock::new(fixture.now)),
+        );
+        assert!(
+            other_service
+                .proposal(&other, persisted.proposal_id())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let page = KeysetConnectionInput {
+            first: Some(10),
+            ..Default::default()
+        }
+        .validate(10, 100)
+        .unwrap();
+        let error = other_service
+            .proposals(&other, running.session_id(), page)
+            .await
+            .expect_err("another tenant must not list proposals");
+        assert!(matches!(error, AiError::NotFound), "{error:?}");
+        let error = other_service
+            .review_proposal(
+                &other,
+                ReviewAiProposalInput {
+                    id: view.id,
+                    decision: AiProposalReviewDecision::Accept,
+                    edited_payload: None,
+                    edited_item_count: None,
+                    expected_version: view.row_version,
+                },
+            )
+            .await
+            .expect_err("another tenant must not review");
+        assert!(matches!(error, AiError::NotFound), "{error:?}");
+        let unchanged = AiProposalRecord::find_by_id(&fixture.database, &view.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.state, "pending_review");
+        assert_eq!(unchanged.row_version, view.row_version);
     }
 
     fn refused_request_principals(principal: &AuthPrincipal) -> [AuthPrincipal; 2] {

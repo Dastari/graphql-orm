@@ -76,7 +76,12 @@ let provider = OllamaProvider::new(
 ```
 
 Only a root `http` or `https` origin is accepted. URL credentials, path, query,
-and fragment are rejected, and HTTP redirects are disabled. The endpoint policy
+and fragment are rejected, and HTTP redirects are disabled. Plain `http` is
+accepted for a loopback origin; an `http` origin on another host, such as a
+model server on a private network or in another container, also needs
+`AiProviderEndpointPolicy::authorize_plaintext_endpoint` to return `true`. The
+policy is asked again before every request, and the client ignores the proxy
+environment unless the host calls `OllamaProvider::with_environment_proxy`. The endpoint policy
 must match the normalized origin and enforce the deployment's exact host/port,
 DNS rebinding, private-address, container-boundary, and network-zone rules. The
 adapter does not discover servers or models and never accepts a model-authored

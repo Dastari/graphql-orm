@@ -28,7 +28,11 @@ choose a storage path.
    and `StorageByteStream` to `AiAttachmentUploadService::upload`.
 4. The service atomically consumes the one-use token, writes under a
    create-if-absent quarantine key, and compares exact expected/stored size and
-   lowercase SHA-256.
+   lowercase SHA-256. The body is counted while it streams: the chunk that
+   would take it past the ticket's expected byte count is never passed to
+   storage. The write fails, any partial quarantine object is deleted, and the
+   attachment is rejected with reason code `upload_size_exceeded`. A host body
+   cap is still recommended, but the ticket bound does not depend on it.
 5. The configured `AiAttachmentScanner` consumes a fresh complete object stream
    and attests detected MIME, bytes, hash, scanner version, and clean/reject
    verdict. Truncation, timeout, unsupported parsing, or unavailable signatures

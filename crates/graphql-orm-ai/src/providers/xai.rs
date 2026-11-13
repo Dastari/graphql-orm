@@ -89,6 +89,20 @@ impl XAiProvider {
         Ok(Self { config, inner })
     }
 
+    /// Lets this provider's client use the process proxy environment
+    /// (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`).
+    ///
+    /// By default provider clients ignore it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::InvalidConfiguration`] when the HTTP client
+    /// cannot be rebuilt.
+    pub fn with_environment_proxy(mut self) -> Result<Self, ProviderError> {
+        self.inner = self.inner.with_environment_proxy()?;
+        Ok(self)
+    }
+
     #[cfg(test)]
     fn for_loopback_test(
         config: XAiProviderConfig,
