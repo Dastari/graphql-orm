@@ -10,6 +10,12 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.131.0 fixes native search column collisions in repository and generated
+GraphQL searches by hiding managed search-table columns from entity SQL.
+Server-authored default-sort SQL passes through unchanged. Upgrade ORM/macros
+together; see the
+[root migration guide](../../MIGRATION.md#01300-to-01310-native-search-column-collisions).
+
 Version 0.130.0 makes four authority defaults fail closed: generated
 single-row reads apply the same row visibility as list reads, a field
 `read_policy` on a `SimpleObject` entity requires `graphql_policy_object`, an

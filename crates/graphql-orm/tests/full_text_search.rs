@@ -596,3 +596,140 @@ fn postgres_search_schema_plans_shadow_table_and_gin_index() {
             && statement.contains("idx_gom_search_pg_search_articles_vector")
     }));
 }
+
+#[cfg(feature = "postgres")]
+#[allow(dead_code)]
+#[path = "support/owned_postgres.rs"]
+mod owned_postgres;
+
+#[derive(GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[cfg_attr(
+    feature = "sqlite",
+    graphql_entity(
+        table = "sort_collisions",
+        plural = "SortCollisions",
+        auth = "none",
+        backend = "sqlite",
+        default_sort = "rank ASC"
+    )
+)]
+#[cfg_attr(
+    feature = "postgres",
+    graphql_entity(
+        table = "sort_collisions",
+        plural = "SortCollisions",
+        auth = "none",
+        backend = "postgres",
+        default_sort = "entity_pk ASC"
+    )
+)]
+#[graphql_orm(search(index = true))]
+struct SortCollision {
+    #[primary_key]
+    pub id: String,
+    #[sortable]
+    #[filterable(type = "int64")]
+    pub rank: i64,
+    #[sortable]
+    #[filterable(type = "int64")]
+    pub entity_pk: i64,
+    #[graphql_orm(searchable(weight = "A"))]
+    pub title: String,
+}
+
+mod collision_schema {
+    use super::*;
+    schema_roots! { query_custom_ops: [], entities: [SortCollision], }
+}
+
+#[tokio::test]
+async fn native_search_sort_collisions_repository() -> Result<(), Box<dyn std::error::Error>> {
+    native_search_sort_collisions(false).await
+}
+
+#[tokio::test]
+async fn native_search_sort_collisions_graphql() -> Result<(), Box<dyn std::error::Error>> {
+    native_search_sort_collisions(true).await
+}
+
+async fn native_search_sort_collisions(graphql: bool) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(feature = "sqlite")]
+    let pool = graphql_orm::sqlx::SqlitePool::connect("sqlite::memory:").await?;
+    #[cfg(feature = "postgres")]
+    let owned = owned_postgres::OwnedPostgres::start("search-sort-collision")?;
+    #[cfg(feature = "postgres")]
+    let pool = graphql_orm::sqlx::PgPool::connect(&owned.url).await?;
+    #[cfg(feature = "sqlite")]
+    type Backend = graphql_orm::SqliteBackend;
+    #[cfg(feature = "postgres")]
+    type Backend = graphql_orm::PostgresBackend;
+    let target = SchemaModel::from_entities(&[SortCollision::metadata()]);
+    let plan = build_migration_plan(
+        Backend::DIALECT,
+        &SchemaModel {
+            extensions: vec![],
+            tables: vec![],
+        },
+        &target,
+    );
+    for statement in &plan.statements {
+        graphql_orm::sqlx::query(statement).execute(&pool).await?;
+    }
+    let db = graphql_orm::db::Database::<Backend>::new(pool.clone());
+    for value in [2, 1, 1] {
+        SortCollision::insert(
+            &db,
+            CreateSortCollisionInput {
+                rank: value,
+                entity_pk: value,
+                title: "identical search text".into(),
+            },
+        )
+        .await?;
+    }
+    if graphql {
+        let schema = collision_schema::schema_builder(db).finish();
+        let response = schema.execute("{ sortCollisionsSearch(search: {query: \"identical\"}) { edges { node { id rank entityPk } } pageInfo { totalCount } } }").await;
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+        let json = response.data.into_json()?;
+        let edges = json["sortCollisionsSearch"]["edges"].as_array().unwrap();
+        assert_eq!(edges.len(), 3);
+        assert_eq!(edges[0]["node"]["rank"], 1);
+        assert_eq!(edges[2]["node"]["rank"], 2);
+        assert!(edges[0]["node"]["id"].as_str() < edges[1]["node"]["id"].as_str());
+        let response = schema.execute("{ sortCollisionsSearch(search: {query: \"identical\"}, where: {entityPk: {eq: 2}}, page: {limit: 1}) { edges { node { rank } } pageInfo { totalCount } } }").await;
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+        let json = response.data.into_json()?;
+        assert_eq!(json["sortCollisionsSearch"]["edges"][0]["node"]["rank"], 2);
+        assert_eq!(json["sortCollisionsSearch"]["pageInfo"]["totalCount"], 1);
+    } else {
+        let input = SearchInput {
+            query: "identical".into(),
+            mode: Some(SearchMode::Plain),
+            min_score: None,
+        };
+        let hits = SortCollision::search_db(&db, input.clone())
+            .limit(4)
+            .fetch_all()
+            .await?;
+        assert_eq!(
+            hits.iter().map(|hit| hit.entity.rank).collect::<Vec<_>>(),
+            vec![1, 1, 2]
+        );
+        assert!(hits[0].entity.id < hits[1].entity.id);
+        let filtered = SortCollision::search_db(&db, input)
+            .filter(SortCollisionWhereInput {
+                entity_pk: Some(Int64Filter {
+                    eq: Some(2),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .fetch_all()
+            .await?;
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].entity.rank, 2);
+    }
+    pool.close().await;
+    Ok(())
+}

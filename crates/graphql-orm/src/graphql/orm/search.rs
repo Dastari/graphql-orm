@@ -828,38 +828,40 @@ where
         let projection = if count_only {
             B::DIALECT.count_projection().to_string()
         } else {
-            format!(
-                "{}, CAST(ts_rank_cd(s.document_vector, q.query) AS DOUBLE PRECISION) AS __gom_search_score",
-                T::column_names().join(", ")
-            )
+            format!("{}, s.__gom_search_score", T::column_names().join(", "))
         };
+        // Keep managed document columns out of the entity SQL scope. In
+        // particular, entity filters/projections may also use `entity_pk`.
         let mut sql = format!(
-            "SELECT {} \
-             FROM {} \
-             JOIN {} s ON s.entity_pk = {}::text \
-             CROSS JOIN {}('{}', ?) q(query) \
-             WHERE s.document_vector @@ q.query",
+            "SELECT {} FROM {} \
+             JOIN (SELECT entity_pk AS __gom_search_pk, \
+                   CAST(ts_rank_cd(document_vector, q.query) AS DOUBLE PRECISION) AS __gom_search_score \
+                   FROM {} CROSS JOIN {}('{}', ?) q(query) \
+                   WHERE document_vector @@ q.query) s \
+             ON s.__gom_search_pk = {}::text WHERE 1 = 1",
             projection,
             B::DIALECT.render_identifier_path(T::TABLE_NAME),
             search_table,
-            B::DIALECT.render_identifier(T::PRIMARY_KEY),
             function,
-            index.language.replace('\'', "''")
+            index.language.replace('\'', "''"),
+            self.entity_column(T::PRIMARY_KEY),
         );
         let mut values = vec![SqlValue::String(query_text)];
         self.append_filter_sql(&mut sql, &mut values);
         if !count_only {
-            sql.push_str(" ORDER BY __gom_search_score DESC");
+            sql.push_str(" ORDER BY s.__gom_search_score DESC");
             if !T::DEFAULT_SORT.trim().is_empty() {
                 sql.push_str(", ");
-                sql.push_str(T::DEFAULT_SORT);
+                sql.push_str(&qualify_search_sort(
+                    B::DIALECT,
+                    T::TABLE_NAME,
+                    T::column_names(),
+                    T::DEFAULT_SORT,
+                ));
             }
             for column in T::PRIMARY_KEYS {
                 if !crate::graphql::orm::sort_clause_mentions_column(T::DEFAULT_SORT, column) {
-                    sql.push_str(&format!(
-                        ", {} ASC",
-                        B::DIALECT.render_identifier_path(column)
-                    ));
+                    sql.push_str(&format!(", {} ASC", self.entity_column(column)));
                 }
             }
             let page = self
@@ -882,23 +884,22 @@ where
         let projection = if count_only {
             B::DIALECT.count_projection().to_string()
         } else {
-            format!(
-                "{}, bm25({}, 1.0, 0.7, 0.4, 0.1, 0.1) * -1.0 AS __gom_search_score",
-                T::column_names().join(", "),
-                fts_table
-            )
+            format!("{}, s.__gom_search_score", T::column_names().join(", "))
         };
+        // A derived table also hides FTS5's implicit `rank` column from
+        // entity projections, filters and relation subqueries.
         let mut sql = format!(
-            "SELECT {} \
-             FROM {} \
-             JOIN {} ON {}.entity_pk = CAST({} AS TEXT) \
-             WHERE {} MATCH ?",
+            "SELECT {} FROM {} \
+             JOIN (SELECT entity_pk AS __gom_search_pk, \
+                   bm25({}, 1.0, 0.7, 0.4, 0.1, 0.1) * -1.0 AS __gom_search_score \
+                   FROM {} WHERE {} MATCH ?) s \
+             ON s.__gom_search_pk = CAST({} AS TEXT) WHERE 1 = 1",
             projection,
             B::DIALECT.render_identifier_path(T::TABLE_NAME),
             fts_table,
             fts_table,
-            B::DIALECT.render_identifier(T::PRIMARY_KEY),
             fts_table,
+            self.entity_column(T::PRIMARY_KEY),
         );
         let mut values = vec![SqlValue::String(sqlite_fts_query(
             &self.search,
@@ -906,17 +907,19 @@ where
         ))];
         self.append_filter_sql(&mut sql, &mut values);
         if !count_only {
-            sql.push_str(" ORDER BY __gom_search_score DESC");
+            sql.push_str(" ORDER BY s.__gom_search_score DESC");
             if !T::DEFAULT_SORT.trim().is_empty() {
                 sql.push_str(", ");
-                sql.push_str(T::DEFAULT_SORT);
+                sql.push_str(&qualify_search_sort(
+                    B::DIALECT,
+                    T::TABLE_NAME,
+                    T::column_names(),
+                    T::DEFAULT_SORT,
+                ));
             }
             for column in T::PRIMARY_KEYS {
                 if !crate::graphql::orm::sort_clause_mentions_column(T::DEFAULT_SORT, column) {
-                    sql.push_str(&format!(
-                        ", {} ASC",
-                        B::DIALECT.render_identifier_path(column)
-                    ));
+                    sql.push_str(&format!(", {} ASC", self.entity_column(column)));
                 }
             }
             let page = self
@@ -927,6 +930,14 @@ where
             }
         }
         (sql, values)
+    }
+
+    fn entity_column(&self, column: &str) -> String {
+        format!(
+            "{}.{}",
+            B::DIALECT.render_identifier_path(T::TABLE_NAME),
+            B::DIALECT.render_identifier_path(column)
+        )
     }
 
     fn append_filter_sql(&self, sql: &mut String, values: &mut Vec<SqlValue>) {
@@ -1398,4 +1409,247 @@ fn current_epoch_seconds() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or(0)
+}
+
+// Default sorts are trusted SQL, including expressions. Qualify only known
+// column tokens, preserving literals, function names and existing paths.
+fn qualify_search_sort(
+    dialect: DatabaseBackend,
+    table: &str,
+    columns: &[&str],
+    sort: &str,
+) -> String {
+    let columns = columns
+        .iter()
+        .map(|column| {
+            column
+                .rsplit_once(" AS ")
+                .map_or(*column, |(_, alias)| alias)
+        })
+        .collect::<Vec<_>>();
+    let mut output = String::new();
+    let bytes = sort.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let start = i;
+        // Comments and PostgreSQL dollar strings are opaque trusted SQL.
+        if sort[i..].starts_with("--") {
+            i = sort[i..]
+                .find('\n')
+                .map_or(bytes.len(), |offset| i + offset);
+            output.push_str(&sort[start..i]);
+            continue;
+        }
+        if sort[i..].starts_with("/*") {
+            i += 2;
+            let mut depth = 1;
+            while i < bytes.len() && depth > 0 {
+                if sort[i..].starts_with("/*") {
+                    depth += 1;
+                    i += 2;
+                } else if sort[i..].starts_with("*/") {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    i += sort[i..].chars().next().unwrap().len_utf8();
+                }
+            }
+            output.push_str(&sort[start..i]);
+            continue;
+        }
+        if bytes[i] == b'$' {
+            let end = sort[i + 1..].find('$').map(|offset| i + 1 + offset);
+            if let Some(end) = end.filter(|end| {
+                bytes[i + 1..*end]
+                    .iter()
+                    .all(|c| c.is_ascii_alphanumeric() || *c == b'_')
+            }) {
+                let delimiter = &sort[i..=end];
+                if let Some(close) = sort[end + 1..].find(delimiter) {
+                    i = end + 1 + close + delimiter.len();
+                    output.push_str(&sort[start..i]);
+                    continue;
+                }
+            }
+        }
+        let delimiter = match bytes[i] {
+            b'\'' => Some(b'\''),
+            b'"' => Some(b'"'),
+            b'[' => Some(b']'),
+            b'`' => Some(b'`'),
+            _ => None,
+        };
+        if let Some(end) = delimiter {
+            let escape_string = end == b'\''
+                && dialect == DatabaseBackend::Postgres
+                && matches!(bytes.get(start.wrapping_sub(1)), Some(b'e' | b'E'));
+            i += 1;
+            while i < bytes.len() {
+                if escape_string && bytes[i] == b'\\' {
+                    i = (i + 2).min(bytes.len());
+                    continue;
+                }
+                if bytes[i] == end {
+                    i += 1;
+                    if bytes.get(i) != Some(&end) {
+                        break;
+                    }
+                }
+                i += 1;
+            }
+        } else if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' || bytes[i] >= 128 {
+            i += 1;
+            while i < bytes.len()
+                && (bytes[i].is_ascii_alphanumeric()
+                    || bytes[i] == b'_'
+                    || bytes[i] == b'$'
+                    || bytes[i] >= 128)
+            {
+                i += 1;
+            }
+        } else {
+            output.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+        let token = &sort[start..i];
+        let before = sort[..start].trim_end();
+        let after = sort[i..].trim_start();
+        let name = |identifier: &str| {
+            let resolved = super::dialect::postgres_resolved_identifier(identifier);
+            if dialect == DatabaseBackend::Postgres {
+                resolved
+            } else {
+                identifier
+                    .strip_prefix('[')
+                    .and_then(|s| s.strip_suffix(']'))
+                    .map(|s| s.replace("]]", "]"))
+                    .or_else(|| {
+                        identifier
+                            .strip_prefix('`')
+                            .and_then(|s| s.strip_suffix('`'))
+                            .map(|s| s.replace("``", "`"))
+                    })
+                    .unwrap_or(resolved)
+                    .to_ascii_lowercase()
+            }
+        };
+        let previous = before.split_whitespace().last().unwrap_or_default();
+        let keyword = delimiter.is_none()
+            && (dialect.render_identifier(token).as_ref() != token
+                || matches!(
+                    token.to_ascii_uppercase().as_str(),
+                    "ASC"
+                        | "DESC"
+                        | "NULLS"
+                        | "FIRST"
+                        | "LAST"
+                        | "CASE"
+                        | "WHEN"
+                        | "THEN"
+                        | "ELSE"
+                        | "END"
+                        | "COLLATE"
+                        | "AS"
+                        | "IS"
+                        | "NULL"
+                        | "TRUE"
+                        | "FALSE"
+                        | "NOT"
+                        | "AND"
+                        | "OR"
+                        | "BETWEEN"
+                        | "IN"
+                        | "LIKE"
+                        | "ILIKE"
+                        | "ESCAPE"
+                        | "DISTINCT"
+                        | "FILTER"
+                        | "OVER"
+                        | "PARTITION"
+                        | "BY"
+                        | "ROWS"
+                        | "RANGE"
+                        | "CURRENT"
+                        | "ROW"
+                        | "PRECEDING"
+                        | "FOLLOWING"
+                        | "UNBOUNDED"
+                ));
+        let literal_prefix = delimiter.is_none()
+            && matches!(
+                token.to_ascii_uppercase().as_str(),
+                "E" | "B" | "X" | "N" | "U"
+            )
+            && (after.starts_with('\'') || after.starts_with("&'"));
+        if !keyword
+            && !literal_prefix
+            && delimiter != Some(b'\'')
+            && !bytes
+                .get(start.wrapping_sub(1))
+                .is_some_and(|byte| byte.is_ascii_digit())
+            && !before.ends_with('.')
+            && !before.ends_with("::")
+            && !previous.eq_ignore_ascii_case("COLLATE")
+            && !previous.eq_ignore_ascii_case("AS")
+            && !after.starts_with('.')
+            && !after.starts_with('(')
+            && !after.starts_with("=>")
+            && !after.starts_with(":=")
+            && columns.iter().any(|column| name(column) == name(token))
+        {
+            output.push_str(&dialect.render_identifier_path(table));
+            output.push('.');
+            output.push_str(&dialect.render_identifier(token));
+        } else {
+            output.push_str(token);
+        }
+    }
+    output
+}
+
+#[cfg(test)]
+mod native_sort_tests {
+    use super::*;
+
+    #[test]
+    fn qualifies_sqlite_delimited_columns() {
+        assert_eq!(
+            qualify_search_sort(
+                DatabaseBackend::Sqlite,
+                "records",
+                &["rank"],
+                "[rank] ASC, `rank` DESC, \"rank\" ASC"
+            ),
+            "records.[rank] ASC, records.`rank` DESC, records.\"rank\" ASC"
+        );
+    }
+
+    #[test]
+    fn preserves_sort_keywords_comments_and_literals() {
+        assert_eq!(
+            qualify_search_sort(
+                DatabaseBackend::Postgres,
+                "records",
+                &["rank", "\"desc\""],
+                "rank DESC NULLS LAST /* rank */, CASE WHEN rank = 1 THEN $$rank$$ ELSE 'rank' END"
+            ),
+            "records.rank DESC NULLS LAST /* rank */, CASE WHEN records.rank = 1 THEN $$rank$$ ELSE 'rank' END"
+        );
+    }
+
+    #[test]
+    fn qualifies_sort_columns_without_rewriting_expressions_or_paths() {
+        let dialect = DatabaseBackend::Postgres;
+        let columns = ["rank", "title", "\"sort value\""];
+        assert_eq!(
+            qualify_search_sort(
+                dialect,
+                "app.order",
+                &columns,
+                "rank ASC, lower(title) DESC, \"sort value\" ASC, app.records.rank DESC, CASE WHEN title = 'rank' THEN rank ELSE 0 END"
+            ),
+            "app.\"order\".rank ASC, lower(app.\"order\".title) DESC, app.\"order\".\"sort value\" ASC, app.records.rank DESC, CASE WHEN app.\"order\".title = 'rank' THEN app.\"order\".rank ELSE 0 END"
+        );
+    }
 }
