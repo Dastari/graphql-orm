@@ -283,8 +283,55 @@ fn compacted_id() -> Uuid {
 
 struct MockObjectIndex;
 
+#[tokio::test]
+async fn incremental_index_without_export_derivation_fails_closed() {
+    struct LiveOnly;
+    #[async_trait]
+    impl BackupObjectIndex for LiveOnly {
+        async fn list_objects_for_full_backup(&self) -> Result<Vec<BackupObjectRef>, BackupError> {
+            Ok(vec![])
+        }
+        async fn list_objects_for_incremental_backup(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<BackupObjectRef>, BackupError> {
+            Ok(vec![])
+        }
+        async fn load_object(&self, _: &BackupObjectRef) -> Result<bytes::Bytes, BackupError> {
+            unreachable!()
+        }
+    }
+    let dir = TempDir::new().unwrap();
+    let repo = LocalBackupRepository::new(dir.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
+    let db = MockDatabase::with_incremental(sample_changes());
+    create_full_backup(&repo, &db, &MockObjectIndex, full_request())
+        .await
+        .unwrap();
+    let error = create_incremental_backup(&repo, &db, &LiveOnly, incremental_request(full_id()))
+        .await
+        .expect_err("incremental index must derive references from exported changes");
+    assert!(matches!(error, BackupError::UnsupportedOperation { .. }));
+}
+
 #[async_trait]
 impl BackupObjectIndex for MockObjectIndex {
+    async fn objects_from_incremental_export(
+        &self,
+        parent_snapshot_id: Uuid,
+        _changes: &[graphql_orm_backup::BackupChangeExport],
+    ) -> Result<Vec<BackupObjectRef>, BackupError> {
+        self.list_objects_for_incremental_backup(parent_snapshot_id)
+            .await
+    }
+
+    async fn objects_from_full_export(
+        &self,
+        _: &[graphql_orm_backup::BackupTableExport],
+    ) -> Result<Vec<BackupObjectRef>, BackupError> {
+        self.list_objects_for_full_backup().await
+    }
+
     async fn list_objects_for_full_backup(&self) -> Result<Vec<BackupObjectRef>, BackupError> {
         Ok(Vec::new())
     }
@@ -803,4 +850,5 @@ fn test_manifest_authenticator() -> graphql_orm_backup::ManifestAuthenticator {
     graphql_orm_backup::ManifestAuthenticator::new(
         graphql_orm_backup::ManifestKey::from_bytes(&[7; 32]).expect("test manifest key"),
     )
+    .with_repository_identity(uuid::Uuid::from_u128(1))
 }

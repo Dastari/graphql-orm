@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.133.0 to 0.137.0: smaller generated update code
+## 0.136.0 to 0.137.0: smaller generated update code
 
 Upgrade runtime and macros together. No action is needed: no schema, data,
 SDL, catalogue, generated Rust API or behaviour change.
@@ -19,6 +19,12 @@ SDL, catalogue, generated Rust API or behaviour change.
   private helper (`__gom_push_update_assignments`), and call it from every
   generated update path. Names starting with `__gom_` are reserved for
   generated code; do not call them.
+
+## 0.133.0 to 0.136.0: administrative backup and search reads
+
+Upgrade ORM and macros together; 0.136.0 is a placeholder pending sequential merges. PostgreSQL backup export, restore emptiness checks and search rebuild now fail for roles subject to RLS. `SET LOCAL row_security = off` refuses filtering; it does not bypass policies. Use a role exempt from RLS for administrative operations (superuser, `BYPASSRLS`, or an owner without forced RLS). A permissive policy does not qualify. No schema migration is required.
+
+Single-document search rebuild releases its guarded PostgreSQL read transaction before host row/field callbacks run, then opens the index write transaction. The callbacks authorize the exact fetched row used to build the document; the source may change before the later index write, as with the earlier rebuild behavior. Hosts can rebuild again after concurrent source updates.
 
 ## 0.132.0 to 0.133.0: reserved runtime table names
 

@@ -260,7 +260,7 @@ async fn prune_keeps_payloads_of_a_stored_manifest_that_was_not_listed() {
         .expect_err("a stored but unlisted manifest is not an orphan");
 
     assert!(
-        matches!(&error, BackupError::InvalidManifestChain { reason } if reason.contains("listing is incomplete")),
+        matches!(&error, BackupError::IncompleteRepositoryListing { reason } if reason.contains("listing is incomplete")),
         "unexpected error: {error:?}"
     );
     assert_eq!(all_blobs(&repository.inner).await, before);
@@ -1089,7 +1089,14 @@ async fn full_backup_enforces_the_decoded_payload_limit_at_the_restore_boundary(
     .await
     .expect_err("one byte over");
     assert_capacity(&error, BackupCapacityLimitKind::DecodedPayload, exact - 1);
-    assert!(all_blobs(&limited).await.is_empty(), "nothing written");
+    assert_eq!(
+        all_blobs(&limited).await,
+        vec![(
+            graphql_orm_backup::REPOSITORY_ID_KEY.to_string(),
+            Bytes::from(Uuid::from_u128(1).to_string()),
+        )],
+        "only identity enrollment may precede payload limits"
+    );
 
     let fits = repository(&temp).with_capacity_limits(BackupCapacityLimits {
         decompressed_bytes: BackupByteLimit::Bytes(exact),
@@ -1120,7 +1127,14 @@ async fn full_backup_enforces_the_stage_limit_across_tables() {
     .await
     .expect_err("aggregate over");
     assert_capacity(&error, BackupCapacityLimitKind::Stage, total - 1);
-    assert!(all_blobs(&limited).await.is_empty(), "nothing written");
+    assert_eq!(
+        all_blobs(&limited).await,
+        vec![(
+            graphql_orm_backup::REPOSITORY_ID_KEY.to_string(),
+            Bytes::from(Uuid::from_u128(1).to_string()),
+        )],
+        "only identity enrollment may precede payload limits"
+    );
 
     let fits = repository(&temp).with_capacity_limits(BackupCapacityLimits {
         stage_bytes: BackupByteLimit::Bytes(total),
@@ -1173,9 +1187,13 @@ async fn backup_and_restore_enforce_the_same_object_limit() {
     .await
     .expect_err("declared size over");
     assert_capacity(&error, BackupCapacityLimitKind::Object, 4);
-    assert!(
-        all_blobs(&limited).await.is_empty(),
-        "refused before writing"
+    assert_eq!(
+        all_blobs(&limited).await,
+        vec![(
+            graphql_orm_backup::REPOSITORY_ID_KEY.to_string(),
+            Bytes::from(Uuid::from_u128(1).to_string()),
+        )],
+        "only identity enrollment may precede payload limits"
     );
     assert_eq!(declared.loads(), 0);
 
@@ -1272,9 +1290,10 @@ async fn compaction_enforces_the_stage_limit_of_its_synthetic_full() {
 // ---------------------------------------------------------------------------
 
 fn repository(temp: &TempDir) -> LocalBackupRepository {
-    LocalBackupRepository::new(temp.path()).with_manifest_authenticator(ManifestAuthenticator::new(
-        ManifestKey::from_bytes(&[7; 32]).expect("test manifest key"),
-    ))
+    LocalBackupRepository::new(temp.path()).with_manifest_authenticator(
+        ManifestAuthenticator::new(ManifestKey::from_bytes(&[7; 32]).expect("test manifest key"))
+            .with_repository_identity(uuid::Uuid::from_u128(1)),
+    )
 }
 
 fn id(n: u8) -> Uuid {
@@ -1644,6 +1663,22 @@ impl Objects {
 
 #[async_trait]
 impl BackupObjectIndex for Objects {
+    async fn objects_from_incremental_export(
+        &self,
+        parent_snapshot_id: Uuid,
+        _changes: &[graphql_orm_backup::BackupChangeExport],
+    ) -> Result<Vec<BackupObjectRef>, BackupError> {
+        self.list_objects_for_incremental_backup(parent_snapshot_id)
+            .await
+    }
+
+    async fn objects_from_full_export(
+        &self,
+        _: &[graphql_orm_backup::BackupTableExport],
+    ) -> Result<Vec<BackupObjectRef>, BackupError> {
+        self.list_objects_for_full_backup().await
+    }
+
     async fn list_objects_for_full_backup(&self) -> Result<Vec<BackupObjectRef>, BackupError> {
         Ok(self
             .objects

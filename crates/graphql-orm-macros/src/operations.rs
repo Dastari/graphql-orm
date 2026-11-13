@@ -5888,6 +5888,23 @@ fn generate_graphql_operations_unfiltered(
     } else {
         quote! {}
     };
+    let rebuild_rls_guard = if backend == BackendKind::Postgres {
+        quote! { hook_ctx.execute("SET LOCAL row_security = off", &[]).await?; }
+    } else {
+        quote! {}
+    };
+    let rebuild_document_read = if backend == BackendKind::Postgres {
+        quote! {
+            let mut read_tx = db.pool().begin().await?;
+            ::graphql_orm::sqlx::query("SET LOCAL row_security = off")
+                .execute(&mut *read_tx).await?;
+            let entity = query.fetch_one_on(&mut *read_tx).await?;
+            read_tx.commit().await?;
+            entity
+        }
+    } else {
+        quote! { query.fetch_one(db).await? }
+    };
     let search_rebuild_methods = if has_search
         && backend != BackendKind::Mssql
         && !schema_policy_read_only
@@ -5903,13 +5920,14 @@ fn generate_graphql_operations_unfiltered(
                 if !index.enabled {
                     return Ok(());
                 }
-                let rows = ::graphql_orm::graphql::orm::EntityQuery::<Self, #backend_marker>::new()
-                    .fetch_all(db)
-                    .await?;
                 let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin(
                     db,
                     ::graphql_orm::graphql::orm::TransactionMode::Default,
                 ).await?;
+                #rebuild_rls_guard
+                let rows = ::graphql_orm::graphql::orm::EntityQuery::<Self, #backend_marker>::new()
+                    .fetch_all_in_transaction(&mut hook_ctx)
+                    .await?;
                 for entity in &rows {
                     let document = <Self as ::graphql_orm::graphql::orm::SearchableEntity>::search_document(entity);
                     ::graphql_orm::graphql::orm::upsert_search_document_on::<#backend_marker>(
@@ -5932,14 +5950,42 @@ fn generate_graphql_operations_unfiltered(
                 if !index.enabled {
                     return Ok(());
                 }
-                let Some(entity) = Self::find_by_key(db, id).await? else {
+                db.ensure_entity_access(None, #entity_name_lit,
+                    <Self as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
+                    ::graphql_orm::graphql::orm::EntityAccessKind::Read,
+                    ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
+                ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
+                let query = ::graphql_orm::graphql::orm::with_repository_read_visibility(
+                    db,
+                    ::graphql_orm::graphql::orm::EntityQuery::<Self, #backend_marker>::new()
+                        .where_values(&Self::__gom_key_where_clause(), Self::__gom_key_values(id)),
+                ).await?;
+                // The short guarded read finishes before host callbacks, which may
+                // query through a one-connection pool. They authorize the exact
+                // fetched row used for the document; the later index write is separate.
+                let entity = { #rebuild_document_read };
+                let Some(entity) = entity else {
                     return Ok(());
                 };
+                if !db.can_read_row(None, #entity_name_lit,
+                    <Self as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
+                    ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
+                    &entity as &(dyn ::std::any::Any + Send + Sync),
+                ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)? {
+                    return Ok(());
+                }
+                for field in <Self as ::graphql_orm::graphql::orm::Entity>::repository_field_policies() {
+                    db.ensure_repository_readable_field(None, #entity_name_lit,
+                        field.api_name, field.read_policy,
+                        Some(&entity as &(dyn ::std::any::Any + Send + Sync)),
+                    ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)?;
+                }
+                let document = <Self as ::graphql_orm::graphql::orm::SearchableEntity>::search_document(&entity);
                 let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin(
                     db,
                     ::graphql_orm::graphql::orm::TransactionMode::Default,
                 ).await?;
-                let document = <Self as ::graphql_orm::graphql::orm::SearchableEntity>::search_document(&entity);
+                #rebuild_rls_guard
                 ::graphql_orm::graphql::orm::upsert_search_document_on::<#backend_marker>(
                     &mut hook_ctx,
                     index,

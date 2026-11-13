@@ -15,6 +15,10 @@ per-field UPDATE assignment list once per entity instead of once per generated
 update path, which removes about 2.5% of the expanded code of a 15-field
 entity ([#677](https://github.com/Dastari/graphql-orm/issues/677)).
 
+Version 0.136.0 (placeholder) keeps runtime and macros aligned. PostgreSQL
+backup export and search rebuild fail when RLS would filter rows. Use a role
+exempt from RLS; see the [migration guide](../../MIGRATION.md).
+
 Version 0.133.0 stays aligned with ORM 0.133.0, which refuses reserved runtime
 schema table names and quotes PostgreSQL runtime literal defaults with escape
 strings. Generated code is unchanged. Upgrade ORM/macros together; see the

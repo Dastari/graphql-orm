@@ -288,13 +288,27 @@ impl GraphqlOrmBackupAdapter for OrmBackupAdapter {
     }
 
     async fn restore_target_is_empty(&self) -> Result<bool, BackupError> {
+        let mut tx = self
+            .database
+            .pool()
+            .begin()
+            .await
+            .map_err(database_error("begin target preflight"))?;
+        if graphql_orm::graphql::orm::current_backend()
+            == graphql_orm::graphql::orm::DatabaseBackend::Postgres
+        {
+            graphql_orm::sqlx::query("SET LOCAL row_security = off")
+                .execute(&mut *tx)
+                .await
+                .map_err(database_error("disable filtered target reads"))?;
+        }
         for descriptor in self.descriptors()? {
             let sql = format!(
                 "SELECT COUNT(*) AS row_count FROM {}",
                 quote_identifier(&descriptor.table_name)
             );
             let row = graphql_orm::sqlx::query(&sql)
-                .fetch_one(self.database.pool())
+                .fetch_one(&mut *tx)
                 .await
                 .map_err(database_error(&format!(
                     "count rows in table {}",
@@ -437,6 +451,8 @@ pub struct OrmObjectIndexColumns {
 /// blob stream at listing time, with checked byte counting and no whole-blob
 /// collection. Backup verifies recorded checksums against object bytes; recorded
 /// sizes are not independently verified and cannot constrain buffered allocation.
+/// Full backup instead derives references directly from the supplied exported
+/// rows and requires a recorded checksum; live listing backfill is not used.
 pub struct OrmBackupObjectIndex {
     database: Arc<Database>,
     entities: Vec<&'static EntityMetadata>,
@@ -521,6 +537,48 @@ impl BackupObjectIndex for OrmBackupObjectIndex {
     fn buffered_byte_limit(&self) -> BackupByteLimit {
         self.buffered_limit
     }
+    async fn objects_from_full_export(
+        &self,
+        tables: &[BackupTableExport],
+    ) -> Result<Vec<BackupObjectRef>, BackupError> {
+        let table = tables
+            .iter()
+            .find(|table| table.table_name == self.columns.table_name)
+            .ok_or_else(|| BackupError::Database {
+                message: format!(
+                    "object index table {} is absent from the full export",
+                    self.columns.table_name
+                ),
+            })?;
+        let mut objects = Vec::with_capacity(table.rows.len());
+        for row in &table.rows {
+            let row = orm_row_from_crate(row.clone())?;
+            // A missing or redacted checksum cannot establish that the live bytes
+            // belong to this snapshot. Require a recorded digest for full backup.
+            let digest = row_string(&row, &self.columns.sha256_hex_column)?.to_ascii_lowercase();
+            crate::manifest::validate_sha256_hex(&digest).map_err(|_| BackupError::Database {
+                message: format!(
+                    "object index column {}.{} requires a recorded SHA-256 digest",
+                    self.columns.table_name, self.columns.sha256_hex_column
+                ),
+            })?;
+            objects.push(BackupObjectRef {
+                object_id: row_uuid(&row, &self.columns.object_id_column)?,
+                storage_key: row_string(&row, &self.columns.storage_key_column)?,
+                sha256_hex: digest,
+                size_bytes: row_optional_i64(&row, &self.columns.size_bytes_column)
+                    .and_then(|size| u64::try_from(size).ok())
+                    .unwrap_or(0),
+                mime_type: self
+                    .columns
+                    .mime_type_column
+                    .as_ref()
+                    .and_then(|column| row_optional_string(&row, column)),
+            });
+        }
+        Ok(objects)
+    }
+
     async fn list_objects_for_full_backup(&self) -> Result<Vec<BackupObjectRef>, BackupError> {
         let descriptor = self.object_table_descriptor()?;
         let mut snapshot = self

@@ -137,22 +137,7 @@ async fn setup_pool() -> Result<TestPool, Box<dyn std::error::Error>> {
 
 #[cfg(feature = "orm-postgres")]
 async fn setup_pool() -> Result<TestPool, Box<dyn std::error::Error>> {
-    let database_url =
-        std::env::var("GRAPHQL_ORM_BACKUP_TEST_DATABASE_URL").map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "GRAPHQL_ORM_BACKUP_TEST_DATABASE_URL must name an owned disposable database",
-            )
-        })?;
-    let pool = graphql_orm::sqlx::PgPool::connect(&database_url).await?;
-    graphql_orm::sqlx::query(
-        "DROP TABLE IF EXISTS conformance_activity_events, conformance_identity_accounts CASCADE",
-    )
-    .execute(&pool)
-    .await?;
-    graphql_orm::sqlx::query("DROP TABLE IF EXISTS __graphql_orm_migrations")
-        .execute(&pool)
-        .await?;
+    let pool = owned_postgres::OwnedPostgres::pool("backup-conformance", 5).await?;
     Ok(pool)
 }
 
@@ -369,6 +354,16 @@ struct FixedObjectIndex {
 
 #[async_trait]
 impl BackupObjectIndex for FixedObjectIndex {
+    async fn objects_from_incremental_export(
+        &self, parent_snapshot_id: Uuid, _changes: &[graphql_orm_backup::BackupChangeExport],
+    ) -> Result<Vec<BackupObjectRef>, BackupError> {
+        self.list_objects_for_incremental_backup(parent_snapshot_id).await
+    }
+
+    async fn objects_from_full_export(&self, _: &[graphql_orm_backup::BackupTableExport]) -> Result<Vec<BackupObjectRef>, BackupError> {
+        self.list_objects_for_full_backup().await
+    }
+
     async fn list_objects_for_full_backup(&self) -> Result<Vec<BackupObjectRef>, BackupError> {
         Ok(vec![self.object.clone()])
     }
@@ -410,7 +405,7 @@ impl RestoreObjectSink for RecordingObjectSink {
 #[tokio::test]
 #[cfg_attr(
     feature = "orm-postgres",
-    ignore = "requires GRAPHQL_ORM_BACKUP_TEST_DATABASE_URL for an owned disposable database"
+    ignore = "requires test-owned PostgreSQL container"
 )]
 async fn private_modules_round_trip_through_graphql_orm_016(
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -529,5 +524,5 @@ async fn private_modules_round_trip_through_graphql_orm_016(
 fn test_manifest_authenticator() -> graphql_orm_backup::ManifestAuthenticator {
     graphql_orm_backup::ManifestAuthenticator::new(
         graphql_orm_backup::ManifestKey::from_bytes(&[7; 32]).expect("test manifest key"),
-    )
+    ).with_repository_identity(uuid::Uuid::from_u128(1))
 }
