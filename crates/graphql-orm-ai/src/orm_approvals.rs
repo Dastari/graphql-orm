@@ -1369,27 +1369,30 @@ impl OrmAiApprovalService {
                         {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }
-                        if next_state == "approved" {
-                            // An approval is decided for one waiting run. Once the
-                            // run has left its wait it can never be resumed, so an
-                            // approval decision would only strand the approved
-                            // claim scan.
-                            let call = tx
-                                .find_by_id::<AiToolCallRecord>(&current.tool_call_id)
-                                .await
-                                .map_err(OrmPublicError::from)?
-                                .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
-                            let run = tx
-                                .find_by_id::<AiRunRecord>(&call.run_id)
-                                .await
-                                .map_err(OrmPublicError::from)?
-                                .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
-                            if call.approval_id != Some(current.id)
-                                || run.session_id != current.session_id
-                                || run.state != crate::AiRunState::WaitingApproval.as_str()
-                            {
-                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                            }
+                        // An approval is decided for one waiting run. Once the
+                        // run has left its wait no decision can take effect, so
+                        // every decision is refused with a stable code rather
+                        // than committing a change nothing will act on.
+                        let call = tx
+                            .find_by_id::<AiToolCallRecord>(&current.tool_call_id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                        let run = tx
+                            .find_by_id::<AiRunRecord>(&call.run_id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                        if call.approval_id != Some(current.id)
+                            || run.session_id != current.session_id
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        if run.state != crate::AiRunState::WaitingApproval.as_str() {
+                            return Err(OrmPublicError::with_message(
+                                OrmErrorCode::InvalidInput,
+                                crate::AI_APPROVAL_RUN_NOT_WAITING,
+                            ));
                         }
                         let session = tx
                             .find_by_id::<AiSessionRecord>(&current.session_id)
@@ -3736,6 +3739,207 @@ mod tests {
         assert!(call.completed_at.is_none());
     }
 
+    struct AllowSessions;
+
+    #[async_trait]
+    impl crate::AiAccessPolicy for AllowSessions {
+        async fn can_access_scope(
+            &self,
+            _principal: &AuthPrincipal,
+            _scope: &AiScope,
+            _action: crate::AiSessionAction,
+        ) -> crate::AiAccessDecision {
+            crate::AiAccessDecision::allow("approval-exit-test", "v1")
+        }
+
+        async fn can_access_session(
+            &self,
+            _principal: &AuthPrincipal,
+            _session_id: crate::AiSessionId,
+            _action: crate::AiSessionAction,
+        ) -> crate::AiAccessDecision {
+            crate::AiAccessDecision::allow("approval-exit-test", "v1")
+        }
+    }
+
+    /// Adds a second call of the same run waiting on its own pending approval.
+    async fn add_second_waiting_approval(
+        fixture: &Fixture,
+        requested: &AiRequestedApproval,
+        first_call: AiToolCallId,
+    ) -> Uuid {
+        let call = AiToolCallRecord::find_by_id(&fixture.database, &first_call.0)
+            .await
+            .unwrap()
+            .unwrap();
+        let approval = AiApprovalRecord::find_by_id(&fixture.database, &requested.approval_id().0)
+            .await
+            .unwrap()
+            .unwrap();
+        let call_id = Uuid::new_v4();
+        let approval_id = Uuid::new_v4();
+        AiToolCallRecord::insert(
+            &fixture.database,
+            crate::persistence::CreateAiToolCallRecordInput {
+                id: call_id,
+                run_id: call.run_id,
+                provider_call_key: format!("second-{call_id}"),
+                provider_call_id: format!("second-{call_id}"),
+                provider_kind: call.provider_kind.clone(),
+                provider_model: call.provider_model.clone(),
+                provider_response_id: call.provider_response_id.clone(),
+                budget_reservation_id: call.budget_reservation_id,
+                provider_turn_index: call.provider_turn_index,
+                tool_call_index: call.tool_call_index + 1,
+                tool_id: call.tool_id.clone(),
+                tool_fingerprint: call.tool_fingerprint.clone(),
+                execution_provenance: None,
+                protected_arguments: None,
+                argument_hash: call.argument_hash.clone(),
+                protected_result: None,
+                protected_result_source: None,
+                payload_purged_at: None,
+                risk: call.risk.clone(),
+                authorization_code: None,
+                authorization_policy_version: None,
+                authorization_state_digest: None,
+                disclosure_schema_fingerprint: None,
+                result_classification: None,
+                result_egress_decision_id: None,
+                result_egress_manifest_hash: None,
+                application_audit_ref: None,
+                approval_id: Some(approval_id),
+                idempotency_key: None,
+                correlation_id: None,
+                causation_id: None,
+                delegation_reference: None,
+                lease_generation: call.lease_generation,
+                state: "waiting_approval".to_owned(),
+                completed_at: None,
+            },
+        )
+        .await
+        .expect("second waiting call should insert");
+        AiApprovalRecord::insert(
+            &fixture.database,
+            crate::persistence::CreateAiApprovalRecordInput {
+                id: approval_id,
+                tool_call_id: call_id,
+                session_id: approval.session_id,
+                principal_subject: approval.principal_subject.clone(),
+                principal_reference_fingerprint: approval.principal_reference_fingerprint.clone(),
+                delegated_actor_subject: None,
+                delegation_reference: None,
+                argument_hash: approval.argument_hash.clone(),
+                tool_fingerprint: approval.tool_fingerprint.clone(),
+                binding_hash: approval.binding_hash.clone(),
+                execution_target_id: approval.execution_target_id.clone(),
+                target_schema_fingerprint: approval.target_schema_fingerprint.clone(),
+                operation_name: approval.operation_name.clone(),
+                operation_document_hash: approval.operation_document_hash.clone(),
+                result_projection_fingerprint: approval.result_projection_fingerprint.clone(),
+                disclosure_schema_fingerprint: approval.disclosure_schema_fingerprint.clone(),
+                policy_version: approval.policy_version.clone(),
+                authorization_state_digest: approval.authorization_state_digest.clone(),
+                protected_resource_bindings: None,
+                protected_action_preview: None,
+                payload_purged_at: None,
+                action_preview_hash: approval.action_preview_hash.clone(),
+                state: "pending".to_owned(),
+                recent_mfa_required: false,
+                approver_subject: None,
+                expires_at: approval.expires_at,
+                decided_at: None,
+                maximum_uses: 1,
+                consumed_uses: 0,
+                consumed_at: None,
+            },
+        )
+        .await
+        .expect("second pending approval should insert");
+        approval_id
+    }
+
+    #[tokio::test]
+    async fn every_exit_from_an_approval_wait_closes_all_open_approvals_of_the_run() {
+        for exit in ["finish_failed", "two_waiting_calls", "cancel", "lease_loss"] {
+            let fixture = fixture().await;
+            let (requested, tool_call_id) =
+                request_wait(&fixture, fixture.now + Duration::hours(3)).await;
+            let run_id = requested.lease().run_id().0;
+            let mut approvals = vec![requested.approval_id().0];
+            if exit == "two_waiting_calls" {
+                approvals
+                    .push(add_second_waiting_approval(&fixture, &requested, tool_call_id).await);
+            }
+            match exit {
+                "finish_failed" | "two_waiting_calls" => fixture
+                    .run_service
+                    .finish(
+                        requested.lease(),
+                        crate::AiRunCompletion::new(
+                            crate::AiRunState::Failed,
+                            "provider_failed",
+                            Some("provider_failed".to_owned()),
+                            None,
+                        )
+                        .expect("completion should validate"),
+                    )
+                    .await
+                    .expect("a waiting run should finish as failed"),
+                "cancel" => {
+                    let cancellation = crate::OrmAiRunCancellationService::new(
+                        fixture.database.clone(),
+                        Arc::new(AllowSessions),
+                        Arc::new(Protection(fixture.scope.clone())),
+                        Arc::new(crate::DatabaseManagedContentProtector),
+                        Arc::new(Resolver {
+                            principal: fixture.principal.clone(),
+                            clock: fixture.clock.clone(),
+                        }),
+                        fixture.clock.clone(),
+                        crate::AiRunCancellationLimits::default(),
+                        Arc::new(crate::AiRunCancellationHub::default()),
+                    );
+                    crate::AiRunCancellationService::request_cancellation(
+                        &cancellation,
+                        &fixture.principal,
+                        crate::CancelAiRunInput {
+                            session_id: requested.lease().session_id().0,
+                            run_id,
+                            client_request_id: Uuid::new_v4(),
+                        },
+                    )
+                    .await
+                    .expect("the owner should cancel a waiting run");
+                }
+                _ => {
+                    // The waiting attempt's lease is lost while it runs again.
+                    force_run_state(&fixture, run_id, "running").await;
+                    fixture.clock.advance_seconds(2 * 3_600);
+                    let report = fixture
+                        .run_service
+                        .recover_expired_leases()
+                        .await
+                        .expect("recovery should succeed");
+                    assert_eq!(report.recovery_required, 1, "{report:?}");
+                }
+            }
+            for approval_id in approvals {
+                let approval = AiApprovalRecord::find_by_id(&fixture.database, &approval_id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(
+                    !matches!(approval.state.as_str(), "pending" | "approved"),
+                    "exit={exit} left approval {}",
+                    approval.state
+                );
+                assert_eq!(approval.consumed_uses, 0);
+            }
+        }
+    }
+
     async fn force_run_state(fixture: &Fixture, run_id: Uuid, state: &'static str) {
         fixture
             .database
@@ -3771,20 +3975,27 @@ mod tests {
             .await
             .expect("approval read should succeed")
             .expect("approval should remain visible");
-        assert!(matches!(
-            fixture
+        for decision in [AiApprovalDecision::Approve, AiApprovalDecision::Deny] {
+            let refused = fixture
                 .approval_service
                 .decide_approval(
                     &fixture.principal,
                     DecideAiApprovalInput {
                         id: view.id,
-                        decision: AiApprovalDecision::Approve,
+                        decision,
                         expected_version: view.row_version,
                     },
                 )
-                .await,
-            Err(AiError::Conflict)
-        ));
+                .await;
+            assert!(
+                matches!(
+                    &refused,
+                    Err(AiError::InvalidInput(message))
+                        if message == crate::AI_APPROVAL_RUN_NOT_WAITING
+                ),
+                "{refused:?}"
+            );
+        }
 
         // An approval already approved before its run closed must not fail
         // every later approved claim.

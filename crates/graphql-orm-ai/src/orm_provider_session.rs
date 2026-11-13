@@ -200,6 +200,9 @@ mod service {
         clock: Arc<dyn Clock>,
         limits: AiProviderSessionLimits,
         maximum_principal_age: Duration,
+        /// Process-local resume offset for the parked-wait fallback scan,
+        /// whose terminal-run readiness only a per-row read can prove.
+        parked_scan_offset: Arc<std::sync::Mutex<usize>>,
     }
 
     impl OrmAiProviderSessionService {
@@ -237,6 +240,7 @@ mod service {
                 clock,
                 limits,
                 maximum_principal_age,
+                parked_scan_offset: Arc::default(),
             })
         }
 
@@ -2337,6 +2341,11 @@ mod service {
             let limit = i64::try_from(self.limits.maximum_candidate_scan())
                 .map_err(|_| AiError::InvalidConfiguration("invalid cleanup limit".to_owned()))?;
             let maximum_retries = i64::from(self.limits.maximum_retries());
+            let parked_offset = self
+                .parked_scan_offset
+                .lock()
+                .map(|offset| *offset)
+                .unwrap_or_default();
             let record = self
                 .database
                 .transaction(TransactionMode::StateMachine, move |tx| {
@@ -2394,10 +2403,26 @@ mod service {
                                 provider_expires_at: Some(due()),
                                 ..Default::default()
                             },
-                            // A parked wait is also ready when its run closed,
-                            // which only a per-row read can prove.
+                            // Parked waits whose unconfirmed claim, wait, or
+                            // binding expiry has passed.
                             AiProviderSessionBindingRecordWhereInput {
                                 state: Some(state_is(AiProviderSessionState::ParkedWait)),
+                                claim_expires_at: Some(due()),
+                                ..Default::default()
+                            },
+                            AiProviderSessionBindingRecordWhereInput {
+                                state: Some(state_is(AiProviderSessionState::ParkedWait)),
+                                parked_expires_at: Some(due()),
+                                ..Default::default()
+                            },
+                            AiProviderSessionBindingRecordWhereInput {
+                                state: Some(state_is(AiProviderSessionState::ParkedWait)),
+                                absolute_expires_at: Some(due()),
+                                ..Default::default()
+                            },
+                            AiProviderSessionBindingRecordWhereInput {
+                                state: Some(state_is(AiProviderSessionState::ParkedWait)),
+                                provider_expires_at: Some(due()),
                                 ..Default::default()
                             },
                         ];
@@ -2412,12 +2437,50 @@ mod service {
                                 .fetch_all()
                                 .await
                                 .map_err(OrmPublicError::from)?;
-                            candidates.extend(rows.into_iter().filter(|row| seen.insert(row.id)));
+                            candidates.extend(
+                                rows.into_iter()
+                                    .filter(|row| seen.insert(row.id))
+                                    .map(|row| (row, false)),
+                            );
                         }
-                        for candidate in candidates {
-                            // A malformed row is left for operators; it must not
-                            // stop cleanup of every other binding.
+                        // A parked wait is also ready when its run closed,
+                        // which only a per-row read can prove. That page
+                        // resumes after the rows a previous call examined and
+                        // left unready, so they cannot hold the window.
+                        let mut fallback_offset = parked_offset;
+                        let fallback = loop {
+                            let rows = tx
+                                .query::<AiProviderSessionBindingRecord>()
+                                .filter(AiProviderSessionBindingRecordWhereInput {
+                                    state: Some(state_is(AiProviderSessionState::ParkedWait)),
+                                    ..Default::default()
+                                })
+                                .default_order()
+                                .offset(i64::try_from(fallback_offset).unwrap_or(i64::MAX))
+                                .internal_limit(limit)
+                                .fetch_all()
+                                .await
+                                .map_err(OrmPublicError::from)?;
+                            if rows.is_empty() && fallback_offset > 0 {
+                                fallback_offset = 0;
+                                continue;
+                            }
+                            break rows;
+                        };
+                        let fallback_rows = fallback.len();
+                        candidates.extend(
+                            fallback
+                                .into_iter()
+                                .filter(|row| seen.insert(row.id))
+                                .map(|row| (row, true)),
+                        );
+                        let mut fallback_remaining = 0usize;
+                        for (candidate, from_fallback) in candidates {
+                            // A malformed row is quarantined for operators and
+                            // audited, so it cannot stop cleanup of every
+                            // other binding or recur in later windows.
                             if validate_binding_record(&candidate).is_err() {
+                                quarantine_malformed_binding(tx, &candidate, now).await?;
                                 continue;
                             }
                             let state = AiProviderSessionState::from_persisted(&candidate.state)
@@ -2426,6 +2489,7 @@ mod service {
                                 && candidate.parked_confirmed_at.is_none()
                                 && reconcile_parked_confirmation(tx, &candidate, now).await?
                             {
+                                fallback_remaining += usize::from(from_fallback);
                                 continue;
                             }
                             let ready = match state {
@@ -2486,6 +2550,7 @@ mod service {
                                 | AiProviderSessionState::CleanupExhausted => false,
                             };
                             if !ready {
+                                fallback_remaining += usize::from(from_fallback);
                                 continue;
                             }
                             // Lease expiry consumes an attempt too: repeated worker death
@@ -2590,15 +2655,28 @@ mod service {
                                 .await
                                 .map_err(OrmPublicError::from)?;
                             if let ConditionalUpdateOutcome::Updated(updated) = outcome {
-                                return Ok(Some(updated));
+                                let next_offset = from_fallback
+                                    .then(|| fallback_offset.saturating_add(fallback_remaining));
+                                return Ok((Some(updated), next_offset));
                             }
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }
-                        Ok(None)
+                        let next_offset = if fallback_rows < limit as usize {
+                            0
+                        } else {
+                            fallback_offset.saturating_add(fallback_remaining)
+                        };
+                        Ok((None, Some(next_offset)))
                     })
                 })
                 .await
                 .map_err(map_transaction)?;
+            let (record, next_offset) = record;
+            if let (Some(next_offset), Ok(mut offset)) =
+                (next_offset, self.parked_scan_offset.lock())
+            {
+                *offset = next_offset;
+            }
             record.as_ref().map(cleanup_claim_from_record).transpose()
         }
 
@@ -2781,6 +2859,62 @@ mod service {
                 .await
                 .map_err(map_transaction)
         }
+    }
+
+    /// Moves a binding whose durable state fails validation to the terminal
+    /// `cleanup_exhausted` state with an audited safe reason, so operators see
+    /// it with other bindings that need manual provider cleanup and the
+    /// cleanup scan never examines it again.
+    async fn quarantine_malformed_binding(
+        tx: &mut MutationContext<'_, DefaultWriteBackend>,
+        candidate: &AiProviderSessionBindingRecord,
+        now: OffsetDateTime,
+    ) -> Result<(), OrmPublicError> {
+        const REASON: &str = "provider_session_state_invalid";
+        let outcome = tx
+            .compare_and_swap::<AiProviderSessionBindingRecord>(
+                &candidate.id,
+                candidate.row_version,
+                AiProviderSessionBindingRecordWhereInput {
+                    state: Some(StringFilter {
+                        eq: Some(candidate.state.clone()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                UpdateAiProviderSessionBindingRecordInput {
+                    state: Some(AiProviderSessionState::CleanupExhausted.as_str().to_owned()),
+                    last_run_id: Some(candidate.claimed_run_id.or(candidate.last_run_id)),
+                    claimed_run_id: Some(None),
+                    claimed_attempt_id: Some(None),
+                    claimed_run_lease_generation: Some(None),
+                    claim_owner: Some(None),
+                    claim_expires_at: Some(None),
+                    cleanup_owner: Some(None),
+                    cleanup_lease_expires_at: Some(None),
+                    cleanup_next_attempt_at: Some(None),
+                    cleanup_retry_count: Some(candidate.cleanup_retry_count.max(1)),
+                    cleanup_reason_code: Some(Some(REASON.to_owned())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(OrmPublicError::from)?;
+        if !matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
+            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+        }
+        append_audit(
+            tx,
+            "ai.provider_session.cleanup_quarantined",
+            candidate.id,
+            REASON,
+            candidate
+                .claimed_run_id
+                .or(candidate.last_run_id)
+                .unwrap_or(candidate.session_id),
+            now,
+        )
+        .await
     }
 
     fn cleanup_required_update(
@@ -5187,6 +5321,214 @@ mod service {
                 .expect("parked binding should scan")
                 .expect("a park past the binding's absolute expiry requires cleanup");
             assert_eq!(cleanup.binding_id(), fixture.binding_id);
+        }
+
+        /// A copy of `template` as a fresh binding for another session.
+        fn binding_like(
+            template: &AiProviderSessionBindingRecord,
+            id: Uuid,
+            state: AiProviderSessionState,
+        ) -> CreateAiProviderSessionBindingRecordInput {
+            let template = template.clone();
+            CreateAiProviderSessionBindingRecordInput {
+                id,
+                session_id: Uuid::new_v4(),
+                owner_principal_kind: template.owner_principal_kind,
+                owner_subject: template.owner_subject,
+                principal_reference: template.principal_reference,
+                scope_key: template.scope_key,
+                scope_kind: template.scope_kind,
+                scope_id: template.scope_id,
+                tenant_id: template.tenant_id,
+                provider_kind: template.provider_kind,
+                provider_profile_id: template.provider_profile_id,
+                provider_model: template.provider_model,
+                registration_fingerprint: template.registration_fingerprint,
+                protocol_version: template.protocol_version,
+                policy_fingerprint: template.policy_fingerprint,
+                cursor_kind: template.cursor_kind,
+                cursor_fingerprint: template.cursor_fingerprint,
+                installed_offering_fingerprint: None,
+                protected_cursor: template.protected_cursor,
+                through_message_sequence: 0,
+                transcript_fingerprint: template.transcript_fingerprint,
+                last_run_id: None,
+                last_assistant_message_id: None,
+                state: state.as_str().to_owned(),
+                claimed_run_id: None,
+                claimed_attempt_id: None,
+                claimed_run_lease_generation: None,
+                claim_owner: None,
+                claim_generation: 1,
+                claim_expires_at: None,
+                parked_wait_kind: None,
+                parked_wait_id: None,
+                park_generation: 0,
+                parked_source_checkpoint_id: None,
+                parked_source_checkpoint_fingerprint: None,
+                parked_checkpoint_id: None,
+                parked_checkpoint_fingerprint: None,
+                parked_continuation_fingerprint: None,
+                parked_confirmed_at: None,
+                parked_expires_at: None,
+                parked_reclaimed_at: None,
+                provider_expires_at: None,
+                idle_expires_at: template.idle_expires_at,
+                absolute_expires_at: template.absolute_expires_at,
+                cleanup_owner: None,
+                cleanup_generation: 0,
+                cleanup_lease_expires_at: None,
+                cleanup_retry_count: 0,
+                cleanup_next_attempt_at: None,
+                cleanup_reason_code: None,
+                provider_absence_observed_at: None,
+            }
+        }
+
+        /// A confirmed park of `run` that expires at `parked_expires_at`.
+        fn confirmed_park(
+            template: &AiProviderSessionBindingRecord,
+            id: Uuid,
+            run: &AiRunLease,
+            parked_expires_at: i64,
+        ) -> CreateAiProviderSessionBindingRecordInput {
+            let mut input = binding_like(template, id, AiProviderSessionState::ParkedWait);
+            input.claimed_run_id = Some(run.run_id().0);
+            input.claimed_attempt_id = Some(run.attempt_id());
+            input.claimed_run_lease_generation = Some(run.lease_generation());
+            input.park_generation = 1;
+            input.parked_wait_kind = Some("approval".to_owned());
+            input.parked_wait_id = Some(Uuid::new_v4());
+            input.parked_source_checkpoint_id = Some(Uuid::new_v4());
+            input.parked_source_checkpoint_fingerprint = Some("1".repeat(64));
+            input.parked_continuation_fingerprint = Some("2".repeat(64));
+            input.parked_checkpoint_id = Some(Uuid::new_v4());
+            input.parked_checkpoint_fingerprint = Some("3".repeat(64));
+            input.parked_confirmed_at = Some(parked_expires_at - 600);
+            input.parked_expires_at = Some(parked_expires_at);
+            input
+        }
+
+        #[tokio::test]
+        async fn unexpired_parks_cannot_hide_an_expired_park() {
+            let fixture = parked_wait_fixture().await;
+            let template =
+                AiProviderSessionBindingRecord::find_by_id(&fixture.database, &fixture.binding_id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            AiProviderSessionBindingRecord::delete_by_id(&fixture.database, &fixture.binding_id)
+                .await
+                .unwrap();
+            let now = fixture.clock.now().unix_timestamp();
+            // Parks of a live run that have not expired fill the window.
+            for index in 0..AiProviderSessionLimits::default().maximum_candidate_scan() {
+                AiProviderSessionBindingRecord::insert(
+                    &fixture.database,
+                    confirmed_park(
+                        &template,
+                        Uuid::from_u128(index as u128 + 1),
+                        &fixture.lease,
+                        now + 600,
+                    ),
+                )
+                .await
+                .unwrap();
+            }
+            let expired = Uuid::from_u128(u128::MAX);
+            AiProviderSessionBindingRecord::insert(
+                &fixture.database,
+                confirmed_park(&template, expired, &fixture.lease, now - 1),
+            )
+            .await
+            .unwrap();
+            let cleanup = fixture
+                .service
+                .claim_cleanup("parked-expiry-cleaner")
+                .await
+                .expect("cleanup scan should succeed")
+                .expect("the expired park must be claimed");
+            assert_eq!(cleanup.binding_id(), expired);
+        }
+
+        #[tokio::test]
+        async fn a_malformed_cleanup_row_is_quarantined_and_audited() {
+            let fixture = parked_wait_fixture().await;
+            let template =
+                AiProviderSessionBindingRecord::find_by_id(&fixture.database, &fixture.binding_id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            AiProviderSessionBindingRecord::delete_by_id(&fixture.database, &fixture.binding_id)
+                .await
+                .unwrap();
+            // A ready cleanup row that fails validation (no cursor) sorts
+            // ahead of a valid one.
+            let malformed = Uuid::from_u128(1);
+            let mut broken = binding_like(
+                &template,
+                malformed,
+                AiProviderSessionState::CleanupRequired,
+            );
+            broken.protected_cursor = None;
+            broken.cleanup_next_attempt_at = Some(0);
+            broken.cleanup_reason_code = Some("provider_session_expired".to_owned());
+            AiProviderSessionBindingRecord::insert(&fixture.database, broken)
+                .await
+                .unwrap();
+            let valid = Uuid::from_u128(2);
+            let mut ready = binding_like(&template, valid, AiProviderSessionState::CleanupRequired);
+            ready.cleanup_next_attempt_at = Some(0);
+            ready.cleanup_reason_code = Some("provider_session_expired".to_owned());
+            AiProviderSessionBindingRecord::insert(&fixture.database, ready)
+                .await
+                .unwrap();
+            let cleanup = fixture
+                .service
+                .claim_cleanup("malformed-row-cleaner")
+                .await
+                .expect("a malformed row must not fail the scan")
+                .expect("the valid row should be claimed");
+            assert_eq!(cleanup.binding_id(), valid);
+            let quarantined =
+                AiProviderSessionBindingRecord::find_by_id(&fixture.database, &malformed)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(
+                quarantined.state,
+                AiProviderSessionState::CleanupExhausted.as_str()
+            );
+            assert_eq!(
+                quarantined.cleanup_reason_code.as_deref(),
+                Some("provider_session_state_invalid")
+            );
+            let audits = fixture
+                .database
+                .transaction(TransactionMode::Default, |tx| {
+                    Box::pin(async move {
+                        tx.query::<AiAuditEventRecord>()
+                            .limit(100)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)
+                    })
+                })
+                .await
+                .unwrap();
+            assert!(audits.iter().any(|audit| {
+                audit.action == "ai.provider_session.cleanup_quarantined"
+                    && audit.resource_reference == malformed.to_string()
+            }));
+            // The quarantined row is never scanned again.
+            assert!(
+                fixture
+                    .service
+                    .claim_cleanup("malformed-row-cleaner")
+                    .await
+                    .expect("scan should succeed")
+                    .is_none()
+            );
         }
 
         #[tokio::test]

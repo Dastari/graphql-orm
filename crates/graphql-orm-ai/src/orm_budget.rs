@@ -410,6 +410,10 @@ impl OrmAiBudgetService {
         database
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
+                    // Usage and counters are runtime writes: they stay closed
+                    // while the recovery epoch is closed, including for a
+                    // cancelled attempt that settles after its lease ended.
+                    let live = crate::orm_runtime_recovery::require_live_epoch(tx).await?;
                     let record = tx
                         .find_by_id::<AiBudgetReservationRecord>(&reconciliation.reservation_id.0)
                         .await
@@ -450,6 +454,12 @@ impl OrmAiBudgetService {
                     let Some(run) = run else {
                         return Ok(Err(AiError::Conflict));
                     };
+                    // The attempt must have been leased under the current live
+                    // epoch. Cancellation relaxes only lease ownership, never
+                    // this binding.
+                    if run.recovery_epoch_id != Some(live) {
+                        return Ok(Err(AiError::Conflict));
+                    }
                     if let Err(error) = validate_reconciliation_fence(
                         &run,
                         &record,
@@ -2275,6 +2285,132 @@ mod tests {
         let counter = only_counter(&fixture.database).await;
         assert_eq!(counter.reserved_input_tokens, 0);
         assert_eq!(counter.committed_input_tokens, 40);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_attempt_cannot_reconcile_while_the_runtime_is_closed() {
+        for advance in [false, true] {
+            let fixture = fixture(100).await;
+            let run = seed_running_run(&fixture.database, &fixture.principal, fixture.now).await;
+            let reservation = fixture
+                .service
+                .reserve(
+                    &fixture.principal,
+                    request(run.0, run.1, run.2, 60, "cancelled-restore", fixture.now),
+                )
+                .await
+                .expect("reservation should succeed");
+            cancel_running_run(&fixture.database, run.1).await;
+            // A restore closes the runtime, or a successor epoch replaces the
+            // one the attempt was leased under.
+            if advance {
+                crate::orm_runtime_recovery::advance_test_epoch(&fixture.database).await;
+            } else {
+                crate::orm_runtime_recovery::close_test_epoch(&fixture.database).await;
+            }
+            let result = fixture
+                .service
+                .reconcile(
+                    &fixture.principal,
+                    AiBudgetReconciliation {
+                        reservation_id: reservation.id(),
+                        attempt_id: run.2,
+                        lease_generation: 1,
+                        actual: Some(AiBudgetAmounts {
+                            input_tokens: 40,
+                            output_tokens: 5,
+                            tool_units: 0,
+                            image_units: 0,
+                            cost_microunits: 80,
+                            runs: 1,
+                        }),
+                        cached_input_tokens: Some(0),
+                        outcome: AiBudgetReconciliationOutcome::Commit,
+                    },
+                )
+                .await;
+            if advance {
+                assert!(matches!(result, Err(AiError::Conflict)), "{result:?}");
+            } else {
+                assert!(
+                    matches!(result, Err(AiError::RuntimeNotReady)),
+                    "{result:?}"
+                );
+            }
+            let counter = only_counter(&fixture.database).await;
+            assert_eq!(counter.reserved_input_tokens, 60);
+            assert_eq!(counter.committed_input_tokens, 0);
+            assert!(usage_entries(&fixture.database).await.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn reservations_still_owned_cannot_hide_a_stranded_one_from_settlement() {
+        let fixture = fixture(1_000).await;
+        // The stranded reservation is the oldest; newer reservations sort
+        // first and are still owned by live attempts.
+        let stranded = seed_running_run(&fixture.database, &fixture.principal, fixture.now).await;
+        let stranded_reservation = fixture
+            .service
+            .reserve(
+                &fixture.principal,
+                request(
+                    stranded.0,
+                    stranded.1,
+                    stranded.2,
+                    60,
+                    "stranded",
+                    fixture.now,
+                ),
+            )
+            .await
+            .expect("reservation should succeed");
+        cancel_running_run(&fixture.database, stranded.1).await;
+        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+        for index in 0..2 {
+            let live = seed_running_run(&fixture.database, &fixture.principal, fixture.now).await;
+            fixture
+                .service
+                .reserve(
+                    &fixture.principal,
+                    request(
+                        live.0,
+                        live.1,
+                        live.2,
+                        60,
+                        &format!("owned-{index}"),
+                        fixture.now,
+                    ),
+                )
+                .await
+                .expect("reservation should succeed");
+        }
+        // One candidate per pass, after every reservation expired but while
+        // the owning leases are still live.
+        let runs = crate::OrmAiRunService::new(
+            fixture.database.clone(),
+            Arc::new(FixedClock::new(fixture.now + Duration::seconds(180))),
+            crate::AiRunServiceLimits::new(Duration::seconds(60), Duration::hours(1), 1, 2, 8)
+                .expect("run limits should validate"),
+        );
+        let mut settled = 0;
+        for _ in 0..3 {
+            settled += runs
+                .recover_expired_leases()
+                .await
+                .expect("recovery should succeed")
+                .budget_reservations_settled;
+        }
+        assert_eq!(settled, 1);
+        let record =
+            AiBudgetReservationRecord::find_by_id(&fixture.database, &stranded_reservation.id().0)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(record.state, "committed");
+        let counter = only_counter(&fixture.database).await;
+        assert_eq!(counter.reserved_input_tokens, 120);
+        assert_eq!(counter.committed_input_tokens, 60);
     }
 
     #[tokio::test]

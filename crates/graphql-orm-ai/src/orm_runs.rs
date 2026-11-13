@@ -418,6 +418,35 @@ pub struct OrmAiRunService {
     clock: Arc<dyn Clock>,
     limits: AiRunServiceLimits,
     cancellation_hub: Option<Arc<AiRunCancellationHub>>,
+    scan_cursors: Arc<std::sync::Mutex<MaintenanceScanCursors>>,
+}
+
+/// Process-local resume points for the bounded maintenance scans.
+///
+/// Each value is the offset, in the scan's stable order, of the first row the
+/// next pass reads. A pass advances it past the rows it examined that are
+/// still eligible (a recovery row whose transaction failed, a reservation
+/// still owned by a live attempt), so such rows cannot hold the window: every
+/// eligible row is reached within a bounded number of passes. A short page
+/// wraps the cursor to the start. Losing the cursor (a restart) only restarts
+/// the rotation.
+#[derive(Clone, Copy, Debug, Default)]
+struct MaintenanceScanCursors {
+    expiry_missing: usize,
+    expired: usize,
+    settlement: usize,
+}
+
+impl MaintenanceScanCursors {
+    /// Next offset after a page read at `offset` that returned `rows` rows of
+    /// which `remaining` are still eligible.
+    fn advance(offset: usize, rows: usize, limit: usize, remaining: usize) -> usize {
+        if rows < limit {
+            0
+        } else {
+            offset.saturating_add(remaining)
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -785,6 +814,7 @@ impl OrmAiRunService {
             clock,
             limits,
             cancellation_hub: None,
+            scan_cursors: Arc::default(),
         }
     }
 
@@ -1036,66 +1066,76 @@ impl OrmAiRunService {
         completion: AiRunCompletion,
     ) -> Result<(), AiError> {
         let now = canonical_second(self.clock.now());
-        let lease = lease.clone();
         retry_transaction(self.limits.maximum_transaction_retries, || {
-            let completion = completion.clone();
-            let lease = lease.clone();
-            self.database
-                .transaction(TransactionMode::StateMachine, move |tx| {
-                    Box::pin(async move {
-                        let current = load_and_validate_active_lease(tx, &lease, now).await?;
-                        let current_state = persisted_state(&current)?;
-                        if !current_state.can_transition_to(completion.final_state) {
-                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                        }
-                        let outcome = tx
-                            .compare_and_swap::<AiRunRecord>(
-                                &current.id,
-                                current.row_version,
-                                exact_state(&current.state),
-                                UpdateAiRunRecordInput {
-                                    state: Some(completion.final_state.as_str().to_owned()),
-                                    lease_owner: Some(None),
-                                    lease_expires_at: Some(None),
-                                    lease_heartbeat_at: Some(None),
-                                    next_attempt_at: Some(None),
-                                    error_code: Some(completion.error_code.clone()),
-                                    ..Default::default()
-                                },
-                            )
-                            .await
-                            .map_err(OrmPublicError::from)?;
-                        if !matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
-                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                        }
-                        // The event must classify from the value that lands on the
-                        // run row, because that is what the retry mutation will
-                        // later re-evaluate. Classifying from `outcome_code` would
-                        // let a completion with an outcome code but no error code
-                        // advertise a retry the mutation then refuses.
-                        let terminal_error_code = completion.error_code.clone();
-                        append_attempt_outcome(
-                            tx,
-                            &lease,
-                            completion.final_state,
-                            completion.outcome_code,
-                            completion.provider_response_id,
-                            now,
-                        )
-                        .await?;
-                        append_terminal_run_event(
-                            tx,
-                            &current,
-                            completion.final_state,
-                            terminal_error_code.as_deref(),
-                            now,
-                        )
-                        .await
-                    })
-                })
+            self.finish_once(lease.clone(), completion.clone(), now)
         })
         .await
         .map_err(map_transaction)
+    }
+
+    /// One attempt of [`Self::finish`]. Every attempt re-validates the exact
+    /// lease fence, so a retry after an attempt that committed but whose
+    /// acknowledgement was lost finds the run already closed and is refused
+    /// with `Conflict` instead of writing a second outcome.
+    fn finish_once(
+        &self,
+        lease: AiRunLease,
+        completion: AiRunCompletion,
+        now: OffsetDateTime,
+    ) -> impl std::future::Future<Output = Result<(), TransactionError>> + '_ {
+        self.database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let current = load_and_validate_active_lease(tx, &lease, now).await?;
+                    let current_state = persisted_state(&current)?;
+                    if !current_state.can_transition_to(completion.final_state) {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    let outcome = tx
+                        .compare_and_swap::<AiRunRecord>(
+                            &current.id,
+                            current.row_version,
+                            exact_state(&current.state),
+                            UpdateAiRunRecordInput {
+                                state: Some(completion.final_state.as_str().to_owned()),
+                                lease_owner: Some(None),
+                                lease_expires_at: Some(None),
+                                lease_heartbeat_at: Some(None),
+                                next_attempt_at: Some(None),
+                                error_code: Some(completion.error_code.clone()),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if !matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    // The event must classify from the value that lands on the
+                    // run row, because that is what the retry mutation will
+                    // later re-evaluate. Classifying from `outcome_code` would
+                    // let a completion with an outcome code but no error code
+                    // advertise a retry the mutation then refuses.
+                    let terminal_error_code = completion.error_code.clone();
+                    append_attempt_outcome(
+                        tx,
+                        &lease,
+                        completion.final_state,
+                        completion.outcome_code,
+                        completion.provider_response_id,
+                        now,
+                    )
+                    .await?;
+                    append_terminal_run_event(
+                        tx,
+                        &current,
+                        completion.final_state,
+                        terminal_error_code.as_deref(),
+                        now,
+                    )
+                    .await
+                })
+            })
     }
 
     /// Schedules a bounded retry and relinquishes the current fence.
@@ -1223,89 +1263,124 @@ impl OrmAiRunService {
                 AiError::InvalidConfiguration("lease recovery time overflow".to_owned())
             })?
             .unix_timestamp();
-        let candidates = retry_transaction(limits.maximum_transaction_retries, || {
-            self.database
-                .transaction(TransactionMode::Default, move |tx| {
-                    Box::pin(async move {
-                        crate::orm_runtime_recovery::require_live_epoch(tx).await?;
-                        let mut candidates = Vec::new();
-                        for state in EXPIRED_LEASE_RECOVERY_STATES {
-                            // An active row without an expiry is malformed and
-                            // is quarantined instead of being skipped forever.
-                            for expiry in [
-                                Int64Filter {
-                                    is_null: Some(true),
-                                    ..Default::default()
-                                },
-                                Int64Filter {
-                                    lte: Some(cutoff),
-                                    ..Default::default()
-                                },
-                            ] {
-                                let mut rows = tx
-                                    .query::<AiRunRecord>()
-                                    .filter(AiRunRecordWhereInput {
-                                        state: Some(StringFilter {
-                                            eq: Some(state.as_str().to_owned()),
-                                            ..Default::default()
-                                        }),
-                                        lease_expires_at: Some(expiry),
-                                        ..Default::default()
-                                    })
-                                    .default_order()
-                                    .internal_limit(limits.maximum_candidate_scan as i64)
-                                    .fetch_all()
-                                    .await
-                                    .map_err(OrmPublicError::from)?;
-                                candidates.append(&mut rows);
-                            }
-                        }
-                        candidates.sort_by_key(|run| (run.created_at, run.id));
-                        candidates.dedup_by_key(|run| run.id);
-                        candidates.truncate(limits.maximum_candidate_scan);
-                        Ok(candidates.into_iter().map(|run| run.id).collect::<Vec<_>>())
-                    })
-                })
-        })
-        .await
-        .map_err(map_transaction)?;
-
+        let scan = limits.maximum_candidate_scan;
+        let cursors = self.scan_cursor_snapshot();
         let mut report = AiRunRecoveryReport::default();
-        for run_id in candidates {
-            let outcome = retry_transaction(limits.maximum_transaction_retries, || {
-                self.database
-                    .transaction(TransactionMode::StateMachine, move |tx| {
-                        Box::pin(async move {
-                            recover_expired_run(tx, run_id, now, cutoff, limits).await
+        let mut next = cursors;
+        // Two bounded pages: active rows with no expiry (malformed, so they
+        // are quarantined rather than skipped forever) and expired rows.
+        for missing_expiry in [true, false] {
+            let offset = if missing_expiry {
+                cursors.expiry_missing
+            } else {
+                cursors.expired
+            };
+            let (offset, candidates) =
+                retry_transaction(limits.maximum_transaction_retries, || {
+                    self.database
+                        .transaction(TransactionMode::Default, move |tx| {
+                            Box::pin(async move {
+                                crate::orm_runtime_recovery::require_live_epoch(tx).await?;
+                                let filter = || AiRunRecordWhereInput {
+                                    state: Some(StringFilter {
+                                        in_list: Some(
+                                            EXPIRED_LEASE_RECOVERY_STATES
+                                                .iter()
+                                                .map(|state| state.as_str().to_owned())
+                                                .collect(),
+                                        ),
+                                        ..Default::default()
+                                    }),
+                                    lease_expires_at: Some(if missing_expiry {
+                                        Int64Filter {
+                                            is_null: Some(true),
+                                            ..Default::default()
+                                        }
+                                    } else {
+                                        Int64Filter {
+                                            lte: Some(cutoff),
+                                            ..Default::default()
+                                        }
+                                    }),
+                                    ..Default::default()
+                                };
+                                let mut offset = offset;
+                                loop {
+                                    let rows = tx
+                                        .query::<AiRunRecord>()
+                                        .filter(filter())
+                                        .default_order()
+                                        .offset(i64::try_from(offset).unwrap_or(i64::MAX))
+                                        .internal_limit(scan as i64)
+                                        .fetch_all()
+                                        .await
+                                        .map_err(OrmPublicError::from)?;
+                                    if rows.is_empty() && offset > 0 {
+                                        offset = 0;
+                                        continue;
+                                    }
+                                    return Ok((
+                                        offset,
+                                        rows.into_iter().map(|run| run.id).collect::<Vec<_>>(),
+                                    ));
+                                }
+                            })
                         })
-                    })
-            })
-            .await;
-            match outcome {
-                Ok(ExpiredLeaseRecovery::Unchanged) => {}
-                Ok(ExpiredLeaseRecovery::Quarantined) => {
-                    report.quarantined = report.quarantined.saturating_add(1);
+                })
+                .await
+                .map_err(map_transaction)?;
+            let rows = candidates.len();
+            let mut remaining = 0usize;
+            for run_id in candidates {
+                let outcome = retry_transaction(limits.maximum_transaction_retries, || {
+                    self.database
+                        .transaction(TransactionMode::StateMachine, move |tx| {
+                            Box::pin(async move {
+                                recover_expired_run(tx, run_id, now, cutoff, limits).await
+                            })
+                        })
+                })
+                .await;
+                match outcome {
+                    Ok(ExpiredLeaseRecovery::Unchanged) => {}
+                    Ok(ExpiredLeaseRecovery::Quarantined) => {
+                        report.quarantined = report.quarantined.saturating_add(1);
+                    }
+                    Ok(ExpiredLeaseRecovery::Recovered(state, code)) => {
+                        let counter = match (state, code) {
+                            (AiRunState::Completed, _) => &mut report.completed,
+                            (AiRunState::Failed, _) => &mut report.failed,
+                            (AiRunState::RetryScheduled, "checkpoint_adoption_ready") => {
+                                &mut report.checkpoint_requeued
+                            }
+                            (AiRunState::RetryScheduled, _) => &mut report.requeued,
+                            _ => &mut report.recovery_required,
+                        };
+                        *counter = counter.saturating_add(1);
+                    }
+                    Err(error)
+                        if crate::orm_runtime_recovery::is_epoch_not_live(error.public_error()) =>
+                    {
+                        return Err(AiError::RuntimeNotReady);
+                    }
+                    Err(_) => {
+                        // The row stays eligible; the cursor moves past it.
+                        report.skipped = report.skipped.saturating_add(1);
+                        remaining += 1;
+                    }
                 }
-                Ok(ExpiredLeaseRecovery::Recovered(state, code)) => {
-                    let counter = match (state, code) {
-                        (AiRunState::Completed, _) => &mut report.completed,
-                        (AiRunState::Failed, _) => &mut report.failed,
-                        (AiRunState::RetryScheduled, "checkpoint_adoption_ready") => {
-                            &mut report.checkpoint_requeued
-                        }
-                        (AiRunState::RetryScheduled, _) => &mut report.requeued,
-                        _ => &mut report.recovery_required,
-                    };
-                    *counter = counter.saturating_add(1);
-                }
-                Err(error)
-                    if crate::orm_runtime_recovery::is_epoch_not_live(error.public_error()) =>
-                {
-                    return Err(AiError::RuntimeNotReady);
-                }
-                Err(_) => report.skipped = report.skipped.saturating_add(1),
+            }
+            let advanced = MaintenanceScanCursors::advance(offset, rows, scan, remaining);
+            if missing_expiry {
+                next.expiry_missing = advanced;
+            } else {
+                next.expired = advanced;
             }
         }
+        self.store_scan_cursors(|cursors| {
+            cursors.expiry_missing = next.expiry_missing;
+            cursors.expired = next.expired;
+        });
         self.settle_stranded_budget_reservations(now, &mut report)
             .await?;
         Ok(report)
@@ -1331,40 +1406,59 @@ impl OrmAiRunService {
         report: &mut AiRunRecoveryReport,
     ) -> Result<(), AiError> {
         let limits = self.limits;
+        let scan = limits.maximum_candidate_scan;
         let now_seconds = now.unix_timestamp();
-        let candidates = retry_transaction(limits.maximum_transaction_retries, || {
+        let offset = self.scan_cursor_snapshot().settlement;
+        let (offset, candidates) = retry_transaction(limits.maximum_transaction_retries, || {
             self.database
                 .transaction(TransactionMode::Default, move |tx| {
                     Box::pin(async move {
-                        let rows = tx
-                            .query::<AiBudgetReservationRecord>()
-                            .filter(AiBudgetReservationRecordWhereInput {
-                                state: Some(StringFilter {
-                                    in_list: Some(vec![
-                                        "reserved".to_owned(),
-                                        "uncertain".to_owned(),
-                                    ]),
+                        let mut offset = offset;
+                        loop {
+                            let rows = tx
+                                .query::<AiBudgetReservationRecord>()
+                                .filter(AiBudgetReservationRecordWhereInput {
+                                    state: Some(StringFilter {
+                                        in_list: Some(vec![
+                                            "reserved".to_owned(),
+                                            "uncertain".to_owned(),
+                                        ]),
+                                        ..Default::default()
+                                    }),
+                                    expires_at: timestamp_at_or_before(now_seconds),
                                     ..Default::default()
-                                }),
-                                expires_at: timestamp_at_or_before(now_seconds),
-                                ..Default::default()
-                            })
-                            .default_order()
-                            .internal_limit(limits.maximum_candidate_scan as i64)
-                            .fetch_all()
-                            .await
-                            .map_err(OrmPublicError::from)?;
-                        Ok(rows
-                            .into_iter()
-                            .filter(|reservation| reservation.expires_at <= now_seconds)
-                            .map(|reservation| reservation.id)
-                            .collect::<Vec<_>>())
+                                })
+                                .default_order()
+                                .offset(i64::try_from(offset).unwrap_or(i64::MAX))
+                                .internal_limit(scan as i64)
+                                .fetch_all()
+                                .await
+                                .map_err(OrmPublicError::from)?;
+                            if rows.is_empty() && offset > 0 {
+                                offset = 0;
+                                continue;
+                            }
+                            return Ok((
+                                offset,
+                                rows.into_iter()
+                                    .map(|reservation| {
+                                        (reservation.id, reservation.expires_at <= now_seconds)
+                                    })
+                                    .collect::<Vec<_>>(),
+                            ));
+                        }
                     })
                 })
         })
         .await
         .map_err(map_transaction)?;
-        for reservation_id in candidates {
+        let rows = candidates.len();
+        let mut remaining = 0usize;
+        for (reservation_id, expired) in candidates {
+            if !expired {
+                remaining += 1;
+                continue;
+            }
             let outcome = retry_transaction(limits.maximum_transaction_retries, || {
                 self.database
                     .transaction(TransactionMode::StateMachine, move |tx| {
@@ -1376,20 +1470,41 @@ impl OrmAiRunService {
             })
             .await;
             match outcome {
-                Ok(true) => {
+                Ok(ReservationSettlement::Settled) => {
                     report.budget_reservations_settled =
                         report.budget_reservations_settled.saturating_add(1);
                 }
-                Ok(false) => {}
+                Ok(ReservationSettlement::Gone) => {}
+                // Owned by a live attempt or a background submission: still
+                // in the scan set, so the cursor moves past it.
+                Ok(ReservationSettlement::Owned) => remaining += 1,
                 Err(error)
                     if crate::orm_runtime_recovery::is_epoch_not_live(error.public_error()) =>
                 {
                     return Err(AiError::RuntimeNotReady);
                 }
-                Err(_) => report.skipped = report.skipped.saturating_add(1),
+                Err(_) => {
+                    report.skipped = report.skipped.saturating_add(1);
+                    remaining += 1;
+                }
             }
         }
+        let advanced = MaintenanceScanCursors::advance(offset, rows, scan, remaining);
+        self.store_scan_cursors(|cursors| cursors.settlement = advanced);
         Ok(())
+    }
+
+    fn scan_cursor_snapshot(&self) -> MaintenanceScanCursors {
+        self.scan_cursors
+            .lock()
+            .map(|cursors| *cursors)
+            .unwrap_or_default()
+    }
+
+    fn store_scan_cursors(&self, update: impl FnOnce(&mut MaintenanceScanCursors)) {
+        if let Ok(mut cursors) = self.scan_cursors.lock() {
+            update(&mut cursors);
+        }
     }
 
     pub(crate) async fn append_provider_output(
@@ -5301,14 +5416,9 @@ impl OrmAiRunService {
                             approval_id,
                             tool_call_id,
                         } => {
-                            // The run leaves its wait for good, so its open
-                            // approval closes in the same transaction. A
-                            // decision can then never approve it, and an
-                            // approved row cannot strand the approved claim.
-                            if let Some(approval_id) = approval_id {
-                                expire_open_approval_of_closed_run(tx, approval_id, current.id)
-                                    .await?;
-                            }
+                            // Every open approval of the run closes in the terminal
+                            // event below, including any this reconciliation could not
+                            // identify.
                             (
                                 AiRunState::RecoveryRequired,
                                 approval_id,
@@ -6019,22 +6129,32 @@ async fn recover_expired_run(
 
 /// Commits one expired unresolved reservation whose attempt is closed.
 /// Returns `false` without writing when the reservation is still owned.
+/// Outcome of examining one stranded-reservation candidate.
+enum ReservationSettlement {
+    /// Committed at its reserved estimate.
+    Settled,
+    /// No longer unresolved or expired; it left the scan set.
+    Gone,
+    /// Still owned by a live attempt or a background submission.
+    Owned,
+}
+
 async fn settle_stranded_budget_reservation(
     tx: &mut MutationContext<'_, DefaultWriteBackend>,
     reservation_id: Uuid,
     now: OffsetDateTime,
-) -> Result<bool, OrmPublicError> {
+) -> Result<ReservationSettlement, OrmPublicError> {
     let Some(reservation) = tx
         .find_by_id::<AiBudgetReservationRecord>(&reservation_id)
         .await
         .map_err(OrmPublicError::from)?
     else {
-        return Ok(false);
+        return Ok(ReservationSettlement::Gone);
     };
     if !matches!(reservation.state.as_str(), "reserved" | "uncertain")
         || reservation.expires_at > now.unix_timestamp()
     {
-        return Ok(false);
+        return Ok(ReservationSettlement::Gone);
     }
     let Some(run) = tx
         .find_by_id::<AiRunRecord>(&reservation.run_id)
@@ -6050,7 +6170,7 @@ async fn settle_stranded_budget_reservation(
         && run.lease_generation == reservation.lease_generation
         && run.lease_expires_at.is_some();
     if attempt_live {
-        return Ok(false);
+        return Ok(ReservationSettlement::Owned);
     }
     let submissions = tx
         .query::<AiProviderBackgroundSubmissionRecord>()
@@ -6070,7 +6190,7 @@ async fn settle_stranded_budget_reservation(
             .iter()
             .any(|submission| submission.budget_reservation_id == reservation.id)
     {
-        return Ok(false);
+        return Ok(ReservationSettlement::Owned);
     }
     crate::orm_budget::commit_stranded_reservation(tx, &reservation, now).await?;
     tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
@@ -6087,7 +6207,7 @@ async fn settle_stranded_budget_reservation(
     })
     .await
     .map_err(OrmPublicError::from)?;
-    Ok(true)
+    Ok(ReservationSettlement::Settled)
 }
 
 /// Active states whose expired lease the recovery pass reconciles.
@@ -6112,52 +6232,71 @@ enum ApprovedHandoff {
     Expire(&'static str),
 }
 
-/// Expires a still-open approval whose run is closing in this transaction.
-async fn expire_open_approval_of_closed_run(
+/// Expires every still-open (`pending` or `approved`) approval of a run that
+/// is leaving its wait for good, in the caller's transaction.
+///
+/// Every terminal run transition calls this through
+/// [`append_terminal_run_event`], and cancellation calls it directly, so no
+/// exit from `WaitingApproval` can leave an approval that a later decision or
+/// approved claim would act on.
+pub(crate) async fn expire_open_approvals_of_run(
     tx: &mut MutationContext<'_, DefaultWriteBackend>,
-    approval_id: Uuid,
     run_id: Uuid,
 ) -> Result<(), OrmPublicError> {
-    let Some(approval) = tx
-        .find_by_id::<AiApprovalRecord>(&approval_id)
-        .await
-        .map_err(OrmPublicError::from)?
-    else {
-        return Ok(());
-    };
-    if !matches!(approval.state.as_str(), "pending" | "approved") {
-        return Ok(());
-    }
-    let Some(call) = tx
-        .find_by_id::<AiToolCallRecord>(&approval.tool_call_id)
-        .await
-        .map_err(OrmPublicError::from)?
-    else {
-        return Ok(());
-    };
-    if call.run_id != run_id || call.approval_id != Some(approval.id) {
-        return Ok(());
-    }
-    let expired = tx
-        .compare_and_swap::<AiApprovalRecord>(
-            &approval.id,
-            approval.row_version,
-            AiApprovalRecordWhereInput {
-                state: Some(StringFilter {
-                    eq: Some(approval.state.clone()),
-                    ..Default::default()
-                }),
+    const MAXIMUM_CALLS: usize = 4_096;
+    let calls = tx
+        .query::<AiToolCallRecord>()
+        .filter(AiToolCallRecordWhereInput {
+            run_id: Some(UuidFilter {
+                eq: Some(run_id),
                 ..Default::default()
-            },
-            UpdateAiApprovalRecordInput {
-                state: Some("expired".to_owned()),
-                ..Default::default()
-            },
-        )
+            }),
+            ..Default::default()
+        })
+        .internal_limit(MAXIMUM_CALLS as i64 + 1)
+        .fetch_all()
         .await
         .map_err(OrmPublicError::from)?;
-    if !matches!(expired, ConditionalUpdateOutcome::Updated(_)) {
-        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+    if calls.len() > MAXIMUM_CALLS {
+        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+    }
+    for call in calls {
+        let Some(approval_id) = call.approval_id else {
+            continue;
+        };
+        let Some(approval) = tx
+            .find_by_id::<AiApprovalRecord>(&approval_id)
+            .await
+            .map_err(OrmPublicError::from)?
+        else {
+            continue;
+        };
+        if approval.tool_call_id != call.id
+            || !matches!(approval.state.as_str(), "pending" | "approved")
+        {
+            continue;
+        }
+        let expired = tx
+            .compare_and_swap::<AiApprovalRecord>(
+                &approval.id,
+                approval.row_version,
+                AiApprovalRecordWhereInput {
+                    state: Some(StringFilter {
+                        eq: Some(approval.state.clone()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                UpdateAiApprovalRecordInput {
+                    state: Some("expired".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(OrmPublicError::from)?;
+        if !matches!(expired, ConditionalUpdateOutcome::Updated(_)) {
+            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+        }
     }
     Ok(())
 }
@@ -6809,6 +6948,7 @@ pub(crate) async fn append_terminal_run_event(
     now: OffsetDateTime,
 ) -> Result<(), OrmPublicError> {
     abandon_native_approval_candidates(tx, run.id, final_state, now.unix_timestamp()).await?;
+    expire_open_approvals_of_run(tx, run.id).await?;
     let terminal = AiRunTerminalEvent::from_run_state(final_state)
         .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InvalidInput))?;
     let principal_reference: PrincipalReference =
@@ -8238,6 +8378,131 @@ mod tests {
                 .requeued,
             1
         );
+    }
+
+    #[tokio::test]
+    async fn a_retry_after_a_lost_commit_acknowledgement_does_not_repeat_the_transition() {
+        let fixture = fixture().await;
+        let run_id = seed_queued(&fixture).await;
+        let lease = fixture
+            .service
+            .claim_next("worker-lost-ack")
+            .await
+            .expect("claim should succeed")
+            .expect("run should be eligible");
+        let lease = fixture
+            .service
+            .start(&lease)
+            .await
+            .expect("run should start");
+        let completion = AiRunCompletion::new(
+            AiRunState::Failed,
+            "provider_failed",
+            Some("provider_failed".to_owned()),
+            None,
+        )
+        .expect("completion should validate");
+        let now = canonical_second(fixture.clock.now());
+        let mut attempts = 0;
+        let result = retry_transaction(2, || {
+            attempts += 1;
+            let first = attempts == 1;
+            let attempt = fixture
+                .service
+                .finish_once(lease.clone(), completion.clone(), now);
+            async move {
+                let outcome = attempt.await;
+                if first {
+                    // The first attempt committed, but its acknowledgement
+                    // was lost and surfaced as a retryable failure.
+                    outcome?;
+                    return Err(TransactionError::Retryable(OrmPublicError::new(
+                        OrmErrorCode::ServiceUnavailable,
+                    )));
+                }
+                outcome
+            }
+        })
+        .await;
+        assert_eq!(attempts, 2, "the lost acknowledgement must be retried");
+        assert!(
+            matches!(result.map_err(map_transaction), Err(AiError::Conflict)),
+            "the retried transition must be refused by its fence"
+        );
+        assert_eq!(
+            run_record(&fixture, run_id).await.state,
+            AiRunState::Failed.as_str()
+        );
+        assert_eq!(attempt_outcomes(&fixture).await.len(), 1);
+        assert_eq!(session_events(&fixture).await.len(), 1);
+        assert_eq!(inbox_events(&fixture).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn recovery_moves_past_rows_that_fail_every_pass() {
+        let fixture = fixture().await;
+        let scan = fixture.service.limits.maximum_candidate_scan();
+        // A full window of the oldest expired rows whose recovery always
+        // fails: their sessions are gone, so the terminal event cannot write.
+        let mut broken = Vec::new();
+        for index in 0..scan {
+            let run = seed_queued_with_id(&fixture, Uuid::from_u128(index as u128 + 1)).await;
+            let lease = fixture
+                .service
+                .claim_next("worker-broken")
+                .await
+                .expect("claim should succeed")
+                .expect("run should be eligible");
+            fixture
+                .service
+                .start(&lease)
+                .await
+                .expect("run should start");
+            broken.push(run);
+        }
+        let healthy = seed_queued_with_id(&fixture, Uuid::from_u128(u128::MAX)).await;
+        let lease = fixture
+            .service
+            .claim_next("worker-healthy")
+            .await
+            .expect("claim should succeed")
+            .expect("run should be eligible");
+        fixture
+            .service
+            .start(&lease)
+            .await
+            .expect("run should start");
+        for run in &broken {
+            let session = run_record(&fixture, *run).await.session_id;
+            AiSessionRecord::delete_by_id(&fixture.database, &session)
+                .await
+                .expect("test session delete should succeed");
+        }
+        fixture.clock.advance_seconds(61);
+        let first = fixture
+            .service
+            .recover_expired_leases()
+            .await
+            .expect("failing rows must not fail the pass");
+        assert_eq!(first.skipped as usize, scan);
+        assert_eq!(first.recovery_required, 0);
+        let second = fixture
+            .service
+            .recover_expired_leases()
+            .await
+            .expect("the next pass should resume after the failing rows");
+        assert_eq!(second.recovery_required, 1, "{second:?}");
+        assert_eq!(
+            run_record(&fixture, healthy).await.state,
+            AiRunState::RecoveryRequired.as_str()
+        );
+        // The rotation wraps, so failing rows are retried on later passes.
+        let third = fixture
+            .service
+            .recover_expired_leases()
+            .await
+            .expect("the rotation should wrap");
+        assert_eq!(third.skipped as usize, scan);
     }
 
     #[tokio::test]

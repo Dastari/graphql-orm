@@ -697,7 +697,10 @@ unconfirmed park whose source claim expires, and a park whose binding reaches
 its absolute or provider expiry become cleanup candidates. `claim_cleanup`
 scans each readiness bucket separately, so unexpired bindings never hide a
 ready one, and taking over an expired claim or park records that run as the
-binding's last run. The
+binding's last run. A binding that fails validation is moved to
+`cleanup_exhausted` with `provider_session_state_invalid` and audited as
+`ai.provider_session.cleanup_quarantined`; alert on it like any other
+exhausted cleanup. The
 registered deletion service must still delete the exact old provider session
 or authoritatively prove absence. Expiry, local process death and restore are
 not absence proof. Portable restore continues to quarantine/redact provider

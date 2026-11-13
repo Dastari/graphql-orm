@@ -668,6 +668,9 @@ async fn cancel_active_tool_calls(
             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
         }
     }
+    // Approvals of calls in any other state close too: no exit from a wait
+    // may leave an approval that a later decision or claim would act on.
+    crate::orm_runs::expire_open_approvals_of_run(tx, run.id).await?;
     Ok(())
 }
 

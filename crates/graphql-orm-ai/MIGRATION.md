@@ -33,9 +33,13 @@ table, column or index, and no data migration is needed.
   runs `recover_expired_leases`; it must not exceed the lease TTL.
 - Behaviour changes hosts can observe: a malformed expired or queued run is
   closed as `RecoveryRequired` (`lease_recovery_state_invalid` or
-  `claim_state_invalid`) instead of failing the pass or claim; an approval is
-  expired when its run is closed for recovery, and approving one whose run is
-  no longer waiting returns `Conflict`; lease recovery commits the reserved
+  `claim_state_invalid`) instead of failing the pass or claim; every terminal
+  transition and cancellation expires the run's open approvals, and any
+  decision on an approval whose run is no longer waiting returns
+  `InvalidInput` with `AI_APPROVAL_RUN_NOT_WAITING` (match on that constant);
+  budget reconciliation requires the live recovery epoch, also for a
+  cancelled attempt; a provider-session binding that fails validation is
+  moved to `cleanup_exhausted` (`provider_session_state_invalid`) and audited; lease recovery commits the reserved
   estimate of an expired `reserved` or `uncertain` reservation whose attempt
   is closed; retention moves an idle retained provider thread to cleanup when
   it purges content the thread holds.
