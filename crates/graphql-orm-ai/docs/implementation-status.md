@@ -10,9 +10,8 @@ supersedes: []
 
 # Implementation Status
 
-Package paths and internal dependency selectors are generated in the
-[workspace inventory](../../../docs/reference/workspace-packages.md); versions
-are in each crate's `Cargo.toml` and the release manifest.
+Current package versions and dependency selectors are generated in the
+[workspace inventory](../../../docs/reference/workspace-packages.md).
 The AI schema module is `0.67.0`, including protected native approval candidates
 and optional trusted tool-call provenance. External `agql-auth` uses the published
 `v0.19.1` tag with its full resolved commit retained in `Cargo.lock`.
