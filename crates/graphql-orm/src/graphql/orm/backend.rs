@@ -230,6 +230,17 @@ pub trait IntrospectionBackend: OrmBackend {
 /// target validation can remain backend-generic.
 pub trait RlsIntrospectionBackend: OrmBackend {
     /// Return live table RLS flags and policies known to this backend.
+    ///
+    /// Tables are keyed by a flattened `schema_table` name (bare for
+    /// `public`), so `audit.logs` and `public.audit_logs` share a key, and
+    /// `FOR ALL` policies are omitted. Target validation does not use it: it
+    /// reads each table by the path the plan's SQL resolves, through
+    /// [`introspect_rls_target`](Self::introspect_rls_target) and
+    /// [`introspect_rls_enforcement`](Self::introspect_rls_enforcement).
+    #[deprecated(
+        since = "0.132.0",
+        note = "keys tables by flattened name and omits FOR ALL policies; use introspect_rls_target and introspect_rls_enforcement"
+    )]
     async fn introspect_rls(_pool: &Self::Pool) -> crate::Result<Vec<LiveRlsTable>> {
         Ok(Vec::new())
     }

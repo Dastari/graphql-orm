@@ -155,6 +155,11 @@ impl StaticDeleteBackend for SqliteBackend {
         })
     }
 }
+// The PostgreSQL gate runs inside the caller's write transaction. Its catalog
+// reads are pure: every catalog relation, function and operator is named with
+// its schema and nothing changes session or transaction state, so the reads
+// cannot alter the caller's transaction, including when the future is dropped
+// part way. No nested transaction is opened here.
 #[cfg(feature = "postgres")]
 impl StaticDeleteBackend for PostgresBackend {
     fn validate_delete_relations<'a>(
@@ -165,22 +170,7 @@ impl StaticDeleteBackend for PostgresBackend {
             // DELETE also visits inheritance/partition descendants, and rules
             // can execute unrelated writes. Only ordinary standalone heap
             // tables have the dependency semantics modeled by this planner.
-            let unsupported: bool = sqlx::query_scalar(
-                "SELECT EXISTS(
-                    SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-                    WHERE n.nspname=current_schema() AND c.relname=ANY($1)
-                      AND (c.relkind<>'r' OR c.relispartition
-                           OR EXISTS(SELECT 1 FROM pg_inherits i WHERE i.inhparent=c.oid OR i.inhrelid=c.oid)
-                           OR EXISTS(SELECT 1 FROM pg_rewrite r WHERE r.ev_class=c.oid AND r.rulename<>'_RETURN'))
-                )",
-            )
-            .bind(ownership.tables().collect::<Vec<_>>())
-            .fetch_one(tx.as_mut())
-            .await?;
-            if unsupported {
-                return Err(sqlx::Error::Protocol("Dependent delete refused".into()));
-            }
-            Ok(())
+            postgres_unsupported_delete_relations(tx.as_mut(), ownership).await
         })
     }
     fn dependencies<'a>(
@@ -200,8 +190,22 @@ impl StaticDeleteBackend for PostgresBackend {
                 .execute(tx.as_mut())
                 .await?;
             for table in ownership.tables() {
-                let same:Option<bool>=sqlx::query_scalar("SELECT to_regclass(quote_ident($1)) = to_regclass(quote_ident(current_schema()) || '.' || quote_ident($1))").bind(table).fetch_one(tx.as_mut()).await?;
-                if same != Some(true) {
+                // Each name must resolve, under the session's search_path, to
+                // the table of that name in the current schema. The query uses
+                // only schema-qualified functions and no operators.
+                let (bare, qualified): (
+                    Option<sqlx::postgres::types::Oid>,
+                    Option<sqlx::postgres::types::Oid>,
+                ) = sqlx::query_as(
+                    "SELECT pg_catalog.to_regclass(pg_catalog.quote_ident($1))::pg_catalog.oid,
+                            pg_catalog.to_regclass(pg_catalog.textcat(pg_catalog.textcat(
+                                pg_catalog.quote_ident(pg_catalog.current_schema()::pg_catalog.text), '.'),
+                                pg_catalog.quote_ident($1)))::pg_catalog.oid",
+                )
+                .bind(table)
+                .fetch_one(tx.as_mut())
+                .await?;
+                if bare.is_none() || bare != qualified {
                     return Err(sqlx::Error::Protocol("Dependent delete refused".into()));
                 }
             }
@@ -211,82 +215,194 @@ impl StaticDeleteBackend for PostgresBackend {
             sqlx::query("SET LOCAL row_security = off")
                 .execute(tx.as_mut())
                 .await?;
-            super::owned_foreign_keys::validate_postgres(tx.as_mut(), ownership)
-                .await
-                .map_err(|_| sqlx::Error::Protocol("Dependent delete refused".into()))?;
-            // Only native FK/unique/exclusion constraint triggers have modeled
-            // effects. User and extension trigger bodies are opaque. The ORM's
-            // own RLS search-document trigger only deletes from its search
-            // table, which holds no foreign keys or entity rows; it is exempt
-            // only when it fires normally, has the exact type, arguments and
-            // target, and calls the unmodified ORM function. The ORM's change
-            // journal trigger only appends to the journal, which likewise holds
-            // no foreign keys or entity rows; it is exempt only when it fires
-            // normally, has the exact type, and calls the unmodified recorder
-            // owned by the table owner.
-            let owned_tables = ownership
-                .tables()
-                .map(|table| table.to_string())
-                .collect::<Vec<_>>();
-            let owned_search_tables = owned_tables
-                .iter()
-                .map(|table| super::search::search_table_name(table))
-                .collect::<Vec<_>>();
-            let triggered:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_trigger tr JOIN pg_class t ON t.oid=tr.tgrelid JOIN pg_namespace n ON n.oid=t.relnamespace JOIN pg_proc p ON p.oid=tr.tgfoid JOIN pg_namespace pn ON pn.oid=p.pronamespace LEFT JOIN pg_constraint con ON con.oid=tr.tgconstraint WHERE n.nspname=current_schema() AND t.relname=ANY($1) AND NOT COALESCE(tr.tgisinternal AND pn.nspname='pg_catalog' AND con.contype IN ('f','u','x'),false) AND NOT (NOT tr.tgisinternal AND tr.tgname=$2 AND tr.tgenabled='O' AND tr.tgtype=$4 AND tr.tgnargs=4 AND pn.nspname='graphql_orm' AND p.proname=$3 AND p.pronargs=0 AND NOT p.prosecdef AND p.prosrc=$5 AND p.proconfig=ARRAY[$6]::text[] AND EXISTS (SELECT 1 FROM unnest($1::text[], $7::text[]) AS e(base, search) WHERE e.base=t.relname AND (string_to_array(encode(tr.tgargs,'escape'),'\\000'))[1]=current_schema() AND (string_to_array(encode(tr.tgargs,'escape'),'\\000'))[2]=e.search)) AND NOT (NOT tr.tgisinternal AND tr.tgname=$8 AND tr.tgenabled='O' AND tr.tgtype=$9 AND tr.tgqual IS NULL AND tr.tgnargs=7 AND pn.nspname='graphql_orm' AND p.proname=$10 AND p.pronargs=0 AND p.prosecdef AND p.proowner=t.relowner AND p.prosrc=$11 AND p.proconfig=ARRAY[$6]::text[]))").bind(&owned_tables).bind(super::rls::SEARCH_DELETE_TRIGGER).bind(super::rls::SEARCH_DELETE_FUNCTION).bind(i16::try_from(super::rls::SEARCH_DELETE_TRIGGER_TYPE).unwrap_or(0)).bind(super::rls::SEARCH_DELETE_FUNCTION_BODY).bind(super::rls::SEARCH_DELETE_FUNCTION_CONFIG).bind(&owned_search_tables).bind(super::rls::CHANGE_JOURNAL_TRIGGER).bind(i16::try_from(super::rls::CHANGE_JOURNAL_TRIGGER_TYPE).unwrap_or(0)).bind(super::rls::CHANGE_JOURNAL_FUNCTION).bind(super::rls::CHANGE_JOURNAL_FUNCTION_BODY).fetch_one(tx.as_mut()).await?;
-            if triggered {
-                return Err(sqlx::Error::Protocol("Dependent delete refused".into()));
-            }
-            // The planner and final no-referencer check use the child
-            // column's equality semantics; FK enforcement uses the parent's.
-            // Prove them identical before either lookup. Relation locks fence
-            // concurrent DDL; hook changes are revalidated before writes. Extension/
-            // domain equality and blank-padded char vs bound text are unmodeled.
-            let incompatible: bool = sqlx::query_scalar(
-                "SELECT EXISTS(
-                    SELECT 1 FROM pg_constraint con
-                    JOIN pg_class t ON t.oid=con.confrelid
-                    JOIN pg_namespace n ON n.oid=t.relnamespace
-                    CROSS JOIN LATERAL unnest(con.conkey,con.confkey) AS pair(child_att,parent_att)
-                    JOIN pg_attribute child ON child.attrelid=con.conrelid AND child.attnum=pair.child_att
-                    JOIN pg_attribute parent ON parent.attrelid=con.confrelid AND parent.attnum=pair.parent_att
-                    JOIN pg_type key_type ON key_type.oid=parent.atttypid
-                    JOIN pg_namespace type_ns ON type_ns.oid=key_type.typnamespace
-                    LEFT JOIN pg_collation cc ON cc.oid=child.attcollation
-                    LEFT JOIN pg_collation pc ON pc.oid=parent.attcollation
-                    WHERE con.contype='f' AND n.nspname=current_schema() AND t.relname=ANY($1)
-                    AND (child.atttypid<>parent.atttypid OR child.atttypmod<>parent.atttypmod
-                         OR child.attcollation<>parent.attcollation
-                         OR NOT COALESCE(cc.collisdeterministic,true)
-                         OR NOT COALESCE(pc.collisdeterministic,true)
-                         OR type_ns.nspname<>'pg_catalog' OR key_type.typname='bpchar')
-                )",
-            )
-            .bind(ownership.tables().collect::<Vec<_>>())
-            .fetch_one(tx.as_mut())
-            .await?;
-            if incompatible {
-                return Err(sqlx::Error::Protocol("Dependent delete refused".into()));
-            }
-            let physical = super::migrations::introspect_owned_postgres_connection_with_internal(
-                tx.as_mut(),
-                true,
-            )
-            .await?;
-            // information_schema hides tables without privileges; pg_catalog
-            // must prove that no incoming FK source disappeared from that view.
-            let visible = physical
-                .tables
-                .iter()
-                .map(|t| t.table_name.as_str())
-                .collect::<Vec<_>>();
-            let tables = ownership.tables().collect::<Vec<_>>();
-            let hidden:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_constraint con JOIN pg_class s ON s.oid=con.conrelid JOIN pg_namespace sn ON sn.oid=s.relnamespace JOIN pg_class t ON t.oid=con.confrelid JOIN pg_namespace tn ON tn.oid=t.relnamespace WHERE con.contype='f' AND tn.nspname=current_schema() AND t.relname=ANY($1) AND (sn.nspname<>current_schema() OR NOT(s.relname=ANY($2))))").bind(tables).bind(visible).fetch_one(tx.as_mut()).await?;
-            if hidden {
-                return Err(sqlx::Error::Protocol("Dependent delete refused".into()));
-            }
-            Ok(physical)
+            postgres_dependency_reads(tx.as_mut(), ownership).await
         })
     }
+}
+
+/// Refuse when any owned table is not an ordinary standalone heap table
+/// without rules. A pure, fully qualified catalog read.
+#[cfg(feature = "postgres")]
+fn postgres_unsupported_delete_relations<'a>(
+    conn: &'a mut sqlx::PgConnection,
+    ownership: &'a ManagedTableSet,
+) -> BoxFuture<'a, crate::Result<()>> {
+    Box::pin(async move {
+        let unsupported: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1 FROM pg_catalog.pg_class c
+                JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+                WHERE n.nspname OPERATOR(pg_catalog.=) pg_catalog.current_schema()
+                  AND c.relname::pg_catalog.text OPERATOR(pg_catalog.=) ANY ($1::pg_catalog.text[])
+                  AND (c.relkind OPERATOR(pg_catalog.<>) 'r'::pg_catalog.\"char\" OR c.relispartition
+                       OR EXISTS(SELECT 1 FROM pg_catalog.pg_inherits i
+                                 WHERE i.inhparent OPERATOR(pg_catalog.=) c.oid OR i.inhrelid OPERATOR(pg_catalog.=) c.oid)
+                       OR EXISTS(SELECT 1 FROM pg_catalog.pg_rewrite r
+                                 WHERE r.ev_class OPERATOR(pg_catalog.=) c.oid
+                                   AND r.rulename OPERATOR(pg_catalog.<>) '_RETURN'::pg_catalog.name))
+            )",
+        )
+        .bind(ownership.tables().collect::<Vec<_>>())
+        .fetch_one(&mut *conn)
+        .await?;
+        if unsupported {
+            return Err(sqlx::Error::Protocol("Dependent delete refused".into()));
+        }
+        Ok(())
+    })
+}
+
+/// The dependent-delete gate's catalog reads and the physical model it plans
+/// against. Pure, fully qualified catalog reads on the caller's connection;
+/// the physical model's types and defaults render with the session's path,
+/// as the planner compares them.
+#[cfg(feature = "postgres")]
+pub(super) fn postgres_dependency_reads<'a>(
+    conn: &'a mut sqlx::PgConnection,
+    ownership: &'a ManagedTableSet,
+) -> BoxFuture<'a, crate::Result<OwnedSchemaModel>> {
+    Box::pin(async move {
+        super::owned_foreign_keys::validate_postgres(&mut *conn, ownership)
+            .await
+            .map_err(|_| sqlx::Error::Protocol("Dependent delete refused".into()))?;
+        // Only native FK/unique/exclusion constraint triggers have modeled
+        // effects. User and extension trigger bodies are opaque. The ORM's
+        // own RLS search-document trigger only deletes from its search
+        // table, which holds no foreign keys or entity rows; it is exempt
+        // only when it fires normally, has the exact type, arguments and
+        // target, and calls the unmodified ORM function. The ORM's change
+        // journal trigger only appends to the journal, which likewise holds
+        // no foreign keys or entity rows; it is exempt only when it fires
+        // normally, has the exact type, and calls the unmodified recorder
+        // owned by the table owner.
+        let owned_tables = ownership
+            .tables()
+            .map(|table| table.to_string())
+            .collect::<Vec<_>>();
+        let owned_search_tables = owned_tables
+            .iter()
+            .map(|table| super::search::search_table_name(table))
+            .collect::<Vec<_>>();
+        let triggered: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_trigger tr
+                JOIN pg_catalog.pg_class t ON t.oid OPERATOR(pg_catalog.=) tr.tgrelid
+                JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) t.relnamespace
+                JOIN pg_catalog.pg_proc p ON p.oid OPERATOR(pg_catalog.=) tr.tgfoid
+                JOIN pg_catalog.pg_namespace pn ON pn.oid OPERATOR(pg_catalog.=) p.pronamespace
+                LEFT JOIN pg_catalog.pg_constraint con ON con.oid OPERATOR(pg_catalog.=) tr.tgconstraint
+                WHERE n.nspname OPERATOR(pg_catalog.=) pg_catalog.current_schema()
+                  AND t.relname::pg_catalog.text OPERATOR(pg_catalog.=) ANY ($1::pg_catalog.text[])
+                  AND NOT COALESCE(tr.tgisinternal AND pn.nspname OPERATOR(pg_catalog.=) 'pg_catalog'::pg_catalog.name
+                                   AND con.contype OPERATOR(pg_catalog.=) ANY (ARRAY['f', 'u', 'x']::pg_catalog.\"char\"[]), false)
+                  AND NOT (NOT tr.tgisinternal AND tr.tgname::pg_catalog.text OPERATOR(pg_catalog.=) $2::pg_catalog.text
+                           AND tr.tgenabled OPERATOR(pg_catalog.=) 'O'::pg_catalog.\"char\"
+                           AND tr.tgtype OPERATOR(pg_catalog.=) $4::pg_catalog.int2
+                           AND tr.tgnargs OPERATOR(pg_catalog.=) 4::pg_catalog.int2
+                           AND pn.nspname OPERATOR(pg_catalog.=) 'graphql_orm'::pg_catalog.name
+                           AND p.proname::pg_catalog.text OPERATOR(pg_catalog.=) $3::pg_catalog.text
+                           AND p.pronargs OPERATOR(pg_catalog.=) 0::pg_catalog.int2 AND NOT p.prosecdef
+                           AND p.prosrc OPERATOR(pg_catalog.=) $5::pg_catalog.text
+                           AND p.proconfig OPERATOR(pg_catalog.=) ARRAY[$6]::pg_catalog.text[]
+                           AND EXISTS (SELECT 1 FROM ROWS FROM (pg_catalog.unnest($1::pg_catalog.text[]), pg_catalog.unnest($7::pg_catalog.text[])) AS e(base, search)
+                                       WHERE e.base OPERATOR(pg_catalog.=) t.relname::pg_catalog.text
+                                         AND (pg_catalog.string_to_array(pg_catalog.encode(tr.tgargs, 'escape'), '\\000'))[1] OPERATOR(pg_catalog.=) pg_catalog.current_schema()::pg_catalog.text
+                                         AND (pg_catalog.string_to_array(pg_catalog.encode(tr.tgargs, 'escape'), '\\000'))[2] OPERATOR(pg_catalog.=) e.search))
+                  AND NOT (NOT tr.tgisinternal AND tr.tgname::pg_catalog.text OPERATOR(pg_catalog.=) $8::pg_catalog.text
+                           AND tr.tgenabled OPERATOR(pg_catalog.=) 'O'::pg_catalog.\"char\"
+                           AND tr.tgtype OPERATOR(pg_catalog.=) $9::pg_catalog.int2 AND tr.tgqual IS NULL
+                           AND tr.tgnargs OPERATOR(pg_catalog.=) 7::pg_catalog.int2
+                           AND pn.nspname OPERATOR(pg_catalog.=) 'graphql_orm'::pg_catalog.name
+                           AND p.proname::pg_catalog.text OPERATOR(pg_catalog.=) $10::pg_catalog.text
+                           AND p.pronargs OPERATOR(pg_catalog.=) 0::pg_catalog.int2 AND p.prosecdef
+                           AND p.proowner OPERATOR(pg_catalog.=) t.relowner
+                           AND p.prosrc OPERATOR(pg_catalog.=) $11::pg_catalog.text
+                           AND p.proconfig OPERATOR(pg_catalog.=) ARRAY[$6]::pg_catalog.text[]))",
+        )
+        .bind(&owned_tables)
+        .bind(super::rls::SEARCH_DELETE_TRIGGER)
+        .bind(super::rls::SEARCH_DELETE_FUNCTION)
+        .bind(i16::try_from(super::rls::SEARCH_DELETE_TRIGGER_TYPE).unwrap_or(0))
+        .bind(super::rls::SEARCH_DELETE_FUNCTION_BODY)
+        .bind(super::rls::SEARCH_DELETE_FUNCTION_CONFIG)
+        .bind(&owned_search_tables)
+        .bind(super::rls::CHANGE_JOURNAL_TRIGGER)
+        .bind(i16::try_from(super::rls::CHANGE_JOURNAL_TRIGGER_TYPE).unwrap_or(0))
+        .bind(super::rls::CHANGE_JOURNAL_FUNCTION)
+        .bind(super::rls::CHANGE_JOURNAL_FUNCTION_BODY)
+        .fetch_one(&mut *conn)
+        .await?;
+        if triggered {
+            return Err(sqlx::Error::Protocol("Dependent delete refused".into()));
+        }
+        // The planner and final no-referencer check use the child
+        // column's equality semantics; FK enforcement uses the parent's.
+        // Prove them identical before either lookup. Relation locks fence
+        // concurrent DDL; hook changes are revalidated before writes. Extension/
+        // domain equality and blank-padded char vs bound text are unmodeled.
+        let incompatible: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1 FROM pg_catalog.pg_constraint con
+                JOIN pg_catalog.pg_class t ON t.oid OPERATOR(pg_catalog.=) con.confrelid
+                JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) t.relnamespace
+                CROSS JOIN LATERAL ROWS FROM (pg_catalog.unnest(con.conkey), pg_catalog.unnest(con.confkey)) AS pair(child_att, parent_att)
+                JOIN pg_catalog.pg_attribute child
+                  ON child.attrelid OPERATOR(pg_catalog.=) con.conrelid AND child.attnum OPERATOR(pg_catalog.=) pair.child_att
+                JOIN pg_catalog.pg_attribute parent
+                  ON parent.attrelid OPERATOR(pg_catalog.=) con.confrelid AND parent.attnum OPERATOR(pg_catalog.=) pair.parent_att
+                JOIN pg_catalog.pg_type key_type ON key_type.oid OPERATOR(pg_catalog.=) parent.atttypid
+                JOIN pg_catalog.pg_namespace type_ns ON type_ns.oid OPERATOR(pg_catalog.=) key_type.typnamespace
+                LEFT JOIN pg_catalog.pg_collation cc ON cc.oid OPERATOR(pg_catalog.=) child.attcollation
+                LEFT JOIN pg_catalog.pg_collation pc ON pc.oid OPERATOR(pg_catalog.=) parent.attcollation
+                WHERE con.contype OPERATOR(pg_catalog.=) 'f'::pg_catalog.\"char\"
+                  AND n.nspname OPERATOR(pg_catalog.=) pg_catalog.current_schema()
+                  AND t.relname::pg_catalog.text OPERATOR(pg_catalog.=) ANY ($1::pg_catalog.text[])
+                  AND (child.atttypid OPERATOR(pg_catalog.<>) parent.atttypid
+                       OR child.atttypmod OPERATOR(pg_catalog.<>) parent.atttypmod
+                       OR child.attcollation OPERATOR(pg_catalog.<>) parent.attcollation
+                       OR NOT COALESCE(cc.collisdeterministic, true)
+                       OR NOT COALESCE(pc.collisdeterministic, true)
+                       OR type_ns.nspname OPERATOR(pg_catalog.<>) 'pg_catalog'::pg_catalog.name
+                       OR key_type.typname OPERATOR(pg_catalog.=) 'bpchar'::pg_catalog.name)
+            )",
+        )
+        .bind(ownership.tables().collect::<Vec<_>>())
+        .fetch_one(&mut *conn)
+        .await?;
+        if incompatible {
+            return Err(sqlx::Error::Protocol("Dependent delete refused".into()));
+        }
+        let physical =
+            super::migrations::introspect_owned_postgres_connection_with_internal(&mut *conn, true)
+                .await?;
+        // information_schema hides tables without privileges; pg_catalog
+        // must prove that no incoming FK source disappeared from that view.
+        let visible = physical
+            .tables
+            .iter()
+            .map(|t| t.table_name.as_str())
+            .collect::<Vec<_>>();
+        let tables = ownership.tables().collect::<Vec<_>>();
+        let hidden: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_constraint con
+                JOIN pg_catalog.pg_class s ON s.oid OPERATOR(pg_catalog.=) con.conrelid
+                JOIN pg_catalog.pg_namespace sn ON sn.oid OPERATOR(pg_catalog.=) s.relnamespace
+                JOIN pg_catalog.pg_class t ON t.oid OPERATOR(pg_catalog.=) con.confrelid
+                JOIN pg_catalog.pg_namespace tn ON tn.oid OPERATOR(pg_catalog.=) t.relnamespace
+                WHERE con.contype OPERATOR(pg_catalog.=) 'f'::pg_catalog.\"char\"
+                  AND tn.nspname OPERATOR(pg_catalog.=) pg_catalog.current_schema()
+                  AND t.relname::pg_catalog.text OPERATOR(pg_catalog.=) ANY ($1::pg_catalog.text[])
+                  AND (sn.nspname OPERATOR(pg_catalog.<>) pg_catalog.current_schema()
+                       OR NOT (s.relname::pg_catalog.text OPERATOR(pg_catalog.=) ANY ($2::pg_catalog.text[]))))",
+        )
+        .bind(tables)
+        .bind(visible)
+        .fetch_one(&mut *conn)
+        .await?;
+        if hidden {
+            return Err(sqlx::Error::Protocol("Dependent delete refused".into()));
+        }
+        Ok(physical)
+    })
 }
 
 /// Internal typed row retained by a bounded dependent-delete plan.

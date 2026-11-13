@@ -275,6 +275,9 @@ jobs:
           cargo test -p graphql-orm --no-default-features --features postgres --test projection_visibility --test cross_crate_relations_fixture --test repository_counts --locked
           cargo test -p graphql-orm --no-default-features --features postgres --test grouped_aggregates_postgres --test portable_group_pages --test host_timestamps --test point_read_visibility_backends --locked -- --ignored --test-threads=1
           cargo test -p graphql-orm --locked --no-default-features --features postgres --test runtime_strings --test full_text_search -- --include-ignored --test-threads=1
+          cargo test -p graphql-orm --locked --no-default-features --features postgres --test postgres_rls --test postgres_rls_drift -- --include-ignored --test-threads=1
+          cargo test -p graphql-orm --locked --no-default-features --features postgres,change-journal --test postgres_rls_coverage --test postgres_change_journal_paths --test dependent_delete_repro -- --include-ignored --test-threads=1
+          cargo test -p graphql-orm --locked --no-default-features --features postgres,change-journal --lib catalog_read_cancellation -- --include-ignored --test-threads=1
           cargo test --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --target-dir target/fixtures --locked --no-default-features --features postgres --test runtime_strings -- --ignored --test-threads=1
           cargo run --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --target-dir target/fixtures --locked --no-default-features --features sqlite --example runtime_strings
           cargo run --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --target-dir target/fixtures --locked --no-default-features --features sqlite --example policy_projections

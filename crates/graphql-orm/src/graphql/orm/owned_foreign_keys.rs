@@ -116,38 +116,52 @@ fn has_deferrable_clause(sql: &str) -> bool {
     false
 }
 
+/// Refuse foreign keys into or out of the owned tables that the owned
+/// planner does not model.
+///
+/// The read is pure: it names every catalog relation, function and operator
+/// with its schema and changes no session or transaction state, so it is safe
+/// on a connection that may already hold the caller's transaction, including
+/// when the future is dropped part way.
 #[cfg(feature = "postgres")]
-pub(super) async fn validate_postgres(
-    connection: &mut sqlx::PgConnection,
-    ownership: &ManagedTableSet,
-) -> Result<(), RuntimeMigrationError> {
-    // pg_catalog includes incoming constraints from other schemas and reserved/system
-    // sources. information_schema may omit constraints and does not expose every action.
-    let tables: Vec<&str> = ownership.tables().collect();
-    let unsupported: Option<(String, String)> = sqlx::query_as(
-        "SELECT sn.nspname || '.' || s.relname, con.conname
-         FROM pg_constraint con
-         JOIN pg_class s ON s.oid = con.conrelid
-         JOIN pg_namespace sn ON sn.oid = s.relnamespace
-         JOIN pg_class t ON t.oid = con.confrelid
-         JOIN pg_namespace tn ON tn.oid = t.relnamespace
-         WHERE con.contype = 'f'
-           AND ((sn.nspname = current_schema() AND s.relname = ANY($1))
-             OR (tn.nspname = current_schema() AND t.relname = ANY($1)))
-           AND (con.confdeltype NOT IN ('r', 'c', 'n') OR con.confupdtype <> 'a'
-                OR con.condeferrable OR con.condeferred OR con.confmatchtype <> 's'
-                OR NOT con.convalidated
-                OR COALESCE(to_jsonb(con)->>'confdelsetcols', '') <> ''
-                OR sn.nspname <> current_schema() OR tn.nspname <> current_schema())
-         ORDER BY sn.nspname, s.relname, con.conname LIMIT 1",
-    )
-    .bind(tables)
-    .fetch_optional(&mut *connection)
-    .await?;
-    if let Some((table, constraint)) = unsupported {
-        return Err(self::unsupported(table, constraint));
-    }
-    Ok(())
+pub(super) fn validate_postgres<'a>(
+    connection: &'a mut sqlx::PgConnection,
+    ownership: &'a ManagedTableSet,
+) -> futures::future::BoxFuture<'a, Result<(), RuntimeMigrationError>> {
+    Box::pin(async move {
+        // pg_catalog includes incoming constraints from other schemas and reserved/system
+        // sources. information_schema may omit constraints and does not expose every action.
+        let tables: Vec<&str> = ownership.tables().collect();
+        let unsupported: Option<(String, String)> = sqlx::query_as(
+            "SELECT pg_catalog.concat(sn.nspname, '.', s.relname), con.conname::pg_catalog.text
+             FROM pg_catalog.pg_constraint con
+             JOIN pg_catalog.pg_class s ON s.oid OPERATOR(pg_catalog.=) con.conrelid
+             JOIN pg_catalog.pg_namespace sn ON sn.oid OPERATOR(pg_catalog.=) s.relnamespace
+             JOIN pg_catalog.pg_class t ON t.oid OPERATOR(pg_catalog.=) con.confrelid
+             JOIN pg_catalog.pg_namespace tn ON tn.oid OPERATOR(pg_catalog.=) t.relnamespace
+             WHERE con.contype OPERATOR(pg_catalog.=) 'f'::pg_catalog.\"char\"
+               AND ((sn.nspname OPERATOR(pg_catalog.=) pg_catalog.current_schema()
+                     AND s.relname::pg_catalog.text OPERATOR(pg_catalog.=) ANY ($1::pg_catalog.text[]))
+                 OR (tn.nspname OPERATOR(pg_catalog.=) pg_catalog.current_schema()
+                     AND t.relname::pg_catalog.text OPERATOR(pg_catalog.=) ANY ($1::pg_catalog.text[])))
+               AND (con.confdeltype OPERATOR(pg_catalog.<>) ALL (ARRAY['r', 'c', 'n']::pg_catalog.\"char\"[])
+                    OR con.confupdtype OPERATOR(pg_catalog.<>) 'a'::pg_catalog.\"char\"
+                    OR con.condeferrable OR con.condeferred
+                    OR con.confmatchtype OPERATOR(pg_catalog.<>) 's'::pg_catalog.\"char\"
+                    OR NOT con.convalidated
+                    OR COALESCE(pg_catalog.to_jsonb(con) OPERATOR(pg_catalog.->>) 'confdelsetcols', '') OPERATOR(pg_catalog.<>) ''
+                    OR sn.nspname OPERATOR(pg_catalog.<>) pg_catalog.current_schema()
+                    OR tn.nspname OPERATOR(pg_catalog.<>) pg_catalog.current_schema())
+             ORDER BY sn.nspname, s.relname, con.conname LIMIT 1",
+        )
+        .bind(tables)
+        .fetch_optional(&mut *connection)
+        .await?;
+        if let Some((table, constraint)) = unsupported {
+            return Err(self::unsupported(table, constraint));
+        }
+        Ok(())
+    })
 }
 
 #[cfg(all(test, feature = "sqlite"))]

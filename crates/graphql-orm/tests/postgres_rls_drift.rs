@@ -590,3 +590,431 @@ async fn a_hostile_search_path_cannot_mask_a_lookalike_function()
     );
     Ok(())
 }
+
+/// Generated policies on tenant and owner columns whose types live outside
+/// the catalog: `citext` from an extension, and a domain.
+#[derive(GraphQLSchemaEntity, Clone, Debug)]
+#[graphql_entity(
+    backend = "postgres",
+    table = "rls_drift_ext_docs",
+    plural = "RlsDriftExtDocs"
+)]
+#[graphql_rls(
+    select(tenant = "tenant_id", owner = "owner_id"),
+    insert(tenant = "tenant_id"),
+    update(tenant = "tenant_id", owner = "owner_id"),
+    delete(owner = "owner_id")
+)]
+#[allow(dead_code)]
+struct RlsDriftExtDoc {
+    #[primary_key]
+    id: String,
+    tenant_id: String,
+    owner_id: String,
+}
+
+/// Generated policy on a tenant column whose equality with `text` resolves to
+/// an operator outside the catalog.
+#[derive(GraphQLSchemaEntity, Clone, Debug)]
+#[graphql_entity(
+    backend = "postgres",
+    table = "rls_drift_ext_codes",
+    plural = "RlsDriftExtCodes"
+)]
+#[graphql_rls(select(tenant = "tenant_id"))]
+#[allow(dead_code)]
+struct RlsDriftExtCode {
+    #[primary_key]
+    id: String,
+    tenant_id: String,
+}
+
+/// The same tenant column with a custom predicate that names the operator
+/// and the type with their schema.
+#[derive(GraphQLSchemaEntity, Clone, Debug)]
+#[graphql_entity(
+    backend = "postgres",
+    table = "rls_drift_ext_qualified",
+    plural = "RlsDriftExtQualifieds"
+)]
+#[graphql_rls(select(
+    predicate = "tenant_id OPERATOR(drift_ext.=) graphql_orm.current_tenant_id()::drift_ext.tenant_kind"
+))]
+#[allow(dead_code)]
+struct RlsDriftExtQualified {
+    #[primary_key]
+    id: String,
+    tenant_id: String,
+}
+
+fn ext_target() -> SchemaTarget {
+    SchemaTarget::from_entities(
+        &[
+            <RlsDriftExtDoc as Entity>::metadata(),
+            <RlsDriftExtCode as Entity>::metadata(),
+            <RlsDriftExtQualified as Entity>::metadata(),
+        ],
+        &[
+            <RlsDriftExtDoc as DatabaseRls>::rls_metadata(),
+            <RlsDriftExtCode as DatabaseRls>::rls_metadata(),
+            <RlsDriftExtQualified as DatabaseRls>::rls_metadata(),
+        ],
+    )
+}
+
+#[tokio::test]
+#[ignore = "requires test-owned PostgreSQL container"]
+async fn extension_type_tenant_columns_validate_as_postgresql_bound_them()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (owner, role, runtime) = provision().await?;
+    // The extension and the types live in their own schema, which the
+    // applying session has on its path.
+    sqlx::raw_sql(&format!(
+        "CREATE SCHEMA drift_ext; GRANT USAGE ON SCHEMA drift_ext TO {role}; \
+         CREATE EXTENSION citext SCHEMA drift_ext; \
+         CREATE DOMAIN drift_ext.owner_code AS text; \
+         CREATE TYPE drift_ext.tenant_kind AS ENUM ('tenant-a', 'tenant-b'); \
+         CREATE FUNCTION drift_ext.tenant_kind_eq(drift_ext.tenant_kind, drift_ext.tenant_kind) RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT $1::text = $2::text'; \
+         CREATE OPERATOR drift_ext.= (LEFTARG = drift_ext.tenant_kind, RIGHTARG = drift_ext.tenant_kind, FUNCTION = drift_ext.tenant_kind_eq); \
+         CREATE CAST (text AS drift_ext.tenant_kind) WITH INOUT AS IMPLICIT; \
+         CREATE TABLE rls_drift_ext_docs (id text PRIMARY KEY, tenant_id drift_ext.citext NOT NULL, owner_id drift_ext.owner_code NOT NULL); \
+         CREATE TABLE rls_drift_ext_codes (id text PRIMARY KEY, tenant_id drift_ext.tenant_kind NOT NULL); \
+         CREATE TABLE rls_drift_ext_qualified (id text PRIMARY KEY, tenant_id drift_ext.tenant_kind NOT NULL); \
+         GRANT SELECT, INSERT, UPDATE, DELETE ON rls_drift_ext_docs, rls_drift_ext_codes, rls_drift_ext_qualified TO {role}"
+    ))
+    .execute(&owner)
+    .await?;
+    let plan = build_schema_target_rls_plan(
+        DatabaseBackend::Postgres,
+        SchemaPolicy::Managed,
+        &ext_target(),
+    );
+    let mut tx = owner.begin().await?;
+    sqlx::raw_sql("SET LOCAL search_path = public, drift_ext")
+        .execute(&mut *tx)
+        .await?;
+    for statement in &plan.statements {
+        sqlx::raw_sql(statement).execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
+
+    // PostgreSQL binds `citext = text` and `domain = text` to the catalog's
+    // text equality, so these policies validate clean whatever the path.
+    let on_path = pool_with_search_path(&owner, &role, "public,drift_ext").await?;
+    for pool in [&runtime, &on_path] {
+        let errors = rls_errors_for(pool, &ext_target()).await?;
+        assert!(
+            !errors
+                .iter()
+                .any(|error| error.starts_with("rls_drift_ext_docs:")),
+            "{errors:#?}"
+        );
+        // A generated predicate whose `=` resolved to an operator outside the
+        // catalog cannot be compared with only the catalog on the path: it is
+        // reported, never accepted.
+        assert!(
+            errors.iter().any(|error| {
+                error.starts_with("rls_drift_ext_codes:")
+                    && error.contains("graphql_orm_rls_drift_ext_codes_select")
+                    && error.contains("could not be compared")
+            }),
+            "{errors:#?}"
+        );
+        // Naming the operator and the type with their schema compares.
+        assert!(
+            !errors
+                .iter()
+                .any(|error| error.starts_with("rls_drift_ext_qualified:")),
+            "{errors:#?}"
+        );
+    }
+    let stored: String =
+        sqlx::query_scalar("SELECT qual FROM pg_policies WHERE tablename = $1 AND policyname = $2")
+            .bind("rls_drift_ext_docs")
+            .bind("graphql_orm_rls_drift_ext_docs_select")
+            .fetch_one(&owner)
+            .await?;
+    assert!(stored.contains("(tenant_id)::text ="), "{stored}");
+    Ok(())
+}
+
+/// RLS search entity in a non-public schema whose flattened name equals the
+/// plain public table `drift_audit_notes`.
+#[derive(GraphQLSchemaEntity, Clone, Debug)]
+#[graphql_entity(
+    backend = "postgres",
+    table = "drift_audit.notes",
+    plural = "DriftAuditNotes"
+)]
+#[graphql_rls(select(tenant = "tenant_id"))]
+#[graphql_orm(search(index = true, language = "english"))]
+#[allow(dead_code)]
+struct DriftAuditNote {
+    #[primary_key]
+    id: String,
+    tenant_id: String,
+    #[graphql_orm(searchable(weight = "A"))]
+    body: String,
+}
+
+fn qualified_search_target() -> SchemaTarget {
+    SchemaTarget::from_entities(
+        &[<DriftAuditNote as Entity>::metadata()],
+        &[<DriftAuditNote as DatabaseRls>::rls_metadata()],
+    )
+}
+
+#[tokio::test]
+#[ignore = "requires test-owned PostgreSQL container"]
+async fn a_search_delete_trigger_counts_only_on_the_resolved_base_table()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (owner, role, runtime) = provision().await?;
+    let search_table = "__graphql_orm_search_drift_audit_notes";
+    sqlx::raw_sql(&format!(
+        "CREATE TABLE drift_audit.notes (id text PRIMARY KEY, tenant_id text NOT NULL, body text NOT NULL); \
+         CREATE TABLE {search_table} (entity_pk text PRIMARY KEY); \
+         CREATE TABLE public.drift_audit_notes (id text PRIMARY KEY); \
+         GRANT SELECT, INSERT, UPDATE, DELETE ON drift_audit.notes, {search_table}, public.drift_audit_notes TO {role}"
+    ))
+    .execute(&owner)
+    .await?;
+    let plan = build_schema_target_rls_plan(
+        DatabaseBackend::Postgres,
+        SchemaPolicy::Managed,
+        &qualified_search_target(),
+    );
+    assert!(
+        plan.statements
+            .iter()
+            .any(|statement| statement.contains(search_table)),
+        "{:#?}",
+        plan.statements
+    );
+    for statement in &plan.statements {
+        sqlx::raw_sql(statement).execute(&owner).await?;
+    }
+    let trigger_errors = || async {
+        Ok::<_, Box<dyn std::error::Error>>(
+            rls_errors_for(&runtime, &qualified_search_target())
+                .await?
+                .into_iter()
+                .filter(|error| error.contains("graphql_orm_search_delete"))
+                .collect::<Vec<_>>(),
+        )
+    };
+    let applied = trigger_errors().await?;
+    assert!(applied.is_empty(), "{applied:#?}");
+    // Move the intact trigger to the public table whose flattened
+    // `schema_table` name is the same.
+    sqlx::raw_sql(&format!(
+        "DROP TRIGGER graphql_orm_search_delete ON drift_audit.notes; \
+         CREATE TRIGGER graphql_orm_search_delete BEFORE DELETE ON public.drift_audit_notes \
+             FOR EACH ROW EXECUTE FUNCTION graphql_orm.delete_search_document('public', '{search_table}', 'id', 'text')"
+    ))
+    .execute(&owner)
+    .await?;
+    let moved = trigger_errors().await?;
+    assert!(
+        moved.iter().any(|error| error.contains(
+            "Missing search document delete trigger graphql_orm_search_delete on drift_audit.notes"
+        )),
+        "{moved:#?}"
+    );
+    Ok(())
+}
+
+/// Append-only storage on an entity the schema half of validation reads.
+#[derive(GraphQLSchemaEntity, Clone, Debug)]
+#[graphql_entity(
+    backend = "postgres",
+    table = "drift_ledger",
+    plural = "DriftLedgers",
+    append_only = true
+)]
+#[allow(dead_code)]
+struct DriftLedger {
+    #[primary_key]
+    id: String,
+    note: String,
+}
+
+#[tokio::test]
+#[ignore = "requires test-owned PostgreSQL container"]
+async fn schema_introspection_reads_catalog_relations_under_any_search_path()
+-> Result<(), Box<dyn std::error::Error>> {
+    let owner = owned_postgres::OwnedPostgres::pool("postgres-catalog-relations", 5).await?;
+    let database = graphql_orm::db::Database::new(owner.clone());
+    let target = SchemaTarget::from_entities(&[<DriftLedger as Entity>::metadata()], &[]);
+    let plan = database
+        .schema()
+        .plan_schema_target("1", "append-only ledger", &target)
+        .await?;
+    database
+        .schema()
+        .apply_schema_target(&plan, ApplyOptions::default())
+        .await?;
+    let append_only = |pool: sqlx::PgPool| async move {
+        let model = graphql_orm::graphql::orm::introspect_schema::<
+            graphql_orm::graphql::orm::PostgresBackend,
+            _,
+        >(&graphql_orm::db::Database::new(pool))
+        .await?;
+        Ok::<_, Box<dyn std::error::Error>>(
+            model
+                .tables
+                .iter()
+                .find(|table| table.table_name == "drift_ledger")
+                .map(|table| table.append_only),
+        )
+    };
+    assert_eq!(append_only(owner.clone()).await?, Some(true));
+    // Remove the append-only trigger, and add a same-named `pg_trigger` view
+    // in public that a session searching public first can see.
+    sqlx::raw_sql(
+        "CREATE TABLE public.saved_trigger AS SELECT * FROM pg_catalog.pg_trigger t \
+             WHERE t.tgrelid OPERATOR(pg_catalog.=) 'public.drift_ledger'::pg_catalog.regclass::pg_catalog.oid AND NOT t.tgisinternal; \
+         DO $$ DECLARE name pg_catalog.text; BEGIN SELECT tgname INTO name FROM public.saved_trigger; \
+             EXECUTE pg_catalog.format('DROP TRIGGER %I ON public.drift_ledger', name); END $$; \
+         CREATE VIEW public.pg_trigger AS SELECT * FROM pg_catalog.pg_trigger UNION ALL SELECT * FROM public.saved_trigger",
+    )
+    .execute(&owner)
+    .await?;
+    let options = owner
+        .connect_options()
+        .as_ref()
+        .clone()
+        .options([("search_path", "public,pg_catalog")]);
+    let public_first = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(options)
+        .await?;
+    assert_eq!(append_only(owner.clone()).await?, Some(false));
+    assert_eq!(append_only(public_first).await?, Some(false));
+    Ok(())
+}
+
+/// A second append-only entity that keeps its trigger while
+/// [`DriftLedger`]'s is removed.
+#[derive(GraphQLSchemaEntity, Clone, Debug)]
+#[graphql_entity(
+    backend = "postgres",
+    table = "drift_journal",
+    plural = "DriftJournals",
+    append_only = true
+)]
+#[allow(dead_code)]
+struct DriftJournal {
+    #[primary_key]
+    id: String,
+    note: String,
+}
+
+/// A pool for `owner`'s role whose sessions use `search_path`.
+async fn owner_with_search_path(
+    owner: &sqlx::PgPool,
+    search_path: &str,
+) -> Result<sqlx::PgPool, Box<dyn std::error::Error>> {
+    let options = owner
+        .connect_options()
+        .as_ref()
+        .clone()
+        .options([("search_path", search_path)]);
+    Ok(sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(options)
+        .await?)
+}
+
+async fn introspected(
+    pool: &sqlx::PgPool,
+) -> Result<graphql_orm::graphql::orm::SchemaModel, Box<dyn std::error::Error>> {
+    Ok(graphql_orm::graphql::orm::introspect_schema::<
+        graphql_orm::graphql::orm::PostgresBackend,
+        _,
+    >(&graphql_orm::db::Database::new(pool.clone()))
+    .await?)
+}
+
+#[tokio::test]
+#[ignore = "requires test-owned PostgreSQL container"]
+async fn schema_introspection_uses_catalog_operators_under_any_search_path()
+-> Result<(), Box<dyn std::error::Error>> {
+    let owner = owned_postgres::OwnedPostgres::pool("postgres-catalog-operators", 5).await?;
+    let database = graphql_orm::db::Database::new(owner.clone());
+    let target = SchemaTarget::from_entities(
+        &[
+            <DriftLedger as Entity>::metadata(),
+            <DriftJournal as Entity>::metadata(),
+        ],
+        &[],
+    );
+    let plan = database
+        .schema()
+        .plan_schema_target("1", "append-only ledgers", &target)
+        .await?;
+    database
+        .schema()
+        .apply_schema_target(&plan, ApplyOptions::default())
+        .await?;
+    // Remove the ledger's append-only trigger; the journal keeps its own.
+    // Operators named `=` for (name, text) and (text, text) in public are on
+    // the second session's path; one partial index uses the latter, and
+    // another uses an operator class defined in public.
+    sqlx::raw_sql(
+        "DO $$ DECLARE name pg_catalog.text; BEGIN \
+             SELECT t.tgname INTO name FROM pg_catalog.pg_trigger t \
+             WHERE t.tgrelid OPERATOR(pg_catalog.=) 'public.drift_ledger'::pg_catalog.regclass::pg_catalog.oid AND NOT t.tgisinternal; \
+             EXECUTE pg_catalog.format('DROP TRIGGER %I ON public.drift_ledger', name); END $$; \
+         CREATE TABLE public.drift_tags (id text PRIMARY KEY, status text NOT NULL); \
+         CREATE FUNCTION public.any_name(name, text) RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT true'; \
+         CREATE OPERATOR public.= (LEFTARG = name, RIGHTARG = text, FUNCTION = public.any_name); \
+         CREATE FUNCTION public.loose_text(text, text) RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT pg_catalog.lower($1) OPERATOR(pg_catalog.=) pg_catalog.lower($2)'; \
+         CREATE OPERATOR public.= (LEFTARG = text, RIGHTARG = text, FUNCTION = public.loose_text); \
+         CREATE INDEX drift_tags_catalog ON public.drift_tags (id) WHERE status OPERATOR(pg_catalog.=) ANY (ARRAY['open', 'held']); \
+         CREATE INDEX drift_tags_public_operator ON public.drift_tags (status) WHERE status OPERATOR(public.=) ANY (ARRAY['open', 'held']); \
+         CREATE OPERATOR CLASS public.text_alt_ops FOR TYPE text USING btree AS \
+             OPERATOR 1 pg_catalog.<, OPERATOR 2 pg_catalog.<=, OPERATOR 3 pg_catalog.=, \
+             OPERATOR 4 pg_catalog.>=, OPERATOR 5 pg_catalog.>, \
+             FUNCTION 1 pg_catalog.bttextcmp(text, text); \
+         CREATE INDEX drift_tags_public_class ON public.drift_tags (status public.text_alt_ops) WHERE status OPERATOR(pg_catalog.=) ANY (ARRAY['open', 'held'])",
+    )
+    .execute(&owner)
+    .await?;
+    let public_first = owner_with_search_path(&owner, "public,pg_catalog").await?;
+    for pool in [&owner, &public_first] {
+        let model = introspected(pool).await?;
+        let append_only = |table: &str| {
+            model
+                .tables
+                .iter()
+                .find(|candidate| candidate.table_name == table)
+                .map(|candidate| candidate.append_only)
+        };
+        assert_eq!(append_only("drift_ledger"), Some(false));
+        assert_eq!(append_only("drift_journal"), Some(true));
+        let tags = model
+            .tables
+            .iter()
+            .find(|candidate| candidate.table_name == "drift_tags")
+            .expect("drift_tags is introspected");
+        let predicate = |index: &str| {
+            tags.indexes
+                .iter()
+                .find(|candidate| candidate.name == index)
+                .map(|candidate| candidate.predicate.is_some())
+        };
+        // A closed-set predicate is reported only for the catalog's equality.
+        // A session whose path puts another `=(text, text)` first sees the
+        // catalog's rendered schema-qualified, which is reported without a
+        // predicate rather than accepted.
+        assert_eq!(
+            predicate("drift_tags_catalog"),
+            Some(std::ptr::eq(pool, &owner))
+        );
+        assert_eq!(predicate("drift_tags_public_operator"), Some(false));
+        // So is one whose operator class is defined outside the catalog,
+        // even with the catalog's equality in its predicate.
+        assert_eq!(predicate("drift_tags_public_class"), Some(false));
+    }
+    Ok(())
+}
