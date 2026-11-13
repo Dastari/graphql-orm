@@ -176,3 +176,30 @@ unknown contract version.
 
 See the [core macro reference](../../docs/reference/graphql-orm/macros-and-attributes.md),
 and [operation assurance architecture](../../docs/architecture/operation-assurance.md).
+
+## Stable entity identity
+
+Generated descriptors use an optional entity `stable_type_id` as their existing
+`entity_rust_type()` fingerprint/sort input. The default remains the Rust module
+path. The override is an opaque token, normally the old Rust path: a string
+literal of 1–1024 printable ASCII bytes without whitespace or control characters.
+No fingerprint algorithm, name, input order or serialized export changes.
+`diagnostic_rust_type()` records the real Rust path outside hashes and exports.
+
+`GraphqlOperationCatalog::compose` panics if entity groups repeat an identity,
+including declared IDs that collide with default paths, and names both real Rust
+types. Multiple operations belonging to one entity remain valid. Empty groups
+have no operation identity to check. Semantic catalogues and tool/router bindings
+consume the resulting operation fingerprints rather than independently producing
+Rust identities.
+
+A stable entity identity alone does not guarantee stable fingerprints after a
+move. The schema signature retains Rust source spellings: field types, argument
+types and relation targets must be spelled identically before and after the
+move, including across crates. Prefer imported bare names rather than changing
+`crate::types::Status` to `old_crate::types::Status`. Compare
+`catalog().fingerprint()` before and after using the generated
+`graphql_orm_operation_catalog()` helper or your catalogue accessor.
+
+See [attribute validation](../../docs/reference/graphql-orm/macros-and-attributes.md#stable-entity-identity)
+and the [move migration recipe](../../MIGRATION.md#01370-to-01390-optional-stable-entity-identity).

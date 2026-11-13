@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.137.0 to 0.142.0: test-only release
+## 0.139.0 to 0.142.0: test-only release
 
 No code, SDL, schema or data migration is needed. Tests compile complete AI
 capabilities over macro-generated inputs and runtime search, link and
@@ -24,6 +24,40 @@ that trusted host code asserts the resolver is the ORM generated resolver.
 Tool profiles checks canonical input identities and shapes to limit disclosure;
 it cannot prove how a host resolver interprets canonical arguments. No API,
 fingerprint, schema or data migration change.
+
+## 0.137.0 to 0.139.0: optional stable entity identity
+
+Upgrade ORM and macros together; catalogue is 0.7.4.
+
+Declare `#[graphql_entity(stable_type_id = "old_crate::old_module::Record")]`
+(or `#[repository_entity(stable_type_id = "...")]`) before or when moving an
+entity. Use the exact previous descriptor's `entity_rust_type()` value, including
+the old crate, module and type name. Keep this value after the move. The value
+is an opaque token, normally the old Rust path: use a string literal of 1–1024
+printable ASCII bytes without whitespace or control characters. Duplicate
+declarations are rejected.
+
+Omitting the option preserves the module-path identity and all existing
+fingerprints byte for byte. Choosing a new identity intentionally invalidates
+persisted operation/catalogue bindings. Using the old value preserves the entity
+identity input, but other fingerprint inputs must also stay unchanged. Field
+types, argument types and relation targets must be spelled identically in source
+before and after the move, including across crates: the schema signature records
+their Rust spelling. For example, changing `crate::types::Status` to
+`old_crate::types::Status` changes fingerprints even if both name the same type.
+Prefer imported bare names (such as `Status`) and retain those spellings after
+moving. Compare `catalog().fingerprint()` before and after the move (using the
+generated `graphql_orm_operation_catalog()` helper or your catalogue accessor).
+No database migration is required. The fingerprint algorithms, names, input
+order and default module path are unchanged.
+
+Catalogue composition panics on repeated entity identities, naming both Rust
+types. Assign distinct identities to distinct entities. Generated descriptors
+retain their real Rust path as separate diagnostic metadata outside every
+fingerprint and serialized export; `entity_rust_type()` remains the identity
+used by the existing hash/sort contract, and `diagnostic_rust_type()` exposes
+the real path. Semantic catalogues and AI/router bindings consume the resulting
+operation fingerprints; they do not independently generate a Rust identity.
 
 ## 0.136.0 to 0.137.0: smaller generated update code
 
