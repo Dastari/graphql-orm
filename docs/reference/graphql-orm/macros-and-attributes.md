@@ -1244,4 +1244,4 @@ by `entity_rust_type()`, outside hashes and serialized exports.
 
 To preserve persisted bindings during a move, set the option to the exact old
 `entity_rust_type()` value and keep it after moving. See the
-[migration recipe](../../../MIGRATION.md#01360-to-01390-optional-stable-entity-identity).
+[migration recipe](../../../MIGRATION.md#01370-to-01390-optional-stable-entity-identity).

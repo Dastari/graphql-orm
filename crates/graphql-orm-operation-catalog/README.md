@@ -190,4 +190,4 @@ consume the resulting operation fingerprints rather than independently producing
 Rust identities.
 
 See [attribute validation](../../docs/reference/graphql-orm/macros-and-attributes.md#stable-entity-identity)
-and the [move migration recipe](../../MIGRATION.md#01360-to-01390-optional-stable-entity-identity).
+and the [move migration recipe](../../MIGRATION.md#01370-to-01390-optional-stable-entity-identity).

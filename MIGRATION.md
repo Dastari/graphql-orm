@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.136.0 to 0.139.0: optional stable entity identity
+## 0.137.0 to 0.139.0: optional stable entity identity
 
 Upgrade ORM and macros together; catalogue is 0.7.4.
 
@@ -34,6 +34,16 @@ fingerprint and serialized export; `entity_rust_type()` remains the identity
 used by the existing hash/sort contract, and `diagnostic_rust_type()` exposes
 the real path. Semantic catalogues and AI/router bindings consume the resulting
 operation fingerprints; they do not independently generate a Rust identity.
+
+## 0.136.0 to 0.137.0: smaller generated update code
+
+Upgrade runtime and macros together. No action is needed: no schema, data,
+SDL, catalogue, generated Rust API or behaviour change.
+
+- The derives emit the per-field UPDATE assignment list once per entity, in a
+  private helper (`__gom_push_update_assignments`), and call it from every
+  generated update path. Names starting with `__gom_` are reserved for
+  generated code; do not call them.
 
 ## 0.133.0 to 0.136.0: administrative backup and search reads
 

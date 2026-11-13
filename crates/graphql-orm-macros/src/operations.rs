@@ -1446,6 +1446,82 @@ pub(crate) fn generate_graphql_operations(
     Ok(quote! { #generated })
 }
 
+/// Whether a token stream contains the `?` operator at any depth.
+fn contains_question_mark(tokens: proc_macro2::TokenStream) -> bool {
+    tokens.into_iter().any(|token| match token {
+        proc_macro2::TokenTree::Punct(punct) => punct.as_char() == '?',
+        proc_macro2::TokenTree::Group(group) => contains_question_mark(group.stream()),
+        _ => false,
+    })
+}
+
+/// The first of `names` that occurs as a free-standing identifier at any depth.
+///
+/// A name that directly follows a `.` is a field or method name (`input.db`,
+/// a field the entity itself declares) and is not reported, unless it is listed
+/// in `also_after_dot` (`.await`). Raw identifiers (`r#return`) never match.
+fn first_identifier_in(
+    tokens: proc_macro2::TokenStream,
+    names: &[&'static str],
+    also_after_dot: &[&'static str],
+) -> Option<&'static str> {
+    let mut after_dot = false;
+    for token in tokens {
+        let follows_dot = std::mem::replace(
+            &mut after_dot,
+            matches!(&token, proc_macro2::TokenTree::Punct(punct) if punct.as_char() == '.'),
+        );
+        let found = match token {
+            proc_macro2::TokenTree::Ident(ident) => names
+                .iter()
+                .copied()
+                .find(|name| ident == name)
+                .filter(|name| !follows_dot || also_after_dot.contains(name)),
+            proc_macro2::TokenTree::Group(group) => {
+                first_identifier_in(group.stream(), names, also_after_dot)
+            }
+            _ => None,
+        };
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
+}
+
+/// The per-field UPDATE assignment lists are emitted into a synchronous helper
+/// that every update path calls after its field write checks. A list entry
+/// that awaits, returns, or reaches for the resolver context or the database
+/// is a policy call in the wrong list: moved into the helper it would be
+/// skipped or reordered, so it is refused here.
+fn ensure_pure_update_assignments(
+    list_name: &str,
+    list: &[proc_macro2::TokenStream],
+    span: proc_macro2::Span,
+) -> syn::Result<()> {
+    for tokens in list {
+        if let Some(found) = first_identifier_in(
+            tokens.clone(),
+            &["await", "return", "ctx", "db"],
+            &["await"],
+        ) {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "graphql-orm-macros internal error: `{list_name}` contains `{found}`. \
+                     The per-field UPDATE assignment lists must be pure and synchronous, \
+                     because they are emitted once into `__gom_push_update_assignments` \
+                     and run after the field write checks. Put field policy calls in the \
+                     inline policy lists instead: `update_policy_checks`, \
+                     `update_runtime_policy_checks`, or the repository field checks \
+                     (`authorize_repository_update_fields`)."
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn generate_graphql_operations_unfiltered(
     input: &DeriveInput,
 ) -> syn::Result<proc_macro2::TokenStream> {
@@ -3718,6 +3794,100 @@ fn generate_graphql_operations_unfiltered(
         }
     }
 
+    // The per-field UPDATE assignments are pure and synchronous. Every generated
+    // update path needs the same list, so it is emitted once per entity and
+    // called, instead of being spliced into each async body (#677). Field write
+    // policy checks are not part of it: they stay inline at each call site.
+    ensure_pure_update_assignments(
+        "update_field_checks_repo",
+        &update_field_checks_repo,
+        struct_name.span(),
+    )?;
+    ensure_pure_update_assignments(
+        "update_field_checks_graphql",
+        &update_field_checks_graphql,
+        struct_name.span(),
+    )?;
+    // The GraphQL resolver shares the repository helper only when the two lists
+    // are token-identical and cannot leave the helper early.
+    let update_assignments_shared_with_graphql = update_field_checks_graphql.len()
+        == update_field_checks_repo.len()
+        && update_field_checks_graphql
+            .iter()
+            .zip(&update_field_checks_repo)
+            .all(|(graphql, repo)| graphql.to_string() == repo.to_string())
+        && !update_field_checks_repo.iter().any(|tokens| {
+            contains_question_mark(tokens.clone())
+                || first_identifier_in(tokens.clone(), &["return"], &[]).is_some()
+        });
+    let update_assignments_graphql_helper = if update_assignments_shared_with_graphql {
+        quote! {}
+    } else {
+        quote! {
+            #[doc(hidden)]
+            #[allow(dead_code, unused_imports, unused_variables, clippy::ptr_arg)]
+            fn __gom_push_update_assignments_graphql(
+                input: &#update_input,
+                set_clauses: &mut ::std::vec::Vec<::std::string::String>,
+                changed_fields: &mut ::std::vec::Vec<&'static str>,
+                values: &mut ::std::vec::Vec<::graphql_orm::graphql::orm::SqlValue>,
+            ) -> ::graphql_orm::async_graphql::Result<()> {
+                use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow, SqlValue};
+                #(#update_field_checks_graphql)*
+                Ok(())
+            }
+        }
+    };
+    let update_assignment_helpers = quote! {
+        impl #struct_name {
+            #[doc(hidden)]
+            #[allow(dead_code, unused_imports, unused_variables, clippy::ptr_arg)]
+            fn __gom_push_update_assignments(
+                input: &#update_input,
+                set_clauses: &mut ::std::vec::Vec<::std::string::String>,
+                changed_fields: &mut ::std::vec::Vec<&'static str>,
+                values: &mut ::std::vec::Vec<::graphql_orm::graphql::orm::SqlValue>,
+            ) -> ::graphql_orm::Result<()> {
+                use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow, SqlValue};
+                #(#update_field_checks_repo)*
+                Ok(())
+            }
+
+            #update_assignments_graphql_helper
+        }
+    };
+    let update_assignments_repo_call = quote! {
+        #struct_name::__gom_push_update_assignments(
+            &input,
+            &mut set_clauses,
+            &mut changed_fields,
+            &mut values,
+        )?;
+    };
+    let update_assignments_graphql_call = if update_assignments_shared_with_graphql {
+        // The shared list has no fallible conversion, so this cannot fail today.
+        // If it ever does, the error is sanitized like every other database
+        // error of the resolver, not rendered through `Display`.
+        quote! {
+            #struct_name::__gom_push_update_assignments(
+                &input,
+                &mut set_clauses,
+                &mut changed_fields,
+                &mut values,
+            )
+            .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
+        }
+    } else {
+        quote! {
+            #struct_name::__gom_push_update_assignments_graphql(
+                &input,
+                &mut set_clauses,
+                &mut changed_fields,
+                &mut values,
+            )?;
+        }
+    };
+
     let has_updated_at_column = fields.iter().any(|field| {
         field.ident.as_ref().is_some_and(|ident| {
             parse_field_metadata(field).is_ok_and(|meta| {
@@ -4847,7 +5017,7 @@ fn generate_graphql_operations_unfiltered(
                     let mut set_clauses = vec![format!("{quoted_version_column} = {quoted_version_column} + 1")];
                     let mut changed_fields = vec![#version_column];
                     let mut values: Vec<SqlValue> = Vec::new();
-                    #(#update_field_checks_repo)*
+                    #update_assignments_repo_call
                     for (clause, column) in set_clauses.iter_mut().zip(changed_fields.iter()) {
                         let rhs = clause.split_once('=').map(|(_, rhs)| rhs.trim()).unwrap_or("?");
                         *clause = format!("{} = {rhs}", dialect.quote_identifier_path(column));
@@ -6527,6 +6697,8 @@ fn generate_graphql_operations_unfiltered(
             #[derive(Clone, Debug, Default)]
             pub struct #update_input { #(#update_input_fields)* }
 
+            #update_assignment_helpers
+
             impl #struct_name {
                 #[doc(hidden)]
                 fn __gom_runtime_error(message: impl Into<String>) -> ::graphql_orm::sqlx::Error {
@@ -6800,7 +6972,7 @@ fn generate_graphql_operations_unfiltered(
                     let mut set_clauses: Vec<String> = Vec::new();
                     let mut changed_fields: Vec<&str> = Vec::new();
                     let mut values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
-                    #(#update_field_checks_repo)*
+                    #update_assignments_repo_call
                     let dialect = <#backend_marker as OrmBackend>::DIALECT;
                     for (clause, column) in set_clauses.iter_mut().zip(changed_fields.iter()) {
                         let rhs = clause.split_once('=').map(|(_, rhs)| rhs.trim()).unwrap_or("?");
@@ -7069,7 +7241,7 @@ fn generate_graphql_operations_unfiltered(
                     let mut set_clauses: Vec<String> = Vec::new();
                     let mut changed_fields: Vec<&str> = Vec::new();
                     let mut values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
-                    #(#update_field_checks_repo)*
+                    #update_assignments_repo_call
                     let dialect = <#backend_marker as OrmBackend>::DIALECT;
                     for (clause, column) in set_clauses.iter_mut().zip(changed_fields.iter()) {
                         let rhs = clause.split_once('=').map(|(_, rhs)| rhs.trim()).unwrap_or("?");
@@ -8617,7 +8789,7 @@ fn generate_graphql_operations_unfiltered(
                 let mut values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
 
                 #(#update_policy_checks)*
-                #(#update_field_checks_graphql)*
+                #update_assignments_graphql_call
 
                 // Update timestamp column when this entity defines one
                 if #has_updated_at_column {
@@ -8858,6 +9030,8 @@ fn generate_graphql_operations_unfiltered(
         pub struct #update_input {
             #(#update_input_fields)*
         }
+
+        #update_assignment_helpers
 
         #graphql_create_input_definition
 
@@ -9590,7 +9764,7 @@ fn generate_graphql_operations_unfiltered(
                 let mut changed_fields: Vec<&str> = Vec::new();
                 let mut values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
 
-                #(#update_field_checks_repo)*
+                #update_assignments_repo_call
 
                 if #has_updated_at_column {
                     set_clauses.push(format!("updated_at = {}", Self::__gom_current_updated_at_expr()));
@@ -9727,7 +9901,7 @@ fn generate_graphql_operations_unfiltered(
                     let mut changed_fields: Vec<&str> = Vec::new();
                     let mut values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
 
-                    #(#update_field_checks_repo)*
+                    #update_assignments_repo_call
 
                     if #has_updated_at_column {
                         set_clauses.push(format!("updated_at = {}", Self::__gom_current_updated_at_expr()));
@@ -10167,7 +10341,7 @@ fn generate_graphql_operations_unfiltered(
                 let mut changed_fields: Vec<&str> = Vec::new();
                 let mut values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
 
-                #(#update_field_checks_repo)*
+                #update_assignments_repo_call
 
                 if #has_updated_at_column {
                     set_clauses.push(format!("updated_at = {}", Self::__gom_current_updated_at_expr()));
@@ -10369,7 +10543,7 @@ fn generate_graphql_operations_unfiltered(
                     let mut changed_fields: Vec<&str> = Vec::new();
                     let mut values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
 
-                    #(#update_field_checks_repo)*
+                    #update_assignments_repo_call
 
                     if #has_updated_at_column {
                         set_clauses.push(format!("updated_at = {}", Self::__gom_current_updated_at_expr()));
@@ -11155,5 +11329,283 @@ mod upsert_primary_key_tests {
         if let Err(error) = generate_graphql_operations(&input) {
             panic!("{error}");
         }
+    }
+}
+
+#[cfg(test)]
+mod update_assignment_tests {
+    use super::{
+        contains_question_mark, ensure_pure_update_assignments, first_identifier_in,
+        generate_graphql_operations,
+    };
+    use quote::quote;
+
+    fn generated(entity: syn::DeriveInput) -> String {
+        generate_graphql_operations(&entity)
+            .expect("operations generate")
+            .to_string()
+    }
+
+    fn count(haystack: &str, needle: &str) -> usize {
+        haystack.matches(needle).count()
+    }
+
+    /// The per-field UPDATE assignments are emitted once per entity and called
+    /// from every generated update path (#677).
+    #[test]
+    fn infallible_assignments_are_emitted_once_and_shared_with_graphql() {
+        let generated = generated(syn::parse_quote! {
+            #[graphql_entity(table = "update_assignment_fixture")]
+            struct UpdateAssignmentFixture {
+                #[primary_key]
+                id: String,
+                title: String,
+                rank: Option<i64>,
+            }
+        });
+        assert_eq!(
+            count(&generated, "changed_fields . push (\"title\")"),
+            1,
+            "the title assignment is emitted once"
+        );
+        assert_eq!(count(&generated, "changed_fields . push (\"rank\")"), 1);
+        assert_eq!(count(&generated, "fn __gom_push_update_assignments ("), 1);
+        assert_eq!(
+            count(&generated, "fn __gom_push_update_assignments_graphql ("),
+            0,
+            "an infallible list needs no GraphQL-typed copy"
+        );
+        // update_by_id, update_where and their two transaction forms.
+        assert_eq!(
+            count(
+                &generated,
+                ":: __gom_push_update_assignments (& input , & mut set_clauses , & mut changed_fields , & mut values ,) ?"
+            ),
+            4
+        );
+        // The GraphQL resolver sanitizes an error from the shared helper.
+        assert_eq!(
+            count(
+                &generated,
+                ":: __gom_push_update_assignments (& input , & mut set_clauses , & mut changed_fields , & mut values ,) . map_err (:: graphql_orm :: graphql :: errors :: graphql_error_from_sqlx) ?"
+            ),
+            1
+        );
+    }
+
+    /// A fallible conversion names its error type, so the GraphQL resolver
+    /// keeps a copy that fails with `async_graphql::Error` as before.
+    #[test]
+    fn fallible_assignments_keep_a_graphql_typed_copy() {
+        let generated = generated(syn::parse_quote! {
+            #[graphql_entity(table = "update_assignment_json_fixture")]
+            struct UpdateAssignmentJsonFixture {
+                #[primary_key]
+                id: String,
+                tags: Vec<String>,
+            }
+        });
+        assert_eq!(count(&generated, "changed_fields . push (\"tags\")"), 2);
+        assert_eq!(count(&generated, "fn __gom_push_update_assignments ("), 1);
+        assert_eq!(
+            count(&generated, "fn __gom_push_update_assignments_graphql ("),
+            1
+        );
+        assert_eq!(
+            count(
+                &generated,
+                ":: __gom_push_update_assignments_graphql (& input , & mut set_clauses , & mut changed_fields , & mut values ,) ?"
+            ),
+            1
+        );
+        assert_eq!(
+            count(
+                &generated,
+                ":: __gom_push_update_assignments (& input , & mut set_clauses , & mut changed_fields , & mut values ,) ?"
+            ),
+            4
+        );
+    }
+
+    /// Field write checks run before the shared assignment helper (#677, #678).
+    #[test]
+    fn field_write_checks_precede_the_assignment_helper() {
+        let generated = generated(syn::parse_quote! {
+            #[graphql_entity(table = "update_assignment_policy_fixture")]
+            struct UpdateAssignmentPolicyFixture {
+                #[primary_key]
+                id: String,
+                #[graphql_orm(write_policy = "fixture.title.write")]
+                title: String,
+            }
+        });
+        let body_of = |signature: &str| -> &str {
+            let start = generated
+                .find(signature)
+                .unwrap_or_else(|| panic!("generated code has `{signature}`"));
+            let rest = &generated[start..];
+            let end = rest[signature.len()..]
+                .find("async fn ")
+                .map_or(rest.len(), |next| next + signature.len());
+            &rest[..end]
+        };
+        let helper_call = ":: __gom_push_update_assignments (";
+
+        let resolver = body_of("async fn update (");
+        let field_check = resolver
+            .find("check_field_write (")
+            .expect("the GraphQL update resolver checks the field write policy");
+        assert!(resolver.contains("\"fixture.title.write\""));
+        let assignments = resolver
+            .find(helper_call)
+            .expect("the GraphQL update resolver calls the assignment helper");
+        assert!(
+            field_check < assignments,
+            "the field write check precedes the assignments in the GraphQL update resolver"
+        );
+        assert_eq!(count(resolver, helper_call), 1);
+
+        let repository = body_of("pub async fn update_by_id (");
+        let field_checks = repository
+            .find("authorize_repository_update_fields (")
+            .expect("update_by_id authorizes the updated fields");
+        let assignments = repository
+            .find(helper_call)
+            .expect("update_by_id calls the assignment helper");
+        assert!(
+            field_checks < assignments,
+            "the field authorization precedes the assignments in update_by_id"
+        );
+        assert_eq!(count(repository, helper_call), 1);
+    }
+
+    #[test]
+    fn impure_assignment_lists_are_refused() {
+        let span = proc_macro2::Span::call_site();
+        let pure = [quote! {
+            if let Some(ref val) = input.title {
+                changed_fields.push("title");
+                set_clauses.push(format!("{} = ?", "title"));
+                values.push(convert(val)?);
+            }
+        }];
+        assert!(ensure_pure_update_assignments("update_field_checks_repo", &pure, span).is_ok());
+
+        for (tokens, found) in [
+            (
+                quote! { if !db.check_field_write(input).await? { input.title = None; } },
+                "db",
+            ),
+            (quote! { let allowed = { policy(ctx) }; }, "ctx"),
+            (quote! { let allowed = check(input).await; }, "await"),
+            (
+                quote! { if input.title.is_none() { return Ok(()); } },
+                "return",
+            ),
+        ] {
+            let error =
+                ensure_pure_update_assignments("update_field_checks_graphql", &[tokens], span)
+                    .expect_err("an impure entry is refused")
+                    .to_string();
+            assert!(error.contains(&format!("`update_field_checks_graphql` contains `{found}`")));
+            assert!(error.contains("update_policy_checks"));
+            assert!(error.contains("update_runtime_policy_checks"));
+            assert!(error.contains("authorize_repository_update_fields"));
+        }
+    }
+
+    #[test]
+    fn identifier_detection_ignores_literals_and_longer_names() {
+        assert_eq!(
+            first_identifier_in(
+                quote! { values.push(db_column("ctx return await", context)); },
+                &["await", "return", "ctx", "db"],
+                &["await"]
+            ),
+            None
+        );
+        assert_eq!(
+            first_identifier_in(quote! { values.push({ [db] }); }, &["ctx", "db"], &[]),
+            Some("db")
+        );
+    }
+
+    /// `input.db` and `input.ctx` read fields the entity declares; a
+    /// free-standing `db` or `ctx`, and `.await`, are still reported.
+    #[test]
+    fn identifier_detection_ignores_member_names_but_not_await() {
+        let names = ["await", "return", "ctx", "db"];
+        assert_eq!(
+            first_identifier_in(
+                quote! {
+                    if let Some(ref val) = input.db { values.push(convert(val.ctx())); }
+                    if let Some(ref val) = input.r#return { values.push(convert(val)); }
+                    if let Some(ref val) = input.r#await { values.push(r#return(val)); }
+                },
+                &names,
+                &["await"]
+            ),
+            None
+        );
+        assert_eq!(
+            first_identifier_in(quote! { input.db.push(db.pool()); }, &names, &["await"]),
+            Some("db")
+        );
+        assert_eq!(
+            first_identifier_in(quote! { check(input.ctx, ctx); }, &names, &["await"]),
+            Some("ctx")
+        );
+        assert_eq!(
+            first_identifier_in(quote! { check(input.db).await; }, &names, &["await"]),
+            Some("await")
+        );
+        assert_eq!(
+            first_identifier_in(quote! { value.return_code(); return; }, &names, &["await"]),
+            Some("return")
+        );
+    }
+
+    /// An entity may name its own fields `db` and `ctx` (#680).
+    #[test]
+    fn fields_named_db_and_ctx_generate() {
+        let generated = generated(syn::parse_quote! {
+            #[graphql_entity(table = "update_assignment_names_fixture")]
+            struct UpdateAssignmentNamesFixture {
+                #[primary_key]
+                id: String,
+                db: String,
+                ctx: Option<String>,
+            }
+        });
+        assert_eq!(count(&generated, "changed_fields . push (\"db\")"), 1);
+        assert_eq!(count(&generated, "changed_fields . push (\"ctx\")"), 1);
+        assert_eq!(count(&generated, "= input . db"), 1);
+        assert_eq!(count(&generated, "= input . ctx"), 1);
+    }
+
+    /// Raw identifiers are not the keywords the purity check looks for.
+    #[test]
+    fn raw_identifier_fields_generate() {
+        let generated = generated(syn::parse_quote! {
+            #[graphql_entity(table = "update_assignment_raw_fixture")]
+            struct UpdateAssignmentRawFixture {
+                #[primary_key]
+                id: String,
+                r#return: String,
+                r#await: Option<String>,
+            }
+        });
+        assert_eq!(count(&generated, "= input . r#return"), 1);
+        assert_eq!(count(&generated, "= input . r#await"), 1);
+    }
+
+    #[test]
+    fn question_mark_detection_ignores_literals_and_reads_groups() {
+        assert!(!contains_question_mark(
+            quote! { set_clauses.push(format!("{} = ?", "title")); }
+        ));
+        assert!(contains_question_mark(
+            quote! { values.push({ convert(value)? }); }
+        ));
     }
 }
