@@ -354,11 +354,11 @@ fn render_search_delete_trigger_sql(search: &RlsSearchTable) -> String {
     let search_regclass = sql_string_literal(&search_table_sql(search));
     format!(
         "DO $graphql_orm$ DECLARE target pg_catalog.regclass := pg_catalog.to_regclass({search_regclass}); target_schema pg_catalog.text; target_name pg_catalog.text; BEGIN \
-         IF target IS NULL THEN RAISE EXCEPTION USING ERRCODE = '42P01', MESSAGE = format('graphql-orm search document table %s does not exist', {search_regclass}); END IF; \
-         SELECT n.nspname, c.relname INTO target_schema, target_name FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = target; \
-         IF target_schema LIKE 'pg\\_temp%' OR target_schema LIKE 'pg\\_toast\\_temp%' THEN RAISE EXCEPTION USING ERRCODE = '42P01', MESSAGE = 'graphql-orm search document table resolves to a temporary table'; END IF; \
+         IF target IS NULL THEN RAISE EXCEPTION USING ERRCODE = '42P01', MESSAGE = pg_catalog.format('graphql-orm search document table %s does not exist', {search_regclass}); END IF; \
+         SELECT n.nspname, c.relname INTO target_schema, target_name FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace WHERE c.oid OPERATOR(pg_catalog.=) target; \
+         IF target_schema OPERATOR(pg_catalog.~~) 'pg\\_temp%' OR target_schema OPERATOR(pg_catalog.~~) 'pg\\_toast\\_temp%' THEN RAISE EXCEPTION USING ERRCODE = '42P01', MESSAGE = 'graphql-orm search document table resolves to a temporary table'; END IF; \
          DROP TRIGGER IF EXISTS {trigger} ON {base}; \
-         EXECUTE format('CREATE TRIGGER %I BEFORE DELETE ON %s FOR EACH ROW EXECUTE FUNCTION graphql_orm.{SEARCH_DELETE_FUNCTION}(%L, %L, %L, %L)', {trigger_name}, {base_literal}, target_schema, target_name, {primary_key}, {encoding}); \
+         EXECUTE pg_catalog.format('CREATE TRIGGER %I BEFORE DELETE ON %s FOR EACH ROW EXECUTE FUNCTION graphql_orm.{SEARCH_DELETE_FUNCTION}(%L, %L, %L, %L)', {trigger_name}, {base_literal}, target_schema, target_name, {primary_key}, {encoding}); \
          END $graphql_orm$",
         trigger_name = sql_string_literal(SEARCH_DELETE_TRIGGER),
         base_literal = sql_string_literal(&base),
@@ -374,7 +374,7 @@ pub(crate) fn render_drop_search_delete_trigger_sql(base_table: &str) -> String 
     let backend = DatabaseBackend::Postgres;
     let base = backend.render_identifier_path(base_table);
     format!(
-        "DO $graphql_orm$ BEGIN IF to_regclass({}) IS NOT NULL THEN DROP TRIGGER IF EXISTS {} ON {}; END IF; END $graphql_orm$",
+        "DO $graphql_orm$ BEGIN IF pg_catalog.to_regclass({}) IS NOT NULL THEN DROP TRIGGER IF EXISTS {} ON {}; END IF; END $graphql_orm$",
         sql_string_literal(&base),
         backend.quote_identifier(SEARCH_DELETE_TRIGGER),
         base,
@@ -448,7 +448,7 @@ pub(crate) fn postgres_ensure_change_log_rls_sql() -> String {
     let policy_name = legacy_change_log_policy_name();
     let policy = backend.quote_identifier(&policy_name);
     format!(
-        "DO $graphql_orm$ BEGIN IF NOT (SELECT relrowsecurity FROM pg_class WHERE oid = to_regclass({regclass})) THEN ALTER TABLE {table} ENABLE ROW LEVEL SECURITY; END IF; IF EXISTS (SELECT 1 FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid WHERE p.polrelid = to_regclass({regclass}) AND p.polname = {name} AND pg_has_role(c.relowner, 'USAGE')) THEN DROP POLICY {policy} ON {table}; END IF; END $graphql_orm$",
+        "DO $graphql_orm$ BEGIN IF NOT (SELECT c.relrowsecurity FROM pg_catalog.pg_class c WHERE c.oid OPERATOR(pg_catalog.=) pg_catalog.to_regclass({regclass})::pg_catalog.oid) THEN ALTER TABLE {table} ENABLE ROW LEVEL SECURITY; END IF; IF EXISTS (SELECT 1 FROM pg_catalog.pg_policy p JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) p.polrelid WHERE p.polrelid OPERATOR(pg_catalog.=) pg_catalog.to_regclass({regclass})::pg_catalog.oid AND p.polname OPERATOR(pg_catalog.=) {name}::pg_catalog.name AND pg_catalog.pg_has_role(c.relowner, 'USAGE')) THEN DROP POLICY {policy} ON {table}; END IF; END $graphql_orm$",
         regclass = sql_string_literal(&table),
         name = sql_string_literal(&policy_name),
     )
@@ -650,12 +650,12 @@ pub(crate) fn change_journal_tables(schema: &super::core::SchemaModel) -> Vec<Ch
 /// use the variables `grantee_name`, `privilege_name` and `column_name`.
 fn revoke_beyond_select_statements(what: &str) -> String {
     format!(
-        "FOR grantee_name, privilege_name IN SELECT DISTINCT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(a.grantee)) END, a.privilege_type FROM pg_catalog.pg_class c CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) a WHERE c.oid = target AND a.grantee <> c.relowner AND a.privilege_type <> 'SELECT' LOOP \
+        "FOR grantee_name, privilege_name IN SELECT DISTINCT CASE WHEN a.grantee OPERATOR(pg_catalog.=) 0::pg_catalog.oid THEN 'PUBLIC' ELSE pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(a.grantee)) END, a.privilege_type FROM pg_catalog.pg_class c CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) a WHERE c.oid OPERATOR(pg_catalog.=) target AND a.grantee OPERATOR(pg_catalog.<>) c.relowner AND a.privilege_type OPERATOR(pg_catalog.<>) 'SELECT' LOOP \
          EXECUTE pg_catalog.format('REVOKE %s ON %s FROM %s CASCADE', privilege_name, target, grantee_name); END LOOP; \
-         FOR grantee_name, privilege_name, column_name IN SELECT DISTINCT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(a.grantee)) END, a.privilege_type, pg_catalog.quote_ident(att.attname) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_attribute att ON att.attrelid = c.oid AND att.attnum > 0 AND NOT att.attisdropped CROSS JOIN LATERAL pg_catalog.aclexplode(att.attacl) a WHERE c.oid = target AND a.grantee <> c.relowner AND a.privilege_type <> 'SELECT' LOOP \
+         FOR grantee_name, privilege_name, column_name IN SELECT DISTINCT CASE WHEN a.grantee OPERATOR(pg_catalog.=) 0::pg_catalog.oid THEN 'PUBLIC' ELSE pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(a.grantee)) END, a.privilege_type, pg_catalog.quote_ident(att.attname) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_attribute att ON att.attrelid OPERATOR(pg_catalog.=) c.oid AND att.attnum OPERATOR(pg_catalog.>) 0 AND NOT att.attisdropped CROSS JOIN LATERAL pg_catalog.aclexplode(att.attacl) a WHERE c.oid OPERATOR(pg_catalog.=) target AND a.grantee OPERATOR(pg_catalog.<>) c.relowner AND a.privilege_type OPERATOR(pg_catalog.<>) 'SELECT' LOOP \
          EXECUTE pg_catalog.format('REVOKE %s (%s) ON %s FROM %s CASCADE', privilege_name, column_name, target, grantee_name); END LOOP; \
-         IF EXISTS (SELECT 1 FROM pg_catalog.pg_class c CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) a WHERE c.oid = target AND a.grantee <> c.relowner AND a.privilege_type <> 'SELECT') \
-            OR EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_attribute att ON att.attrelid = c.oid AND att.attnum > 0 AND NOT att.attisdropped CROSS JOIN LATERAL pg_catalog.aclexplode(att.attacl) a WHERE c.oid = target AND a.grantee <> c.relowner AND a.privilege_type <> 'SELECT') \
+         IF EXISTS (SELECT 1 FROM pg_catalog.pg_class c CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) a WHERE c.oid OPERATOR(pg_catalog.=) target AND a.grantee OPERATOR(pg_catalog.<>) c.relowner AND a.privilege_type OPERATOR(pg_catalog.<>) 'SELECT') \
+            OR EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_attribute att ON att.attrelid OPERATOR(pg_catalog.=) c.oid AND att.attnum OPERATOR(pg_catalog.>) 0 AND NOT att.attisdropped CROSS JOIN LATERAL pg_catalog.aclexplode(att.attacl) a WHERE c.oid OPERATOR(pg_catalog.=) target AND a.grantee OPERATOR(pg_catalog.<>) c.relowner AND a.privilege_type OPERATOR(pg_catalog.<>) 'SELECT') \
          THEN RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'graphql-orm could not revoke every non-owner table or column privilege beyond SELECT on the {what}; revoke the remaining grants as their grantor and re-apply'; END IF;"
     )
 }
@@ -705,7 +705,7 @@ pub(crate) fn postgres_change_journal_recorder_sql(tables: &[ChangeJournalTable]
         format!("GRANT SELECT ON {CHANGE_JOURNAL_REGISTRY} TO PUBLIC"),
         // Bindings whose table no longer exists bind nothing.
         format!(
-            "DELETE FROM {CHANGE_JOURNAL_REGISTRY} r WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c WHERE c.oid = r.relid::pg_catalog.oid)"
+            "DELETE FROM {CHANGE_JOURNAL_REGISTRY} r WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c WHERE c.oid OPERATOR(pg_catalog.=) r.relid::pg_catalog.oid)"
         ),
         format!(
             "CREATE OR REPLACE FUNCTION graphql_orm.{CHANGE_JOURNAL_FUNCTION}() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $graphql_orm${CHANGE_JOURNAL_FUNCTION_BODY}$graphql_orm$"
@@ -713,7 +713,7 @@ pub(crate) fn postgres_change_journal_recorder_sql(tables: &[ChangeJournalTable]
         format!("REVOKE ALL ON FUNCTION graphql_orm.{CHANGE_JOURNAL_FUNCTION}() FROM PUBLIC"),
         format!(
             "DO $graphql_orm$ DECLARE recorder pg_catalog.regprocedure := pg_catalog.to_regprocedure('graphql_orm.{CHANGE_JOURNAL_FUNCTION}()'); grantee_name pg_catalog.text; BEGIN \
-             FOR grantee_name IN SELECT DISTINCT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(a.grantee)) END FROM pg_catalog.pg_proc p CROSS JOIN LATERAL pg_catalog.aclexplode(p.proacl) a WHERE p.oid = recorder AND a.grantee <> p.proowner LOOP \
+             FOR grantee_name IN SELECT DISTINCT CASE WHEN a.grantee OPERATOR(pg_catalog.=) 0::pg_catalog.oid THEN 'PUBLIC' ELSE pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(a.grantee)) END FROM pg_catalog.pg_proc p CROSS JOIN LATERAL pg_catalog.aclexplode(p.proacl) a WHERE p.oid OPERATOR(pg_catalog.=) recorder AND a.grantee OPERATOR(pg_catalog.<>) p.proowner LOOP \
              EXECUTE pg_catalog.format('REVOKE ALL ON FUNCTION %s FROM %s CASCADE', recorder, grantee_name); END LOOP; END $graphql_orm$"
         ),
         // graphql-orm only installs the recorder as `graphql_orm_change_journal`;
@@ -723,7 +723,7 @@ pub(crate) fn postgres_change_journal_recorder_sql(tables: &[ChangeJournalTable]
         // partition clones, which go with their parent.
         format!(
             "DO $graphql_orm$ DECLARE stray pg_catalog.record; BEGIN \
-             FOR stray IN SELECT t.tgname, t.tgrelid::pg_catalog.regclass AS target FROM pg_catalog.pg_trigger t JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid WHERE t.tgfoid = pg_catalog.to_regprocedure('graphql_orm.{CHANGE_JOURNAL_FUNCTION}()') AND t.tgname <> {trigger} AND t.tgparentid = 0 AND pg_catalog.pg_has_role(c.relowner, 'USAGE') LOOP \
+             FOR stray IN SELECT t.tgname, t.tgrelid::pg_catalog.regclass AS target FROM pg_catalog.pg_trigger t JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) t.tgrelid WHERE t.tgfoid OPERATOR(pg_catalog.=) pg_catalog.to_regprocedure('graphql_orm.{CHANGE_JOURNAL_FUNCTION}()') AND t.tgname OPERATOR(pg_catalog.<>) {trigger} AND t.tgparentid OPERATOR(pg_catalog.=) 0::pg_catalog.oid AND pg_catalog.pg_has_role(c.relowner, 'USAGE') LOOP \
              EXECUTE pg_catalog.format('DROP TRIGGER %I ON %s', stray.tgname, stray.target); END LOOP; END $graphql_orm$",
             trigger = sql_string_literal(CHANGE_JOURNAL_TRIGGER),
         ),
@@ -745,22 +745,22 @@ fn render_change_journal_trigger_sql(table: &ChangeJournalTable) -> String {
     // A bare name must resolve in the journal's schema, where the ORM's
     // unqualified names and the journal itself resolve.
     let binding = if table.bare {
-        "target_ns = journal_ns"
+        "target_ns OPERATOR(pg_catalog.=) journal_ns"
     } else {
         "true"
     };
     format!(
         "DO $graphql_orm$ DECLARE journal pg_catalog.regclass := pg_catalog.to_regclass({journal_regclass}); target pg_catalog.regclass := pg_catalog.to_regclass({base_literal}); journal_ns pg_catalog.text; target_ns pg_catalog.text; target_rel pg_catalog.text; BEGIN \
          IF journal IS NULL THEN RAISE EXCEPTION USING ERRCODE = '42P01', MESSAGE = 'graphql-orm change journal table does not exist'; END IF; \
-         IF target IS NULL THEN RAISE EXCEPTION USING ERRCODE = '42P01', MESSAGE = format('graphql-orm table %s does not exist', {base_literal}); END IF; \
-         SELECT n.nspname INTO journal_ns FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = journal; \
-         SELECT n.nspname, c.relname INTO target_ns, target_rel FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = target; \
-         IF journal_ns LIKE 'pg\\_temp%' OR journal_ns LIKE 'pg\\_toast\\_temp%' OR target_ns LIKE 'pg\\_temp%' OR target_ns LIKE 'pg\\_toast\\_temp%' THEN RAISE EXCEPTION USING ERRCODE = '42P01', MESSAGE = 'graphql-orm change journal trigger resolves to a temporary table'; END IF; \
-         IF NOT ({binding}) THEN RAISE EXCEPTION USING ERRCODE = '42P01', MESSAGE = format('graphql-orm change journal cannot bind table %s: it resolves to %I.%I, and a bare table name must resolve in the journal schema %I; qualify the entity table', {base_literal}, target_ns, target_rel, journal_ns); END IF; \
+         IF target IS NULL THEN RAISE EXCEPTION USING ERRCODE = '42P01', MESSAGE = pg_catalog.format('graphql-orm table %s does not exist', {base_literal}); END IF; \
+         SELECT n.nspname INTO journal_ns FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace WHERE c.oid OPERATOR(pg_catalog.=) journal; \
+         SELECT n.nspname, c.relname INTO target_ns, target_rel FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace WHERE c.oid OPERATOR(pg_catalog.=) target; \
+         IF journal_ns OPERATOR(pg_catalog.~~) 'pg\\_temp%' OR journal_ns OPERATOR(pg_catalog.~~) 'pg\\_toast\\_temp%' OR target_ns OPERATOR(pg_catalog.~~) 'pg\\_temp%' OR target_ns OPERATOR(pg_catalog.~~) 'pg\\_toast\\_temp%' THEN RAISE EXCEPTION USING ERRCODE = '42P01', MESSAGE = 'graphql-orm change journal trigger resolves to a temporary table'; END IF; \
+         IF NOT ({binding}) THEN RAISE EXCEPTION USING ERRCODE = '42P01', MESSAGE = pg_catalog.format('graphql-orm change journal cannot bind table %s: it resolves to %I.%I, and a bare table name must resolve in the journal schema %I; qualify the entity table', {base_literal}, target_ns, target_rel, journal_ns); END IF; \
          INSERT INTO {CHANGE_JOURNAL_REGISTRY} (journal_schema, declared_table, entity_name, key_column, relid) VALUES (journal_ns, {table_name}, {entity}, {key}, target) \
          ON CONFLICT (journal_schema, declared_table) DO UPDATE SET entity_name = EXCLUDED.entity_name, key_column = EXCLUDED.key_column, relid = EXCLUDED.relid; \
-         EXECUTE format('DROP TRIGGER IF EXISTS %I ON %s', {trigger_name}, target); \
-         EXECUTE format('CREATE TRIGGER %I AFTER INSERT OR UPDATE OR DELETE ON %s FOR EACH ROW EXECUTE FUNCTION graphql_orm.{CHANGE_JOURNAL_FUNCTION}(%L, %L, %L, %L, %L, %L, %L)', {trigger_name}, target, journal_ns, target_ns, target_rel, {entity}, {table_name}, {key}, {encoding}); \
+         EXECUTE pg_catalog.format('DROP TRIGGER IF EXISTS %I ON %s', {trigger_name}, target); \
+         EXECUTE pg_catalog.format('CREATE TRIGGER %I AFTER INSERT OR UPDATE OR DELETE ON %s FOR EACH ROW EXECUTE FUNCTION graphql_orm.{CHANGE_JOURNAL_FUNCTION}(%L, %L, %L, %L, %L, %L, %L)', {trigger_name}, target, journal_ns, target_ns, target_rel, {entity}, {table_name}, {key}, {encoding}); \
          END $graphql_orm$",
         trigger_name = sql_string_literal(CHANGE_JOURNAL_TRIGGER),
         base_literal = sql_string_literal(&base),
@@ -1223,14 +1223,12 @@ fn search_table_sql(search: &RlsSearchTable) -> String {
         .into_owned()
 }
 
-/// Flattened [`LiveRlsEnforcement`] key of the table a declared path resolves
-/// to when the ORM's SQL renders it.
-fn resolved_table_key(table_name: &str) -> String {
-    let joined = super::dialect::postgres_resolved_identifier_parts(table_name).join("_");
-    joined
-        .strip_prefix("public_")
-        .map(str::to_string)
-        .unwrap_or(joined)
+/// The search document's base table as the ORM's SQL names it; it is also
+/// the base entity's probed table.
+fn base_table_sql(search: &RlsSearchTable) -> String {
+    DatabaseBackend::Postgres
+        .render_identifier_path(&search.base_table)
+        .into_owned()
 }
 
 fn declared_entity_policies(entity: &RlsEntityMetadata) -> Vec<DeclaredPolicy> {
@@ -1470,14 +1468,14 @@ pub struct LiveRlsEnforcement {
     pub superuser: bool,
     /// `pg_roles.rolbypassrls` for the current role.
     pub bypass_rls: bool,
-    /// `row_security_active(table)` per table key (same keys as [`LiveRlsTable`]).
-    pub row_security_active: std::collections::BTreeMap<String, bool>,
-    /// ORM search-document delete triggers, by base table key.
+    /// ORM search-document delete triggers, by the
+    /// [`change_journal_table_key`] of the base table they are on.
     pub search_delete_triggers: std::collections::BTreeMap<String, LiveSearchDeleteTrigger>,
     /// Live `graphql_orm.delete_search_document()` definition, when present.
     pub search_delete_function: Option<LiveSearchDeleteFunction>,
-    /// Every policy name per table key, including `FOR ALL` policies.
-    pub policy_names: std::collections::BTreeMap<String, Vec<String>>,
+    /// Row security of the change journal the connection's `search_path`
+    /// resolves, when it resolves.
+    pub change_journal_table: Option<LiveChangeJournalTable>,
     /// ORM change journal triggers, by [`change_journal_table_key`].
     pub change_journal_triggers: std::collections::BTreeMap<String, LiveChangeJournalTrigger>,
     /// Schema of the change journal the connection's `search_path` resolves.
@@ -1507,6 +1505,21 @@ pub struct LiveRlsEnforcement {
     /// Roles other than the recorder owner (`PUBLIC` included) holding
     /// `EXECUTE` on `graphql_orm.record_change_journal_entry()`.
     pub change_journal_recorder_executors: Vec<String>,
+}
+
+/// Row security of the change journal the connection's `search_path`
+/// resolves.
+#[doc(hidden)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LiveChangeJournalTable {
+    /// Schema the journal resolves to.
+    pub schema: String,
+    /// `pg_class.relrowsecurity`.
+    pub enabled: bool,
+    /// `row_security_active(journal)` for the introspecting role.
+    pub row_security_active: bool,
+    /// Every policy on the journal by name, including `FOR ALL` policies.
+    pub policies: Vec<String>,
 }
 
 /// A live trigger named [`CHANGE_JOURNAL_TRIGGER`].
@@ -1635,8 +1648,8 @@ pub(crate) fn validate_rls_enforcement_state(
         return diagnostics;
     }
 
-    // Entity and search tables are resolved by the path the ORM's SQL uses;
-    // the change journal by its table key.
+    // Entity and search tables are resolved by the path the ORM's SQL uses,
+    // and so is the change journal.
     let mut protected = sorted_entities(&target.rls)
         .into_iter()
         .map(|entity| {
@@ -1652,7 +1665,9 @@ pub(crate) fn validate_rls_enforcement_state(
     }));
     protected.push((
         CHANGE_LOG_TABLE.to_string(),
-        live.row_security_active.get(CHANGE_LOG_TABLE).copied(),
+        live.change_journal_table
+            .as_ref()
+            .map(|journal| journal.row_security_active),
     ));
     for (table, active) in protected {
         if active == Some(false) {
@@ -1739,7 +1754,7 @@ pub(crate) fn validate_protected_rls_tables(
             "the visible base row predicate",
         );
         if let Some(live) = live
-            && let Some(message) = search_delete_trigger_problem(live, &search)
+            && let Some(message) = search_delete_trigger_problem(live, current, &search)
         {
             diagnostics.push(rls_diagnostic(
                 SchemaDiagnosticSeverity::Error,
@@ -1765,7 +1780,6 @@ pub(crate) fn validate_protected_rls_tables(
 pub(crate) fn validate_change_journal(
     backend: DatabaseBackend,
     policy: SchemaPolicy,
-    current: &[LiveRlsTable],
     live: Option<&LiveRlsEnforcement>,
     target: &SchemaTarget,
 ) -> Vec<SchemaDiagnostic> {
@@ -1783,34 +1797,20 @@ pub(crate) fn validate_change_journal(
     let error = |message: String| {
         rls_diagnostic(SchemaDiagnosticSeverity::Error, CHANGE_LOG_TABLE, message)
     };
-    match current
-        .iter()
-        .find(|table| normalize_table_key(&table.table_name) == CHANGE_LOG_TABLE)
-    {
+    let Some(live) = live else {
+        return diagnostics;
+    };
+    match &live.change_journal_table {
         Some(change_log) => {
             if !change_log.enabled {
                 diagnostics.push(error(format!("RLS is not enabled on {CHANGE_LOG_TABLE}")));
             }
-            let mut names = change_log
-                .policies
-                .iter()
-                .map(|policy| policy.policy_name.clone())
-                .collect::<Vec<_>>();
-            if let Some(live) = live
-                && let Some(all) = live.policy_names.get(CHANGE_LOG_TABLE)
-            {
-                names.extend(all.iter().cloned());
-            }
-            names.sort();
-            names.dedup();
-            for name in names {
+            for name in &change_log.policies {
                 diagnostics.push(error(format!(
                     "Unexpected RLS policy {name} on {CHANGE_LOG_TABLE} lets a role subject to RLS read or write journal entries; re-apply the schema target"
                 )));
             }
-            if let Some(live) = live
-                && live.change_journal_owned_by_current_role
-            {
+            if live.change_journal_owned_by_current_role {
                 diagnostics.push(error(format!(
                     "Current database role {} acts as the journal owner of {CHANGE_LOG_TABLE}: it bypasses the journal's row security and every recorder privilege check. Validate with the runtime pool, and do not let the runtime role own the journal",
                     live.role
@@ -1827,9 +1827,6 @@ pub(crate) fn validate_change_journal(
     if !recorder {
         return diagnostics;
     }
-    let Some(live) = live else {
-        return diagnostics;
-    };
     let function_matches = live
         .change_journal_function
         .as_ref()
@@ -2007,10 +2004,18 @@ fn change_journal_binding_problem(
 /// not reliably remove its documents, if it would not.
 fn search_delete_trigger_problem(
     live: &LiveRlsEnforcement,
+    probed: &LiveRlsTarget,
     search: &RlsSearchTable,
 ) -> Option<String> {
     let base = &search.base_table;
-    let Some(trigger) = live.search_delete_triggers.get(&resolved_table_key(base)) else {
+    // The trigger must be on the table the base path resolves to.
+    let trigger = live_table_state(probed, &base_table_sql(search))
+        .and_then(|state| state.relation.as_ref())
+        .and_then(|(schema, name)| {
+            live.search_delete_triggers
+                .get(&change_journal_table_key(schema, name))
+        });
+    let Some(trigger) = trigger else {
         return Some(format!(
             "Missing search document delete trigger {SEARCH_DELETE_TRIGGER} on {base}"
         ));
@@ -2055,14 +2060,6 @@ fn search_delete_trigger_problem(
         ));
     }
     None
-}
-
-fn normalize_table_key(table_name: &str) -> String {
-    let unquoted = unquote_identifier_path(table_name);
-    unquoted
-        .strip_prefix("public_")
-        .unwrap_or(&unquoted)
-        .to_string()
 }
 
 fn rls_diagnostic(
@@ -2370,6 +2367,60 @@ mod drift_tests {
             vec![select_predicate(), "status IN ('a', 'b')".to_string()]
         );
     }
+
+    #[test]
+    fn search_delete_triggers_are_found_on_the_resolved_base_table() {
+        let search = RlsSearchTable {
+            base_table: "audit.logs".to_string(),
+            search_table: "__graphql_orm_search_audit_logs".to_string(),
+            primary_key: "id".to_string(),
+            primary_key_sql_type: "text".to_string(),
+            force: true,
+        };
+        let trigger = LiveSearchDeleteTrigger {
+            enabled: "O".to_string(),
+            trigger_type: SEARCH_DELETE_TRIGGER_TYPE,
+            calls_orm_function: true,
+            arguments: ["audit", "__graphql_orm_search_audit_logs", "id", "text"]
+                .map(str::to_string)
+                .to_vec(),
+            target_exists: true,
+        };
+        let probed = LiveRlsTarget {
+            tables: vec![LiveRlsTableState {
+                table_sql: "audit.logs".to_string(),
+                relation: Some(("audit".to_string(), "logs".to_string())),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut live = LiveRlsEnforcement {
+            search_delete_function: Some(LiveSearchDeleteFunction {
+                body: SEARCH_DELETE_FUNCTION_BODY.to_string(),
+                config: vec![SEARCH_DELETE_FUNCTION_CONFIG.to_string()],
+                security_definer: false,
+            }),
+            ..Default::default()
+        };
+        // An intact trigger on public.audit_logs is not on audit.logs.
+        live.search_delete_triggers.insert(
+            change_journal_table_key("public", "audit_logs"),
+            trigger.clone(),
+        );
+        let problem = search_delete_trigger_problem(&live, &probed, &search);
+        assert!(
+            problem.as_deref().is_some_and(
+                |message| message.starts_with("Missing search document delete trigger")
+            ),
+            "{problem:?}"
+        );
+        // Nor is a base path that does not resolve.
+        let unresolved = LiveRlsTarget::default();
+        assert!(search_delete_trigger_problem(&live, &unresolved, &search).is_some());
+        live.search_delete_triggers
+            .insert(change_journal_table_key("audit", "logs"), trigger);
+        assert_eq!(search_delete_trigger_problem(&live, &probed, &search), None);
+    }
 }
 
 #[cfg(test)]
@@ -2405,6 +2456,7 @@ mod change_journal_tests {
         LiveRlsEnforcement {
             role: "app_runtime".to_string(),
             change_journal_owned_by_current_role: owned,
+            change_journal_table: Some(journal_table()),
             change_journal_registry_present: true,
             change_journal_registry_owned_by_recorder_owner: true,
             change_journal_function: Some(LiveChangeJournalFunction {
@@ -2416,11 +2468,11 @@ mod change_journal_tests {
         }
     }
 
-    fn journal_table() -> LiveRlsTable {
-        LiveRlsTable {
-            table_name: CHANGE_LOG_TABLE.to_string(),
+    fn journal_table() -> LiveChangeJournalTable {
+        LiveChangeJournalTable {
+            schema: "public".to_string(),
             enabled: true,
-            forced: false,
+            row_security_active: true,
             policies: Vec::new(),
         }
     }
@@ -2429,7 +2481,6 @@ mod change_journal_tests {
         validate_change_journal(
             DatabaseBackend::Postgres,
             SchemaPolicy::Managed,
-            &[journal_table()],
             Some(live),
             &SchemaTarget::from_entities(&[], &[]),
         )
@@ -2592,20 +2643,54 @@ mod change_journal_tests {
     }
 
     #[test]
+    fn the_resolved_journal_is_validated_in_any_schema() {
+        let mut elsewhere = live(false);
+        elsewhere.change_journal_schema = Some("app".to_string());
+        elsewhere.change_journal_table = Some(LiveChangeJournalTable {
+            schema: "app".to_string(),
+            enabled: false,
+            row_security_active: false,
+            policies: vec!["everything".to_string()],
+        });
+        let reported = messages(&elsewhere);
+        assert!(
+            !reported
+                .iter()
+                .any(|message| message.contains("Missing change journal table")),
+            "{reported:#?}"
+        );
+        assert!(
+            reported
+                .iter()
+                .any(|message| message
+                    .contains(&format!("RLS is not enabled on {CHANGE_LOG_TABLE}"))),
+            "{reported:#?}"
+        );
+        assert!(
+            reported
+                .iter()
+                .any(|message| message.contains("Unexpected RLS policy everything")),
+            "{reported:#?}"
+        );
+        let missing = LiveRlsEnforcement {
+            change_journal_table: None,
+            ..live(false)
+        };
+        assert!(
+            messages(&missing)
+                .iter()
+                .any(|message| message.contains("Missing change journal table"))
+        );
+    }
+
+    #[test]
     fn a_role_acting_as_the_journal_owner_is_reported_without_rls_entities() {
         let target = SchemaTarget::from_entities(&[], &[]);
         assert!(target.rls.entities.is_empty());
-        let journal = LiveRlsTable {
-            table_name: CHANGE_LOG_TABLE.to_string(),
-            enabled: true,
-            forced: false,
-            policies: Vec::new(),
-        };
         let diagnostics = |owned| {
             validate_change_journal(
                 DatabaseBackend::Postgres,
                 SchemaPolicy::Managed,
-                std::slice::from_ref(&journal),
                 Some(&live(owned)),
                 &target,
             )

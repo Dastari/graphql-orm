@@ -10,6 +10,18 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.132.0 hardens PostgreSQL catalog reads: they use catalog-defined
+objects regardless of the session's `search_path`. RLS validation pins the
+path to `pg_catalog, pg_temp` in a transaction of its own. Schema
+introspection, the dependent-delete gate, the runtime migration's checks and
+the plan's own `DO` blocks name every catalog relation, function, type and
+operator with its schema. A partial index counts as a closed-set predicate
+only when everything it depends on belongs to `pg_catalog`. RLS validation
+also validates the change journal in whichever schema the connection resolves
+it to, and looks for the search-document delete trigger on the table the base
+path resolves to. Upgrade ORM/macros together; see the
+[root migration guide](../../MIGRATION.md#01310-to-01320-postgresql-catalog-reads).
+
 Version 0.131.0 fixes native search column collisions in repository and generated
 GraphQL searches by hiding managed search-table columns from entity SQL.
 Server-authored default-sort SQL passes through unchanged. Upgrade ORM/macros
