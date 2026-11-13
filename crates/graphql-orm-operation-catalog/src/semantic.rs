@@ -1306,6 +1306,12 @@ impl GraphqlSemanticOperationDescriptor {
     /// Mutations start as [`AiMutationExecutionPolicy::Prohibited`]; use
     /// [`Self::with_ai_mutation_execution`] to classify them.
     ///
+    /// The generated label is a statement by trusted code that the ORM
+    /// produced this root. It proves nothing about the input types the root
+    /// uses and never widens their disclosure: consumers treat an input as a
+    /// generated entity input only when its members also have the canonical
+    /// generated shape, and treat every other input as handwritten.
+    ///
     /// # Errors
     ///
     /// Returns an error for invalid names, descriptions, arguments, or types.

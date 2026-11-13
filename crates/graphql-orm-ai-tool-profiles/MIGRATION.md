@@ -22,12 +22,17 @@ shared generated helper (filter operator or page input), wherever it is reached:
 custom roots, generated roots and relationship arguments alike. Generated entity
 inputs, filter operators and page arguments are unchanged.
 
-A name of a generated input kind (for example `Create{Entity}Input` or
-`{Entity}AggregateMetricInput`) counts as generated only when a generated root
-of that entity, or a relationship argument targeting it, reaches it. A
-host-written input with such a name, for example one used by a custom root while
-the entity's generated create root is disabled, is handwritten and needs
-declarations like any other.
+An input with a generated kind's name (for example `Create{Entity}Input` or
+`{Entity}AggregateMetricInput`) counts as generated only when it has that kind's
+canonical member shape and a generated root of that entity, or a relationship
+argument targeting it, reaches it. For an aggregate metric input, `operator` must
+be the aggregate-operator enum and `field` the entity's `{Entity}AggregateField`
+enum; for the other kinds, every member the generated rules admit must have the
+generated type. Any other input with such a name, including a host-written one
+used by a custom root or by a root built with
+`GraphqlSemanticOperationDescriptor::generated`, is handwritten and needs
+declarations like any other. A canonical aggregate metric input applies the
+generated field and operator rules on every root that uses it.
 Declare each field the model may describe and send, or declare a custom
 operation to disclose every handwritten input its arguments reach:
 

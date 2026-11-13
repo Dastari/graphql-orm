@@ -10,6 +10,8 @@ supersedes: []
 
 # `graphql-orm-operation-catalog`
 
+Version `0.7.4` documents that `GraphqlSemanticOperationDescriptor::generated` is a statement by trusted code and does not widen the disclosure of the inputs a root uses. Documentation only; no API, fingerprint or data migration change.
+
 Version `0.7.3` adds:
 
 - `GeneratedGraphqlQueryShape` and `query_shape()` on generated and resolved descriptors, so adapters can tell Keyset roots from bounded Scan roots that share the `KeysetList` category. Shapes take part in no fingerprint or encoding.

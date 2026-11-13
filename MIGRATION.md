@@ -10,6 +10,14 @@ supersedes: []
 
 # Migration Guide
 
+## Operation catalogue 0.7.4: generated label documentation
+
+Documentation only. `GraphqlSemanticOperationDescriptor::generated` now states
+that the generated label is a statement by trusted code and never widens the
+disclosure of the inputs a root uses; tool profiles 0.23.0 treats an input as a
+generated entity input only when its members also have the canonical generated
+shape. No API, fingerprint, schema or data migration change.
+
 ## 0.129.0 to 0.130.0: fail-closed authority defaults
 
 Upgrade runtime and macros together. No schema or data migration is needed.

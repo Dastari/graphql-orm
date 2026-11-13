@@ -4100,18 +4100,11 @@ fn restrict_input_fields(
     // A generated type belongs to its exact entity, not the longest entity
     // name that happens to prefix it (e.g. Subscription vs SubscriptionWhere).
     let binding = schema.custom_input_binding(catalog)?;
-    // A generated-kind name is generated only when that entity's generated
-    // operations or relationships actually reach it; a host-written input
-    // with the same name is handwritten.
-    let generated = catalog
-        .entities
-        .iter()
-        .filter_map(|entity| {
-            generated_input_kind(input_name, &entity.entity_name)
-                .filter(|_| binding.generated_for(&entity.entity_name, input_name))
-                .map(|kind| (entity, kind))
-        })
-        .collect::<Vec<_>>();
+    // A generated-kind name is generated only when it has that kind's
+    // canonical member shape and that entity's generated operations or
+    // relationships actually reach it. Anything else with the same name is
+    // handwritten.
+    let generated = canonical_generated_owners(schema, catalog, &binding, input_name);
     let (entity, kind) = match generated.as_slice() {
         [(entity, kind)] => (*entity, *kind),
         [] => {
@@ -4184,6 +4177,142 @@ fn restrict_input_fields(
         .collect())
 }
 
+/// Returns every entity that canonically owns a generated-kind input: the
+/// name is that entity's generated kind, the entity's generated roots or
+/// relationships reach it, and every member the generated rules would admit
+/// has the generated type. A generated label or a matching name alone never
+/// makes an input generated.
+fn canonical_generated_owners<'a>(
+    schema: &FinishedSchema,
+    catalog: &'a GraphqlSemanticCatalog,
+    binding: &CustomInputBinding,
+    input_name: &str,
+) -> Vec<(
+    &'a graphql_orm_operation_catalog::GraphqlEntitySemanticMetadata,
+    SemanticInputKind,
+)> {
+    let empty = BTreeMap::new();
+    let fields = match schema.types.get(input_name) {
+        Some(SchemaType::InputObject(fields)) => fields,
+        _ => &empty,
+    };
+    catalog
+        .entities
+        .iter()
+        .filter_map(|entity| {
+            generated_input_kind(input_name, &entity.entity_name)
+                .filter(|_| binding.generated_for(&entity.entity_name, input_name))
+                .filter(|kind| generated_shape_matches(schema, entity, *kind, fields))
+                .map(|kind| (entity, kind))
+        })
+        .collect()
+}
+
+/// Returns whether the members a generated kind would admit have exactly the
+/// types the ORM generates for that kind.
+fn generated_shape_matches(
+    schema: &FinishedSchema,
+    entity: &graphql_orm_operation_catalog::GraphqlEntitySemanticMetadata,
+    kind: SemanticInputKind,
+    fields: &BTreeMap<String, SchemaInput>,
+) -> bool {
+    let is_enum = |ty: &str| {
+        list_item_type(ty).is_none()
+            && named_type(ty)
+                .is_ok_and(|name| matches!(schema.types.get(name), Some(SchemaType::Enum(_))))
+    };
+    let entity_field = |name: &str| {
+        entity.fields.iter().find(|field| {
+            field.field_name == name
+                && field.relationship.is_none()
+                && field.export == GraphqlSemanticExport::Exportable
+                && field.classification != GraphqlSemanticClassification::Secret
+        })
+    };
+    match kind {
+        SemanticInputKind::AggregateMetric => {
+            let member = |expected: &str| {
+                let mut matches = fields
+                    .iter()
+                    .filter(|(name, _)| name.eq_ignore_ascii_case(expected));
+                let first = matches.next();
+                first.filter(|_| matches.next().is_none())
+            };
+            // `operator` is the closed aggregate-operator enum and `field` is
+            // the entity's restricted aggregate-field enum, never a free-form
+            // scalar.
+            let operator_is_canonical = member("operator").is_some_and(|(_, field)| {
+                is_non_null(&field.ty)
+                    && list_item_type(&field.ty).is_none()
+                    && matches!(
+                        named_type(&field.ty).ok().and_then(|name| schema.types.get(name)),
+                        Some(SchemaType::Enum(values))
+                            if !values.is_empty()
+                                && values.iter().all(|value| aggregate_operator(value).is_ok())
+                    )
+            });
+            let aggregate_field = format!("{}AggregateField", entity.entity_name);
+            let field_is_canonical = member("field").is_some_and(|(_, field)| {
+                is_enum(&field.ty)
+                    && named_type(&field.ty).is_ok_and(|name| name == aggregate_field)
+            });
+            operator_is_canonical && field_is_canonical
+        }
+        // The runtime order input is validated against its exact shape where
+        // it is restricted.
+        SemanticInputKind::RuntimeOrder => true,
+        SemanticInputKind::Where => fields.iter().all(|(name, field)| {
+            entity_field(name)
+                .filter(|semantic| !semantic.filter_operators.is_empty())
+                .and_then(|semantic| semantic.filter_input.as_ref())
+                .is_none_or(|input| render_type_ref(&input.type_ref) == field.ty)
+        }),
+        SemanticInputKind::OrderBy | SemanticInputKind::KeysetOrderBy => fields
+            .iter()
+            .all(|(name, field)| entity_field(name).is_none() || is_enum(&field.ty)),
+        SemanticInputKind::Fields => fields.iter().all(|(name, field)| {
+            entity_field(name).is_none_or(|semantic| {
+                let generated = render_type_ref(&semantic.type_ref);
+                list_item_type(&generated).is_some() == list_item_type(&field.ty).is_some()
+                    && named_type(&generated).ok() == named_type(&field.ty).ok()
+            })
+        }),
+    }
+}
+
+/// Applies the generated aggregate metric rules to one supplied metric value,
+/// wherever the canonical metric input is used: the selected field must be an
+/// exact exportable field of the owning entity that supports the operator,
+/// and only a row count may omit the field.
+fn validate_aggregate_metric_value(
+    entity: &graphql_orm_operation_catalog::GraphqlEntitySemanticMetadata,
+    metric: &Map<String, Value>,
+) -> Result<(), AiError> {
+    let operator = aggregate_object_value(metric, "operator")?
+        .as_str()
+        .ok_or_else(|| input_error("aggregate metric operator is invalid"))?;
+    let (operator, _) = aggregate_operator(operator)?;
+    match aggregate_object_value_optional(metric, "field")?.filter(|value| !value.is_null()) {
+        Some(value) => {
+            let selected = value
+                .as_str()
+                .ok_or_else(|| input_error("aggregate metric field is invalid"))?;
+            let field = aggregate_semantic_field(entity, selected)?;
+            ensure_aggregate_field_exportable(field)?;
+            if !field.aggregate_operators.contains(&operator) {
+                return Err(input_error("aggregate metric operator is unavailable"));
+            }
+        }
+        None if operator == GraphqlAggregateOperator::Count => {}
+        None => {
+            return Err(input_error(
+                "aggregate metric field is required for this operator",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Returns whether an input object is handwritten: neither a generated entity
 /// input nor a shared generated helper (filter operator or page input).
 fn handwritten_input(
@@ -4193,10 +4322,8 @@ fn handwritten_input(
     operator_roles: Option<&BTreeMap<String, Value>>,
     input_name: &str,
 ) -> bool {
-    !catalog.entities.iter().any(|entity| {
-        generated_input_kind(input_name, &entity.entity_name).is_some()
-            && binding.generated_for(&entity.entity_name, input_name)
-    }) && !operator_roles.is_some_and(|roles| roles.contains_key(input_name))
+    canonical_generated_owners(schema, catalog, binding, input_name).is_empty()
+        && !operator_roles.is_some_and(|roles| roles.contains_key(input_name))
         && !shared_input_helper(schema, catalog, input_name)
 }
 
@@ -5560,7 +5687,16 @@ fn prevalidate_input_json(
     if let (Some(SchemaType::InputObject(fields)), Some(values)) =
         (schema.types.get(name), value.as_object())
     {
-        let fields = restrict_input_fields(schema, catalog, name, fields)?;
+        let restricted = restrict_input_fields(schema, catalog, name, fields)?;
+        // A canonical metric input carries the same field and operator rules
+        // on every root that uses it, not only on generated aggregate roots.
+        let binding = schema.custom_input_binding(catalog)?;
+        if let [(entity, SemanticInputKind::AggregateMetric)] =
+            canonical_generated_owners(schema, catalog, &binding, name).as_slice()
+        {
+            validate_aggregate_metric_value(entity, values)?;
+        }
+        let fields = restricted;
         ancestry.push(name.to_owned());
         for (key, value) in values {
             if let Some(field) = fields.get(key) {
@@ -5940,7 +6076,8 @@ mod tests {
         input ParentMutationInput { name: String!, credential: String }
         input PageInput { limit: Int, offset: Int }
         enum AggregateOperator { COUNT MIN MAX SUM }
-        input ParentAggregateMetricInput { operator: AggregateOperator!, field: String }
+        input ParentAggregateMetricInput { operator: AggregateOperator!, field: ParentAggregateField }
+        enum ParentAggregateField { id name amount credential }
         type AggregateRow { groups: [AggregateValue!]!, metrics: [AggregateValue!]! }
         type AggregateValue { field: String, operator: String, kind: String!, value: String }
     "#;
@@ -10380,7 +10517,7 @@ mod tests {
         // Drop the shared fixture's own definition of the same name.
         let sdl = query_sdl()
             .replace(
-                "        input ParentAggregateMetricInput { operator: AggregateOperator!, field: String }\n",
+                "        input ParentAggregateMetricInput { operator: AggregateOperator!, field: ParentAggregateField }\n",
                 "",
             )
             .replace(
@@ -10518,6 +10655,189 @@ mod tests {
             Err(AiError::InvalidConfiguration(message))
                 if message == "declared custom operation reaches no handwritten input"
         ));
+    }
+
+    /// The aggregate fixture plus one extra root over `Parent` taking
+    /// `ParentAggregateMetricInput`, optionally with a replaced input shape.
+    fn shared_metric_fixture(
+        extra: GraphqlSemanticOperationDescriptor,
+        metric_input: Option<&str>,
+    ) -> (String, GraphqlSemanticCatalog) {
+        let mut sdl = SDL.replace(
+            "          ReadParent(id: ID!): Parent!\n",
+            &format!(
+                "          ReadParent(id: ID!): Parent!\n          {}(metric: ParentAggregateMetricInput!): Parent\n",
+                extra.field_name
+            ),
+        );
+        if let Some(metric_input) = metric_input {
+            sdl = sdl.replace(
+                "        input ParentAggregateMetricInput { operator: AggregateOperator!, field: ParentAggregateField }\n",
+                &format!("        {metric_input}\n"),
+            );
+        }
+        let mut semantics = aggregate_semantic_catalog();
+        semantics.operations.push(extra);
+        let semantics =
+            GraphqlSemanticCatalog::compose_descriptors(semantics.entities, semantics.operations)
+                .expect("shared metric catalogue validates");
+        (sdl, semantics)
+    }
+
+    fn metric_root_arguments() -> Vec<GraphqlSemanticArgumentDescriptor> {
+        vec![GraphqlSemanticArgumentDescriptor {
+            graphql_name: "metric".to_owned(),
+            description: "One reviewed aggregate expression.".to_owned(),
+            type_ref: GraphqlSemanticTypeRef::named(
+                "ParentAggregateMetricInput",
+                GraphqlSemanticTypeKind::Object,
+                false,
+            ),
+        }]
+    }
+
+    fn compile_shared_metric(
+        sdl: &str,
+        semantics: &GraphqlSemanticCatalog,
+    ) -> Result<AiGraphqlQueryCapabilityCatalog, AiError> {
+        AiGraphqlQueryCapabilityCatalog::compile(
+            "inventory",
+            GraphqlExecutionTargetId::parse("inventory.graphql").expect("target"),
+            sdl,
+            semantics,
+            AiGraphqlQueryCapabilityLimits::default(),
+        )
+    }
+
+    fn assert_metric_rules(catalog: &AiGraphqlQueryCapabilityCatalog, root: &str) {
+        let capability = catalog
+            .capabilities()
+            .find(|capability| capability.field_name() == root)
+            .expect("metric root capability");
+        let described = format!(
+            "{}{}",
+            capability.argument_schema(),
+            capability.compact_argument_schema()
+        );
+        assert!(!described.contains("credential"), "{described}");
+        let plan = |metric: Value| {
+            json!({
+                "arguments": { "metric": metric },
+                "fields": { "id": true },
+                "relationships": {}
+            })
+        };
+        capability
+            .compile(plan(json!({ "operator": "SUM", "field": "amount" })))
+            .expect("an exportable field with a supported operator compiles");
+        for metric in [
+            json!({ "operator": "MAX", "field": "credential" }),
+            json!({ "operator": "SUM", "field": "name" }),
+            json!({ "operator": "SUM" }),
+        ] {
+            assert!(
+                capability.compile(plan(metric.clone())).is_err(),
+                "{root} accepted {metric}"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_metric_inputs_keep_generated_rules_on_every_root() {
+        // A custom root sharing the generated aggregate metric input gets the
+        // generated rules, never more.
+        let custom = GraphqlSemanticOperationDescriptor::custom(
+            GraphqlOperationKind::Query,
+            "MetricParent",
+            "Read one parent through a reviewed metric.",
+            metric_root_arguments(),
+            GraphqlSemanticTypeRef::named("Parent", GraphqlSemanticTypeKind::Object, true),
+            true,
+        )
+        .expect("custom metric root");
+        let (sdl, semantics) = shared_metric_fixture(custom.clone(), None);
+        assert_metric_rules(
+            &compile_shared_metric(&sdl, &semantics).expect("shared metric compiles"),
+            "MetricParent",
+        );
+
+        // A non-aggregate generated root using the metric input gets the same
+        // rules.
+        let listed = generated_root(
+            "Parent",
+            GraphqlOperationKind::Query,
+            "MetricListParent",
+            "Read one parent through a reviewed metric.",
+            metric_root_arguments(),
+            GraphqlSemanticTypeRef::named("Parent", GraphqlSemanticTypeKind::Object, true),
+            true,
+        )
+        .expect("generated metric root");
+        let (sdl, semantics) = shared_metric_fixture(listed, None);
+        assert_metric_rules(
+            &compile_shared_metric(&sdl, &semantics).expect("listed metric compiles"),
+            "MetricListParent",
+        );
+
+        // A free-form metric shape is not the generated contract, even when a
+        // generated aggregate root also uses it: it is handwritten everywhere.
+        let (sdl, semantics) = shared_metric_fixture(
+            custom,
+            Some(
+                "input ParentAggregateMetricInput { operator: AggregateOperator!, field: String }",
+            ),
+        );
+        assert!(matches!(
+            compile_shared_metric(&sdl, &semantics),
+            Err(AiError::InvalidConfiguration(message))
+                if message == "required custom input field has no declared disclosure"
+        ));
+    }
+
+    #[test]
+    fn a_generated_label_over_a_non_canonical_input_does_not_widen_disclosure() {
+        let labelled = generated_root(
+            "Parent",
+            GraphqlOperationKind::Query,
+            "LabelledParent",
+            "Read one parent through a host-written metric.",
+            metric_root_arguments(),
+            GraphqlSemanticTypeRef::named("Parent", GraphqlSemanticTypeKind::Object, true),
+            true,
+        )
+        .expect("host-labelled root");
+        let (sdl, semantics) = shared_metric_fixture(
+            labelled,
+            Some("input ParentAggregateMetricInput { operator: String!, field: String }"),
+        );
+        assert!(matches!(
+            compile_shared_metric(&sdl, &semantics),
+            Err(AiError::InvalidConfiguration(message))
+                if message == "required custom input field has no declared disclosure"
+        ));
+        let declared = AiGraphqlQueryCapabilityCatalog::compile_with_options(
+            "inventory",
+            GraphqlExecutionTargetId::parse("inventory.graphql").expect("target"),
+            &sdl,
+            &semantics,
+            AiGraphqlQueryCapabilityLimits::default(),
+            AiGraphqlQueryCapabilityOptions::default().with_custom_input_disclosure(
+                AiCustomInputDisclosure::new()
+                    .with_exportable_field("ParentAggregateMetricInput", "operator")
+                    .unwrap(),
+            ),
+        )
+        .expect("declared host metric compiles");
+        let capability = declared
+            .capabilities()
+            .find(|capability| capability.field_name() == "LabelledParent")
+            .expect("labelled capability");
+        let described = format!(
+            "{}{}",
+            capability.argument_schema(),
+            capability.compact_argument_schema()
+        );
+        assert!(!described.contains("\"field\""), "{described}");
     }
 
     #[test]
