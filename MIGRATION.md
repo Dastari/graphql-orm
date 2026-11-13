@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-13
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -12,16 +12,18 @@ supersedes: []
 
 ## 0.133.0 to 0.134.0: test-only release
 
-No code, SDL, schema or data migration is needed. The release changes one test
-fixture to build its generated stand-in root with
-`GraphqlSemanticOperationDescriptor::generated`.
+No code, SDL, schema or data migration is needed. Tests compile complete AI
+capabilities over macro-generated inputs and runtime search, link and
+projected-output inputs.
+Generated stand-in roots use `GraphqlSemanticOperationDescriptor::generated`.
 
 ## Operation catalogue 0.7.4: generated label documentation
 
 Documentation only. `GraphqlSemanticOperationDescriptor::generated` now states
 that trusted host code asserts the resolver is the ORM generated resolver.
 Tool profiles checks canonical input identities and shapes to limit disclosure;
-it cannot prove how a host resolver interprets canonical arguments. No API, fingerprint, schema or data migration change.
+it cannot prove how a host resolver interprets canonical arguments. No API,
+fingerprint, schema or data migration change.
 
 ## 0.132.0 to 0.133.0: reserved runtime table names
 

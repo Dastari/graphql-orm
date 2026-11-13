@@ -12,6 +12,8 @@ supersedes: []
 
 ## Unreleased - 0.137.0
 
+- **Documentation:** backend-neutral API descriptions name optional database-backed services without unconditional links.
+
 - **Changed (security):** the AI control-plane root set is now derived from this crate's own composable GraphQL roots: sessions, messages, approvals, proposals, skills, rules, budgets, configuration, attachments, usage and subscriptions. It is exposed as `ai_control_plane_root_fields()` and matched ignoring case and underscores. A test fails if a new GraphQL object type is added without being classified as a control-plane root or a non-root output.
 - **Changed (security):** `register_query_capability_catalog`, `register_mutation_capability_catalog` and `register_subscription_capability_catalog` now refuse a whole capability set that contains a control-plane root.
 - **Changed (security):** static tool registration now parses the document. It refuses a document that does not parse, spreads an undefined fragment, or selects, at any depth, an AI control-plane field name, an introspection field other than `__typename`, or the federation fields `_service` and `_entities`. Registration now also requires exactly one operation, named as the contract names it, whose type equals the declared `operation_kind`. Remote delegated requests apply the same document check.

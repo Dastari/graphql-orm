@@ -13,6 +13,9 @@ supersedes: []
 ## 0.136.0 to 0.137.0: exact tool registration and derived control-plane roots
 
 No data migration is needed, and no GraphQL SDL or persistent schema changes.
+Database-backed service references in backend-neutral Rustdoc remain readable
+when the selected backend does not provide those services. No feature or API
+change.
 
 - Static tool documents must contain exactly one named operation. Its name must
   equal the contract's `operation_name`, and its type must equal the

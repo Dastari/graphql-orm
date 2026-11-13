@@ -1306,11 +1306,11 @@ impl GraphqlSemanticOperationDescriptor {
     /// Mutations start as [`AiMutationExecutionPolicy::Prohibited`]; use
     /// [`Self::with_ai_mutation_execution`] to classify them.
     ///
-    /// The generated label is a statement by trusted code that the ORM
-    /// produced this root. It proves nothing about the input types the root
-    /// uses and never widens their disclosure: consumers treat an input as a
-    /// generated entity input only when its members also have the canonical
-    /// generated shape, and treat every other input as handwritten.
+    /// The generated label is an assertion by trusted host code that the
+    /// resolver is the ORM's generated resolver. Consumers check canonical
+    /// input identities and shapes to limit what this label can disclose.
+    /// Those checks cannot prove how a host resolver interprets canonical
+    /// arguments. Other input types require handwritten-input disclosure.
     ///
     /// # Errors
     ///

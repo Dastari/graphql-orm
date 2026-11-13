@@ -215,6 +215,78 @@ mod mixed {
     }
 }
 
+/// The macros emit relation-count order aliases for readable to-one relations.
+mod one_count {
+    use graphql_orm::async_graphql::SimpleObject;
+    use graphql_orm::prelude::*;
+
+    #[derive(
+        GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug,
+    )]
+    #[graphql_entity(
+        table = "conformance_count_targets",
+        plural = "ConformanceCountTargets"
+    )]
+    pub struct ConformanceCountTarget {
+        #[primary_key]
+        #[sortable]
+        pub id: String,
+        #[filterable(type = "string")]
+        #[sortable]
+        pub label: String,
+    }
+
+    #[derive(
+        GraphQLEntity,
+        GraphQLOperations,
+        GraphQLRelations,
+        SimpleObject,
+        serde::Serialize,
+        serde::Deserialize,
+        Clone,
+        Debug,
+    )]
+    #[graphql(complex, rename_fields = "PascalCase")]
+    #[graphql_entity(
+        table = "conformance_count_sources",
+        plural = "ConformanceCountSources"
+    )]
+    pub struct ConformanceCountSource {
+        #[primary_key]
+        #[sortable]
+        pub id: String,
+        #[filterable(type = "string")]
+        #[sortable]
+        pub target_id: String,
+        #[graphql(skip)]
+        #[relation(
+            target = "ConformanceCountTarget",
+            from = "target_id",
+            to = "id",
+            emit_fk = false,
+            order_aggregate(name = "TargetCount", aggregate = "count")
+        )]
+        pub target: Option<ConformanceCountTarget>,
+    }
+
+    impl BatchLoadEntity for ConformanceCountTarget {
+        fn batch_column() -> &'static str {
+            "id"
+        }
+        fn batch_key_from_row(
+            row: &graphql_orm::DbRow,
+        ) -> Result<String, graphql_orm::sqlx::Error> {
+            use graphql_orm::sqlx::Row;
+            row.try_get("id")
+        }
+    }
+
+    schema_roots! {
+        query_custom_ops: [],
+        entities: [ConformanceCountTarget, ConformanceCountSource],
+    }
+}
+
 /// A writable root whose only entity has repository-only composite writes.
 mod composite_only {
     use graphql_orm::prelude::*;
@@ -502,4 +574,186 @@ fn sdl_contract_reads_every_argument_type() {
     assert_eq!(arguments["id"].0, "ID!");
     assert_eq!(arguments["expected"].0, "Int");
     assert_eq!(arguments["keys"].0, "[String!]");
+}
+
+/// All generated input families are exercised through complete query capabilities
+/// over SDL produced by the real macros, including create/update and composite keys.
+#[tokio::test]
+async fn generated_input_families_compile_complete_capabilities() {
+    use graphql_orm::graphql::orm::*;
+    use graphql_orm_ai_tool_profiles::*;
+    let mut all_covered = Vec::new();
+    for (mut sdl, catalog) in [
+        (sdl_of!(mixed).0, mixed::graphql_orm_semantic_catalog()),
+        (
+            sdl_of!(one_count).0,
+            one_count::graphql_orm_semantic_catalog(),
+        ),
+        (
+            sdl_of!(composite_only).0,
+            composite_only::graphql_orm_semantic_catalog(),
+        ),
+    ] {
+        if catalog
+            .entities
+            .iter()
+            .any(|entity| entity.entity_name == "ConformanceCountSource")
+        {
+            assert!(sdl.contains("TargetCount: OrderDirection"), "{sdl}");
+        }
+        let start = sdl.find("type Query {").expect("generated query root");
+        let end = start + sdl[start..].find("\n}").unwrap() + 2;
+        sdl.replace_range(start..end, "type Query {\n}");
+        let entities = catalog
+            .entities
+            .iter()
+            .filter(|entity| {
+                matches!(
+                    entity.entity_name.as_str(),
+                    "ConformanceManagedRecord"
+                        | "ConformanceCountSource"
+                        | "ConformanceCountTarget"
+                        | "ConformanceCompositeRecord"
+                        | "ConformanceCompositeOnlyRecord"
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut operations = Vec::new();
+        let mut covered = Vec::new();
+        for entity in &entities {
+            for name in [
+                format!("{}KeyInput", entity.entity_name),
+                format!("Create{}Input", entity.entity_name),
+                format!("Update{}Input", entity.entity_name),
+                format!("{}WhereInput", entity.entity_name),
+                format!("{}OrderByInput", entity.entity_name),
+                format!("{}KeysetOrderByInput", entity.entity_name),
+                format!("{}AggregateMetricInput", entity.entity_name),
+                "SearchInput".to_owned(),
+                "SubscriptionFilterInput".to_owned(),
+                "PageInput".to_owned(),
+            ] {
+                if !sdl.contains(&format!("input {name} {{")) {
+                    continue;
+                }
+                let field = format!("probe{}", covered.len());
+                let argument_name = "input";
+                let page_argument = if name == "PageInput" {
+                    ", page: PageInput"
+                } else {
+                    ""
+                };
+                let mut arguments = vec![GraphqlSemanticArgumentDescriptor {
+                    graphql_name: argument_name.into(),
+                    description: "Generated input.".into(),
+                    type_ref: GraphqlSemanticTypeRef::named(
+                        &name,
+                        GraphqlSemanticTypeKind::Object,
+                        true,
+                    ),
+                }];
+                if name == "PageInput" {
+                    arguments.push(GraphqlSemanticArgumentDescriptor {
+                        graphql_name: "page".into(),
+                        description: "Server pagination.".into(),
+                        type_ref: GraphqlSemanticTypeRef::named(
+                            &name,
+                            GraphqlSemanticTypeKind::Object,
+                            true,
+                        ),
+                    });
+                }
+                sdl = sdl.replacen(
+                    "type Query {",
+                    &format!(
+                        "type Query {{\n {field}({argument_name}: {name}{page_argument}): {}",
+                        entity.entity_name
+                    ),
+                    1,
+                );
+                operations.push(
+                    GraphqlSemanticOperationDescriptor::generated(
+                        GraphqlOperationKind::Query,
+                        GeneratedGraphqlOperationCategory::SingleRead,
+                        entity.entity_name.clone(),
+                        field,
+                        "Inspect a generated input contract.",
+                        arguments,
+                        GraphqlSemanticTypeRef::named(
+                            &entity.entity_name,
+                            GraphqlSemanticTypeKind::Object,
+                            true,
+                        ),
+                        true,
+                    )
+                    .unwrap(),
+                );
+                covered.push(name);
+            }
+        }
+        assert!(!covered.is_empty());
+        let semantic = GraphqlSemanticCatalog::compose_descriptors(entities, operations).unwrap();
+        let capabilities = AiGraphqlQueryCapabilityCatalog::compile(
+            "generated-inputs",
+            GraphqlExecutionTargetId::parse("generated.inputs").unwrap(),
+            &sdl,
+            &semantic,
+            AiGraphqlQueryCapabilityLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            capabilities
+                .capabilities()
+                .filter(|capability| capability.field_name().starts_with("probe"))
+                .count(),
+            covered.len()
+        );
+        for (index, name) in covered.iter().enumerate() {
+            let capability = capabilities
+                .capabilities()
+                .find(|capability| capability.field_name() == format!("probe{index}"))
+                .unwrap();
+            let input = &capability.compact_argument_schema()["properties"]["arguments"]["properties"]
+                ["input"];
+            let input = input
+                .get("anyOf")
+                .and_then(|values| values.as_array())
+                .map(|values| &values[0])
+                .unwrap_or(input);
+            assert!(
+                !input["properties"]
+                    .as_object()
+                    .unwrap_or_else(|| panic!("input contract for {name}: {input}"))
+                    .is_empty(),
+                "generated members are disclosed for {name}"
+            );
+            if name == "ConformanceCountSourceOrderByInput" {
+                assert!(input["properties"].get("TargetCount").is_none());
+            }
+        }
+        all_covered.extend(covered);
+    }
+    for suffix in [
+        "KeyInput",
+        "WhereInput",
+        "OrderByInput",
+        "KeysetOrderByInput",
+        "AggregateMetricInput",
+        "SearchInput",
+        "SubscriptionFilterInput",
+        "PageInput",
+    ] {
+        assert!(
+            all_covered.iter().any(|name| name.ends_with(suffix)
+                && (suffix != "OrderByInput" || !name.ends_with("KeysetOrderByInput"))),
+            "missing {suffix}: {all_covered:?}"
+        );
+    }
+    for prefix in ["Create", "Update"] {
+        assert!(
+            all_covered.iter().any(|name| name.starts_with(prefix)),
+            "missing {prefix}"
+        );
+    }
 }

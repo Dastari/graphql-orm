@@ -44,15 +44,12 @@ const SDL: &str = r#"
     type Plan { code: String!, codeKey: String! }
     input SubscriptionWhereInput {
         id: StringFilterInput, ownerId: StringFilterInput, ownerEmail: StringFilterInput
-        owner: OwnerWhereInput, ownerSome: OwnerWhereInput, ownerIsNull: Boolean
-        plan: PlanWhereInput
-        ownerIdExtra: StringFilterInput, owner_id: StringFilterInput, OWNERID: StringFilterInput
         and: [SubscriptionWhereInput!], or: [SubscriptionWhereInput!], not: SubscriptionWhereInput
     }
     input OwnerWhereInput { id: StringFilterInput }
     input PlanWhereInput { code: StringFilterInput, codeKey: StringFilterInput }
     input SubscriptionOrderByInput {
-        ownerId: OrderDirection, ownerEmail: OrderDirection, ownerCount: OrderDirection
+        ownerId: OrderDirection, ownerEmail: OrderDirection
     }
     input StringFilterInput { eq: String, isNull: Boolean }
     input PageInput { limit: Int, offset: Int }

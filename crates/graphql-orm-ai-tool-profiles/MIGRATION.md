@@ -3,7 +3,7 @@ title: "graphql-orm-ai-tool-profiles migration guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-10-31
+last_reviewed: 2026-11-13
 review_by: 2027-02-11
 supersedes: []
 ---
@@ -15,12 +15,13 @@ supersedes: []
 No data migration is needed. Rebuild capability catalogues and refresh any
 retained capability bindings whose provider argument schema changes.
 
-Handwritten input objects now disclose nothing unless declared. An input object
-is handwritten when it is neither a generated entity input (`Where`, `OrderBy`,
-keyset, runtime order, key, create, update or aggregate metric input) nor a
-shared generated helper (filter operator or page input), wherever it is reached:
-custom roots, generated roots and relationship arguments alike. Generated entity
-inputs, filter operators and page arguments are unchanged.
+Handwritten input objects disclose nothing unless declared. Canonical generated
+entity inputs include key, create, update, where/filter, order, keyset order,
+runtime order, aggregate metric and link inputs. Service inputs include search
+and subscription filters. These inputs and their filter, operand and page
+helpers require generated reach and canonical identity and type contracts.
+Other inputs are handwritten everywhere, including custom roots, generated roots
+and relationship arguments, and their fields need declarations.
 
 An input with a generated kind's name (for example `Create{Entity}Input` or
 `{Entity}AggregateMetricInput`) counts as generated only when it has that kind's
@@ -41,6 +42,20 @@ and the runtime `RuntimeSearchInput`), the change-subscription filter (only
 only exportable relations; each `{Entity}{Relation}LinkChangeInput` offers
 `set`, `add` and `remove`). The same shape reached only by a custom root is
 handwritten.
+Order and keyset inputs use `OrderDirection` with exactly `ASC` and `DESC`.
+Search inputs use `SearchMode` or `RuntimeSearchMode`, respectively, with exactly
+`PLAIN`, `PHRASE`, `WEB` and `PREFIX`. `SubscriptionFilterInput` uses
+`[ChangeAction!]` with exactly `CREATED`, `UPDATED` and `DELETED`.
+Canonical names and complete helper member shapes are required. A generated
+label asserts a trusted host resolver choice; shape checks cannot establish
+how a host resolver interprets otherwise canonical arguments.
+Runtime projected outputs retain stored scalar input and ordering contracts;
+projected members omitted from semantic metadata remain undisclosed. Link
+helpers describe to-many join relations. Logical where controls follow one
+configured field case. Ordinary order inputs retain generated relation-count
+aliases for readable to-one and to-many relations; these aliases are not offered
+to the model.
+
 Declare each field the model may describe and send, or declare a custom
 operation to disclose every handwritten input its arguments reach:
 

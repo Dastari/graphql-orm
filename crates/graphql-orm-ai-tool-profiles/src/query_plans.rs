@@ -239,12 +239,7 @@ impl AiCustomInputDisclosure {
                 arguments
                     .iter()
                     .flat_map(|argument| {
-                        reachable_input_types(
-                            schema,
-                            catalog,
-                            operator_roles.as_ref(),
-                            &render_type_ref(&argument.type_ref),
-                        )
+                        all_reachable_inputs(schema, &render_type_ref(&argument.type_ref))
                     })
                     .collect::<BTreeSet<_>>()
             };
@@ -272,6 +267,33 @@ impl AiCustomInputDisclosure {
                 .entry(relationship.target.clone())
                 .or_default()
                 .extend(reachable(&relationship.arguments));
+        }
+        // Canonical link changes reach keys owned by the relationship target.
+        for entity in &catalog.entities {
+            for (name, ty) in &schema.types {
+                let Some(relation) = link_change_relation(entity, name) else {
+                    continue;
+                };
+                let SchemaType::InputObject(fields) = ty else {
+                    continue;
+                };
+                if generated_reach
+                    .get(&entity.entity_name)
+                    .is_some_and(|reach| reach.contains(name))
+                    && generated_shape_matches(
+                        schema,
+                        entity,
+                        SemanticInputKind::LinkChange,
+                        name,
+                        fields,
+                    )
+                {
+                    generated_reach
+                        .entry(relation.target.clone())
+                        .or_default()
+                        .insert(format!("{}KeyInput", relation.target));
+                }
+            }
         }
         let mut binding = CustomInputBinding {
             declared: BTreeMap::new(),
@@ -3964,7 +3986,7 @@ fn input_object_schema(
         // use recursive JSON Schema, so expose the complete flat typed filter
         // surface while omitting only a self-recursive generated connective.
         // Handwritten recursive inputs retain the existing fail-closed path.
-        if is_generated_filter_self_reference(catalog, &field.ty, ancestry) {
+        if is_generated_filter_self_reference(schema, catalog, &field.ty, ancestry)? {
             continue;
         }
         let description = descriptions
@@ -3994,21 +4016,26 @@ fn input_object_schema(
 }
 
 fn is_generated_filter_self_reference(
+    schema: &FinishedSchema,
     catalog: &GraphqlSemanticCatalog,
     graphql_type: &str,
     ancestry: &[String],
-) -> bool {
+) -> Result<bool, AiError> {
     let Some(current) = ancestry.last() else {
-        return false;
+        return Ok(false);
     };
     let Ok(referenced) = named_type(graphql_type) else {
-        return false;
+        return Ok(false);
     };
-    current == referenced
-        && catalog
-            .entities
+    if current != referenced {
+        return Ok(false);
+    }
+    let binding = schema.custom_input_binding(catalog)?;
+    Ok(
+        canonical_generated_owners(schema, catalog, &binding, current)
             .iter()
-            .any(|entity| current == &format!("{}WhereInput", entity.entity_name))
+            .any(|(_, kind)| *kind == SemanticInputKind::Where),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4121,8 +4148,12 @@ fn restrict_input_fields(
                 }
                 None => {}
             }
-            let shared = operator_roles.contains_key(input_name)
-                || shared_input_helper(schema, catalog, input_name);
+            let shared = (operator_roles.contains_key(input_name)
+                && binding
+                    .generated_reach
+                    .values()
+                    .any(|reach| reach.contains(input_name)))
+                || shared_input_helper(schema, catalog, &binding, input_name);
             if !shared {
                 // Every other input is handwritten wherever it is reached. It
                 // carries no canonical field coordinates, so its disclosure is
@@ -4150,7 +4181,7 @@ fn restrict_input_fields(
         }
     };
     if matches!(kind, SemanticInputKind::RuntimeOrder) {
-        validate_runtime_order_input(schema, &entity.entity_name, fields)?;
+        validate_runtime_order_input(schema, entity, fields)?;
     }
     Ok(fields
         .iter()
@@ -4204,11 +4235,10 @@ fn restrict_input_fields(
         .collect())
 }
 
-/// Returns every entity that canonically owns a generated-kind input: the
-/// name is that entity's generated kind, the entity's generated roots or
-/// relationships reach it, and every member the generated rules would admit
-/// has the generated type. A generated label or a matching name alone never
-/// makes an input generated.
+/// Finds generated ownership from exact identity, generated reach and member
+/// types. Runtime-order candidates retain their explicit validation error path:
+/// their complete contract is checked before any members are admitted. Other
+/// noncanonical inputs have no generated owner.
 fn canonical_generated_owners<'a>(
     schema: &FinishedSchema,
     catalog: &'a GraphqlSemanticCatalog,
@@ -4247,6 +4277,9 @@ fn link_change_relation<'a>(
 ) -> Option<&'a GraphqlSemanticRelationshipDescriptor> {
     entity.fields.iter().find_map(|field| {
         let relationship = field.relationship.as_ref()?;
+        if relationship.cardinality != GraphqlSemanticRelationshipCardinality::Many {
+            return None;
+        }
         let mut characters = field.field_name.chars();
         let relation = characters
             .next()
@@ -4271,14 +4304,35 @@ enum GeneratedServiceHelper {
 /// they are compared by normalised spelling.
 fn generated_service_helper_shape(
     schema: &FinishedSchema,
+    input_name: &str,
     fields: &BTreeMap<String, SchemaInput>,
 ) -> Option<GeneratedServiceHelper> {
-    let enum_values = |ty: &str| match named_type(ty).ok().and_then(|name| schema.types.get(name)) {
-        Some(SchemaType::Enum(values)) => Some(values.clone()),
-        _ => None,
+    let canonical_names: &[&[&str]] = match input_name {
+        "SearchInput" | "RuntimeSearchInput" => &[
+            &["query", "mode", "minScore"],
+            &["Query", "Mode", "MinScore"],
+            &["query", "mode", "min_score"],
+            &["QUERY", "MODE", "MIN_SCORE"],
+            &["query", "mode", "minscore"],
+            &["QUERY", "MODE", "MINSCORE"],
+        ],
+        "SubscriptionFilterInput" => &[
+            &["actions", "dummy"],
+            &["Actions", "Dummy"],
+            &["ACTIONS", "DUMMY"],
+        ],
+        _ => return None,
     };
+    if !canonical_names.iter().any(|names| {
+        fields.len() == names.len() && names.iter().all(|name| fields.contains_key(*name))
+    }) {
+        return None;
+    }
     let mut members = BTreeMap::new();
     for (name, field) in fields {
+        if field.has_default {
+            return None;
+        }
         if members.insert(semantic_name_key(name), field).is_some() {
             return None;
         }
@@ -4288,16 +4342,13 @@ fn generated_service_helper_shape(
         let query = members["query"];
         let mode = members["mode"];
         let minimum = members["minscore"];
-        let modes_are_canonical = list_item_type(&mode.ty).is_none()
-            && enum_values(&mode.ty).is_some_and(|values| {
-                !values.is_empty()
-                    && values.iter().all(|value| {
-                        matches!(
-                            semantic_name_key(value).as_str(),
-                            "plain" | "phrase" | "web" | "prefix"
-                        )
-                    })
-            });
+        let expected_mode = match input_name {
+            "SearchInput" => "SearchMode",
+            "RuntimeSearchInput" => "RuntimeSearchMode",
+            _ => return None,
+        };
+        let modes_are_canonical = mode.ty == expected_mode
+            && exact_enum(schema, expected_mode, &["PLAIN", "PHRASE", "WEB", "PREFIX"]);
         return (query.ty == "String!"
             && modes_are_canonical
             && !is_non_null(&mode.ty)
@@ -4306,10 +4357,9 @@ fn generated_service_helper_shape(
     }
     if keys == BTreeSet::from(["actions", "dummy"]) {
         let actions = members["actions"];
-        return (!is_non_null(&actions.ty)
-            && list_item_type(&actions.ty).is_some_and(|item| {
-                list_item_type(item).is_none() && enum_values(item).is_some()
-            })
+        return (input_name == "SubscriptionFilterInput"
+            && actions.ty == "[ChangeAction!]"
+            && exact_enum(schema, "ChangeAction", &["CREATED", "UPDATED", "DELETED"])
             && members["dummy"].ty == "Boolean")
             .then_some(GeneratedServiceHelper::SubscriptionFilter);
     }
@@ -4326,7 +4376,7 @@ fn generated_service_helper(
     let Some(SchemaType::InputObject(fields)) = schema.types.get(input_name) else {
         return None;
     };
-    generated_service_helper_shape(schema, fields).filter(|_| {
+    generated_service_helper_shape(schema, input_name, fields).filter(|_| {
         binding
             .generated_reach
             .values()
@@ -4334,8 +4384,118 @@ fn generated_service_helper(
     })
 }
 
-/// Returns whether the members a generated kind would admit have exactly the
-/// types the ORM generates for that kind.
+/// Checks an enum's identity and complete value set.
+fn exact_enum(schema: &FinishedSchema, name: &str, expected: &[&str]) -> bool {
+    matches!(schema.types.get(name), Some(SchemaType::Enum(values))
+        if values.len() == expected.len()
+            && expected.iter().all(|value| values.iter().any(|actual| actual == value)))
+}
+
+/// Runtime projectors replace scalar outputs with flat host objects; the
+/// semantic catalogue omits these outputs while the ORM keeps their stored
+/// scalar inputs. These members establish shape only, never disclosure.
+fn opaque_runtime_projection(
+    schema: &FinishedSchema,
+    entity: &graphql_orm_operation_catalog::GraphqlEntitySemanticMetadata,
+    name: &str,
+) -> bool {
+    if entity.fields.iter().any(|field| field.field_name == name) {
+        return false;
+    }
+    let Some(SchemaType::Object(fields)) = schema.types.get(&entity.entity_name) else {
+        return false;
+    };
+    let Some(field) = fields.get(name) else {
+        return false;
+    };
+    if !field.arguments.is_empty() || list_item_type(&field.ty).is_some() {
+        return false;
+    }
+    let Ok(object) = named_type(&field.ty) else {
+        return false;
+    };
+    matches!(schema.types.get(object), Some(SchemaType::Object(fields))
+        if (1..=32).contains(&fields.len()) && fields.values().all(|field|
+            field.arguments.is_empty() && runtime_scalar_type(schema, &field.ty)))
+}
+
+/// Scalar identities emitted by `graphql/runtime/scalar.rs`, including their
+/// finished SDL kind. Projected inputs remain scalar, never host enums.
+fn runtime_scalar_type(schema: &FinishedSchema, ty: &str) -> bool {
+    if list_item_type(ty).is_some() {
+        return false;
+    }
+    let Ok(name) = named_type(ty) else {
+        return false;
+    };
+    matches!(
+        name,
+        "Boolean"
+            | "RuntimeInt64"
+            | "Float"
+            | "String"
+            | "RuntimeUuid"
+            | "RuntimeJson"
+            | "RuntimeBytes"
+            | "RuntimeDateTime"
+            | "Decimal"
+    ) && match schema.types.get(name) {
+        Some(SchemaType::Scalar) => true,
+        None => matches!(name, "Boolean" | "Float" | "String"),
+        _ => false,
+    }
+}
+
+/// Exact fixed helpers emitted by `graphql/runtime/schema.rs::filter` for
+/// stored scalar members whose output is projected and has no scalar metadata.
+fn projected_runtime_filter_shape(schema: &FinishedSchema, ty: &str) -> bool {
+    let (scalar, compares, text) = match ty {
+        "RuntimeBooleanFilter" => ("Boolean", false, false),
+        "RuntimeInt64Filter" => ("RuntimeInt64", true, false),
+        "RuntimeFloatFilter" => ("Float", true, false),
+        "RuntimeStringFilter" => ("String", true, true),
+        "RuntimeUuidFilter" => ("RuntimeUuid", false, false),
+        "RuntimeJsonFilter" => ("RuntimeJson", false, false),
+        "RuntimeBytesFilter" => ("RuntimeBytes", false, false),
+        "RuntimeDateTimeFilter" => ("RuntimeDateTime", true, false),
+        "RuntimeDecimalFilter" => ("Decimal", true, false),
+        _ => return false,
+    };
+    if !runtime_scalar_type(schema, scalar) {
+        return false;
+    }
+    let Some(SchemaType::InputObject(fields)) = schema.types.get(ty) else {
+        return false;
+    };
+    let mut expected = BTreeMap::from([("isNull", "Boolean".to_owned())]);
+    if scalar != "RuntimeJson" {
+        for operator in ["eq", "ne"] {
+            expected.insert(operator, scalar.to_owned());
+        }
+        for operator in ["in", "notIn"] {
+            expected.insert(operator, format!("[{scalar}!]"));
+        }
+    }
+    if compares {
+        for operator in ["lt", "lte", "gt", "gte"] {
+            expected.insert(operator, scalar.to_owned());
+        }
+    }
+    if text {
+        for operator in ["contains", "startsWith", "endsWith"] {
+            expected.insert(operator, "String".to_owned());
+        }
+    }
+    fields.len() == expected.len()
+        && expected.iter().all(|(name, ty)| {
+            fields
+                .get(*name)
+                .is_some_and(|field| !field.has_default && field.ty == *ty)
+        })
+}
+
+/// Checks a generated kind's member types. Runtime ordering uses its explicit
+/// validation error path before admission instead of the handwritten fallback.
 fn generated_shape_matches(
     schema: &FinishedSchema,
     entity: &graphql_orm_operation_catalog::GraphqlEntitySemanticMetadata,
@@ -4343,18 +4503,11 @@ fn generated_shape_matches(
     input_name: &str,
     fields: &BTreeMap<String, SchemaInput>,
 ) -> bool {
-    let is_enum = |ty: &str| {
-        list_item_type(ty).is_none()
-            && named_type(ty)
-                .is_ok_and(|name| matches!(schema.types.get(name), Some(SchemaType::Enum(_))))
-    };
     let entity_field = |name: &str| {
-        entity.fields.iter().find(|field| {
-            field.field_name == name
-                && field.relationship.is_none()
-                && field.export == GraphqlSemanticExport::Exportable
-                && field.classification != GraphqlSemanticClassification::Secret
-        })
+        entity
+            .fields
+            .iter()
+            .find(|field| field.field_name == name && field.relationship.is_none())
     };
     match kind {
         SemanticInputKind::AggregateMetric => {
@@ -4369,67 +4522,169 @@ fn generated_shape_matches(
             // the entity's restricted aggregate-field enum, never a free-form
             // scalar.
             let operator_is_canonical = member("operator").is_some_and(|(_, field)| {
-                is_non_null(&field.ty)
-                    && list_item_type(&field.ty).is_none()
-                    && matches!(
-                        named_type(&field.ty).ok().and_then(|name| schema.types.get(name)),
-                        Some(SchemaType::Enum(values))
-                            if !values.is_empty()
-                                && values.iter().all(|value| aggregate_operator(value).is_ok())
+                field.ty == "GraphqlAggregateInputOperator!"
+                    && exact_enum(
+                        schema,
+                        "GraphqlAggregateInputOperator",
+                        &["COUNT", "MIN", "MAX", "SUM"],
                     )
             });
             let aggregate_field = format!("{}AggregateField", entity.entity_name);
+            let expected_fields = entity
+                .fields
+                .iter()
+                .filter(|field| field.relationship.is_none())
+                .map(|field| field.field_name.as_str())
+                .collect::<Vec<_>>();
             let field_is_canonical = member("field").is_some_and(|(_, field)| {
-                is_enum(&field.ty)
-                    && named_type(&field.ty).is_ok_and(|name| name == aggregate_field)
+                field.ty == aggregate_field
+                    && exact_enum(schema, &aggregate_field, &expected_fields)
             });
-            operator_is_canonical && field_is_canonical
+            fields.len() == 2
+                && [
+                    ["operator", "field"],
+                    ["Operator", "Field"],
+                    ["OPERATOR", "FIELD"],
+                ]
+                .iter()
+                .any(|names| names.iter().all(|name| fields.contains_key(*name)))
+                && fields.values().all(|field| !field.has_default)
+                && operator_is_canonical
+                && field_is_canonical
         }
         // The runtime order input is validated against its exact shape where
         // it is restricted.
         SemanticInputKind::RuntimeOrder => true,
         // One optional member per relation, typed as that relation's exact
         // link-change input.
-        SemanticInputKind::Links => {
-            fields.iter().all(|(name, field)| {
-                let Some(semantic) = entity.fields.iter().find(|semantic| {
-                    semantic.field_name == *name && semantic.relationship.is_some()
-                }) else {
-                    return false;
-                };
-                let mut characters = semantic.field_name.chars();
-                let relation = characters
-                    .next()
-                    .map(|first| first.to_uppercase().chain(characters).collect::<String>())
-                    .unwrap_or_default();
-                !is_non_null(&field.ty)
-                    && field.ty == format!("{}{relation}LinkChangeInput", entity.entity_name)
-            })
-        }
+        SemanticInputKind::Links => fields.iter().all(|(name, field)| {
+            let Some(semantic) = entity.fields.iter().find(|semantic| {
+                semantic.field_name == *name
+                    && semantic.relationship.as_ref().is_some_and(|relation| {
+                        relation.cardinality == GraphqlSemanticRelationshipCardinality::Many
+                    })
+            }) else {
+                return false;
+            };
+            let mut characters = semantic.field_name.chars();
+            let relation = characters
+                .next()
+                .map(|first| first.to_uppercase().chain(characters).collect::<String>())
+                .unwrap_or_default();
+            !field.has_default
+                && field.ty == format!("{}{relation}LinkChangeInput", entity.entity_name)
+        }),
         // `set`, `add` and `remove`, each a list of the target's key input.
         SemanticInputKind::LinkChange => {
             link_change_relation(entity, input_name).is_some_and(|relationship| {
-                !fields.is_empty()
+                fields.len() == 3
                     && fields.iter().all(|(name, field)| {
                         matches!(name.as_str(), "set" | "add" | "remove")
                             && field.ty == format!("[{}KeyInput!]", relationship.target)
+                            && !field.has_default
                     })
             })
         }
-        SemanticInputKind::Where => fields.iter().all(|(name, field)| {
-            entity_field(name)
-                .filter(|semantic| !semantic.filter_operators.is_empty())
-                .and_then(|semantic| semantic.filter_input.as_ref())
-                .is_none_or(|input| render_type_ref(&input.type_ref) == field.ty)
-        }),
-        SemanticInputKind::OrderBy | SemanticInputKind::KeysetOrderBy => fields
+        SemanticInputKind::Where => {
+            // Logical controls share one configured field case. Exact entity
+            // aliases and opaque projected field names retain their own contracts.
+            let logical_names = fields
+                .keys()
+                .filter(|name| {
+                    matches!(
+                        name.as_str(),
+                        "and" | "And" | "AND" | "or" | "Or" | "OR" | "not" | "Not" | "NOT"
+                    ) && !entity.fields.iter().any(|field| field.field_name == **name)
+                        && !opaque_runtime_projection(schema, entity, name)
+                })
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            let logical_case_matches = [
+                ["and", "or", "not"],
+                ["And", "Or", "Not"],
+                ["AND", "OR", "NOT"],
+            ]
             .iter()
-            .all(|(name, field)| entity_field(name).is_none() || is_enum(&field.ty)),
+            .any(|names| logical_names.iter().all(|name| names.contains(name)));
+            logical_case_matches
+                && fields.iter().all(|(name, field)| {
+                    if field.has_default {
+                        return false;
+                    }
+                    if let Some(semantic) = entity
+                        .fields
+                        .iter()
+                        .find(|semantic| semantic.field_name == *name)
+                    {
+                        return match &semantic.relationship {
+                            Some(relation) => match relation.cardinality {
+                                GraphqlSemanticRelationshipCardinality::Many => {
+                                    field.ty == format!("[{}WhereInput!]", relation.target)
+                                        || field.ty == format!("{}ToManyFilter", relation.target)
+                                }
+                                GraphqlSemanticRelationshipCardinality::One => {
+                                    field.ty == format!("{}ToOneFilter", relation.target)
+                                }
+                            },
+                            None => semantic
+                                .filter_input
+                                .as_ref()
+                                .is_some_and(|input| render_type_ref(&input.type_ref) == field.ty),
+                        };
+                    }
+                    if opaque_runtime_projection(schema, entity, name) {
+                        return projected_runtime_filter_shape(schema, &field.ty);
+                    }
+                    match name.as_str() {
+                        "and" | "And" | "AND" | "or" | "Or" | "OR" => {
+                            field.ty == format!("[{input_name}!]")
+                        }
+                        "not" | "Not" | "NOT" => field.ty == input_name,
+                        _ => false,
+                    }
+                })
+        }
+        SemanticInputKind::OrderBy | SemanticInputKind::KeysetOrderBy => {
+            exact_enum(schema, "OrderDirection", &["ASC", "DESC"])
+                && fields.iter().all(|(name, field)| {
+                    // Static relation-count ordering emits host-configured
+                    // aliases. Their fixed direction type is canonical, but
+                    // only scalar semantic fields are disclosed below.
+                    (entity_field(name).is_some()
+                        || (kind == SemanticInputKind::OrderBy
+                            && entity
+                                .fields
+                                .iter()
+                                .any(|field| field.relationship.is_some())))
+                        && field.ty == "OrderDirection"
+                        && !field.has_default
+                })
+        }
         SemanticInputKind::Fields => fields.iter().all(|(name, field)| {
-            entity_field(name).is_none_or(|semantic| {
+            if opaque_runtime_projection(schema, entity, name) {
+                return !field.has_default
+                    && runtime_scalar_type(schema, &field.ty)
+                    && if input_name == format!("Update{}Input", entity.entity_name) {
+                        !is_non_null(&field.ty)
+                    } else if input_name == format!("{}KeyInput", entity.entity_name) {
+                        is_non_null(&field.ty)
+                    } else {
+                        true
+                    };
+            }
+            entity_field(name).is_some_and(|semantic| {
                 let generated = render_type_ref(&semantic.type_ref);
-                list_item_type(&generated).is_some() == list_item_type(&field.ty).is_some()
-                    && named_type(&generated).ok() == named_type(&field.ty).ok()
+                let expected = if input_name == format!("Update{}Input", entity.entity_name) {
+                    generated.strip_suffix('!').unwrap_or(&generated)
+                } else {
+                    &generated
+                };
+                // Runtime defaults can make a non-null output's create
+                // member optional; nested list references retain their type.
+                (field.ty == expected
+                    || (input_name == format!("Create{}Input", entity.entity_name)
+                        && field.ty == generated.strip_suffix('!').unwrap_or(&generated)))
+                    && !field.has_default
             })
         }),
     }
@@ -4469,7 +4724,7 @@ fn validate_aggregate_metric_value(
 }
 
 /// Returns whether an input object is handwritten: neither a generated entity
-/// input nor a shared generated helper (filter operator or page input).
+/// or service input nor a proved filter, operand or page helper.
 fn handwritten_input(
     schema: &FinishedSchema,
     catalog: &GraphqlSemanticCatalog,
@@ -4479,8 +4734,12 @@ fn handwritten_input(
 ) -> bool {
     canonical_generated_owners(schema, catalog, binding, input_name).is_empty()
         && generated_service_helper(schema, binding, input_name).is_none()
-        && !operator_roles.is_some_and(|roles| roles.contains_key(input_name))
-        && !shared_input_helper(schema, catalog, input_name)
+        && !(operator_roles.is_some_and(|roles| roles.contains_key(input_name))
+            && binding
+                .generated_reach
+                .values()
+                .any(|reach| reach.contains(input_name)))
+        && !shared_input_helper(schema, catalog, binding, input_name)
 }
 
 /// Restricts a handwritten input object to its explicitly declared fields.
@@ -4599,6 +4858,24 @@ fn input_type_reaches(
         .contains(input_name)
 }
 
+/// Walks the complete input graph for provenance and explicit declarations.
+fn all_reachable_inputs(schema: &FinishedSchema, ty: &str) -> BTreeSet<String> {
+    let mut pending = vec![ty.to_owned()];
+    let mut visited = BTreeSet::new();
+    while let Some(ty) = pending.pop() {
+        let Ok(name) = named_type(&ty) else {
+            continue;
+        };
+        if !visited.insert(name.to_owned()) {
+            continue;
+        }
+        if let Some(SchemaType::InputObject(fields)) = schema.types.get(name) {
+            pending.extend(fields.values().map(|field| field.ty.clone()));
+        }
+    }
+    visited
+}
+
 fn reachable_input_types(
     schema: &FinishedSchema,
     catalog: &GraphqlSemanticCatalog,
@@ -4618,10 +4895,16 @@ fn reachable_input_types(
             continue;
         }
         if let Some(SchemaType::InputObject(fields)) = schema.types.get(name) {
-            let where_entity = catalog
-                .entities
-                .iter()
-                .find(|entity| name == format!("{}WhereInput", entity.entity_name));
+            let where_entity = catalog.entities.iter().find(|entity| {
+                name == format!("{}WhereInput", entity.entity_name)
+                    && generated_shape_matches(
+                        schema,
+                        entity,
+                        SemanticInputKind::Where,
+                        name,
+                        fields,
+                    )
+            });
             for (field_name, field) in fields {
                 if let Some(entity) = where_entity {
                     // Match the generated Where field admission contract. Hidden,
@@ -4803,22 +5086,30 @@ fn validate_filter_operand_type(
 fn shared_input_helper(
     schema: &FinishedSchema,
     catalog: &GraphqlSemanticCatalog,
+    binding: &CustomInputBinding,
     input_name: &str,
 ) -> bool {
-    let page_shape = match schema.types.get(input_name) {
-        Some(SchemaType::InputObject(fields)) => {
-            fields.keys().any(|name| {
-                name.eq_ignore_ascii_case("limit") || name.eq_ignore_ascii_case("first")
-            }) && fields.iter().all(|(name, field)| {
-                (name.eq_ignore_ascii_case("limit")
-                    || name.eq_ignore_ascii_case("first")
-                    || name.eq_ignore_ascii_case("offset"))
-                    && field.ty == "Int"
-                    && !field.has_default
-            })
-        }
-        _ => false,
-    };
+    let page_shape = input_name == "PageInput"
+        && binding
+            .generated_reach
+            .values()
+            .any(|reach| reach.contains(input_name))
+        && match schema.types.get(input_name) {
+            Some(SchemaType::InputObject(fields)) => {
+                fields.len() == 2
+                    && [
+                        ["limit", "offset"],
+                        ["Limit", "Offset"],
+                        ["LIMIT", "OFFSET"],
+                    ]
+                    .iter()
+                    .any(|names| names.iter().all(|name| fields.contains_key(*name)))
+                    && fields
+                        .values()
+                        .all(|field| field.ty == "Int" && !field.has_default)
+            }
+            _ => false,
+        };
     let page_argument =
         |argument: &graphql_orm_operation_catalog::GraphqlSemanticArgumentDescriptor| {
             let ty = render_type_ref(&argument.type_ref);
@@ -4842,9 +5133,13 @@ fn shared_input_helper(
 
 fn validate_runtime_order_input(
     schema: &FinishedSchema,
-    entity_name: &str,
+    entity: &graphql_orm_operation_catalog::GraphqlEntitySemanticMetadata,
     fields: &BTreeMap<String, SchemaInput>,
 ) -> Result<(), AiError> {
+    let entity_name = &entity.entity_name;
+    if fields.len() != 3 {
+        return Err(configuration_error("runtime order input shape is invalid"));
+    }
     for (name, ty) in [
         ("field", format!("{entity_name}OrderField!")),
         ("direction", "RuntimeOrderDirection".to_owned()),
@@ -4870,11 +5165,27 @@ fn validate_runtime_order_input(
             ));
         }
     }
-    if !matches!(
-        schema.types.get(&format!("{entity_name}OrderField")),
-        Some(SchemaType::Enum(_))
-    ) {
-        return Err(configuration_error("runtime order field enum is missing"));
+    let expected_fields = entity
+        .fields
+        .iter()
+        .filter(|field| field.relationship.is_none() && field.sortable)
+        .map(|field| field.field_name.as_str())
+        .collect::<Vec<_>>();
+    let Some(SchemaType::Enum(values)) = schema.types.get(&format!("{entity_name}OrderField"))
+    else {
+        return Err(configuration_error("runtime order field enum is invalid"));
+    };
+    // Projected outputs have no scalar metadata, but retain stored-scalar
+    // ordering in the emitted SDL. They remain absent from restricted enums.
+    if !expected_fields
+        .iter()
+        .all(|name| values.iter().any(|value| value.as_str() == *name))
+        || !values.iter().all(|name| {
+            expected_fields.contains(&name.as_str())
+                || opaque_runtime_projection(schema, entity, name)
+        })
+    {
+        return Err(configuration_error("runtime order field enum is invalid"));
     }
     Ok(())
 }
@@ -4907,7 +5218,7 @@ fn restricted_enum_values(
                 "runtime order enum has no owning input",
             ));
         };
-        validate_runtime_order_input(schema, &entity.entity_name, fields)?;
+        validate_runtime_order_input(schema, entity, fields)?;
     }
     Ok(values
         .iter()
@@ -6237,8 +6548,8 @@ mod tests {
         }
         input ParentMutationInput { name: String!, credential: String }
         input PageInput { limit: Int, offset: Int }
-        enum AggregateOperator { COUNT MIN MAX SUM }
-        input ParentAggregateMetricInput { operator: AggregateOperator!, field: ParentAggregateField }
+        enum GraphqlAggregateInputOperator { COUNT MIN MAX SUM }
+        input ParentAggregateMetricInput { operator: GraphqlAggregateInputOperator!, field: ParentAggregateField }
         enum ParentAggregateField { id name amount credential }
         type AggregateRow { groups: [AggregateValue!]!, metrics: [AggregateValue!]! }
         type AggregateValue { field: String, operator: String, kind: String!, value: String }
@@ -7176,17 +7487,13 @@ mod tests {
             input SubscriptionWhereInput {
                 @Id@: StringFilterInput, @CustomerId@: StringFilterInput
                 @CustomerEmail@: StringFilterInput, @CustomerName@: StringFilterInput
-                @Secret@: StringFilterInput, @Customer@: CustomerWhereInput
-                @CustomerSome@: CustomerWhereInput, @CustomerIsNull@: Boolean
-                CustomerIdExtra: StringFilterInput, Customer_Id: StringFilterInput
-                CUSTOMERID: StringFilterInput
+                @Secret@: StringFilterInput
                 @And@: [SubscriptionWhereInput!], @Or@: [SubscriptionWhereInput!]
                 @Not@: SubscriptionWhereInput
             }
             input CustomerWhereInput { @Id@: StringFilterInput }
             input SubscriptionOrderByInput {
                 @CustomerId@: OrderDirection, @CustomerEmail@: OrderDirection
-                @CustomerCount@: OrderDirection, CustomerIdExtra: OrderDirection
             }
             input StringFilterInput { @Eq@: String, @IsNull@: Boolean }
             input PageInput { @Limit@: Int, @Offset@: Int }
@@ -7522,7 +7829,7 @@ mod tests {
         );
         sdl.push_str(
             "\ninput SubscriptionKeysetOrderByInput { id: OrderDirection, \
-             customerEmail: OrderDirection, unknown: OrderDirection }",
+             customerEmail: OrderDirection }",
         );
         semantics
             .entities
@@ -7800,14 +8107,30 @@ mod tests {
                     ),
                 };
             let operation = |name: &str, argument, result: &str| {
-                GraphqlSemanticOperationDescriptor::custom(
-                    GraphqlOperationKind::Query,
-                    name,
-                    format!("Read the reviewed {name} result."),
-                    vec![argument],
-                    GraphqlSemanticTypeRef::named(result, GraphqlSemanticTypeKind::Object, false),
-                    true,
-                )
+                let arguments = vec![argument];
+                let result =
+                    GraphqlSemanticTypeRef::named(result, GraphqlSemanticTypeKind::Object, false);
+                let description = format!("Read the reviewed {name} result.");
+                if name == "Rows" {
+                    generated_root(
+                        "Row",
+                        GraphqlOperationKind::Query,
+                        name,
+                        description,
+                        arguments,
+                        result,
+                        true,
+                    )
+                } else {
+                    GraphqlSemanticOperationDescriptor::custom(
+                        GraphqlOperationKind::Query,
+                        name,
+                        description,
+                        arguments,
+                        result,
+                        true,
+                    )
+                }
                 .unwrap()
             };
             let semantics = GraphqlSemanticCatalog::compose_with_custom(
@@ -8101,7 +8424,7 @@ mod tests {
                 type StringFilter {{ id: String!, privateId: String!, name: String! }}
                 input StringFilterWhereInput {{
                     id: StringFilterInput, privateId: StringFilterInput
-                    name: StringFilterInput, unknown: StringFilterInput
+
                 }}
                 input StringFilterInput {{ eq: String, isNull: Boolean }}
                 input LookupFilterInput {{ criteria: [StringFilterWhereInput!]! }}
@@ -9092,9 +9415,9 @@ mod tests {
             r#"
             input SubscriptionOrderInput {
                 field: SubscriptionOrderField!, direction: RuntimeOrderDirection,
-                nulls: RuntimeNullPlacement, unexpected: String
+                nulls: RuntimeNullPlacement
             }
-            enum SubscriptionOrderField { number customerEmail name secret unknown NUMBER }
+            enum SubscriptionOrderField { number id customerId planName customerEmail customerName secret }
             enum RuntimeOrderDirection { ASC DESC }
             enum RuntimeNullPlacement { FIRST LAST }
         "#,
@@ -9273,14 +9596,7 @@ mod tests {
                 .compile_compact(ordered)
                 .expect("public scalar ordering");
 
-            for denied in [
-                "Customer",
-                "CustomerEmail",
-                "CustomerName",
-                "Secret",
-                "CustomerSome",
-                "CustomerIsNull",
-            ] {
+            for denied in ["CustomerEmail", "CustomerName", "Secret"] {
                 let mut invalid = plan.clone();
                 let value = match denied {
                     "CustomerIsNull" => json!(true),
@@ -9649,31 +9965,32 @@ mod tests {
 
     #[test]
     fn handwritten_recursive_inputs_remain_unsupported() {
-        let base = semantic_catalog();
-        let search = GraphqlSemanticOperationDescriptor::custom(
-            GraphqlOperationKind::Query,
-            "SearchParent",
-            "Search reviewed parent records.",
-            vec![GraphqlSemanticArgumentDescriptor {
-                graphql_name: "input".to_owned(),
-                description: "Recursive custom search expression.".to_owned(),
-                type_ref: GraphqlSemanticTypeRef::named(
-                    "CustomRecursiveInput",
-                    GraphqlSemanticTypeKind::Object,
-                    false,
-                ),
-            }],
-            GraphqlSemanticTypeRef::named("Parent", GraphqlSemanticTypeKind::Object, false),
-            true,
-        )
-        .expect("custom query semantics");
-        let semantics = GraphqlSemanticCatalog::compose_with_custom(
-            base.entities,
-            &GraphqlOperationCatalog::compose(std::iter::empty()),
-            base.operations.into_iter().chain([search]),
-        )
-        .expect("recursive custom input semantics");
-        let sdl = query_sdl()
+        for input_name in ["CustomRecursiveInput", "ParentWhereInput"] {
+            let base = semantic_catalog();
+            let search = GraphqlSemanticOperationDescriptor::custom(
+                GraphqlOperationKind::Query,
+                "SearchParent",
+                "Search reviewed parent records.",
+                vec![GraphqlSemanticArgumentDescriptor {
+                    graphql_name: "input".to_owned(),
+                    description: "Recursive custom search expression.".to_owned(),
+                    type_ref: GraphqlSemanticTypeRef::named(
+                        input_name,
+                        GraphqlSemanticTypeKind::Object,
+                        false,
+                    ),
+                }],
+                GraphqlSemanticTypeRef::named("Parent", GraphqlSemanticTypeKind::Object, false),
+                true,
+            )
+            .expect("custom query semantics");
+            let semantics = GraphqlSemanticCatalog::compose_with_custom(
+                base.entities,
+                &GraphqlOperationCatalog::compose(std::iter::empty()),
+                base.operations.into_iter().chain([search]),
+            )
+            .expect("recursive custom input semantics");
+            let sdl = query_sdl()
             .replace(
                 "ReadParent(id: ID!): Parent!",
                 "ReadParent(id: ID!): Parent!\nSearchParent(input: CustomRecursiveInput!): Parent!",
@@ -9681,23 +9998,24 @@ mod tests {
             .replace(
                 "input PageInput { limit: Int, offset: Int }",
                 "input PageInput { limit: Int, offset: Int }\ninput CustomRecursiveInput { next: CustomRecursiveInput }",
-            );
-        assert!(matches!(
-            AiGraphqlQueryCapabilityCatalog::compile_with_options(
-                "inventory",
-                GraphqlExecutionTargetId::parse("inventory.graphql").expect("target"),
-                &sdl,
-                &semantics,
-                AiGraphqlQueryCapabilityLimits::default(),
-                AiGraphqlQueryCapabilityOptions::default().with_custom_input_disclosure(
-                    AiCustomInputDisclosure::new()
-                        .with_declared_operation(GraphqlOperationKind::Query, "SearchParent")
-                        .expect("declared operation"),
+            ).replace("CustomRecursiveInput", input_name);
+            assert!(matches!(
+                AiGraphqlQueryCapabilityCatalog::compile_with_options(
+                    "inventory",
+                    GraphqlExecutionTargetId::parse("inventory.graphql").expect("target"),
+                    &sdl,
+                    &semantics,
+                    AiGraphqlQueryCapabilityLimits::default(),
+                    AiGraphqlQueryCapabilityOptions::default().with_custom_input_disclosure(
+                        AiCustomInputDisclosure::new()
+                            .with_declared_operation(GraphqlOperationKind::Query, "SearchParent")
+                            .expect("declared operation"),
+                    ),
                 ),
-            ),
-            Err(AiError::InvalidConfiguration(message))
-                if message == "recursive query inputs are unsupported"
-        ));
+                Err(AiError::InvalidConfiguration(message))
+                    if message == "recursive query inputs are unsupported"
+            ));
+        }
     }
 
     #[test]
@@ -10679,7 +10997,7 @@ mod tests {
         // Drop the shared fixture's own definition of the same name.
         let sdl = query_sdl()
             .replace(
-                "        input ParentAggregateMetricInput { operator: AggregateOperator!, field: ParentAggregateField }\n",
+                "        input ParentAggregateMetricInput { operator: GraphqlAggregateInputOperator!, field: ParentAggregateField }\n",
                 "",
             )
             .replace(
@@ -10834,7 +11152,7 @@ mod tests {
         );
         if let Some(metric_input) = metric_input {
             sdl = sdl.replace(
-                "        input ParentAggregateMetricInput { operator: AggregateOperator!, field: ParentAggregateField }\n",
+                "        input ParentAggregateMetricInput { operator: GraphqlAggregateInputOperator!, field: ParentAggregateField }\n",
                 &format!("        {metric_input}\n"),
             );
         }
@@ -10946,7 +11264,7 @@ mod tests {
         let (sdl, semantics) = shared_metric_fixture(
             custom,
             Some(
-                "input ParentAggregateMetricInput { operator: AggregateOperator!, field: String }",
+                "input ParentAggregateMetricInput { operator: GraphqlAggregateInputOperator!, field: String }",
             ),
         );
         assert!(matches!(
@@ -11062,6 +11380,172 @@ mod tests {
     }
 
     #[test]
+    fn mixed_logical_names_are_handwritten_on_generated_roots() {
+        use graphql_orm_operation_catalog::{
+            GraphqlSemanticFilterInputMetadata, GraphqlSemanticFilterInputOperator,
+            GraphqlSemanticFilterOperator,
+        };
+        let sdl = format!(
+            "{}\ninput ParentWhereInput {{ name: StringEqualsFilter, and: [ParentWhereInput!], Or: [ParentWhereInput!], not: ParentWhereInput }}\ninput StringEqualsFilter {{ eq: String }}",
+            query_sdl().replace("ReadParent(id: ID!)", "ReadParent(input: ParentWhereInput)")
+        );
+        let mut semantics = semantic_catalog();
+        let name = semantics
+            .entities
+            .iter_mut()
+            .find(|entity| entity.entity_name == "Parent")
+            .unwrap()
+            .fields
+            .iter_mut()
+            .find(|field| field.field_name == "name")
+            .unwrap();
+        name.filter_operators = vec![GraphqlSemanticFilterOperator::Equal];
+        name.filter_input = Some(
+            GraphqlSemanticFilterInputMetadata::new(
+                GraphqlSemanticTypeRef::named(
+                    "StringEqualsFilter",
+                    GraphqlSemanticTypeKind::Object,
+                    true,
+                ),
+                named("String", false),
+                vec![GraphqlSemanticFilterInputOperator {
+                    graphql_name: "eq".into(),
+                    operator: GraphqlSemanticFilterOperator::Equal,
+                    operand_type: named("String", true),
+                }],
+                Vec::new(),
+            )
+            .unwrap(),
+        );
+        semantics.operations = vec![
+            generated_root(
+                "Parent",
+                GraphqlOperationKind::Query,
+                "ReadParent",
+                "Read a parent record.",
+                vec![GraphqlSemanticArgumentDescriptor {
+                    graphql_name: "input".into(),
+                    description: "Parent criteria.".into(),
+                    type_ref: GraphqlSemanticTypeRef::named(
+                        "ParentWhereInput",
+                        GraphqlSemanticTypeKind::Object,
+                        true,
+                    ),
+                }],
+                GraphqlSemanticTypeRef::named("Parent", GraphqlSemanticTypeKind::Object, false),
+                true,
+            )
+            .unwrap(),
+        ];
+        let semantics =
+            GraphqlSemanticCatalog::compose_descriptors(semantics.entities, semantics.operations)
+                .unwrap();
+        let plan = json!({"arguments": {"input": {"name": {"eq": "public"}}}, "selections": ["id"],
+            "relationshipArguments": {}, "relationshipMaximumItems": {}});
+        let closed = compile_shared_metric(&sdl, &semantics).unwrap();
+        assert!(
+            closed
+                .capabilities()
+                .next()
+                .unwrap()
+                .compile_compact(plan.clone())
+                .is_err()
+        );
+        let declared = input_collision_capabilities_with(
+            &sdl,
+            &semantics,
+            AiCustomInputDisclosure::new()
+                .with_exportable_field("ParentWhereInput", "name")
+                .unwrap(),
+        )
+        .unwrap();
+        declared
+            .capabilities()
+            .next()
+            .unwrap()
+            .compile_compact(plan)
+            .unwrap();
+    }
+
+    #[test]
+    fn host_search_shape_requires_disclosure_on_generated_roots() {
+        for (name, mode, values) in [
+            ("HostSearchInput", "HostMode", "PLAIN PHRASE WEB PREFIX"),
+            ("SearchInput", "SearchMode", "PLAIN"),
+            ("SearchInput", "HostMode", "PLAIN PHRASE WEB PREFIX"),
+        ] {
+            let definition = format!(
+                "input {name} {{ query: String!, mode: {mode}, minScore: Float }} enum {mode} {{ {values} }}"
+            );
+            let (sdl, semantics) = search_composition(name, &definition, true);
+            assert!(
+                matches!(compile_shared_metric(&sdl, &semantics),
+                Err(AiError::InvalidConfiguration(message))
+                    if message == "required custom input field has no declared disclosure"),
+                "{name} / {mode}"
+            );
+        }
+    }
+
+    #[test]
+    fn host_order_enum_requires_disclosure_on_generated_roots() {
+        for suffix in ["OrderByInput", "KeysetOrderByInput"] {
+            for required in [false, true] {
+                let name = format!("Parent{suffix}");
+                let definition = format!(
+                    "input {name} {{ name: HostSelector{} }} enum HostSelector {{ NAME OWNER_EMAIL }}",
+                    if required { "!" } else { "" }
+                );
+                let (sdl, mut semantics) = generated_name_fixture(&definition, &name);
+                semantics
+                    .entities
+                    .iter_mut()
+                    .find(|entity| entity.entity_name == "Parent")
+                    .unwrap()
+                    .fields
+                    .iter_mut()
+                    .find(|field| field.field_name == "name")
+                    .unwrap()
+                    .sortable = true;
+                let operation = semantics
+                    .operations
+                    .iter_mut()
+                    .find(|operation| operation.field_name == "ProvisionParent")
+                    .unwrap();
+                *operation = generated_root(
+                    "Parent",
+                    operation.kind,
+                    operation.field_name.clone(),
+                    operation.description.clone(),
+                    operation.arguments.clone(),
+                    operation.result_type.clone(),
+                    true,
+                )
+                .unwrap();
+                let semantics = GraphqlSemanticCatalog::compose_descriptors(
+                    semantics.entities,
+                    semantics.operations,
+                )
+                .unwrap();
+                let result = compile_generated_name_fixture(
+                    &sdl,
+                    &semantics,
+                    AiCustomInputDisclosure::new(),
+                );
+                if required {
+                    assert!(matches!(result, Err(AiError::InvalidConfiguration(message))
+                        if message == "required custom input field has no declared disclosure"));
+                } else {
+                    let catalog = result.expect("optional handwritten input compiles closed");
+                    assert!(!provision_schema(&catalog).contains("OWNER_EMAIL"));
+                    assert!(catalog.capabilities().find(|capability| capability.field_name() == "ProvisionParent").unwrap()
+                        .compile_compact(json!({"arguments":{"input":{"name":"OWNER_EMAIL"}}, "selections":["id"], "relationshipArguments":{}, "relationshipMaximumItems":{}})).is_err());
+                }
+            }
+        }
+    }
+
+    #[test]
     fn generated_search_inputs_compile_without_declarations() {
         for (search_type, search_sdl, query, mode) in [
             (
@@ -11072,7 +11556,7 @@ mod tests {
             ),
             (
                 "SearchInput",
-                "input SearchInput { Query: String!, Mode: RuntimeSearchMode, MinScore: Float }",
+                "input SearchInput { Query: String!, Mode: SearchMode, MinScore: Float } enum SearchMode { PLAIN PHRASE WEB PREFIX }",
                 "Query",
                 "Mode",
             ),
@@ -11120,6 +11604,9 @@ mod tests {
             "{}\n        input ChildKeyInput {{ id: String! }}\n        input ParentLinksInput {{ children: ParentChildrenLinkChangeInput }}\n        input ParentChildrenLinkChangeInput {{ set: [ChildKeyInput!], add: [ChildKeyInput!], remove: [ChildKeyInput!] }}\n        input SubscriptionFilterInput {{ actions: [ChangeAction!], dummy: Boolean }}\n        enum ChangeAction {{ CREATED UPDATED DELETED }}\n",
             query_sdl()
         );
+        // Link SDL follows runtime/mutation.rs; subscription SDL follows
+        // graphql/orm/query.rs (SubscriptionFilterInput and ChangeAction).
+        let sdl = sdl.replace("type Query {", "type Query { LinkParent(links: ParentLinksInput, filter: SubscriptionFilterInput): Parent");
         let schema = FinishedSchema::parse(&sdl).expect("link schema parses");
         let mut semantics = semantic_catalog();
         semantics.operations.push(
@@ -11156,6 +11643,8 @@ mod tests {
         let semantics =
             GraphqlSemanticCatalog::compose_descriptors(semantics.entities, semantics.operations)
                 .unwrap();
+        compile_shared_metric(&sdl, &semantics)
+            .expect("complete capability admits links, nested target keys and subscription filter");
         let restricted = |schema: &FinishedSchema, name: &str| {
             let Some(SchemaType::InputObject(fields)) = schema.types.get(name) else {
                 panic!("{name} is defined");
@@ -11178,6 +11667,36 @@ mod tests {
         )
         .unwrap();
         assert!(restricted(&forged, "ParentChildrenLinkChangeInput").is_empty());
+
+        // Runtime link inputs describe join-table collections, not to-one relations.
+        let mut one = semantics.clone();
+        let field = one
+            .entities
+            .iter_mut()
+            .find(|entity| entity.entity_name == "Parent")
+            .unwrap()
+            .fields
+            .iter_mut()
+            .find(|field| field.field_name == "children")
+            .unwrap();
+        field.type_ref =
+            GraphqlSemanticTypeRef::named("Child", GraphqlSemanticTypeKind::Object, true);
+        let relation = field.relationship.as_mut().unwrap();
+        relation.cardinality = GraphqlSemanticRelationshipCardinality::One;
+        relation.arguments.clear();
+        relation.collection_bound = None;
+        let one =
+            GraphqlSemanticCatalog::compose_descriptors(one.entities, one.operations).unwrap();
+        for name in ["ParentLinksInput", "ParentChildrenLinkChangeInput"] {
+            let Some(SchemaType::InputObject(fields)) = schema.types.get(name) else {
+                panic!("{name}");
+            };
+            assert!(
+                restrict_input_fields(&schema, &one, name, fields)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
     }
 
     #[test]
@@ -11287,10 +11806,15 @@ mod tests {
     }
 
     fn colliding_aggregate_fixture() -> (String, GraphqlSemanticCatalog) {
-        let sdl = SDL.replace(
-            "          name: String!\n",
-            "          name: String!\n          NAME: String!\n",
-        );
+        let sdl = SDL
+            .replace(
+                "          name: String!\n",
+                "          name: String!\n          NAME: String!\n",
+            )
+            .replace(
+                "enum ParentAggregateField { id name amount credential }",
+                "enum ParentAggregateField { id name NAME amount credential }",
+            );
         let mut semantics = aggregate_semantic_catalog();
         let parent = semantics
             .entities

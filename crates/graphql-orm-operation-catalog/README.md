@@ -3,14 +3,14 @@ title: "graphql-orm-operation-catalog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-31
+last_reviewed: 2026-11-13
 review_by: 2027-02-11
 supersedes: []
 ---
 
 # `graphql-orm-operation-catalog`
 
-Version `0.7.4` documents that `GraphqlSemanticOperationDescriptor::generated` is a statement by trusted code and does not widen the disclosure of the inputs a root uses. Documentation only; no API, fingerprint or data migration change.
+Version `0.7.4` documents that `GraphqlSemanticOperationDescriptor::generated` asserts that trusted host code uses the ORM generated resolver. Canonical input identity and shape checks limit disclosure; they cannot prove how a host resolver interprets canonical arguments. Documentation only; no API, fingerprint or data migration change.
 
 Version `0.7.3` adds:
 
