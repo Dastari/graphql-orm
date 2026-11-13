@@ -5629,7 +5629,7 @@ async fn classify_expired_lease(
                 .fetch_one()
                 .await
                 .map_err(OrmPublicError::from)?
-                .ok_or_else(|| recovery_state_invalid())?;
+                .ok_or_else(recovery_state_invalid)?;
             // A checkpoint written by an earlier attempt is inherited only by an
             // adoption requeue: `claim_once` keeps the pointer for the adopting
             // attempt, which clears it when it consumes the batch. Validate it
@@ -5653,15 +5653,15 @@ async fn classify_expired_lease(
             if checkpoint.checkpoint_kind == "assistant_output_persisted" {
                 let message_id = checkpoint
                     .assistant_message_id
-                    .ok_or_else(|| recovery_state_invalid())?;
+                    .ok_or_else(recovery_state_invalid)?;
                 let budget_reservation_id = checkpoint
                     .budget_reservation_id
-                    .ok_or_else(|| recovery_state_invalid())?;
+                    .ok_or_else(recovery_state_invalid)?;
                 let reservation = tx
                     .find_by_id::<AiBudgetReservationRecord>(&budget_reservation_id)
                     .await
                     .map_err(OrmPublicError::from)?
-                    .ok_or_else(|| recovery_state_invalid())?;
+                    .ok_or_else(recovery_state_invalid)?;
                 if reservation.session_id != current.session_id
                     || reservation.run_id != current.id
                     || reservation.attempt_id != source_attempt_id
@@ -5687,7 +5687,7 @@ async fn classify_expired_lease(
                     .find_by_id::<AiMessageRecord>(&message_id)
                     .await
                     .map_err(OrmPublicError::from)?
-                    .ok_or_else(|| recovery_state_invalid())?;
+                    .ok_or_else(recovery_state_invalid)?;
                 if message.session_id != current.session_id
                     || message.run_id != Some(current.id)
                     || message.message_role != "assistant"
@@ -5739,7 +5739,7 @@ async fn classify_expired_lease(
                 }
                 let budget_reservation_id = checkpoint
                     .budget_reservation_id
-                    .ok_or_else(|| recovery_state_invalid())?;
+                    .ok_or_else(recovery_state_invalid)?;
                 let protected_state = checkpoint
                     .protected_state
                     .as_ref()
@@ -5747,7 +5747,7 @@ async fn classify_expired_lease(
                         serde_json::to_vec(state)
                             .is_ok_and(|encoded| encoded.len() <= 64 * 1024 * 1024)
                     })
-                    .ok_or_else(|| recovery_state_invalid())?;
+                    .ok_or_else(recovery_state_invalid)?;
                 if checkpoint.assistant_message_id.is_some() {
                     return Err(recovery_state_invalid());
                 }
@@ -5755,7 +5755,7 @@ async fn classify_expired_lease(
                     .find_by_id::<AiBudgetReservationRecord>(&budget_reservation_id)
                     .await
                     .map_err(OrmPublicError::from)?
-                    .ok_or_else(|| recovery_state_invalid())?;
+                    .ok_or_else(recovery_state_invalid)?;
                 if reservation.session_id != current.session_id
                     || reservation.run_id != current.id
                     || (!native_outcome
@@ -5842,7 +5842,7 @@ async fn classify_expired_lease(
                             .find_by_id::<AiApprovalRecord>(&approval_id)
                             .await
                             .map_err(OrmPublicError::from)?
-                            .ok_or_else(|| recovery_state_invalid())?;
+                            .ok_or_else(recovery_state_invalid)?;
                         matches!(
                             call.risk.as_str(),
                             "low_risk_write" | "non_idempotent_write" | "high_impact"
@@ -5865,7 +5865,7 @@ async fn classify_expired_lease(
                         .find_by_id::<AiRunStepRecord>(&call.id)
                         .await
                         .map_err(OrmPublicError::from)?
-                        .ok_or_else(|| recovery_state_invalid())?;
+                        .ok_or_else(recovery_state_invalid)?;
                     if step.run_id != current.id
                         || step.lease_generation != source_generation
                         || step.state != call.state
@@ -5923,7 +5923,7 @@ async fn classify_expired_lease(
                     current
                         .retry_count
                         .checked_add(1)
-                        .ok_or_else(|| recovery_state_invalid())?,
+                        .ok_or_else(recovery_state_invalid)?,
                     Some(now.unix_timestamp()),
                     None,
                 )
@@ -5946,7 +5946,7 @@ async fn classify_expired_lease(
                     current
                         .retry_count
                         .checked_add(1)
-                        .ok_or_else(|| recovery_state_invalid())?,
+                        .ok_or_else(recovery_state_invalid)?,
                     Some(now.unix_timestamp()),
                     None,
                 )
