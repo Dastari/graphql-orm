@@ -2071,6 +2071,7 @@ impl OrmAiApprovalWaitReconciliationService {
                                     approval,
                                 )
                                 .await
+                                .map_err(OrmPublicError::from)
                                 {
                                     Ok(()) => true,
                                     Err(error)

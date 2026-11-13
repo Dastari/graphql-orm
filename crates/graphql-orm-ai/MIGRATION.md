@@ -23,7 +23,17 @@ take the default; no data migration is needed. A stamp is written as
 `max(now, previous + 1)`, so repeated passes within one second still rotate.
 After a clock rollback, a row stamped in the future waits until the clock
 passes its stamp. The scans sort the active (expired or unresolved) set by the
-stamp; no index is added for this order in this release. It also changes generated filter metadata (see the
+stamp; no index is added for this order in this release.
+
+Under database row security, make the recovery role exempt from it on the AI
+tables (a superuser, a `BYPASSRLS` role, or the table owner without
+`FORCE ROW LEVEL SECURITY`). Recovery reads PostgreSQL's `row_security_active`
+for its role on every AI table once per pass. When row security is active,
+or a host ORM row policy is registered, or the check fails, a row recovery
+cannot read is skipped and counted in `skipped`, never quarantined, so a
+defect hidden that way stays in place until the row is readable. The run
+service is not built for SQL Server, so no SQL Server security policy
+applies to recovery. It also changes generated filter metadata (see the
 last item below).
 
 - `AiRunRecoveryReport` has three new public fields: `quarantined`,
@@ -48,9 +58,9 @@ last item below).
   budget reconciliation requires the live recovery epoch, also for a
   cancelled attempt; lease recovery quarantines a run only for a durable
   defect of its own stored state and otherwise leaves it unchanged and counts
-  it in `skipped` (with a host row policy registered, a linked row recovery
-  cannot read is never treated as absent; a progress stamp the host refuses
-  fails the pass) (a host row policy whose candidate budget refuses a recovery
+  it in `skipped` (when reads can be filtered, a linked row recovery cannot
+  read is never treated as absent; a progress stamp the host refuses fails
+  the pass) (a host row policy whose candidate budget refuses a recovery
   scan fails the pass instead, and quarantines nothing); a run
   that closes while its provider session is parked moves that binding to
   `cleanup_required` (`provider_session_parked_wait_closed`); a provider-session binding that fails validation is

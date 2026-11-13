@@ -1239,6 +1239,9 @@ impl OrmAiRunService {
         // pass finishes its other work, then fails with it: a row that cannot
         // be stamped would otherwise hold the head of every later page.
         let mut stamp_failure: Option<TransactionError> = None;
+        // Decided once per pass: whether any read of this pass can have been
+        // filtered. Absence and incompleteness quarantine only when it cannot.
+        let filtering_excluded = recovery_filtering_excluded(&self.database).await;
         // Two bounded pages: active rows with no expiry (malformed, so they
         // are quarantined rather than skipped forever) and expired rows, each
         // least recently examined first. A row is recovered, quarantined for
@@ -1300,7 +1303,15 @@ impl OrmAiRunService {
                     self.database
                         .transaction(TransactionMode::StateMachine, move |tx| {
                             Box::pin(async move {
-                                recover_expired_run(tx, run_id, now, cutoff, limits).await
+                                recover_expired_run(
+                                    tx,
+                                    run_id,
+                                    now,
+                                    cutoff,
+                                    limits,
+                                    filtering_excluded,
+                                )
+                                .await
                             })
                         })
                 })
@@ -5626,11 +5637,12 @@ async fn classify_expired_lease(
     lease: &AiRunLease,
     now: OffsetDateTime,
     limits: AiRunServiceLimits,
+    filtering_excluded: bool,
 ) -> Result<ExpiredLeaseTransition, OrmPublicError> {
-    // A registered row policy can hide an existing row, and the ORM offers
-    // no read that tells hidden from absent. Absence is then not proof of a
-    // stored defect.
-    let absence_proven = tx.database().row_policy().is_none();
+    // A missing linked row, or a check that needs a complete set of rows, is
+    // proof of a stored defect only when no read can have been filtered
+    // (see [`recovery_filtering_excluded`]). Field-to-field contradictions
+    // between rows that were read are durable regardless.
     let current_state = persisted_state(current)?;
     let (final_checkpoint, adoptable_tool_batch, inherited_checkpoint) =
         if let Some(checkpoint_id) = current.latest_checkpoint_id {
@@ -5647,7 +5659,7 @@ async fn classify_expired_lease(
                 .fetch_one()
                 .await
                 .map_err(OrmPublicError::from)?
-                .ok_or_else(|| missing_linked_row(absence_proven))?;
+                .ok_or_else(|| missing_linked_row(filtering_excluded))?;
             // A checkpoint written by an earlier attempt is inherited only by an
             // adoption requeue: `claim_once` keeps the pointer for the adopting
             // attempt, which clears it when it consumes the batch. Validate it
@@ -5679,7 +5691,7 @@ async fn classify_expired_lease(
                     .find_by_id::<AiBudgetReservationRecord>(&budget_reservation_id)
                     .await
                     .map_err(OrmPublicError::from)?
-                    .ok_or_else(|| missing_linked_row(absence_proven))?;
+                    .ok_or_else(|| missing_linked_row(filtering_excluded))?;
                 if reservation.session_id != current.session_id
                     || reservation.run_id != current.id
                     || reservation.attempt_id != source_attempt_id
@@ -5705,7 +5717,7 @@ async fn classify_expired_lease(
                     .find_by_id::<AiMessageRecord>(&message_id)
                     .await
                     .map_err(OrmPublicError::from)?
-                    .ok_or_else(|| missing_linked_row(absence_proven))?;
+                    .ok_or_else(|| missing_linked_row(filtering_excluded))?;
                 if message.session_id != current.session_id
                     || message.run_id != Some(current.id)
                     || message.message_role != "assistant"
@@ -5732,17 +5744,19 @@ async fn classify_expired_lease(
                     .await
                     .map_err(OrmPublicError::from)?;
                 blocks.sort_by_key(|block| block.block_index);
-                if !absence_proven
-                    && i64::try_from(blocks.len()).is_ok_and(|len| len < message.block_count)
-                {
-                    return Err(missing_linked_row(false));
-                }
+                // Completeness: the count and the index sequence are derived
+                // from enumerating the visible blocks.
                 if i64::try_from(blocks.len()).ok() != Some(message.block_count)
-                    || blocks.iter().enumerate().any(|(index, block)| {
-                        i64::try_from(index).ok() != Some(block.block_index)
-                            || block.byte_count < 0
-                            || block.line_count < 1
-                    })
+                    || blocks
+                        .iter()
+                        .enumerate()
+                        .any(|(index, block)| i64::try_from(index).ok() != Some(block.block_index))
+                {
+                    return Err(missing_linked_row(filtering_excluded));
+                }
+                if blocks
+                    .iter()
+                    .any(|block| block.byte_count < 0 || block.line_count < 1)
                 {
                     return Err(recovery_state_invalid());
                 }
@@ -5778,7 +5792,7 @@ async fn classify_expired_lease(
                     .find_by_id::<AiBudgetReservationRecord>(&budget_reservation_id)
                     .await
                     .map_err(OrmPublicError::from)?
-                    .ok_or_else(|| missing_linked_row(absence_proven))?;
+                    .ok_or_else(|| missing_linked_row(filtering_excluded))?;
                 if reservation.session_id != current.session_id
                     || reservation.run_id != current.id
                     || (!native_outcome
@@ -5829,20 +5843,20 @@ async fn classify_expired_lease(
                             && call.budget_reservation_id == Some(budget_reservation_id)
                     })
                     .collect::<Vec<_>>();
-                if relevant.is_empty() && !absence_proven {
-                    return Err(missing_linked_row(false));
-                }
+                // Completeness: counts derived from enumerating the batch.
                 if relevant.is_empty()
                     || relevant.len() > 4_096
                     || (supervised && relevant.len() != 1)
-                    || relevant.iter().any(|call| {
-                        !matches!(call.state.as_str(), "completed" | "execution_failed")
-                            || call.protected_result.is_none()
-                            || call.result_egress_decision_id.is_none()
-                            || call.result_egress_manifest_hash.is_none()
-                            || call.completed_at.is_none()
-                    })
                 {
+                    return Err(missing_linked_row(filtering_excluded));
+                }
+                if relevant.iter().any(|call| {
+                    !matches!(call.state.as_str(), "completed" | "execution_failed")
+                        || call.protected_result.is_none()
+                        || call.result_egress_decision_id.is_none()
+                        || call.result_egress_manifest_hash.is_none()
+                        || call.completed_at.is_none()
+                }) {
                     return Err(recovery_state_invalid());
                 }
                 if native_outcome {
@@ -5858,14 +5872,15 @@ async fn classify_expired_lease(
                         None,
                     )
                     .await
-                    .map_err(|error| {
-                        if native_checkpoints::is_graph_invalid(&error) {
+                    .map_err(|error| match error {
+                        native_checkpoints::NativeCheckError::Contradiction => {
                             recovery_state_invalid()
-                        } else if native_checkpoints::is_row_missing(&error) {
-                            missing_linked_row(absence_proven)
-                        } else {
-                            error
                         }
+                        native_checkpoints::NativeCheckError::Incomplete
+                        | native_checkpoints::NativeCheckError::Missing => {
+                            missing_linked_row(filtering_excluded)
+                        }
+                        native_checkpoints::NativeCheckError::Operational(error) => error,
                     })?;
                 }
                 for call in relevant {
@@ -5877,7 +5892,7 @@ async fn classify_expired_lease(
                             .find_by_id::<AiApprovalRecord>(&approval_id)
                             .await
                             .map_err(OrmPublicError::from)?
-                            .ok_or_else(|| missing_linked_row(absence_proven))?;
+                            .ok_or_else(|| missing_linked_row(filtering_excluded))?;
                         matches!(
                             call.risk.as_str(),
                             "low_risk_write" | "non_idempotent_write" | "high_impact"
@@ -5900,7 +5915,7 @@ async fn classify_expired_lease(
                         .find_by_id::<AiRunStepRecord>(&call.id)
                         .await
                         .map_err(OrmPublicError::from)?
-                        .ok_or_else(|| missing_linked_row(absence_proven))?;
+                        .ok_or_else(|| missing_linked_row(filtering_excluded))?;
                     if step.run_id != current.id
                         || step.lease_generation != source_generation
                         || step.state != call.state
@@ -6015,6 +6030,7 @@ async fn recover_expired_run(
     now: OffsetDateTime,
     cutoff: i64,
     limits: AiRunServiceLimits,
+    filtering_excluded: bool,
 ) -> Result<ExpiredLeaseRecovery, OrmPublicError> {
     crate::orm_runtime_recovery::require_live_epoch(tx).await?;
     let Some(current) = tx
@@ -6038,7 +6054,9 @@ async fn recover_expired_run(
         .ok_or_else(recovery_state_invalid)
         .and_then(|_| lease_from_record(&current).map_err(|_| recovery_state_invalid()));
     let classified = match &lease {
-        Ok(lease) => classify_expired_lease(tx, &current, lease, now, limits).await,
+        Ok(lease) => {
+            classify_expired_lease(tx, &current, lease, now, limits, filtering_excluded).await
+        }
         Err(error) => Err(error.clone()),
     };
     // Only an explicitly identified durable failure of the run's own stored
@@ -6053,10 +6071,7 @@ async fn recover_expired_run(
             match terminal_event_session(tx, &current).await? {
                 Ok(_) => Ok(transition),
                 // A session a registered row policy hides is not proven absent.
-                Err(defect)
-                    if defect.code == OrmErrorCode::NotFound
-                        && tx.database().row_policy().is_some() =>
-                {
+                Err(defect) if defect.code == OrmErrorCode::NotFound && !filtering_excluded => {
                     Err(missing_linked_row(false))
                 }
                 Err(_) => Err(recovery_state_invalid()),
@@ -6257,6 +6272,86 @@ async fn settle_stranded_budget_reservation(
     Ok(ReservationSettlement::Settled)
 }
 
+/// Row security the backend applies to the AI tables for the current role.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BackendRowSecurity {
+    /// The backend has no row security (SQLite).
+    None,
+    /// Row security exists but is not active for this role on any AI table.
+    Inactive,
+    /// Row security is active for this role on at least one AI table.
+    Active,
+    /// The state could not be established.
+    Unknown,
+}
+
+/// Whether recovery can rule out that a read was filtered: no ORM row policy
+/// is registered and the backend cannot be filtering the AI tables for the
+/// current role.
+fn filtering_excluded_decision(row_policy_registered: bool, backend: BackendRowSecurity) -> bool {
+    !row_policy_registered
+        && matches!(
+            backend,
+            BackendRowSecurity::None | BackendRowSecurity::Inactive
+        )
+}
+
+/// Decides, once per recovery pass, whether reads can have been filtered.
+///
+/// A host row policy, or PostgreSQL row-level security active for the
+/// recovery role on any AI table, can hide an existing row, and no read
+/// tells hidden from absent. Then a missing linked row or an incomplete set
+/// of rows is an operational skip, never a quarantine. The PostgreSQL state
+/// is read through the ORM's row-security introspection
+/// (`row_security_active` for each AI table and the current role); a failed
+/// or incomplete introspection counts as "cannot be excluded". The run
+/// service is compiled only for SQLite and PostgreSQL.
+pub(crate) async fn recovery_filtering_excluded(database: &Database<DefaultWriteBackend>) -> bool {
+    use graphql_orm::graphql::orm::{OrmBackend, RlsIntrospectionBackend, RlsTableProbe};
+    let backend =
+        match <DefaultWriteBackend as RlsIntrospectionBackend>::introspect_rls_enforcement(
+            database.pool(),
+        )
+        .await
+        {
+            Ok(None) => BackendRowSecurity::None,
+            Err(_) => BackendRowSecurity::Unknown,
+            Ok(Some(_)) => {
+                let probes = <crate::AiSchemaModule as graphql_orm::graphql::orm::OrmSchemaModule>::entities(
+                &crate::AiSchemaModule,
+            )
+            .iter()
+            .map(|entity| RlsTableProbe {
+                table_sql: <DefaultWriteBackend as OrmBackend>::DIALECT
+                    .render_identifier_path(entity.table_name)
+                    .into_owned(),
+                expressions: Vec::new(),
+                render: false,
+            })
+            .collect::<Vec<_>>();
+                match <DefaultWriteBackend as RlsIntrospectionBackend>::introspect_rls_target(
+                    database.pool(),
+                    &probes,
+                )
+                .await
+                {
+                    Ok(target)
+                        if target.tables.len() == probes.len()
+                            && target.tables.iter().all(|table| table.relation.is_some()) =>
+                    {
+                        if target.tables.iter().any(|table| table.row_security_active) {
+                            BackendRowSecurity::Active
+                        } else {
+                            BackendRowSecurity::Inactive
+                        }
+                    }
+                    _ => BackendRowSecurity::Unknown,
+                }
+            }
+        };
+    filtering_excluded_decision(database.row_policy().is_some(), backend)
+}
+
 /// Safe message marking a durable validation failure of a run's own stored
 /// recovery state, as opposed to an operational failure.
 const RECOVERY_STATE_INVALID: &str = "AI run recovery state is invalid";
@@ -6271,9 +6366,10 @@ fn recovery_state_invalid() -> OrmPublicError {
 /// policy is registered: an operational skip, never a quarantine.
 const LINKED_ROW_NOT_VISIBLE: &str = "AI run recovery could not read a linked row";
 
-/// A linked row recovery could not read. Durable only when `absence_proven`.
-fn missing_linked_row(absence_proven: bool) -> OrmPublicError {
-    if absence_proven {
+/// A linked row recovery could not read, or a check that needs a complete
+/// set of rows failed. Durable only when `filtering_excluded`.
+fn missing_linked_row(filtering_excluded: bool) -> OrmPublicError {
+    if filtering_excluded {
         recovery_state_invalid()
     } else {
         OrmPublicError::with_message(OrmErrorCode::ServiceUnavailable, LINKED_ROW_NOT_VISIBLE)
@@ -9250,6 +9346,56 @@ mod tests {
         }
         assert_eq!(examined.iter().sum::<u32>(), 12);
         assert!(examined.iter().all(|count| *count >= 3), "{examined:?}");
+    }
+
+    #[test]
+    fn filtering_is_excluded_only_without_any_possible_filter() {
+        use BackendRowSecurity::{Active, Inactive, None as NoRowSecurity, Unknown};
+        for (row_policy, backend, excluded) in [
+            (false, NoRowSecurity, true),
+            (false, Inactive, true),
+            (false, Active, false),
+            (false, Unknown, false),
+            (true, NoRowSecurity, false),
+            (true, Inactive, false),
+            (true, Active, false),
+            (true, Unknown, false),
+        ] {
+            assert_eq!(
+                filtering_excluded_decision(row_policy, backend),
+                excluded,
+                "row_policy={row_policy} backend={backend:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_recovery_excludes_filtering_only_without_a_row_policy() {
+        let fixture = fixture().await;
+        assert!(recovery_filtering_excluded(&fixture.database).await);
+        let mut database = fixture.database.clone();
+        database.set_row_policy(CallbackRunRows);
+        assert!(!recovery_filtering_excluded(&database).await);
+    }
+
+    #[test]
+    fn native_check_kinds_keep_their_previous_outward_errors() {
+        use native_checkpoints::NativeCheckError;
+        for (error, code) in [
+            (NativeCheckError::Contradiction, OrmErrorCode::Conflict),
+            (NativeCheckError::Incomplete, OrmErrorCode::Conflict),
+            (NativeCheckError::Missing, OrmErrorCode::NotFound),
+            (
+                NativeCheckError::Operational(OrmPublicError::new(
+                    OrmErrorCode::ServiceUnavailable,
+                )),
+                OrmErrorCode::ServiceUnavailable,
+            ),
+        ] {
+            let outward = OrmPublicError::from(error);
+            assert_eq!(outward.code, code);
+            assert_eq!(outward.message, OrmPublicError::new(code).message);
+        }
     }
 
     #[tokio::test]
