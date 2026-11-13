@@ -10,20 +10,39 @@ supersedes: []
 
 # Migration Guide
 
-## 0.137.0 to 0.141.0: write transforms fail closed
+## 0.137.0 to 0.139.0: optional stable entity identity
 
-Upgrade ORM and macros together (0.141.0 is a placeholder). Every generated
-entity field with `#[transform(write = "path")]` now fails compilation at the
-attribute. There is no supported generated write path for this signature;
-GraphQL operations also generate context-free repository writes. Some typed
-bind branches previously skipped the transform and stored raw values. Audit
-stored data if you relied on that attribute for hashing or encryption.
+Upgrade ORM and macros together; catalogue is 0.7.4.
 
-Move transformation to a host-controlled write boundary before using generated
-write APIs. Removing the attribute alone is unsafe for sensitive inputs. This
-release adds no replacement signature or public API. Read-only transforms are
-unchanged; entities without write transforms need no migration and retain their
-SDL and operation catalogues.
+Declare `#[graphql_entity(stable_type_id = "old_crate::old_module::Record")]`
+(or `#[repository_entity(stable_type_id = "...")]`) before or when moving an
+entity. Use the exact previous descriptor's `entity_rust_type()` value, including
+the old crate, module and type name. Keep this value after the move. The value
+is an opaque token, normally the old Rust path: use a string literal of 1–1024
+printable ASCII bytes without whitespace or control characters. Duplicate
+declarations are rejected.
+
+Omitting the option preserves the module-path identity and all existing
+fingerprints byte for byte. Choosing a new identity intentionally invalidates
+persisted operation/catalogue bindings. Using the old value preserves the entity
+identity input, but other fingerprint inputs must also stay unchanged. Field
+types, argument types and relation targets must be spelled identically in source
+before and after the move, including across crates: the schema signature records
+their Rust spelling. For example, changing `crate::types::Status` to
+`old_crate::types::Status` changes fingerprints even if both name the same type.
+Prefer imported bare names (such as `Status`) and retain those spellings after
+moving. Compare `catalog().fingerprint()` before and after the move (using the
+generated `graphql_orm_operation_catalog()` helper or your catalogue accessor).
+No database migration is required. The fingerprint algorithms, names, input
+order and default module path are unchanged.
+
+Catalogue composition panics on repeated entity identities, naming both Rust
+types. Assign distinct identities to distinct entities. Generated descriptors
+retain their real Rust path as separate diagnostic metadata outside every
+fingerprint and serialized export; `entity_rust_type()` remains the identity
+used by the existing hash/sort contract, and `diagnostic_rust_type()` exposes
+the real path. Semantic catalogues and AI/router bindings consume the resulting
+operation fingerprints; they do not independently generate a Rust identity.
 
 ## 0.136.0 to 0.137.0: smaller generated update code
 
