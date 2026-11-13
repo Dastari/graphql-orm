@@ -467,7 +467,7 @@ where
         if !query
             .order_clauses
             .iter()
-            .any(|clause| crate::graphql::orm::sort_clause_mentions_column(clause, column))
+            .any(|clause| crate::graphql::orm::sort_clause_orders_by_column(clause, column))
         {
             query
                 .order_clauses
@@ -784,7 +784,7 @@ where
         sorts.extend(sample.sorts.clone());
         for primary_key in T::PRIMARY_KEYS {
             if !sorts.iter().any(|sort| {
-                crate::graphql::orm::sort_clause_mentions_column(&sort.clause, primary_key)
+                crate::graphql::orm::sort_clause_orders_by_column(&sort.clause, primary_key)
             }) {
                 sorts.push(SortExpression::unbound(format!(
                     "{} ASC",

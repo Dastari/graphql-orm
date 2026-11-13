@@ -1321,8 +1321,16 @@ impl SqlDialect for DatabaseBackend {
             },
             _ => {
                 let mut sql = String::new();
-                if let Some(limit) = limit {
-                    sql.push_str(&format!(" LIMIT {}", limit.max(0)));
+                match limit {
+                    Some(limit) => sql.push_str(&format!(" LIMIT {}", limit.max(0))),
+                    // SQLite and MySQL accept `OFFSET` only after a `LIMIT`.
+                    None if offset > 0 && matches!(self, DatabaseBackend::Sqlite) => {
+                        sql.push_str(" LIMIT -1");
+                    }
+                    None if offset > 0 && matches!(self, DatabaseBackend::Mysql) => {
+                        sql.push_str(" LIMIT 18446744073709551615");
+                    }
+                    None => {}
                 }
                 if offset > 0 {
                     sql.push_str(&format!(" OFFSET {}", offset));

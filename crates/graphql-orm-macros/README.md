@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.134.0 stays aligned with ORM 0.134.0, which makes Rust repository
+`limit` and `offset` count visible rows when the row policy decides rows in
+Rust. Generated code is unchanged. Upgrade ORM/macros together; see the
+[root migration guide](../../MIGRATION.md#01310-to-01340-repository-limits-and-offsets-count-visible-rows).
+
 Version 0.131.0 fixes native search column collisions in repository and generated
 GraphQL searches by hiding managed search-table columns from entity SQL.
 Server-authored default-sort SQL passes through unchanged. Upgrade ORM/macros
