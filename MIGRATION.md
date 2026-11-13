@@ -10,6 +10,46 @@ supersedes: []
 
 # Migration Guide
 
+## 0.139.0 to 0.141.0: write transforms fail closed
+
+Upgrade ORM and macros together (0.141.0 is a placeholder). Every generated
+entity field with `#[transform(write = "path")]` now fails compilation at the
+`write` key. If an entity with `transform(write)` compiled, the transform never
+ran: every value written through that field by any generated write path was
+stored as supplied. Affected field kinds include bool, integer and float (and
+their `Option` forms), UUID, JSON / non-byte `Vec`, `Vec<u8>`, decimal and spatial
+fields. String-like fields with write transforms never compiled.
+
+Replace the field attribute with the existing `WriteInputTransform` mechanism
+on `Database`, installed using `Database::with_write_input_transform` or
+`set_write_input_transform`. Implement the create, update and upsert callbacks
+needed by your entity; upsert invokes `before_upsert` on both branches, rather
+than invoking create/update callbacks. See the
+[runtime write-transform contract](docs/reference/graphql-orm/runtime-and-writes.md#hooks).
+The generated paths verified in `operations.rs` are:
+
+- GraphQL `create`, `update`, `update_many` and `upsert`.
+- Repository `insert` through a `Database`, `insert_many`, and the inserted rows
+  of `replace_all`; `upsert` and `upsert_many`.
+- Repository `update_by_id`, `update_where`, `update_where_bounded` and
+  `compare_and_swap`; composite-key `insert`, `insert_if_absent`,
+  `update_by_key`, `update_if` and `update_where_bounded`.
+- Their generated transaction / `MutationContext` forms, which delegate to the
+  same helpers. Bulk updates transform a separate input for each matched row;
+  empty matches invoke no transform. Conditional writes and insert-if-absent
+  can invoke the transform on an attempt that ultimately writes no row.
+
+`WriteInputTransform` does not run for raw SQL or raw-pool writes, deletes, or
+backup restore. Restore writes snapshot values verbatim, so older snapshots
+restore untransformed rows even after the replacement is installed. Plan
+remediation for restored data as well as the current database.
+
+After installing the replacement, backfill existing rows. Treat values that
+were meant to be protected as exposed and rotate them. A paired
+`#[transform(read = "path")]` will see a mix of transformed and untransformed
+rows until the backfill completes. Read transforms remain supported. Entities
+without write-transform attributes retain their SDL and operation catalogues.
+
 ## 0.137.0 to 0.139.0: optional stable entity identity
 
 Upgrade ORM and macros together; catalogue is 0.7.4.

@@ -123,13 +123,13 @@ still subject to entity policy and backend/schema-policy restrictions.
 | `#[graphql_orm(read_policy = "…", write_policy = "…")]` | policy identifiers for runtime enforcement |
 | `#[graphql_orm(version)]` | compare-and-swap version (`i64`, one per entity). Only `compare_and_swap` advances it; ordinary inserts, updates and upserts leave it unchanged. Not writable and omitted from inputs. Same as `version = "cas"` |
 | `#[graphql_orm(version = "managed")]` | managed record version (`i64`). See [managed versions](#managed-versions) |
-| `#[graphql_orm(default = "SQL expression" | false)]` | explicit SQL default or disables the implicit default; one declaration only |
+| `#[graphql_orm(default = "SQL expression" \| false)]` | explicit SQL default or disables the implicit default; one declaration only |
 | `#[graphql_orm(decimal(precision = P, scale = S))]` | required for `rust_decimal::Decimal`; portable precision is 1 through 18 and scale must not exceed precision |
 | `#[graphql_orm(mssql_money)]` | SQL Server only: exact native `MONEY` field as `rust_decimal::Decimal` or `Option<Decimal>`; scale 4 and signed 64-bit scaled range; cannot be combined with `decimal(...)` |
 | `#[graphql_orm(auto_generated = bool)]` | declares whether the value is database-generated |
 | `#[date_field]`, `#[boolean_field]`, `#[json_field]`, `#[graphql_orm(json)]` | type metadata; JSON disables filter/order generation |
-| `#[transform(write = "…", read = "…")]` | names generated write/read transforms; other options are rejected |
-| `#[backup(include | exclude | redact)]` | per-field backup treatment; exactly one policy |
+| `#[transform(read = "…")]` | synchronous read transform; see [write transforms](#write-transforms) for rejected `write` declarations |
+| `#[backup(include \| exclude \| redact)]` | per-field backup treatment; exactly one policy |
 
 On a `GraphQLEntity` + `SimpleObject` entity, `private`, `read = false`, and `input_only` must
 also remove the object getter: add `#[graphql(skip)]`, or place
@@ -205,6 +205,22 @@ Validation metadata accepted inside `graphql_orm` is `min`, `max`,
 `min_exclusive`, `max_exclusive` (numeric), `non_negative`, `min_length`,
 `max_length`, `one_of = ["…"]`, and `gte_field`, `gt_field`, `lte_field`,
 `lt_field` (field-name strings).
+
+### Write transforms
+
+`#[transform(write = "path")]` is rejected on every field, including optional,
+typed, skipped, non-writable, generated and schema-only fields. Selecting only
+GraphQL create operations does not remove the generated repository API.
+If an entity with this attribute compiled, its write transform never ran:
+values written through the field by generated writes were stored as supplied.
+String-like fields with write transforms never compiled.
+
+Use a `WriteInputTransform` installed on `Database` for GraphQL and repository
+writes. It does not run for raw SQL, raw-pool writes, deletes or backup restore.
+See [runtime write transforms](runtime-and-writes.md#hooks)
+and the [migration guide](../../../MIGRATION.md#01390-to-01410-write-transforms-fail-closed)
+for verified paths, existing-row remediation and restore behavior.
+`#[transform(read = "path")]` remains supported and does not protect writes.
 
 ### Generated date-filter contract
 
@@ -566,6 +582,8 @@ scalar, JSON-path or relation search. A protected searchable field needs an
 explicit `policy`. Spatial fields are JSON-shaped and cannot be ordered. The
 [backend guide](backends.md#spatial-support) explains the PostgreSQL/SQLite
 execution difference and the MSSQL compile-time limitation.
+
+
 
 ## Generated-operation authorization
 
