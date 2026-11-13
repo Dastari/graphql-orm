@@ -16,8 +16,9 @@ Persisted documents remain disabled by default. Enable `persistedDocuments` or
 `RouterConfig::with_persisted_allow_list(path)` (strict) or
 `RouterConfig::with_persisted_ids_or_text(path)` (ordinary text also allowed) with a local manifest.
 The file configuration requires an explicit `strict` boolean. Registered
-documents are capped at 4 KiB; snapshot integrity is checked on every candidate
-generation. Strict deployments require clients to send an id for every operation. See the
+documents are capped at 256 KiB; WebSocket forwarding separately checks the actual
+serialized operation against its 64 KiB internal budget. Snapshot integrity is
+checked on every candidate generation. Strict deployments require clients to send an id for every operation. See the
 [configuration reference](docs/configuration.md#persisted-documents) for exact
 hashing, limits, wire forms, and authorization boundaries.
 

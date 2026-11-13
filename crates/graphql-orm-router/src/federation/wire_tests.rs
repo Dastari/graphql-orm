@@ -673,6 +673,32 @@ fn persisted_documents_wire_case(case: &str) {
         "subscription Events($Id: ID!) { productChanged(id: $Id) { id } }"
     );
     let padded_subscription = &padded_subscription[..];
+    let large_query = "query Find($Id: ID!) { product(id: $Id) { id } }";
+    let sized_document = |size: usize, padding: char| {
+        format!(
+            "{large_query}\n#{}",
+            padding.to_string().repeat(size - large_query.len() - 2)
+        )
+    };
+    let sized_documents = [
+        ("20-kib", sized_document(20 * 1024, ' '), 0, true),
+        (
+            "20-kib-variables",
+            sized_document(20 * 1024, ' '),
+            33 * 1024,
+            true,
+        ),
+        ("20-kib-escaped", sized_document(20 * 1024, '\t'), 0, true),
+        ("36-kib", sized_document(36 * 1024, ' '), 0, true),
+        (
+            "36-kib-variables",
+            sized_document(36 * 1024, ' '),
+            33 * 1024,
+            false,
+        ),
+        ("36-kib-escaped", sized_document(36 * 1024, '\t'), 0, false),
+        ("70-kib", sized_document(70 * 1024, ' '), 0, false),
+    ];
     let documents = [
         query,
         mutation,
@@ -681,8 +707,14 @@ fn persisted_documents_wire_case(case: &str) {
         introspection,
         padded_subscription,
     ]
-    .map(|text| (hash(text), text))
     .into_iter()
+    .chain(
+        sized_documents
+            .iter()
+            .filter(|_| case == "document_sizes")
+            .map(|(_, document, _, _)| document.as_str()),
+    )
+    .map(|text| (hash(text), text))
     .collect::<std::collections::BTreeMap<_, _>>();
     fs::write(&manifest, serde_json::to_vec(&documents).unwrap()).unwrap();
     let mut command = Command::new(env::current_exe().unwrap());
@@ -727,16 +759,66 @@ fn persisted_documents_wire_case(case: &str) {
             .1
     };
     match case {
+        "document_sizes" => {
+            let mut socket = TestWebSocket::connect_at(router.address, "/api/graphql");
+            socket.connection_init_bearer("product-p1");
+            for (label, document, unused_bytes, fits_websocket) in &sized_documents {
+                let variables = json!({"Id": "p1", "Unused": "x".repeat(*unused_bytes)});
+                let result = router
+                    .graphql_response_at(
+                        "/api/graphql",
+                        json!({"documentId": hash(document), "variables": variables}),
+                        &[("authorization", "Bearer product-p1")],
+                    )
+                    .1;
+                assert_eq!(result["data"]["product"]["id"], "p1", "{label}: {result}");
+                let opens = products.opens();
+                socket.send_json(&json!({"id": label, "type": "subscribe", "payload": {
+                    "documentId": hash(document), "variables": variables
+                }}));
+                let result = socket.next_message();
+                assert_eq!(result["id"], *label, "{result}");
+                if *fits_websocket {
+                    assert_eq!(result["type"], "next", "{label}: {result}");
+                    // This scope requires the injected Id projection: a successful
+                    // response proves it was preserved alongside the large document.
+                    assert_eq!(
+                        result["payload"]["data"]["product"]["id"], "p1",
+                        "{label}: {result}"
+                    );
+                    let complete = socket.next_message();
+                    assert_eq!(complete["type"], "complete", "{complete}");
+                } else {
+                    assert_eq!(result["type"], "error", "{label}: {result}");
+                    assert_eq!(
+                        result["payload"][0]["extensions"]["code"], "REQUEST_TOO_LARGE",
+                        "{result}"
+                    );
+                    assert!(!result.to_string().contains("query Find"), "{result}");
+                    assert_eq!(
+                        products.opens(),
+                        opens,
+                        "oversized operation must not be forwarded"
+                    );
+                    // Reuse the same id immediately: the connection and operation
+                    // tracking must remain usable, without a trailing complete.
+                    socket.send_json(&json!({"id": label, "type": "subscribe", "payload": {"documentId": hash(query)}}));
+                    let next = socket.next_message();
+                    assert_eq!(next["type"], "next", "{next}");
+                    assert_eq!(next["payload"]["data"]["__typename"], "Query", "{next}");
+                    assert_eq!(socket.next_message()["type"], "complete");
+                }
+            }
+            socket.close();
+        }
         "ws_budget" => {
             let mut socket = TestWebSocket::connect_at(router.address, "/api/graphql");
             socket.connection_init_bearer("product-events");
             socket.send_json(&json!({"id": "large", "type": "subscribe", "payload": {"documentId": hash(query), "variables": {"Unused": "x".repeat(33 * 1024)}}}));
-            let error = socket.next_message();
-            assert_eq!(error["type"], "error", "{error}");
-            assert_eq!(
-                error["payload"][0]["extensions"]["code"], "REQUEST_TOO_LARGE",
-                "{error}"
-            );
+            let result = socket.next_message();
+            assert_eq!(result["type"], "next", "{result}");
+            assert_eq!(result["payload"]["data"]["__typename"], "Query", "{result}");
+            assert_eq!(socket.next_message()["type"], "complete");
             socket.send_json(&json!({"id": "still-open", "type": "subscribe", "payload": {"documentId": hash(padded_subscription), "variables": {"Id": "p1", "Unused": "x".repeat(28 * 1024)}}}));
             let result = socket.next_message();
             assert_eq!(
@@ -1076,6 +1158,11 @@ fn persisted_review_non_strict_introspection_disabled() {
 #[test]
 fn persisted_review_snapshot_cold_read() {
     persisted_documents_wire_case("snapshot_cold_read");
+}
+
+#[test]
+fn persisted_review_document_sizes() {
+    persisted_documents_wire_case("document_sizes");
 }
 
 #[test]

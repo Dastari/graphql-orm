@@ -1023,27 +1023,36 @@ async fn forward_subscribe(
         );
         state.gateway.add_operation();
     }
-    let internal_max_bytes = state.borrow().gateway.config.max_client_message_bytes;
-    if state.borrow().gateway.persisted_documents.is_some() {
-        inject_operation_variables_inner(&mut message, usize::MAX, true);
-        if message.to_string().len() > crate::persisted::INTERNAL_FRAME_BYTES {
-            state.borrow_mut().remove_operation(&id);
-            return Some(ws::Message::Text(
-                json!({"id": id, "type": "error", "payload": [{
-                    "message": "Persisted operation exceeds the internal WebSocket budget",
-                    "extensions": {"code": "REQUEST_TOO_LARGE"}
-                }]})
-                .to_string()
-                .into(),
-            ));
-        }
+    let persisted = state.borrow().gateway.persisted_documents.is_some();
+    if persisted {
+        inject_operation_variables_inner(
+            &mut message,
+            crate::persisted::INTERNAL_FRAME_BYTES,
+            true,
+        );
     } else {
+        let internal_max_bytes = state.borrow().gateway.config.max_client_message_bytes;
         inject_operation_variables(&mut message, internal_max_bytes);
+    }
+    // Measure the exact JSON bytes sent to Hive, after document expansion,
+    // internal id assignment, and the complete bounded authorization projection.
+    // The codec limit counts the frame payload, excluding its header and mask.
+    let encoded = message.to_string();
+    if persisted && encoded.len() > crate::persisted::INTERNAL_FRAME_BYTES {
+        state.borrow_mut().remove_operation(&id);
+        return Some(ws::Message::Text(
+            json!({"id": id, "type": "error", "payload": [{
+                "message": "Persisted operation exceeds the internal WebSocket budget",
+                "extensions": {"code": "REQUEST_TOO_LARGE"}
+            }]})
+            .to_string()
+            .into(),
+        ));
     }
     let internal = state.borrow().internal_sink.clone();
     if let Some(internal) = internal
         && internal
-            .send(ws::Message::Text(message.to_string().into()))
+            .send(ws::Message::Text(encoded.into()))
             .await
             .is_ok()
     {
@@ -1114,6 +1123,12 @@ fn inject_operation_variables_inner(
         INTERNAL_SUBSCRIPTION_VARIABLES_EXTENSION.to_owned(),
         Value::Object(projected),
     );
+
+    if exact_budget {
+        // Persisted forwarding refuses an oversized operation as a whole. Never
+        // strip authorization projection to make room for the document.
+        return;
+    }
 
     while message.to_string().len() > internal_max_bytes {
         let Some(projected) = message

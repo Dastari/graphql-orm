@@ -334,7 +334,7 @@ impl RouterConfig {
     /// Requires registered ids from a local JSON id-to-document manifest.
     ///
     /// Keys are lowercase SHA-256 hashes of exact UTF-8 document bytes. Startup
-    /// validates the 16 MiB / 10,000-entry manifest and 4 KiB document bounds.
+    /// validates the 16 MiB / 10,000-entry manifest and 256 KiB document bounds.
     /// A private snapshot is checked on every graph candidate; restart with a
     /// new configuration to adopt operator-file changes. Authorization remains
     /// mandatory according to the operation's existing policy.
@@ -1573,16 +1573,31 @@ mod tests {
     }
 
     #[test]
+    fn persisted_manifest_accepts_documents_up_to_256_kib() {
+        use sha2::{Digest, Sha256};
+        for size in [20 * 1024, 70 * 1024, 256 * 1024] {
+            let query = "query { __typename }";
+            let doc = format!("{query}{}", " ".repeat(size - query.len()));
+            let bytes = serde_json::to_vec(&BTreeMap::from([(
+                format!("{:x}", Sha256::digest(doc.as_bytes())),
+                doc,
+            )]))
+            .unwrap();
+            check_manifest(&bytes).unwrap();
+        }
+    }
+
+    #[test]
     fn persisted_manifest_document_size_is_bounded() {
         use sha2::{Digest, Sha256};
-        let doc = format!("{}query {{ __typename }}", " ".repeat(4096));
+        let doc = format!("{}query {{ __typename }}", " ".repeat(256 * 1024));
         let bytes = serde_json::to_vec(&BTreeMap::from([(
             format!("{:x}", Sha256::digest(doc.as_bytes())),
             doc,
         )]))
         .unwrap();
         let error = check_manifest(&bytes).unwrap_err().to_string();
-        assert!(error.contains("4096"), "{error}");
+        assert!(error.contains("262144"), "{error}");
     }
 
     #[test]

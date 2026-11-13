@@ -122,8 +122,9 @@ or `RouterConfig::with_persisted_ids_or_text(path)` or the `persistedDocuments` 
 boolean. A local JSON object maps
 bare lowercase SHA-256 ids to exact document text. Strict mode requires registered
 ids over HTTP and WebSocket; it limits documents and preserves all authorization
-checks. See [persisted documents](docs/configuration.md#persisted-documents) for
-wire forms, manifest bounds, and restart requirements.
+checks. Documents may be up to 256 KiB; operations exceeding the 64 KiB internal
+WebSocket message budget are refused over WebSocket only. See
+[persisted documents](docs/configuration.md#persisted-documents) for wire forms, manifest bounds, and restart requirements.
 
 ## Install
 

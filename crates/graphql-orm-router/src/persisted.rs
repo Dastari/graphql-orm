@@ -9,8 +9,8 @@ use crate::{RouterError, RouterErrorKind};
 use sha2::{Digest, Sha256};
 
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
-pub(crate) const MAX_DOCUMENT_BYTES: usize = 4096;
-pub(crate) const MAX_PERSISTED_MESSAGE_BYTES: usize = 32 * 1024;
+pub(crate) const MAX_DOCUMENT_BYTES: usize = 256 * 1024;
+const DOCUMENT_SIZE_ERROR: &str = "persisted document exceeds 262144 bytes (256 KiB)";
 pub(crate) const INTERNAL_FRAME_BYTES: usize = 64 * 1024;
 
 const MAX_MANIFEST_ENTRIES: usize = 10_000;
@@ -77,8 +77,8 @@ impl PersistedDocuments {
             return Err(invalid("persisted documents manifest exceeds 16 MiB"));
         }
         let entries: ManifestEntries = serde_json::from_slice(&bytes).map_err(|error| {
-            if error.to_string().starts_with("persisted document exceeds 4096 bytes") {
-                invalid("persisted document exceeds 4096 bytes")
+            if error.to_string().starts_with(DOCUMENT_SIZE_ERROR) {
+                invalid(DOCUMENT_SIZE_ERROR)
             } else {
                 invalid("persisted documents manifest must map exact SHA-256 ids to documents, with at most 10000 unique entries and no duplicate keys")
             }
@@ -153,12 +153,6 @@ impl PersistedDocuments {
         message: &mut serde_json::Value,
     ) -> Result<(), &'static str> {
         use serde_json::Value;
-        // Measure canonical JSON before expansion: numeric/string formatting can
-        // differ from the input bytes. Keep ample headroom for the document,
-        // scalar authorization projection and internal transport metadata.
-        if message.to_string().len() > MAX_PERSISTED_MESSAGE_BYTES {
-            return Err("REQUEST_TOO_LARGE");
-        }
         let payload = message
             .get_mut("payload")
             .and_then(Value::as_object_mut)
@@ -245,7 +239,7 @@ impl<'de> serde::Deserialize<'de> for ManifestEntries {
                         return Err(M::Error::custom("too many manifest entries"));
                     }
                     if document.len() > MAX_DOCUMENT_BYTES {
-                        return Err(M::Error::custom("persisted document exceeds 4096 bytes"));
+                        return Err(M::Error::custom(DOCUMENT_SIZE_ERROR));
                     }
                     if id != format!("{:x}", Sha256::digest(document.as_bytes())) {
                         return Err(M::Error::custom(

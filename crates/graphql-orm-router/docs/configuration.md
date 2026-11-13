@@ -563,7 +563,8 @@ with an explicit `strict: true` or `strict: false` (the key is required). Use
 `RouterConfig::with_persisted_ids_or_text(path)` to permit ordinary text. Only local files are
 accepted; Hive CDN and remote storage are refused. The manifest is a JSON object
 mapping each id to its GraphQL document string, limited to 16 MiB and 10,000
-entries. Each document is limited to 4,096 UTF-8 bytes. Every key must be the bare 64-character lowercase hexadecimal SHA-256
+entries. Each document is limited to 256 KiB of UTF-8 text. Every key must be the
+bare 64-character lowercase hexadecimal SHA-256
 of the exact UTF-8 document bytes. Whitespace and line endings are not normalized.
 Invalid manifests fail startup without echoing document text.
 
@@ -597,14 +598,25 @@ with a missing or changed snapshot fails closed with `SERVICE_UNAVAILABLE`. A mi
 the last-known-good generation and its original documents remain active for both
 HTTP and WebSocket. Restart from the operator manifest to recover. Schema refresh never adopts changes to either manifest.
 
-The pinned internal WebSocket codec accepts frames up to 65,536 bytes. Registered
-documents are capped at 4,096 bytes so their worst-case JSON escaping uses at most
-24 KiB. The gateway limits a normalized persisted-operation message to 32 KiB and
-reserves up to 4 KiB for serialized authorization-variable projection plus framing
-and id metadata, keeping forwarding below 64 KiB. Configured public message limits
-still apply. An oversized operation is refused with `REQUEST_TOO_LARGE` without
-closing the connection or dropping its authorization projection. This document cap
-also applies when subscriptions are disabled.
+Each registered document is limited to 256 KiB of exact UTF-8 text, independently
+of transport. The manifest limits remain 16 MiB and 10,000 entries. HTTP requests
+remain subject to their configured request-body and execution limits; the default
+HTTP body limit is 1 MiB.
+
+The pinned internal WebSocket codec accepts message payloads up to 65,536 bytes
+(the WebSocket frame header and mask are outside this codec limit). Before
+forwarding an operation, the gateway measures its actual serialized JSON,
+including the escaped document, client variables, the complete bounded
+authorization-variable projection, id metadata, and GraphQL WebSocket envelope.
+It forwards only if that complete message fits. An oversized operation returns
+`REQUEST_TOO_LARGE` without document text, without closing the connection, and
+without removing authorization projection or forwarding a partial message.
+This restriction applies only to WebSocket; the same document can still run over
+HTTP. With little escaping and small variables and projection, the threshold is just
+under 64 KiB of document text. The envelope, metadata, client variables, up to
+4 KiB of authorization projection, and additional JSON escaping reduce the
+available document space. Configured public client-message limits still apply to the
+original incoming message.
 
 Documents are hash-checked at load, but are not parsed or validated against the
 supergraph then. An invalid registered document fails normal validation at first
