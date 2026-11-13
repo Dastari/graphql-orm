@@ -6,6 +6,8 @@
 #
 # Usage: scripts/compare-generated-schema.sh <base-ref>
 # Run under the caller's Cargo resource limits and target directory. No database.
+# The base build is not `--locked`, so Cargo may use the network to resolve it.
+# A temporary Git worktree of the base revision is created and removed again.
 set -euo pipefail
 base=${1:?usage: scripts/compare-generated-schema.sh <base-ref>}
 root=$(git rev-parse --show-toplevel)
@@ -19,7 +21,9 @@ cleanup() {
 trap cleanup EXIT
 git worktree add --detach "$work/base" "$base" >/dev/null
 rm -rf "$work/base/$fixture"
-cp -R "$root/$fixture" "$work/base/$fixture"
+# Copy the fixture source only: never a `target` directory built inside it.
+mkdir -p "$work/base/$fixture"
+tar -C "$root/$fixture" --exclude=target -cf - . | tar -C "$work/base/$fixture" -xf -
 target=${CARGO_TARGET_DIR:-$root/target}
 for backend in sqlite postgres; do
   cargo run --manifest-path "$fixture/Cargo.toml" --locked --no-default-features \

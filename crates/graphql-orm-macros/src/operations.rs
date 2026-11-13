@@ -1455,6 +1455,48 @@ fn contains_question_mark(tokens: proc_macro2::TokenStream) -> bool {
     })
 }
 
+/// The first of `names` that occurs as an identifier at any depth.
+fn first_identifier_in(
+    tokens: proc_macro2::TokenStream,
+    names: &[&'static str],
+) -> Option<&'static str> {
+    tokens.into_iter().find_map(|token| match token {
+        proc_macro2::TokenTree::Ident(ident) => names.iter().copied().find(|name| ident == name),
+        proc_macro2::TokenTree::Group(group) => first_identifier_in(group.stream(), names),
+        _ => None,
+    })
+}
+
+/// The per-field UPDATE assignment lists are emitted into a synchronous helper
+/// that every update path calls after its field write checks. A list entry
+/// that awaits, returns, or reaches for the resolver context or the database
+/// is a policy call in the wrong list: moved into the helper it would be
+/// skipped or reordered, so it is refused here.
+fn ensure_pure_update_assignments(
+    list_name: &str,
+    list: &[proc_macro2::TokenStream],
+    span: proc_macro2::Span,
+) -> syn::Result<()> {
+    for tokens in list {
+        if let Some(found) = first_identifier_in(tokens.clone(), &["await", "return", "ctx", "db"])
+        {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "graphql-orm-macros internal error: `{list_name}` contains `{found}`. \
+                     The per-field UPDATE assignment lists must be pure and synchronous, \
+                     because they are emitted once into `__gom_push_update_assignments` \
+                     and run after the field write checks. Put field policy calls in the \
+                     inline policy lists instead: `update_policy_checks`, \
+                     `update_runtime_policy_checks`, or the repository field checks \
+                     (`authorize_repository_update_fields`)."
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn generate_graphql_operations_unfiltered(
     input: &DeriveInput,
 ) -> syn::Result<proc_macro2::TokenStream> {
@@ -3731,15 +3773,28 @@ fn generate_graphql_operations_unfiltered(
     // update path needs the same list, so it is emitted once per entity and
     // called, instead of being spliced into each async body (#677). Field write
     // policy checks are not part of it: they stay inline at each call site.
+    ensure_pure_update_assignments(
+        "update_field_checks_repo",
+        &update_field_checks_repo,
+        struct_name.span(),
+    )?;
+    ensure_pure_update_assignments(
+        "update_field_checks_graphql",
+        &update_field_checks_graphql,
+        struct_name.span(),
+    )?;
+    // The GraphQL resolver shares the repository helper only when the two lists
+    // are token-identical and cannot leave the helper early.
     let update_assignments_shared_with_graphql = update_field_checks_graphql.len()
         == update_field_checks_repo.len()
         && update_field_checks_graphql
             .iter()
             .zip(&update_field_checks_repo)
             .all(|(graphql, repo)| graphql.to_string() == repo.to_string())
-        && !update_field_checks_repo
-            .iter()
-            .any(|tokens| contains_question_mark(tokens.clone()));
+        && !update_field_checks_repo.iter().any(|tokens| {
+            contains_question_mark(tokens.clone())
+                || first_identifier_in(tokens.clone(), &["return"]).is_some()
+        });
     let update_assignments_graphql_helper = if update_assignments_shared_with_graphql {
         quote! {}
     } else {
@@ -3785,8 +3840,18 @@ fn generate_graphql_operations_unfiltered(
         )?;
     };
     let update_assignments_graphql_call = if update_assignments_shared_with_graphql {
-        // No fallible conversion in the list, so the helper cannot fail.
-        update_assignments_repo_call.clone()
+        // The shared list has no fallible conversion, so this cannot fail today.
+        // If it ever does, the error is sanitized like every other database
+        // error of the resolver, not rendered through `Display`.
+        quote! {
+            #struct_name::__gom_push_update_assignments(
+                &input,
+                &mut set_clauses,
+                &mut changed_fields,
+                &mut values,
+            )
+            .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
+        }
     } else {
         quote! {
             #struct_name::__gom_push_update_assignments_graphql(
@@ -11194,7 +11259,10 @@ mod upsert_primary_key_tests {
 
 #[cfg(test)]
 mod update_assignment_tests {
-    use super::{contains_question_mark, generate_graphql_operations};
+    use super::{
+        contains_question_mark, ensure_pure_update_assignments, first_identifier_in,
+        generate_graphql_operations,
+    };
     use quote::quote;
 
     fn generated(entity: syn::DeriveInput) -> String {
@@ -11232,14 +11300,21 @@ mod update_assignment_tests {
             0,
             "an infallible list needs no GraphQL-typed copy"
         );
-        // The GraphQL resolver, update_by_id, update_where and their two
-        // transaction forms.
+        // update_by_id, update_where and their two transaction forms.
         assert_eq!(
             count(
                 &generated,
                 ":: __gom_push_update_assignments (& input , & mut set_clauses , & mut changed_fields , & mut values ,) ?"
             ),
-            5
+            4
+        );
+        // The GraphQL resolver sanitizes an error from the shared helper.
+        assert_eq!(
+            count(
+                &generated,
+                ":: __gom_push_update_assignments (& input , & mut set_clauses , & mut changed_fields , & mut values ,) . map_err (:: graphql_orm :: graphql :: errors :: graphql_error_from_sqlx) ?"
+            ),
+            1
         );
     }
 
@@ -11274,6 +11349,108 @@ mod update_assignment_tests {
                 ":: __gom_push_update_assignments (& input , & mut set_clauses , & mut changed_fields , & mut values ,) ?"
             ),
             4
+        );
+    }
+
+    /// Field write checks run before the shared assignment helper (#677, #678).
+    #[test]
+    fn field_write_checks_precede_the_assignment_helper() {
+        let generated = generated(syn::parse_quote! {
+            #[graphql_entity(table = "update_assignment_policy_fixture")]
+            struct UpdateAssignmentPolicyFixture {
+                #[primary_key]
+                id: String,
+                #[graphql_orm(write_policy = "fixture.title.write")]
+                title: String,
+            }
+        });
+        let body_of = |signature: &str| -> &str {
+            let start = generated
+                .find(signature)
+                .unwrap_or_else(|| panic!("generated code has `{signature}`"));
+            let rest = &generated[start..];
+            let end = rest[signature.len()..]
+                .find("async fn ")
+                .map_or(rest.len(), |next| next + signature.len());
+            &rest[..end]
+        };
+        let helper_call = ":: __gom_push_update_assignments (";
+
+        let resolver = body_of("async fn update (");
+        let field_check = resolver
+            .find("check_field_write (")
+            .expect("the GraphQL update resolver checks the field write policy");
+        assert!(resolver.contains("\"fixture.title.write\""));
+        let assignments = resolver
+            .find(helper_call)
+            .expect("the GraphQL update resolver calls the assignment helper");
+        assert!(
+            field_check < assignments,
+            "the field write check precedes the assignments in the GraphQL update resolver"
+        );
+        assert_eq!(count(resolver, helper_call), 1);
+
+        let repository = body_of("pub async fn update_by_id (");
+        let field_checks = repository
+            .find("authorize_repository_update_fields (")
+            .expect("update_by_id authorizes the updated fields");
+        let assignments = repository
+            .find(helper_call)
+            .expect("update_by_id calls the assignment helper");
+        assert!(
+            field_checks < assignments,
+            "the field authorization precedes the assignments in update_by_id"
+        );
+        assert_eq!(count(repository, helper_call), 1);
+    }
+
+    #[test]
+    fn impure_assignment_lists_are_refused() {
+        let span = proc_macro2::Span::call_site();
+        let pure = [quote! {
+            if let Some(ref val) = input.title {
+                changed_fields.push("title");
+                set_clauses.push(format!("{} = ?", "title"));
+                values.push(convert(val)?);
+            }
+        }];
+        assert!(ensure_pure_update_assignments("update_field_checks_repo", &pure, span).is_ok());
+
+        for (tokens, found) in [
+            (
+                quote! { if !db.check_field_write(input).await? { input.title = None; } },
+                "db",
+            ),
+            (quote! { let allowed = { policy(ctx) }; }, "ctx"),
+            (quote! { let allowed = check(input).await; }, "await"),
+            (
+                quote! { if input.title.is_none() { return Ok(()); } },
+                "return",
+            ),
+        ] {
+            let error =
+                ensure_pure_update_assignments("update_field_checks_graphql", &[tokens], span)
+                    .expect_err("an impure entry is refused")
+                    .to_string();
+            assert!(error.contains(&format!("`update_field_checks_graphql` contains `{found}`")));
+            assert!(error.contains("update_policy_checks"));
+            assert!(error.contains("update_runtime_policy_checks"));
+            assert!(error.contains("authorize_repository_update_fields"));
+        }
+    }
+
+    #[test]
+    fn identifier_detection_ignores_literals_and_longer_names() {
+        assert_eq!(
+            first_identifier_in(
+                quote! { values.push(db_column("ctx return await", context)); },
+                &["await", "return", "ctx", "db"]
+            ),
+            None
+        );
+        assert_eq!(
+            first_identifier_in(quote! { values.push({ [db] }); }, &["ctx", "db"]),
+            Some("db")
         );
     }
 
