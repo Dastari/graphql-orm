@@ -31,8 +31,9 @@ This crate is a reusable backup and restore companion for applications that use 
 
 ## Integration contracts
 
-- Package versions and workspace dependency identities belong to the generated
-  [workspace inventory](../../docs/reference/workspace-packages.md).
+- Workspace dependency identities belong to the generated
+  [workspace inventory](../../docs/reference/workspace-packages.md); package
+  versions belong to each `Cargo.toml` and the release manifest.
 - The optional ORM adapter resolves `graphql-orm` through workspace path
   dependencies and the root `Cargo.lock`. Keep downstream applications on one
   reviewed monorepo revision so ORM, backup and storage share one canonical
