@@ -202,6 +202,11 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         /// The catalog resolves generated root exposure after mutation and
         /// read-only policy but is discovery metadata only; it does not
         /// authorize GraphQL execution.
+        ///
+        /// # Panics
+        ///
+        /// Panics on a repeated entity identity during catalogue composition at
+        /// schema build, naming both Rust types.
         pub fn graphql_orm_operation_catalog(
         ) -> &'static ::graphql_orm::graphql::orm::GraphqlOperationCatalog {
             static CATALOG: ::std::sync::OnceLock<
@@ -378,6 +383,12 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             }
 
             /// Build the schema, or return the Keyset read-policy contradiction.
+            ///
+            /// # Panics
+            ///
+            /// Panics on a repeated entity identity during catalogue composition at
+            /// schema build, naming both Rust types. This is not returned as a
+            /// `KeysetReadPolicyError`.
             pub fn try_schema_builder(
                 database: ::graphql_orm::db::Database<#backend_marker>,
             ) -> ::std::result::Result<
@@ -391,6 +402,12 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             }
 
             /// Build the schema with limits, or return the Keyset read-policy contradiction.
+            ///
+            /// # Panics
+            ///
+            /// Panics on a repeated entity identity during catalogue composition at
+            /// schema build, naming both Rust types. This is not returned as a
+            /// `KeysetReadPolicyError`.
             pub fn try_schema_builder_with_limits(
                 database: ::graphql_orm::db::Database<#backend_marker>,
                 limits: ::graphql_orm::graphql::orm::SchemaLimits,
@@ -572,6 +589,12 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         }
 
         /// Build the schema, or return the Keyset read-policy contradiction.
+        ///
+        /// # Panics
+        ///
+        /// Panics on a repeated entity identity during catalogue composition at
+        /// schema build, naming both Rust types. This is not returned as a
+        /// `KeysetReadPolicyError`.
         pub fn try_schema_builder(
             database: ::graphql_orm::db::Database<#backend_marker>,
         ) -> ::std::result::Result<
@@ -585,6 +608,12 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         }
 
         /// Build the schema with limits, or return the Keyset read-policy contradiction.
+        ///
+        /// # Panics
+        ///
+        /// Panics on a repeated entity identity during catalogue composition at
+        /// schema build, naming both Rust types. This is not returned as a
+        /// `KeysetReadPolicyError`.
         pub fn try_schema_builder_with_limits(
             database: ::graphql_orm::db::Database<#backend_marker>,
             limits: ::graphql_orm::graphql::orm::SchemaLimits,

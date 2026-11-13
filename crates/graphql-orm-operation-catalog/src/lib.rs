@@ -466,6 +466,7 @@ impl GraphqlOperationArgumentDescriptor {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GeneratedGraphqlOperationDescriptor {
     entity_rust_type: &'static str,
+    diagnostic_rust_type: &'static str,
     entity_name: &'static str,
     table_name: &'static str,
     backend: &'static str,
@@ -668,6 +669,7 @@ impl GeneratedGraphqlOperationDescriptor {
     ) -> Self {
         let mut descriptor = Self {
             entity_rust_type,
+            diagnostic_rust_type: entity_rust_type,
             entity_name,
             table_name,
             backend,
@@ -696,6 +698,19 @@ impl GeneratedGraphqlOperationDescriptor {
         descriptor
     }
 
+    /// Records the real Rust path for diagnostics without changing fingerprints.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_diagnostic_rust_type(mut self, rust_type: &'static str) -> Self {
+        self.diagnostic_rust_type = rust_type;
+        self
+    }
+
+    /// Returns the real Rust path, independently of the stable fingerprint identity.
+    pub const fn diagnostic_rust_type(&self) -> &'static str {
+        self.diagnostic_rust_type
+    }
+
     /// Records the generated query shape of a query root.
     ///
     /// This builder is public only for derive output. It has no effect on
@@ -715,7 +730,9 @@ impl GeneratedGraphqlOperationDescriptor {
         self.query_shape
     }
 
-    /// Returns the fully qualified Rust entity type emitted with `module_path!`.
+    /// Returns the fingerprint/sort identity: the declared stable type ID, or
+    /// the fully qualified Rust entity type emitted with `module_path!`.
+    /// Use [`Self::diagnostic_rust_type`] for the real path.
     pub const fn entity_rust_type(&self) -> &'static str {
         self.entity_rust_type
     }
@@ -1074,13 +1091,34 @@ impl GraphqlOperationCatalog {
     /// This method is public because `schema_roots!` expands in downstream
     /// crates; applications normally call its generated
     /// `graphql_orm_operation_catalog()` helper instead.
+    ///
+    /// # Panics
+    ///
+    /// Panics when entity groups repeat a fingerprint identity. The diagnostic
+    /// names both Rust types, including when an explicit identity collides with
+    /// a default module-path identity. Generated `try_schema_builder*` helpers
+    /// compose the catalogue at schema build, so they also panic on a repeated
+    /// identity rather than returning it as a schema-builder error.
     #[doc(hidden)]
     pub fn compose<I>(groups: I) -> Self
     where
         I: IntoIterator<Item = (&'static [GeneratedGraphqlOperationDescriptor], bool, bool)>,
     {
+        let mut identities = std::collections::BTreeMap::new();
         let mut operations = groups
             .into_iter()
+            .inspect(|(generated, _, _)| {
+                let entities = generated.iter().map(|entity| (
+                    entity.entity_rust_type(), entity.diagnostic_rust_type(),
+                )).collect::<std::collections::BTreeSet<_>>();
+                for (identity, diagnostic) in entities {
+                    if let Some(previous) = identities.insert(identity, diagnostic) {
+                        panic!(
+                            "duplicate entity identity {identity:?} for Rust types {previous:?} and {diagnostic:?}",
+                        );
+                    }
+                }
+            })
             .flat_map(|(generated, mutations_exposed, subscriptions_exposed)| {
                 generated.iter().map(move |operation| {
                     let exposed = match operation.kind() {
@@ -1443,6 +1481,28 @@ mod tests {
                 );
             assert_eq!(descriptor.description, expected);
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate entity identity")]
+    fn duplicate_derived_identity_is_rejected() {
+        let generated = Box::leak(
+            vec![GeneratedGraphqlOperationDescriptor::generated(
+                "example::Record",
+                "Record",
+                "records",
+                "sqlite",
+                GraphqlOperationKind::Query,
+                GeneratedGraphqlOperationCategory::List,
+                "records",
+                vec![],
+                "Record",
+                "[Record!]!",
+                "shape",
+            )]
+            .into_boxed_slice(),
+        );
+        GraphqlOperationCatalog::compose([(&*generated, true, true), (&*generated, true, true)]);
     }
 
     #[test]

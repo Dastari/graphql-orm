@@ -10,10 +10,12 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.137.0 changes nothing a host can observe. The derives emit the
-per-field UPDATE assignment list once per entity instead of once per generated
-update path, which removes about 2.5% of the expanded code of a 15-field
-entity ([#677](https://github.com/Dastari/graphql-orm/issues/677)).
+Version 0.139.0 (placeholder) adds optional
+`#[graphql_entity(stable_type_id = "old_crate::models::Record")]` to preserve
+the entity identity across Rust module/crate moves. Type and relation-target
+spellings must also remain unchanged to preserve fingerprints. Default identities and
+fingerprint algorithms are unchanged. Upgrade ORM/macros together; see the
+[migration recipe](../../MIGRATION.md#01370-to-01390-optional-stable-entity-identity).
 
 Version 0.136.0 (placeholder) keeps runtime and macros aligned. PostgreSQL
 backup export and search rebuild fail when RLS would filter rows. Use a role

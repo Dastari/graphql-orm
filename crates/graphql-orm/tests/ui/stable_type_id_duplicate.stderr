@@ -1,0 +1,5 @@
+error: stable_type_id may only be declared once per entity
+ --> tests/ui/stable_type_id_duplicate.rs:3:81
+  |
+3 | #[graphql_entity(table = "records", plural = "Records", stable_type_id = "one", stable_type_id = "two")]
+  |                                                                                 ^^^^^^^^^^^^^^

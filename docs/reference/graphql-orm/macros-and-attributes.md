@@ -1227,3 +1227,28 @@ delete (single and composite keys), retention purge, and every
 post-commit actions for repository side effects; they run only after the outer
 commit and are discarded on rollback. Do not invoke this callback before
 the outer commit.
+
+## Stable entity identity
+
+`#[graphql_entity(stable_type_id = "old_crate::models::Record")]` replaces the
+default Rust module-path identity in generated operation fingerprints and sort
+keys. The shared entity parser also accepts it on `#[repository_entity(...)]`;
+repository-only entities emit no GraphQL operation descriptors.
+
+The value is an opaque token, normally the old Rust path. Use a string literal
+of 1–1024 printable ASCII bytes without whitespace or control characters. Repeated declarations fail compilation. Omitting the option preserves
+all existing fingerprints. Distinct entities must have distinct identities;
+catalogue composition panics on collisions and names both real Rust paths.
+`diagnostic_rust_type()` retains that path independently of the identity returned
+by `entity_rust_type()`, outside hashes and serialized exports.
+
+To preserve persisted bindings during a move, set the option to the exact old
+`entity_rust_type()` value and keep it after moving. This preserves only that
+identity input: field types, argument types and relation targets must also be
+spelled identically before and after the move. The schema signature records
+Rust source spellings, so qualifying a previously bare type or changing its
+qualifier changes fingerprints even if it names the same type. Prefer imported
+bare names, retain their spelling across modules/crates, and compare
+`catalog().fingerprint()` before and after (via `graphql_orm_operation_catalog()`
+or your catalogue accessor). See the
+[migration recipe](../../../MIGRATION.md#01370-to-01390-optional-stable-entity-identity).
