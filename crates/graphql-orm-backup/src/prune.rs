@@ -46,7 +46,7 @@ pub struct PruneResult {
 ///
 /// Retention and object reachability are derived from the snapshot listing,
 /// so pruning fails closed when that listing is incomplete. It aborts with
-/// [`BackupError::InvalidManifestChain`] before deleting any snapshot or object
+/// [`BackupError::IncompleteRepositoryListing`] before deleting any snapshot or object
 /// if a listed manifest's parent is stored but was not listed, or if
 /// re-listing manifests gives a different set. It lists manifests once more
 /// immediately before the object sweep and aborts, without deleting any
@@ -358,7 +358,7 @@ async fn ensure_stable_listing(
 }
 
 fn incomplete_listing(detail: String) -> BackupError {
-    BackupError::InvalidManifestChain {
+    BackupError::IncompleteRepositoryListing {
         reason: format!(
             "snapshot listing is incomplete; refusing to delete snapshots or objects: {detail}"
         ),

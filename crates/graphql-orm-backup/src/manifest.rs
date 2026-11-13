@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::{BackupError, BackupRepository, ManifestAuthenticator};
 
 /// Manifest format written by this crate: sealed with a host-keyed MAC.
-pub const BACKUP_FORMAT_VERSION: u32 = 2;
+pub const BACKUP_FORMAT_VERSION: u32 = 3;
 /// Format of manifests written before authentication existed. They carry no
 /// seal and are read only under an explicit [`crate::LegacyManifestPolicy`].
 pub const LEGACY_BACKUP_FORMAT_VERSION: u32 = 1;
@@ -74,8 +74,9 @@ pub struct BackupSnapshotManifest {
     /// write the repository can recompute it; [`Self::authentication`] is what
     /// ties the manifest to the host.
     pub checksum: String,
-    /// Host-keyed seal over the same canonical bytes as the checksum. Required
-    /// for [`BACKUP_FORMAT_VERSION`]; absent from legacy manifests.
+    /// Host-keyed seal over canonical manifest bytes and repository identity.
+    /// Required for [`BACKUP_FORMAT_VERSION`]; format 2 seals omit the identity,
+    /// and format 1 manifests have no seal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authentication: Option<ManifestMac>,
 }
@@ -96,6 +97,9 @@ pub struct ManifestMac {
     pub algorithm: ManifestMacAlgorithm,
     /// Public id of the sealing key; see [`crate::ManifestKey::key_id`].
     pub key_id: String,
+    /// Repository identity covered by the MAC (required for stored format 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_id: Option<Uuid>,
     /// Lowercase hex MAC.
     pub mac: String,
 }
@@ -218,7 +222,9 @@ pub fn verify_manifest_checksum(manifest: &BackupSnapshotManifest) -> Result<(),
 ///
 /// Returns [`BackupError::UnsupportedManifestFormat`] unless the manifest uses
 /// [`BACKUP_FORMAT_VERSION`], [`BackupError::InvalidManifestEntry`] for an entry
-/// outside its namespace, or another [`BackupError`] if serialization fails.
+/// outside its namespace, [`BackupError::ManifestAuthenticationFailed`] if no
+/// repository identity is configured (initialize the repository, then pin its
+/// identity on the authenticator), or another error if serialization fails.
 pub fn authenticate_manifest(
     authenticator: &ManifestAuthenticator,
     manifest: &mut BackupSnapshotManifest,
@@ -230,8 +236,16 @@ pub fn authenticate_manifest(
         });
     }
     validate_manifest_entries(manifest)?;
+    authenticator.require_repository_identity()?;
     let canonical = canonical_manifest_bytes(manifest)?;
     manifest.checksum = sha256_hex(&canonical);
+    if let Some(identity) = manifest
+        .authentication
+        .as_ref()
+        .and_then(|seal| seal.repository_id)
+    {
+        authenticator.check_repository_identity(identity)?;
+    }
     manifest.authentication = Some(authenticator.seal(&canonical));
     Ok(())
 }
@@ -243,8 +257,8 @@ pub fn authenticate_manifest(
 /// [`crate::LegacyManifestPolicy`] allows. In both cases the checksum must
 /// match and every content key must stay inside its namespace.
 ///
-/// This does not bind the manifest to a repository path; [`load_manifest`]
-/// also checks that.
+/// This checks the cryptographic host identity pin but does not read storage.
+/// [`load_manifest`] also compares the durable identity record and snapshot path.
 ///
 /// # Errors
 ///
@@ -259,11 +273,26 @@ pub fn verify_manifest_authenticity(
 ) -> Result<(), BackupError> {
     let key = manifest_key(manifest.snapshot_id);
     match (manifest.format_version, &manifest.authentication) {
-        (BACKUP_FORMAT_VERSION, Some(seal)) => {
+        (BACKUP_FORMAT_VERSION | 2, Some(seal)) => {
+            if manifest.format_version == BACKUP_FORMAT_VERSION {
+                authenticator.require_repository_identity()?;
+            }
+
+            if manifest.format_version == BACKUP_FORMAT_VERSION && seal.repository_id.is_none() {
+                return Err(BackupError::ManifestAuthenticationFailed {
+                    key,
+                    reason: "manifest has no repository identity".into(),
+                });
+            }
             verify_manifest_checksum(manifest)?;
             authenticator
                 .verify(seal, &canonical_manifest_bytes(manifest)?)
                 .map_err(|reason| BackupError::ManifestAuthenticationFailed { key, reason })?;
+            if manifest.format_version == 2 && !trusts_legacy_manifest(authenticator, manifest) {
+                return Err(BackupError::LegacyManifestRefused {
+                    snapshot_id: manifest.snapshot_id,
+                });
+            }
         }
         (BACKUP_FORMAT_VERSION, None) => {
             return Err(BackupError::ManifestAuthenticationFailed {
@@ -411,6 +440,7 @@ pub async fn load_manifest(
         });
     }
     verify_manifest_authenticity(authenticator, &manifest)?;
+    verify_repository_binding(repository, &manifest).await?;
     Ok(manifest)
 }
 
@@ -683,4 +713,98 @@ pub fn decompress_payload_with_limit(
         result.extend_from_slice(&chunk[..count]);
     }
     Ok(result)
+}
+
+/// Durable identity key, outside the snapshot and object namespaces.
+pub const REPOSITORY_ID_KEY: &str = "repository-id";
+
+pub(crate) async fn repository_identity(
+    repository: &dyn BackupRepository,
+    create: bool,
+) -> Result<Uuid, BackupError> {
+    let authenticator = required_authenticator(repository)?;
+    let expected = if create {
+        let proposed = authenticator
+            .expected_repository_identity()
+            .unwrap_or_else(Uuid::new_v4);
+        let created = repository
+            .put_blob_if_absent(REPOSITORY_ID_KEY, bytes::Bytes::from(proposed.to_string()))
+            .await?;
+        if !created {
+            // An existing storage record cannot enroll itself as a host trust anchor.
+            authenticator.require_repository_identity()?;
+        }
+        proposed
+    } else {
+        authenticator.require_repository_identity()?
+    };
+    let bytes = crate::collect_backup_stream(
+        repository.get_blob_stream(REPOSITORY_ID_KEY).await?,
+        crate::BackupByteLimit::Bytes(64),
+    )
+    .await?;
+    let identity = std::str::from_utf8(&bytes)
+        .ok()
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .ok_or_else(|| BackupError::ManifestAuthenticationFailed {
+            key: REPOSITORY_ID_KEY.into(),
+            reason: "invalid repository identity".into(),
+        })?;
+    if identity != expected {
+        return Err(BackupError::ManifestAuthenticationFailed {
+            key: REPOSITORY_ID_KEY.into(),
+            reason: "repository identity changed or differs from the host pin".into(),
+        });
+    }
+    Ok(expected)
+}
+
+pub(crate) async fn verify_repository_binding(
+    repository: &dyn BackupRepository,
+    manifest: &BackupSnapshotManifest,
+) -> Result<(), BackupError> {
+    if manifest.format_version < BACKUP_FORMAT_VERSION {
+        return Ok(());
+    }
+    let identity = repository_identity(repository, false).await?;
+    if manifest
+        .authentication
+        .as_ref()
+        .and_then(|seal| seal.repository_id)
+        != Some(identity)
+    {
+        return Err(BackupError::ManifestAuthenticationFailed {
+            key: manifest_key(manifest.snapshot_id),
+            reason: "manifest belongs to a different repository identity".into(),
+        });
+    }
+    Ok(())
+}
+
+/// Creates the repository identity atomically once. Reading an existing record
+/// requires an independently configured host identity pin; storage cannot enroll
+/// its own identity. A newly created record must still match the proposed UUID.
+/// Record the returned value outside storage and pin it with
+/// [`ManifestAuthenticator::with_repository_identity`].
+///
+/// # Errors
+/// Returns an error for missing authentication, malformed records, a mismatched
+/// host pin, or a provider without atomic conditional creation.
+pub async fn initialize_repository_identity(
+    repository: &dyn BackupRepository,
+) -> Result<Uuid, BackupError> {
+    repository_identity(repository, true).await
+}
+
+fn trusts_legacy_manifest(
+    authenticator: &ManifestAuthenticator,
+    manifest: &BackupSnapshotManifest,
+) -> bool {
+    match authenticator.legacy_manifest_policy() {
+        crate::LegacyManifestPolicy::TrustPinned(pins) => {
+            pins.get(&manifest.snapshot_id) == Some(&manifest.checksum)
+        }
+        crate::LegacyManifestPolicy::TrustUnauthenticated => true,
+        crate::LegacyManifestPolicy::Refuse => false,
+    }
 }

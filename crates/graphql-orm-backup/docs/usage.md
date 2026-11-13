@@ -50,10 +50,12 @@ async fn run_backup(
     objects: &dyn BackupObjectIndex,
     // At least 32 random bytes from the host's secret store.
     manifest_key_material: &[u8],
+    // Stable identity loaded from trusted host configuration.
+    repository_id: Uuid,
 ) -> Result<(), graphql_orm_backup::BackupError> {
     let key = ManifestKey::from_bytes(manifest_key_material)?;
     let repository = LocalBackupRepository::new("./backups")
-        .with_manifest_authenticator(ManifestAuthenticator::new(key));
+        .with_manifest_authenticator(ManifestAuthenticator::new(key).with_repository_identity(repository_id));
 
     let result = create_full_backup(
         &repository,
@@ -382,7 +384,7 @@ for `prune` to remove when no manifest landed.
 
 Retention, dependency checks and reachability come from the snapshot listing,
 so `prune` and `delete_snapshot` fail closed when that listing is incomplete.
-They return `BackupError::InvalidManifestChain` before deleting any snapshot or
+They return `BackupError::IncompleteRepositoryListing` before deleting any snapshot or
 object if a listed manifest's parent is stored but was not listed, or if
 re-listing manifests gives a different set. Just before the object sweep they
 list manifests again and stop, without deleting any object, unless the set is

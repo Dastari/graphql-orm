@@ -16,6 +16,8 @@ for historical context.
 
 ## Unreleased
 
+- ORM and macros 0.133.0 (placeholder): PostgreSQL backup snapshots, restore emptiness checks and search rebuild fail when row security would filter rows (#526). Search rebuild reads and writes use the same transaction.
+
 - CI and release supply chain: CI's schema-export job now uses the same full-SHA action pins and Rust 1.97.1 toolchain as every other job (#492). The release publisher is split: a read-only, cache-free `release-bundle` job (and `release-scoped-bundle` for the scoped profile) generates the manifest and notes, builds the optional router artifact and checksums the bundle, and the `release`/`release-scoped` publisher, the only job holding `contents`, `id-token` and `attestations` write, runs no compiler, interpreter, cache or repository script. It checks the bundle artifact's ID and digest against the build job's outputs, verifies every file against the checksum list whose digest the build job reported, then attests, tags and publishes as before (#493). Full release validation adds a `schema-export` lane that runs the macros crate tests and the schema-export equivalence check with the lockfile fixed, as CI does (#494). `scripts/check-workflow-supply-chain.py` enforces these rules in CI and release integrity. Release inputs, the protected `release` environment on the entry job, manifest generation and workflow-only tag creation are unchanged.
 - Storage 0.9.3: the managed Samba test runner uses a digest-pinned image and refuses tag-only `SMB_TEST_IMAGE` overrides (#495). Test harness only.
 - `compose.yaml` is marked local-test-only: PostgreSQL is published on `127.0.0.1` only, the image is digest-pinned, and there is no default password; `GRAPHQL_ORM_TEST_POSTGRES_PASSWORD` must be set (#500).

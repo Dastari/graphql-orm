@@ -19,7 +19,7 @@ supersedes: []
 The backup repository is storage, not a trust anchor. Anyone with write access
 to it can replace payloads and recompute plain SHA-256 digests, so digests and
 the manifest `checksum` detect corruption only. Trust comes from a host-held
-key:
+key and an independently retained repository identity:
 
 - Every manifest is sealed with HMAC-SHA256 under a `ManifestKey` that the host
   supplies at run time and that is never written to the repository. The MAC
@@ -33,6 +33,9 @@ key:
   object restore (which re-checks a caller-supplied manifest), verification,
   compaction, pruning and snapshot deletion. Payload digests are trusted only
   because a verified manifest names them.
+- Format 3 seals carry a repository UUID that must match both the host pin and
+  the durable identity record. Storage cannot enroll its own UUID as a host
+  trust anchor; initial creation is checked against the locally proposed value.
 - A repository may serve different bytes on each read, so a digest is checked
   against the bytes that are actually used, not only during verification.
   Restore and compaction hash each table and change payload as it is buffered
@@ -55,12 +58,18 @@ key:
 
 Legacy manifests (format version 1, written before sealing existed) carry no
 seal. They are refused unless the host selects a `LegacyManifestPolicy`; the
-identity, content-key and restore-target checks still apply to them.
+snapshot-path, content-key and restore-target checks still apply to them.
+Format 2 seals are authenticated but lack repository binding, so they also
+require explicit legacy trust. Their original MAC is still checked; accepted
+older formats do not require an identity record. See the
+[migration guide](../MIGRATION.md).
 
 Residual risks the host owns: a repository writer can still delete snapshots,
-withhold the newest ones, or copy sealed manifests and payloads between
-repositories that share a key. Use one key per repository or environment,
-keep independent copies, and choose the snapshot id to restore from host
+withhold the newest ones, or replace an entire repository including its identity
+record. New seals bind a manifest to its repository UUID. Hosts must pin that UUID outside
+storage with `with_repository_identity` to detect replacement of the record
+itself; the identity record is not a trust anchor. Unpinned format 3 operations
+fail closed. Keep independent copies, and choose the snapshot id to restore from host
 records rather than from the repository listing alone. Sealed manifests are
 not encrypted.
 
@@ -77,7 +86,7 @@ not encrypted.
 
 1. Read schema snapshot from `GraphqlOrmBackupAdapter`.
 2. Export all backup-enabled tables through `GraphqlOrmBackupAdapter`.
-3. List all referenced stored objects through `BackupObjectIndex`.
+3. Derive object references from those exported rows through `BackupObjectIndex::objects_from_full_export`.
 4. Serialize table exports as JSON Lines.
 5. Compress table exports with zstd, checksum the stored compressed bytes, and write them to the backup repository.
 6. Load and checksum each object from `BackupObjectIndex`.
@@ -86,6 +95,33 @@ not encrypted.
    would reject.
 9. Set the manifest checksum and seal it with the host key.
 10. Write manifest last.
+
+The built-in adapter exports all tables in a PostgreSQL `REPEATABLE READ
+READ ONLY` transaction or a SQLite read transaction. SQLite establishes its
+snapshot on the first read; concurrent writes subsequently see the usual
+journal/WAL locking rules. Schema metadata is host-supplied, so schema migration
+must be quiesced during backup. SQL Server has no built-in backup adapter in
+this crate: a custom adapter must enable `ALLOW_SNAPSHOT_ISOLATION` and use a
+single `SNAPSHOT` transaction covering all table queries (or quiesce writers),
+or fail. Read-committed export, including statement-level
+`READ_COMMITTED_SNAPSHOT`, does not provide this cross-table guarantee. See
+[Microsoft's isolation-level reference](https://learn.microsoft.com/en-us/sql/t-sql/statements/set-transaction-isolation-level-transact-sql?view=sql-server-ver17).
+
+The object set comes from those exact exported metadata rows. Each row must
+carry its expected checksum. Copying validates the source stream against that
+checksum, even if content-addressed bytes already exist in the repository.
+A missing source or a checksum mismatch in the bytes read at copy time fails
+before manifest publication. This is a logical snapshot of the rows and their referenced bytes, not an atomic
+transaction across the database and blob provider. It relies on hosts recording
+checksums with metadata and retaining the referenced bytes; a mutation to
+unreferenced live objects is irrelevant.
+
+PostgreSQL reads use `SET LOCAL row_security = off`: the server errors when
+RLS would filter a table, taking account of ownership, `FORCE ROW LEVEL
+SECURITY`, superuser and `BYPASSRLS`. This setting does not bypass RLS. Restore
+emptiness checks and search rebuild follow the same fail-closed rule. No
+policy-filtered export mode is provided. This follows
+[PostgreSQL's backup guidance](https://www.postgresql.org/docs/17/ddl-rowsecurity.html).
 
 ## Incremental Backup Flow
 

@@ -451,6 +451,9 @@ async fn begin_consistent_snapshot(pool: &DbPool) -> crate::Result<BackupSnapsho
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .execute(&mut *tx)
         .await?;
+    sqlx::query("SET LOCAL row_security = off")
+        .execute(&mut *tx)
+        .await?;
     Ok(BackupSnapshot { tx })
 }
 
@@ -1784,6 +1787,9 @@ async fn table_row_count_on(
         "SELECT COUNT(*) AS count FROM {}",
         quote_identifier(table_name)
     );
+    sqlx::query("SET LOCAL row_security = off")
+        .execute(&mut **tx)
+        .await?;
     let row = sqlx::query(&sql).fetch_one(&mut **tx).await?;
     row.try_get::<i64, _>("count")
 }

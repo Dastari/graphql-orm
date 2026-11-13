@@ -10,6 +10,55 @@ supersedes: []
 
 # Migration Guide
 
+## 0.16.0 to 0.17.0: snapshot consistency and repository identity
+
+1. Implement `BackupObjectIndex::objects_from_full_export` for custom indexes.
+   Derive the object set solely from its supplied rows. An objectless or
+   externally frozen index may return its fixed set explicitly; querying a
+   live metadata table is not valid. `export_full` must export all tables in
+   one consistent snapshot or fail. The ORM index requires a valid recorded
+   checksum for every exported object; backfill checksums before backup and
+   include those columns in backup policy.
+2. Handle `BackupError::IncompleteRepositoryListing { reason }` in exhaustive
+   matches. Existing listing safety checks now return this variant rather than
+   `InvalidManifestChain`; do not match error strings.
+3. New writes use format 3; older readers cannot read them. `ManifestMac`
+   gains `repository_id`, so update struct literals. New seals require the
+   repository UUID; `None` represents an older unbound seal only. Call
+   `initialize_repository_identity` on an
+   authenticated repository, record the returned UUID outside storage, then
+   configure `ManifestAuthenticator::with_repository_identity` with that pin.
+   This pin is mandatory for format 3 sealing, verification and restore;
+   unpinned handles fail closed before a new backup exports or writes payloads.
+   Initialization uses atomic conditional creation and never replaces a record.
+   Initial enrollment without a pin must create a new record. An existing
+   record is refused until the host supplies its independently retained UUID;
+   the helper never adopts an identity from storage. It also refuses a record
+   replaced between atomic creation and its readback. Alternatively generate and
+   retain a UUID in host configuration first; a new repository's first manifest
+   write stores that configured UUID atomically.
+   Preserve the record when moving the entire repository. A different repository
+   must keep its own record and unique host pin; never reuse an identity across
+   independent repositories. Copied manifests and payloads will be refused.
+4. Existing backups are not rewritten. Format 1 keeps its existing legacy
+   policy. For format 2, keep the old sealing key and opt in with
+   `LegacyManifestPolicy::TrustPinned`, using snapshot checksums retained in
+   trusted host records. The seal is still checked. If trusted checksum records
+   are unavailable, a host-reviewed one-time `TrustUnauthenticated` policy also
+   accepts format 2 (still checking its seal). Restore old snapshots directly
+   under that policy, or compact them into a new identity-bound format 3
+   snapshot; then return to `Refuse`. No identity record is needed to restore
+   an explicitly trusted older snapshot.
+5. PostgreSQL roles subject to RLS now fail export, target emptiness checks,
+   and search rebuild. Use an administrative role exempt from RLS: a superuser,
+   a role with `BYPASSRLS`, or the table owner when RLS is not forced. A permissive
+   policy is still RLS and does not qualify. There is no policy-filtered export
+   option. ORM and macros move together to
+   placeholder 0.133.0 for this change; refresh consumer lockfiles together.
+
+See the [snapshot guarantees](docs/architecture.md#full-backup-flow) and
+[format reference](docs/snapshot-format.md#manifest-authentication).
+
 ## 0.15.0 to 0.16.0: storage 0.11.0
 
 Update the backup requirement to 0.16.0 and storage to 0.11.0 together, then

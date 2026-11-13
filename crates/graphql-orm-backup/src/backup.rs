@@ -245,7 +245,7 @@ pub async fn create_full_backup_with_options(
     options: &BackupExecutionOptions,
 ) -> Result<FullBackupResult, BackupError> {
     // Refuse before writing payloads that no sealed manifest would reference.
-    required_authenticator(repository)?;
+    required_authenticator(repository)?.require_repository_identity()?;
     let lock = RepositoryLock::acquire_for(repository, &options.lock, "full_backup").await?;
     let snapshot_id = request.snapshot_id;
     let mut write = SnapshotWrite::default();
@@ -385,7 +385,7 @@ pub async fn create_incremental_backup_with_options(
     request: IncrementalBackupRequest,
     options: &BackupExecutionOptions,
 ) -> Result<IncrementalBackupResult, BackupError> {
-    required_authenticator(repository)?;
+    required_authenticator(repository)?.require_repository_identity()?;
     let lock = RepositoryLock::acquire_for(repository, &options.lock, "incremental_backup").await?;
     let snapshot_id = request.snapshot_id;
     let mut write = SnapshotWrite::default();
@@ -533,7 +533,7 @@ pub async fn compact_chain_with_options(
     request: CompactChainRequest,
     options: &BackupExecutionOptions,
 ) -> Result<CompactChainResult, BackupError> {
-    required_authenticator(repository)?;
+    required_authenticator(repository)?.require_repository_identity()?;
     let lock = RepositoryLock::acquire_for(repository, &options.lock, "compaction").await?;
     let snapshot_id = request.snapshot_id;
     let mut write = SnapshotWrite::default();
@@ -729,6 +729,8 @@ async fn write_manifest_tracked(
     manifest: &mut BackupSnapshotManifest,
     write: &mut SnapshotWrite,
 ) -> Result<(), BackupError> {
+    required_authenticator(repository)?.require_repository_identity()?;
+    crate::manifest::repository_identity(repository, true).await?;
     authenticate_manifest(required_authenticator(repository)?, manifest)?;
     let body = serde_json::to_vec_pretty(manifest)?;
     let key = snapshot_manifest_key(manifest.snapshot_id);

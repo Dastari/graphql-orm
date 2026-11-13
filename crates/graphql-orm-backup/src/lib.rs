@@ -130,9 +130,10 @@ pub use lock::{
 pub use manifest::{
     BACKUP_FORMAT_VERSION, BackupCompression, BackupKind, BackupSnapshotManifest, BackupTombstone,
     DatabaseBackupManifest, LEGACY_BACKUP_FORMAT_VERSION, ManifestMac, ManifestMacAlgorithm,
-    ObjectBackupEntry, TableBackupEntry, authenticate_manifest, compress_payload,
-    decompress_payload, decompress_payload_with_limit, load_manifest, load_manifest_chain,
-    manifest_checksum, set_manifest_checksum, validate_manifest_chain, validate_manifest_entries,
+    ObjectBackupEntry, REPOSITORY_ID_KEY, TableBackupEntry, authenticate_manifest,
+    compress_payload, decompress_payload, decompress_payload_with_limit,
+    initialize_repository_identity, load_manifest, load_manifest_chain, manifest_checksum,
+    set_manifest_checksum, validate_manifest_chain, validate_manifest_entries,
     verify_manifest_authenticity, verify_manifest_checksum,
 };
 pub use object_index::{BackupObjectIndex, BackupObjectRef};

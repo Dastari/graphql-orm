@@ -10,6 +10,10 @@ supersedes: []
 
 # Migration Guide
 
+## 0.131.0 to 0.133.0: administrative backup and search reads
+
+Upgrade ORM and macros together; 0.133.0 is a placeholder pending sequential merges. PostgreSQL backup export, restore emptiness checks and search rebuild now fail for roles subject to RLS. `SET LOCAL row_security = off` refuses filtering; it does not bypass policies. Use a role exempt from RLS for administrative operations (superuser, `BYPASSRLS`, or an owner without forced RLS). A permissive policy does not qualify. No schema migration is required.
+
 ## 0.132.0 to 0.133.0: reserved runtime table names
 
 Upgrade runtime and macros together, and AI to 0.136.0 if you use it. No data

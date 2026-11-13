@@ -260,7 +260,7 @@ async fn prune_keeps_payloads_of_a_stored_manifest_that_was_not_listed() {
         .expect_err("a stored but unlisted manifest is not an orphan");
 
     assert!(
-        matches!(&error, BackupError::InvalidManifestChain { reason } if reason.contains("listing is incomplete")),
+        matches!(&error, BackupError::IncompleteRepositoryListing { reason } if reason.contains("listing is incomplete")),
         "unexpected error: {error:?}"
     );
     assert_eq!(all_blobs(&repository.inner).await, before);
@@ -1272,9 +1272,10 @@ async fn compaction_enforces_the_stage_limit_of_its_synthetic_full() {
 // ---------------------------------------------------------------------------
 
 fn repository(temp: &TempDir) -> LocalBackupRepository {
-    LocalBackupRepository::new(temp.path()).with_manifest_authenticator(ManifestAuthenticator::new(
-        ManifestKey::from_bytes(&[7; 32]).expect("test manifest key"),
-    ))
+    LocalBackupRepository::new(temp.path()).with_manifest_authenticator(
+        ManifestAuthenticator::new(ManifestKey::from_bytes(&[7; 32]).expect("test manifest key"))
+            .with_repository_identity(uuid::Uuid::from_u128(1)),
+    )
 }
 
 fn id(n: u8) -> Uuid {
@@ -1644,6 +1645,13 @@ impl Objects {
 
 #[async_trait]
 impl BackupObjectIndex for Objects {
+    async fn objects_from_full_export(
+        &self,
+        _: &[graphql_orm_backup::BackupTableExport],
+    ) -> Result<Vec<BackupObjectRef>, BackupError> {
+        self.list_objects_for_full_backup().await
+    }
+
     async fn list_objects_for_full_backup(&self) -> Result<Vec<BackupObjectRef>, BackupError> {
         Ok(self
             .objects

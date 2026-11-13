@@ -28,7 +28,12 @@ pub trait GraphqlOrmBackupAdapter: Send + Sync {
         })
     }
 
-    /// Exports all backup-enabled tables for a full snapshot.
+    /// Exports all backup-enabled tables in one consistent database snapshot.
+    /// Implementations must use a snapshot transaction (or equivalent host
+    /// quiescence) covering every table, and fail if that guarantee is unavailable.
+    /// Object metadata tables must be included in this same export. Reject
+    /// exports whose rows would be omitted by row-visibility policies; this
+    /// contract provides no policy-filtered full-export mode.
     ///
     /// # Errors
     ///

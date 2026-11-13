@@ -148,4 +148,5 @@ fn test_manifest_authenticator() -> graphql_orm_backup::ManifestAuthenticator {
     graphql_orm_backup::ManifestAuthenticator::new(
         graphql_orm_backup::ManifestKey::from_bytes(&[7; 32]).expect("test manifest key"),
     )
+    .with_repository_identity(uuid::Uuid::from_u128(1))
 }

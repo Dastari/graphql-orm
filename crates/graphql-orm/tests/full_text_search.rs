@@ -9,6 +9,105 @@
 use graphql_orm::prelude::*;
 
 #[cfg(feature = "sqlite")]
+mod rebuild_visibility {
+    use super::*;
+
+    struct PublishedRows;
+
+    impl RowPolicy for PublishedRows {
+        fn read_visibility<'a>(
+            &'a self,
+            _: Option<&'a async_graphql::Context<'_>>,
+            _: &'a Database,
+            _: &'static str,
+            _: Option<&'static str>,
+            surface: EntityAccessSurface,
+        ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<ReadVisibility>>
+        {
+            Box::pin(async move {
+                assert_eq!(surface, EntityAccessSurface::Repository);
+                let filter = SearchArticleWhereInput {
+                    published: Some(BoolFilter {
+                        eq: Some(true),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+                Ok(ReadVisibility::Complete(ReadPredicate::from_filter::<
+                    SqliteBackend,
+                    _,
+                >(&filter)?))
+            })
+        }
+
+        fn can_read_row<'a>(
+            &'a self,
+            _: Option<&'a async_graphql::Context<'_>>,
+            _: &'a Database,
+            _: &'static str,
+            _: Option<&'static str>,
+            _: EntityAccessSurface,
+            _: &'a (dyn std::any::Any + Send + Sync),
+        ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+            // This provider relies on its SQL predicate for visibility.
+            Box::pin(async { Ok(true) })
+        }
+
+        fn can_write_row<'a>(
+            &'a self,
+            _: Option<&'a async_graphql::Context<'_>>,
+            _: &'a Database,
+            _: &'static str,
+            _: Option<&'static str>,
+            _: EntityAccessSurface,
+            _: &'a (dyn std::any::Any + Send + Sync),
+        ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+            Box::pin(async { Ok(true) })
+        }
+    }
+
+    #[tokio::test]
+    async fn single_document_rebuild_preserves_repository_read_visibility()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let pool = graphql_orm::sqlx::SqlitePool::connect("sqlite::memory:").await?;
+        let plan = build_migration_plan(
+            DatabaseBackend::Sqlite,
+            &SchemaModel {
+                extensions: Vec::new(),
+                tables: Vec::new(),
+            },
+            &SchemaModel::from_entities(&[SearchArticle::metadata()]),
+        );
+        for statement in &plan.statements {
+            graphql_orm::sqlx::query(statement).execute(&pool).await?;
+        }
+        graphql_orm::sqlx::query(
+            "INSERT INTO search_articles (id, title, body, published) VALUES
+             ('hidden', 'Private draft', NULL, 0), ('visible', 'Published note', NULL, 1)",
+        )
+        .execute(&pool)
+        .await?;
+        let db = Database::<SqliteBackend>::with_row_policy(pool, PublishedRows);
+        let count_sql = format!(
+            "SELECT COUNT(*) FROM \"{}\"",
+            graphql_orm::graphql::orm::sqlite_fts_table_name("search_articles")
+        );
+        SearchArticle::rebuild_search_document(&db, &"hidden".into()).await?;
+        let hidden_count: i64 = graphql_orm::sqlx::query_scalar(&count_sql)
+            .fetch_one(db.pool())
+            .await?;
+        assert_eq!(hidden_count, 0, "a hidden row must not be indexed");
+
+        SearchArticle::rebuild_search_document(&db, &"visible".into()).await?;
+        let visible_count: i64 = graphql_orm::sqlx::query_scalar(&count_sql)
+            .fetch_one(db.pool())
+            .await?;
+        assert_eq!(visible_count, 1);
+        Ok(())
+    }
+}
+
+#[cfg(feature = "sqlite")]
 #[derive(
     GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]

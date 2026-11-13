@@ -18,6 +18,7 @@ snapshots/{snapshot_id}/database/tables/{table_name}.jsonl.zst
 snapshots/{snapshot_id}/database/changes/{table_name}.jsonl.zst
 objects/sha256/{first_two}/{next_two}/{sha256}
 locks/repository.lock
+repository-id
 ```
 
 ## Manifest
@@ -44,13 +45,14 @@ The manifest checksum is the SHA-256 of the serialized manifest with the
 
 ## Manifest Authentication
 
-`format_version` 2 manifests carry an `authentication` seal:
+`format_version` 3 manifests carry an `authentication` seal:
 
 ```json
 {
   "authentication": {
     "algorithm": "HmacSha256",
     "key_id": "0123456789abcdef",
+    "repository_id": "00112233-4455-4677-8899-aabbccddeeff",
     "mac": "<64 lowercase hex digits>"
   }
 }
@@ -58,11 +60,15 @@ The manifest checksum is the SHA-256 of the serialized manifest with the
 
 `mac` is HMAC-SHA256 over the label
 `graphql-orm-backup/manifest/hmac-sha256/v2` and a newline, followed by the
-same canonical bytes as the checksum. The MAC key and the public `key_id` are
+label `repository-bound/v3` and a newline, the repository UUID's 16 raw bytes,
+then the same canonical bytes as the checksum. The UUID is stored as a UUID
+string at `repository-id`, created once with atomic conditional creation.
+Repository-aware reads compare the seal's identity to this record and the
+required host pin before using a manifest. The MAC key and the public `key_id` are
 derived from the host's `ManifestKey` with HKDF-SHA256. Readers reject unknown
 fields, so every accepted field is covered by the seal. Format version 1
 manifests have no `authentication` field and are read only under an explicit
-`LegacyManifestPolicy`. Other versions are refused. See the
+`LegacyManifestPolicy`. Format 2 seals use the original MAC input without a repository UUID and require explicit legacy trust on repository reads. Other versions are refused. See the
 [trust model](architecture.md#trust-model).
 
 ## Key Constraints
@@ -147,6 +153,7 @@ one exclusive advisory lock blob:
 
 ```text
 locks/repository.lock
+repository-id
 ```
 
 The lock is created with repository conditional-write semantics and is removed

@@ -264,10 +264,11 @@ async fn create_full_backup_writes_manifest_after_payloads() {
         .expect("create full backup");
 
     let writes = repository.write_order();
-    assert_eq!(writes.len(), 3);
+    assert_eq!(writes.len(), 4);
     assert_eq!(writes[0], "locks/repository.lock");
     assert_eq!(writes[1], database_table_key(snapshot_id(), "users"));
-    assert_eq!(writes[2], snapshot_manifest_key(snapshot_id()));
+    assert_eq!(writes[2], graphql_orm_backup::REPOSITORY_ID_KEY);
+    assert_eq!(writes[3], snapshot_manifest_key(snapshot_id()));
 }
 
 fn backup_request() -> FullBackupRequest {
@@ -534,6 +535,13 @@ impl MockObjectIndex {
 
 #[async_trait]
 impl BackupObjectIndex for MockObjectIndex {
+    async fn objects_from_full_export(
+        &self,
+        _: &[graphql_orm_backup::BackupTableExport],
+    ) -> Result<Vec<BackupObjectRef>, BackupError> {
+        self.list_objects_for_full_backup().await
+    }
+
     async fn list_objects_for_full_backup(&self) -> Result<Vec<BackupObjectRef>, BackupError> {
         Ok(self.objects.clone())
     }
@@ -565,6 +573,13 @@ struct StreamingObjectIndex {
 
 #[async_trait]
 impl BackupObjectIndex for StreamingObjectIndex {
+    async fn objects_from_full_export(
+        &self,
+        _: &[graphql_orm_backup::BackupTableExport],
+    ) -> Result<Vec<BackupObjectRef>, BackupError> {
+        self.list_objects_for_full_backup().await
+    }
+
     async fn list_objects_for_full_backup(&self) -> Result<Vec<BackupObjectRef>, BackupError> {
         Ok(vec![self.object.clone()])
     }
@@ -596,7 +611,35 @@ fn test_manifest_authenticator() -> graphql_orm_backup::ManifestAuthenticator {
     graphql_orm_backup::ManifestAuthenticator::new(
         graphql_orm_backup::ManifestKey::from_bytes(&[7; 32]).expect("test manifest key"),
     )
+    .with_repository_identity(uuid::Uuid::from_u128(1))
 }
 
 static TEST_MANIFEST_AUTHENTICATOR: std::sync::LazyLock<graphql_orm_backup::ManifestAuthenticator> =
     std::sync::LazyLock::new(test_manifest_authenticator);
+
+#[tokio::test]
+async fn full_plan_refuses_an_index_without_snapshot_support() {
+    struct NoSnapshotIndex;
+    #[async_trait]
+    impl BackupObjectIndex for NoSnapshotIndex {
+        async fn list_objects_for_full_backup(&self) -> Result<Vec<BackupObjectRef>, BackupError> {
+            Ok(vec![])
+        }
+        async fn list_objects_for_incremental_backup(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<BackupObjectRef>, BackupError> {
+            unreachable!()
+        }
+        async fn load_object(&self, _: &BackupObjectRef) -> Result<Bytes, BackupError> {
+            unreachable!()
+        }
+    }
+    let database = MockDatabase::new(vec![]);
+    let objects = NoSnapshotIndex;
+    assert!(
+        graphql_orm_backup::plan_full_backup(&database, &objects)
+            .await
+            .is_err()
+    );
+}

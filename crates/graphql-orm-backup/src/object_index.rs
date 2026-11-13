@@ -13,6 +13,22 @@ pub trait BackupObjectIndex: Send + Sync {
     fn buffered_byte_limit(&self) -> BackupByteLimit {
         BackupByteLimit::default()
     }
+    /// Derives the full object set from the rows already exported in the database
+    /// snapshot. Implementations must not query a live database here. The default
+    /// fails closed; objectless or externally frozen indexes must opt in explicitly.
+    ///
+    /// # Errors
+    /// Returns [`BackupError::UnsupportedOperation`] by default, or an error if
+    /// the exported metadata cannot establish a complete object set and digests.
+    async fn objects_from_full_export(
+        &self,
+        _tables: &[crate::BackupTableExport],
+    ) -> Result<Vec<BackupObjectRef>, BackupError> {
+        Err(BackupError::UnsupportedOperation {
+            operation: "object index must derive references from the full database export".into(),
+        })
+    }
+
     /// Lists all objects referenced by a full backup.
     ///
     /// # Errors

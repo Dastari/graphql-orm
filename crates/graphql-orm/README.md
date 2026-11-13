@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.133.0 (placeholder) keeps runtime and macros aligned. PostgreSQL
+backup export and search rebuild fail when RLS would filter rows. Use a role
+exempt from RLS; see the [migration guide](../../MIGRATION.md).
+
 Version 0.133.0 refuses reserved runtime schema physical table names (catalog,
 pragma, ORM and companion-package prefixes, and the exact names of SQLite
 table-valued functions and SQL Server compatibility views), adds `validate_with_reserved_tables` for trusted code

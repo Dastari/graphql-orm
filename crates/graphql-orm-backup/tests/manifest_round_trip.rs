@@ -207,6 +207,13 @@ struct MockObjectIndex;
 
 #[async_trait]
 impl BackupObjectIndex for MockObjectIndex {
+    async fn objects_from_full_export(
+        &self,
+        _: &[graphql_orm_backup::BackupTableExport],
+    ) -> Result<Vec<BackupObjectRef>, BackupError> {
+        self.list_objects_for_full_backup().await
+    }
+
     async fn list_objects_for_full_backup(&self) -> Result<Vec<BackupObjectRef>, BackupError> {
         Ok(vec![BackupObjectRef {
             object_id: object_id(),

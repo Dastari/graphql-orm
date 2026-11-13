@@ -37,7 +37,13 @@ fn repository(temp: &TempDir) -> LocalBackupRepository {
 }
 
 fn repository_with(temp: &TempDir, authenticator: ManifestAuthenticator) -> LocalBackupRepository {
-    LocalBackupRepository::new(temp.path()).with_manifest_authenticator(authenticator)
+    // The host fixture retains its pin independently of repository contents.
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    temp.path().hash(&mut hasher);
+    let identity = Uuid::from_u128(u128::from(hasher.finish()));
+    LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(authenticator.with_repository_identity(identity))
 }
 
 fn legacy_repository(temp: &TempDir, policy: LegacyManifestPolicy) -> LocalBackupRepository {
@@ -310,7 +316,8 @@ async fn unknown_fields_and_unsupported_formats_are_refused() {
     assert!(matches!(error, BackupError::Serialization(_)));
 
     let mut future = manifest.clone();
-    future.format_version = 3;
+    let future_version = graphql_orm_backup::BACKUP_FORMAT_VERSION + 1;
+    future.format_version = future_version;
     future.authentication = None;
     write_raw_manifest(&repository, &mut future).await;
     let error = load_manifest(&repository, manifest.snapshot_id)
@@ -318,10 +325,7 @@ async fn unknown_fields_and_unsupported_formats_are_refused() {
         .expect_err("unknown format refused");
     assert!(matches!(
         error,
-        BackupError::UnsupportedManifestFormat {
-            format_version: 3,
-            ..
-        }
+        BackupError::UnsupportedManifestFormat { format_version, .. } if format_version == future_version
     ));
 
     // A current-format manifest with its seal stripped is refused even when
@@ -1027,6 +1031,13 @@ struct MockObjectIndex {
 
 #[async_trait]
 impl BackupObjectIndex for MockObjectIndex {
+    async fn objects_from_full_export(
+        &self,
+        _: &[graphql_orm_backup::BackupTableExport],
+    ) -> Result<Vec<BackupObjectRef>, BackupError> {
+        self.list_objects_for_full_backup().await
+    }
+
     async fn list_objects_for_full_backup(&self) -> Result<Vec<BackupObjectRef>, BackupError> {
         Ok(vec![self.object.clone()])
     }
@@ -1120,4 +1131,216 @@ impl graphql_orm_backup::RestoreObjectSink for RecordingSink {
         self.restored.lock().expect("restored").push(object);
         Ok(())
     }
+}
+
+#[tokio::test]
+async fn copied_snapshot_is_refused_by_another_repository_with_the_same_key() {
+    let source_dir = TempDir::new().unwrap();
+    let target_dir = TempDir::new().unwrap();
+    let source = repository(&source_dir);
+    let target = repository(&target_dir);
+    let manifest = backup_with_object(&source, "media/source.txt").await;
+    // Initialize an independent destination with the same host key.
+    backup_with_object(&target, "media/target.txt").await;
+    for key in source.list_blobs("snapshots").await.unwrap() {
+        target
+            .put_blob(&key, source.get_blob(&key).await.unwrap())
+            .await
+            .unwrap();
+    }
+    for key in source.list_blobs("objects").await.unwrap() {
+        target
+            .put_blob(&key, source.get_blob(&key).await.unwrap())
+            .await
+            .unwrap();
+    }
+    assert!(load_manifest(&target, manifest.snapshot_id).await.is_err());
+    assert!(
+        verify_manifest_and_objects(&target, &manifest)
+            .await
+            .is_err()
+    );
+    assert!(
+        restore_snapshot(
+            &target,
+            &MockDatabase::default(),
+            manifest.snapshot_id,
+            RestoreContext::dry_run()
+        )
+        .await
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn pinned_format_two_backup_restores_without_an_identity_record() {
+    use hmac::{Hmac, Mac};
+    let dir = TempDir::new().unwrap();
+    let repo = repository(&dir);
+    let mut manifest = backup_with_object(&repo, "media/legacy.txt").await;
+    // Reproduce the released format-2 MAC using the synthetic fixture key.
+    manifest.format_version = 2;
+    manifest.authentication = None;
+    manifest.checksum.clear();
+    let canonical = serde_json::to_vec(&manifest).unwrap();
+    let mut mac_key = [0u8; 32];
+    hkdf::Hkdf::<sha2::Sha256>::new(
+        Some(b"graphql-orm-backup manifest authentication"),
+        &[7; 32],
+    )
+    .expand(b"manifest hmac-sha256 key v1", &mut mac_key)
+    .unwrap();
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(&mac_key).unwrap();
+    mac.update(b"graphql-orm-backup/manifest/hmac-sha256/v2\n");
+    mac.update(&canonical);
+    let tag: String = mac
+        .finalize()
+        .into_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    manifest.checksum = bytes_sha256_hex(&canonical);
+    manifest.authentication = Some(
+        serde_json::from_value(serde_json::json!({
+            "algorithm": "HmacSha256", "key_id": authenticator().key_id(), "mac": tag,
+        }))
+        .unwrap(),
+    );
+    repo.put_blob(
+        &snapshot_manifest_key(manifest.snapshot_id),
+        Bytes::from(serde_json::to_vec(&manifest).unwrap()),
+    )
+    .await
+    .unwrap();
+    repo.delete_blob("repository-id").await.unwrap();
+    let pinned = LocalBackupRepository::new(dir.path()).with_manifest_authenticator(
+        authenticator().with_legacy_manifest_policy(LegacyManifestPolicy::TrustPinned(
+            BTreeMap::from([(manifest.snapshot_id, manifest.checksum.clone())]),
+        )),
+    );
+    load_manifest(&pinned, manifest.snapshot_id).await.unwrap();
+    verify_manifest_and_objects(&pinned, &manifest)
+        .await
+        .unwrap();
+    restore_snapshot(
+        &pinned,
+        &MockDatabase::default(),
+        manifest.snapshot_id,
+        RestoreContext::dry_run(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !pinned
+            .blob_exists(graphql_orm_backup::REPOSITORY_ID_KEY)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn copying_an_identity_record_cannot_change_the_hosts_repository_binding() {
+    let source_dir = TempDir::new().unwrap();
+    let target_dir = TempDir::new().unwrap();
+    let source = repository(&source_dir);
+    let target = repository(&target_dir);
+    let manifest = backup_with_object(&source, "media/source.txt").await;
+    backup_with_object(&target, "media/target.txt").await;
+    for key in source.list_blobs("").await.unwrap() {
+        target
+            .put_blob(&key, source.get_blob(&key).await.unwrap())
+            .await
+            .unwrap();
+    }
+    assert!(load_manifest(&target, manifest.snapshot_id).await.is_err());
+    assert!(
+        verify_manifest_and_objects(&target, &manifest)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn identity_enrollment_refuses_an_existing_record_without_a_host_pin() {
+    let dir = TempDir::new().unwrap();
+    let repo = LocalBackupRepository::new(dir.path()).with_manifest_authenticator(authenticator());
+    repo.put_blob(
+        graphql_orm_backup::REPOSITORY_ID_KEY,
+        Bytes::from(Uuid::new_v4().to_string()),
+    )
+    .await
+    .unwrap();
+    assert!(
+        graphql_orm_backup::initialize_repository_identity(&repo)
+            .await
+            .is_err()
+    );
+}
+
+struct ReplacingIdentity<'a>(&'a LocalBackupRepository);
+
+#[async_trait]
+impl BackupRepository for ReplacingIdentity<'_> {
+    fn manifest_authenticator(&self) -> Option<&ManifestAuthenticator> {
+        self.0.manifest_authenticator()
+    }
+    async fn put_blob_if_absent(&self, key: &str, body: Bytes) -> Result<bool, BackupError> {
+        let created = self.0.put_blob_if_absent(key, body).await?;
+        if created && key == graphql_orm_backup::REPOSITORY_ID_KEY {
+            self.0
+                .put_blob(key, Bytes::from(Uuid::from_u128(1).to_string()))
+                .await?;
+        }
+        Ok(created)
+    }
+    async fn put_blob(&self, key: &str, body: Bytes) -> Result<(), BackupError> {
+        self.0.put_blob(key, body).await
+    }
+    async fn get_blob(&self, key: &str) -> Result<Bytes, BackupError> {
+        self.0.get_blob(key).await
+    }
+    async fn blob_exists(&self, key: &str) -> Result<bool, BackupError> {
+        self.0.blob_exists(key).await
+    }
+    async fn list_blobs(&self, prefix: &str) -> Result<Vec<String>, BackupError> {
+        self.0.list_blobs(prefix).await
+    }
+    async fn delete_blob(&self, key: &str) -> Result<(), BackupError> {
+        self.0.delete_blob(key).await
+    }
+}
+
+#[tokio::test]
+async fn identity_enrollment_refuses_a_record_replaced_during_creation() {
+    let dir = TempDir::new().unwrap();
+    let repo = LocalBackupRepository::new(dir.path()).with_manifest_authenticator(authenticator());
+    assert!(
+        graphql_orm_backup::initialize_repository_identity(&ReplacingIdentity(&repo))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn identity_enrollment_creates_once_then_reopens_with_the_host_pin() {
+    let dir = TempDir::new().unwrap();
+    let bootstrap =
+        LocalBackupRepository::new(dir.path()).with_manifest_authenticator(authenticator());
+    let identity = graphql_orm_backup::initialize_repository_identity(&bootstrap)
+        .await
+        .unwrap();
+    let pinned = LocalBackupRepository::new(dir.path())
+        .with_manifest_authenticator(authenticator().with_repository_identity(identity));
+    assert_eq!(
+        graphql_orm_backup::initialize_repository_identity(&pinned)
+            .await
+            .unwrap(),
+        identity
+    );
+    let manifest = backup_with_object(&pinned, "media/enrolled.txt").await;
+    assert_eq!(
+        manifest.authentication.as_ref().unwrap().repository_id,
+        Some(identity)
+    );
+    load_manifest(&pinned, manifest.snapshot_id).await.unwrap();
 }
