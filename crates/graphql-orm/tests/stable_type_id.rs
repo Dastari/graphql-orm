@@ -5,7 +5,7 @@ mod original {
     #[derive(
         GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug,
     )]
-    #[graphql_entity(table = "stable_records", plural = "StableRecords")]
+    #[graphql_entity(backend = "sqlite", table = "stable_records", plural = "StableRecords")]
     pub struct Record {
         #[primary_key]
         #[sortable]
@@ -17,7 +17,7 @@ mod moved {
     #[derive(
         GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug,
     )]
-    #[graphql_entity(table = "stable_records", plural = "StableRecords")]
+    #[graphql_entity(backend = "sqlite", table = "stable_records", plural = "StableRecords")]
     pub struct Record {
         #[primary_key]
         #[sortable]
@@ -30,6 +30,7 @@ mod stable_a {
         GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug,
     )]
     #[graphql_entity(
+        backend = "sqlite",
         table = "stable_records",
         plural = "StableRecords",
         stable_type_id = "stable_type_id::original::Record"
@@ -46,6 +47,7 @@ mod stable_b {
         GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug,
     )]
     #[graphql_entity(
+        backend = "sqlite",
         table = "stable_records",
         plural = "StableRecords",
         stable_type_id = "stable_type_id::original::Record"
@@ -155,6 +157,7 @@ mod repository {
     use graphql_orm::prelude::*;
     #[derive(RepositoryEntity, serde::Serialize, serde::Deserialize, Clone, Debug)]
     #[repository_entity(
+        backend = "sqlite",
         table = "repository_records",
         plural = "RepositoryRecords",
         stable_type_id = "stable::RepositoryRecord"
@@ -203,6 +206,7 @@ mod qualified_before {
         GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug,
     )]
     #[graphql_entity(
+        backend = "sqlite",
         table = "spelling_records",
         plural = "SpellingRecords",
         stable_type_id = "stable::SpellingRecord"
@@ -221,6 +225,7 @@ mod qualified_after {
         GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug,
     )]
     #[graphql_entity(
+        backend = "sqlite",
         table = "spelling_records",
         plural = "SpellingRecords",
         stable_type_id = "stable::SpellingRecord"
@@ -239,6 +244,7 @@ mod imported_before {
         GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug,
     )]
     #[graphql_entity(
+        backend = "sqlite",
         table = "spelling_records",
         plural = "SpellingRecords",
         stable_type_id = "stable::SpellingRecord"
@@ -257,6 +263,7 @@ mod imported_after {
         GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug,
     )]
     #[graphql_entity(
+        backend = "sqlite",
         table = "spelling_records",
         plural = "SpellingRecords",
         stable_type_id = "stable::SpellingRecord"
@@ -298,6 +305,7 @@ mod maximum_identity {
         GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug,
     )]
     #[graphql_entity(
+        backend = "sqlite",
         table = "spelling_records",
         plural = "SpellingRecords",
         stable_type_id = "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss"
