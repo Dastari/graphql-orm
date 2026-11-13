@@ -27,6 +27,11 @@ def cargo_metadata() -> dict[str, object]:
     return json.loads(result.stdout)
 
 
+def repository_url(source: str) -> str:
+    """Strip the `git+` prefix and any `?rev=`/`?tag=`/`#commit` suffix."""
+    return source.removeprefix("git+").split("?", 1)[0].split("#", 1)[0]
+
+
 def render(metadata: dict[str, object]) -> str:
     packages = metadata["packages"]
     workspace_members = set(metadata["workspace_members"])
@@ -37,8 +42,12 @@ def render(metadata: dict[str, object]) -> str:
     lines = [
         BEGIN,
         "",
-        "| Package | Version | Path | Default features | Direct internal dependencies |",
-        "| --- | --- | --- | --- | --- |",
+        "Versions are not recorded here so version bumps do not conflict. Read each",
+        "package version from its `Cargo.toml` and the released versions, external",
+        "requirements and pinned revisions from the release manifest.",
+        "",
+        "| Package | Path | Default features | Direct internal dependencies |",
+        "| --- | --- | --- | --- |",
     ]
     for package in members:
         manifest = Path(package["manifest_path"])
@@ -57,7 +66,7 @@ def render(metadata: dict[str, object]) -> str:
             internal.append((dependency["name"], label))
         dependency_text = ", ".join(label for _, label in sorted(internal)) or "none"
         lines.append(
-            f"| `{package['name']}` | `{package['version']}` | `{path}` | "
+            f"| `{package['name']}` | `{path}` | "
             f"{default_text} | {dependency_text} |"
         )
 
@@ -65,18 +74,21 @@ def render(metadata: dict[str, object]) -> str:
     for package in members:
         for dependency in package["dependencies"]:
             if dependency["name"] == "agql-auth" and dependency.get("source"):
+                # Requirement versions and pinned revisions change on release
+                # bumps and live in Cargo.toml and the release manifest, so only
+                # the stable repository identity is recorded here.
                 auth_dependencies.append(
-                    (dependency["req"], dependency["source"], package["name"])
+                    (repository_url(dependency["source"]), package["name"])
                 )
     if auth_dependencies:
-        req, source, _ = sorted(auth_dependencies)[0]
-        consumers = sorted({entry[2] for entry in auth_dependencies})
+        url, _ = sorted(auth_dependencies)[0]
+        consumers = sorted({entry[1] for entry in auth_dependencies})
         lines.extend(
             [
                 "",
                 "External Git dependency:",
                 "",
-                f"- `agql-auth` requirement `{req}`, source `{source}`, consumed by "
+                f"- `agql-auth`, source repository `{url}`, consumed by "
                 + ", ".join(f"`{consumer}`" for consumer in consumers)
                 + ".",
             ]

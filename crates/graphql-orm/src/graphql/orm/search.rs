@@ -828,38 +828,35 @@ where
         let projection = if count_only {
             B::DIALECT.count_projection().to_string()
         } else {
-            format!(
-                "{}, CAST(ts_rank_cd(s.document_vector, q.query) AS DOUBLE PRECISION) AS __gom_search_score",
-                T::column_names().join(", ")
-            )
+            format!("{}, s.__gom_search_score", T::column_names().join(", "))
         };
+        // Keep managed document columns out of the entity SQL scope. In
+        // particular, entity filters/projections may also use `entity_pk`.
         let mut sql = format!(
-            "SELECT {} \
-             FROM {} \
-             JOIN {} s ON s.entity_pk = {}::text \
-             CROSS JOIN {}('{}', ?) q(query) \
-             WHERE s.document_vector @@ q.query",
+            "SELECT {} FROM {} \
+             JOIN (SELECT entity_pk AS __gom_search_pk, \
+                   CAST(ts_rank_cd(document_vector, q.query) AS DOUBLE PRECISION) AS __gom_search_score \
+                   FROM {} CROSS JOIN {}('{}', ?) q(query) \
+                   WHERE document_vector @@ q.query) s \
+             ON s.__gom_search_pk = {}::text WHERE 1 = 1",
             projection,
             B::DIALECT.render_identifier_path(T::TABLE_NAME),
             search_table,
-            B::DIALECT.render_identifier(T::PRIMARY_KEY),
             function,
-            index.language.replace('\'', "''")
+            index.language.replace('\'', "''"),
+            self.entity_column(T::PRIMARY_KEY),
         );
         let mut values = vec![SqlValue::String(query_text)];
         self.append_filter_sql(&mut sql, &mut values);
         if !count_only {
-            sql.push_str(" ORDER BY __gom_search_score DESC");
+            sql.push_str(" ORDER BY s.__gom_search_score DESC");
             if !T::DEFAULT_SORT.trim().is_empty() {
                 sql.push_str(", ");
                 sql.push_str(T::DEFAULT_SORT);
             }
             for column in T::PRIMARY_KEYS {
                 if !crate::graphql::orm::sort_clause_mentions_column(T::DEFAULT_SORT, column) {
-                    sql.push_str(&format!(
-                        ", {} ASC",
-                        B::DIALECT.render_identifier_path(column)
-                    ));
+                    sql.push_str(&format!(", {} ASC", self.entity_column(column)));
                 }
             }
             let page = self
@@ -882,23 +879,22 @@ where
         let projection = if count_only {
             B::DIALECT.count_projection().to_string()
         } else {
-            format!(
-                "{}, bm25({}, 1.0, 0.7, 0.4, 0.1, 0.1) * -1.0 AS __gom_search_score",
-                T::column_names().join(", "),
-                fts_table
-            )
+            format!("{}, s.__gom_search_score", T::column_names().join(", "))
         };
+        // A derived table also hides FTS5's implicit `rank` column from
+        // entity projections, filters and relation subqueries.
         let mut sql = format!(
-            "SELECT {} \
-             FROM {} \
-             JOIN {} ON {}.entity_pk = CAST({} AS TEXT) \
-             WHERE {} MATCH ?",
+            "SELECT {} FROM {} \
+             JOIN (SELECT entity_pk AS __gom_search_pk, \
+                   bm25({}, 1.0, 0.7, 0.4, 0.1, 0.1) * -1.0 AS __gom_search_score \
+                   FROM {} WHERE {} MATCH ?) s \
+             ON s.__gom_search_pk = CAST({} AS TEXT) WHERE 1 = 1",
             projection,
             B::DIALECT.render_identifier_path(T::TABLE_NAME),
             fts_table,
             fts_table,
-            B::DIALECT.render_identifier(T::PRIMARY_KEY),
             fts_table,
+            self.entity_column(T::PRIMARY_KEY),
         );
         let mut values = vec![SqlValue::String(sqlite_fts_query(
             &self.search,
@@ -906,17 +902,14 @@ where
         ))];
         self.append_filter_sql(&mut sql, &mut values);
         if !count_only {
-            sql.push_str(" ORDER BY __gom_search_score DESC");
+            sql.push_str(" ORDER BY s.__gom_search_score DESC");
             if !T::DEFAULT_SORT.trim().is_empty() {
                 sql.push_str(", ");
                 sql.push_str(T::DEFAULT_SORT);
             }
             for column in T::PRIMARY_KEYS {
                 if !crate::graphql::orm::sort_clause_mentions_column(T::DEFAULT_SORT, column) {
-                    sql.push_str(&format!(
-                        ", {} ASC",
-                        B::DIALECT.render_identifier_path(column)
-                    ));
+                    sql.push_str(&format!(", {} ASC", self.entity_column(column)));
                 }
             }
             let page = self
@@ -927,6 +920,14 @@ where
             }
         }
         (sql, values)
+    }
+
+    fn entity_column(&self, column: &str) -> String {
+        format!(
+            "{}.{}",
+            B::DIALECT.render_identifier_path(T::TABLE_NAME),
+            B::DIALECT.render_identifier_path(column)
+        )
     }
 
     fn append_filter_sql(&self, sql: &mut String, values: &mut Vec<SqlValue>) {

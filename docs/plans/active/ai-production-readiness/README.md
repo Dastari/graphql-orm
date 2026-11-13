@@ -40,8 +40,9 @@ retention, or restore proofs remain closed.
 - Exact external `agql-auth` release declared by the workspace.
 - Test-owned SQLite and disposable PostgreSQL infrastructure.
 
-Current versions and dependency selectors come from the generated
-[workspace inventory](../../../reference/workspace-packages.md).
+Internal dependency selectors come from the generated
+[workspace inventory](../../../reference/workspace-packages.md); versions come
+from each crate's `Cargo.toml` and the release manifest.
 
 ## Acceptance gates
 

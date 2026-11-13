@@ -68,7 +68,7 @@ run_postgres() {
     --test runtime_search_graphql --test runtime_search_writes --test runtime_search_ir \
     -- --test-threads=1
   cargo test -p graphql-orm --no-default-features --features postgres \
-    --test runtime_strings --locked -- --include-ignored --test-threads=1
+    --test runtime_strings --test full_text_search --locked -- --include-ignored --test-threads=1
   cargo test --manifest-path \
     crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml \
     --no-default-features --features postgres --locked --test runtime_strings \
