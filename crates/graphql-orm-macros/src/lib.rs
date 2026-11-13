@@ -707,12 +707,31 @@ pub fn schema_roots(input: TokenStream) -> TokenStream {
 }
 
 #[proc_macro_attribute]
-/// Emits canonical semantic metadata beside an `async-graphql` custom root impl.
+/// Emits canonical semantic metadata beside an `async-graphql` custom root impl
+/// and enforces the authorization the root declares.
 ///
-/// Place this attribute before `#[async_graphql::Object]`, `Mutation`, or
-/// `Subscription`. The metadata is descriptive and grants no authority.
+/// Place this attribute before `#[async_graphql::Object]` or `Subscription`.
+/// Every described resolver requires an authenticated subject before its body
+/// runs, with the scopes of `all_scopes = [...]` or `any_scopes = [[...]]`
+/// when declared; `authorization = false` declares the root public. The
+/// metadata itself is descriptive and grants no authority.
 pub fn graphql_orm_custom_operations(args: TokenStream, input: TokenStream) -> TokenStream {
     custom_operations::expand(args, input)
+}
+
+#[proc_macro_attribute]
+/// Declares the root field names of a handwritten `async-graphql` root.
+///
+/// Place this attribute directly before `#[async_graphql::Object]` or
+/// `#[async_graphql::Subscription]` on a root that `schema_roots!` composes
+/// through `extra_query_types`, `extra_mutation_types`,
+/// `extra_subscription_types` or `query_custom_ops`. `schema_roots!` uses the
+/// names to reject, at compile time, a handwritten field that has the name of
+/// a generated operation or of another handwritten root's field. A root
+/// described with `#[graphql_orm_custom_operations]` already declares them.
+/// The attribute adds no guard, description or metadata.
+pub fn graphql_orm_root_fields(args: TokenStream, input: TokenStream) -> TokenStream {
+    custom_operations::expand_root_fields(args, input)
 }
 
 mod dependent_deletes;

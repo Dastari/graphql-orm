@@ -105,7 +105,9 @@ async fn rotate_credential(&self) -> bool {
 ```
 
 `#[graphql_orm_custom_operations]` adds this guard, with the root's own kind,
-to each described root. A host guard is composed after it as
+to each described root. It runs after the root's declared authorization guard
+(`DeclaredAuthorizationGuard`, absent only for an explicitly public root) and
+before a host guard, which is composed last as
 `DeclaredAssuranceGuard::new(…).and(HostGuard)`, so the host guard cannot
 replace, weaken or misclassify it. A guard on the root's `Object` or
 `Subscription` attribute is composed the same way into resolvers without

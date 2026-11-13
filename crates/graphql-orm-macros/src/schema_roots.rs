@@ -254,6 +254,100 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         }
     };
 
+    // Reject, at compile time, a handwritten root field with the name of a
+    // generated operation or of another handwritten root's field: a merged
+    // root would serve only one of them.
+    let root_field_sources = |constant: &str, exposed: &dyn Fn(&Ident) -> bool| {
+        let constant = syn::Ident::new(constant, span);
+        entities
+            .iter()
+            .filter(|entity| exposed(entity))
+            .map(|entity| {
+                quote! {
+                    ::graphql_orm::graphql::orm::RootFieldSource {
+                        owner: stringify!(#entity),
+                        fields: #entity::#constant,
+                    }
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let handwritten_sources = |roots: &[&proc_macro2::TokenStream]| {
+        roots
+            .iter()
+            .map(|root| {
+                quote! {
+                    ::graphql_orm::graphql::orm::RootFieldSource {
+                        owner: stringify!(#root),
+                        fields: <#root as ::graphql_orm::graphql::orm::GraphqlRootFieldNames>
+                            ::ROOT_FIELD_NAMES,
+                    }
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let generated_queries = root_field_sources("__GOM_QUERY_ROOT_FIELDS", &|_| true);
+    let generated_mutations =
+        root_field_sources("__GOM_MUTATION_ROOT_FIELDS", &generated_mutation_is_exposed);
+    let generated_subscriptions = root_field_sources("__GOM_SUBSCRIPTION_ROOT_FIELDS", &|_| true);
+    let handwritten_queries = handwritten_sources(&custom_op_types.iter().collect::<Vec<_>>());
+    let handwritten_mutations =
+        handwritten_sources(&extra_mutation_type_streams.iter().collect::<Vec<_>>());
+    let described_subscription_streams = args
+        .extra_subscription_types
+        .iter()
+        .chain(&args.described_subscription_types)
+        .map(|root| quote! { #root })
+        .collect::<Vec<_>>();
+    let handwritten_subscriptions =
+        handwritten_sources(&described_subscription_streams.iter().collect::<Vec<_>>());
+    // The collision check trusts each handwritten root's declared field
+    // names. When the schema is built, compare them with the fields the type
+    // really exposes, so a manual declaration that omits one is refused.
+    let handwritten_query_roots = &custom_op_types;
+    let handwritten_mutation_roots = &extra_mutation_type_streams;
+    let handwritten_subscription_roots = &described_subscription_streams;
+    let root_field_declaration_check = quote! {
+        #(
+            ::graphql_orm::graphql::orm::assert_declared_object_root_fields::<#handwritten_query_roots>(
+                stringify!(#handwritten_query_roots),
+                <#handwritten_query_roots as ::graphql_orm::graphql::orm::GraphqlRootFieldNames>::ROOT_FIELD_NAMES,
+            );
+        )*
+        #(
+            ::graphql_orm::graphql::orm::assert_declared_object_root_fields::<#handwritten_mutation_roots>(
+                stringify!(#handwritten_mutation_roots),
+                <#handwritten_mutation_roots as ::graphql_orm::graphql::orm::GraphqlRootFieldNames>::ROOT_FIELD_NAMES,
+            );
+        )*
+        #(
+            ::graphql_orm::graphql::orm::assert_declared_subscription_root_fields::<#handwritten_subscription_roots>(
+                stringify!(#handwritten_subscription_roots),
+                <#handwritten_subscription_roots as ::graphql_orm::graphql::orm::GraphqlRootFieldNames>::ROOT_FIELD_NAMES,
+            );
+        )*
+    };
+    let root_field_collision_check = quote! {
+        #[allow(long_running_const_eval)]
+        const _: () = {
+            ::graphql_orm::graphql::orm::assert_unique_root_fields(
+                "Query",
+                &[#(#generated_queries),*],
+                &[#(#handwritten_queries),*],
+            );
+            ::graphql_orm::graphql::orm::assert_unique_root_fields(
+                "Mutation",
+                &[#(#generated_mutations),*],
+                &[#(#handwritten_mutations),*],
+            );
+            ::graphql_orm::graphql::orm::assert_unique_root_fields(
+                "Subscription",
+                &[#(#generated_subscriptions),*],
+                &[#(#handwritten_subscriptions),*],
+            );
+        };
+    };
+
     let extra_subscription_type_streams: Vec<proc_macro2::TokenStream> = args
         .extra_subscription_types
         .iter()
@@ -354,6 +448,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         return quote! {
             #query_root
             #operation_catalog_helper
+            #root_field_collision_check
 
             pub type MutationRoot = ::graphql_orm::async_graphql::EmptyMutation;
             #readonly_subscription_root
@@ -408,6 +503,8 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             /// Panics on a repeated entity identity during catalogue composition at
             /// schema build, naming both Rust types. This is not returned as a
             /// `KeysetReadPolicyError`.
+            /// It also panics when a handwritten root exposes a field its
+            /// `GraphqlRootFieldNames` declaration omits.
             pub fn try_schema_builder_with_limits(
                 database: ::graphql_orm::db::Database<#backend_marker>,
                 limits: ::graphql_orm::graphql::orm::SchemaLimits,
@@ -415,6 +512,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 ::graphql_orm::async_graphql::SchemaBuilder<QueryRoot, MutationRoot, SubscriptionRoot>,
                 ::graphql_orm::graphql::orm::KeysetReadPolicyError,
             > {
+                #root_field_declaration_check
                 database.validate_keyset_read_policies(
                     graphql_orm_operation_catalog(),
                     &graphql_orm_entity_metadata(),
@@ -562,6 +660,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         #mutation_root
         #subscription_root
         #operation_catalog_helper
+        #root_field_collision_check
 
         pub type AppSchema = ::graphql_orm::async_graphql::Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
 
@@ -614,6 +713,8 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         /// Panics on a repeated entity identity during catalogue composition at
         /// schema build, naming both Rust types. This is not returned as a
         /// `KeysetReadPolicyError`.
+        /// It also panics when a handwritten root exposes a field its
+        /// `GraphqlRootFieldNames` declaration omits.
         pub fn try_schema_builder_with_limits(
             database: ::graphql_orm::db::Database<#backend_marker>,
             limits: ::graphql_orm::graphql::orm::SchemaLimits,
@@ -621,6 +722,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             ::graphql_orm::async_graphql::SchemaBuilder<QueryRoot, MutationRoot, SubscriptionRoot>,
             ::graphql_orm::graphql::orm::KeysetReadPolicyError,
         > {
+            #root_field_declaration_check
             database.validate_keyset_read_policies(
                 graphql_orm_operation_catalog(),
                 &graphql_orm_entity_metadata(),

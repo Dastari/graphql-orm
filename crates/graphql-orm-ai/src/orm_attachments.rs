@@ -201,6 +201,8 @@ impl Default for AiAttachmentCleanupLimits {
 /// roots do. Provider resolution for a lease is unchanged.
 pub struct OrmAiAttachmentService {
     database: Database<DefaultWriteBackend>,
+    /// The handle the host supplied, returned by `database()`.
+    host_database: Database<DefaultWriteBackend>,
     access_policy: Arc<dyn AiAccessPolicy>,
     protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
     content_protector: Arc<dyn AiContentProtector>,
@@ -235,7 +237,10 @@ impl OrmAiAttachmentService {
         acceptance_policy: Arc<dyn AiAttachmentAcceptancePolicy>,
         clock: Arc<dyn Clock>,
     ) -> Self {
+        let host_database = database.clone();
+        let database = crate::custody_field_policy::custody_database(database);
         Self {
+            host_database,
             database,
             access_policy,
             protection_policy,
@@ -279,8 +284,11 @@ impl OrmAiAttachmentService {
     }
 
     /// Returns the ORM database handle for host composition.
+    // The public accessor returns the host's handle; `database` is the
+    // crate's internal handle and never leaves the crate.
+    #[allow(clippy::misnamed_getters)]
     pub const fn database(&self) -> &Database<DefaultWriteBackend> {
-        &self.database
+        &self.host_database
     }
 
     async fn visible_session(

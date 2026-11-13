@@ -20,7 +20,7 @@ impl AiProviderCallExecutor {
             return Ok(0);
         };
         let binding = crate::orm_provider_session::AiProviderSessionBindingRecord::find_by_id(
-            service.run_service().database(),
+            service.run_service().custody_database(),
             &claim.binding_id(),
         )
         .await

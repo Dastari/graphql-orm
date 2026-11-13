@@ -1,0 +1,5 @@
+error: `authorization(...)` replaces the root's requirement and must say so: write `authorization(replace, ...)`. To add scopes to the root's requirement, write `all_scopes = [...]` or `any_scopes = [[...]]` directly
+  --> tests/ui/custom_authorization_replace_unstated.rs:10:19
+   |
+10 |     #[graphql_orm(authorization(all_scopes = ["notes.read"]))]
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

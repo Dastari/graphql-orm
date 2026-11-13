@@ -239,6 +239,8 @@ impl AiRestoreAttachmentMetadataAuditLimits {
 #[derive(Clone)]
 pub struct OrmAiRestoreFactCollector {
     database: Database<DefaultWriteBackend>,
+    /// The handle the host supplied, returned by `database()`.
+    host_database: Database<DefaultWriteBackend>,
     limits: AiRestoreCollectorLimits,
     policy_audit_limits: Option<AiRestorePolicyAuditLimits>,
     attachment_metadata_audit_limits: Option<AiRestoreAttachmentMetadataAuditLimits>,
@@ -247,7 +249,10 @@ pub struct OrmAiRestoreFactCollector {
 impl OrmAiRestoreFactCollector {
     /// Creates a collector with conservative default bounds.
     pub fn new(database: Database<DefaultWriteBackend>) -> Self {
+        let host_database = database.clone();
+        let database = crate::custody_field_policy::custody_database(database);
         Self {
+            host_database,
             database,
             limits: AiRestoreCollectorLimits::default(),
             policy_audit_limits: None,
@@ -288,8 +293,11 @@ impl OrmAiRestoreFactCollector {
     }
 
     /// Returns the ORM database handle used by the collector.
+    // The public accessor returns the host's handle; `database` is the
+    // crate's internal handle and never leaves the crate.
+    #[allow(clippy::misnamed_getters)]
     pub fn database(&self) -> &Database<DefaultWriteBackend> {
-        &self.database
+        &self.host_database
     }
 
     /// Deployment-owned collection bounds.
@@ -299,7 +307,10 @@ impl OrmAiRestoreFactCollector {
 
     /// Returns the same audit configuration bound to another database handle.
     pub(crate) fn rebind(&self, database: Database<DefaultWriteBackend>) -> Self {
+        let host_database = database.clone();
+        let database = crate::custody_field_policy::custody_database(database);
         Self {
+            host_database,
             database,
             limits: self.limits,
             policy_audit_limits: self.policy_audit_limits,

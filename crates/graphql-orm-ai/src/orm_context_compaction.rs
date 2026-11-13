@@ -417,7 +417,7 @@ impl OrmAiContextCompactionService {
             return Err(AiError::Conflict);
         }
         let session =
-            AiSessionRecord::find_by_id(self.run_service.database(), &lease.session_id().0)
+            AiSessionRecord::find_by_id(self.run_service.custody_database(), &lease.session_id().0)
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::NotFound)?;
@@ -732,7 +732,7 @@ impl OrmAiContextCompactionService {
     ) -> Result<Option<AiLoadedContextCheckpoint>, AiError> {
         let lease = self.run_service.heartbeat(lease).await?;
         let session =
-            AiSessionRecord::find_by_id(self.run_service.database(), &lease.session_id().0)
+            AiSessionRecord::find_by_id(self.run_service.custody_database(), &lease.session_id().0)
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::NotFound)?;
@@ -823,7 +823,7 @@ impl OrmAiContextCompactionService {
     ) -> Result<Vec<AiContextCheckpointRecord>, AiError> {
         let limit = limit_with_lookahead(self.limits.maximum_checkpoints_per_session)?;
         self.run_service
-            .database()
+            .custody_database()
             .transaction(TransactionMode::Default, move |tx| {
                 Box::pin(async move {
                     tx.query::<AiContextCheckpointRecord>()
@@ -854,7 +854,7 @@ impl OrmAiContextCompactionService {
     ) -> Result<Vec<AiMessageRecord>, AiError> {
         let limit = limit_with_lookahead(maximum)?;
         self.run_service
-            .database()
+            .custody_database()
             .transaction(TransactionMode::Default, move |tx| {
                 Box::pin(async move {
                     tx.query::<AiMessageRecord>()
@@ -888,7 +888,7 @@ impl OrmAiContextCompactionService {
     ) -> Result<Vec<AiMessageBlockRecord>, AiError> {
         let limit = limit_with_lookahead(maximum)?;
         self.run_service
-            .database()
+            .custody_database()
             .transaction(TransactionMode::Default, move |tx| {
                 Box::pin(async move {
                     tx.query::<AiMessageBlockRecord>()

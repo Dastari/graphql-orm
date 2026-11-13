@@ -313,6 +313,7 @@ pub struct LegacyComment {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LegacyCustomQuery;
 
+#[graphql_orm::graphql_orm_root_fields]
 #[Object(rename_fields = "PascalCase", rename_args = "PascalCase")]
 impl LegacyCustomQuery {
     async fn legacy_work_item_comments(&self, job_no: String, first: i32) -> Vec<LegacyComment> {

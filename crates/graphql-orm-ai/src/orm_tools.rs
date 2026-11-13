@@ -640,7 +640,7 @@ impl OrmAiApplicationToolCallService {
             .get(context.tool_call_index)
             .ok_or(AiError::Conflict)?;
         let session =
-            AiSessionRecord::find_by_id(self.run_service.database(), &lease.session_id().0)
+            AiSessionRecord::find_by_id(self.run_service.custody_database(), &lease.session_id().0)
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::NotFound)?;
@@ -779,7 +779,7 @@ impl OrmAiApplicationToolCallService {
             return Err(AiError::Forbidden);
         }
         let session =
-            AiSessionRecord::find_by_id(self.run_service.database(), &lease.session_id().0)
+            AiSessionRecord::find_by_id(self.run_service.custody_database(), &lease.session_id().0)
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::NotFound)?;
@@ -1030,7 +1030,7 @@ impl OrmAiApplicationToolCallService {
             code = crate::AiApplicationToolFailureCode::InvalidArguments;
         }
         let session =
-            AiSessionRecord::find_by_id(self.run_service.database(), &lease.session_id().0)
+            AiSessionRecord::find_by_id(self.run_service.custody_database(), &lease.session_id().0)
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::NotFound)?;
@@ -1445,7 +1445,7 @@ impl OrmAiApplicationToolCallService {
         }
 
         let session =
-            AiSessionRecord::find_by_id(self.run_service.database(), &lease.session_id().0)
+            AiSessionRecord::find_by_id(self.run_service.custody_database(), &lease.session_id().0)
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::NotFound)?;
@@ -1973,7 +1973,7 @@ impl OrmAiApplicationToolCallService {
         }
 
         let session =
-            AiSessionRecord::find_by_id(self.run_service.database(), &lease.session_id().0)
+            AiSessionRecord::find_by_id(self.run_service.custody_database(), &lease.session_id().0)
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::NotFound)?;
@@ -2928,7 +2928,7 @@ impl OrmAiConsequentialToolCallService {
             .load_prepared_native_approval(lease, candidate.tool_call_id())
             .await?;
         let session = AiSessionRecord::find_by_id(
-            self.application_tools.run_service.database(),
+            self.application_tools.run_service.custody_database(),
             &lease.session_id().0,
         )
         .await
@@ -3115,7 +3115,7 @@ impl OrmAiConsequentialToolCallService {
             ));
         }
         let session = AiSessionRecord::find_by_id(
-            self.application_tools.run_service.database(),
+            self.application_tools.run_service.custody_database(),
             &lease.session_id().0,
         )
         .await
@@ -3321,7 +3321,7 @@ impl OrmAiConsequentialToolCallService {
                     .latest_checkpoint_id()
                     .ok_or(AiError::Conflict)?;
                 let checkpoint = AiRunCheckpointRecord::find_by_id(
-                    self.application_tools.run_service.database(),
+                    self.application_tools.run_service.custody_database(),
                     &checkpoint_id,
                 )
                 .await
@@ -3564,7 +3564,7 @@ impl OrmAiConsequentialToolCallService {
     ) -> Result<AiConsequentialToolCallOutcome, AiError> {
         route.validate()?;
         let call = AiToolCallRecord::find_by_id(
-            self.application_tools.run_service.database(),
+            self.application_tools.run_service.custody_database(),
             &tool_call_id.0,
         )
         .await
@@ -3580,7 +3580,7 @@ impl OrmAiConsequentialToolCallService {
             return Err(AiError::Conflict);
         }
         let session = AiSessionRecord::find_by_id(
-            self.application_tools.run_service.database(),
+            self.application_tools.run_service.custody_database(),
             &lease.session_id().0,
         )
         .await
@@ -3613,7 +3613,7 @@ impl OrmAiConsequentialToolCallService {
             .clone()
             .ok_or(AiError::PersistenceFailed)?;
         let reservation = AiBudgetReservationRecord::find_by_id(
-            self.application_tools.run_service.database(),
+            self.application_tools.run_service.custody_database(),
             &budget_reservation_id,
         )
         .await

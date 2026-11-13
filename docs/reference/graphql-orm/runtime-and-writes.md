@@ -180,6 +180,7 @@ impl NestedCreate {
         .map_err(|error| async_graphql::Error::new(format!("{error}")))
     }
 }
+// `NestedCreate` carries `#[graphql_orm_root_fields]` before `#[Object]`.
 // schema_roots! { ..., generated_mutations: "none", extra_mutation_types: [NestedCreate], ... }
 ```
 
@@ -448,7 +449,8 @@ MSSQL:
 - **Failures are contained.** An action that returns `Err` doesn't change the committed result: a
   GraphQL mutation still returns `success: true`, a repository call returns `Ok`, and `transaction`
   returns the callback's value. The error text goes to `PostCommitErrorHandler` through
-  `report_post_commit_error`, or to stderr if none is installed. The remaining actions of that commit
+  `report_post_commit_error`, or to a `tracing` error event on the `graphql_orm::post_commit` target if
+  none is installed. The remaining actions of that commit
   still run.
 - **Order.** After the commit: `Changed` events for every row, then every deferred action, then
   `notify_with`. For a bulk GraphQL write that is all rows' events, all rows' actions, then all rows'

@@ -73,6 +73,8 @@ impl Default for AiSessionServiceLimits {
 /// or submission admission is installed; neither admits these credentials.
 pub struct OrmAiSessionService {
     database: Database<DefaultWriteBackend>,
+    /// The handle the host supplied, returned by `database()`.
+    host_database: Database<DefaultWriteBackend>,
     access_policy: Arc<dyn AiAccessPolicy>,
     protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
     content_protector: Arc<dyn AiContentProtector>,
@@ -120,7 +122,10 @@ impl OrmAiSessionService {
         protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
         content_protector: Arc<dyn AiContentProtector>,
     ) -> Self {
+        let host_database = database.clone();
+        let database = crate::custody_field_policy::custody_database(database);
         Self {
+            host_database,
             database,
             access_policy,
             protection_policy,
@@ -201,7 +206,15 @@ impl OrmAiSessionService {
 
     /// Returns the underlying ORM database handle for schema composition and
     /// host wiring, without exposing a driver pool.
+    // The public accessor returns the host's handle; `database` is the
+    // crate's internal handle and never leaves the crate.
+    #[allow(clippy::misnamed_getters)]
     pub fn database(&self) -> &Database<DefaultWriteBackend> {
+        &self.host_database
+    }
+
+    /// The crate's internal handle: the host handle behind the custody field policy.
+    pub(crate) fn custody_database(&self) -> &Database<DefaultWriteBackend> {
         &self.database
     }
 

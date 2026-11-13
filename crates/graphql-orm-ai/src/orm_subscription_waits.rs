@@ -491,6 +491,11 @@ impl OrmAiSubscriptionWaitService {
         self.run_service.database()
     }
 
+    /// The crate's internal handle: the host handle behind the custody field policy.
+    pub(crate) fn custody_database(&self) -> &Database<DefaultWriteBackend> {
+        self.run_service.custody_database()
+    }
+
     /// Compiles, freshly authorizes and durably suspends one exact provider
     /// subscription-capability call.
     ///
@@ -584,7 +589,7 @@ impl OrmAiSubscriptionWaitService {
             .preauthorize_compiled_subscription(lease.principal_reference(), &descriptor, &request)
             .await?;
         self.ensure_fresh(preauthorization.principal(), lease.principal_reference())?;
-        let session = AiSessionRecord::find_by_id(self.database(), &lease.session_id().0)
+        let session = AiSessionRecord::find_by_id(self.custody_database(), &lease.session_id().0)
             .await
             .map_err(|error| map_orm(OrmPublicError::from(error)))?
             .ok_or(AiError::NotFound)?;
@@ -691,7 +696,7 @@ impl OrmAiSubscriptionWaitService {
             .await?;
         let source_checkpoint_id = lease.latest_checkpoint_id().ok_or(AiError::Conflict)?;
         let source_checkpoint =
-            AiRunCheckpointRecord::find_by_id(self.database(), &source_checkpoint_id)
+            AiRunCheckpointRecord::find_by_id(self.custody_database(), &source_checkpoint_id)
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::Conflict)?;
@@ -933,7 +938,7 @@ impl OrmAiSubscriptionWaitService {
             .ok_or(AiError::PersistenceFailed)?;
         let maximum = i64::try_from(self.limits.maximum_candidate_scan)
             .map_err(|_| AiError::InvalidConfiguration("invalid waiter scan bound".to_owned()))?;
-        self.database()
+        self.custody_database()
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
                     crate::orm_runtime_recovery::require_live_epoch(tx).await?;
@@ -1434,7 +1439,7 @@ impl OrmAiSubscriptionWaitService {
     async fn release_claim(&self, claim: &AiSubscriptionWaitClaim) -> Result<(), AiError> {
         let now = canonical_second(self.clock.now());
         let claim = claim.clone();
-        self.database()
+        self.custody_database()
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
                     let waiter = tx
@@ -1507,7 +1512,7 @@ impl OrmAiSubscriptionWaitService {
             .ok_or(AiError::PersistenceFailed)?;
         let now = canonical_second(self.clock.now());
         let claim = claim.clone();
-        self.database()
+        self.custody_database()
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
                     let waiter = tx
@@ -1787,7 +1792,7 @@ impl OrmAiSubscriptionWaitService {
     ) -> Result<(), AiError> {
         let claim = claim.clone();
         let now = canonical_second(self.clock.now());
-        self.database()
+        self.custody_database()
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
                     crate::orm_runtime_recovery::require_live_epoch(tx).await?;
@@ -1956,7 +1961,7 @@ impl OrmAiSubscriptionWaitService {
         let claim = claim.clone();
         let reason_code = reason_code.to_owned();
         let now = canonical_second(self.clock.now());
-        self.database()
+        self.custody_database()
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
                     crate::orm_runtime_recovery::require_live_epoch(tx).await?;
@@ -2077,7 +2082,7 @@ impl OrmAiSubscriptionWaitService {
         lease: &AiRunLease,
         checkpoint_id: Uuid,
     ) -> Result<Option<crate::AiAdoptedReadOnlyToolBatch>, AiError> {
-        let checkpoint = AiRunCheckpointRecord::find_by_id(self.database(), &checkpoint_id)
+        let checkpoint = AiRunCheckpointRecord::find_by_id(self.custody_database(), &checkpoint_id)
             .await
             .map_err(|error| map_orm(OrmPublicError::from(error)))?
             .ok_or(AiError::NotFound)?;
@@ -2085,15 +2090,16 @@ impl OrmAiSubscriptionWaitService {
             return Ok(None);
         }
         let adoption =
-            AiSubscriptionWaitAdoptionRecord::find_by_id(self.database(), &checkpoint_id)
+            AiSubscriptionWaitAdoptionRecord::find_by_id(self.custody_database(), &checkpoint_id)
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::NotFound)?;
-        let waiter = AiSubscriptionWaiterRecord::find_by_id(self.database(), &adoption.waiter_id)
-            .await
-            .map_err(|error| map_orm(OrmPublicError::from(error)))?
-            .ok_or(AiError::NotFound)?;
-        let session = AiSessionRecord::find_by_id(self.database(), &lease.session_id().0)
+        let waiter =
+            AiSubscriptionWaiterRecord::find_by_id(self.custody_database(), &adoption.waiter_id)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
+        let session = AiSessionRecord::find_by_id(self.custody_database(), &lease.session_id().0)
             .await
             .map_err(|error| map_orm(OrmPublicError::from(error)))?
             .ok_or(AiError::NotFound)?;
@@ -2340,7 +2346,7 @@ impl OrmAiSubscriptionWaitService {
         let lease = lease.clone();
         let adoption = adoption.clone();
         let now = canonical_second(self.clock.now());
-        self.database()
+        self.custody_database()
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
                     load_and_validate_active_lease(tx, &lease, now).await?;
@@ -2384,7 +2390,7 @@ impl OrmAiSubscriptionWaitService {
         let now = canonical_second(self.clock.now());
         let ttl = self.run_service.lease_ttl();
         let updated = self
-            .database()
+            .custody_database()
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
                     let run = load_and_validate_active_lease(tx, &lease, now).await?;
@@ -2497,10 +2503,11 @@ impl OrmAiSubscriptionWaitService {
     }
 
     async fn open_claim(&self, claim: &AiSubscriptionWaitClaim) -> Result<OpenedWait, AiError> {
-        let waiter = AiSubscriptionWaiterRecord::find_by_id(self.database(), &claim.waiter_id.0)
-            .await
-            .map_err(|error| map_orm(OrmPublicError::from(error)))?
-            .ok_or(AiError::NotFound)?;
+        let waiter =
+            AiSubscriptionWaiterRecord::find_by_id(self.custody_database(), &claim.waiter_id.0)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
         let now = self.clock.now().unix_timestamp();
         if waiter.run_id != claim.run_id.0
             || waiter.state != "claimed"
@@ -2512,28 +2519,32 @@ impl OrmAiSubscriptionWaitService {
         {
             return Err(AiError::Conflict);
         }
-        let session = AiSessionRecord::find_by_id(self.database(), &waiter.session_id)
+        let session = AiSessionRecord::find_by_id(self.custody_database(), &waiter.session_id)
             .await
             .map_err(|error| map_orm(OrmPublicError::from(error)))?
             .ok_or(AiError::NotFound)?;
-        let run = AiRunRecord::find_by_id(self.database(), &waiter.run_id)
+        let run = AiRunRecord::find_by_id(self.custody_database(), &waiter.run_id)
             .await
             .map_err(|error| map_orm(OrmPublicError::from(error)))?
             .ok_or(AiError::NotFound)?;
-        let call = AiToolCallRecord::find_by_id(self.database(), &waiter.tool_call_id)
+        let call = AiToolCallRecord::find_by_id(self.custody_database(), &waiter.tool_call_id)
             .await
             .map_err(|error| map_orm(OrmPublicError::from(error)))?
             .ok_or(AiError::NotFound)?;
-        let source_checkpoint =
-            AiRunCheckpointRecord::find_by_id(self.database(), &waiter.source_checkpoint_id)
-                .await
-                .map_err(|error| map_orm(OrmPublicError::from(error)))?
-                .ok_or(AiError::NotFound)?;
-        let parked_checkpoint =
-            AiRunCheckpointRecord::find_by_id(self.database(), &waiter.parked_checkpoint_id)
-                .await
-                .map_err(|error| map_orm(OrmPublicError::from(error)))?
-                .ok_or(AiError::NotFound)?;
+        let source_checkpoint = AiRunCheckpointRecord::find_by_id(
+            self.custody_database(),
+            &waiter.source_checkpoint_id,
+        )
+        .await
+        .map_err(|error| map_orm(OrmPublicError::from(error)))?
+        .ok_or(AiError::NotFound)?;
+        let parked_checkpoint = AiRunCheckpointRecord::find_by_id(
+            self.custody_database(),
+            &waiter.parked_checkpoint_id,
+        )
+        .await
+        .map_err(|error| map_orm(OrmPublicError::from(error)))?
+        .ok_or(AiError::NotFound)?;
         if run.session_id != waiter.session_id
             || run.state != AiRunState::WaitingSubscription.as_str()
             || run.attempt_id.is_some()
@@ -2947,7 +2958,7 @@ impl OrmAiSubscriptionWaitService {
         now: OffsetDateTime,
     ) -> Result<(), AiError> {
         let lease = lease.clone();
-        self.database()
+        self.custody_database()
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
                     let run = load_and_validate_active_lease(tx, &lease, now).await?;
@@ -3275,10 +3286,11 @@ impl crate::AiAgentCheckpointAdopter for AiSubscriptionCheckpointAdopter {
         lease: &AiRunLease,
         checkpoint_id: Uuid,
     ) -> Result<AiRunLease, AiError> {
-        let checkpoint = AiRunCheckpointRecord::find_by_id(self.waits.database(), &checkpoint_id)
-            .await
-            .map_err(|error| map_orm(OrmPublicError::from(error)))?
-            .ok_or(AiError::NotFound)?;
+        let checkpoint =
+            AiRunCheckpointRecord::find_by_id(self.waits.custody_database(), &checkpoint_id)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
         if checkpoint.checkpoint_kind == "subscription_wait_adopted" {
             self.waits.consume_wait_adoption(lease, checkpoint_id).await
         } else {

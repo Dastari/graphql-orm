@@ -10,6 +10,8 @@ supersedes: []
 
 # graphql-orm-ai
 
+Version `0.139.0` adopts ORM 0.143.0 and keeps the crate's own records readable and writable whatever the host `FieldPolicy` answers for repository field decisions: internal handles answer those decisions for the crate's own entities and delegate everything else, and `database()` returns the host's handle. No data migration is needed. See the [migration guide](MIGRATION.md#01380-to-01390-custody-of-the-crates-own-records-under-a-host-field-policy).
+
 Version `0.136.0` adopts ORM 0.133.0, which reserves runtime schema table names; the internal session-activity query admits its own tables by exact name, so session listing is unchanged. No data migration is needed. See the [migration guide](MIGRATION.md#01350-to-01360-orm-01330-reserved-runtime-table-names).
 
 Version `0.135.0` bounds attachment uploads while they stream, applies a crate-level tenant predicate to approval and proposal lookups, refuses trusted-worker entity access without a host entity policy unless the host opts in, and limits provider endpoints: plain `http` only for loopback unless the endpoint policy opts in, a policy recheck before every request, and no proxy environment unless the host opts in. Several of these are breaking defaults; AI schema is unchanged and no data migration is needed. See the [migration guide](MIGRATION.md#01340-to-01350).

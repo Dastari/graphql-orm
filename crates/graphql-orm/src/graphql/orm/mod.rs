@@ -24,6 +24,7 @@ mod point_read;
 mod query;
 mod read_authorization;
 mod rls;
+mod root_fields;
 mod runtime_backup;
 mod runtime_decimal;
 mod runtime_description;
@@ -93,6 +94,7 @@ pub use point_read::*;
 pub use query::*;
 pub use read_authorization::*;
 pub use rls::*;
+pub use root_fields::*;
 pub use runtime_backup::*;
 #[cfg(feature = "runtime-graphql")]
 pub(crate) use runtime_decimal::runtime_decimal_syntax;

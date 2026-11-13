@@ -306,18 +306,14 @@ struct Secured {
     name: String,
 }
 
-/// Same names as generated operations, to show which resolver runs.
+/// Described custom roots. A field with the name of a generated operation
+/// (`deleteOrder`, `orders`) no longer compiles: `schema_roots!` rejects it.
 #[derive(Default)]
 struct TwinMutations;
 
-#[graphql_orm_custom_operations(kind = "mutation", authorization = true)]
+#[graphql_orm_custom_operations(kind = "mutation")]
 #[Object]
 impl TwinMutations {
-    /// Collides with the generated `deleteOrder`.
-    async fn delete_order(&self, id: async_graphql::ID) -> String {
-        format!("custom:{}", id.as_str())
-    }
-
     /// A custom resolver calling a repository helper.
     async fn rename_secured(&self, ctx: &Context<'_>, id: Uuid) -> async_graphql::Result<bool> {
         let db = ctx.data::<Database<SqliteBackend>>()?;
@@ -337,11 +333,11 @@ impl TwinMutations {
 #[derive(Default)]
 struct TwinQueries;
 
-#[graphql_orm_custom_operations(kind = "query", authorization = true)]
+#[graphql_orm_custom_operations(kind = "query")]
 #[Object]
 impl TwinQueries {
-    /// Collides with the generated `orders`.
-    async fn orders(&self) -> String {
+    /// A distinct name beside the generated `orders`.
+    async fn order_summary(&self) -> String {
         "custom".into()
     }
 }
@@ -845,27 +841,32 @@ async fn the_default_delete_policy_refuses_a_parent_with_children() {
 }
 
 #[tokio::test]
-async fn a_custom_root_with_a_generated_name_never_runs() {
+async fn a_described_custom_root_enforces_its_declared_authorization() {
     let db = database().await;
     let schema = schema_builder(db.clone()).finish();
-    let (_, order, _) = seed(&db).await;
 
-    // The custom resolvers return String, but the schema exposes the generated types.
-    let query = schema
-        .execute(as_user("query { orders { edges { node { reference } } } }"))
-        .await;
+    // A described root requires an authenticated subject before its body runs.
+    let anonymous = schema.execute("query { orderSummary }").await;
+    assert_eq!(
+        anonymous.errors[0]
+            .extensions
+            .as_ref()
+            .and_then(|extensions| extensions.get("code")),
+        Some(&async_graphql::Value::from("UNAUTHENTICATED"))
+    );
+    let query = schema.execute(as_user("query { orderSummary }")).await;
     assert!(query.errors.is_empty(), "{:?}", query.errors);
-    let mutation = schema
-        .execute(as_user(format!(
-            r#"mutation {{ deleteOrder(id: "{}") {{ success }} }}"#,
-            order.id
-        )))
-        .await;
-    assert!(mutation.errors.is_empty(), "{:?}", mutation.errors);
-    assert_eq!(Order::count_all(&db).await.unwrap(), 0);
 
-    // The only signal is a panic from the semantic catalogue.
-    assert!(std::panic::catch_unwind(graphql_orm_semantic_catalog).is_err());
+    // Custom and generated names are distinct, so the catalogue composes.
+    let catalog = graphql_orm_semantic_catalog();
+    assert!(
+        catalog
+            .operations
+            .iter()
+            .find(|operation| operation.field_name == "orderSummary")
+            .expect("custom root is catalogued")
+            .has_authorization_policy
+    );
 }
 
 #[tokio::test]

@@ -2771,6 +2771,16 @@ fn generate_graphql_operations_unfiltered(
     let mut update_bulk_omission_checks: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut upsert_policy_checks_graphql: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut upsert_policy_checks_repo: Vec<proc_macro2::TokenStream> = Vec::new();
+    // Field write decisions of the repository insert and update paths. A
+    // `RepositoryEntity` asks them through its `Entity` hook instead.
+    let mut repository_create_field_checks: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut repository_update_field_checks: Vec<proc_macro2::TokenStream> = Vec::new();
+    // Which key-less optional fields the GraphQL client supplied, recorded
+    // before an input transform or hook can change the input. A GraphQL write
+    // asks about a key-less field only when the client could and did send it.
+    let mut create_client_supplied: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut update_client_supplied: Vec<proc_macro2::TokenStream> = Vec::new();
+    let repository_entity_hook_asks = crate::entity::has_repository_entity_attribute(&input.attrs);
     let mut upsert_update_columns: Vec<String> = Vec::new();
     let mut upsert_change_fields: Vec<String> = Vec::new();
     let mut upsert_change_binds_graphql: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -2820,6 +2830,12 @@ fn generate_graphql_operations_unfiltered(
         let db_col = meta.db_column.clone().unwrap_or_else(|| rust_name.clone());
         let db_col_sql = backend_render_identifier_path(backend, &db_col);
         let is_json_like_field = meta.is_json_field || meta.spatial.is_some();
+        // One rule on every generated write path: the field write decision is
+        // asked for each field written, with its declared key or `None`.
+        let write_policy_key = match &meta.write_policy {
+            Some(policy_key) => quote! { Some(#policy_key) },
+            None => quote! { None },
+        };
 
         // Track string-filterable fields for fuzzy search
         if meta.filter && meta.filterable.as_deref() == Some("string") {
@@ -2846,14 +2862,14 @@ fn generate_graphql_operations_unfiltered(
             } else {
                 quote! { #field_type }
             };
-            let create_policy_check = if let Some(policy_key) = &meta.write_policy {
+            let create_policy_check = {
                 if is_option_type(field_type) {
                     quote! {
                         if !db.check_field_write(
                             ctx,
                             #entity_name_lit,
                             #graphql_name,
-                            Some(#policy_key),
+                            #write_policy_key,
                             None,
                             Some(&input.#field_name as &(dyn ::std::any::Any + Send + Sync)),
                         ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)? {
@@ -2866,16 +2882,50 @@ fn generate_graphql_operations_unfiltered(
                             ctx,
                             #entity_name_lit,
                             #graphql_name,
-                            Some(#policy_key),
+                            #write_policy_key,
                             None,
                             Some(&input.#field_name as &(dyn ::std::any::Any + Send + Sync)),
                         ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                     }
                 }
-            } else {
-                quote! {}
             };
-            create_policy_checks.push(create_policy_check);
+            // A field with a declared key is asked as before, also when the
+            // optional input is absent. A key-less field is asked only when it
+            // is part of the GraphQL input type and the client supplied it; a
+            // required input is always supplied.
+            let keyless = meta.write_policy.is_none();
+            let graphql_create_asks = !keyless || graphql_include_in_create;
+            let graphql_create_condition = if keyless && is_option_type(field_type) {
+                create_client_supplied.push(quote! {
+                    if input.#field_name.is_some() {
+                        __gom_client_supplied.insert(#graphql_name);
+                    }
+                });
+                quote! { __gom_client_supplied.contains(#graphql_name) }
+            } else {
+                quote! { true }
+            };
+            if graphql_create_asks {
+                create_policy_checks.push(quote! {
+                    if #graphql_create_condition {
+                        #create_policy_check
+                    }
+                });
+            }
+            // Repository code writes every create field; ORM-managed columns
+            // are not the caller's to write and are not asked about.
+            if !repository_entity_hook_asks && !meta.managed_version {
+                repository_create_field_checks.push(quote! {
+                    db.ensure_repository_writable_field(
+                        None,
+                        #entity_name_lit,
+                        #graphql_name,
+                        #write_policy_key,
+                        None,
+                        Some(&input.#field_name as &(dyn ::std::any::Any + Send + Sync)),
+                    ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)?;
+                });
+            }
             // For create: use the field type directly (required fields stay required)
             create_input_fields.push(quote! {
                 pub #field_name: #field_type,
@@ -2910,7 +2960,7 @@ fn generate_graphql_operations_unfiltered(
                 let upsert_update_candidate =
                     !meta.is_primary_key && !upsert_target_db_columns.contains(&db_col);
 
-                if let Some(policy_key) = &meta.write_policy {
+                {
                     let graphql_check = if is_option_type(field_type) {
                         if upsert_update_candidate {
                             quote! {
@@ -2919,7 +2969,7 @@ fn generate_graphql_operations_unfiltered(
                                         ctx,
                                         #entity_name_lit,
                                         #graphql_name,
-                                        Some(#policy_key),
+                                        #write_policy_key,
                                         Some(current_entity as &(dyn ::std::any::Any + Send + Sync)),
                                         Some(&input.#field_name as &(dyn ::std::any::Any + Send + Sync)),
                                     ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?
@@ -2928,7 +2978,7 @@ fn generate_graphql_operations_unfiltered(
                                         ctx,
                                         #entity_name_lit,
                                         #graphql_name,
-                                        Some(#policy_key),
+                                        #write_policy_key,
                                         None,
                                         Some(&input.#field_name as &(dyn ::std::any::Any + Send + Sync)),
                                     ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?
@@ -2944,7 +2994,7 @@ fn generate_graphql_operations_unfiltered(
                                         ctx,
                                         #entity_name_lit,
                                         #graphql_name,
-                                        Some(#policy_key),
+                                        #write_policy_key,
                                         None,
                                         Some(&input.#field_name as &(dyn ::std::any::Any + Send + Sync)),
                                     ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?
@@ -2960,7 +3010,7 @@ fn generate_graphql_operations_unfiltered(
                                     ctx,
                                     #entity_name_lit,
                                     #graphql_name,
-                                    Some(#policy_key),
+                                    #write_policy_key,
                                     Some(current_entity as &(dyn ::std::any::Any + Send + Sync)),
                                     Some(&input.#field_name as &(dyn ::std::any::Any + Send + Sync)),
                                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
@@ -2969,7 +3019,7 @@ fn generate_graphql_operations_unfiltered(
                                     ctx,
                                     #entity_name_lit,
                                     #graphql_name,
-                                    Some(#policy_key),
+                                    #write_policy_key,
                                     None,
                                     Some(&input.#field_name as &(dyn ::std::any::Any + Send + Sync)),
                                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
@@ -2982,7 +3032,7 @@ fn generate_graphql_operations_unfiltered(
                                     ctx,
                                     #entity_name_lit,
                                     #graphql_name,
-                                    Some(#policy_key),
+                                    #write_policy_key,
                                     None,
                                     Some(&input.#field_name as &(dyn ::std::any::Any + Send + Sync)),
                                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
@@ -2996,7 +3046,7 @@ fn generate_graphql_operations_unfiltered(
                                     None,
                                     #entity_name_lit,
                                     #graphql_name,
-                                    Some(#policy_key),
+                                    #write_policy_key,
                                     Some(current_entity as &(dyn ::std::any::Any + Send + Sync)),
                                     Some(&input.#field_name as &(dyn ::std::any::Any + Send + Sync)),
                                 ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)?;
@@ -3005,7 +3055,7 @@ fn generate_graphql_operations_unfiltered(
                                     None,
                                     #entity_name_lit,
                                     #graphql_name,
-                                    Some(#policy_key),
+                                    #write_policy_key,
                                     None,
                                     Some(&input.#field_name as &(dyn ::std::any::Any + Send + Sync)),
                                 ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)?;
@@ -3018,15 +3068,23 @@ fn generate_graphql_operations_unfiltered(
                                     None,
                                     #entity_name_lit,
                                     #graphql_name,
-                                    Some(#policy_key),
+                                    #write_policy_key,
                                     None,
                                     Some(&input.#field_name as &(dyn ::std::any::Any + Send + Sync)),
                                 ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)?;
                             }
                         }
                     };
-                    upsert_policy_checks_graphql.push(graphql_check);
-                    upsert_policy_checks_repo.push(repo_check);
+                    if graphql_create_asks {
+                        upsert_policy_checks_graphql.push(quote! {
+                            if #graphql_create_condition {
+                                #graphql_check
+                            }
+                        });
+                    }
+                    if !meta.managed_version {
+                        upsert_policy_checks_repo.push(repo_check);
+                    }
                 }
 
                 if upsert_update_candidate {
@@ -3318,14 +3376,14 @@ fn generate_graphql_operations_unfiltered(
             }
 
             // Generate update field check
-            let update_policy_check = if let Some(policy_key) = &meta.write_policy {
+            let update_policy_check = {
                 quote! {
-                    let __gom_field_write_allowed = if let Some(ref val) = input.#field_name {
+                    let __gom_field_write_allowed = if let Some(val) = &input.#field_name {
                         db.check_field_write(
                             ctx,
                             #entity_name_lit,
                             #graphql_name,
-                            Some(#policy_key),
+                            #write_policy_key,
                             Some(&current_entity as &(dyn ::std::any::Any + Send + Sync)),
                             Some(val as &(dyn ::std::any::Any + Send + Sync)),
                         ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?
@@ -3336,18 +3394,50 @@ fn generate_graphql_operations_unfiltered(
                         input.#field_name = None;
                     }
                 }
-            } else {
-                quote! {}
             };
-            update_policy_checks.push(update_policy_check);
-            if let Some(policy_key) = &meta.write_policy {
+            let keyless = meta.write_policy.is_none();
+            let graphql_update_asks = !keyless || graphql_include_in_update;
+            let graphql_update_condition = if keyless {
+                update_client_supplied.push(quote! {
+                    if __gom_client_input.#field_name.is_some() {
+                        __gom_client_supplied.insert(#graphql_name);
+                    }
+                });
+                quote! { __gom_client_supplied.contains(#graphql_name) }
+            } else {
+                quote! { true }
+            };
+            if graphql_update_asks {
+                update_policy_checks.push(quote! {
+                    if #graphql_update_condition {
+                        #update_policy_check
+                    }
+                });
+            }
+            if !repository_entity_hook_asks && !meta.managed_version {
+                repository_update_field_checks.push(quote! {
+                    if let Some(value) = &input.#field_name {
+                        db.ensure_repository_writable_field(
+                            None,
+                            #entity_name_lit,
+                            #graphql_name,
+                            #write_policy_key,
+                            __gom_existing,
+                            Some(value as &(dyn ::std::any::Any + Send + Sync)),
+                        ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)?;
+                    }
+                });
+            }
+            if graphql_update_asks {
                 update_runtime_policy_checks.push(quote! {
-                    let __gom_field_write_allowed = if let Some(ref val) = input.#field_name {
+                    let __gom_field_write_allowed = if !(#graphql_update_condition) {
+                        true
+                    } else if let Some(val) = &input.#field_name {
                         db.check_field_write(
                             ctx,
                             #entity_name_lit,
                             #graphql_name,
-                            Some(#policy_key),
+                            #write_policy_key,
                             Some(policy_entity as &(dyn ::std::any::Any + Send + Sync)),
                             Some(val as &(dyn ::std::any::Any + Send + Sync)),
                         ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?
@@ -3770,6 +3860,20 @@ fn generate_graphql_operations_unfiltered(
             }
 
             #update_assignments_graphql_helper
+
+            /// Asks the repository field write decision for every field a
+            /// repository update supplies. Emitted once per entity and called
+            /// by every repository update path, before the assignments.
+            #[doc(hidden)]
+            #[allow(dead_code, unused_variables)]
+            async fn __gom_authorize_repository_update_field_writes(
+                db: &::graphql_orm::db::Database<#backend_marker>,
+                __gom_existing: Option<&(dyn ::std::any::Any + Send + Sync)>,
+                input: &#update_input,
+            ) -> ::graphql_orm::Result<()> {
+                #(#repository_update_field_checks)*
+                Ok(())
+            }
         }
     };
     let update_assignments_repo_call = quote! {
@@ -4542,6 +4646,10 @@ fn generate_graphql_operations_unfiltered(
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                 db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                 let mut input: #create_input = input.into();
+                #[allow(unused_mut)]
+                let mut __gom_client_supplied: ::std::collections::HashSet<&'static str> =
+                    ::std::collections::HashSet::new();
+                #(#create_client_supplied)*
                 let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin_with_auth(
                     db,
                     ::graphql_orm::graphql::orm::TransactionMode::StateMachine,
@@ -4926,6 +5034,11 @@ fn generate_graphql_operations_unfiltered(
                         &db,
                         current_entity.as_ref().map(|entity| entity as &(dyn ::std::any::Any + Send + Sync)),
                         &input as &(dyn ::std::any::Any + Send + Sync),
+                    ).await?;
+                    Self::__gom_authorize_repository_update_field_writes(
+                        &db,
+                        current_entity.as_ref().map(|entity| entity as &(dyn ::std::any::Any + Send + Sync)),
+                        &input,
                     ).await?;
 
                     let dialect = <#backend_marker as OrmBackend>::DIALECT;
@@ -6088,6 +6201,10 @@ fn generate_graphql_operations_unfiltered(
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                 db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                 let mut input: #create_input = input.into();
+                #[allow(unused_mut)]
+                let mut __gom_client_supplied: ::std::collections::HashSet<&'static str> =
+                    ::std::collections::HashSet::new();
+                #(#create_client_supplied)*
                 db.run_before_create(
                     Some(ctx),
                     #entity_name_lit,
@@ -6471,6 +6588,7 @@ fn generate_graphql_operations_unfiltered(
                         &db,
                         &input as &(dyn ::std::any::Any + Send + Sync),
                     ).await?;
+                    #(#repository_create_field_checks)*
                     #created_key_init
                     let sql = Self::__gom_rebind_sql(#insert_sql, 1);
                     let mut bind_values: Vec<SqlValue> = Vec::new();
@@ -6733,6 +6851,7 @@ fn generate_graphql_operations_unfiltered(
                         &db,
                         &input as &(dyn ::std::any::Any + Send + Sync),
                     ).await?;
+                    #(#repository_create_field_checks)*
                     let key = #key_type { #(#key_from_input)* };
                     let sql = Self::__gom_rebind_sql(&::graphql_orm::graphql::orm::build_insert_sql(
                         #table_name,
@@ -6794,6 +6913,7 @@ fn generate_graphql_operations_unfiltered(
                         &db,
                         &input as &(dyn ::std::any::Any + Send + Sync),
                     ).await?;
+                    #(#repository_create_field_checks)*
                     let key = #key_type { #(#key_from_input)* };
                     let lookup_input = input.clone();
                     let sql = Self::__gom_rebind_sql(&::graphql_orm::graphql::orm::build_insert_if_absent_sql(
@@ -6880,6 +7000,11 @@ fn generate_graphql_operations_unfiltered(
                         &db,
                         Some(&current_entity as &(dyn ::std::any::Any + Send + Sync)),
                         &input as &(dyn ::std::any::Any + Send + Sync),
+                    ).await?;
+                    Self::__gom_authorize_repository_update_field_writes(
+                        &db,
+                        Some(&current_entity as &(dyn ::std::any::Any + Send + Sync)),
+                        &input,
                     ).await?;
                     let mut set_clauses: Vec<String> = Vec::new();
                     let mut changed_fields: Vec<&str> = Vec::new();
@@ -7149,6 +7274,11 @@ fn generate_graphql_operations_unfiltered(
                         &db,
                         Some(&current_entity as &(dyn ::std::any::Any + Send + Sync)),
                         &input as &(dyn ::std::any::Any + Send + Sync),
+                    ).await?;
+                    Self::__gom_authorize_repository_update_field_writes(
+                        &db,
+                        Some(&current_entity as &(dyn ::std::any::Any + Send + Sync)),
+                        &input,
                     ).await?;
                     let mut set_clauses: Vec<String> = Vec::new();
                     let mut changed_fields: Vec<&str> = Vec::new();
@@ -7688,6 +7818,9 @@ fn generate_graphql_operations_unfiltered(
     // Argument lists are read from the resolver signatures after expansion;
     // see `catalog_arguments`. Descriptors name only their root coordinate.
     use crate::catalog_arguments::{RootKind, placeholder as root_arguments};
+    // Every generated root field, recorded as its descriptor is built, for
+    // the `schema_roots!` collision check against handwritten roots.
+    let generated_root_fields = ::std::cell::RefCell::new(Vec::<(RootKind, String)>::new());
     let descriptor = |kind: RootKind,
                       category: proc_macro2::TokenStream,
                       field_name: &str,
@@ -7703,6 +7836,9 @@ fn generate_graphql_operations_unfiltered(
                 quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription }
             }
         };
+        generated_root_fields
+            .borrow_mut()
+            .push((kind, field_name.to_owned()));
         let arguments = root_arguments(kind, field_name);
         quote! {
             ::graphql_orm::graphql::orm::GeneratedGraphqlOperationDescriptor::generated_with_authorization_and_description(
@@ -7748,6 +7884,9 @@ fn generate_graphql_operations_unfiltered(
          rust_result_type: proc_macro2::TokenStream,
          operation_authorization: &proc_macro2::TokenStream| {
             let policy = ai_mutation_policy(category_name);
+            generated_root_fields
+                .borrow_mut()
+                .push((RootKind::Mutation, field_name.to_owned()));
             let arguments = root_arguments(RootKind::Mutation, field_name);
             quote! {
                 ::graphql_orm::graphql::orm::GeneratedGraphqlOperationDescriptor::generated_with_authorization_description_and_ai_policy(
@@ -8095,7 +8234,32 @@ fn generate_graphql_operations_unfiltered(
                 && [#(#disabled_mutation_fields),*].contains(&operation.field_name())));
         }
     };
+    // The root fields each generated root object exposes: the descriptors
+    // above, less the shapes the entity does not select.
+    let exposed_root_fields = |kind: RootKind, disabled: &[&str]| {
+        generated_root_fields
+            .borrow()
+            .iter()
+            .filter(|(field_kind, name)| *field_kind == kind && !disabled.contains(&name.as_str()))
+            .map(|(_, name)| name.clone())
+            .collect::<Vec<_>>()
+    };
+    let query_root_fields = exposed_root_fields(RootKind::Query, &disabled_query_fields);
+    let mutation_root_fields = exposed_root_fields(RootKind::Mutation, &disabled_mutation_fields);
+    let subscription_root_fields = exposed_root_fields(RootKind::Subscription, &[]);
     let operation_metadata_impl = quote! {
+        impl #struct_name {
+            #[doc(hidden)]
+            pub const __GOM_QUERY_ROOT_FIELDS: &'static [&'static str] =
+                &[#(#query_root_fields),*];
+            #[doc(hidden)]
+            pub const __GOM_MUTATION_ROOT_FIELDS: &'static [&'static str] =
+                &[#(#mutation_root_fields),*];
+            #[doc(hidden)]
+            pub const __GOM_SUBSCRIPTION_ROOT_FIELDS: &'static [&'static str] =
+                &[#(#subscription_root_fields),*];
+        }
+
         impl ::graphql_orm::graphql::orm::GraphqlOperationMetadata for #struct_name {
             fn generated_graphql_operations(
             ) -> &'static [::graphql_orm::graphql::orm::GeneratedGraphqlOperationDescriptor] {
@@ -8646,6 +8810,13 @@ fn generate_graphql_operations_unfiltered(
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                 db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                 let mut input: #update_input = input.into();
+                #[allow(unused_mut)]
+                let mut __gom_client_supplied: ::std::collections::HashSet<&'static str> =
+                    ::std::collections::HashSet::new();
+                {
+                    let __gom_client_input = &input;
+                    #(#update_client_supplied)*
+                }
                 let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin_with_auth(
                     db,
                     ::graphql_orm::graphql::orm::TransactionMode::StateMachine,
@@ -9569,6 +9740,7 @@ fn generate_graphql_operations_unfiltered(
                     &db,
                     &input as &(dyn ::std::any::Any + Send + Sync),
                 ).await?;
+                #(#repository_create_field_checks)*
                 #created_pk_init
                 let sql = Self::__gom_rebind_sql(#insert_sql, 1);
                 let mut bind_values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
@@ -9670,6 +9842,11 @@ fn generate_graphql_operations_unfiltered(
                     &db,
                     Some(&current_entity as &(dyn ::std::any::Any + Send + Sync)),
                     &input as &(dyn ::std::any::Any + Send + Sync),
+                ).await?;
+                Self::__gom_authorize_repository_update_field_writes(
+                    &db,
+                    Some(&current_entity as &(dyn ::std::any::Any + Send + Sync)),
+                    &input,
                 ).await?;
 
                 let mut set_clauses: Vec<String> = Vec::new();
@@ -9807,6 +9984,11 @@ fn generate_graphql_operations_unfiltered(
                         &db,
                         Some(policy_entity as &(dyn ::std::any::Any + Send + Sync)),
                         &input as &(dyn ::std::any::Any + Send + Sync),
+                    ).await?;
+                    Self::__gom_authorize_repository_update_field_writes(
+                        &db,
+                        Some(policy_entity as &(dyn ::std::any::Any + Send + Sync)),
+                        &input,
                     ).await?;
 
                     let mut set_clauses: Vec<String> = Vec::new();
@@ -10248,6 +10430,11 @@ fn generate_graphql_operations_unfiltered(
                     Some(&current_entity as &(dyn ::std::any::Any + Send + Sync)),
                     &input as &(dyn ::std::any::Any + Send + Sync),
                 ).await?;
+                Self::__gom_authorize_repository_update_field_writes(
+                    db,
+                    Some(&current_entity as &(dyn ::std::any::Any + Send + Sync)),
+                    &input,
+                ).await?;
 
                 let mut set_clauses: Vec<String> = Vec::new();
                 let mut changed_fields: Vec<&str> = Vec::new();
@@ -10408,6 +10595,13 @@ fn generate_graphql_operations_unfiltered(
                     return Ok(0);
                 }
                 let original_input = input;
+                #[allow(unused_mut)]
+                let mut __gom_client_supplied: ::std::collections::HashSet<&'static str> =
+                    ::std::collections::HashSet::new();
+                {
+                    let __gom_client_input = &original_input;
+                    #(#update_client_supplied)*
+                }
                 let mut row_inputs = Vec::with_capacity(matched_entities.len());
                 #[allow(unused_mut)]
                 let mut __gom_omitted_fields: ::std::collections::HashSet<&'static str> = ::std::collections::HashSet::new();
@@ -10439,6 +10633,11 @@ fn generate_graphql_operations_unfiltered(
                             db,
                             Some(policy_entity as &(dyn ::std::any::Any + Send + Sync)),
                             &input as &(dyn ::std::any::Any + Send + Sync),
+                        ).await?;
+                        Self::__gom_authorize_repository_update_field_writes(
+                            db,
+                            Some(policy_entity as &(dyn ::std::any::Any + Send + Sync)),
+                            &input,
                         ).await?;
                     }
 
@@ -11387,6 +11586,15 @@ mod update_assignment_tests {
         assert!(
             field_checks < assignments,
             "the field authorization precedes the assignments in update_by_id"
+        );
+        // The generated field write decision (asked for every supplied field,
+        // key or no key) also precedes the assignments.
+        let field_decision = repository
+            .find("__gom_authorize_repository_update_field_writes (")
+            .expect("update_by_id asks the repository field write decision");
+        assert!(
+            field_decision < assignments,
+            "the field write decision precedes the assignments in update_by_id"
         );
         assert_eq!(count(repository, helper_call), 1);
     }

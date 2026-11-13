@@ -1804,7 +1804,7 @@ where
     /// - A returned error does not change the committed result and does not stop the remaining
     ///   actions. Its text goes to [`PostCommitErrorHandler`] through
     ///   [`Database::report_post_commit_error`](crate::db::Database::report_post_commit_error), or to
-    ///   stderr if no handler is installed.
+    ///   a `tracing` error event on the `graphql_orm::post_commit` target if no handler is installed.
     pub fn defer<F, Fut, E>(&mut self, action: F)
     where
         F: FnOnce(crate::db::Database<B>) -> Fut + Send + 'static,

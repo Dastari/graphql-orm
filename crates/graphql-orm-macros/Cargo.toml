@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm-macros"
-version = "0.141.0"
+version = "0.143.0"
 edition = "2024"
 authors = ["Toby Martin"]
 description = "Procedural macros for async-graphql and ORM-backed entities, relations, and CRUD operations."
@@ -45,6 +45,9 @@ field-case-upper = []
 
 [dependencies]
 convert_case = "0.7"
+# The version and features async-graphql-derive resolves, so handwritten root
+# field names are derived exactly as it derives them.
+Inflector = { version = "0.11.4", default-features = false }
 proc-macro2 = "1"
 quote = "1"
 rust_decimal = { workspace = true }

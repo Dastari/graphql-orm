@@ -642,6 +642,8 @@ impl std::fmt::Debug for AiOpenAiBackgroundReconciliationClaim {
 #[derive(Clone)]
 pub struct OrmAiOpenAiBackgroundReconciliationService {
     database: Database<DefaultWriteBackend>,
+    /// The handle the host supplied, returned by `database()`.
+    host_database: Database<DefaultWriteBackend>,
     worker_database: Database<DefaultWriteBackend>,
     clock: Arc<dyn Clock>,
     limits: AiOpenAiBackgroundReconciliationLimits,
@@ -1139,7 +1141,7 @@ impl OrmAiOpenAiBackgroundSubmissionService {
         let lease = lease.clone();
         let prepared = prepared.clone();
         self.run_service
-            .database()
+            .custody_database()
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
                     let current = load_and_validate_active_lease(tx, &lease, now).await?;
@@ -1311,7 +1313,7 @@ impl OrmAiOpenAiBackgroundSubmissionService {
         let acknowledgement_for_tx = acknowledgement.clone();
         let prepared_for_tx = prepared.clone();
         self.run_service
-            .database()
+            .custody_database()
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
                     let current = load_and_validate_active_lease(tx, &lease, now).await?;
@@ -1449,7 +1451,7 @@ impl OrmAiOpenAiBackgroundSubmissionService {
         let lease = lease.clone();
         let prepared = prepared.clone();
         self.run_service
-            .database()
+            .custody_database()
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
                     let current = load_and_validate_active_lease(tx, &lease, now).await?;
@@ -1605,7 +1607,10 @@ impl OrmAiOpenAiBackgroundReconciliationService {
         clock: Arc<dyn Clock>,
         limits: AiOpenAiBackgroundReconciliationLimits,
     ) -> Self {
+        let host_database = database.clone();
+        let database = crate::custody_field_policy::custody_database(database);
         Self {
+            host_database,
             worker_database: crate::orm_webhooks::with_provider_webhook_receipt_policy(
                 database.clone(),
                 crate::AiTrustedWorkerEntityFallback::Deny,
@@ -1632,8 +1637,11 @@ impl OrmAiOpenAiBackgroundReconciliationService {
     ///
     /// The handle carries the host's own entity policy, not the service's
     /// internal receipt grant.
+    // The public accessor returns the host's handle; `database` is the
+    // crate's internal handle and never leaves the crate.
+    #[allow(clippy::misnamed_getters)]
     pub const fn database(&self) -> &Database<DefaultWriteBackend> {
-        &self.database
+        &self.host_database
     }
 
     /// Claims the oldest eligible accepted submission or reclaims an expired
@@ -2488,6 +2496,7 @@ impl OrmAiOpenAiBackgroundRetrievalService {
         route: AiOpenAiBackgroundRetrievalRoute,
         limits: AiOpenAiBackgroundRetrievalLimits,
     ) -> Self {
+        let database = crate::custody_field_policy::custody_database(database);
         Self {
             database,
             runtime,
@@ -2852,6 +2861,7 @@ impl OrmAiOpenAiBackgroundTerminalService {
         output_limits: AiProviderOutputLimits,
         maximum_principal_age: Duration,
     ) -> Result<Self, AiError> {
+        let database = crate::custody_field_policy::custody_database(database);
         if maximum_principal_age <= Duration::ZERO
             || maximum_principal_age > MAXIMUM_BACKGROUND_PRINCIPAL_AGE
         {

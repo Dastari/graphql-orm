@@ -247,6 +247,8 @@ impl AiAgentRuleResolver for DeploymentAiCurrentRuleResolver {
 #[derive(Clone)]
 pub struct OrmAiRulePolicyService {
     database: Database<DefaultWriteBackend>,
+    /// The handle the host supplied, returned by `database()`.
+    host_database: Database<DefaultWriteBackend>,
     access_policy: Arc<dyn AiRuleAccessPolicy>,
     hierarchy_resolver: Arc<dyn AiRuleHierarchyResolver>,
     recent_mfa_policy: RecentMfaPolicy,
@@ -264,7 +266,10 @@ impl OrmAiRulePolicyService {
         clock: Arc<dyn Clock>,
         limits: AiRuleDeploymentLimits,
     ) -> Self {
+        let host_database = database.clone();
+        let database = crate::custody_field_policy::custody_database(database);
         Self {
+            host_database,
             database,
             access_policy,
             hierarchy_resolver,
@@ -275,8 +280,11 @@ impl OrmAiRulePolicyService {
     }
 
     /// Returns the underlying ORM handle for host schema wiring.
+    // The public accessor returns the host's handle; `database` is the
+    // crate's internal handle and never leaves the crate.
+    #[allow(clippy::misnamed_getters)]
     pub fn database(&self) -> &Database<DefaultWriteBackend> {
-        &self.database
+        &self.host_database
     }
 
     async fn require_access(

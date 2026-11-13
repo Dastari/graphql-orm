@@ -413,11 +413,18 @@ resolve to null without errors, exactly like a physically absent target. Collect
 relations omit denied targets and count only visible targets. Callback policy
 errors still fail closed; they are never converted to null or empty collections.
 
-Target entity read denials and relation-field `read_policy` denials are explicit
-`FORBIDDEN` errors. Relation-field policy checks run on the source record before
-looking up targets, including absent ones. Missing policy providers retain
-`AUTHORIZATION_MISCONFIGURED`. These operation/field denials are independent of
-row existence. Public errors are sanitized at the relation boundary.
+Target entity read denials and relation-field denials are explicit
+`FORBIDDEN` errors. The relation field's read decision is asked on the source
+record before looking up targets, including absent ones, with the relation's
+`read_policy` key or `None` when it declares none; see
+[field read decisions](strict-authorization.md#field-read-decisions). Missing
+policy providers retain `AUTHORIZATION_MISCONFIGURED`, a policy that answers
+`UNAUTHENTICATED` keeps that code, an error the policy authored itself is a
+`FORBIDDEN` refusal, and an error it propagated from something else is
+`INTERNAL_ERROR` or `SERVICE_UNAVAILABLE` (see
+[policy callback errors](strict-authorization.md#policy-callback-errors)). These
+operation/field denials are independent of row existence. Public errors are
+sanitized at the relation boundary: no callback text crosses it.
 
 A handwritten non-null relation cannot promise availability under visibility
 filtering. Prefer the generated nullable field. If a host exposes a non-null

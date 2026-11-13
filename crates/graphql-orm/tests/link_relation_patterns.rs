@@ -196,6 +196,7 @@ pub struct NestedLinkInput {
 #[derive(Default)]
 pub struct NestedCreate;
 
+#[graphql_orm_root_fields]
 #[Object]
 impl NestedCreate {
     /// Create an owner and its link rows in one transaction. Any failure rolls

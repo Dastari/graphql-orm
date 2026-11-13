@@ -510,10 +510,11 @@ pub struct OrmAiSessionRetentionService {
 impl OrmAiSessionRetentionService {
     /// Creates a bounded trusted retention worker.
     pub fn new(
-        mut database: Database<DefaultWriteBackend>,
+        database: Database<DefaultWriteBackend>,
         clock: Arc<dyn Clock>,
         limits: AiSessionRetentionLimits,
     ) -> Self {
+        let mut database = crate::custody_field_policy::custody_database(database);
         let delegate = database.entity_policy().cloned();
         database.set_entity_policy(SessionRetentionEntityPolicy { delegate });
         Self {

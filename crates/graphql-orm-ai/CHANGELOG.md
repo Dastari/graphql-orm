@@ -10,6 +10,12 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.139.0
+
+- **Fix:** the crate's own persistence no longer depends on what the host `FieldPolicy` answers for repository field decisions. ORM 0.143.0 asks `can_write_repository_field` about every field a generated repository write touches (it already asked `can_read_repository_field` on reads), with no access context, so a host policy that refuses unknown entities or every call without an access context would have refused the crate's inserts, updates and compare-and-swap writes of its own records with `FORBIDDEN`. Every service now works on an internal handle whose field policy answers repository-surface decisions for the crate's own entities (the entities of `AiSchemaModule`, for fields without a policy key) and delegates every other entity, every declared key and both GraphQL surfaces to the host policy unchanged. A database without a field policy is used as it is.
+- **Changed:** `database()` on every service returns the handle the host supplied, never the internal one. Host code that writes AI records or its own entities through that handle keeps following the host's own field policy. For the webhook receipt and background reconciliation services this was already the case for the entity policy.
+- Adopt ORM 0.143.0.
+
 ## Unreleased - 0.136.0
 
 - **Changed:** the session-activity query declares the reserved tables it uses. ORM 0.133.0 reserves `graphql_orm_` table names in runtime schemas, and the query's schema describes this crate's own session, event, message, run and failure-disposition tables, so it admits exactly those five names through `RuntimeSchema::validate_with_reserved_tables`. Session listing is unchanged.

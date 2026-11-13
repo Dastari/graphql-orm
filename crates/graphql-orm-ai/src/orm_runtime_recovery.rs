@@ -155,6 +155,7 @@ pub struct OrmAiRuntimeRecoveryService {
 impl OrmAiRuntimeRecoveryService {
     /// Creates a recovery service with conservative default bounds.
     pub fn new(database: Database<DefaultWriteBackend>, clock: Arc<dyn Clock>) -> Self {
+        let database = crate::custody_field_policy::custody_database(database);
         Self {
             database: database.with_pagination_config(PaginationConfig::unbounded()),
             clock,

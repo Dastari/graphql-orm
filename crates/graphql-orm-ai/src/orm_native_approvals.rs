@@ -227,14 +227,15 @@ impl crate::OrmAiConsequentialToolCallService {
         let candidate = run_service
             .load_prepared_native_approval(lease, prepared.tool_call_id)
             .await?;
-        let call = AiToolCallRecord::find_by_id(run_service.database(), &candidate.id)
+        let call = AiToolCallRecord::find_by_id(run_service.custody_database(), &candidate.id)
             .await
             .map_err(|_| AiError::PersistenceFailed)?
             .ok_or(AiError::Conflict)?;
-        let session = AiSessionRecord::find_by_id(run_service.database(), &lease.session_id().0)
-            .await
-            .map_err(|_| AiError::PersistenceFailed)?
-            .ok_or(AiError::Conflict)?;
+        let session =
+            AiSessionRecord::find_by_id(run_service.custody_database(), &lease.session_id().0)
+                .await
+                .map_err(|_| AiError::PersistenceFailed)?
+                .ok_or(AiError::Conflict)?;
         if call.provider_call_id != prepared.provider_call_id {
             return Err(AiError::Conflict);
         }

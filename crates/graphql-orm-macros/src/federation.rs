@@ -672,6 +672,8 @@ pub(crate) struct NodeIdPart {
     pub(crate) rust_type: syn::Type,
     pub(crate) kind: RelationValueKind,
     pub(crate) quoted_column: String,
+    /// Public GraphQL name of the key field this part encodes.
+    pub(crate) graphql_name: String,
 }
 
 /// Validate a `node_id` declaration and return its key parts.
@@ -729,6 +731,7 @@ pub(crate) fn resolve_node_id_parts(
             rust_type: field.field_type.clone(),
             kind,
             quoted_column: backend_render_identifier_path(backend, &column),
+            graphql_name: name.clone(),
         });
     }
     Ok(Some(parts))
@@ -754,21 +757,40 @@ pub(crate) fn node_id_json_part(
 }
 
 /// The `NodeId` field method for the entity's GraphQL object.
+///
+/// A `NodeId` discloses every primary-key value. Its key fields declare no
+/// read policy key, so the field read decision is asked without one: for the
+/// `NodeId` field itself and for each key field it encodes.
 pub(crate) fn node_id_field_tokens(
     struct_name_str: &str,
+    entity_name: &proc_macro2::TokenStream,
+    backend_marker: &proc_macro2::TokenStream,
+    record: &proc_macro2::TokenStream,
     parts: &[NodeIdPart],
 ) -> proc_macro2::TokenStream {
     let values = parts.iter().map(|part| {
         let ident = &part.ident;
         node_id_json_part(part.kind, quote! { self.#ident })
     });
+    let disclosed = parts.iter().map(|part| &part.graphql_name);
     let description = format!(
         "Opaque global identity of this {struct_name_str}: base64url (no padding) of the compact JSON array of its type name and complete primary key."
     );
     quote! {
         #[doc = #description]
         #[graphql(name = "NodeId")]
-        async fn __gom_node_id(&self) -> ::graphql_orm::async_graphql::Result<::graphql_orm::async_graphql::ID> {
+        async fn __gom_node_id(
+            &self,
+            ctx: &::graphql_orm::async_graphql::Context<'_>,
+        ) -> ::graphql_orm::async_graphql::Result<::graphql_orm::async_graphql::ID> {
+            let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
+            ::graphql_orm::graphql::federation::authorize_node_id_fields(
+                db,
+                ctx,
+                #entity_name,
+                &[#(#disclosed),*],
+                #record as &(dyn ::std::any::Any + Send + Sync),
+            ).await?;
             Ok(::graphql_orm::graphql::federation::encode_node_id(
                 #struct_name_str,
                 vec![#(#values),*],

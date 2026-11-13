@@ -1,0 +1,5 @@
+error: any_scopes must not contain an empty scope list
+  --> tests/ui/custom_authorization_empty_scopes.rs:10:51
+   |
+10 |     #[graphql_orm(any_scopes = [["reports.read"], []])]
+   |                                                   ^^

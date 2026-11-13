@@ -1,0 +1,26 @@
+error[E0080]: evaluation panicked: graphql-orm: entity `Item` generates the Query root field `item` twice, so one of its operations would silently replace the other. This happens when two generated names coincide, for example a `plural` equal to the entity's name. Change the `plural`, or remove one operation with `query_shapes`/`mutation_shapes`.
+  --> tests/ui/root_collision_within_entity.rs:14:1
+   |
+14 | / schema_roots! {
+15 | |     backend: "sqlite",
+16 | |     query_custom_ops: [],
+17 | |     entities: [Item],
+18 | | }
+   | |_^ evaluation of `_` failed inside this call
+   |
+note: inside `graphql_orm::prelude::assert_unique_root_fields`
+  --> $RUST/core/src/panic.rs
+   |
+   = note: the failure occurred here
+   |
+  ::: src/graphql/orm/root_fields.rs
+   |
+   | /                     fail!(Message::new()
+   | |                         .push("graphql-orm: entity `")
+   | |                         .push(generated[entity].owner)
+   | |                         .push("` generates the ")
+...  |
+   | |                         .push(name)
+   | |                         .push("` twice, so one of its operations would silently replace the other. This happens when two generated names coincide, for example a `plural` equal to the entity's name. Change the `plural`, or remove one operation with `query_shapes`/`mutation_shapes`."));
+   | |____________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________- in this macro invocation
+   = note: this error originates in the macro `schema_roots` which comes from the expansion of the macro `fail` (in Nightly builds, run with -Z macro-backtrace for more info)

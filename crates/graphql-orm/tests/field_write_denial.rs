@@ -218,6 +218,8 @@ async fn run(operation: &str, field: &str, legacy: bool, fail: bool) {
             "new"
         };
         format!("recordKey: \"{key}\", required: \"after\", optional: \"after\", other: \"after\"")
+    } else if field == "other" {
+        "other: \"after\"".to_string()
     } else {
         format!("{field}: \"after\", other: \"after\"")
     };
@@ -373,6 +375,14 @@ async fn explicit_opt_out_never_swallows_policy_errors() {
         run(operation, "optional", true, true).await;
     }
 }
+
+// `other` declares no `write_policy`: the write decision is asked for it with
+// `None`, and a policy that denies it by name is obeyed on every write path.
+case!(create_keyless, "create", "other");
+case!(update_keyless, "update", "other");
+case!(upsert_new_keyless, "upsert_new", "other");
+case!(upsert_existing_keyless, "upsert_existing", "other");
+case!(bulk_keyless, "bulk", "other");
 
 case!(update_optional_null, "update_null", "optional");
 case!(bulk_optional_null, "bulk_null", "optional");

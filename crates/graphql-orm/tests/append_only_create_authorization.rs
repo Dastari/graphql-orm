@@ -77,6 +77,11 @@ impl FieldPolicy for Policy {
     ) -> BoxFuture<'a, async_graphql::Result<bool>> {
         Box::pin(async move {
             assert!(value.is_some());
+            // Every written field is asked; this policy restricts only the
+            // two that declare a key.
+            if policy.is_none() {
+                return Ok(true);
+            }
             if self.fail_field {
                 return Err(std::io::Error::other("private provider details").into());
             }

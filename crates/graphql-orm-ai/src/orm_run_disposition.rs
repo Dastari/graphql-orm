@@ -92,6 +92,7 @@ impl OrmAiRunDispositionService {
         clock: Arc<dyn Clock>,
         limits: AiRunDispositionLimits,
     ) -> Self {
+        let database = crate::custody_field_policy::custody_database(database);
         Self {
             database,
             access_policy,

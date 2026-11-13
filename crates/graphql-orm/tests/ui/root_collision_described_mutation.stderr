@@ -1,0 +1,26 @@
+error[E0080]: evaluation panicked: graphql-orm: handwritten Mutation root field `deleteItem` of `ApplicationMutations` collides with the generated operation `deleteItem` of entity `Item`. A merged root serves only one of them, so one would silently replace the other. Rename the handwritten field with `#[graphql(name = "...")]`, or remove the generated operation with the entity's `query_shapes`/`mutation_shapes` or `generated_mutations` in `schema_roots!`.
+  --> tests/ui/root_collision_described_mutation.rs:26:1
+   |
+26 | / schema_roots! {
+27 | |     backend: "sqlite",
+28 | |     entities: [Item],
+29 | |     described_mutation_types: [ApplicationMutations],
+30 | | }
+   | |_^ evaluation of `_` failed inside this call
+   |
+note: inside `graphql_orm::prelude::assert_unique_root_fields`
+  --> $RUST/core/src/panic.rs
+   |
+   = note: the failure occurred here
+   |
+  ::: src/graphql/orm/root_fields.rs
+   |
+   | /                         fail!(Message::new()
+   | |                             .push("graphql-orm: handwritten ")
+   | |                             .push(root)
+   | |                             .push(" root field `")
+...  |
+   | |                             .push(generated[entity].owner)
+   | |                             .push("`. A merged root serves only one of them, so one would silently replace the other. Rename the handwritten field with `#[graphql(name = \"...\")]`, or remove the generated operation with the entity's `query_shapes`/`mutation_shapes` or `generated_mutations` in `schema_roots!`."));
+   | |__________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________- in this macro invocation
+   = note: this error originates in the macro `schema_roots` which comes from the expansion of the macro `fail` (in Nightly builds, run with -Z macro-backtrace for more info)

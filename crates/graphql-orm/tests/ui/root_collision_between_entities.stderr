@@ -1,0 +1,26 @@
+error[E0080]: evaluation panicked: graphql-orm: generated Query root field `items` is produced by both entity `Item` and entity `StockItem`. A merged root serves only one of them, so one entity's operation would silently replace the other's. Give one entity a different `plural` or GraphQL name, or remove the operation from one of them with `query_shapes`/`mutation_shapes`.
+  --> tests/ui/root_collision_between_entities.rs:33:1
+   |
+33 | / schema_roots! {
+34 | |     backend: "sqlite",
+35 | |     query_custom_ops: [],
+36 | |     entities: [Item, StockItem],
+37 | | }
+   | |_^ evaluation of `_` failed inside this call
+   |
+note: inside `graphql_orm::prelude::assert_unique_root_fields`
+  --> $RUST/core/src/panic.rs
+   |
+   = note: the failure occurred here
+   |
+  ::: src/graphql/orm/root_fields.rs
+   |
+   | /                         fail!(Message::new()
+   | |                             .push("graphql-orm: generated ")
+   | |                             .push(root)
+   | |                             .push(" root field `")
+...  |
+   | |                             .push(generated[other].owner)
+   | |                             .push("`. A merged root serves only one of them, so one entity's operation would silently replace the other's. Give one entity a different `plural` or GraphQL name, or remove the operation from one of them with `query_shapes`/`mutation_shapes`."));
+   | |___________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________- in this macro invocation
+   = note: this error originates in the macro `schema_roots` which comes from the expansion of the macro `fail` (in Nightly builds, run with -Z macro-backtrace for more info)

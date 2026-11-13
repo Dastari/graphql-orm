@@ -204,6 +204,7 @@ impl OrmAiInboxPruningService {
         clock: Arc<dyn Clock>,
         limits: AiInboxPruningLimits,
     ) -> Self {
+        let database = crate::custody_field_policy::custody_database(database);
         Self {
             database,
             clock,
@@ -481,6 +482,7 @@ impl OrmAiInboxService {
         protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
         content_protector: Arc<dyn AiContentProtector>,
     ) -> Self {
+        let database = crate::custody_field_policy::custody_database(database);
         Self {
             database,
             principal_resolver,
