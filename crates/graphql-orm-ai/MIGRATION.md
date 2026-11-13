@@ -15,10 +15,11 @@ supersedes: []
 ### Run and session lifecycle fixes
 
 Apply `AiSchemaModule` version `0.78.0` with the normal module migration. It
-adds one column, `graphql_orm_ai_budget_reservations.settlement_examined_at`
-(integer, not null, default `0`), which the stranded-reservation sweeper uses to
-rotate reservations it cannot settle yet. Existing rows take the default; no
-data migration is needed. It also changes generated filter metadata (see the
+adds two columns, `graphql_orm_ai_budget_reservations.settlement_examined_at`
+and `graphql_orm_ai_runs.recovery_examined_at` (integers, not null, default
+`0`). The stranded-reservation sweep and lease recovery use them to rotate rows
+they leave unresolved, so no row can hold their bounded scans. Existing rows
+take the default; no data migration is needed. It also changes generated filter metadata (see the
 last item below).
 
 - `AiRunRecoveryReport` has three new public fields: `quarantined`,
@@ -41,8 +42,10 @@ last item below).
   decision on an approval whose run is no longer waiting returns
   `InvalidInput` with `AI_APPROVAL_RUN_NOT_WAITING` (match on that constant);
   budget reconciliation requires the live recovery epoch, also for a
-  cancelled attempt; an expired-lease run whose recovery transaction is
-  refused is closed as `RecoveryRequired` with `lease_recovery_failed`; a run
+  cancelled attempt; lease recovery quarantines a run only for a durable
+  defect of its own stored state and otherwise leaves it unchanged and counts
+  it in `skipped` (a host row policy whose candidate budget refuses a recovery
+  scan fails the pass instead, and quarantines nothing); a run
   that closes while its provider session is parked moves that binding to
   `cleanup_required` (`provider_session_parked_wait_closed`); a provider-session binding that fails validation is
   moved to `cleanup_exhausted` (`provider_session_state_invalid`) and audited; lease recovery commits the reserved

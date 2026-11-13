@@ -700,7 +700,11 @@ ready one, and taking over an expired claim or park records that run as the
 binding's last run. A binding that fails validation is moved to
 `cleanup_exhausted` with `provider_session_state_invalid` and audited as
 `ai.provider_session.cleanup_quarantined`; alert on it like any other
-exhausted cleanup. The
+exhausted cleanup. A run that closes while its provider session is
+parked moves that binding to `cleanup_required` in the same transaction. Parks
+closed before that rule are found by a per-row fallback page whose resume
+offset is process-local; after a restart such a park is cleaned up at the
+latest when its wait, claim or binding expiry passes. The
 registered deletion service must still delete the exact old provider session
 or authoritatively prove absence. Expiry, local process death and restore are
 not absence proof. Portable restore continues to quarantine/redact provider

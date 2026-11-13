@@ -4615,6 +4615,7 @@ mod service {
                     latest_checkpoint_id: Some(source_checkpoint_id),
                     cancellation_request_id: None,
                     cancellation_requested_at: None,
+                    recovery_examined_at: 0,
                 },
             )
             .await

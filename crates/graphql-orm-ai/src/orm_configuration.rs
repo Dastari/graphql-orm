@@ -2382,6 +2382,7 @@ mod tests {
                 latest_checkpoint_id: None,
                 cancellation_request_id: None,
                 cancellation_requested_at: None,
+                recovery_examined_at: 0,
             },
         )
         .await

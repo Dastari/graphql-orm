@@ -1236,10 +1236,12 @@ impl OrmAiRunService {
         let scan = limits.maximum_candidate_scan;
         let mut report = AiRunRecoveryReport::default();
         // Two bounded pages: active rows with no expiry (malformed, so they
-        // are quarantined rather than skipped forever) and expired rows.
-        // Every row examined either leaves the scan set durably (recovered
-        // or quarantined) or failed for an infrastructure reason that affects
-        // every row alike, so no row can hold the head of the window.
+        // are quarantined rather than skipped forever) and expired rows, each
+        // least recently examined first. A row is recovered, quarantined for
+        // a durable defect of its own state, or left unchanged after an
+        // operational failure with a fenced progress stamp that moves it
+        // behind the rest, so no row can hold the head of the window across
+        // passes or restarts.
         for missing_expiry in [true, false] {
             let candidates = retry_transaction(limits.maximum_transaction_retries, || {
                 self.database
@@ -1272,18 +1274,24 @@ impl OrmAiRunService {
                             let rows = tx
                                 .query::<AiRunRecord>()
                                 .filter(filter())
-                                .default_order()
+                                .order_by(AiRunRecordOrderByInput {
+                                    recovery_examined_at: Some(OrderDirection::Asc),
+                                    ..Default::default()
+                                })
                                 .internal_limit(scan as i64)
                                 .fetch_all()
                                 .await
                                 .map_err(OrmPublicError::from)?;
-                            Ok(rows.into_iter().map(|run| run.id).collect::<Vec<_>>())
+                            Ok(rows
+                                .into_iter()
+                                .map(|run| (run.id, run.row_version, run.state))
+                                .collect::<Vec<_>>())
                         })
                     })
             })
             .await
             .map_err(map_transaction)?;
-            for run_id in candidates {
+            for (run_id, observed_version, observed_state) in candidates {
                 let outcome = retry_transaction(limits.maximum_transaction_retries, || {
                     self.database
                         .transaction(TransactionMode::StateMachine, move |tx| {
@@ -1315,36 +1323,32 @@ impl OrmAiRunService {
                     {
                         return Err(AiError::RuntimeNotReady);
                     }
-                    Err(TransactionError::Rejected(_)) => {
-                        // The transaction itself was refused after its bounded
-                        // serialization retries: the row's durable state cannot
-                        // be recovered as classified and would fail the same
-                        // way on every pass and after every restart. Close it
-                        // for manual recovery instead of letting it hold the
-                        // head of the window.
-                        let quarantined =
-                            retry_transaction(limits.maximum_transaction_retries, || {
-                                self.database.transaction(
-                                    TransactionMode::StateMachine,
-                                    move |tx| {
-                                        Box::pin(async move {
-                                            quarantine_unrecoverable_run(tx, run_id, cutoff).await
-                                        })
-                                    },
-                                )
-                            })
-                            .await;
-                        match quarantined {
-                            Ok(true) => {
-                                report.quarantined = report.quarantined.saturating_add(1);
-                            }
-                            Ok(false) => {}
-                            Err(_) => report.skipped = report.skipped.saturating_add(1),
-                        }
+                    // An operational failure (a host policy refusal, a
+                    // refused read, a database error after the bounded
+                    // serialization retries). The run stays exactly as it
+                    // was; a fenced stamp moves it behind the rest of the
+                    // scan so it cannot starve the rows behind it.
+                    Err(_) => {
+                        report.skipped = report.skipped.saturating_add(1);
+                        let observed_state = observed_state.clone();
+                        let _ = retry_transaction(limits.maximum_transaction_retries, || {
+                            let observed_state = observed_state.clone();
+                            self.database
+                                .transaction(TransactionMode::StateMachine, move |tx| {
+                                    Box::pin(async move {
+                                        stamp_run_recovery_progress(
+                                            tx,
+                                            run_id,
+                                            observed_version,
+                                            &observed_state,
+                                            now.unix_timestamp(),
+                                        )
+                                        .await
+                                    })
+                                })
+                        })
+                        .await;
                     }
-                    // Infrastructure failure: every row is affected alike and
-                    // the next pass retries.
-                    Err(_) => report.skipped = report.skipped.saturating_add(1),
                 }
             }
         }
@@ -1406,14 +1410,16 @@ impl OrmAiRunService {
                         Ok(rows
                             .into_iter()
                             .filter(|reservation| reservation.expires_at <= now_seconds)
-                            .map(|reservation| reservation.id)
+                            .map(|reservation| {
+                                (reservation.id, reservation.row_version, reservation.state)
+                            })
                             .collect::<Vec<_>>())
                     })
                 })
         })
         .await
         .map_err(map_transaction)?;
-        for reservation_id in candidates {
+        for (reservation_id, observed_version, observed_state) in candidates {
             let outcome = retry_transaction(limits.maximum_transaction_retries, || {
                 self.database
                     .transaction(TransactionMode::StateMachine, move |tx| {
@@ -1424,15 +1430,14 @@ impl OrmAiRunService {
                     })
             })
             .await;
-            let left_unresolved = match outcome {
+            match outcome {
                 Ok(ReservationSettlement::Settled) => {
                     report.budget_reservations_settled =
                         report.budget_reservations_settled.saturating_add(1);
-                    false
                 }
-                Ok(ReservationSettlement::Gone) => false,
-                // Owned by a live attempt or a background submission.
-                Ok(ReservationSettlement::Owned) => true,
+                // Gone left the scan set; Owned was stamped inside the same
+                // epoch-checked transaction that observed the owner.
+                Ok(ReservationSettlement::Gone | ReservationSettlement::Owned) => {}
                 Err(error)
                     if crate::orm_runtime_recovery::is_epoch_not_live(error.public_error()) =>
                 {
@@ -1440,30 +1445,27 @@ impl OrmAiRunService {
                 }
                 Err(_) => {
                     report.skipped = report.skipped.saturating_add(1);
-                    true
-                }
-            };
-            if left_unresolved {
-                // A stamp failure leaves the row where it was; the next pass
-                // stamps it again.
-                let _ = retry_transaction(limits.maximum_transaction_retries, || {
-                    self.database
-                        .transaction(TransactionMode::StateMachine, move |tx| {
-                            Box::pin(async move {
-                                tx.update_by_id::<AiBudgetReservationRecord>(
-                                    &reservation_id,
-                                    UpdateAiBudgetReservationRecordInput {
-                                        settlement_examined_at: Some(now_seconds),
-                                        ..Default::default()
-                                    },
-                                )
-                                .await
-                                .map_err(OrmPublicError::from)?;
-                                Ok(())
+                    // Fenced by the live epoch and the observed version and
+                    // state; a refusal leaves the row for the next pass.
+                    let observed_state = observed_state.clone();
+                    let _ = retry_transaction(limits.maximum_transaction_retries, || {
+                        let observed_state = observed_state.clone();
+                        self.database
+                            .transaction(TransactionMode::StateMachine, move |tx| {
+                                Box::pin(async move {
+                                    stamp_reservation_settlement_progress(
+                                        tx,
+                                        reservation_id,
+                                        observed_version,
+                                        &observed_state,
+                                        now_seconds,
+                                    )
+                                    .await
+                                })
                             })
-                        })
-                })
-                .await;
+                    })
+                    .await;
+                }
             }
         }
         Ok(())
@@ -5627,7 +5629,7 @@ async fn classify_expired_lease(
                 .fetch_one()
                 .await
                 .map_err(OrmPublicError::from)?
-                .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                .ok_or_else(|| recovery_state_invalid())?;
             // A checkpoint written by an earlier attempt is inherited only by an
             // adoption requeue: `claim_once` keeps the pointer for the adopting
             // attempt, which clears it when it consumes the batch. Validate it
@@ -5646,20 +5648,20 @@ async fn classify_expired_lease(
                             | native_checkpoints::OUTCOME_KIND
                     ))
             {
-                return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                return Err(recovery_state_invalid());
             }
             if checkpoint.checkpoint_kind == "assistant_output_persisted" {
                 let message_id = checkpoint
                     .assistant_message_id
-                    .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    .ok_or_else(|| recovery_state_invalid())?;
                 let budget_reservation_id = checkpoint
                     .budget_reservation_id
-                    .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    .ok_or_else(|| recovery_state_invalid())?;
                 let reservation = tx
                     .find_by_id::<AiBudgetReservationRecord>(&budget_reservation_id)
                     .await
                     .map_err(OrmPublicError::from)?
-                    .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    .ok_or_else(|| recovery_state_invalid())?;
                 if reservation.session_id != current.session_id
                     || reservation.run_id != current.id
                     || reservation.attempt_id != source_attempt_id
@@ -5668,7 +5670,7 @@ async fn classify_expired_lease(
                     || reservation.actual_runs != Some(1)
                     || reservation.reconciled_at.is_none()
                 {
-                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                    return Err(recovery_state_invalid());
                 }
                 let expected_hash = final_output_checkpoint_hash(
                     lease.run_id,
@@ -5679,13 +5681,13 @@ async fn classify_expired_lease(
                     budget_reservation_id,
                 );
                 if checkpoint.checkpoint_hash != expected_hash {
-                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                    return Err(recovery_state_invalid());
                 }
                 let message = tx
                     .find_by_id::<AiMessageRecord>(&message_id)
                     .await
                     .map_err(OrmPublicError::from)?
-                    .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    .ok_or_else(|| recovery_state_invalid())?;
                 if message.session_id != current.session_id
                     || message.run_id != Some(current.id)
                     || message.message_role != "assistant"
@@ -5696,7 +5698,7 @@ async fn classify_expired_lease(
                     || message.finalized_at.is_none()
                     || !(1..=4_096).contains(&message.block_count)
                 {
-                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                    return Err(recovery_state_invalid());
                 }
                 let mut blocks = tx
                     .query::<AiMessageBlockRecord>()
@@ -5719,7 +5721,7 @@ async fn classify_expired_lease(
                             || block.line_count < 1
                     })
                 {
-                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                    return Err(recovery_state_invalid());
                 }
                 (Some(checkpoint.provider_response_id), false, inherited)
             } else if matches!(
@@ -5733,11 +5735,11 @@ async fn classify_expired_lease(
                     || checkpoint.checkpoint_kind == "supervised_tool_batch_persisted";
                 let provider_response_id = checkpoint.provider_response_id.as_deref();
                 if provider_response_id.is_some_and(|value| !valid_provider_reference(value)) {
-                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                    return Err(recovery_state_invalid());
                 }
                 let budget_reservation_id = checkpoint
                     .budget_reservation_id
-                    .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    .ok_or_else(|| recovery_state_invalid())?;
                 let protected_state = checkpoint
                     .protected_state
                     .as_ref()
@@ -5745,15 +5747,15 @@ async fn classify_expired_lease(
                         serde_json::to_vec(state)
                             .is_ok_and(|encoded| encoded.len() <= 64 * 1024 * 1024)
                     })
-                    .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    .ok_or_else(|| recovery_state_invalid())?;
                 if checkpoint.assistant_message_id.is_some() {
-                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                    return Err(recovery_state_invalid());
                 }
                 let reservation = tx
                     .find_by_id::<AiBudgetReservationRecord>(&budget_reservation_id)
                     .await
                     .map_err(OrmPublicError::from)?
-                    .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    .ok_or_else(|| recovery_state_invalid())?;
                 if reservation.session_id != current.session_id
                     || reservation.run_id != current.id
                     || (!native_outcome
@@ -5765,7 +5767,7 @@ async fn classify_expired_lease(
                     || reservation.provider_kind.trim().is_empty()
                     || reservation.provider_model.trim().is_empty()
                 {
-                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                    return Err(recovery_state_invalid());
                 }
                 let expected_hash = coordinator_checkpoint_hash(
                     lease.run_id,
@@ -5779,9 +5781,9 @@ async fn classify_expired_lease(
                     budget_reservation_id,
                     protected_state,
                 )
-                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                .map_err(|_| recovery_state_invalid())?;
                 if checkpoint.checkpoint_hash != expected_hash {
-                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                    return Err(recovery_state_invalid());
                 }
                 let calls = tx
                     .query::<AiToolCallRecord>()
@@ -5815,7 +5817,7 @@ async fn classify_expired_lease(
                             || call.completed_at.is_none()
                     })
                 {
-                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                    return Err(recovery_state_invalid());
                 }
                 if native_outcome {
                     native_checkpoints::outcome(
@@ -5834,13 +5836,13 @@ async fn classify_expired_lease(
                 for call in relevant {
                     let authorization_matches = if supervised {
                         let Some(approval_id) = call.approval_id else {
-                            return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                            return Err(recovery_state_invalid());
                         };
                         let approval = tx
                             .find_by_id::<AiApprovalRecord>(&approval_id)
                             .await
                             .map_err(OrmPublicError::from)?
-                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                            .ok_or_else(|| recovery_state_invalid())?;
                         matches!(
                             call.risk.as_str(),
                             "low_risk_write" | "non_idempotent_write" | "high_impact"
@@ -5863,14 +5865,14 @@ async fn classify_expired_lease(
                         .find_by_id::<AiRunStepRecord>(&call.id)
                         .await
                         .map_err(OrmPublicError::from)?
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        .ok_or_else(|| recovery_state_invalid())?;
                     if step.run_id != current.id
                         || step.lease_generation != source_generation
                         || step.state != call.state
                         || step.finished_at.is_none()
                         || !authorization_matches
                     {
-                        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                        return Err(recovery_state_invalid());
                     }
                 }
                 // Read-only provider-retained/stateless batches
@@ -5892,7 +5894,7 @@ async fn classify_expired_lease(
             && current_state != AiRunState::Running
             && !(inherited_checkpoint && current_state == AiRunState::Leased))
     {
-        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+        return Err(recovery_state_invalid());
     }
     let (next_state, outcome_code, next_retry_count, next_attempt_at, provider_response_id) =
         if let Some(provider_response_id) = final_checkpoint {
@@ -5904,8 +5906,8 @@ async fn classify_expired_lease(
                 provider_response_id,
             )
         } else if adoptable_tool_batch {
-            let retry_count = u32::try_from(current.retry_count)
-                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+            let retry_count =
+                u32::try_from(current.retry_count).map_err(|_| recovery_state_invalid())?;
             if retry_count >= limits.maximum_run_retries {
                 (
                     AiRunState::RecoveryRequired,
@@ -5921,14 +5923,14 @@ async fn classify_expired_lease(
                     current
                         .retry_count
                         .checked_add(1)
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?,
+                        .ok_or_else(|| recovery_state_invalid())?,
                     Some(now.unix_timestamp()),
                     None,
                 )
             }
         } else if current_state == AiRunState::Leased {
-            let retry_count = u32::try_from(current.retry_count)
-                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+            let retry_count =
+                u32::try_from(current.retry_count).map_err(|_| recovery_state_invalid())?;
             if retry_count >= limits.maximum_run_retries {
                 (
                     AiRunState::Failed,
@@ -5944,7 +5946,7 @@ async fn classify_expired_lease(
                     current
                         .retry_count
                         .checked_add(1)
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?,
+                        .ok_or_else(|| recovery_state_invalid())?,
                     Some(now.unix_timestamp()),
                     None,
                 )
@@ -5998,15 +6000,31 @@ async fn recover_expired_run(
     }
     let lease = current
         .lease_expires_at
-        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))
-        .and_then(|_| lease_from_record(&current));
+        .ok_or_else(recovery_state_invalid)
+        .and_then(|_| lease_from_record(&current).map_err(|_| recovery_state_invalid()));
     let classified = match &lease {
         Ok(lease) => classify_expired_lease(tx, &current, lease, now, limits).await,
         Err(error) => Err(error.clone()),
     };
+    // Only an explicitly identified durable failure of the run's own stored
+    // state quarantines it: a malformed lease, checkpoint, reservation, call,
+    // step or approval linkage found by classification, or terminal-event
+    // linkage (a missing or inconsistent session, an unreadable principal
+    // reference) that the terminal event would refuse. Every other error (a
+    // host policy refusal, a refused read, a database error) returns to the
+    // caller, which leaves the run untouched.
+    let classified = match classified {
+        Ok(transition) if AiRunTerminalEvent::from_run_state(transition.next_state).is_some() => {
+            match terminal_event_session(tx, &current).await? {
+                Ok(_) => Ok(transition),
+                Err(_) => Err(recovery_state_invalid()),
+            }
+        }
+        other => other,
+    };
     let (transition, quarantined) = match classified {
         Ok(transition) => (transition, false),
-        Err(error) if error.code == OrmErrorCode::InternalError => (
+        Err(error) if is_recovery_state_invalid(&error) => (
             ExpiredLeaseTransition {
                 next_state: AiRunState::RecoveryRequired,
                 outcome_code: "lease_recovery_state_invalid",
@@ -6093,6 +6111,27 @@ async fn recover_expired_run(
 
 /// Commits one expired unresolved reservation whose attempt is closed.
 /// Returns `false` without writing when the reservation is still owned.
+/// Stamps a reservation the sweep must leave to its owner, inside the
+/// settlement transaction that checked the live epoch and observed the owner.
+async fn stamp_owned_reservation(
+    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    reservation: &AiBudgetReservationRecord,
+    now: OffsetDateTime,
+) -> Result<(), OrmPublicError> {
+    if !stamp_reservation_settlement_progress(
+        tx,
+        reservation.id,
+        reservation.row_version,
+        &reservation.state,
+        now.unix_timestamp(),
+    )
+    .await?
+    {
+        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+    }
+    Ok(())
+}
+
 /// Outcome of examining one stranded-reservation candidate.
 enum ReservationSettlement {
     /// Committed at its reserved estimate.
@@ -6134,6 +6173,7 @@ async fn settle_stranded_budget_reservation(
         && run.lease_generation == reservation.lease_generation
         && run.lease_expires_at.is_some();
     if attempt_live {
+        stamp_owned_reservation(tx, &reservation, now).await?;
         return Ok(ReservationSettlement::Owned);
     }
     let submissions = tx
@@ -6154,6 +6194,7 @@ async fn settle_stranded_budget_reservation(
             .iter()
             .any(|submission| submission.budget_reservation_id == reservation.id)
     {
+        stamp_owned_reservation(tx, &reservation, now).await?;
         return Ok(ReservationSettlement::Owned);
     }
     crate::orm_budget::commit_stranded_reservation(tx, &reservation, now).await?;
@@ -6172,6 +6213,132 @@ async fn settle_stranded_budget_reservation(
     .await
     .map_err(OrmPublicError::from)?;
     Ok(ReservationSettlement::Settled)
+}
+
+/// Safe message marking a durable validation failure of a run's own stored
+/// recovery state, as opposed to an operational failure.
+const RECOVERY_STATE_INVALID: &str = "AI run recovery state is invalid";
+
+/// A durable validation failure of the run's own stored state. Only this
+/// error quarantines an expired run.
+fn recovery_state_invalid() -> OrmPublicError {
+    OrmPublicError::with_message(OrmErrorCode::InternalError, RECOVERY_STATE_INVALID)
+}
+
+fn is_recovery_state_invalid(error: &OrmPublicError) -> bool {
+    error.code == OrmErrorCode::InternalError && error.message == RECOVERY_STATE_INVALID
+}
+
+/// Loads and validates the session a terminal run event is written to.
+///
+/// The outer error is operational (a read failed or was refused). The inner
+/// error is a durable defect of the run's stored linkage: an unreadable
+/// principal reference, a missing session, or a session that does not match
+/// the run's owner, scope or tenant.
+async fn terminal_event_session(
+    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    run: &AiRunRecord,
+) -> Result<Result<AiSessionRecord, OrmPublicError>, OrmPublicError> {
+    let Ok(principal_reference) =
+        serde_json::from_value::<PrincipalReference>(run.principal_reference.clone())
+    else {
+        return Ok(Err(OrmPublicError::new(OrmErrorCode::InternalError)));
+    };
+    let expected_principal_kind = match &principal_reference.kind {
+        agql_auth::PrincipalReferenceKind::UserSession => "user".to_owned(),
+        agql_auth::PrincipalReferenceKind::ApiToken { principal_kind } => {
+            format!("api_token:{principal_kind}")
+        }
+    };
+    let Some(session) = tx
+        .find_by_id::<AiSessionRecord>(&run.session_id)
+        .await
+        .map_err(OrmPublicError::from)?
+    else {
+        return Ok(Err(OrmPublicError::not_found()));
+    };
+    let valid_session_state = match session.state.as_str() {
+        "active" | "archived" => session.deleted_at.is_none(),
+        "deleting" => session.deleted_at.is_some(),
+        _ => false,
+    };
+    if run.id.is_nil()
+        || run.lease_generation <= 0
+        || session.id != run.session_id
+        || !valid_session_state
+        || session.owner_principal_kind != expected_principal_kind
+        || session.owner_subject != principal_reference.subject
+        || session.scope_kind.trim().is_empty()
+        || session.scope_id.trim().is_empty()
+        || session.stream_head < 0
+        || session.stream_head == i64::MAX
+        || principal_reference
+            .tenant_id
+            .as_ref()
+            .is_some_and(|tenant_id| session.tenant_id.as_ref() != Some(tenant_id))
+    {
+        return Ok(Err(OrmPublicError::new(OrmErrorCode::InternalError)));
+    }
+    Ok(Ok(session))
+}
+
+/// Records that recovery examined `run_id` and left it unchanged, so the run
+/// rotates behind the rest of the scan. Fenced like every runtime write: it
+/// requires the live recovery epoch and the exact row version and state the
+/// scan observed, and changes nothing else. Returns `false` when the run
+/// changed since it was scanned.
+async fn stamp_run_recovery_progress(
+    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    run_id: Uuid,
+    observed_version: i64,
+    observed_state: &str,
+    now: i64,
+) -> Result<bool, OrmPublicError> {
+    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
+    let outcome = tx
+        .compare_and_swap::<AiRunRecord>(
+            &run_id,
+            observed_version,
+            exact_state(observed_state),
+            UpdateAiRunRecordInput {
+                recovery_examined_at: Some(now),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(OrmPublicError::from)?;
+    Ok(matches!(outcome, ConditionalUpdateOutcome::Updated(_)))
+}
+
+/// Records that the settlement sweep examined a reservation and left it
+/// unresolved, under the same fencing as [`stamp_run_recovery_progress`].
+async fn stamp_reservation_settlement_progress(
+    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    reservation_id: Uuid,
+    observed_version: i64,
+    observed_state: &str,
+    now: i64,
+) -> Result<bool, OrmPublicError> {
+    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
+    let outcome = tx
+        .compare_and_swap::<AiBudgetReservationRecord>(
+            &reservation_id,
+            observed_version,
+            AiBudgetReservationRecordWhereInput {
+                state: Some(StringFilter {
+                    eq: Some(observed_state.to_owned()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            UpdateAiBudgetReservationRecordInput {
+                settlement_examined_at: Some(now),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(OrmPublicError::from)?;
+    Ok(matches!(outcome, ConditionalUpdateOutcome::Updated(_)))
 }
 
 /// Active states whose expired lease the recovery pass reconciles.
@@ -6289,78 +6456,6 @@ async fn close_parked_provider_session_of_run(
         .map_err(OrmPublicError::from)?;
     }
     Ok(())
-}
-
-/// Closes, for manual recovery, an expired-lease run whose recovery
-/// transaction was refused after its bounded retries.
-///
-/// Such a refusal comes from the row's own durable state (for example a
-/// linked session or attempt the terminal event cannot write) and would
-/// repeat on every pass and after every restart, holding the head of the
-/// bounded scan. The run moves to `RecoveryRequired` with
-/// `lease_recovery_failed`, which is never replayed, its dependents close, and
-/// the quarantine is audited. Returns `false` when the row changed since it
-/// was scanned.
-async fn quarantine_unrecoverable_run(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
-    run_id: Uuid,
-    cutoff: i64,
-) -> Result<bool, OrmPublicError> {
-    const CODE: &str = "lease_recovery_failed";
-    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
-    let Some(current) = tx
-        .find_by_id::<AiRunRecord>(&run_id)
-        .await
-        .map_err(OrmPublicError::from)?
-    else {
-        return Ok(false);
-    };
-    if !EXPIRED_LEASE_RECOVERY_STATES
-        .iter()
-        .any(|state| state.as_str() == current.state)
-        || current
-            .lease_expires_at
-            .is_some_and(|expires_at| expires_at > cutoff)
-    {
-        return Ok(false);
-    }
-    let update = tx
-        .compare_and_swap::<AiRunRecord>(
-            &current.id,
-            current.row_version,
-            exact_state(&current.state),
-            UpdateAiRunRecordInput {
-                state: Some(AiRunState::RecoveryRequired.as_str().to_owned()),
-                attempt_id: Some(None),
-                lease_owner: Some(None),
-                lease_expires_at: Some(None),
-                lease_heartbeat_at: Some(None),
-                next_attempt_at: Some(None),
-                error_code: Some(Some(CODE.to_owned())),
-                ..Default::default()
-            },
-        )
-        .await
-        .map_err(OrmPublicError::from)?;
-    if !matches!(update, ConditionalUpdateOutcome::Updated(_)) {
-        return Ok(false);
-    }
-    close_run_dependents(tx, &current).await?;
-    tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
-        actor_principal_kind: "system".to_owned(),
-        actor_subject: "run-lease-recovery".to_owned(),
-        action: "ai.run.lease_recovery_quarantined".to_owned(),
-        resource_kind: "ai_run".to_owned(),
-        resource_reference: current.id.to_string(),
-        outcome: "denied".to_owned(),
-        reason_code: CODE.to_owned(),
-        correlation_id: current.id.to_string(),
-        causation_id: current.attempt_id.map(|attempt| attempt.to_string()),
-        policy_version: None,
-    })
-    .await
-    .map_err(OrmPublicError::from)?;
-    Ok(true)
 }
 
 /// Expires every unconsumed (`pending`, `approved` or `resume_claimed`)
@@ -7092,41 +7187,7 @@ pub(crate) async fn append_terminal_run_event(
     close_run_dependents(tx, run).await?;
     let terminal = AiRunTerminalEvent::from_run_state(final_state)
         .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InvalidInput))?;
-    let principal_reference: PrincipalReference =
-        serde_json::from_value(run.principal_reference.clone())
-            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
-    let expected_principal_kind = match &principal_reference.kind {
-        agql_auth::PrincipalReferenceKind::UserSession => "user".to_owned(),
-        agql_auth::PrincipalReferenceKind::ApiToken { principal_kind } => {
-            format!("api_token:{principal_kind}")
-        }
-    };
-    let session = tx
-        .find_by_id::<AiSessionRecord>(&run.session_id)
-        .await
-        .map_err(OrmPublicError::from)?
-        .ok_or_else(OrmPublicError::not_found)?;
-    let valid_session_state = match session.state.as_str() {
-        "active" | "archived" => session.deleted_at.is_none(),
-        "deleting" => session.deleted_at.is_some(),
-        _ => false,
-    };
-    if run.id.is_nil()
-        || run.lease_generation <= 0
-        || session.id != run.session_id
-        || !valid_session_state
-        || session.owner_principal_kind != expected_principal_kind
-        || session.owner_subject != principal_reference.subject
-        || session.scope_kind.trim().is_empty()
-        || session.scope_id.trim().is_empty()
-        || session.stream_head < 0
-        || principal_reference
-            .tenant_id
-            .as_ref()
-            .is_some_and(|tenant_id| session.tenant_id.as_ref() != Some(tenant_id))
-    {
-        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
-    }
+    let session = terminal_event_session(tx, run).await??;
     let sequence = session
         .stream_head
         .checked_add(1)
@@ -7515,6 +7576,7 @@ mod tests {
                 latest_checkpoint_id: None,
                 cancellation_request_id: None,
                 cancellation_requested_at: None,
+                recovery_examined_at: 0,
             },
         )
         .await
@@ -8149,6 +8211,7 @@ mod tests {
                 latest_checkpoint_id: None,
                 cancellation_request_id: None,
                 cancellation_requested_at: None,
+                recovery_examined_at: 0,
             },
         )
         .await
@@ -8583,7 +8646,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rows_whose_recovery_always_fails_cannot_hold_the_window_across_restarts() {
+    async fn runs_whose_session_is_gone_are_quarantined_without_holding_the_window() {
         let fixture = fixture().await;
         let scan = fixture.service.limits.maximum_candidate_scan();
         // A full window of the oldest expired rows whose recovery always
@@ -8628,14 +8691,17 @@ mod tests {
             .recover_expired_leases()
             .await
             .expect("failing rows must not fail the pass");
-        // Their recovery is refused on every attempt, so they are closed for
-        // manual recovery instead of holding the head of the window.
+        // A missing session is a durable defect of the run's own linkage, so
+        // they are closed for manual recovery instead of holding the window.
         assert_eq!(first.quarantined as usize, scan, "{first:?}");
         assert_eq!(first.skipped, 0);
         for run in &broken {
             let record = run_record(&fixture, *run).await;
             assert_eq!(record.state, AiRunState::RecoveryRequired.as_str());
-            assert_eq!(record.error_code.as_deref(), Some("lease_recovery_failed"));
+            assert_eq!(
+                record.error_code.as_deref(),
+                Some("lease_recovery_state_invalid")
+            );
         }
         // A fresh service, as after a restart, carries no scan state.
         let restarted = OrmAiRunService::new(
@@ -8652,6 +8718,307 @@ mod tests {
             run_record(&fixture, healthy).await.state,
             AiRunState::RecoveryRequired.as_str()
         );
+    }
+
+    /// A host entity policy that refuses session-event writes while `refuse`
+    /// is set, as a host callback might during an outage.
+    #[derive(Clone)]
+    struct RefuseSessionEvents {
+        refuse: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl graphql_orm::graphql::orm::EntityPolicy<DefaultWriteBackend> for RefuseSessionEvents {
+        fn can_access_entity<'a>(
+            &'a self,
+            _context: Option<&'a async_graphql::Context<'_>>,
+            _database: &'a Database<DefaultWriteBackend>,
+            entity_name: &'static str,
+            _policy_key: Option<&'static str>,
+            kind: graphql_orm::graphql::orm::EntityAccessKind,
+            surface: graphql_orm::graphql::orm::EntityAccessSurface,
+        ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+            let refused = entity_name == "AiSessionEventRecord"
+                && kind == graphql_orm::graphql::orm::EntityAccessKind::Write
+                && self.refuse.load(std::sync::atomic::Ordering::SeqCst);
+            let allowed =
+                surface == graphql_orm::graphql::orm::EntityAccessSurface::Repository && !refused;
+            Box::pin(async move { Ok(allowed) })
+        }
+    }
+
+    fn service_on(
+        fixture: &Fixture,
+        database: Database<SqliteBackend>,
+        scan: usize,
+    ) -> OrmAiRunService {
+        OrmAiRunService::new(
+            database,
+            Arc::new(fixture.clock.clone()),
+            AiRunServiceLimits::new(Duration::seconds(60), Duration::hours(1), scan, 2, 8)
+                .expect("run limits should validate"),
+        )
+    }
+
+    async fn started_run(fixture: &Fixture, id: Uuid) -> AiRunId {
+        let run = seed_queued_with_id(fixture, id).await;
+        let lease = fixture
+            .service
+            .claim_next("worker-policy")
+            .await
+            .expect("claim should succeed")
+            .expect("run should be eligible");
+        fixture
+            .service
+            .start(&lease)
+            .await
+            .expect("run should start");
+        run
+    }
+
+    #[tokio::test]
+    async fn a_refusing_host_callback_never_quarantines_a_recoverable_run() {
+        let fixture = fixture().await;
+        let run = started_run(&fixture, Uuid::new_v4()).await;
+        let refuse = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut database = fixture.database.clone();
+        database.set_entity_policy(RefuseSessionEvents {
+            refuse: refuse.clone(),
+        });
+        fixture.clock.advance_seconds(61);
+        let refused = service_on(&fixture, database.clone(), 16)
+            .recover_expired_leases()
+            .await
+            .expect("an operational refusal must not fail the pass");
+        assert_eq!(refused.skipped, 1, "{refused:?}");
+        assert_eq!(refused.quarantined, 0);
+        let untouched = run_record(&fixture, run).await;
+        assert_eq!(untouched.state, AiRunState::Running.as_str());
+        assert!(untouched.lease_owner.is_some());
+        assert!(untouched.recovery_examined_at > 0);
+        // The host recovers; a fresh service recovers the run normally.
+        refuse.store(false, std::sync::atomic::Ordering::SeqCst);
+        let recovered = service_on(&fixture, database, 16)
+            .recover_expired_leases()
+            .await
+            .expect("recovery should succeed");
+        assert_eq!(recovered.recovery_required, 1, "{recovered:?}");
+        assert_eq!(recovered.quarantined, 0);
+        assert_eq!(
+            run_record(&fixture, run).await.error_code.as_deref(),
+            Some("lease_expired_after_start")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_permanently_refused_run_rotates_behind_healthy_runs_across_restarts() {
+        let fixture = fixture().await;
+        // The refused run sorts first; its terminal event is always refused.
+        let refused_run = started_run(&fixture, Uuid::from_u128(1)).await;
+        // The healthy run is only leased, so its requeue writes no event.
+        let healthy = seed_queued_with_id(&fixture, Uuid::from_u128(u128::MAX)).await;
+        fixture
+            .service
+            .claim_next("worker-healthy")
+            .await
+            .expect("claim should succeed")
+            .expect("run should be eligible");
+        let mut database = fixture.database.clone();
+        database.set_entity_policy(RefuseSessionEvents {
+            refuse: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        });
+        fixture.clock.advance_seconds(61);
+        let mut requeued = 0;
+        for pass in 0..4 {
+            // One candidate per pass, and a new service each time.
+            let report = service_on(&fixture, database.clone(), 1)
+                .recover_expired_leases()
+                .await
+                .expect("an operational refusal must not fail the pass");
+            assert_eq!(report.quarantined, 0, "pass {pass}: {report:?}");
+            requeued += report.requeued;
+            fixture.clock.advance_seconds(1);
+        }
+        assert_eq!(requeued, 1);
+        assert_eq!(
+            run_record(&fixture, healthy).await.state,
+            AiRunState::RetryScheduled.as_str()
+        );
+        let refused = run_record(&fixture, refused_run).await;
+        assert_eq!(refused.state, AiRunState::Running.as_str());
+        assert!(refused.error_code.is_none());
+    }
+
+    #[tokio::test]
+    async fn progress_stamps_are_refused_after_the_epoch_or_row_changes() {
+        let fixture = fixture().await;
+        let run = started_run(&fixture, Uuid::new_v4()).await;
+        let record = run_record(&fixture, run).await;
+        let stamp = |version: i64, state: String| {
+            fixture
+                .database
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        stamp_run_recovery_progress(tx, run.0, version, &state, 7).await
+                    })
+                })
+        };
+        // A stale row version or state writes nothing.
+        assert!(
+            !stamp(record.row_version + 1, record.state.clone())
+                .await
+                .unwrap()
+        );
+        assert!(
+            !stamp(record.row_version, "leased".to_owned())
+                .await
+                .unwrap()
+        );
+        assert_eq!(run_record(&fixture, run).await.recovery_examined_at, 0);
+        let reservation = AiBudgetReservationRecord::insert(
+            &fixture.database,
+            CreateAiBudgetReservationRecordInput {
+                budget_counter_ids: serde_json::json!([]),
+                scope_kind: "tenant".to_owned(),
+                scope_id: "tenant-run".to_owned(),
+                tenant_id: Some("tenant-run".to_owned()),
+                principal_kind: "user".to_owned(),
+                principal_subject: "run-user".to_owned(),
+                session_id: record.session_id,
+                run_id: record.id,
+                attempt_id: record.attempt_id.unwrap(),
+                lease_generation: record.lease_generation,
+                provider_kind: "openai".to_owned(),
+                provider_model: "stamp-test".to_owned(),
+                reasoning_effort: "unspecified".to_owned(),
+                pricing_policy_version: "pricing-v1".to_owned(),
+                reserved_input_tokens: 1,
+                reserved_output_tokens: 1,
+                reserved_tool_units: 0,
+                reserved_image_units: 0,
+                reserved_cost_microunits: 1,
+                reserved_runs: 1,
+                actual_input_tokens: None,
+                actual_cached_input_tokens: None,
+                actual_output_tokens: None,
+                actual_tool_units: None,
+                actual_image_units: None,
+                actual_cost_microunits: None,
+                actual_runs: None,
+                idempotency_key: "stamp-test".to_owned(),
+                state: "reserved".to_owned(),
+                expires_at: fixture.clock.now().unix_timestamp(),
+                reconciled_at: None,
+                settlement_examined_at: 0,
+            },
+        )
+        .await
+        .expect("test reservation should insert");
+        let stamp_reservation = |version: i64| {
+            let id = reservation.id;
+            fixture
+                .database
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        stamp_reservation_settlement_progress(tx, id, version, "reserved", 7).await
+                    })
+                })
+        };
+        assert!(
+            !stamp_reservation(reservation.row_version + 1)
+                .await
+                .unwrap()
+        );
+        // A restore closes the runtime between settlement and its stamp: both
+        // stamps are refused outright.
+        crate::orm_runtime_recovery::close_test_epoch(&fixture.database).await;
+        let closed_reservation = stamp_reservation(reservation.row_version).await;
+        assert!(closed_reservation.is_err_and(|error| {
+            crate::orm_runtime_recovery::is_epoch_not_live(error.public_error())
+        }));
+        let unstamped = AiBudgetReservationRecord::find_by_id(&fixture.database, &reservation.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unstamped.settlement_examined_at, 0);
+        assert_eq!(unstamped.row_version, reservation.row_version);
+        let closed = stamp(record.row_version, record.state.clone()).await;
+        assert!(
+            closed.is_err_and(|error| crate::orm_runtime_recovery::is_epoch_not_live(
+                error.public_error()
+            ))
+        );
+        let after = run_record(&fixture, run).await;
+        assert_eq!(after.recovery_examined_at, 0);
+        assert_eq!(after.row_version, record.row_version);
+    }
+
+    /// A host row policy that decides AI run rows in Rust, row by row.
+    struct CallbackRunRows;
+
+    impl graphql_orm::graphql::orm::RowPolicy<DefaultWriteBackend> for CallbackRunRows {
+        fn can_read_row<'a>(
+            &'a self,
+            _ctx: Option<&'a async_graphql::Context<'_>>,
+            _db: &'a Database<DefaultWriteBackend>,
+            _entity_name: &'static str,
+            _policy_key: Option<&'static str>,
+            _surface: graphql_orm::graphql::orm::EntityAccessSurface,
+            _row: &'a (dyn std::any::Any + Send + Sync),
+        ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+            Box::pin(async { Ok(true) })
+        }
+
+        fn can_write_row<'a>(
+            &'a self,
+            _ctx: Option<&'a async_graphql::Context<'_>>,
+            _db: &'a Database<DefaultWriteBackend>,
+            _entity_name: &'static str,
+            _policy_key: Option<&'static str>,
+            _surface: graphql_orm::graphql::orm::EntityAccessSurface,
+            _row: &'a (dyn std::any::Any + Send + Sync),
+        ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+            Box::pin(async { Ok(true) })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_scan_refused_by_a_host_row_policy_budget_is_an_operational_failure() {
+        let fixture = fixture().await;
+        let mut runs = Vec::new();
+        for _ in 0..3 {
+            runs.push(started_run(&fixture, Uuid::new_v4()).await);
+        }
+        fixture.clock.advance_seconds(61);
+        let mut database = fixture.database.clone();
+        database.set_row_policy(CallbackRunRows);
+        let narrow =
+            database
+                .clone()
+                .with_pagination_config(graphql_orm::graphql::orm::PaginationConfig {
+                    max_scanned_rows: Some(1),
+                    ..Default::default()
+                });
+        // The candidate budget refuses the scan: the pass reports the failure
+        // and changes and quarantines nothing.
+        assert!(
+            service_on(&fixture, narrow, 16)
+                .recover_expired_leases()
+                .await
+                .is_err()
+        );
+        for run in &runs {
+            assert_eq!(
+                run_record(&fixture, *run).await.state,
+                AiRunState::Running.as_str()
+            );
+        }
+        // With the default budget the same row policy lets recovery proceed.
+        let report = service_on(&fixture, database, 16)
+            .recover_expired_leases()
+            .await
+            .expect("recovery under a callback row policy should succeed");
+        assert_eq!(report.recovery_required, 3, "{report:?}");
+        assert_eq!(report.quarantined, 0);
     }
 
     #[tokio::test]
