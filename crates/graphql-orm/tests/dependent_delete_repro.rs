@@ -2154,3 +2154,63 @@ mod write_policy_dependent {
         }
     }
 }
+
+/// The dependent-delete gate reads catalog-defined objects regardless of the
+/// session's `search_path`, so a database trigger is always found.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+#[ignore = "requires test-owned PostgreSQL container"]
+async fn dependent_delete_gate_reads_catalog_objects_under_any_search_path() {
+    let pool = fixture("dependent-catalog-search-path").await;
+    sqlx::query("DELETE FROM delete_nulls")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "CREATE FUNCTION spawn_dependent() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO delete_leaves VALUES('late-trigger',OLD.id); RETURN OLD; END $$; \
+         CREATE TRIGGER spawn_dependent BEFORE DELETE ON delete_children FOR EACH ROW EXECUTE FUNCTION spawn_dependent(); \
+         CREATE VIEW public.pg_trigger AS SELECT * FROM pg_catalog.pg_trigger WHERE false",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let options = pool
+        .connect_options()
+        .as_ref()
+        .clone()
+        .options([("search_path", "public,pg_catalog")]);
+    let public_first = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(options)
+        .await
+        .unwrap();
+    let registry =
+        StaticDependentDeletes::<DefaultBackend>::new(RuntimeDependentLimits::new(2, 4).unwrap())
+            .register::<DeleteParent>()
+            .unwrap()
+            .register::<DeleteChild>()
+            .unwrap()
+            .register::<DeleteLeaf>()
+            .unwrap()
+            .register::<DeleteNull>()
+            .unwrap();
+    let response = schema_builder(Database::new(public_first))
+        .data(AuthSubject::new("test-principal"))
+        .data(registry)
+        .finish()
+        .execute("mutation { deleteDeleteParent(id: \"parent\") { success } }")
+        .await;
+    assert_eq!(
+        response.errors.first().map(|error| error.message.as_str()),
+        Some("Dependent delete refused"),
+        "{:?}",
+        response.errors
+    );
+    for table in ["delete_parents", "delete_children", "delete_leaves"] {
+        let n: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 1, "{table}");
+    }
+}
