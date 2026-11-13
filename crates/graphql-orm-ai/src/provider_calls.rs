@@ -6628,6 +6628,7 @@ mod tests {
             has_field_policy: false,
         };
         let entity = GraphqlEntitySemanticMetadata {
+            generated_input_members: Vec::new(),
             entity_name: "Record".to_owned(),
             description: "A reviewed application record.".to_owned(),
             default_classification: GraphqlSemanticClassification::Internal,
@@ -6699,6 +6700,7 @@ mod tests {
             has_field_policy: false,
         };
         let entity = GraphqlEntitySemanticMetadata {
+            generated_input_members: Vec::new(),
             entity_name: "Record".to_owned(),
             description: "A reviewed application record.".to_owned(),
             default_classification: GraphqlSemanticClassification::Internal,
@@ -6763,6 +6765,7 @@ mod tests {
             has_field_policy: true,
         };
         let entity = GraphqlEntitySemanticMetadata {
+            generated_input_members: Vec::new(),
             entity_name: "Record".to_owned(),
             description: "A reviewed replayable record event.".to_owned(),
             default_classification: GraphqlSemanticClassification::Internal,

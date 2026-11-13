@@ -12,6 +12,17 @@ supersedes: []
 
 ## 0.22.0 to 0.23.0: explicit handwritten input disclosure
 
+Generated input compilation requires producer metadata from ORM/macros 0.144.0
+and catalogue 0.7.5. Undisclosed generated members remain closed even when a
+host declares custom inputs. Query, mutation and subscription catalogues expose
+host-only `diagnostics()` for capabilities omitted because a generated member
+requires a host-supplied value. Other capabilities compile normally. Do not log
+or send diagnostics to models. Generated input shape mismatches return a host
+configuration error naming the input and member; rebuild matching producer
+metadata instead of declaring hidden members. The host-only member sidecar is
+not serialized; reattach producer metadata after public catalogue round trips.
+
+
 No data migration is needed. Rebuild capability catalogues and refresh any
 retained capability bindings whose provider argument schema changes.
 

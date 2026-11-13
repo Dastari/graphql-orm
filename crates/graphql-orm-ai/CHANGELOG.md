@@ -12,6 +12,8 @@ supersedes: []
 
 ## Unreleased - 0.140.0
 
+- **Breaking:** require ORM/macros 0.144.0 and catalogue 0.7.5 for generated input contracts. Re-exported query options are non-`Copy`, and their relationship-depth accessor takes `&self`. Hosts can inspect capability-specific omission diagnostics without disclosing producer-hidden members.
+
 - **Documentation:** backend-neutral API descriptions name optional database-backed services without unconditional links.
 
 - **Changed (security):** the AI control-plane root set is now derived from this crate's own composable GraphQL roots: sessions, messages, approvals, proposals, skills, rules, budgets, configuration, attachments, usage and subscriptions. It is exposed as `ai_control_plane_root_fields()` and matched ignoring case and underscores. A test fails if a new GraphQL object type is added without being classified as a control-plane root or a non-root output.

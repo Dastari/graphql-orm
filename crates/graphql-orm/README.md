@@ -10,11 +10,12 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.142.0 adds test coverage for complete AI capabilities compiled from
-macro-generated and runtime-generated input SDL, including supported field
-cases, search, links, projections and pagination. Runtime and macro behaviour,
-GraphQL SDL and stored data are unchanged. See the
-[root migration guide](../../MIGRATION.md#01410-to-01420-test-only-release).
+Version 0.144.0 emits host-only generated input member contracts for AI
+capability compilation. Readable members remain available; undisclosed members
+stay closed, and a required undisclosed member omits only its capability with a
+host diagnostic. Upgrade ORM/macros together and use catalogue 0.7.5. Existing
+SDL and public catalogue bytes/fingerprints are unchanged; no data migration is
+needed. See the [migration guide](../../MIGRATION.md#01410-to-01440-host-only-generated-input-contracts).
 
 Version 0.141.0 (placeholder) rejects `#[transform(write = "path")]` on
 fields. If the entity compiled, that transform never ran and generated writes
@@ -28,11 +29,6 @@ the entity identity across Rust module/crate moves. Type and relation-target
 spellings must also remain unchanged to preserve fingerprints. Default identities and
 fingerprint algorithms are unchanged. Upgrade ORM/macros together; see the
 [migration recipe](../../MIGRATION.md#01370-to-01390-optional-stable-entity-identity).
-
-Version 0.137.0 changes nothing a host can observe. The derives emit the
-per-field UPDATE assignment list once per entity instead of once per generated
-update path, which removes about 2.5% of the expanded code of a 15-field
-entity ([#677](https://github.com/Dastari/graphql-orm/issues/677)).
 
 Version 0.136.0 (placeholder) keeps runtime and macros aligned. PostgreSQL
 backup export and search rebuild fail when RLS would filter rows. Use a role

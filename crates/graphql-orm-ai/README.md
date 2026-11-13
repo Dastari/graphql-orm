@@ -12,6 +12,10 @@ supersedes: []
 
 Version `0.140.0` derives the AI control-plane root set from this crate's own GraphQL roots and applies it to static tools, generated capability sets and remote requests. Static tool documents must parse to exactly one operation of the declared kind and contract name, and handwritten operation inputs disclose only host-declared fields. No data migration is needed. See the [migration guide](MIGRATION.md#01380-to-01400-exact-tool-registration-and-derived-control-plane-roots).
 
+AI 0.140.0 requires ORM/macros 0.144.0 and operation catalogue 0.7.5 for
+host-only generated input contracts. Static GraphQL variable definitions and
+tool argument schemas are host-authored and are not cross-checked by registration.
+
 Version `0.138.0` keeps run recovery, claims and session retention going when one row is malformed, refuses to retry a cancelled run whose mutation may have run, settles budget reservations of closed attempts, and retries serialization conflicts in run transitions. Apply AI schema module `0.78.0`; it adds two defaulted columns and needs no data migration. See the [migration guide](MIGRATION.md#01370-to-01380).
 
 Version `0.136.0` adopts ORM 0.133.0, which reserves runtime schema table names; the internal session-activity query admits its own tables by exact name, so session listing is unchanged. No data migration is needed. See the [migration guide](MIGRATION.md#01350-to-01360-orm-01330-reserved-runtime-table-names).

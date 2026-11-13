@@ -2565,3 +2565,62 @@ async fn dependent_set_null_advances_record_version_and_refuses_stale_expected_c
         );
     }
 }
+
+#[tokio::test]
+async fn live_composite_key_inputs_compile_public_query_capabilities() {
+    use graphql_orm_ai_tool_profiles::*;
+    let mut definition = definition();
+    definition.collections[0].fields[0].value_kind = RuntimeValueKind::Integer;
+    definition.collections[0].primary_key.push(fid("tenant"));
+    let fixture = Fixture::with_definition(definition).await;
+    #[cfg(feature = "sqlite")]
+    let match_profile = RuntimeMatchProfile::SqliteBinaryCanonical;
+    #[cfg(feature = "postgres")]
+    let match_profile = RuntimeMatchProfile::PostgresCUtf8;
+    let module = RuntimeGraphqlModule::compile(
+        fixture.schema.clone(),
+        RuntimeGraphqlOptions::default().with_live_source(
+            fixture.source.clone(),
+            RuntimeLiveProfile::ApplicationPolicy { match_profile },
+        ),
+    )
+    .unwrap();
+    let mut sdl = fixture.api.sdl();
+    let start = sdl.find("type Query {").unwrap();
+    let end = start + sdl[start..].find("\n}").unwrap() + 2;
+    sdl.replace_range(
+        start..end,
+        "type Query {\n inspectKey(key: RecordKeyInput): Record\n}",
+    );
+    let operation = GraphqlSemanticOperationDescriptor::generated(
+        GraphqlOperationKind::Query,
+        GeneratedGraphqlOperationCategory::SingleRead,
+        "Record",
+        "inspectKey",
+        "Inspect a public record key.",
+        vec![GraphqlSemanticArgumentDescriptor {
+            graphql_name: "key".into(),
+            description: "Generated key.".into(),
+            type_ref: GraphqlSemanticTypeRef::named(
+                "RecordKeyInput",
+                GraphqlSemanticTypeKind::Object,
+                true,
+            ),
+        }],
+        GraphqlSemanticTypeRef::named("Record", GraphqlSemanticTypeKind::Object, true),
+        true,
+    )
+    .unwrap();
+    let catalog =
+        GraphqlSemanticCatalog::compose_descriptors(module.semantic_entities(), [operation])
+            .unwrap();
+    let capabilities = AiGraphqlQueryCapabilityCatalog::compile(
+        "live-keys",
+        GraphqlExecutionTargetId::parse("live.keys").unwrap(),
+        &sdl,
+        &catalog,
+        AiGraphqlQueryCapabilityLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(capabilities.capabilities().count(), 1);
+}

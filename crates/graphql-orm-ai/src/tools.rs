@@ -349,6 +349,10 @@ impl AiToolCatalog {
 
     /// Registers a descriptor without exposing it.
     ///
+    /// Static GraphQL variable definitions and the argument JSON Schema are
+    /// host-authored and are not cross-checked against each other. Hosts keep
+    /// those declarations consistent.
+    ///
     /// # Errors
     ///
     /// Returns [`AiError::AlreadyExists`] for duplicate stable IDs.

@@ -12,6 +12,8 @@ supersedes: []
 
 ## Unreleased - 0.23.0
 
+- **Breaking:** generated input shape drift returns a host error with type/member coordinates. ORM/macros 0.144.0 and catalogue 0.7.5 supply undisclosed input member contracts; optional members remain closed, and required members omit only their capability with host-only diagnostics. These members cannot be opened through custom disclosure. Public catalogue serialization and fingerprints omit the producer sidecar.
+
 - **Changed:** generated inputs require canonical type identities and member types. Order inputs use `OrderDirection` (`ASC`, `DESC`); static and runtime search use their respective complete mode enums; subscription filters use `ChangeAction` (`CREATED`, `UPDATED`, `DELETED`). Runtime order validates its complete member and enum contracts. Link changes carry the target entity's canonical key input, and page inputs have exactly optional integer `limit` and `offset` members. Filter, operand and pagination helpers require generated reach as well as their closed contracts. Runtime projected outputs retain their stored scalar input shapes while projected members stay undisclosed. Link helpers describe to-many join relations. Where logical controls follow one supported field-case convention. Ordinary order inputs retain generator-configured relation-count aliases for readable relations; the aliases remain undisclosed.
 
 - **Breaking:** handwritten input objects are closed wherever reached: custom roots, generated roots and relationship arguments alike. Canonical generated entity and service inputs, and their filter, operand and page helpers, require generated reach and their canonical identity and type contracts. Other inputs expose only fields the host declares with `AiCustomInputDisclosure`, either through an exact field coordinate or a declared custom operation. Undeclared optional fields are neither described nor accepted; an undeclared required field fails compilation. Stale field declarations, absent custom operations and declarations reaching no handwritten input are refused. Canonical aggregate metric inputs apply the generated field and operator rules on every root that uses them.
@@ -19,7 +21,7 @@ supersedes: []
 - **Changed (security):** aggregate grouping and metric fields, and aggregate field enum values, now match the exact public field name on both admission and lookup. Aggregate plans and result shapes that repeat a key under the same normalised spelling are now refused.
 - **Breaking:** remove the hidden `contains_forbidden_graphql_name` helper. `graphql-orm-ai` now derives the AI control-plane root set from its own GraphQL roots.
 
-Capability fingerprints change only where a provider argument schema changes. No data migration is needed. See the migration guide.
+Capability catalogue fingerprints reflect admitted capability sets; individual capability fingerprints reflect their provider schemas. No data migration is needed. See the migration guide.
 
 ## Unreleased - 0.22.0
 

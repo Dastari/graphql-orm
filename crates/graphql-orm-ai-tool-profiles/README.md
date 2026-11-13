@@ -32,7 +32,11 @@ accepted in a plan only when the host declares them with
 `AiCustomInputDisclosure`: an exact input-field coordinate, or a declared custom
 operation whose reachable handwritten inputs are all disclosed. Generated
 ownership follows canonical identities and contracts. An undeclared required field fails
-readiness, and a stale declaration fails compilation. Mutation and subscription
+readiness, and a stale declaration fails compilation. Generated producer contracts
+keep undisclosed members closed while retaining readable members. A required
+undisclosed member omits only the affected capability and returns host-only
+`diagnostics()`; canonical shape drift is a host error naming its type and member.
+Mutation and subscription
 catalogues gain `compile_with_options` to carry the declaration. Aggregate
 grouping and metric fields, and aggregate field enum values, now match the exact
 public field name, and repeated normalised plan keys are refused. See the

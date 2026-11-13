@@ -14,8 +14,21 @@ supersedes: []
 
 No data migration is needed, and no GraphQL SDL or persistent schema changes.
 Database-backed service references in backend-neutral Rustdoc remain readable
-when the selected backend does not provide those services. No feature or API
-change.
+when the selected backend does not provide those services.
+
+**Breaking Rust API:** `ai_control_plane_root_fields()` is added. The
+re-exported `AiGraphqlQueryCapabilityOptions` carries custom disclosure and is
+no longer `Copy`; clone it when reusing options. Its
+`maximum_relationship_argument_depth` accessor takes `&self`.
+
+AI 0.140.0 requires ORM/macros 0.144.0 and catalogue 0.7.5, which supply the
+host-only generated input contracts. It does not support ORM/macros 0.133.0.
+See the [contract migration](../../MIGRATION.md#01410-to-01440-host-only-generated-input-contracts).
+
+Static GraphQL variable definitions and the tool argument JSON Schema are both
+host-authored contracts. Registration checks the document's operation and
+selection rules; it does not cross-check variable definitions against that
+argument schema. Hosts keep the two declarations consistent.
 
 - Static tool documents must contain exactly one named operation. Its name must
   equal the contract's `operation_name`, and its type must equal the

@@ -140,10 +140,21 @@ pub struct AiCustomOperationCoordinate {
 /// arguments reach; the declaration then applies wherever that input object
 /// is used. A name of a generated input kind is generated only when a
 /// generated root of that entity, or a relationship argument targeting it,
-/// reaches it; a host-written input with such a name is handwritten.
+/// reaches it and the complete member shape matches the generated contract.
+/// Other identities remain handwritten. A canonical identity with generated
+/// reach and a mismatching shape is a host configuration error.
 /// Undeclared optional fields are omitted. An undeclared required field fails
 /// capability compilation, because the operation could not be invoked without
 /// it, and so does a declared operation that reaches no handwritten input.
+///
+/// The entire semantic catalogue is a trusted host assertion: its structs have
+/// public fields and implement Deserialize. Generated reach follows operation
+/// declarations, relationship arguments and entity metadata. A custom root
+/// reusing an actual generated input receives that entity's generated disclosure;
+/// shape checks cannot prove how that custom resolver interprets its members.
+/// Undisclosed producer members cannot be opened by a custom declaration. A
+/// required undisclosed member omits only its capability, with a host-only
+/// diagnostic available on the compiled catalogue.
 ///
 /// A declaration is model-facing disclosure only. It grants no resolver
 /// authority, and the resolver remains responsible for authorizing every
@@ -299,6 +310,8 @@ impl AiCustomInputDisclosure {
             declared: BTreeMap::new(),
             generated_reach,
         };
+        validate_generated_input_shapes(schema, catalog, &binding)?;
+        validate_filter_roles(schema, catalog)?;
         // Every input object outside the generated entity inputs and the
         // shared generated helpers is handwritten, wherever it is reached.
         let handwritten = schema
@@ -326,9 +339,10 @@ impl AiCustomInputDisclosure {
                         .insert(coordinate.field.clone());
                 }
                 _ => {
-                    return Err(configuration_error(
-                        "declared custom input field is not a handwritten input field",
-                    ));
+                    return Err(configuration_error(format!(
+                        "declared custom input field {}.{} is not a handwritten input field",
+                        coordinate.input_type, coordinate.field
+                    )));
                 }
             }
         }
@@ -1359,6 +1373,7 @@ fn aggregate_result_list(
 /// Complete finite capability set for one active finished schema.
 #[derive(Clone, Debug)]
 pub struct AiGraphqlQueryCapabilityCatalog {
+    diagnostics: Vec<AiGraphqlCapabilityDiagnostic>,
     semantic_catalog_fingerprint: String,
     finished_schema_fingerprint: String,
     capabilities: BTreeMap<AiToolId, AiGraphqlQueryCapability>,
@@ -1366,10 +1381,16 @@ pub struct AiGraphqlQueryCapabilityCatalog {
 }
 
 impl AiGraphqlQueryCapabilityCatalog {
+    /// Returns host-only diagnostics for capabilities needing undisclosed input values.
+    /// These coordinates are never part of provider-facing schemas or exports.
+    pub fn diagnostics(&self) -> &[AiGraphqlCapabilityDiagnostic] {
+        &self.diagnostics
+    }
+
     /// Compiles every exposed public query root into exactly one segment.
     ///
-    /// Compilation is all-or-nothing: unsupported or excessive roots fail
-    /// readiness instead of being silently omitted. Mutations and
+    /// Unsupported or excessive roots fail readiness. A root requiring an
+    /// undisclosed generated member is omitted with a host-only diagnostic. Mutations and
     /// subscriptions are ignored by this query-only contract.
     ///
     /// # Errors
@@ -1446,6 +1467,9 @@ impl AiGraphqlQueryCapabilityCatalog {
                     && operation_result_is_provider_exportable(operation)
             })
             .collect::<Vec<_>>();
+        let (operations, diagnostics) =
+            admit_input_capabilities(&schema, semantic_catalog, operations, limits, &options)?;
+        let expected_capabilities = operations.len();
         if operations.len() > limits.maximum_capabilities as usize {
             return Err(configuration_error(
                 "query capability capacity would omit active roots",
@@ -1471,16 +1495,7 @@ impl AiGraphqlQueryCapabilityCatalog {
                 return Err(configuration_error("query capability identity collides"));
             }
         }
-        if capabilities.len()
-            != semantic_catalog
-                .operations
-                .iter()
-                .filter(|operation| {
-                    operation.kind == GraphqlOperationKind::Query
-                        && operation_result_is_provider_exportable(operation)
-                })
-                .count()
-        {
+        if capabilities.len() != expected_capabilities {
             return Err(configuration_error(
                 "query capability coverage is incomplete",
             ));
@@ -1510,6 +1525,7 @@ impl AiGraphqlQueryCapabilityCatalog {
             })).collect::<Vec<_>>(),
         }));
         Ok(Self {
+            diagnostics,
             semantic_catalog_fingerprint: semantic_catalog.fingerprint.clone(),
             finished_schema_fingerprint,
             capabilities,
@@ -1679,6 +1695,7 @@ impl AiGraphqlMutationCapability {
 /// Prohibited mutations are structurally absent rather than merely disabled.
 #[derive(Clone, Debug)]
 pub struct AiGraphqlMutationCapabilityCatalog {
+    diagnostics: Vec<AiGraphqlCapabilityDiagnostic>,
     semantic_catalog_fingerprint: String,
     finished_schema_fingerprint: String,
     capabilities: BTreeMap<AiToolId, AiGraphqlMutationCapability>,
@@ -1686,6 +1703,12 @@ pub struct AiGraphqlMutationCapabilityCatalog {
 }
 
 impl AiGraphqlMutationCapabilityCatalog {
+    /// Returns host-only diagnostics for capabilities needing undisclosed input values.
+    /// These coordinates are never part of provider-facing schemas or exports.
+    pub fn diagnostics(&self) -> &[AiGraphqlCapabilityDiagnostic] {
+        &self.diagnostics
+    }
+
     /// Compiles every exposed mutation explicitly classified for AI execution.
     ///
     /// # Errors
@@ -1764,6 +1787,8 @@ impl AiGraphqlMutationCapabilityCatalog {
                     )
             })
             .collect::<Vec<_>>();
+        let (executable, diagnostics) =
+            admit_input_capabilities(&schema, semantic_catalog, executable, limits, &options)?;
         if executable.len() > limits.maximum_capabilities as usize {
             return Err(configuration_error(
                 "mutation capability capacity would omit active roots",
@@ -1808,6 +1833,7 @@ impl AiGraphqlMutationCapabilityCatalog {
             })).collect::<Vec<_>>(),
         }));
         Ok(Self {
+            diagnostics,
             semantic_catalog_fingerprint: semantic_catalog.fingerprint.clone(),
             finished_schema_fingerprint,
             capabilities,
@@ -2106,9 +2132,178 @@ impl AiGraphqlSubscriptionCapability {
     }
 }
 
+/// Host-only reason that one generated capability is not offered.
+///
+/// Returned only by catalogue compilation. This type has no serde export;
+/// Debug formatting redacts coordinates. Do not log these diagnostics or send
+/// them to a model. Supply the required values through a host-authored path.
+#[derive(Clone, Eq, PartialEq)]
+pub struct AiGraphqlCapabilityDiagnostic {
+    /// Root kind of the omitted capability.
+    pub operation_kind: GraphqlOperationKind,
+    /// Exact root coordinate of the omitted capability.
+    pub field_name: String,
+    /// Exact generated input identity requiring a host-supplied value.
+    pub input_type: String,
+    /// Exact undisclosed member requiring a host-supplied value.
+    pub member: String,
+}
+
+impl std::fmt::Debug for AiGraphqlCapabilityDiagnostic {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AiGraphqlCapabilityDiagnostic")
+            .finish_non_exhaustive()
+    }
+}
+
+// Follow only fields that the closed plan schema actually offers. A hidden
+// optional container cannot make an otherwise usable root require its children.
+fn offered_input_types(
+    schema: &FinishedSchema,
+    catalog: &GraphqlSemanticCatalog,
+    roots: impl IntoIterator<Item = String>,
+) -> Result<BTreeSet<String>, AiError> {
+    let mut pending = roots.into_iter().collect::<Vec<_>>();
+    let mut visited = BTreeSet::new();
+    while let Some(ty) = pending.pop() {
+        let name = named_type(&ty)?;
+        let Some(SchemaType::InputObject(fields)) = schema.types.get(name) else {
+            continue;
+        };
+        if !visited.insert(name.to_owned()) {
+            continue;
+        }
+        let offered = restrict_input_fields(schema, catalog, name, fields)?;
+        pending.extend(offered.values().map(|field| field.ty.clone()));
+    }
+    Ok(visited)
+}
+
+fn admit_input_capabilities<'a>(
+    schema: &FinishedSchema,
+    catalog: &GraphqlSemanticCatalog,
+    operations: Vec<&'a GraphqlSemanticOperationDescriptor>,
+    limits: AiGraphqlQueryCapabilityLimits,
+    options: &AiGraphqlQueryCapabilityOptions,
+) -> Result<
+    (
+        Vec<&'a GraphqlSemanticOperationDescriptor>,
+        Vec<AiGraphqlCapabilityDiagnostic>,
+    ),
+    AiError,
+> {
+    let binding = schema.custom_input_binding(catalog)?;
+    let mut admitted = Vec::new();
+    let mut diagnostics = Vec::new();
+    for operation in operations {
+        let root = schema.operation_root_field(operation.kind, &operation.field_name)?;
+        validate_operation_against_schema(operation, root, operation.kind)?;
+        let mut inputs = offered_input_types(
+            schema,
+            catalog,
+            operation
+                .arguments
+                .iter()
+                .map(|argument| render_type_ref(&argument.type_ref)),
+        )?;
+        if options.maximum_relationship_argument_depth > 0
+            && let QueryOutput::Entity { entity, .. } =
+                resolve_query_output(schema, catalog, operation, &root.ty, limits)?
+        {
+            let mut pending = vec![(entity, 0)];
+            let mut visited = BTreeSet::new();
+            while let Some((name, depth)) = pending.pop() {
+                if depth >= options.maximum_relationship_argument_depth
+                    || !visited.insert((name.clone(), depth))
+                {
+                    continue;
+                }
+                let entity = semantic_entity(catalog, &name)?;
+                for field in &entity.fields {
+                    if !field.selectable
+                        || field.export != GraphqlSemanticExport::Exportable
+                        || field.classification == GraphqlSemanticClassification::Secret
+                    {
+                        continue;
+                    }
+                    if let Some(relationship) = &field.relationship {
+                        inputs.extend(offered_input_types(
+                            schema,
+                            catalog,
+                            relationship
+                                .arguments
+                                .iter()
+                                .map(|argument| render_type_ref(&argument.type_ref)),
+                        )?);
+                        pending.push((relationship.target.clone(), depth + 1));
+                    }
+                }
+            }
+        }
+        let mut blocked = false;
+        for entity in &catalog.entities {
+            for member in &entity.generated_input_members {
+                if member.required
+                    && inputs.contains(&member.input_type)
+                    && canonical_generated_owners(schema, catalog, &binding, &member.input_type)
+                        .iter()
+                        .any(|(owner, _)| owner.entity_name == entity.entity_name)
+                {
+                    blocked = true;
+                    diagnostics.push(AiGraphqlCapabilityDiagnostic {
+                        operation_kind: operation.kind,
+                        field_name: operation.field_name.clone(),
+                        input_type: member.input_type.clone(),
+                        member: member.field_name.clone(),
+                    });
+                }
+            }
+        }
+        for input in &inputs {
+            let Some(SchemaType::InputObject(fields)) = schema.types.get(input) else {
+                continue;
+            };
+            for (entity, _) in canonical_generated_owners(schema, catalog, &binding, input) {
+                for (name, field) in fields {
+                    if is_non_null(&field.ty)
+                        && !field.has_default
+                        && entity.fields.iter().any(|semantic| {
+                            semantic.field_name == *name
+                                && (semantic.export != GraphqlSemanticExport::Exportable
+                                    || semantic.classification
+                                        == GraphqlSemanticClassification::Secret)
+                        })
+                    {
+                        blocked = true;
+                        if !diagnostics.iter().any(|diagnostic| {
+                            diagnostic.operation_kind == operation.kind
+                                && diagnostic.field_name == operation.field_name
+                                && diagnostic.input_type == *input
+                                && diagnostic.member == *name
+                        }) {
+                            diagnostics.push(AiGraphqlCapabilityDiagnostic {
+                                operation_kind: operation.kind,
+                                field_name: operation.field_name.clone(),
+                                input_type: input.clone(),
+                                member: name.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        if !blocked {
+            admitted.push(operation);
+        }
+    }
+    Ok((admitted, diagnostics))
+}
+
 /// Complete replayable subscription capability set for one finished schema.
 #[derive(Clone, Debug)]
 pub struct AiGraphqlSubscriptionCapabilityCatalog {
+    diagnostics: Vec<AiGraphqlCapabilityDiagnostic>,
     semantic_catalog_fingerprint: String,
     finished_schema_fingerprint: String,
     capabilities: BTreeMap<AiToolId, AiGraphqlSubscriptionCapability>,
@@ -2116,6 +2311,12 @@ pub struct AiGraphqlSubscriptionCapabilityCatalog {
 }
 
 impl AiGraphqlSubscriptionCapabilityCatalog {
+    /// Returns host-only diagnostics for capabilities needing undisclosed input values.
+    /// These coordinates are never part of provider-facing schemas or exports.
+    pub fn diagnostics(&self) -> &[AiGraphqlCapabilityDiagnostic] {
+        &self.diagnostics
+    }
+
     /// Validates every finished-SDL Subscription root and compiles exactly the
     /// roots that declare replay-then-live delivery. Described best-effort
     /// roots remain ineligible and receive no durable execution path.
@@ -2187,8 +2388,9 @@ impl AiGraphqlSubscriptionCapabilityCatalog {
                 "finished GraphQL Subscription roots and semantic operations differ",
             ));
         }
-        let replayable_count = operations
+        let eligible = operations
             .iter()
+            .copied()
             .filter(|operation| {
                 operation_result_is_provider_exportable(operation)
                     && operation
@@ -2198,12 +2400,18 @@ impl AiGraphqlSubscriptionCapabilityCatalog {
                             observation.replay_mode == GraphqlSubscriptionReplayMode::ReplayThenLive
                         })
             })
-            .count();
-        if replayable_count > limits.query.maximum_capabilities as usize {
+            .collect::<Vec<_>>();
+        let (eligible, diagnostics) =
+            admit_input_capabilities(&schema, semantic_catalog, eligible, limits.query, &options)?;
+        if eligible.len() > limits.query.maximum_capabilities as usize {
             return Err(configuration_error(
                 "subscription capability capacity would omit active roots",
             ));
         }
+        let eligible = eligible
+            .iter()
+            .map(|operation| operation.field_name.as_str())
+            .collect::<BTreeSet<_>>();
         let schema_fingerprint = hex::encode(Sha256::digest(finished_sdl.as_bytes()));
         let mut capabilities = BTreeMap::new();
         for operation in operations {
@@ -2215,6 +2423,9 @@ impl AiGraphqlSubscriptionCapabilityCatalog {
                 continue;
             }
             if !operation_result_is_provider_exportable(operation) {
+                continue;
+            }
+            if !eligible.contains(operation.field_name.as_str()) {
                 continue;
             }
             let maximum_duration_seconds = observation
@@ -2319,6 +2530,7 @@ impl AiGraphqlSubscriptionCapabilityCatalog {
             })).collect::<Vec<_>>(),
         }));
         Ok(Self {
+            diagnostics,
             semantic_catalog_fingerprint: semantic_catalog.fingerprint.clone(),
             finished_schema_fingerprint: schema_fingerprint,
             capabilities,
@@ -4129,8 +4341,8 @@ fn restrict_input_fields(
     let binding = schema.custom_input_binding(catalog)?;
     // A generated-kind name is generated only when it has that kind's
     // canonical member shape and that entity's generated operations or
-    // relationships actually reach it. Anything else with the same name is
-    // handwritten.
+    // relationships actually reach it. Canonical shape drift is rejected
+    // during host binding; other identities remain handwritten.
     let generated = canonical_generated_owners(schema, catalog, &binding, input_name);
     let (entity, kind) = match generated.as_slice() {
         [(entity, kind)] => (*entity, *kind),
@@ -4186,6 +4398,13 @@ fn restrict_input_fields(
     Ok(fields
         .iter()
         .filter(|(name, _)| {
+            if entity
+                .generated_input_members
+                .iter()
+                .any(|member| member.input_type == input_name && member.field_name == **name)
+            {
+                return false;
+            }
             if matches!(kind, SemanticInputKind::AggregateMetric) {
                 // Generated aggregate inputs contain operators and field enums,
                 // not entity fields. The enum is independently restricted below.
@@ -4235,6 +4454,244 @@ fn restrict_input_fields(
         .collect())
 }
 
+/// Shape drift is a host configuration error, never a model plan error.
+fn generated_shape_error(input: &str, member: &str) -> AiError {
+    configuration_error(format!(
+        "generated input {input}.{member} differs from its canonical contract"
+    ))
+}
+
+fn first_contract_mismatch(
+    fields: &BTreeMap<String, SchemaInput>,
+    expected: &BTreeMap<String, String>,
+) -> Option<String> {
+    fields
+        .iter()
+        .find(|(name, field)| field.has_default || expected.get(*name) != Some(&field.ty))
+        .map(|(name, _)| name.clone())
+        .or_else(|| {
+            expected
+                .keys()
+                .find(|name| !fields.contains_key(*name))
+                .cloned()
+        })
+}
+
+fn generated_member_mismatch(
+    schema: &FinishedSchema,
+    entity: &graphql_orm_operation_catalog::GraphqlEntitySemanticMetadata,
+    kind: SemanticInputKind,
+    input: &str,
+    fields: &BTreeMap<String, SchemaInput>,
+) -> Option<String> {
+    if generated_shape_matches(schema, entity, kind, input, fields) {
+        return None;
+    }
+    if let Some(member) = entity
+        .generated_input_members
+        .iter()
+        .filter(|member| member.input_type == input)
+        .find(|member| {
+            fields.get(&member.field_name).is_none_or(|field| {
+                field.has_default || field.ty != render_type_ref(&member.type_ref)
+            })
+        })
+    {
+        return Some(member.field_name.clone());
+    }
+    if kind == SemanticInputKind::AggregateMetric {
+        let names = [
+            ["operator", "field"],
+            ["Operator", "Field"],
+            ["OPERATOR", "FIELD"],
+        ]
+        .into_iter()
+        .max_by_key(|names| {
+            names
+                .iter()
+                .filter(|name| fields.contains_key(**name))
+                .count()
+        })
+        .unwrap();
+        let expected = BTreeMap::from([
+            (names[0].into(), "GraphqlAggregateInputOperator!".into()),
+            (
+                names[1].into(),
+                format!("{}AggregateField", entity.entity_name),
+            ),
+        ]);
+        return first_contract_mismatch(fields, &expected).or_else(|| {
+            Some(
+                if !exact_enum(
+                    schema,
+                    "GraphqlAggregateInputOperator",
+                    &["COUNT", "MIN", "MAX", "SUM"],
+                ) {
+                    names[0].into()
+                } else {
+                    names[1].into()
+                },
+            )
+        });
+    }
+    if kind == SemanticInputKind::LinkChange {
+        let target = link_change_relation(entity, input)
+            .map(|relation| relation.target.as_str())
+            .unwrap_or("");
+        let expected = ["set", "add", "remove"]
+            .into_iter()
+            .map(|name| (name.into(), format!("[{target}KeyInput!]")))
+            .collect();
+        return first_contract_mismatch(fields, &expected);
+    }
+    let mut public_entity = entity.clone();
+    public_entity.generated_input_members.clear();
+    for (name, field) in fields {
+        if entity
+            .generated_input_members
+            .iter()
+            .any(|member| member.input_type == input && member.field_name == *name)
+        {
+            continue;
+        }
+        let single = BTreeMap::from([(name.clone(), field.clone())]);
+        if !generated_shape_matches(schema, &public_entity, kind, input, &single) {
+            return Some(name.clone());
+        }
+    }
+    // Mixed logical casing is a whole-object mismatch.
+    Some(
+        fields
+            .keys()
+            .next()
+            .cloned()
+            .unwrap_or_else(|| "<members>".into()),
+    )
+}
+
+fn validate_generated_input_shapes(
+    schema: &FinishedSchema,
+    catalog: &GraphqlSemanticCatalog,
+    binding: &CustomInputBinding,
+) -> Result<(), AiError> {
+    for (input, ty) in &schema.types {
+        let SchemaType::InputObject(fields) = ty else {
+            continue;
+        };
+        for entity in &catalog.entities {
+            if !binding.generated_for(&entity.entity_name, input) {
+                continue;
+            }
+            let kind=generated_input_kind(input,&entity.entity_name).or_else(||
+                link_change_relation(entity,input).map(|_| SemanticInputKind::LinkChange))
+                .or_else(|| entity.generated_input_members.iter().any(|member|
+                    member.input_type == *input && member.kind == graphql_orm_operation_catalog::GraphqlGeneratedInputKind::LinkChange)
+                    .then_some(SemanticInputKind::LinkChange));
+            let Some(kind) = kind else {
+                continue;
+            };
+            if kind == SemanticInputKind::RuntimeOrder {
+                validate_runtime_order_input(schema, entity, fields)?;
+            } else if let Some(member) =
+                generated_member_mismatch(schema, entity, kind, input, fields)
+            {
+                return Err(generated_shape_error(input, &member));
+            }
+        }
+        if !binding
+            .generated_reach
+            .values()
+            .any(|reach| reach.contains(input))
+        {
+            continue;
+        }
+        let candidates: Vec<Vec<(&str, String)>> = match input.as_str() {
+            "SearchInput" | "RuntimeSearchInput" => {
+                let mode = if input == "SearchInput" {
+                    "SearchMode"
+                } else {
+                    "RuntimeSearchMode"
+                };
+                [
+                    ["query", "mode", "minScore"],
+                    ["Query", "Mode", "MinScore"],
+                    ["query", "mode", "min_score"],
+                    ["QUERY", "MODE", "MIN_SCORE"],
+                    ["query", "mode", "minscore"],
+                    ["QUERY", "MODE", "MINSCORE"],
+                ]
+                .into_iter()
+                .map(|names| {
+                    vec![
+                        (names[0], "String!".into()),
+                        (names[1], mode.into()),
+                        (names[2], "Float".into()),
+                    ]
+                })
+                .collect()
+            }
+            "SubscriptionFilterInput" => [
+                ["actions", "dummy"],
+                ["Actions", "Dummy"],
+                ["ACTIONS", "DUMMY"],
+            ]
+            .into_iter()
+            .map(|names| {
+                vec![
+                    (names[0], "[ChangeAction!]".into()),
+                    (names[1], "Boolean".into()),
+                ]
+            })
+            .collect(),
+            "PageInput" => [
+                ["limit", "offset"],
+                ["Limit", "Offset"],
+                ["LIMIT", "OFFSET"],
+            ]
+            .into_iter()
+            .map(|names| names.into_iter().map(|name| (name, "Int".into())).collect())
+            .collect(),
+            _ => Vec::new(),
+        };
+        if candidates.is_empty() {
+            continue;
+        }
+        let expected = candidates
+            .into_iter()
+            .max_by_key(|members| {
+                members
+                    .iter()
+                    .filter(|(name, _)| fields.contains_key(*name))
+                    .count()
+            })
+            .unwrap()
+            .into_iter()
+            .map(|(name, ty)| (name.to_owned(), ty))
+            .collect();
+        if let Some(member) = first_contract_mismatch(fields, &expected) {
+            return Err(generated_shape_error(input, &member));
+        }
+        if matches!(input.as_str(), "SearchInput" | "RuntimeSearchInput") {
+            if generated_service_helper_shape(schema, input, fields).is_none() {
+                let mode = fields
+                    .keys()
+                    .find(|name| name.eq_ignore_ascii_case("mode"))
+                    .unwrap();
+                return Err(generated_shape_error(input, mode));
+            }
+        } else if input == "SubscriptionFilterInput"
+            && !exact_enum(schema, "ChangeAction", &["CREATED", "UPDATED", "DELETED"])
+        {
+            let actions = fields
+                .keys()
+                .find(|name| name.eq_ignore_ascii_case("actions"))
+                .unwrap();
+            return Err(generated_shape_error(input, actions));
+        }
+    }
+    Ok(())
+}
+
 /// Finds generated ownership from exact identity, generated reach and member
 /// types. Runtime-order candidates retain their explicit validation error path:
 /// their complete contract is checked before any members are admitted. Other
@@ -4258,6 +4715,9 @@ fn canonical_generated_owners<'a>(
         .iter()
         .filter_map(|entity| {
             generated_input_kind(input_name, &entity.entity_name)
+                .or_else(|| entity.generated_input_members.iter().any(|member|
+                    member.input_type == input_name && member.kind == graphql_orm_operation_catalog::GraphqlGeneratedInputKind::LinkChange)
+                    .then_some(SemanticInputKind::LinkChange))
                 .or_else(|| {
                     link_change_relation(entity, input_name).map(|_| SemanticInputKind::LinkChange)
                 })
@@ -4446,54 +4906,6 @@ fn runtime_scalar_type(schema: &FinishedSchema, ty: &str) -> bool {
     }
 }
 
-/// Exact fixed helpers emitted by `graphql/runtime/schema.rs::filter` for
-/// stored scalar members whose output is projected and has no scalar metadata.
-fn projected_runtime_filter_shape(schema: &FinishedSchema, ty: &str) -> bool {
-    let (scalar, compares, text) = match ty {
-        "RuntimeBooleanFilter" => ("Boolean", false, false),
-        "RuntimeInt64Filter" => ("RuntimeInt64", true, false),
-        "RuntimeFloatFilter" => ("Float", true, false),
-        "RuntimeStringFilter" => ("String", true, true),
-        "RuntimeUuidFilter" => ("RuntimeUuid", false, false),
-        "RuntimeJsonFilter" => ("RuntimeJson", false, false),
-        "RuntimeBytesFilter" => ("RuntimeBytes", false, false),
-        "RuntimeDateTimeFilter" => ("RuntimeDateTime", true, false),
-        "RuntimeDecimalFilter" => ("Decimal", true, false),
-        _ => return false,
-    };
-    if !runtime_scalar_type(schema, scalar) {
-        return false;
-    }
-    let Some(SchemaType::InputObject(fields)) = schema.types.get(ty) else {
-        return false;
-    };
-    let mut expected = BTreeMap::from([("isNull", "Boolean".to_owned())]);
-    if scalar != "RuntimeJson" {
-        for operator in ["eq", "ne"] {
-            expected.insert(operator, scalar.to_owned());
-        }
-        for operator in ["in", "notIn"] {
-            expected.insert(operator, format!("[{scalar}!]"));
-        }
-    }
-    if compares {
-        for operator in ["lt", "lte", "gt", "gte"] {
-            expected.insert(operator, scalar.to_owned());
-        }
-    }
-    if text {
-        for operator in ["contains", "startsWith", "endsWith"] {
-            expected.insert(operator, "String".to_owned());
-        }
-    }
-    fields.len() == expected.len()
-        && expected.iter().all(|(name, ty)| {
-            fields
-                .get(*name)
-                .is_some_and(|field| !field.has_default && field.ty == *ty)
-        })
-}
-
 /// Checks a generated kind's member types. Runtime ordering uses its explicit
 /// validation error path before admission instead of the handwritten fallback.
 fn generated_shape_matches(
@@ -4503,6 +4915,25 @@ fn generated_shape_matches(
     input_name: &str,
     fields: &BTreeMap<String, SchemaInput>,
 ) -> bool {
+    // The producer's undisclosed members establish shape, never disclosure.
+    let hidden = entity
+        .generated_input_members
+        .iter()
+        .filter(|member| member.input_type == input_name)
+        .collect::<Vec<_>>();
+    if hidden.iter().any(|member| {
+        fields
+            .get(&member.field_name)
+            .is_none_or(|field| field.has_default || field.ty != render_type_ref(&member.type_ref))
+    }) {
+        return false;
+    }
+    let public_fields = fields
+        .iter()
+        .filter(|(name, _)| !hidden.iter().any(|member| member.field_name == **name))
+        .map(|(name, field)| (name.clone(), field.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let fields = &public_fields;
     let entity_field = |name: &str| {
         entity
             .fields
@@ -4576,6 +5007,19 @@ fn generated_shape_matches(
         }),
         // `set`, `add` and `remove`, each a list of the target's key input.
         SemanticInputKind::LinkChange => {
+            if fields.is_empty()
+                && hidden.len() == 3
+                && ["set", "add", "remove"].iter().all(|name| {
+                    hidden.iter().any(|member| {
+                        member.field_name == *name
+                            && !member.required
+                            && render_type_ref(&member.type_ref).starts_with('[')
+                            && render_type_ref(&member.type_ref).ends_with("KeyInput!]")
+                    })
+                })
+            {
+                return true;
+            }
             link_change_relation(entity, input_name).is_some_and(|relationship| {
                 fields.len() == 3
                     && fields.iter().all(|(name, field)| {
@@ -4632,9 +5076,6 @@ fn generated_shape_matches(
                                 .is_some_and(|input| render_type_ref(&input.type_ref) == field.ty),
                         };
                     }
-                    if opaque_runtime_projection(schema, entity, name) {
-                        return projected_runtime_filter_shape(schema, &field.ty);
-                    }
                     match name.as_str() {
                         "and" | "And" | "AND" | "or" | "Or" | "OR" => {
                             field.ty == format!("[{input_name}!]")
@@ -4661,19 +5102,30 @@ fn generated_shape_matches(
                 })
         }
         SemanticInputKind::Fields => fields.iter().all(|(name, field)| {
-            if opaque_runtime_projection(schema, entity, name) {
-                return !field.has_default
-                    && runtime_scalar_type(schema, &field.ty)
-                    && if input_name == format!("Update{}Input", entity.entity_name) {
-                        !is_non_null(&field.ty)
-                    } else if input_name == format!("{}KeyInput", entity.entity_name) {
-                        is_non_null(&field.ty)
-                    } else {
-                        true
-                    };
-            }
             entity_field(name).is_some_and(|semantic| {
-                let generated = render_type_ref(&semantic.type_ref);
+                let mut generated = render_type_ref(&semantic.type_ref);
+                // Runtime live composite keys use the derived key scalars,
+                // while ordinary stored values keep RuntimeInt64/RuntimeUuid.
+                // NodeId and RecordVersion are the live module's fixed outputs.
+                if input_name == format!("{}KeyInput", entity.entity_name)
+                    && entity.record_version.as_ref().is_some_and(|version| {
+                        version.mode
+                            == graphql_orm_operation_catalog::GraphqlRecordVersionMode::Managed
+                    })
+                    && entity.fields.iter().any(|field| {
+                        field.field_name == "NodeId" && render_type_ref(&field.type_ref) == "ID!"
+                    })
+                    && entity.fields.iter().any(|field| {
+                        field.field_name == "RecordVersion"
+                            && render_type_ref(&field.type_ref) == "Int!"
+                    })
+                {
+                    generated = match generated.as_str() {
+                        "RuntimeInt64!" => "Int!".into(),
+                        "RuntimeUuid!" => "UUID!".into(),
+                        _ => generated,
+                    };
+                }
                 let expected = if input_name == format!("Update{}Input", entity.entity_name) {
                     generated.strip_suffix('!').unwrap_or(&generated)
                 } else {
@@ -4758,9 +5210,9 @@ fn restrict_custom_input_fields(
         if declared.is_some_and(|declared| declared.contains(name)) {
             restricted.insert(name.clone(), field.clone());
         } else if is_non_null(&field.ty) && !field.has_default {
-            return Err(configuration_error(
-                "required custom input field has no declared disclosure",
-            ));
+            return Err(configuration_error(format!(
+                "required custom input field {input_name}.{name} has no declared disclosure"
+            )));
         }
     }
     Ok(restricted)
@@ -4976,13 +5428,17 @@ fn validate_filter_roles(
             {
                 continue;
             }
-            let property = where_fields
-                .get(&field.field_name)
-                .ok_or_else(|| configuration_error("query canonical Where field is missing"))?;
+            let property = where_fields.get(&field.field_name).ok_or_else(|| {
+                generated_shape_error(
+                    &format!("{}WhereInput", entity.entity_name),
+                    &field.field_name,
+                )
+            })?;
             if property.ty != render_type_ref(&input.type_ref) || property.has_default {
-                return Err(configuration_error(
-                    "query filter input type differs from canonical contract",
-                ));
+                return Err(configuration_error(format!(
+                    "generated input {}WhereInput.{} differs from its canonical contract",
+                    entity.entity_name, field.field_name
+                )));
             }
             let helper = named_type(&property.ty)?;
             let Some(SchemaType::InputObject(fields)) = schema.types.get(helper) else {
@@ -4997,12 +5453,26 @@ fn validate_filter_roles(
                     })
                 })
             {
-                return Err(configuration_error(
-                    "query filter helper differs from canonical operator contract",
-                ));
+                return Err(configuration_error(format!(
+                    "generated input {helper}.{} differs from its canonical contract",
+                    fields
+                        .keys()
+                        .find(|name| input.operators.iter().all(|op| op.graphql_name != **name))
+                        .cloned()
+                        .or_else(|| input
+                            .operators
+                            .iter()
+                            .find(|op| fields
+                                .get(&op.graphql_name)
+                                .is_none_or(|field| field.has_default
+                                    || field.ty != render_type_ref(&op.operand_type)))
+                            .map(|op| op.graphql_name.clone()))
+                        .unwrap_or_else(|| "<members>".into())
+                )));
             }
             for op in &input.operators {
-                validate_filter_operand_type(schema, &op.operand_type, &input.input_objects)?;
+                validate_filter_operand_type(schema, &op.operand_type, &input.input_objects)
+                    .map_err(|_| generated_shape_error(helper, &op.graphql_name))?;
             }
             let identity = json!({"value": input.value_type, "operators": input.operators});
             if roles
@@ -5027,12 +5497,32 @@ fn validate_filter_roles(
                         })
                     })
                 {
-                    return Err(configuration_error(
-                        "query filter operand structure differs from canonical contract",
-                    ));
+                    return Err(configuration_error(format!(
+                        "generated input {}.{} differs from its canonical contract",
+                        object.graphql_name,
+                        fields
+                            .keys()
+                            .find(|name| object
+                                .fields
+                                .iter()
+                                .all(|field| field.graphql_name != **name))
+                            .cloned()
+                            .or_else(|| object
+                                .fields
+                                .iter()
+                                .find(|field| fields
+                                    .get(&field.graphql_name)
+                                    .is_none_or(|actual| actual.has_default
+                                        || actual.ty != render_type_ref(&field.type_ref)))
+                                .map(|field| field.graphql_name.clone()))
+                            .unwrap_or_else(|| "<members>".into())
+                    )));
                 }
                 for field in &object.fields {
-                    validate_filter_operand_type(schema, &field.type_ref, &input.input_objects)?;
+                    validate_filter_operand_type(schema, &field.type_ref, &input.input_objects)
+                        .map_err(|_| {
+                            generated_shape_error(&object.graphql_name, &field.graphql_name)
+                        })?;
                 }
                 let identity = json!({"fields": object.fields.iter()
                     .map(|field| (&field.graphql_name, &field.type_ref)).collect::<Vec<_>>()});
@@ -5137,8 +5627,19 @@ fn validate_runtime_order_input(
     fields: &BTreeMap<String, SchemaInput>,
 ) -> Result<(), AiError> {
     let entity_name = &entity.entity_name;
+    let input = format!("{entity_name}OrderInput");
     if fields.len() != 3 {
-        return Err(configuration_error("runtime order input shape is invalid"));
+        let member = fields
+            .keys()
+            .find(|name| !["field", "direction", "nulls"].contains(&name.as_str()))
+            .map(String::as_str)
+            .or_else(|| {
+                ["field", "direction", "nulls"]
+                    .into_iter()
+                    .find(|name| !fields.contains_key(*name))
+            })
+            .unwrap_or("field");
+        return Err(generated_shape_error(&input, member));
     }
     for (name, ty) in [
         ("field", format!("{entity_name}OrderField!")),
@@ -5149,7 +5650,7 @@ fn validate_runtime_order_input(
             .get(name)
             .is_none_or(|field| field.ty != ty || field.has_default)
         {
-            return Err(configuration_error("runtime order input shape is invalid"));
+            return Err(generated_shape_error(&input, name));
         }
     }
     for (name, expected) in [
@@ -5160,8 +5661,13 @@ fn validate_runtime_order_input(
             if values.len() == expected.len()
                 && expected.iter().all(|value| values.iter().any(|actual| actual.as_str() == *value)))
         {
-            return Err(configuration_error(
-                "runtime order operator enum is invalid",
+            return Err(generated_shape_error(
+                &input,
+                if name == "RuntimeOrderDirection" {
+                    "direction"
+                } else {
+                    "nulls"
+                },
             ));
         }
     }
@@ -5173,7 +5679,7 @@ fn validate_runtime_order_input(
         .collect::<Vec<_>>();
     let Some(SchemaType::Enum(values)) = schema.types.get(&format!("{entity_name}OrderField"))
     else {
-        return Err(configuration_error("runtime order field enum is invalid"));
+        return Err(generated_shape_error(&input, "field"));
     };
     // Projected outputs have no scalar metadata, but retain stored-scalar
     // ordering in the emitted SDL. They remain absent from restricted enums.
@@ -5185,7 +5691,7 @@ fn validate_runtime_order_input(
                 || opaque_runtime_projection(schema, entity, name)
         })
     {
-        return Err(configuration_error("runtime order field enum is invalid"));
+        return Err(generated_shape_error(&input, "field"));
     }
     Ok(())
 }
@@ -6584,6 +7090,7 @@ mod tests {
 
     fn semantic_catalog() -> GraphqlSemanticCatalog {
         let child = GraphqlEntitySemanticMetadata {
+            generated_input_members: Vec::new(),
             entity_name: "Child".to_owned(),
             description: "A bounded child record.".to_owned(),
             default_classification: GraphqlSemanticClassification::Internal,
@@ -6632,6 +7139,7 @@ mod tests {
         amount.aggregate_value_kind =
             Some(graphql_orm_operation_catalog::GraphqlAggregateValueKind::Integral);
         let parent = GraphqlEntitySemanticMetadata {
+            generated_input_members: Vec::new(),
             entity_name: "Parent".to_owned(),
             description: "A public parent record.".to_owned(),
             default_classification: GraphqlSemanticClassification::Internal,
@@ -6738,6 +7246,7 @@ mod tests {
     fn aggregate_semantic_catalog() -> GraphqlSemanticCatalog {
         let mut base = semantic_catalog();
         base.entities.push(GraphqlEntitySemanticMetadata {
+            generated_input_members: Vec::new(),
             entity_name: "RestrictedLedger".to_owned(),
             description: "An unrelated restricted aggregate entity.".to_owned(),
             default_classification: GraphqlSemanticClassification::Restricted,
@@ -7180,6 +7689,7 @@ mod tests {
             }
             sdl.push_str("}\n");
             entities.push(GraphqlEntitySemanticMetadata {
+                generated_input_members: Vec::new(),
                 entity_name,
                 description: "One public graph level.".to_owned(),
                 default_classification: GraphqlSemanticClassification::Internal,
@@ -7588,6 +8098,7 @@ mod tests {
         });
         let entity =
             |name: &str, fields: Vec<GraphqlSemanticFieldMetadata>| GraphqlEntitySemanticMetadata {
+                generated_input_members: Vec::new(),
                 entity_name: name.to_owned(),
                 description: format!("Reviewed {name} record."),
                 default_classification: GraphqlSemanticClassification::Internal,
@@ -7911,6 +8422,7 @@ mod tests {
                 "\ntype {entity_name} {{ id: String!, title: String! }}"
             ));
             semantics.entities.push(GraphqlEntitySemanticMetadata {
+                generated_input_members: Vec::new(),
                 entity_name: entity_name.to_owned(),
                 description: format!("A real {entity_name} entity, not an input helper."),
                 default_classification: GraphqlSemanticClassification::Internal,
@@ -8037,14 +8549,10 @@ mod tests {
         else {
             panic!("modified page input");
         };
-        // A page-like input with an extra field is no longer a shared helper.
-        // Reached only by a custom operation, it is a handwritten input and
-        // discloses nothing undeclared.
-        assert!(
-            restrict_input_fields(&unsafe_schema, &semantics, "PageInput", unsafe_page)
-                .unwrap()
-                .is_empty()
-        );
+        // A shared generated page identity has one canonical contract.
+        let error = restrict_input_fields(&unsafe_schema, &semantics, "PageInput", unsafe_page)
+            .expect_err("generated page mismatch");
+        assert!(error.to_string().contains("PageInput.secret"));
     }
 
     #[test]
@@ -8088,6 +8596,7 @@ mod tests {
             private_limit.type_ref = named("Int", false);
             let entity = |name: &str, fields: Vec<GraphqlSemanticFieldMetadata>| {
                 GraphqlEntitySemanticMetadata {
+                    generated_input_members: Vec::new(),
                     entity_name: name.to_owned(),
                     description: format!("Reviewed {name} record."),
                     default_classification: GraphqlSemanticClassification::Internal,
@@ -8477,6 +8986,7 @@ mod tests {
             .unwrap();
             let semantics = GraphqlSemanticCatalog::compose_with_custom(
                 [GraphqlEntitySemanticMetadata {
+                    generated_input_members: Vec::new(),
                     entity_name: "StringFilter".to_owned(),
                     description: "Reviewed StringFilter record.".to_owned(),
                     default_classification: GraphqlSemanticClassification::Internal,
@@ -8699,6 +9209,7 @@ mod tests {
         .unwrap();
         let semantics = GraphqlSemanticCatalog::compose_with_custom(
             [GraphqlEntitySemanticMetadata {
+                generated_input_members: Vec::new(),
                 entity_name: "SpatialRecord".into(),
                 description: "Public spatial record.".into(),
                 default_classification: GraphqlSemanticClassification::Internal,
@@ -9135,6 +9646,7 @@ mod tests {
         .unwrap();
         let semantics = GraphqlSemanticCatalog::compose_with_custom(
             [GraphqlEntitySemanticMetadata {
+                generated_input_members: Vec::new(),
                 entity_name: "Record".into(),
                 description: "Public filter record.".into(),
                 default_classification: GraphqlSemanticClassification::Internal,
@@ -9251,6 +9763,7 @@ mod tests {
         .unwrap();
         let semantics = GraphqlSemanticCatalog::compose_with_custom(
             [GraphqlEntitySemanticMetadata {
+                generated_input_members: Vec::new(),
                 entity_name: "StringFilter".into(),
                 description: "Reviewed record.".into(),
                 default_classification: GraphqlSemanticClassification::Internal,
@@ -10236,6 +10749,7 @@ mod tests {
     fn server_fixed_object_lists_compile_without_paging_arguments() {
         let mut base = semantic_catalog();
         base.entities.push(GraphqlEntitySemanticMetadata {
+            generated_input_members: Vec::new(),
             entity_name: "SearchDetail".to_owned(),
             description: "One resolver-owned search detail.".to_owned(),
             default_classification: GraphqlSemanticClassification::Internal,
@@ -10256,6 +10770,7 @@ mod tests {
             record_version: None,
         });
         base.entities.push(GraphqlEntitySemanticMetadata {
+            generated_input_members: Vec::new(),
             entity_name: "SearchResult".to_owned(),
             description: "One resolver-owned search hit.".to_owned(),
             default_classification: GraphqlSemanticClassification::Internal,
@@ -10316,6 +10831,7 @@ mod tests {
             record_version: None,
         });
         base.entities.push(GraphqlEntitySemanticMetadata {
+            generated_input_members: Vec::new(),
             entity_name: "SearchPayload".to_owned(),
             description: "Bounded resolver-owned search payload.".to_owned(),
             default_classification: GraphqlSemanticClassification::Internal,
@@ -10497,7 +11013,7 @@ mod tests {
                 AiGraphqlQueryCapabilityLimits::default(),
             ),
             Err(AiError::InvalidConfiguration(message))
-                if message == "required custom input field has no declared disclosure"
+                if message.contains("required custom input field ") && message.ends_with(" has no declared disclosure")
         ));
         let catalog = AiGraphqlMutationCapabilityCatalog::compile_with_options(
             "inventory",
@@ -11074,7 +11590,7 @@ mod tests {
         assert!(matches!(
             compile_generated_name_fixture(&sdl, &semantics, AiCustomInputDisclosure::new()),
             Err(AiError::InvalidConfiguration(message))
-                if message == "required custom input field has no declared disclosure"
+                if message.contains("required custom input field ") && message.ends_with(" has no declared disclosure")
         ));
         let declared = compile_generated_name_fixture(
             &sdl,
@@ -11260,7 +11776,7 @@ mod tests {
         );
 
         // A free-form metric shape is not the generated contract, even when a
-        // generated aggregate root also uses it: it is handwritten everywhere.
+        // generated aggregate root also uses it: report the host mismatch.
         let (sdl, semantics) = shared_metric_fixture(
             custom,
             Some(
@@ -11270,12 +11786,12 @@ mod tests {
         assert!(matches!(
             compile_shared_metric(&sdl, &semantics),
             Err(AiError::InvalidConfiguration(message))
-                if message == "required custom input field has no declared disclosure"
+                if message.contains("ParentAggregateMetricInput.field")
         ));
     }
 
     #[test]
-    fn a_generated_label_over_a_non_canonical_input_does_not_widen_disclosure() {
+    fn generated_metric_mismatch_is_a_host_error_with_or_without_a_declaration() {
         let labelled = generated_root(
             "Parent",
             GraphqlOperationKind::Query,
@@ -11293,7 +11809,7 @@ mod tests {
         assert!(matches!(
             compile_shared_metric(&sdl, &semantics),
             Err(AiError::InvalidConfiguration(message))
-                if message == "required custom input field has no declared disclosure"
+                if message.contains("ParentAggregateMetricInput.field")
         ));
         let declared = AiGraphqlQueryCapabilityCatalog::compile_with_options(
             "inventory",
@@ -11307,17 +11823,12 @@ mod tests {
                     .unwrap(),
             ),
         )
-        .expect("declared host metric compiles");
-        let capability = declared
-            .capabilities()
-            .find(|capability| capability.field_name() == "LabelledParent")
-            .expect("labelled capability");
-        let described = format!(
-            "{}{}",
-            capability.argument_schema(),
-            capability.compact_argument_schema()
+        .expect_err("a declaration cannot change a generated contract");
+        assert!(
+            declared
+                .to_string()
+                .contains("ParentAggregateMetricInput.field")
         );
-        assert!(!described.contains("\"field\""), "{described}");
     }
 
     /// A runtime-schema-style search composition: one root over `Parent`
@@ -11380,7 +11891,7 @@ mod tests {
     }
 
     #[test]
-    fn mixed_logical_names_are_handwritten_on_generated_roots() {
+    fn generated_where_controls_require_consistent_case() {
         use graphql_orm_operation_catalog::{
             GraphqlSemanticFilterInputMetadata, GraphqlSemanticFilterInputOperator,
             GraphqlSemanticFilterOperator,
@@ -11440,35 +11951,22 @@ mod tests {
         let semantics =
             GraphqlSemanticCatalog::compose_descriptors(semantics.entities, semantics.operations)
                 .unwrap();
-        let plan = json!({"arguments": {"input": {"name": {"eq": "public"}}}, "selections": ["id"],
-            "relationshipArguments": {}, "relationshipMaximumItems": {}});
-        let closed = compile_shared_metric(&sdl, &semantics).unwrap();
-        assert!(
-            closed
-                .capabilities()
-                .next()
-                .unwrap()
-                .compile_compact(plan.clone())
-                .is_err()
-        );
-        let declared = input_collision_capabilities_with(
+        let error =
+            compile_shared_metric(&sdl, &semantics).expect_err("generated logical shape mismatch");
+        assert!(error.to_string().contains("ParentWhereInput.Or"));
+        let error = input_collision_capabilities_with(
             &sdl,
             &semantics,
             AiCustomInputDisclosure::new()
                 .with_exportable_field("ParentWhereInput", "name")
                 .unwrap(),
         )
-        .unwrap();
-        declared
-            .capabilities()
-            .next()
-            .unwrap()
-            .compile_compact(plan)
-            .unwrap();
+        .expect_err("declarations do not change generated shape");
+        assert!(error.to_string().contains("ParentWhereInput.Or"));
     }
 
     #[test]
-    fn host_search_shape_requires_disclosure_on_generated_roots() {
+    fn host_and_generated_search_shapes_report_host_coordinates() {
         for (name, mode, values) in [
             ("HostSearchInput", "HostMode", "PLAIN PHRASE WEB PREFIX"),
             ("SearchInput", "SearchMode", "PLAIN"),
@@ -11478,17 +11976,20 @@ mod tests {
                 "input {name} {{ query: String!, mode: {mode}, minScore: Float }} enum {mode} {{ {values} }}"
             );
             let (sdl, semantics) = search_composition(name, &definition, true);
-            assert!(
-                matches!(compile_shared_metric(&sdl, &semantics),
-                Err(AiError::InvalidConfiguration(message))
-                    if message == "required custom input field has no declared disclosure"),
-                "{name} / {mode}"
-            );
+            let error =
+                compile_shared_metric(&sdl, &semantics).expect_err("input contract mismatch");
+            let message = error.to_string();
+            assert!(message.contains(name));
+            assert!(message.contains(if name == "HostSearchInput" {
+                "query"
+            } else {
+                "mode"
+            }));
         }
     }
 
     #[test]
-    fn host_order_enum_requires_disclosure_on_generated_roots() {
+    fn generated_order_enum_mismatches_report_host_coordinates() {
         for suffix in ["OrderByInput", "KeysetOrderByInput"] {
             for required in [false, true] {
                 let name = format!("Parent{suffix}");
@@ -11532,15 +12033,8 @@ mod tests {
                     &semantics,
                     AiCustomInputDisclosure::new(),
                 );
-                if required {
-                    assert!(matches!(result, Err(AiError::InvalidConfiguration(message))
-                        if message == "required custom input field has no declared disclosure"));
-                } else {
-                    let catalog = result.expect("optional handwritten input compiles closed");
-                    assert!(!provision_schema(&catalog).contains("OWNER_EMAIL"));
-                    assert!(catalog.capabilities().find(|capability| capability.field_name() == "ProvisionParent").unwrap()
-                        .compile_compact(json!({"arguments":{"input":{"name":"OWNER_EMAIL"}}, "selections":["id"], "relationshipArguments":{}, "relationshipMaximumItems":{}})).is_err());
-                }
+                let error = result.expect_err("generated order contract mismatch");
+                assert!(error.to_string().contains(&format!("{name}.name")));
             }
         }
     }
@@ -11581,7 +12075,7 @@ mod tests {
             assert!(matches!(
                 compile_shared_metric(&sdl, &semantics),
                 Err(AiError::InvalidConfiguration(message))
-                    if message == "required custom input field has no declared disclosure"
+                    if message.contains("required custom input field ") && message.ends_with(" has no declared disclosure")
             ));
         }
 
@@ -11594,7 +12088,7 @@ mod tests {
         assert!(matches!(
             compile_shared_metric(&sdl, &semantics),
             Err(AiError::InvalidConfiguration(message))
-                if message == "required custom input field has no declared disclosure"
+                if message.contains("RuntimeSearchInput.ownerEmail")
         ));
     }
 
@@ -11666,7 +12160,19 @@ mod tests {
             &sdl.replace("set: [ChildKeyInput!], add", "set: [String!], add"),
         )
         .unwrap();
-        assert!(restricted(&forged, "ParentChildrenLinkChangeInput").is_empty());
+        let Some(SchemaType::InputObject(fields)) =
+            forged.types.get("ParentChildrenLinkChangeInput")
+        else {
+            panic!("link input");
+        };
+        let error =
+            restrict_input_fields(&forged, &semantics, "ParentChildrenLinkChangeInput", fields)
+                .expect_err("generated link mismatch");
+        assert!(
+            error
+                .to_string()
+                .contains("ParentChildrenLinkChangeInput.set")
+        );
 
         // Runtime link inputs describe join-table collections, not to-one relations.
         let mut one = semantics.clone();
@@ -11691,11 +12197,9 @@ mod tests {
             let Some(SchemaType::InputObject(fields)) = schema.types.get(name) else {
                 panic!("{name}");
             };
-            assert!(
-                restrict_input_fields(&schema, &one, name, fields)
-                    .unwrap()
-                    .is_empty()
-            );
+            let error = restrict_input_fields(&schema, &one, name, fields)
+                .expect_err("generated links require a collection");
+            assert!(error.to_string().contains("ParentLinksInput.children"));
         }
     }
 

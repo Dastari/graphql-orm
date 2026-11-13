@@ -149,6 +149,7 @@ fn relation(
 
 fn entity(name: &str, fields: Vec<GraphqlSemanticFieldMetadata>) -> GraphqlEntitySemanticMetadata {
     GraphqlEntitySemanticMetadata {
+        generated_input_members: Vec::new(),
         entity_name: name.to_owned(),
         description: format!("Reviewed {name} record."),
         default_classification: GraphqlSemanticClassification::Internal,

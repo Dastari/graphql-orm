@@ -2354,6 +2354,11 @@ mod graphql {
             has_field_policy: true,
         });
         post.fields = fields.into_boxed_slice();
+        // The host publishes this relation's generated disclosure contract.
+        post.generated_input_members.retain(|member| {
+            !(member.input_type == "PostLinksInput" && member.field_name == "tags")
+                && member.input_type != "PostTagsLinkChangeInput"
+        });
         let inputs =
             GraphqlSemanticCatalog::compose_descriptors(inputs.entities, [operation]).unwrap();
         let input_plan = AiGraphqlQueryCapabilityCatalog::compile(

@@ -223,6 +223,7 @@ fn record_entity() -> GraphqlEntitySemanticMetadata {
         has_field_policy: false,
     };
     GraphqlEntitySemanticMetadata {
+        generated_input_members: Vec::new(),
         entity_name: "Record".to_owned(),
         description: "A reviewed application record.".to_owned(),
         default_classification: GraphqlSemanticClassification::Internal,

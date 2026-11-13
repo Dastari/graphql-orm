@@ -9764,6 +9764,7 @@ pub(crate) mod tests {
             input PageInput { limit: Int, offset: Int }
         "#;
         let child = GraphqlEntitySemanticMetadata {
+            generated_input_members: Vec::new(),
             entity_name: "Child".to_owned(),
             description: "A bounded child record.".to_owned(),
             default_classification: GraphqlSemanticClassification::Internal,
@@ -9776,6 +9777,7 @@ pub(crate) mod tests {
             record_version: None,
         };
         let parent = GraphqlEntitySemanticMetadata {
+            generated_input_members: Vec::new(),
             entity_name: "Parent".to_owned(),
             description: "A reviewed parent record.".to_owned(),
             default_classification: GraphqlSemanticClassification::Internal,
@@ -9931,6 +9933,7 @@ pub(crate) mod tests {
             input ParentMutationInput { name: String! }
         "#;
         let parent = GraphqlEntitySemanticMetadata {
+            generated_input_members: Vec::new(),
             entity_name: "Parent".to_owned(),
             description: "A reviewed parent record.".to_owned(),
             default_classification: GraphqlSemanticClassification::Internal,
@@ -10005,6 +10008,7 @@ pub(crate) mod tests {
             type Parent { id: String!, name: String! }
         "#;
         let parent = GraphqlEntitySemanticMetadata {
+            generated_input_members: Vec::new(),
             entity_name: "Parent".to_owned(),
             description: "A reviewed parent event.".to_owned(),
             default_classification: GraphqlSemanticClassification::Internal,

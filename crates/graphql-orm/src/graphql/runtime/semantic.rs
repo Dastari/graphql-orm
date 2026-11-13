@@ -336,7 +336,112 @@ impl RuntimeGraphqlModule {
                         std::slice::from_ref(&node.version_field),
                     ));
                 }
+                let name = self.object_name(c);
+                let mut generated_input_members = Vec::new();
+                let mut append = |kind, input_type: String, field_name: String, ty: String| {
+                    let required = ty.ends_with('!');
+                    generated_input_members.push(GraphqlGeneratedInputMember {
+                        kind,
+                        input_type,
+                        field_name,
+                        type_ref: parse_graphql_type(&ty).expect("runtime generated input type"),
+                        required,
+                    });
+                };
+                for field in &c.fields {
+                    if self.projection(&field.id).is_none()
+                        && field.effective_export(c) == GraphqlSemanticExport::Exportable
+                        && field.effective_classification(c)
+                            != GraphqlSemanticClassification::Secret
+                    {
+                        continue;
+                    }
+                    if let Some(options) = &self.options.mutations {
+                        if options.create
+                            && super::mutation::create_inputs(self, c).any(|f| f.id == field.id)
+                        {
+                            let required = !field.nullable
+                                && (field.default.is_none() || c.primary_key.contains(&field.id));
+                            append(
+                                GraphqlGeneratedInputKind::Create,
+                                format!("Create{name}Input"),
+                                field.api_name.clone(),
+                                format!(
+                                    "{}{}",
+                                    scalar::name(field.value_kind),
+                                    if required { "!" } else { "" }
+                                ),
+                            );
+                        }
+                        if options.update
+                            && super::mutation::update_inputs(self, c).any(|f| f.id == field.id)
+                        {
+                            append(
+                                GraphqlGeneratedInputKind::Update,
+                                format!("Update{name}Input"),
+                                field.api_name.clone(),
+                                scalar::name(field.value_kind).into(),
+                            );
+                        }
+                    }
+                    if field.filterable {
+                        append(
+                            GraphqlGeneratedInputKind::Where,
+                            format!("{name}WhereInput"),
+                            field.api_name.clone(),
+                            super::schema::filter_name(field.value_kind).into(),
+                        );
+                    }
+                    if c.primary_key.contains(&field.id) {
+                        let scalar = if c.live_subscriptions.is_some() {
+                            super::live::key_scalar(field.value_kind)
+                        } else {
+                            scalar::name(field.value_kind)
+                        };
+                        append(
+                            GraphqlGeneratedInputKind::Key,
+                            format!("{name}KeyInput"),
+                            field.api_name.clone(),
+                            format!("{scalar}!"),
+                        );
+                    }
+                }
+                // To-many relationship semantics are not in the public runtime
+                // catalogue. Their exact input shapes remain host-only and closed.
+                for relation in c
+                    .relations
+                    .iter()
+                    .filter(|relation| relation.join.is_some())
+                {
+                    let Some(target) = collections
+                        .iter()
+                        .find(|target| target.id == relation.target)
+                    else {
+                        continue;
+                    };
+                    let mut chars = relation.api_name.chars();
+                    let relation_name = chars
+                        .next()
+                        .map(|first| first.to_uppercase().chain(chars).collect::<String>())
+                        .unwrap_or_default();
+                    let change = format!("{name}{relation_name}LinkChangeInput");
+                    append(
+                        GraphqlGeneratedInputKind::Links,
+                        format!("{name}LinksInput"),
+                        relation.api_name.clone(),
+                        change.clone(),
+                    );
+                    for member in ["set", "add", "remove"] {
+                        append(
+                            GraphqlGeneratedInputKind::LinkChange,
+                            change.clone(),
+                            member.into(),
+                            format!("[{}KeyInput!]", self.object_name(target)),
+                        );
+                    }
+                }
                 GraphqlEntitySemanticMetadata {
+                    generated_input_members,
                     entity_name: self.object_name(c),
                     description: c.effective_description(),
                     default_classification: c.effective_classification(),

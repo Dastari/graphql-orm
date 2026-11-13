@@ -10,20 +10,44 @@ supersedes: []
 
 # Migration Guide
 
-## 0.141.0 to 0.142.0: test-only release
+## 0.141.0 to 0.144.0: host-only generated input contracts
 
-No code, SDL, schema or data migration is needed. Tests compile complete AI
-capabilities over macro-generated inputs and runtime search, link and
-projected-output inputs.
-Generated stand-in roots use `GraphqlSemanticOperationDescriptor::generated`.
+Upgrade ORM/macros together to 0.144.0 and operation catalogue to 0.7.5.
+`GraphqlEntitySemanticMetadata` gains `generated_input_members`. Macros and
+runtime producers supply the exact input identity, member, type and required
+flag for generated members that remain undisclosed. Handwritten struct
+literals initialize this field with `Vec::new()` unless the host supplies a
+producer contract. This is a breaking Rust struct-literal change.
 
-## Operation catalogue 0.7.5: generated label documentation
+The sidecar is host-only in-memory data: serde serialization/deserialization,
+SDL and router-protocol extensions omit it, and Debug formatting redacts its
+contents. It is not serialized anywhere. Hosts using public JSON/extension
+payloads for AI compilation must reattach the producer's sidecar (for example,
+from `Entity::graphql_semantic_metadata()`) after deserialization. The entire
+catalogue is a trusted host assertion; its public fields and Deserialize
+implementation do not prove resolver behavior.
 
-Documentation only. `GraphqlSemanticOperationDescriptor::generated` now states
-that trusted host code asserts the resolver is the ORM generated resolver.
-Tool profiles checks canonical input identities and shapes to limit disclosure;
-it cannot prove how a host resolver interprets canonical arguments. No API,
-fingerprint, schema or data migration change.
+Existing SDL, operation catalogue bytes and operation fingerprints are
+unchanged. Public semantic catalogue bytes and semantic fingerprints are
+also unchanged: the host-only sidecar is excluded from the canonical public
+encoding and fingerprint. No persistent schema or data migration is needed.
+
+Tool profiles 0.23.0 retains readable input members while keeping these
+producer members closed. A required undisclosed member omits only the affected
+capability; query, mutation and subscription catalogues return its input/member
+coordinates through host-only `diagnostics()`. Do not log or send these
+coordinates to a model, and do not declare undisclosed generated members with
+`AiCustomInputDisclosure`. Provide their values through a host-authored path.
+Generated input shape drift returns a host configuration error naming the type
+and first mismatching member; rebuild matching producer metadata and SDL.
+
+## Operation catalogue 0.7.5: generated catalogue trust boundary
+
+`GraphqlSemanticOperationDescriptor::generated` asserts that the resolver is
+the ORM generated resolver. Generated reach also follows relationship arguments
+and entity metadata. A custom root reusing a real generated input receives that
+entity's generated disclosure even when its resolver interprets members
+differently. Input shape checks limit disclosure, not resolver interpretation.
 
 ## 0.139.0 to 0.141.0: write transforms fail closed
 
