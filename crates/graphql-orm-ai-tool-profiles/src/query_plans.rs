@@ -4108,6 +4108,19 @@ fn restrict_input_fields(
     let (entity, kind) = match generated.as_slice() {
         [(entity, kind)] => (*entity, *kind),
         [] => {
+            // Generated search and subscription-filter inputs keep their fixed
+            // members; the filter's unsupported placeholder is never offered.
+            match generated_service_helper(schema, &binding, input_name) {
+                Some(GeneratedServiceHelper::Search) => return Ok(fields.clone()),
+                Some(GeneratedServiceHelper::SubscriptionFilter) => {
+                    return Ok(fields
+                        .iter()
+                        .filter(|(name, _)| semantic_name_key(name) == "actions")
+                        .map(|(name, field)| (name.clone(), field.clone()))
+                        .collect());
+                }
+                None => {}
+            }
             let shared = operator_roles.contains_key(input_name)
                 || shared_input_helper(schema, catalog, input_name);
             if !shared {
@@ -4150,6 +4163,19 @@ fn restrict_input_fields(
             if matches!(kind, SemanticInputKind::RuntimeOrder) {
                 return matches!(name.as_str(), "field" | "direction" | "nulls");
             }
+            if matches!(kind, SemanticInputKind::LinkChange) {
+                // The canonical shape admits only key lists of the target.
+                return true;
+            }
+            if matches!(kind, SemanticInputKind::Links) {
+                // Link changes follow the relation's own disclosure.
+                return entity.fields.iter().any(|field| {
+                    field.field_name == name.as_str()
+                        && field.relationship.is_some()
+                        && field.export == GraphqlSemanticExport::Exportable
+                        && field.classification != GraphqlSemanticClassification::Secret
+                });
+            }
             entity.fields.iter().any(|field| {
                 // Exact canonical names win over lexical similarity. In
                 // particular, private Customer says nothing about CustomerId.
@@ -4167,9 +4193,10 @@ fn restrict_input_fields(
                         // scalar metadata does not mark them sortable.
                         SemanticInputKind::KeysetOrderBy => true,
                         SemanticInputKind::Fields => true,
-                        SemanticInputKind::AggregateMetric | SemanticInputKind::RuntimeOrder => {
-                            false
-                        }
+                        SemanticInputKind::AggregateMetric
+                        | SemanticInputKind::RuntimeOrder
+                        | SemanticInputKind::Links
+                        | SemanticInputKind::LinkChange => false,
                     }
             })
         })
@@ -4201,11 +4228,110 @@ fn canonical_generated_owners<'a>(
         .iter()
         .filter_map(|entity| {
             generated_input_kind(input_name, &entity.entity_name)
+                .or_else(|| {
+                    link_change_relation(entity, input_name).map(|_| SemanticInputKind::LinkChange)
+                })
                 .filter(|_| binding.generated_for(&entity.entity_name, input_name))
-                .filter(|kind| generated_shape_matches(schema, entity, *kind, fields))
+                .filter(|kind| generated_shape_matches(schema, entity, *kind, input_name, fields))
                 .map(|kind| (entity, kind))
         })
         .collect()
+}
+
+/// Returns the relation whose runtime link-change input has this exact name:
+/// `{Entity}{Relation}LinkChangeInput`, with the relation's first letter
+/// upper-cased as the runtime schema module writes it.
+fn link_change_relation<'a>(
+    entity: &'a graphql_orm_operation_catalog::GraphqlEntitySemanticMetadata,
+    input_name: &str,
+) -> Option<&'a GraphqlSemanticRelationshipDescriptor> {
+    entity.fields.iter().find_map(|field| {
+        let relationship = field.relationship.as_ref()?;
+        let mut characters = field.field_name.chars();
+        let relation = characters
+            .next()
+            .map(|first| first.to_uppercase().chain(characters).collect::<String>())?;
+        (input_name == format!("{}{relation}LinkChangeInput", entity.entity_name))
+            .then_some(relationship)
+    })
+}
+
+/// The fixed-shape inputs the ORM generates for search and change
+/// subscriptions, shared by every entity's generated roots.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GeneratedServiceHelper {
+    /// `SearchInput` and the runtime module's `RuntimeSearchInput`.
+    Search,
+    /// `SubscriptionFilterInput` of generated change subscriptions.
+    SubscriptionFilter,
+}
+
+/// Recognises a generated search or subscription-filter input by its exact
+/// generated member shape. Member names follow the configured field case, so
+/// they are compared by normalised spelling.
+fn generated_service_helper_shape(
+    schema: &FinishedSchema,
+    fields: &BTreeMap<String, SchemaInput>,
+) -> Option<GeneratedServiceHelper> {
+    let enum_values = |ty: &str| match named_type(ty).ok().and_then(|name| schema.types.get(name)) {
+        Some(SchemaType::Enum(values)) => Some(values.clone()),
+        _ => None,
+    };
+    let mut members = BTreeMap::new();
+    for (name, field) in fields {
+        if members.insert(semantic_name_key(name), field).is_some() {
+            return None;
+        }
+    }
+    let keys = members.keys().map(String::as_str).collect::<BTreeSet<_>>();
+    if keys == BTreeSet::from(["query", "mode", "minscore"]) {
+        let query = members["query"];
+        let mode = members["mode"];
+        let minimum = members["minscore"];
+        let modes_are_canonical = list_item_type(&mode.ty).is_none()
+            && enum_values(&mode.ty).is_some_and(|values| {
+                !values.is_empty()
+                    && values.iter().all(|value| {
+                        matches!(
+                            semantic_name_key(value).as_str(),
+                            "plain" | "phrase" | "web" | "prefix"
+                        )
+                    })
+            });
+        return (query.ty == "String!"
+            && modes_are_canonical
+            && !is_non_null(&mode.ty)
+            && minimum.ty == "Float")
+            .then_some(GeneratedServiceHelper::Search);
+    }
+    if keys == BTreeSet::from(["actions", "dummy"]) {
+        let actions = members["actions"];
+        return (!is_non_null(&actions.ty)
+            && list_item_type(&actions.ty).is_some_and(|item| {
+                list_item_type(item).is_none() && enum_values(item).is_some()
+            })
+            && members["dummy"].ty == "Boolean")
+            .then_some(GeneratedServiceHelper::SubscriptionFilter);
+    }
+    None
+}
+
+/// Returns the generated service helper an input is, when it has the exact
+/// generated shape and a generated root or relationship reaches it.
+fn generated_service_helper(
+    schema: &FinishedSchema,
+    binding: &CustomInputBinding,
+    input_name: &str,
+) -> Option<GeneratedServiceHelper> {
+    let Some(SchemaType::InputObject(fields)) = schema.types.get(input_name) else {
+        return None;
+    };
+    generated_service_helper_shape(schema, fields).filter(|_| {
+        binding
+            .generated_reach
+            .values()
+            .any(|reach| reach.contains(input_name))
+    })
 }
 
 /// Returns whether the members a generated kind would admit have exactly the
@@ -4214,6 +4340,7 @@ fn generated_shape_matches(
     schema: &FinishedSchema,
     entity: &graphql_orm_operation_catalog::GraphqlEntitySemanticMetadata,
     kind: SemanticInputKind,
+    input_name: &str,
     fields: &BTreeMap<String, SchemaInput>,
 ) -> bool {
     let is_enum = |ty: &str| {
@@ -4261,6 +4388,34 @@ fn generated_shape_matches(
         // The runtime order input is validated against its exact shape where
         // it is restricted.
         SemanticInputKind::RuntimeOrder => true,
+        // One optional member per relation, typed as that relation's exact
+        // link-change input.
+        SemanticInputKind::Links => {
+            fields.iter().all(|(name, field)| {
+                let Some(semantic) = entity.fields.iter().find(|semantic| {
+                    semantic.field_name == *name && semantic.relationship.is_some()
+                }) else {
+                    return false;
+                };
+                let mut characters = semantic.field_name.chars();
+                let relation = characters
+                    .next()
+                    .map(|first| first.to_uppercase().chain(characters).collect::<String>())
+                    .unwrap_or_default();
+                !is_non_null(&field.ty)
+                    && field.ty == format!("{}{relation}LinkChangeInput", entity.entity_name)
+            })
+        }
+        // `set`, `add` and `remove`, each a list of the target's key input.
+        SemanticInputKind::LinkChange => {
+            link_change_relation(entity, input_name).is_some_and(|relationship| {
+                !fields.is_empty()
+                    && fields.iter().all(|(name, field)| {
+                        matches!(name.as_str(), "set" | "add" | "remove")
+                            && field.ty == format!("[{}KeyInput!]", relationship.target)
+                    })
+            })
+        }
         SemanticInputKind::Where => fields.iter().all(|(name, field)| {
             entity_field(name)
                 .filter(|semantic| !semantic.filter_operators.is_empty())
@@ -4323,6 +4478,7 @@ fn handwritten_input(
     input_name: &str,
 ) -> bool {
     canonical_generated_owners(schema, catalog, binding, input_name).is_empty()
+        && generated_service_helper(schema, binding, input_name).is_none()
         && !operator_roles.is_some_and(|roles| roles.contains_key(input_name))
         && !shared_input_helper(schema, catalog, input_name)
 }
@@ -4351,8 +4507,12 @@ fn restrict_custom_input_fields(
     Ok(restricted)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum SemanticInputKind {
+    /// Runtime link changes of one written record, one member per relation.
+    Links,
+    /// One relation's runtime link change (`set`, `add`, `remove`).
+    LinkChange,
     Where,
     OrderBy,
     KeysetOrderBy,
@@ -4372,6 +4532,8 @@ fn generated_input_kind(input_name: &str, entity_name: &str) -> Option<SemanticI
         Some(SemanticInputKind::RuntimeOrder)
     } else if input_name == format!("{entity_name}AggregateMetricInput") {
         Some(SemanticInputKind::AggregateMetric)
+    } else if input_name == format!("{entity_name}LinksInput") {
+        Some(SemanticInputKind::Links)
     } else if input_name == format!("{entity_name}KeyInput")
         || input_name == format!("Create{entity_name}Input")
         || input_name == format!("Update{entity_name}Input")
@@ -10838,6 +11000,184 @@ mod tests {
             capability.compact_argument_schema()
         );
         assert!(!described.contains("\"field\""), "{described}");
+    }
+
+    /// A runtime-schema-style search composition: one root over `Parent`
+    /// taking a search input of the given SDL definition.
+    fn search_composition(
+        search_type: &str,
+        search_sdl: &str,
+        generated: bool,
+    ) -> (String, GraphqlSemanticCatalog) {
+        let sdl = query_sdl()
+            .replace(
+                "          ReadParent(id: ID!): Parent!\n",
+                &format!(
+                    "          ReadParent(id: ID!): Parent!\n          SearchParents(search: {search_type}!): Parent\n"
+                ),
+            )
+            .replace(
+                "        input PageInput { limit: Int, offset: Int }\n",
+                &format!(
+                    "        input PageInput {{ limit: Int, offset: Int }}\n        {search_sdl}\n        enum RuntimeSearchMode {{ PLAIN PHRASE WEB PREFIX }}\n"
+                ),
+            );
+        let arguments = vec![GraphqlSemanticArgumentDescriptor {
+            graphql_name: "search".to_owned(),
+            description: "Full-text search of one collection.".to_owned(),
+            type_ref: GraphqlSemanticTypeRef::named(
+                search_type,
+                GraphqlSemanticTypeKind::Object,
+                false,
+            ),
+        }];
+        let result = GraphqlSemanticTypeRef::named("Parent", GraphqlSemanticTypeKind::Object, true);
+        let operation = if generated {
+            generated_root(
+                "Parent",
+                GraphqlOperationKind::Query,
+                "SearchParents",
+                "Search reviewed parent records.",
+                arguments,
+                result,
+                true,
+            )
+        } else {
+            GraphqlSemanticOperationDescriptor::custom(
+                GraphqlOperationKind::Query,
+                "SearchParents",
+                "Search reviewed parent records.",
+                arguments,
+                result,
+                true,
+            )
+        }
+        .expect("search root");
+        let mut semantics = semantic_catalog();
+        semantics.operations.push(operation);
+        let semantics =
+            GraphqlSemanticCatalog::compose_descriptors(semantics.entities, semantics.operations)
+                .expect("search catalogue validates");
+        (sdl, semantics)
+    }
+
+    #[test]
+    fn generated_search_inputs_compile_without_declarations() {
+        for (search_type, search_sdl, query, mode) in [
+            (
+                "RuntimeSearchInput",
+                "input RuntimeSearchInput { query: String!, mode: RuntimeSearchMode, minScore: Float }",
+                "query",
+                "mode",
+            ),
+            (
+                "SearchInput",
+                "input SearchInput { Query: String!, Mode: RuntimeSearchMode, MinScore: Float }",
+                "Query",
+                "Mode",
+            ),
+        ] {
+            let (sdl, semantics) = search_composition(search_type, search_sdl, true);
+            let catalog = compile_shared_metric(&sdl, &semantics)
+                .expect("a generated search root compiles without any declaration");
+            catalog
+                .capabilities()
+                .find(|capability| capability.field_name() == "SearchParents")
+                .expect("search capability")
+                .compile_compact(json!({
+                    "arguments": { "search": { (query): "bridge", (mode): "PLAIN" } },
+                    "selections": ["id"],
+                    "relationshipArguments": {},
+                    "relationshipMaximumItems": {}
+                }))
+                .expect("the generated search members are accepted");
+
+            // Reached only by a custom root, the same shape is handwritten.
+            let (sdl, semantics) = search_composition(search_type, search_sdl, false);
+            assert!(matches!(
+                compile_shared_metric(&sdl, &semantics),
+                Err(AiError::InvalidConfiguration(message))
+                    if message == "required custom input field has no declared disclosure"
+            ));
+        }
+
+        // An extra member is not the generated shape, even on a generated root.
+        let (sdl, semantics) = search_composition(
+            "RuntimeSearchInput",
+            "input RuntimeSearchInput { query: String!, mode: RuntimeSearchMode, minScore: Float, ownerEmail: String }",
+            true,
+        );
+        assert!(matches!(
+            compile_shared_metric(&sdl, &semantics),
+            Err(AiError::InvalidConfiguration(message))
+                if message == "required custom input field has no declared disclosure"
+        ));
+    }
+
+    #[test]
+    fn generated_link_and_subscription_filter_inputs_keep_their_generated_members() {
+        let sdl = format!(
+            "{}\n        input ChildKeyInput {{ id: String! }}\n        input ParentLinksInput {{ children: ParentChildrenLinkChangeInput }}\n        input ParentChildrenLinkChangeInput {{ set: [ChildKeyInput!], add: [ChildKeyInput!], remove: [ChildKeyInput!] }}\n        input SubscriptionFilterInput {{ actions: [ChangeAction!], dummy: Boolean }}\n        enum ChangeAction {{ CREATED UPDATED DELETED }}\n",
+            query_sdl()
+        );
+        let schema = FinishedSchema::parse(&sdl).expect("link schema parses");
+        let mut semantics = semantic_catalog();
+        semantics.operations.push(
+            generated_root(
+                "Parent",
+                GraphqlOperationKind::Query,
+                "LinkParent",
+                "Change the links of one parent record.",
+                vec![
+                    GraphqlSemanticArgumentDescriptor {
+                        graphql_name: "links".to_owned(),
+                        description: "Link changes.".to_owned(),
+                        type_ref: GraphqlSemanticTypeRef::named(
+                            "ParentLinksInput",
+                            GraphqlSemanticTypeKind::Object,
+                            true,
+                        ),
+                    },
+                    GraphqlSemanticArgumentDescriptor {
+                        graphql_name: "filter".to_owned(),
+                        description: "Change filter.".to_owned(),
+                        type_ref: GraphqlSemanticTypeRef::named(
+                            "SubscriptionFilterInput",
+                            GraphqlSemanticTypeKind::Object,
+                            true,
+                        ),
+                    },
+                ],
+                GraphqlSemanticTypeRef::named("Parent", GraphqlSemanticTypeKind::Object, true),
+                true,
+            )
+            .unwrap(),
+        );
+        let semantics =
+            GraphqlSemanticCatalog::compose_descriptors(semantics.entities, semantics.operations)
+                .unwrap();
+        let restricted = |schema: &FinishedSchema, name: &str| {
+            let Some(SchemaType::InputObject(fields)) = schema.types.get(name) else {
+                panic!("{name} is defined");
+            };
+            restrict_input_fields(schema, &semantics, name, fields)
+                .unwrap()
+                .into_keys()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(restricted(&schema, "ParentLinksInput"), ["children"]);
+        assert_eq!(
+            restricted(&schema, "ParentChildrenLinkChangeInput"),
+            ["add", "remove", "set"]
+        );
+        assert_eq!(restricted(&schema, "SubscriptionFilterInput"), ["actions"]);
+
+        // A link change over another type is not the generated shape.
+        let forged = FinishedSchema::parse(
+            &sdl.replace("set: [ChildKeyInput!], add", "set: [String!], add"),
+        )
+        .unwrap();
+        assert!(restricted(&forged, "ParentChildrenLinkChangeInput").is_empty());
     }
 
     #[test]

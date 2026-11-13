@@ -33,6 +33,14 @@ used by a custom root or by a root built with
 `GraphqlSemanticOperationDescriptor::generated`, is handwritten and needs
 declarations like any other. A canonical aggregate metric input applies the
 generated field and operator rules on every root that uses it.
+
+The ORM's fixed generated inputs need no declarations when a generated root
+reaches them with their exact generated shape: the search input (`SearchInput`
+and the runtime `RuntimeSearchInput`), the change-subscription filter (only
+`actions` is offered) and the runtime link inputs (`{Entity}LinksInput` offers
+only exportable relations; each `{Entity}{Relation}LinkChangeInput` offers
+`set`, `add` and `remove`). The same shape reached only by a custom root is
+handwritten.
 Declare each field the model may describe and send, or declare a custom
 operation to disclose every handwritten input its arguments reach:
 
