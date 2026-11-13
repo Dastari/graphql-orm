@@ -5723,6 +5723,18 @@ fn generate_graphql_operations_unfiltered(
     } else {
         quote! {}
     };
+    let rebuild_document_read = if backend == BackendKind::Postgres {
+        quote! {
+            let mut read_tx = db.pool().begin().await?;
+            ::graphql_orm::sqlx::query("SET LOCAL row_security = off")
+                .execute(&mut *read_tx).await?;
+            let entity = query.fetch_one_on(&mut *read_tx).await?;
+            read_tx.commit().await?;
+            entity
+        }
+    } else {
+        quote! { query.fetch_one(db).await? }
+    };
     let search_rebuild_methods = if has_search
         && backend != BackendKind::Mssql
         && !schema_policy_read_only
@@ -5778,12 +5790,11 @@ fn generate_graphql_operations_unfiltered(
                     ::graphql_orm::graphql::orm::EntityQuery::<Self, #backend_marker>::new()
                         .where_values(&Self::__gom_key_where_clause(), Self::__gom_key_values(id)),
                 ).await?;
-                let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin(
-                    db,
-                    ::graphql_orm::graphql::orm::TransactionMode::Default,
-                ).await?;
-                #rebuild_rls_guard
-                let Some(entity) = query.fetch_one_in_transaction(&mut hook_ctx).await? else {
+                // The short guarded read finishes before host callbacks, which may
+                // query through a one-connection pool. They authorize the exact
+                // fetched row used for the document; the later index write is separate.
+                let entity = { #rebuild_document_read };
+                let Some(entity) = entity else {
                     return Ok(());
                 };
                 if !db.can_read_row(None, #entity_name_lit,
@@ -5800,6 +5811,11 @@ fn generate_graphql_operations_unfiltered(
                     ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)?;
                 }
                 let document = <Self as ::graphql_orm::graphql::orm::SearchableEntity>::search_document(&entity);
+                let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin(
+                    db,
+                    ::graphql_orm::graphql::orm::TransactionMode::Default,
+                ).await?;
+                #rebuild_rls_guard
                 ::graphql_orm::graphql::orm::upsert_search_document_on::<#backend_marker>(
                     &mut hook_ctx,
                     index,

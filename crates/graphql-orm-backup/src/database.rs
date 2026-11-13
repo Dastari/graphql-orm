@@ -40,7 +40,13 @@ pub trait GraphqlOrmBackupAdapter: Send + Sync {
     /// Returns [`BackupError`] if the adapter cannot export table rows.
     async fn export_full(&self) -> Result<Vec<BackupTableExport>, BackupError>;
 
-    /// Exports changed rows and tombstones since a parent snapshot.
+    /// Exports changed rows and tombstones since a reliable parent checkpoint,
+    /// captured in one consistent database snapshot or under host quiescence.
+    /// Include sufficient object metadata from that same snapshot for every
+    /// new/changed reference, even when its metadata row otherwise did not change.
+    /// The object index derives references and recorded digests from this export;
+    /// a second live lookup cannot complete an incomplete export. Fail if these
+    /// guarantees or an unfiltered export cannot be provided.
     ///
     /// # Errors
     ///

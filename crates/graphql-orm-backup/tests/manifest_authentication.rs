@@ -32,6 +32,181 @@ fn authenticator() -> ManifestAuthenticator {
     ManifestAuthenticator::new(key(7))
 }
 
+#[tokio::test]
+async fn sealed_legacy_policy_refuses_unsealed_bad_and_downgraded_manifests() {
+    let dir = TempDir::new().unwrap();
+    let repo = repository(&dir);
+    let modern = backup_with_object(&repo, "media/legacy.txt").await;
+    let accepting = legacy_repository(&dir, LegacyManifestPolicy::AcceptSealedLegacy);
+    let mut unsealed = legacy(&modern);
+    write_raw_manifest(&repo, &mut unsealed).await;
+    assert!(matches!(
+        load_manifest(&accepting, modern.snapshot_id).await,
+        Err(BackupError::LegacyManifestRefused { .. })
+    ));
+    let mut sealed = modern.clone();
+    seal_format_two(&mut sealed);
+    write_raw_manifest(&repo, &mut sealed).await;
+    load_manifest(&accepting, modern.snapshot_id).await.unwrap();
+    sealed.authentication.as_mut().unwrap().mac = "00".repeat(32);
+    write_raw_manifest(&repo, &mut sealed).await;
+    assert!(load_manifest(&accepting, modern.snapshot_id).await.is_err());
+    for (format, remove_identity) in [(2, false), (2, true), (3, true)] {
+        let mut downgraded = modern.clone();
+        downgraded.format_version = format;
+        if remove_identity {
+            downgraded.authentication.as_mut().unwrap().repository_id = None;
+        }
+        write_raw_manifest(&repo, &mut downgraded).await;
+        assert!(
+            load_manifest(&accepting, modern.snapshot_id).await.is_err(),
+            "relabelling a bound seal cannot turn it into an old seal"
+        );
+    }
+}
+
+#[tokio::test]
+async fn sealed_legacy_policy_supports_restore_incremental_compaction_and_retention() {
+    let dir = TempDir::new().unwrap();
+    let repo = repository(&dir);
+    let mut old = backup_with_object(&repo, "media/legacy.txt").await;
+    seal_format_two(&mut old);
+    write_raw_manifest(&repo, &mut old).await;
+    repo.delete_blob(graphql_orm_backup::REPOSITORY_ID_KEY)
+        .await
+        .unwrap();
+    let objects = MockObjectIndex {
+        object: entry_ref(&old.objects[0]),
+        bytes: Bytes::from_static(b"object bytes"),
+    };
+    let incremental = |parent_snapshot_id| IncrementalBackupRequest {
+        snapshot_id: Uuid::new_v4(),
+        parent_snapshot_id,
+        created_at: old.created_at + 1,
+        app_id: old.app_id.clone(),
+        app_version: old.app_version.clone(),
+    };
+    assert!(prune(&repo, &KeepPolicy::default()).await.is_err());
+    assert!(
+        delete_snapshot(&repo, old.snapshot_id, &RepositoryLockOptions::default())
+            .await
+            .is_err()
+    );
+    assert!(
+        create_incremental_backup(
+            &repo,
+            &MockDatabase::default(),
+            &objects,
+            incremental(old.snapshot_id)
+        )
+        .await
+        .is_err()
+    );
+    let accepting = legacy_repository(&dir, LegacyManifestPolicy::AcceptSealedLegacy);
+    verify_manifest_and_objects(&accepting, &old).await.unwrap();
+    restore_snapshot(
+        &accepting,
+        &MockDatabase::default(),
+        old.snapshot_id,
+        RestoreContext::dry_run(),
+    )
+    .await
+    .unwrap();
+    let child = create_incremental_backup(
+        &accepting,
+        &MockDatabase::default(),
+        &objects,
+        incremental(old.snapshot_id),
+    )
+    .await
+    .unwrap();
+    restore_snapshot(
+        &accepting,
+        &MockDatabase::default(),
+        child.manifest.snapshot_id,
+        RestoreContext::dry_run(),
+    )
+    .await
+    .unwrap();
+    let compacted = compact_chain(&accepting, compact_request(child.manifest.snapshot_id))
+        .await
+        .unwrap();
+    assert_eq!(compacted.manifest.format_version, 3);
+    prune(
+        &accepting,
+        &KeepPolicy {
+            keep_last: 10,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    delete_snapshot(
+        &accepting,
+        child.manifest.snapshot_id,
+        &RepositoryLockOptions::default(),
+    )
+    .await
+    .unwrap();
+    delete_snapshot(
+        &accepting,
+        old.snapshot_id,
+        &RepositoryLockOptions::default(),
+    )
+    .await
+    .unwrap();
+    let strict = repository(&dir);
+    load_manifest(&strict, compacted.manifest.snapshot_id)
+        .await
+        .unwrap();
+    prune(&strict, &KeepPolicy::default()).await.unwrap();
+}
+
+#[tokio::test]
+async fn incremental_chain_refuses_a_parent_copied_from_another_repository() {
+    let source_dir = TempDir::new().unwrap();
+    let source = repository(&source_dir);
+    let parent = backup_with_object(&source, "media/parent.txt").await;
+    let target_dir = TempDir::new().unwrap();
+    let target = repository(&target_dir);
+    graphql_orm_backup::initialize_repository_identity(&target)
+        .await
+        .unwrap();
+    target
+        .put_blob(
+            &snapshot_manifest_key(parent.snapshot_id),
+            source
+                .get_blob(&snapshot_manifest_key(parent.snapshot_id))
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let before = without_locks(target.list_blobs("").await.unwrap());
+    let error = create_incremental_backup(
+        &target,
+        &MockDatabase::default(),
+        &MockObjectIndex {
+            object: entry_ref(&parent.objects[0]),
+            bytes: Bytes::from_static(b"object bytes"),
+        },
+        IncrementalBackupRequest {
+            snapshot_id: Uuid::new_v4(),
+            parent_snapshot_id: parent.snapshot_id,
+            created_at: parent.created_at + 1,
+            app_id: parent.app_id,
+            app_version: parent.app_version,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        BackupError::ManifestAuthenticationFailed { .. }
+    ));
+    assert_eq!(without_locks(target.list_blobs("").await.unwrap()), before);
+}
+
 fn repository(temp: &TempDir) -> LocalBackupRepository {
     repository_with(temp, authenticator())
 }
@@ -514,14 +689,14 @@ async fn legacy_manifests_are_refused_unless_the_host_opts_in() {
         BackupError::LegacyManifestRefused { snapshot_id: id } if id == snapshot_id
     ));
 
-    // Pinned: accepted only with the recorded checksum.
+    // Unsealed format 1 needs the explicit unauthenticated policy, even with a pin.
     let pinned = BTreeMap::from([(snapshot_id, legacy_manifest.checksum.clone())]);
     restore(legacy_repository(
         &temp,
         LegacyManifestPolicy::TrustPinned(pinned.clone()),
     ))
     .await
-    .expect("pinned legacy manifest restores");
+    .expect_err("a checksum pin alone does not opt into unauthenticated format 1");
     let mut altered = legacy_manifest.clone();
     altered.app_version = "altered".to_string();
     write_raw_manifest(&repository, &mut altered).await;
@@ -1031,6 +1206,15 @@ struct MockObjectIndex {
 
 #[async_trait]
 impl BackupObjectIndex for MockObjectIndex {
+    async fn objects_from_incremental_export(
+        &self,
+        parent_snapshot_id: Uuid,
+        _changes: &[graphql_orm_backup::BackupChangeExport],
+    ) -> Result<Vec<BackupObjectRef>, BackupError> {
+        self.list_objects_for_incremental_backup(parent_snapshot_id)
+            .await
+    }
+
     async fn objects_from_full_export(
         &self,
         _: &[graphql_orm_backup::BackupTableExport],
@@ -1174,38 +1358,10 @@ async fn copied_snapshot_is_refused_by_another_repository_with_the_same_key() {
 
 #[tokio::test]
 async fn pinned_format_two_backup_restores_without_an_identity_record() {
-    use hmac::{Hmac, Mac};
     let dir = TempDir::new().unwrap();
     let repo = repository(&dir);
     let mut manifest = backup_with_object(&repo, "media/legacy.txt").await;
-    // Reproduce the released format-2 MAC using the synthetic fixture key.
-    manifest.format_version = 2;
-    manifest.authentication = None;
-    manifest.checksum.clear();
-    let canonical = serde_json::to_vec(&manifest).unwrap();
-    let mut mac_key = [0u8; 32];
-    hkdf::Hkdf::<sha2::Sha256>::new(
-        Some(b"graphql-orm-backup manifest authentication"),
-        &[7; 32],
-    )
-    .expand(b"manifest hmac-sha256 key v1", &mut mac_key)
-    .unwrap();
-    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(&mac_key).unwrap();
-    mac.update(b"graphql-orm-backup/manifest/hmac-sha256/v2\n");
-    mac.update(&canonical);
-    let tag: String = mac
-        .finalize()
-        .into_bytes()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    manifest.checksum = bytes_sha256_hex(&canonical);
-    manifest.authentication = Some(
-        serde_json::from_value(serde_json::json!({
-            "algorithm": "HmacSha256", "key_id": authenticator().key_id(), "mac": tag,
-        }))
-        .unwrap(),
-    );
+    seal_format_two(&mut manifest);
     repo.put_blob(
         &snapshot_manifest_key(manifest.snapshot_id),
         Bytes::from(serde_json::to_vec(&manifest).unwrap()),
@@ -1343,4 +1499,35 @@ async fn identity_enrollment_creates_once_then_reopens_with_the_host_pin() {
         Some(identity)
     );
     load_manifest(&pinned, manifest.snapshot_id).await.unwrap();
+}
+
+fn seal_format_two(manifest: &mut BackupSnapshotManifest) {
+    use hmac::{Hmac, Mac};
+    manifest.format_version = 2;
+    manifest.authentication = None;
+    manifest.checksum.clear();
+    let canonical = serde_json::to_vec(&*manifest).unwrap();
+    let mut mac_key = [0u8; 32];
+    hkdf::Hkdf::<sha2::Sha256>::new(
+        Some(b"graphql-orm-backup manifest authentication"),
+        &[7; 32],
+    )
+    .expand(b"manifest hmac-sha256 key v1", &mut mac_key)
+    .unwrap();
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(&mac_key).unwrap();
+    mac.update(b"graphql-orm-backup/manifest/hmac-sha256/v2\n");
+    mac.update(&canonical);
+    let tag: String = mac
+        .finalize()
+        .into_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    manifest.checksum = bytes_sha256_hex(&canonical);
+    manifest.authentication = Some(
+        serde_json::from_value(serde_json::json!({
+            "algorithm": "HmacSha256", "key_id": authenticator().key_id(), "mac": tag,
+        }))
+        .unwrap(),
+    );
 }

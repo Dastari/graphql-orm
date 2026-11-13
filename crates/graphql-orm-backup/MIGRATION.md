@@ -18,7 +18,11 @@ supersedes: []
    live metadata table is not valid. `export_full` must export all tables in
    one consistent snapshot or fail. The ORM index requires a valid recorded
    checksum for every exported object; backfill checksums before backup and
-   include those columns in backup policy.
+   include those columns in backup policy. Implement the analogous
+   `objects_from_incremental_export(parent_snapshot_id, changes)` method for
+   incremental indexes. It must derive references and recorded digests solely
+   from that exact exported change set; its default also fails closed. Export
+   any required object metadata rows within the same database snapshot.
 2. Handle `BackupError::IncompleteRepositoryListing { reason }` in exhaustive
    matches. Existing listing safety checks now return this variant rather than
    `InvalidManifestChain`; do not match error strings.
@@ -35,26 +39,48 @@ supersedes: []
    record is refused until the host supplies its independently retained UUID;
    the helper never adopts an identity from storage. It also refuses a record
    replaced between atomic creation and its readback. Alternatively generate and
-   retain a UUID in host configuration first; a new repository's first manifest
-   write stores that configured UUID atomically.
+   retain a UUID in host configuration first; a new backup run
+   stores that configured UUID atomically after acquiring the lock.
    Preserve the record when moving the entire repository. A different repository
    must keep its own record and unique host pin; never reuse an identity across
    independent repositories. Copied manifests and payloads will be refused.
-4. Existing backups are not rewritten. Format 1 keeps its existing legacy
-   policy. For format 2, keep the old sealing key and opt in with
-   `LegacyManifestPolicy::TrustPinned`, using snapshot checksums retained in
-   trusted host records. The seal is still checked. If trusted checksum records
-   are unavailable, a host-reviewed one-time `TrustUnauthenticated` policy also
-   accepts format 2 (still checking its seal). Restore old snapshots directly
-   under that policy, or compact them into a new identity-bound format 3
-   snapshot; then return to `Refuse`. No identity record is needed to restore
-   an explicitly trusted older snapshot.
+4. Existing backups are not rewritten. For sealed format-2 backups, keep the
+   old sealing key and select `LegacyManifestPolicy::AcceptSealedLegacy`. This
+   policy requires a valid format-2 seal and refuses unsealed format 1. If host
+   checksum records exist, `TrustPinned` additionally requires their checksums
+   for every accepted format-2 manifest. Neither policy accepts format 1.
+
+   **Warning:** `TrustUnauthenticated` is the only policy that accepts format 1.
+   Format 1 has no seal. A repository writer can forge its contents and recompute
+   its plain checksum; this policy accepts that unauthenticated content. Do not
+   enable it to migrate sealed format-2 backups. It is reserved for an explicit
+   host decision to trust unauthenticated historical data.
+
+   The default `Refuse` policy rejects both older formats. The effects on an
+   existing sealed format-2 repository are:
+
+   | Operation | `Refuse` | `AcceptSealedLegacy` |
+   | --- | --- | --- |
+   | Restore, object restore, load or verify a format-2 manifest/chain | Refused | Works with the old sealing key; no identity record or UUID pin is required for reading legacy data |
+   | Incremental from, or compaction of, a chain containing format 2 | Refused | Works; new format-3 writes also require a host UUID pin and validate/create its durable record under the lock before export or payload writes |
+   | Prune or delete while any listed manifest is format 2 | Refused, even if the selected snapshot is format 3 | Works, subject to normal retention and dependency safety checks |
+   | New full backup or an independent all-format-3 chain | Works with a host UUID pin | Works with a host UUID pin |
+
+   Every format-3 member of a mixed chain or repository still requires the
+   host UUID pin and matching durable record, regardless of legacy policy.
+
+   `TrustPinned` supports the same operations when every legacy manifest those
+   operations load has a trusted checksum pin, including all listed manifests
+   for prune/delete and every parent for a chain operation. Compaction creates
+   a repository-bound format-3 snapshot; it does not rewrite or remove old
+   manifests. Keep the sealed-legacy policy while old manifests remain, or
+   remove them under that policy before switching back to `Refuse`.
 5. PostgreSQL roles subject to RLS now fail export, target emptiness checks,
    and search rebuild. Use an administrative role exempt from RLS: a superuser,
    a role with `BYPASSRLS`, or the table owner when RLS is not forced. A permissive
    policy is still RLS and does not qualify. There is no policy-filtered export
    option. ORM and macros move together to
-   placeholder 0.133.0 for this change; refresh consumer lockfiles together.
+   placeholder 0.135.0 for this change; refresh consumer lockfiles together.
 
 See the [snapshot guarantees](docs/architecture.md#full-backup-flow) and
 [format reference](docs/snapshot-format.md#manifest-authentication).

@@ -18,8 +18,10 @@ snapshots/{snapshot_id}/database/tables/{table_name}.jsonl.zst
 snapshots/{snapshot_id}/database/changes/{table_name}.jsonl.zst
 objects/sha256/{first_two}/{next_two}/{sha256}
 locks/repository.lock
-repository-id
 ```
+
+The separate `repository-id` blob stores the durable repository UUID. It is
+created once, remains after lock release, and must match the independent host pin.
 
 ## Manifest
 
@@ -153,8 +155,10 @@ one exclusive advisory lock blob:
 
 ```text
 locks/repository.lock
-repository-id
 ```
+
+The separate `repository-id` blob stores the durable repository UUID. It is
+created once, remains after lock release, and must match the independent host pin.
 
 The lock is created with repository conditional-write semantics and is removed
 with single-attempt deletion when the operation completes, after checking that

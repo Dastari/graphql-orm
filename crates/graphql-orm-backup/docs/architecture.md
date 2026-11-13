@@ -57,10 +57,11 @@ key and an independently retained repository identity:
   `RestoreKeyScope` and never overwrites existing content.
 
 Legacy manifests (format version 1, written before sealing existed) carry no
-seal. They are refused unless the host selects a `LegacyManifestPolicy`; the
+seal. Only the explicit `TrustUnauthenticated` policy accepts this unauthenticated
+content. The
 snapshot-path, content-key and restore-target checks still apply to them.
 Format 2 seals are authenticated but lack repository binding, so they also
-require explicit legacy trust. Their original MAC is still checked; accepted
+require `AcceptSealedLegacy` (or trusted format-2 checksum pins). Their original MAC is still checked; accepted
 older formats do not require an identity record. See the
 [migration guide](../MIGRATION.md).
 
@@ -82,7 +83,10 @@ not encrypted.
 
 ## Full Backup Flow
 
-`create_full_backup` implements the current full snapshot flow:
+`create_full_backup` implements the current full snapshot flow. Full, incremental
+and compaction writers first acquire the repository lock and validate/create the
+host-pinned identity before claiming a snapshot, exporting rows or writing payloads.
+Manifest publication checks the durable identity again.
 
 1. Read schema snapshot from `GraphqlOrmBackupAdapter`.
 2. Export all backup-enabled tables through `GraphqlOrmBackupAdapter`.
@@ -128,11 +132,17 @@ policy-filtered export mode is provided. This follows
 `create_incremental_backup` implements the repository-side incremental snapshot flow. It depends on
 the application adapter, or a future change-journal extension to
 `OrmBackupAdapter`, returning reliable changes from
-`GraphqlOrmBackupAdapter::export_incremental`.
+`GraphqlOrmBackupAdapter::export_incremental`. The export must include sufficient
+object metadata for every new or changed reference, captured within the same
+snapshot (including unchanged metadata rows if needed to describe a new
+reference). Custom adapters must provide a reliable parent checkpoint and one
+consistent change set, or fail. The built-in ORM adapter still has no incremental
+journal integration and returns `UnsupportedOperation`. Copy-time object checksums
+apply exactly as for full backups.
 
-1. Load parent snapshot marker.
-2. Ask the adapter for changed rows and deletes since the parent.
-3. Ask object index for newly referenced or changed objects.
+1. Validate/create the pinned repository identity under the lock, then authenticate the parent chain.
+2. Ask the adapter for changed rows and deletes since the parent in one database snapshot.
+3. Derive object references and recorded digests from those exact exported changes through `objects_from_incremental_export`. Its default fails closed; a second live metadata query is not permitted.
 4. Serialize changes as JSON Lines.
 5. Compress change payloads with zstd, checksum the stored compressed bytes, and write them.
 6. Write object blobs by content-addressed key if missing.

@@ -264,6 +264,8 @@ async fn create_full_backup_inner(
     options: &BackupExecutionOptions,
     write: &mut SnapshotWrite,
 ) -> Result<FullBackupResult, BackupError> {
+    // Under the lock, refuse a foreign durable identity before exports or payload writes.
+    crate::manifest::repository_identity(repository, true).await?;
     claim_snapshot_id(repository, request.snapshot_id, write).await?;
     options.cancellation.check()?;
     let limits = repository.capacity_limits();
@@ -406,6 +408,8 @@ async fn create_incremental_backup_inner(
     options: &BackupExecutionOptions,
     write: &mut SnapshotWrite,
 ) -> Result<IncrementalBackupResult, BackupError> {
+    // Under the lock, refuse a foreign durable identity before exports or payload writes.
+    crate::manifest::repository_identity(repository, true).await?;
     claim_snapshot_id(repository, request.snapshot_id, write).await?;
     if request.parent_snapshot_id == request.snapshot_id {
         return Err(BackupError::InvalidManifestEntry {
@@ -424,7 +428,7 @@ async fn create_incremental_backup_inner(
         .export_incremental(request.parent_snapshot_id)
         .await?;
     let object_refs = objects
-        .list_objects_for_incremental_backup(request.parent_snapshot_id)
+        .objects_from_incremental_export(request.parent_snapshot_id, &changes)
         .await?;
 
     for change in &changes {
@@ -550,6 +554,8 @@ async fn compact_chain_inner(
     write: &mut SnapshotWrite,
 ) -> Result<CompactChainResult, BackupError> {
     // Checked under the repository lock, before any payload is written.
+    // Under the lock, refuse a foreign durable identity before exports or payload writes.
+    crate::manifest::repository_identity(repository, true).await?;
     claim_snapshot_id(repository, request.snapshot_id, write).await?;
     options.cancellation.check()?;
     let limits = repository.capacity_limits();

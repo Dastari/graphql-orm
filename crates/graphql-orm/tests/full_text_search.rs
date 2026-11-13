@@ -43,14 +43,19 @@ mod rebuild_visibility {
         fn can_read_row<'a>(
             &'a self,
             _: Option<&'a async_graphql::Context<'_>>,
-            _: &'a Database,
+            db: &'a Database,
             _: &'static str,
             _: Option<&'static str>,
             _: EntityAccessSurface,
             _: &'a (dyn std::any::Any + Send + Sync),
         ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
             // This provider relies on its SQL predicate for visibility.
-            Box::pin(async { Ok(true) })
+            Box::pin(async move {
+                graphql_orm::sqlx::query("SELECT 1")
+                    .execute(db.pool())
+                    .await?;
+                Ok(true)
+            })
         }
 
         fn can_write_row<'a>(
@@ -69,7 +74,10 @@ mod rebuild_visibility {
     #[tokio::test]
     async fn single_document_rebuild_preserves_repository_read_visibility()
     -> Result<(), Box<dyn std::error::Error>> {
-        let pool = graphql_orm::sqlx::SqlitePool::connect("sqlite::memory:").await?;
+        let pool = graphql_orm::sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
         let plan = build_migration_plan(
             DatabaseBackend::Sqlite,
             &SchemaModel {
@@ -98,7 +106,12 @@ mod rebuild_visibility {
             .await?;
         assert_eq!(hidden_count, 0, "a hidden row must not be indexed");
 
-        SearchArticle::rebuild_search_document(&db, &"visible".into()).await?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            SearchArticle::rebuild_search_document(&db, &"visible".into()),
+        )
+        .await
+        .expect("host callbacks must run without holding the pool connection")?;
         let visible_count: i64 = graphql_orm::sqlx::query_scalar(&count_sql)
             .fetch_one(db.pool())
             .await?;

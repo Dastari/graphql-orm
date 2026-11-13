@@ -21,6 +21,41 @@ use serde_json::{Map, Value};
 use uuid::Uuid;
 
 #[tokio::test]
+async fn mismatched_repository_pin_prevents_payload_writes() {
+    let repository = RecordingRepository::default();
+    repository
+        .put_blob(
+            graphql_orm_backup::REPOSITORY_ID_KEY,
+            Bytes::from(Uuid::from_u128(2).to_string()),
+        )
+        .await
+        .unwrap();
+    repository.clear_write_order();
+    let body = Bytes::from_static(b"object");
+    let objects = MockObjectIndex::new(vec![object_ref(&bytes_sha256_hex(&body))], vec![body]);
+    let database = MockDatabase::new(vec![BackupTableExport {
+        table_name: "users".into(),
+        rows: vec![backup_row("users", "1", &[("name", "Ada")])],
+    }]);
+    assert!(matches!(
+        create_full_backup(&repository, &database, &objects, backup_request()).await,
+        Err(BackupError::ManifestAuthenticationFailed { .. })
+    ));
+    assert!(
+        repository
+            .write_order()
+            .iter()
+            .all(|key| key == graphql_orm_backup::REPOSITORY_LOCK_KEY),
+        "identity mismatch must be checked before any payload write"
+    );
+    assert_eq!(
+        database.exports.load(Ordering::SeqCst),
+        0,
+        "no export before identity validation"
+    );
+}
+
+#[tokio::test]
 async fn create_full_backup_writes_tables_objects_and_manifest_last() {
     let repository = RecordingRepository::default();
     let object_bytes = Bytes::from_static(b"object");
@@ -266,8 +301,8 @@ async fn create_full_backup_writes_manifest_after_payloads() {
     let writes = repository.write_order();
     assert_eq!(writes.len(), 4);
     assert_eq!(writes[0], "locks/repository.lock");
-    assert_eq!(writes[1], database_table_key(snapshot_id(), "users"));
-    assert_eq!(writes[2], graphql_orm_backup::REPOSITORY_ID_KEY);
+    assert_eq!(writes[1], graphql_orm_backup::REPOSITORY_ID_KEY);
+    assert_eq!(writes[2], database_table_key(snapshot_id(), "users"));
     assert_eq!(writes[3], snapshot_manifest_key(snapshot_id()));
 }
 
@@ -469,11 +504,15 @@ impl BackupRepository for StreamingProbeRepository {
 
 struct MockDatabase {
     tables: Vec<BackupTableExport>,
+    exports: AtomicUsize,
 }
 
 impl MockDatabase {
     fn new(tables: Vec<BackupTableExport>) -> Self {
-        Self { tables }
+        Self {
+            tables,
+            exports: AtomicUsize::new(0),
+        }
     }
 }
 
@@ -488,6 +527,7 @@ impl GraphqlOrmBackupAdapter for MockDatabase {
     }
 
     async fn export_full(&self) -> Result<Vec<BackupTableExport>, BackupError> {
+        self.exports.fetch_add(1, Ordering::SeqCst);
         Ok(self.tables.clone())
     }
 
@@ -535,6 +575,15 @@ impl MockObjectIndex {
 
 #[async_trait]
 impl BackupObjectIndex for MockObjectIndex {
+    async fn objects_from_incremental_export(
+        &self,
+        parent_snapshot_id: Uuid,
+        _changes: &[graphql_orm_backup::BackupChangeExport],
+    ) -> Result<Vec<BackupObjectRef>, BackupError> {
+        self.list_objects_for_incremental_backup(parent_snapshot_id)
+            .await
+    }
+
     async fn objects_from_full_export(
         &self,
         _: &[graphql_orm_backup::BackupTableExport],
@@ -573,6 +622,15 @@ struct StreamingObjectIndex {
 
 #[async_trait]
 impl BackupObjectIndex for StreamingObjectIndex {
+    async fn objects_from_incremental_export(
+        &self,
+        parent_snapshot_id: Uuid,
+        _changes: &[graphql_orm_backup::BackupChangeExport],
+    ) -> Result<Vec<BackupObjectRef>, BackupError> {
+        self.list_objects_for_incremental_backup(parent_snapshot_id)
+            .await
+    }
+
     async fn objects_from_full_export(
         &self,
         _: &[graphql_orm_backup::BackupTableExport],

@@ -12,6 +12,13 @@ supersedes: []
 
 ## 0.17.0 (unreleased)
 
+- `AcceptSealedLegacy` migrates authenticated format-2 repositories without accepting
+  unsealed format 1. `TrustPinned` now requires a sealed format-2 manifest; only
+  the explicitly unsafe `TrustUnauthenticated` policy accepts format 1.
+- Backup, incremental and compaction validate the repository identity under the
+  lock before exporting or writing payloads. Incremental indexes derive object
+  references from the exported changes and fail closed without that contract.
+
 - Full backup derives object references from the exported table rows rather
   than a second database snapshot (#474). Custom indexes must implement
   `objects_from_full_export`; its default fails closed. The ORM index requires

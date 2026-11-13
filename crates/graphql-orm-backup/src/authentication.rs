@@ -112,13 +112,20 @@ pub enum LegacyManifestPolicy {
     /// Refuse every older unbound manifest. This is the default.
     #[default]
     Refuse,
-    /// Accept only the listed legacy snapshots, each with the manifest
+    /// Accept only format-2 manifests whose original host-keyed seal verifies.
+    /// Refuses unsealed format 1 and never adopts a repository identity.
+    AcceptSealedLegacy,
+    /// Accept only the listed sealed format-2 snapshots, each with the manifest
     /// `checksum` the host recorded while it still trusted the repository.
     /// A manifest whose contents differ from the pinned checksum is refused.
     TrustPinned(BTreeMap<Uuid, String>),
-    /// Accept every well-formed legacy manifest. Use this only for a one-time
-    /// migration from a repository the host has reason to trust, then switch
-    /// back to [`LegacyManifestPolicy::Refuse`].
+    /// Accept unauthenticated format-1 content as well as sealed format 2.
+    ///
+    /// # Warning
+    /// A repository writer can forge a format-1 manifest and recompute its plain
+    /// checksum. This policy accepts that unauthenticated content. Use it only
+    /// after an explicit host decision to trust historical unsealed data. For
+    /// sealed backups use [`LegacyManifestPolicy::AcceptSealedLegacy`] instead.
     TrustUnauthenticated,
 }
 

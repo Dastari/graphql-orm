@@ -2686,3 +2686,24 @@ async fn search_rebuild_refuses_policy_filtered_rows() -> Result<(), Box<dyn std
     assert!(error.to_string().contains("row-level security"), "{error}");
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires test-owned PostgreSQL container"]
+async fn single_document_rebuild_refuses_policy_filtered_rows()
+-> Result<(), Box<dyn std::error::Error>> {
+    let Provisioned { owner } = provision().await?;
+    let id = graphql_orm::uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO rls_cov_docs (id, tenant_id, title) VALUES ($1, 'tenant-a', 'hidden row')",
+    )
+    .bind(id)
+    .execute(&owner)
+    .await?;
+    let (_, runtime) = role_pool(&owner, "rebuild_document", "NOSUPERUSER NOBYPASSRLS").await?;
+    let database = graphql_orm::db::Database::new(runtime);
+    let error = RlsCovDoc::rebuild_search_document(&database, &id)
+        .await
+        .expect_err("single-document rebuild must refuse a policy-filtered read");
+    assert!(error.to_string().contains("row-level security"), "{error}");
+    Ok(())
+}

@@ -284,6 +284,12 @@ pub fn verify_manifest_authenticity(
                     reason: "manifest has no repository identity".into(),
                 });
             }
+            if manifest.format_version == 2 && seal.repository_id.is_some() {
+                return Err(BackupError::ManifestAuthenticationFailed {
+                    key,
+                    reason: "format 2 does not carry a repository identity".into(),
+                });
+            }
             verify_manifest_checksum(manifest)?;
             authenticator
                 .verify(seal, &canonical_manifest_bytes(manifest)?)
@@ -302,13 +308,10 @@ pub fn verify_manifest_authenticity(
         }
         (LEGACY_BACKUP_FORMAT_VERSION, None) => {
             verify_manifest_checksum(manifest)?;
-            let trusted = match authenticator.legacy_manifest_policy() {
-                crate::LegacyManifestPolicy::Refuse => false,
-                crate::LegacyManifestPolicy::TrustPinned(pinned) => pinned
-                    .get(&manifest.snapshot_id)
-                    .is_some_and(|checksum| *checksum == manifest.checksum),
-                crate::LegacyManifestPolicy::TrustUnauthenticated => true,
-            };
+            let trusted = matches!(
+                authenticator.legacy_manifest_policy(),
+                crate::LegacyManifestPolicy::TrustUnauthenticated
+            );
             if !trusted {
                 return Err(BackupError::LegacyManifestRefused {
                     snapshot_id: manifest.snapshot_id,
@@ -804,7 +807,8 @@ fn trusts_legacy_manifest(
         crate::LegacyManifestPolicy::TrustPinned(pins) => {
             pins.get(&manifest.snapshot_id) == Some(&manifest.checksum)
         }
-        crate::LegacyManifestPolicy::TrustUnauthenticated => true,
+        crate::LegacyManifestPolicy::AcceptSealedLegacy
+        | crate::LegacyManifestPolicy::TrustUnauthenticated => true,
         crate::LegacyManifestPolicy::Refuse => false,
     }
 }

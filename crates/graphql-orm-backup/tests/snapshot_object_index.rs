@@ -20,6 +20,52 @@ struct SnapshotObject {
 }
 
 struct ExportedRows(Vec<BackupTableExport>);
+
+#[tokio::test]
+async fn missing_or_redacted_recorded_digest_is_refused() {
+    let pool = graphql_orm::sqlx::SqlitePool::connect("sqlite::memory:")
+        .await
+        .unwrap();
+    let dir = tempfile::TempDir::new().unwrap();
+    let index = OrmBackupObjectIndex::new(
+        Arc::new(graphql_orm::db::Database::new(pool)),
+        vec![SnapshotObject::metadata()],
+        OrmObjectIndexColumns {
+            table_name: "snapshot_objects".into(),
+            object_id_column: "id".into(),
+            storage_key_column: "storage_key".into(),
+            sha256_hex_column: "digest".into(),
+            size_bytes_column: "size".into(),
+            mime_type_column: None,
+        },
+        Arc::new(LocalStorageBackend::new(dir.path())),
+    );
+    for digest in [
+        None,
+        Some(serde_json::json!("Null")),
+        Some(serde_json::json!({"String": ""})),
+    ] {
+        let id = Uuid::new_v4();
+        let mut values = serde_json::json!({"id": {"Uuid": id}, "storage_key": {"String": "media/object"}, "size": {"Integer": 12}}).as_object().unwrap().clone();
+        if let Some(digest) = digest {
+            values.insert("digest".into(), digest);
+        }
+        let tables = [BackupTableExport {
+            table_name: "snapshot_objects".into(),
+            rows: vec![BackupRow {
+                table_name: "snapshot_objects".into(),
+                primary_key: id.to_string(),
+                row_hash: String::new(),
+                values,
+            }],
+        }];
+        let error = index
+            .objects_from_full_export(&tables)
+            .await
+            .expect_err("only a recorded digest can identify snapshot bytes");
+        assert!(error.to_string().contains("digest"), "{error}");
+    }
+}
 #[async_trait]
 impl GraphqlOrmBackupAdapter for ExportedRows {
     async fn schema_snapshot(&self) -> Result<GraphqlOrmBackupSchema, BackupError> {
