@@ -63,8 +63,9 @@ No package uses a Git dependency on another package in this repository.
 
 Reusable contracts are changed in their owning package and affected dependants
 are updated in the same branch. The [workspace package inventory](../reference/workspace-packages.md)
-is generated from Cargo metadata and records the current versions and direct
-internal dependencies.
+is generated from Cargo metadata and records package paths, default features and
+direct internal dependencies; versions live in each `Cargo.toml` and the release
+manifest.
 
 ## Runtime trust boundaries
 

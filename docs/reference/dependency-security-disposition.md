@@ -19,7 +19,8 @@ it does not make an affected dependency sound or certify an application's graph.
 The snapshot covers the unpublished ORM/macros 0.50.1 candidate and the reviewed
 agql-auth 0.21.3 revision. It is not a published release or whole-workspace
 runtime acceptance. The generated [package inventory](workspace-packages.md)
-and release manifest own package identities. The
+owns package paths and the release manifest owns package versions and
+external revisions. The
 [release process](../operations/release/process.md) owns validation and
 publication gates; this reference creates no additional approval process.
 Application rollout steps belong to the

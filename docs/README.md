@@ -75,7 +75,8 @@ Each package owns its local contract documentation:
 - [`graphql-orm-router`](../crates/graphql-orm-router/README.md)
 
 The [generated workspace package inventory](reference/workspace-packages.md)
-is the canonical version and dependency overview.
+is the canonical path, default-feature and internal dependency overview; package
+versions live in each crate's `Cargo.toml` and the release manifest.
 
 ## Maintainers and governance
 
