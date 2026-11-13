@@ -2120,10 +2120,11 @@ impl OrmAiSubscriptionWaitService {
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::NotFound)?;
-        let waiter = AiSubscriptionWaiterRecord::find_by_id(self.custody_database(), &adoption.waiter_id)
-            .await
-            .map_err(|error| map_orm(OrmPublicError::from(error)))?
-            .ok_or(AiError::NotFound)?;
+        let waiter =
+            AiSubscriptionWaiterRecord::find_by_id(self.custody_database(), &adoption.waiter_id)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
         let session = AiSessionRecord::find_by_id(self.custody_database(), &lease.session_id().0)
             .await
             .map_err(|error| map_orm(OrmPublicError::from(error)))?
@@ -2533,10 +2534,11 @@ impl OrmAiSubscriptionWaitService {
     }
 
     async fn open_claim(&self, claim: &AiSubscriptionWaitClaim) -> Result<OpenedWait, AiError> {
-        let waiter = AiSubscriptionWaiterRecord::find_by_id(self.custody_database(), &claim.waiter_id.0)
-            .await
-            .map_err(|error| map_orm(OrmPublicError::from(error)))?
-            .ok_or(AiError::NotFound)?;
+        let waiter =
+            AiSubscriptionWaiterRecord::find_by_id(self.custody_database(), &claim.waiter_id.0)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
         let now = self.clock.now().unix_timestamp();
         if waiter.run_id != claim.run_id.0
             || waiter.state != "claimed"
@@ -2560,16 +2562,20 @@ impl OrmAiSubscriptionWaitService {
             .await
             .map_err(|error| map_orm(OrmPublicError::from(error)))?
             .ok_or(AiError::NotFound)?;
-        let source_checkpoint =
-            AiRunCheckpointRecord::find_by_id(self.custody_database(), &waiter.source_checkpoint_id)
-                .await
-                .map_err(|error| map_orm(OrmPublicError::from(error)))?
-                .ok_or(AiError::NotFound)?;
-        let parked_checkpoint =
-            AiRunCheckpointRecord::find_by_id(self.custody_database(), &waiter.parked_checkpoint_id)
-                .await
-                .map_err(|error| map_orm(OrmPublicError::from(error)))?
-                .ok_or(AiError::NotFound)?;
+        let source_checkpoint = AiRunCheckpointRecord::find_by_id(
+            self.custody_database(),
+            &waiter.source_checkpoint_id,
+        )
+        .await
+        .map_err(|error| map_orm(OrmPublicError::from(error)))?
+        .ok_or(AiError::NotFound)?;
+        let parked_checkpoint = AiRunCheckpointRecord::find_by_id(
+            self.custody_database(),
+            &waiter.parked_checkpoint_id,
+        )
+        .await
+        .map_err(|error| map_orm(OrmPublicError::from(error)))?
+        .ok_or(AiError::NotFound)?;
         if run.session_id != waiter.session_id
             || run.state != AiRunState::WaitingSubscription.as_str()
             || run.attempt_id.is_some()
@@ -3326,10 +3332,11 @@ impl crate::AiAgentCheckpointAdopter for AiSubscriptionCheckpointAdopter {
         lease: &AiRunLease,
         checkpoint_id: Uuid,
     ) -> Result<AiRunLease, AiError> {
-        let checkpoint = AiRunCheckpointRecord::find_by_id(self.waits.custody_database(), &checkpoint_id)
-            .await
-            .map_err(|error| map_orm(OrmPublicError::from(error)))?
-            .ok_or(AiError::NotFound)?;
+        let checkpoint =
+            AiRunCheckpointRecord::find_by_id(self.waits.custody_database(), &checkpoint_id)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
         if checkpoint.checkpoint_kind == "subscription_wait_adopted" {
             self.waits.consume_wait_adoption(lease, checkpoint_id).await
         } else {

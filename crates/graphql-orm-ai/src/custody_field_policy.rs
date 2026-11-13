@@ -260,7 +260,14 @@ mod tests {
                     .unwrap_or_else(|_| panic!("custody reads {entity}.{}", field.api_name));
                 // The host's own handle keeps the host's answer.
                 let refused = host
-                    .ensure_repository_writable_field(None, entity, field.api_name, None, None, None)
+                    .ensure_repository_writable_field(
+                        None,
+                        entity,
+                        field.api_name,
+                        None,
+                        None,
+                        None,
+                    )
                     .await
                     .expect_err("the host handle is not granted");
                 assert_eq!(refused.code, OrmErrorCode::Forbidden);
