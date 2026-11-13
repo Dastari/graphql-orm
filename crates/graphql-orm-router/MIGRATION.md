@@ -20,7 +20,10 @@ documents are capped at 256 KiB; WebSocket forwarding separately checks the actu
 serialized operation against its 64 KiB internal budget. Snapshot integrity is
 checked on every candidate generation. Strict deployments require clients to send an id for every operation. See the
 [configuration reference](docs/configuration.md#persisted-documents) for exact
-hashing, limits, wire forms, and authorization boundaries.
+hashing, limits, wire forms, and authorization boundaries. On Unix, the temporary
+filesystem must honor private directory and file permissions. Snapshot failures
+have their own lifecycle status and can be retried after repair; poisoned live
+runtimes require a new generation or a restart.
 
 ## 0.12.0 to 0.13.0: outbound transport and admin authentication
 

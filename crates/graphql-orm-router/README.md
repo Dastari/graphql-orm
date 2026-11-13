@@ -124,7 +124,8 @@ bare lowercase SHA-256 ids to exact document text. Strict mode requires register
 ids over HTTP and WebSocket; it limits documents and preserves all authorization
 checks. Documents may be up to 256 KiB; operations exceeding the 64 KiB internal
 WebSocket message budget are refused over WebSocket only. See
-[persisted documents](docs/configuration.md#persisted-documents) for wire forms, manifest bounds, and restart requirements.
+[persisted documents](docs/configuration.md#persisted-documents) for wire forms, manifest bounds, Unix temporary-filesystem permissions, and restart
+requirements.
 
 ## Install
 

@@ -587,7 +587,14 @@ The operator manifest is read and validated when the configuration is first
 validated. Changes to that file take effect only when a new configuration is
 loaded on restart. Startup creates a snapshot in a fresh private directory
 (mode 0700 on Unix) under the writable process temporary directory. The router
-retains that directory for its lifetime and uses `watch: false`.
+retains that directory for its lifetime and uses `watch: false`. On Unix, the
+process temporary directory must be on a filesystem that honors Unix permissions.
+Startup reads back directory and open-file metadata, requiring ownership by the
+router's effective user and no group or other permission bits. A filesystem that
+does not preserve those protections refuses startup. Normal shutdown removes the
+snapshot. A crash or forced kill can leave a mode-0600 copy of the manifest in
+its private temporary directory; remove abandoned snapshot directories as part of
+process cleanup.
 
 Before and after constructing each candidate graph generation (startup,
 schema refresh, registration, or removal), the router checks that the snapshot
@@ -596,7 +603,19 @@ runtime. That read is checked too; a verified runtime is pinned to its live
 generation so runtime-cache eviction cannot reopen the file. A cold runtime
 with a missing or changed snapshot fails closed with `SERVICE_UNAVAILABLE`. A missing or changed snapshot refuses the candidate;
 the last-known-good generation and its original documents remain active for both
-HTTP and WebSocket. Restart from the operator manifest to recover. Schema refresh never adopts changes to either manifest.
+HTTP and WebSocket. Candidate snapshot-check failures appear separately as
+`lastPersistedDocumentsError` in administrative status (or
+`RouterStatus::last_persisted_documents_error()`), rather than composition errors.
+They do not memoize the fetched schema as rejected: after the snapshot is restored,
+the next refresh retries that same schema candidate. Schema refresh never adopts
+changes to either manifest.
+
+If the snapshot check after a lazy runtime build fails, that live generation is
+poisoned and returns `SERVICE_UNAVAILABLE` until a new generation is admitted or
+the router restarts. Restoring the file alone does not clear a poisoned runtime.
+For a deployment with only static subgraphs, restart the router to recover. A
+failure before runtime construction is retried on a later request once the
+snapshot is valid.
 
 Each registered document is limited to 256 KiB of exact UTF-8 text, independently
 of transport. The manifest limits remain 16 MiB and 10,000 entries. HTTP requests

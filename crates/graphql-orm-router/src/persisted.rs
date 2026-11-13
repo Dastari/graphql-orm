@@ -107,6 +107,12 @@ impl PersistedDocuments {
             documents: entries.0,
             bytes,
         });
+        #[cfg(unix)]
+        verify_private_metadata(
+            &std::fs::metadata(&snapshot.directory)
+                .map_err(|_| invalid("failed to inspect persisted documents snapshot directory"))?,
+            rustix::process::geteuid().as_raw(),
+        )?;
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -117,6 +123,13 @@ impl PersistedDocuments {
         let mut output = options
             .open(&snapshot.path)
             .map_err(|_| invalid("failed to create persisted documents snapshot"))?;
+        #[cfg(unix)]
+        verify_private_metadata(
+            &output
+                .metadata()
+                .map_err(|_| invalid("failed to inspect persisted documents snapshot file"))?,
+            rustix::process::geteuid().as_raw(),
+        )?;
         output
             .write_all(&snapshot.bytes)
             .map_err(|_| invalid("failed to write persisted documents snapshot"))?;
@@ -129,6 +142,13 @@ impl PersistedDocuments {
             .snapshot
             .as_ref()
             .ok_or_else(|| invalid("persisted documents snapshot is not initialized"))?;
+        #[cfg(unix)]
+        verify_private_metadata(
+            &std::fs::metadata(&snapshot.directory).map_err(|_| {
+                invalid("persisted documents snapshot directory cannot be inspected")
+            })?,
+            rustix::process::geteuid().as_raw(),
+        )?;
         if !std::fs::metadata(&snapshot.path).is_ok_and(|metadata| metadata.is_file()) {
             return Err(invalid(
                 "persisted documents snapshot is missing or is not a regular file",
@@ -136,6 +156,13 @@ impl PersistedDocuments {
         }
         let file = File::open(&snapshot.path)
             .map_err(|_| invalid("persisted documents snapshot cannot be opened"))?;
+        #[cfg(unix)]
+        verify_private_metadata(
+            &file
+                .metadata()
+                .map_err(|_| invalid("persisted documents snapshot file cannot be inspected"))?,
+            rustix::process::geteuid().as_raw(),
+        )?;
         let mut bytes = Vec::new();
         file.take(snapshot.bytes.len() as u64 + 1)
             .read_to_end(&mut bytes)
@@ -255,4 +282,18 @@ impl<'de> serde::Deserialize<'de> for ManifestEntries {
         }
         deserializer.deserialize_map(Visitor)
     }
+}
+
+#[cfg(unix)]
+pub(crate) fn verify_private_metadata(
+    metadata: &std::fs::Metadata,
+    effective_uid: u32,
+) -> Result<(), RouterError> {
+    use std::os::unix::fs::MetadataExt;
+    if metadata.mode() & 0o077 != 0 || metadata.uid() != effective_uid {
+        return Err(invalid(
+            "persisted documents snapshot must belong to the router's effective user with no group or other permissions; the temporary filesystem must honor Unix permissions",
+        ));
+    }
+    Ok(())
 }

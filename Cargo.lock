@@ -3263,6 +3263,7 @@ dependencies = [
  "ntex",
  "opentelemetry",
  "reqwest 0.13.4",
+ "rustix",
  "serde",
  "serde_json",
  "sha1 0.10.6",

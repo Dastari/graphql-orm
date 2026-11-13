@@ -1637,6 +1637,50 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn persisted_snapshot_permissions_reject_group_or_other_access() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let config = check_manifest(b"{}").unwrap();
+        let hive = config.persisted_documents.as_ref().unwrap().hive_config();
+        let path = std::path::Path::new(hive["storage"]["path"].as_str().unwrap());
+        for target in [path.parent().unwrap(), path] {
+            let metadata = std::fs::metadata(target).unwrap();
+            crate::persisted::verify_private_metadata(&metadata, metadata.uid()).unwrap();
+            for access in [0o040, 0o004, 0o020, 0o002, 0o010, 0o001] {
+                std::fs::set_permissions(
+                    target,
+                    std::fs::Permissions::from_mode(metadata.mode() | access),
+                )
+                .unwrap();
+                let unsafe_metadata = std::fs::metadata(target).unwrap();
+                let result =
+                    crate::persisted::verify_private_metadata(&unsafe_metadata, metadata.uid());
+                std::fs::set_permissions(target, metadata.permissions()).unwrap();
+                assert!(result.is_err(), "group/other access must refuse startup");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persisted_snapshot_permissions_reject_another_owner() {
+        use std::os::unix::fs::MetadataExt;
+        let config = check_manifest(b"{}").unwrap();
+        let hive = config.persisted_documents.as_ref().unwrap().hive_config();
+        let path = std::path::Path::new(hive["storage"]["path"].as_str().unwrap());
+        for target in [path.parent().unwrap(), path] {
+            let metadata = std::fs::metadata(target).unwrap();
+            assert!(
+                crate::persisted::verify_private_metadata(
+                    &metadata,
+                    metadata.uid().wrapping_add(1)
+                )
+                .is_err()
+            );
+        }
+    }
+
     #[test]
     fn persisted_manifest_bad_hash() {
         let error = check_manifest(br#"{"bad":"secret document"}"#)

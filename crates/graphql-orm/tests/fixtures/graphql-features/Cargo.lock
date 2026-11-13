@@ -2703,6 +2703,7 @@ dependencies = [
  "jsonwebtoken 11.0.0",
  "opentelemetry",
  "reqwest 0.13.4",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

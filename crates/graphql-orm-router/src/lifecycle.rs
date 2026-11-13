@@ -125,6 +125,7 @@ pub struct RouterStatus {
     subgraphs: Vec<SubgraphStatus>,
     last_successful_composition: SystemTime,
     last_composition_error: Option<String>,
+    last_persisted_documents_error: Option<String>,
 }
 
 impl RouterStatus {
@@ -143,9 +144,19 @@ impl RouterStatus {
         self.last_successful_composition
     }
 
-    /// Safe latest complete-candidate rejection diagnostic, if any.
+    /// Safe latest composition or runtime rejection diagnostic, if any.
+    ///
+    /// Persisted-document snapshot failures are reported separately through
+    /// [`Self::last_persisted_documents_error`].
     pub fn last_composition_error(&self) -> Option<&str> {
         self.last_composition_error.as_deref()
+    }
+
+    /// Latest candidate snapshot-verification failure, cleared by successful
+    /// admission or a later composition failure. Snapshot errors are retried
+    /// instead of memoizing the fetched schema as rejected.
+    pub fn last_persisted_documents_error(&self) -> Option<&str> {
+        self.last_persisted_documents_error.as_deref()
     }
 }
 
@@ -285,6 +296,7 @@ struct LifecycleState {
     admission_attempts: BTreeMap<String, AdmissionAttempt>,
     last_successful_composition: SystemTime,
     last_composition_error: Option<String>,
+    last_persisted_documents_error: Option<String>,
 }
 
 /// Admitted endpoint and network policy of one dynamic source.
@@ -303,7 +315,9 @@ pub(crate) struct GraphOptions {
 impl GraphOptions {
     fn verify_manifest(&self) -> Result<(), RouterError> {
         if let Some(documents) = &self.persisted_documents {
-            documents.verify_snapshot()?;
+            documents.verify_snapshot().map_err(|error| {
+                RouterError::new(RouterErrorKind::PersistedDocuments, error.to_string())
+            })?;
         }
         Ok(())
     }
@@ -404,6 +418,7 @@ impl GraphLifecycle {
                 admission_attempts: BTreeMap::new(),
                 last_successful_composition: now,
                 last_composition_error: None,
+                last_persisted_documents_error: None,
             }),
             refresh_round: Mutex::new(()),
             execution_targets,
@@ -549,13 +564,17 @@ impl GraphLifecycle {
                 for (name, fetched) in changed {
                     if let Some(source) = state.sources.get_mut(&name) {
                         source.state = SubgraphRuntimeState::Rejected;
-                        source.observed_fingerprint = Some(fetched.fingerprint.clone());
-                        source.observed = Some(fetched);
+                        if error.kind() == RouterErrorKind::PersistedDocuments {
+                            source.observed_fingerprint = None;
+                            source.observed = None;
+                        } else {
+                            source.observed_fingerprint = Some(fetched.fingerprint.clone());
+                            source.observed = Some(fetched);
+                        }
                         source.last_error = Some(details.clone());
                     }
                 }
-                state.last_composition_error = Some(details);
-                self.metrics.composition_failure();
+                self.record_candidate_error(&mut state, &error);
                 self.metrics.subgraphs_rejected(rejected_count);
                 return Ok(SchemaRefreshOutcome::Rejected);
             }
@@ -576,6 +595,7 @@ impl GraphLifecycle {
         self.metrics.composition_success();
         state.last_successful_composition = now;
         state.last_composition_error = None;
+        state.last_persisted_documents_error = None;
         Ok(SchemaRefreshOutcome::Activated)
     }
 
@@ -644,8 +664,7 @@ impl GraphLifecycle {
                     source.state = SubgraphRuntimeState::Rejected;
                     source.last_error = Some(details.clone());
                 }
-                state.last_composition_error = Some(details);
-                self.metrics.composition_failure();
+                self.record_candidate_error(&mut state, &error);
                 self.metrics.subgraphs_rejected(1);
                 return Err(error);
             }
@@ -663,6 +682,7 @@ impl GraphLifecycle {
         self.metrics.composition_success();
         state.last_successful_composition = SystemTime::now();
         state.last_composition_error = None;
+        state.last_persisted_documents_error = None;
         Ok(identity)
     }
 
@@ -736,14 +756,14 @@ impl GraphLifecycle {
                     record(
                         SubgraphRuntimeState::Rejected,
                         false,
-                        Some(fingerprint),
+                        (error.kind() != RouterErrorKind::PersistedDocuments)
+                            .then_some(fingerprint),
                         Some(details.clone()),
                     ),
                 );
                 self.execution_targets
                     .store(Arc::new(execution_targets(&state.sources)));
-                state.last_composition_error = Some(details);
-                self.metrics.composition_failure();
+                self.record_candidate_error(&mut state, &error);
                 return Err(error);
             }
         };
@@ -758,6 +778,7 @@ impl GraphLifecycle {
         self.metrics.composition_success();
         state.last_successful_composition = now;
         state.last_composition_error = None;
+        state.last_persisted_documents_error = None;
         Ok(identity)
     }
 
@@ -898,6 +919,16 @@ impl GraphLifecycle {
             subgraphs,
             last_successful_composition: state.last_successful_composition,
             last_composition_error: state.last_composition_error.clone(),
+            last_persisted_documents_error: state.last_persisted_documents_error.clone(),
+        }
+    }
+
+    fn record_candidate_error(&self, state: &mut LifecycleState, error: &RouterError) {
+        let snapshot_error = error.kind() == RouterErrorKind::PersistedDocuments;
+        state.last_persisted_documents_error = snapshot_error.then(|| error.to_string());
+        state.last_composition_error = (!snapshot_error).then(|| error.to_string());
+        if !snapshot_error {
+            self.metrics.composition_failure();
         }
     }
 
