@@ -2585,7 +2585,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm"
-version = "0.133.0"
+version = "0.136.0"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -2667,7 +2667,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-macros"
-version = "0.133.0"
+version = "0.136.0"
 dependencies = [
  "convert_case 0.7.1",
  "proc-macro2",
@@ -2688,7 +2688,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-router"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "agql-auth",
  "arc-swap",
@@ -2703,6 +2703,7 @@ dependencies = [
  "jsonwebtoken 11.0.0",
  "opentelemetry",
  "reqwest 0.13.4",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

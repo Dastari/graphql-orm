@@ -90,6 +90,7 @@ pub(crate) async fn verify_manifest_and_objects_unlocked(
     options: &VerificationOptions,
 ) -> Result<(), BackupError> {
     verify_manifest_authenticity(required_authenticator(repository)?, manifest)?;
+    crate::manifest::verify_repository_binding(repository, manifest).await?;
     verify_object_checksums_unlocked(repository, manifest, options).await
 }
 

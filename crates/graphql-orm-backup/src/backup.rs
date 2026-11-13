@@ -245,7 +245,7 @@ pub async fn create_full_backup_with_options(
     options: &BackupExecutionOptions,
 ) -> Result<FullBackupResult, BackupError> {
     // Refuse before writing payloads that no sealed manifest would reference.
-    required_authenticator(repository)?;
+    required_authenticator(repository)?.require_repository_identity()?;
     let lock = RepositoryLock::acquire_for(repository, &options.lock, "full_backup").await?;
     let snapshot_id = request.snapshot_id;
     let mut write = SnapshotWrite::default();
@@ -264,6 +264,8 @@ async fn create_full_backup_inner(
     options: &BackupExecutionOptions,
     write: &mut SnapshotWrite,
 ) -> Result<FullBackupResult, BackupError> {
+    // Under the lock, refuse a foreign durable identity before exports or payload writes.
+    crate::manifest::repository_identity(repository, true).await?;
     claim_snapshot_id(repository, request.snapshot_id, write).await?;
     options.cancellation.check()?;
     let limits = repository.capacity_limits();
@@ -385,7 +387,7 @@ pub async fn create_incremental_backup_with_options(
     request: IncrementalBackupRequest,
     options: &BackupExecutionOptions,
 ) -> Result<IncrementalBackupResult, BackupError> {
-    required_authenticator(repository)?;
+    required_authenticator(repository)?.require_repository_identity()?;
     let lock = RepositoryLock::acquire_for(repository, &options.lock, "incremental_backup").await?;
     let snapshot_id = request.snapshot_id;
     let mut write = SnapshotWrite::default();
@@ -406,6 +408,8 @@ async fn create_incremental_backup_inner(
     options: &BackupExecutionOptions,
     write: &mut SnapshotWrite,
 ) -> Result<IncrementalBackupResult, BackupError> {
+    // Under the lock, refuse a foreign durable identity before exports or payload writes.
+    crate::manifest::repository_identity(repository, true).await?;
     claim_snapshot_id(repository, request.snapshot_id, write).await?;
     if request.parent_snapshot_id == request.snapshot_id {
         return Err(BackupError::InvalidManifestEntry {
@@ -424,7 +428,7 @@ async fn create_incremental_backup_inner(
         .export_incremental(request.parent_snapshot_id)
         .await?;
     let object_refs = objects
-        .list_objects_for_incremental_backup(request.parent_snapshot_id)
+        .objects_from_incremental_export(request.parent_snapshot_id, &changes)
         .await?;
 
     for change in &changes {
@@ -508,6 +512,9 @@ async fn create_incremental_backup_inner(
 /// the merged synthetic full against the repository's capacity limits before
 /// writing it, and removes its payloads if it fails or is cancelled before the
 /// manifest write.
+/// Every format-2 input requires its own host-held checksum in
+/// [`crate::LegacyManifestPolicy::TrustPinned`]. A valid unbound seal alone
+/// cannot establish the repository provenance of the synthetic full.
 ///
 /// # Errors
 ///
@@ -533,7 +540,7 @@ pub async fn compact_chain_with_options(
     request: CompactChainRequest,
     options: &BackupExecutionOptions,
 ) -> Result<CompactChainResult, BackupError> {
-    required_authenticator(repository)?;
+    required_authenticator(repository)?.require_repository_identity()?;
     let lock = RepositoryLock::acquire_for(repository, &options.lock, "compaction").await?;
     let snapshot_id = request.snapshot_id;
     let mut write = SnapshotWrite::default();
@@ -550,11 +557,27 @@ async fn compact_chain_inner(
     write: &mut SnapshotWrite,
 ) -> Result<CompactChainResult, BackupError> {
     // Checked under the repository lock, before any payload is written.
+    // Under the lock, refuse a foreign durable identity before exports or payload writes.
+    crate::manifest::repository_identity(repository, true).await?;
     claim_snapshot_id(repository, request.snapshot_id, write).await?;
     options.cancellation.check()?;
     let limits = repository.capacity_limits();
     let chain = load_manifest_chain(repository, request.source_snapshot_id).await?;
+    let legacy_pins = match required_authenticator(repository)?.legacy_manifest_policy() {
+        crate::LegacyManifestPolicy::TrustPinned(pins) => Some(pins),
+        _ => None,
+    };
     for manifest in &chain {
+        if manifest.format_version == 2
+            && legacy_pins.and_then(|pins| pins.get(&manifest.snapshot_id))
+                != Some(&manifest.checksum)
+        {
+            // A format-2 seal authenticates content, not its repository. Only
+            // independent host records may authorize binding it to this one.
+            return Err(BackupError::LegacyManifestRefused {
+                snapshot_id: manifest.snapshot_id,
+            });
+        }
         crate::verify::verify_manifest_and_objects_unlocked(
             repository,
             manifest,
@@ -729,6 +752,8 @@ async fn write_manifest_tracked(
     manifest: &mut BackupSnapshotManifest,
     write: &mut SnapshotWrite,
 ) -> Result<(), BackupError> {
+    required_authenticator(repository)?.require_repository_identity()?;
+    crate::manifest::repository_identity(repository, true).await?;
     authenticate_manifest(required_authenticator(repository)?, manifest)?;
     let body = serde_json::to_vec_pretty(manifest)?;
     let key = snapshot_manifest_key(manifest.snapshot_id);

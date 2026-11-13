@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm-backup"
-version = "0.16.0"
+version = "0.17.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Dastari/graphql-orm"
@@ -80,3 +80,8 @@ required-features = ["local", "orm-postgres"]
 name = "manifest_authentication"
 path = "tests/manifest_authentication.rs"
 required-features = ["local"]
+
+[[test]]
+name = "snapshot_object_index"
+path = "tests/snapshot_object_index.rs"
+required-features = ["local", "orm-sqlite"]

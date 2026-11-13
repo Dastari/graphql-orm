@@ -31,7 +31,10 @@ This crate is a reusable backup and restore companion for applications that use 
 
 ## Integration contracts
 
-- Package versions and workspace dependency identities belong to the generated
+- The package version belongs to [Cargo.toml](Cargo.toml); published versions
+  are retained in the release manifest (see the
+  [release tag checks](../../docs/operations/runbooks/release-tag-check.md)).
+  Workspace dependency identities belong to the generated
   [workspace inventory](../../docs/reference/workspace-packages.md).
 - The optional ORM adapter resolves `graphql-orm` through workspace path
   dependencies and the root `Cargo.lock`. Keep downstream applications on one

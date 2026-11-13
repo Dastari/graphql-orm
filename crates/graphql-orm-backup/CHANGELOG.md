@@ -10,6 +10,32 @@ supersedes: []
 
 # Changelog
 
+## 0.17.0 (unreleased)
+
+- `AcceptSealedLegacy` authenticates format-2 content without repository binding;
+  use it only with keys never shared across repositories and legacy snapshot ids
+  known from host records. Compaction requires an individual `TrustPinned`
+  checksum for every format-2 input before creating a format-3 synthetic full.
+- `TrustPinned` accepts format 1 and format 2 against independent host-held
+  checksums; format 2 also requires its original seal. `TrustUnauthenticated`
+  alone accepts format 1 without host-held authentication.
+- Backup, incremental and compaction validate the repository identity under the
+  lock before exporting or writing payloads. Incremental indexes derive object
+  references from the exported changes and fail closed without that contract.
+
+- Full backup derives object references from the exported table rows rather
+  than a second database snapshot (#474). Custom indexes must implement
+  `objects_from_full_export`; its default fails closed. The ORM index requires
+  recorded checksums in those rows; it never backfills them from live bytes.
+  Existing streaming source checksum checks remain in place.
+- PostgreSQL export, restore emptiness checks and search rebuild refuse reads
+  subject to row security instead of silently omitting rows (#526).
+- `IncompleteRepositoryListing { reason }` distinguishes inconsistent listings
+  from invalid manifest chains in pruning and deletion (#552).
+- New format 3 seals bind manifests to an atomically created `repository-id`
+  record (#610). Restore and verification compare that identity; hosts must pin
+  it outside storage. Format 2 restores require explicit legacy trust.
+
 ## 0.16.0 (unreleased)
 
 Requires `graphql-orm-storage` 0.11.0. See [MIGRATION.md](MIGRATION.md).

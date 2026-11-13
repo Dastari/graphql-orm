@@ -100,25 +100,44 @@ impl std::fmt::Debug for ManifestKey {
     }
 }
 
-/// How manifests written before authentication existed are treated.
+/// How manifests written before repository identity binding are treated.
 ///
-/// Such manifests carry `format_version` 1 and no seal, so nothing ties their
-/// contents to the host. Accepting one trusts that nobody with write access to
-/// the repository has altered it. Identity, content-key and restore-target
-/// checks still apply to accepted manifests.
+/// Format 1 has no seal; it needs a host-held checksum pin or explicit trust
+/// in unauthenticated repository contents.
+/// Format 2 has a host-keyed seal but no repository identity. Repository reads
+/// require explicit legacy trust for either format, and still authenticate a
+/// format 2 seal. Content-key and restore-target checks always apply.
 #[non_exhaustive]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum LegacyManifestPolicy {
-    /// Refuse every unauthenticated manifest. This is the default.
+    /// Refuse every older unbound manifest. This is the default.
     #[default]
     Refuse,
-    /// Accept only the listed legacy snapshots, each with the manifest
+    /// Accept only format-2 manifests whose original host-keyed seal verifies.
+    /// Refuses unsealed format 1 and never adopts a repository identity.
+    ///
+    /// This authenticates content with the key, but does not bind it to this
+    /// repository. Use it only if the key was never shared across repositories;
+    /// otherwise use [`Self::TrustPinned`] with independently recorded checksums.
+    /// Do not prune legacy snapshots unless their ids are known from host records.
+    /// Compaction refuses format-2 inputs under this policy: every such input
+    /// must instead be individually pinned through [`Self::TrustPinned`].
+    AcceptSealedLegacy,
+    /// Accept only the listed format-1 or format-2 snapshots, each with the manifest
     /// `checksum` the host recorded while it still trusted the repository.
     /// A manifest whose contents differ from the pinned checksum is refused.
+    /// The independent checksum authenticates format 1 even though it has no
+    /// seal; format 2 must also pass its original host-keyed seal verification.
     TrustPinned(BTreeMap<Uuid, String>),
-    /// Accept every well-formed legacy manifest. Use this only for a one-time
-    /// migration from a repository the host has reason to trust, then switch
-    /// back to [`LegacyManifestPolicy::Refuse`].
+    /// Accept unauthenticated format-1 content as well as sealed format 2.
+    ///
+    /// # Warning
+    /// A repository writer can forge a format-1 manifest and recompute its plain
+    /// checksum. This policy accepts that unauthenticated content. Use it only
+    /// after an explicit host decision to trust historical unsealed data. For
+    /// Prefer [`Self::TrustPinned`] with independent checksum records. Sealed
+    /// backups whose key was never shared across repositories can also use
+    /// [`Self::AcceptSealedLegacy`], subject to its provenance restrictions.
     TrustUnauthenticated,
 }
 
@@ -134,17 +153,53 @@ pub struct ManifestAuthenticator {
     signing_key: ManifestKey,
     previous_keys: Vec<ManifestKey>,
     legacy: LegacyManifestPolicy,
+    repository_identity: Option<Uuid>,
 }
 
 impl ManifestAuthenticator {
-    /// Seals new manifests with `key` and accepts manifests sealed with it.
+    /// Configures the signing key and accepts seals made with it.
+    /// Format 3 additionally requires [`Self::with_repository_identity`].
     #[must_use]
     pub fn new(key: ManifestKey) -> Self {
         Self {
             signing_key: key,
             previous_keys: Vec::new(),
             legacy: LegacyManifestPolicy::Refuse,
+            repository_identity: None,
         }
+    }
+
+    /// Pins the expected repository identity in host configuration. Required
+    /// for format 3 sealing and verification. Retain this value outside the
+    /// repository to detect replacement of its identity record.
+    #[must_use]
+    pub fn with_repository_identity(mut self, identity: Uuid) -> Self {
+        self.repository_identity = Some(identity);
+        self
+    }
+
+    pub(crate) fn require_repository_identity(&self) -> Result<Uuid, BackupError> {
+        self.repository_identity.ok_or_else(|| BackupError::ManifestAuthenticationFailed {
+            key: "repository-id".into(),
+            reason: "host repository identity pin is required; initialize and retain its UUID outside the repository".into(),
+        })
+    }
+
+    pub(crate) fn expected_repository_identity(&self) -> Option<Uuid> {
+        self.repository_identity
+    }
+
+    pub(crate) fn check_repository_identity(&self, identity: Uuid) -> Result<(), BackupError> {
+        if self
+            .repository_identity
+            .is_some_and(|expected| expected != identity)
+        {
+            return Err(BackupError::ManifestAuthenticationFailed {
+                key: "repository-id".into(),
+                reason: "repository identity differs from host pin".into(),
+            });
+        }
+        Ok(())
     }
 
     /// Also accepts manifests sealed with a retired key, for key rotation.
@@ -155,7 +210,7 @@ impl ManifestAuthenticator {
         self
     }
 
-    /// Selects how unauthenticated legacy manifests are treated.
+    /// Selects how older unbound manifests are treated.
     #[must_use]
     pub fn with_legacy_manifest_policy(mut self, policy: LegacyManifestPolicy) -> Self {
         self.legacy = policy;
@@ -178,7 +233,12 @@ impl ManifestAuthenticator {
         crate::ManifestMac {
             algorithm: crate::ManifestMacAlgorithm::HmacSha256,
             key_id: self.signing_key.key_id.clone(),
-            mac: hex(&self.signing_key.mac(canonical).finalize().into_bytes()),
+            repository_id: self.repository_identity,
+            mac: hex(
+                &repository_mac(&self.signing_key, canonical, self.repository_identity)
+                    .finalize()
+                    .into_bytes(),
+            ),
         }
     }
 
@@ -192,9 +252,24 @@ impl ManifestAuthenticator {
             .find(|key| key.key_id == seal.key_id)
             .ok_or_else(|| format!("sealed with unknown key id {}", seal.key_id))?;
         let tag = decode_hex(&seal.mac).ok_or_else(|| "malformed MAC".to_string())?;
-        key.mac(canonical)
+        if let Some(identity) = seal.repository_id {
+            self.check_repository_identity(identity)
+                .map_err(|error| error.to_string())?;
+        }
+        repository_mac(key, canonical, seal.repository_id)
             .verify_slice(&tag)
             .map_err(|_| "MAC does not match manifest contents".to_string())
+    }
+}
+
+fn repository_mac(key: &ManifestKey, canonical: &[u8], identity: Option<Uuid>) -> HmacSha256 {
+    if let Some(identity) = identity {
+        let mut mac = key.mac(b"repository-bound/v3\n");
+        mac.update(identity.as_bytes());
+        mac.update(canonical);
+        mac
+    } else {
+        key.mac(canonical)
     }
 }
 

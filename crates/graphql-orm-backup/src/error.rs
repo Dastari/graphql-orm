@@ -108,6 +108,10 @@ pub enum BackupError {
     #[error("invalid restore context: {reason}")]
     InvalidRestoreContext { reason: String },
 
+    /// Repository enumeration omitted a parent or changed between reads.
+    #[error("incomplete repository listing: {reason}")]
+    IncompleteRepositoryListing { reason: String },
+
     #[error("invalid manifest chain: {reason}")]
     InvalidManifestChain { reason: String },
 

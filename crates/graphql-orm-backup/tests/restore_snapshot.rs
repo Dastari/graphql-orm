@@ -269,6 +269,22 @@ struct MockObjectIndex {
 
 #[async_trait]
 impl BackupObjectIndex for MockObjectIndex {
+    async fn objects_from_incremental_export(
+        &self,
+        parent_snapshot_id: Uuid,
+        _changes: &[graphql_orm_backup::BackupChangeExport],
+    ) -> Result<Vec<BackupObjectRef>, BackupError> {
+        self.list_objects_for_incremental_backup(parent_snapshot_id)
+            .await
+    }
+
+    async fn objects_from_full_export(
+        &self,
+        _: &[graphql_orm_backup::BackupTableExport],
+    ) -> Result<Vec<BackupObjectRef>, BackupError> {
+        self.list_objects_for_full_backup().await
+    }
+
     async fn list_objects_for_full_backup(&self) -> Result<Vec<BackupObjectRef>, BackupError> {
         Ok(self.objects.clone())
     }
@@ -550,6 +566,11 @@ impl BackupRepository for VersionedObjectRepository {
                     key: key.to_string(),
                 });
         }
+        if key == graphql_orm_backup::REPOSITORY_ID_KEY {
+            return Ok(graphql_orm_storage::StorageByteStream::from_bytes(
+                Bytes::from(Uuid::from_u128(1).to_string()),
+            ));
+        }
         assert_eq!(key, self.key);
         let bytes = if self.reads.fetch_add(1, Ordering::SeqCst) == 0 {
             self.preflight_bytes.clone()
@@ -681,6 +702,7 @@ fn test_manifest_authenticator() -> graphql_orm_backup::ManifestAuthenticator {
     graphql_orm_backup::ManifestAuthenticator::new(
         graphql_orm_backup::ManifestKey::from_bytes(&[7; 32]).expect("test manifest key"),
     )
+    .with_repository_identity(uuid::Uuid::from_u128(1))
 }
 
 static TEST_MANIFEST_AUTHENTICATOR: std::sync::LazyLock<graphql_orm_backup::ManifestAuthenticator> =

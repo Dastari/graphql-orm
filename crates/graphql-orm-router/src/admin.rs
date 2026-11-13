@@ -509,6 +509,7 @@ fn status_response(status: crate::RouterStatus) -> hive_router::ntex::web::HttpR
         },
         "lastSuccessfulCompositionUnixSeconds": unix_seconds(Some(status.last_successful_composition())),
         "lastCompositionError": status.last_composition_error(),
+        "lastPersistedDocumentsError": status.last_persisted_documents_error(),
         "subgraphs": subgraphs,
         "persistence": "process-local",
     }))
