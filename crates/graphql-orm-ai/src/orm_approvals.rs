@@ -3975,6 +3975,26 @@ mod tests {
             .await
             .expect("approval read should succeed")
             .expect("approval should remain visible");
+        // The tenant predicate is checked first: another tenant learns
+        // nothing about the run, not even that it closed.
+        let other = fixture_on(
+            fixture.database.clone(),
+            true,
+            Some(other_tenant_principal(&fixture.principal)),
+        )
+        .await;
+        let hidden = other
+            .approval_service
+            .decide_approval(
+                &other.principal,
+                DecideAiApprovalInput {
+                    id: view.id,
+                    decision: AiApprovalDecision::Deny,
+                    expected_version: view.row_version,
+                },
+            )
+            .await;
+        assert!(matches!(hidden, Err(AiError::NotFound)), "{hidden:?}");
         for decision in [AiApprovalDecision::Approve, AiApprovalDecision::Deny] {
             let refused = fixture
                 .approval_service

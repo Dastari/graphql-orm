@@ -5323,6 +5323,60 @@ mod service {
             assert_eq!(cleanup.binding_id(), fixture.binding_id);
         }
 
+        /// A host entity policy that grants the repository surface only.
+        #[derive(Clone)]
+        struct RepositoryOnlyHostPolicy;
+
+        impl graphql_orm::graphql::orm::EntityPolicy<DefaultWriteBackend> for RepositoryOnlyHostPolicy {
+            fn can_access_entity<'a>(
+                &'a self,
+                _context: Option<&'a async_graphql::Context<'_>>,
+                _database: &'a Database<DefaultWriteBackend>,
+                _entity_name: &'static str,
+                _policy_key: Option<&'static str>,
+                _kind: graphql_orm::graphql::orm::EntityAccessKind,
+                surface: graphql_orm::graphql::orm::EntityAccessSurface,
+            ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>>
+            {
+                let allowed = surface == graphql_orm::graphql::orm::EntityAccessSurface::Repository;
+                Box::pin(async move { Ok(allowed) })
+            }
+        }
+
+        /// The fixture's service, rebuilt on a handle that carries a host
+        /// entity policy.
+        fn service_with_host_policy(fixture: &ParkFixture) -> Arc<OrmAiProviderSessionService> {
+            let mut database = fixture.database.clone();
+            database.set_entity_policy(RepositoryOnlyHostPolicy);
+            let principal = AuthPrincipal::User(AuthUser {
+                user_id: "parked-wait-owner".to_owned(),
+                session_id: Uuid::new_v4(),
+                roles: Vec::new(),
+                scopes: Vec::new(),
+                session: SessionContext::default(),
+                token_claims: AccessTokenMetadata {
+                    tenant_id: Some("parked-wait-tenant".to_owned()),
+                    ..AccessTokenMetadata::default()
+                },
+            });
+            Arc::new(
+                OrmAiProviderSessionService::new(
+                    database,
+                    Arc::new(TestAccess),
+                    Arc::new(TestProtection),
+                    Arc::new(crate::DatabaseManagedContentProtector),
+                    Arc::new(TestPrincipalResolver {
+                        principal,
+                        clock: fixture.clock.clone(),
+                    }),
+                    fixture.clock.clone(),
+                    AiProviderSessionLimits::default(),
+                    Duration::minutes(5),
+                )
+                .expect("provider-session service should construct"),
+            )
+        }
+
         /// A copy of `template` as a fresh binding for another session.
         fn binding_like(
             template: &AiProviderSessionBindingRecord,
@@ -5411,7 +5465,18 @@ mod service {
 
         #[tokio::test]
         async fn unexpired_parks_cannot_hide_an_expired_park() {
+            for host_policy in [false, true] {
+                unexpired_parks_cannot_hide_an_expired_park_with(host_policy).await;
+            }
+        }
+
+        async fn unexpired_parks_cannot_hide_an_expired_park_with(host_policy: bool) {
             let fixture = parked_wait_fixture().await;
+            let service = if host_policy {
+                service_with_host_policy(&fixture)
+            } else {
+                fixture.service.clone()
+            };
             let template =
                 AiProviderSessionBindingRecord::find_by_id(&fixture.database, &fixture.binding_id)
                     .await
@@ -5442,8 +5507,7 @@ mod service {
             )
             .await
             .unwrap();
-            let cleanup = fixture
-                .service
+            let cleanup = service
                 .claim_cleanup("parked-expiry-cleaner")
                 .await
                 .expect("cleanup scan should succeed")
@@ -5453,7 +5517,18 @@ mod service {
 
         #[tokio::test]
         async fn a_malformed_cleanup_row_is_quarantined_and_audited() {
+            for host_policy in [false, true] {
+                malformed_cleanup_row_is_quarantined(host_policy).await;
+            }
+        }
+
+        async fn malformed_cleanup_row_is_quarantined(host_policy: bool) {
             let fixture = parked_wait_fixture().await;
+            let service = if host_policy {
+                service_with_host_policy(&fixture)
+            } else {
+                fixture.service.clone()
+            };
             let template =
                 AiProviderSessionBindingRecord::find_by_id(&fixture.database, &fixture.binding_id)
                     .await
@@ -5483,8 +5558,7 @@ mod service {
             AiProviderSessionBindingRecord::insert(&fixture.database, ready)
                 .await
                 .unwrap();
-            let cleanup = fixture
-                .service
+            let cleanup = service
                 .claim_cleanup("malformed-row-cleaner")
                 .await
                 .expect("a malformed row must not fail the scan")
@@ -5522,8 +5596,7 @@ mod service {
             }));
             // The quarantined row is never scanned again.
             assert!(
-                fixture
-                    .service
+                service
                     .claim_cleanup("malformed-row-cleaner")
                     .await
                     .expect("scan should succeed")

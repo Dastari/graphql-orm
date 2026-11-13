@@ -6375,7 +6375,41 @@ mod tests {
 
     #[tokio::test]
     async fn deleting_session_with_a_parked_provider_binding_does_not_abort_the_pass() {
-        let database = database().await;
+        for host_policy in [false, true] {
+            deleting_session_with_a_parked_provider_binding(host_policy).await;
+        }
+    }
+
+    /// A host entity policy that grants the repository surface only, as a
+    /// strict host would. The retention worker must need nothing else.
+    #[derive(Clone)]
+    struct RepositoryOnlyHostPolicy;
+
+    impl EntityPolicy<DefaultWriteBackend> for RepositoryOnlyHostPolicy {
+        fn can_access_entity<'a>(
+            &'a self,
+            _context: Option<&'a async_graphql::Context<'_>>,
+            _database: &'a Database<DefaultWriteBackend>,
+            _entity_name: &'static str,
+            _policy_key: Option<&'static str>,
+            _kind: EntityAccessKind,
+            surface: EntityAccessSurface,
+        ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+            let allowed = surface == EntityAccessSurface::Repository;
+            Box::pin(async move { Ok(allowed) })
+        }
+    }
+
+    async fn retention_database(host_policy: bool) -> Database<SqliteBackend> {
+        let mut database = database().await;
+        if host_policy {
+            database.set_entity_policy(RepositoryOnlyHostPolicy);
+        }
+        database
+    }
+
+    async fn deleting_session_with_a_parked_provider_binding(host_policy: bool) {
+        let database = retention_database(host_policy).await;
         let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
         seed_policy(&database, &scope).await;
         let deleting = seed_empty_session(&database, &scope).await;
@@ -6421,8 +6455,13 @@ mod tests {
 
     #[tokio::test]
     async fn purging_retained_message_content_retires_the_idle_provider_thread() {
-        for state in ["active", "claimed"] {
-            let database = database().await;
+        for (state, host_policy) in [
+            ("active", false),
+            ("claimed", false),
+            ("active", true),
+            ("claimed", true),
+        ] {
+            let database = retention_database(host_policy).await;
             let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
             seed_policy(&database, &scope).await;
             let session_id = seed_session(&database, &scope).await;

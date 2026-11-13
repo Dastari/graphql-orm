@@ -10,7 +10,7 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.136.0
+## Unreleased - 0.137.0
 
 - **Fixed (run recovery):** `OrmAiRunService::recover_expired_leases` no longer aborts for every run when one row is bad. A run requeued for checkpoint adoption whose adopting attempt also lost its lease before consuming the checkpoint returned `InternalError` on every pass, because the checkpoint belonged to the earlier attempt; no expired lease anywhere was recovered again. Such a checkpoint is now validated against the attempt and generation that wrote it and the run is requeued for adoption again, bounded by the run retry ceiling. Each candidate is reconciled in its own serialization-retried transaction. A row with malformed lease or checkpoint state is closed as `RecoveryRequired` with `lease_recovery_state_invalid` and audited (`ai.run.lease_recovery_quarantined`); a row whose transaction still fails is left for the next pass. Fixes #529.
 - **Fixed (scans):** the expired-lease scan selects only expired rows in SQL, and the claim scan only eligible rows, so live or not-yet-due rows can no longer hide an expired or eligible one behind random primary-key order. Lease recovery and budget settlement also resume each pass after the rows the previous pass examined and left eligible (a row whose transaction failed, a reservation still owned by a live attempt), so such rows cannot hold the bounded window. The resume point is process-local and wraps when a page runs short. A malformed queued row is closed as `RecoveryRequired` with `claim_state_invalid` instead of failing every `claim_next`. An approved approval that can never be handed off (its run has closed, or its wait graph is malformed) is expired and audited instead of failing every `claim_next_approved`.

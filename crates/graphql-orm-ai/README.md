@@ -10,7 +10,7 @@ supersedes: []
 
 # graphql-orm-ai
 
-Version `0.136.0` keeps run recovery, claims and session retention going when one row is malformed, refuses to retry a cancelled run whose mutation may have run, settles budget reservations of closed attempts, and retries serialization conflicts in run transitions. Apply AI schema module `0.78.0`; it changes no tables or data. See the [migration guide](MIGRATION.md#01350-to-01360).
+Version `0.137.0` keeps run recovery, claims and session retention going when one row is malformed, refuses to retry a cancelled run whose mutation may have run, settles budget reservations of closed attempts, and retries serialization conflicts in run transitions. Apply AI schema module `0.78.0`; it changes no tables or data. See the [migration guide](MIGRATION.md#01360-to-01370).
 
 Version `0.135.0` bounds attachment uploads while they stream, applies a crate-level tenant predicate to approval and proposal lookups, refuses trusted-worker entity access without a host entity policy unless the host opts in, and limits provider endpoints: plain `http` only for loopback unless the endpoint policy opts in, a policy recheck before every request, and no proxy environment unless the host opts in. Several of these are breaking defaults; AI schema is unchanged and no data migration is needed. See the [migration guide](MIGRATION.md#01340-to-01350).
 
