@@ -30,6 +30,15 @@ for historical context.
 
 - AI 0.128.0: **breaking:** enforce AI runtime closure after a snapshot restore. The runtime start gate opens only with a proof minted from a store's live recovery epoch (AI schema module `0.77.0`), and leases are bound to that epoch. Worker claims, lease-fenced writes and approval consumption refuse while the epoch is not live. A restored store stays closed until `OrmAiRuntimeRecoveryService::reconcile_restore` expires its approvals, revokes its egress consents and moves unfinished runs to `RecoveryRequired`, and an operator acknowledges the reviewed result. An existing deployment upgraded in place opens once the operator calls `acknowledge_in_place_upgrade`, which leaves its work unchanged. Restore facts now decode strictly. See the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01270-to-01280-enforced-runtime-closure-after-restore).
 
+## 0.131.0
+
+- ORM and macros: native SQLite and PostgreSQL search hide managed search-table
+  columns from entity SQL, so names such as `rank` and `entity_pk` work in
+  repository and generated GraphQL searches (#659). Entity join keys and
+  primary-key tiebreaks are qualified; server-authored default-sort SQL is passed
+  through unchanged, including correlated subqueries and typed literals.
+  Relevance and result ordering are unchanged. Macros stay version-aligned.
+
 ## 0.130.0
 
 ORM runtime/macros **0.130.0**. Authority defaults now fail closed. See the [migration guide](MIGRATION.md#01290-to-01300-fail-closed-authority-defaults).
