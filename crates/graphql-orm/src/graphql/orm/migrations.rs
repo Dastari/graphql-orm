@@ -853,7 +853,7 @@ fn render_append_only_statements(
                 "CREATE TRIGGER {name} BEFORE UPDATE OR DELETE ON {table} FOR EACH ROW EXECUTE FUNCTION {name}()"
             ),
             format!(
-                "DO $graphql_orm$ DECLARE target_owner name; BEGIN SELECT pg_get_userbyid(relowner) INTO target_owner FROM pg_class WHERE oid = '{table_regclass}'::regclass; EXECUTE format('ALTER FUNCTION {name}() OWNER TO %I', target_owner); END $graphql_orm$"
+                "DO $graphql_orm$ DECLARE target_owner pg_catalog.name; BEGIN SELECT pg_catalog.pg_get_userbyid(c.relowner) INTO target_owner FROM pg_catalog.pg_class c WHERE c.oid OPERATOR(pg_catalog.=) '{table_regclass}'::pg_catalog.regclass::pg_catalog.oid; EXECUTE pg_catalog.format('ALTER FUNCTION {name}() OWNER TO %I', target_owner); END $graphql_orm$"
             ),
         ],
         (DatabaseBackend::Postgres, false) => vec![
@@ -2008,12 +2008,13 @@ fn render_composite_unique_changes(
                     .collect::<Vec<_>>()
                     .join(", ");
                 let body = format!(
-                    "DECLARE r record; BEGIN FOR r IN SELECT con.conname FROM pg_constraint con \
-                     WHERE con.conrelid = {}::regclass AND con.contype = 'u' \
-                     AND (SELECT array_agg(a.attname::text ORDER BY k.ord) FROM unnest(con.conkey) \
-                     WITH ORDINALITY k(num, ord) JOIN pg_attribute a ON a.attrelid = con.conrelid \
-                     AND a.attnum = k.num) = ARRAY[{members}]::text[] LOOP \
-                     EXECUTE format('ALTER TABLE %s DROP CONSTRAINT %I', {}::regclass, r.conname); \
+                    "DECLARE r pg_catalog.record; BEGIN FOR r IN SELECT con.conname FROM pg_catalog.pg_constraint con \
+                     WHERE con.conrelid OPERATOR(pg_catalog.=) {}::pg_catalog.regclass::pg_catalog.oid \
+                     AND con.contype OPERATOR(pg_catalog.=) 'u'::pg_catalog.\"char\" \
+                     AND (SELECT pg_catalog.array_agg(a.attname::pg_catalog.text ORDER BY k.ord) FROM pg_catalog.unnest(con.conkey) \
+                     WITH ORDINALITY k(num, ord) JOIN pg_catalog.pg_attribute a ON a.attrelid OPERATOR(pg_catalog.=) con.conrelid \
+                     AND a.attnum OPERATOR(pg_catalog.=) k.num) OPERATOR(pg_catalog.=) ARRAY[{members}]::pg_catalog.text[] LOOP \
+                     EXECUTE pg_catalog.format('ALTER TABLE %s DROP CONSTRAINT %I', {}::pg_catalog.regclass, r.conname); \
                      END LOOP; END",
                     sql_string_literal(&table),
                     sql_string_literal(&table)
@@ -3937,14 +3938,15 @@ pub(super) async fn introspect_owned_postgres_connection_with_internal(
     connection: &mut sqlx::PgConnection,
     include_internal: bool,
 ) -> crate::Result<OwnedSchemaModel> {
-    let schema_name = sqlx::query("SELECT current_schema() AS schema_name")
+    let schema_name = sqlx::query("SELECT pg_catalog.current_schema() AS schema_name")
         .fetch_one(&mut *connection)
         .await?
         .try_get::<Option<String>, _>("schema_name")?
         .unwrap_or_else(|| "public".to_string());
-    let extension_rows = sqlx::query("SELECT extname FROM pg_extension ORDER BY extname")
-        .fetch_all(&mut *connection)
-        .await?;
+    let extension_rows =
+        sqlx::query("SELECT extname FROM pg_catalog.pg_extension ORDER BY extname")
+            .fetch_all(&mut *connection)
+            .await?;
     let extensions = extension_rows
         .into_iter()
         .map(|row| row.try_get::<String, _>("extname"))
@@ -3953,7 +3955,7 @@ pub(super) async fn introspect_owned_postgres_connection_with_internal(
     let table_rows = sqlx::query(
         "SELECT table_name
          FROM information_schema.tables
-         WHERE table_schema = $1 AND table_type = 'BASE TABLE'
+         WHERE table_schema OPERATOR(pg_catalog.=) $1 AND table_type OPERATOR(pg_catalog.=) 'BASE TABLE'
          ORDER BY table_name",
     )
     .bind(&schema_name)
@@ -3968,18 +3970,18 @@ pub(super) async fn introspect_owned_postgres_connection_with_internal(
         }
         let column_rows = sqlx::query(
             "SELECT a.attname AS column_name,
-                    format_type(a.atttypid, a.atttypmod) AS data_type,
+                    pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
                     NOT a.attnotnull AS nullable,
-                    pg_get_expr(ad.adbin, ad.adrelid) AS column_default
-             FROM pg_attribute a
-             JOIN pg_class c ON c.oid = a.attrelid
-             JOIN pg_namespace n ON n.oid = c.relnamespace
-             LEFT JOIN pg_attrdef ad
-               ON ad.adrelid = a.attrelid
-              AND ad.adnum = a.attnum
-             WHERE n.nspname = $2
-               AND c.relname = $1
-               AND a.attnum > 0
+                    pg_catalog.pg_get_expr(ad.adbin, ad.adrelid) AS column_default
+             FROM pg_catalog.pg_attribute a
+             JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) a.attrelid
+             JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+             LEFT JOIN pg_catalog.pg_attrdef ad
+               ON ad.adrelid OPERATOR(pg_catalog.=) a.attrelid
+              AND ad.adnum OPERATOR(pg_catalog.=) a.attnum
+             WHERE n.nspname OPERATOR(pg_catalog.=) $2
+               AND c.relname OPERATOR(pg_catalog.=) $1
+               AND a.attnum OPERATOR(pg_catalog.>) 0
                AND NOT a.attisdropped
              ORDER BY a.attnum",
         )
@@ -3992,11 +3994,11 @@ pub(super) async fn introspect_owned_postgres_connection_with_internal(
             "SELECT kcu.column_name
              FROM information_schema.table_constraints tc
              JOIN information_schema.key_column_usage kcu
-               ON tc.constraint_name = kcu.constraint_name
-              AND tc.table_schema = kcu.table_schema
-             WHERE tc.table_schema = $2
-               AND tc.table_name = $1
-               AND tc.constraint_type = 'PRIMARY KEY'
+               ON tc.constraint_name OPERATOR(pg_catalog.=) kcu.constraint_name
+              AND tc.table_schema OPERATOR(pg_catalog.=) kcu.table_schema
+             WHERE tc.table_schema OPERATOR(pg_catalog.=) $2
+               AND tc.table_name OPERATOR(pg_catalog.=) $1
+               AND tc.constraint_type OPERATOR(pg_catalog.=) 'PRIMARY KEY'
              ORDER BY kcu.ordinal_position",
         )
         .bind(&table_name)
@@ -4011,18 +4013,18 @@ pub(super) async fn introspect_owned_postgres_connection_with_internal(
         let unique_rows = sqlx::query(
             "SELECT con.conname AS constraint_name,
                     a.attname AS column_name,
-                    keys.ordinality::bigint AS key_ordinal
-             FROM pg_constraint con
-             JOIN pg_class c ON c.oid = con.conrelid
-             JOIN pg_namespace n ON n.oid = c.relnamespace
-             CROSS JOIN LATERAL unnest(con.conkey)
+                    keys.ordinality::pg_catalog.int8 AS key_ordinal
+             FROM pg_catalog.pg_constraint con
+             JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) con.conrelid
+             JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+             CROSS JOIN LATERAL pg_catalog.unnest(con.conkey)
                  WITH ORDINALITY AS keys(attnum, ordinality)
-             JOIN pg_attribute a
-               ON a.attrelid = c.oid
-              AND a.attnum = keys.attnum
-             WHERE n.nspname = $2
-               AND c.relname = $1
-               AND con.contype = 'u'
+             JOIN pg_catalog.pg_attribute a
+               ON a.attrelid OPERATOR(pg_catalog.=) c.oid
+              AND a.attnum OPERATOR(pg_catalog.=) keys.attnum
+             WHERE n.nspname OPERATOR(pg_catalog.=) $2
+               AND c.relname OPERATOR(pg_catalog.=) $1
+               AND con.contype OPERATOR(pg_catalog.=) 'u'
              ORDER BY con.conname, keys.ordinality",
         )
         .bind(&table_name)
@@ -4068,40 +4070,45 @@ pub(super) async fn introspect_owned_postgres_connection_with_internal(
         // PK, UNIQUE and EXCLUDE constraints own their backing index, so it is
         // not an ordinary index. An FK's `conindid` names the index it
         // *references*, which stays an ordinary index of this table.
-        let index_rows = sqlx::query(
+        let index_rows = sqlx::query(&format!(
             "SELECT i.relname AS indexname,
                     ix.indisunique AS is_unique,
+                    pg_catalog.pg_get_expr(ix.indpred, ix.indrelid) AS predicate,
+                    {POSTGRES_INDEX_USES_ONLY_CATALOG_OBJECTS} AS predicate_catalog_only,
                     ix.indisprimary AS is_primary,
-                    bool_or(con.oid IS NOT NULL) AS constraint_owned,
+                    pg_catalog.bool_or(con.oid IS NOT NULL) AS constraint_owned,
                     am.amname AS method,
-                    pg_get_expr(ix.indpred, ix.indrelid) AS predicate,
-                    array_remove(array_agg(a.attname ORDER BY cols.ordinality), NULL) AS columns,
-                    array_agg(((ix.indoption[cols.ordinality - 1] & 1) = 1)
+                    pg_catalog.array_remove(pg_catalog.array_agg(a.attname ORDER BY cols.ordinality), NULL) AS columns,
+                    pg_catalog.array_agg(((ix.indoption[cols.ordinality OPERATOR(pg_catalog.-) 1] OPERATOR(pg_catalog.&) 1) OPERATOR(pg_catalog.=) 1)
                               ORDER BY cols.ordinality) AS descending
-             FROM pg_class t
-             JOIN pg_namespace n ON n.oid = t.relnamespace
-             JOIN pg_index ix ON ix.indrelid = t.oid
-             JOIN pg_class i ON i.oid = ix.indexrelid
-             JOIN pg_am am ON am.oid = i.relam
-             LEFT JOIN pg_constraint con
-               ON con.conindid = ix.indexrelid
-              AND con.conrelid = t.oid
-              AND con.contype <> 'f'
-             LEFT JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS cols(attnum, ordinality)
+             FROM pg_catalog.pg_class t
+             JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) t.relnamespace
+             JOIN pg_catalog.pg_index ix ON ix.indrelid OPERATOR(pg_catalog.=) t.oid
+             JOIN pg_catalog.pg_class i ON i.oid OPERATOR(pg_catalog.=) ix.indexrelid
+             JOIN pg_catalog.pg_am am ON am.oid OPERATOR(pg_catalog.=) i.relam
+             LEFT JOIN pg_catalog.pg_constraint con
+               ON con.conindid OPERATOR(pg_catalog.=) ix.indexrelid
+              AND con.conrelid OPERATOR(pg_catalog.=) t.oid
+              AND con.contype OPERATOR(pg_catalog.<>) 'f'
+             LEFT JOIN LATERAL pg_catalog.unnest(ix.indkey) WITH ORDINALITY AS cols(attnum, ordinality)
                ON true
-             LEFT JOIN pg_attribute a
-               ON a.attrelid = t.oid
-              AND a.attnum = cols.attnum
-             WHERE n.nspname = $2
-               AND t.relname = $1
-             GROUP BY i.relname, ix.indisunique, ix.indisprimary, am.amname,
+             LEFT JOIN pg_catalog.pg_attribute a
+               ON a.attrelid OPERATOR(pg_catalog.=) t.oid
+              AND a.attnum OPERATOR(pg_catalog.=) cols.attnum
+             WHERE n.nspname OPERATOR(pg_catalog.=) $2
+               AND t.relname OPERATOR(pg_catalog.=) $1
+             GROUP BY i.relname, ix.indexrelid, ix.indisunique, ix.indisprimary, am.amname,
                       ix.indpred, ix.indrelid
-             ORDER BY i.relname",
-        )
+             ORDER BY i.relname"
+        ))
         .bind(&table_name)
         .bind(&schema_name)
         .fetch_all(&mut *connection)
         .await?;
+        // A predicate is accepted as a closed set only when the index binds
+        // nothing outside `pg_catalog` (see
+        // [`POSTGRES_INDEX_USES_ONLY_CATALOG_OBJECTS`]); only then is its
+        // rendering parsed.
         let mut indexes = Vec::new();
         for row in index_rows {
             let index_name: String = row.try_get("indexname")?;
@@ -4111,9 +4118,11 @@ pub(super) async fn introspect_owned_postgres_connection_with_internal(
                 continue;
             }
             let unique: bool = row.try_get("is_unique")?;
+            let predicate_catalog_only: bool = row.try_get("predicate_catalog_only")?;
             let predicate_expression: Option<String> = row.try_get("predicate")?;
             let predicate = predicate_expression
                 .as_deref()
+                .filter(|_| predicate_catalog_only)
                 .and_then(parse_closed_set_index_predicate);
             let method_name: String = row.try_get("method")?;
             let method = match method_name.to_ascii_lowercase().as_str() {
@@ -4158,31 +4167,30 @@ pub(super) async fn introspect_owned_postgres_connection_with_internal(
             "SELECT
                 con.conname AS constraint_name,
                 target.relname AS target_table,
-                CASE con.confdeltype
-                    WHEN 'c' THEN 'CASCADE'
-                    WHEN 'n' THEN 'SET NULL'
+                CASE WHEN con.confdeltype OPERATOR(pg_catalog.=) 'c'::pg_catalog.\"char\" THEN 'CASCADE'
+                    WHEN con.confdeltype OPERATOR(pg_catalog.=) 'n'::pg_catalog.\"char\" THEN 'SET NULL'
                     ELSE 'RESTRICT'
                 END AS delete_rule,
-                array_agg(source_attribute.attname ORDER BY source_key.ordinality) AS source_columns,
-                array_agg(target_attribute.attname ORDER BY source_key.ordinality) AS target_columns
-             FROM pg_constraint con
-             JOIN pg_class source ON source.oid = con.conrelid
-             JOIN pg_namespace source_namespace ON source_namespace.oid = source.relnamespace
-             JOIN pg_class target ON target.oid = con.confrelid
-             JOIN LATERAL unnest(con.conkey) WITH ORDINALITY
+                pg_catalog.array_agg(source_attribute.attname ORDER BY source_key.ordinality) AS source_columns,
+                pg_catalog.array_agg(target_attribute.attname ORDER BY source_key.ordinality) AS target_columns
+             FROM pg_catalog.pg_constraint con
+             JOIN pg_catalog.pg_class source ON source.oid OPERATOR(pg_catalog.=) con.conrelid
+             JOIN pg_catalog.pg_namespace source_namespace ON source_namespace.oid OPERATOR(pg_catalog.=) source.relnamespace
+             JOIN pg_catalog.pg_class target ON target.oid OPERATOR(pg_catalog.=) con.confrelid
+             JOIN LATERAL pg_catalog.unnest(con.conkey) WITH ORDINALITY
                AS source_key(attnum, ordinality) ON true
-             JOIN LATERAL unnest(con.confkey) WITH ORDINALITY
+             JOIN LATERAL pg_catalog.unnest(con.confkey) WITH ORDINALITY
                AS target_key(attnum, ordinality)
-               ON target_key.ordinality = source_key.ordinality
-             JOIN pg_attribute source_attribute
-               ON source_attribute.attrelid = source.oid
-              AND source_attribute.attnum = source_key.attnum
-             JOIN pg_attribute target_attribute
-               ON target_attribute.attrelid = target.oid
-              AND target_attribute.attnum = target_key.attnum
-             WHERE source_namespace.nspname = $2
-               AND source.relname = $1
-               AND con.contype = 'f'
+               ON target_key.ordinality OPERATOR(pg_catalog.=) source_key.ordinality
+             JOIN pg_catalog.pg_attribute source_attribute
+               ON source_attribute.attrelid OPERATOR(pg_catalog.=) source.oid
+              AND source_attribute.attnum OPERATOR(pg_catalog.=) source_key.attnum
+             JOIN pg_catalog.pg_attribute target_attribute
+               ON target_attribute.attrelid OPERATOR(pg_catalog.=) target.oid
+              AND target_attribute.attnum OPERATOR(pg_catalog.=) target_key.attnum
+             WHERE source_namespace.nspname OPERATOR(pg_catalog.=) $2
+               AND source.relname OPERATOR(pg_catalog.=) $1
+               AND con.contype OPERATOR(pg_catalog.=) 'f'
              GROUP BY con.oid, con.conname, target.relname, con.confdeltype
              ORDER BY con.conname",
         )
@@ -4222,38 +4230,38 @@ pub(super) async fn introspect_owned_postgres_connection_with_internal(
             .collect::<crate::Result<Vec<_>>>()?;
         let append_trigger_name = append_only_name(&table_name);
         let append_function_body: Option<String> = sqlx::query_scalar(
-            "SELECT p.prosrc FROM pg_trigger tr
-                JOIN pg_class c ON c.oid = tr.tgrelid
-                JOIN pg_namespace n ON n.oid = c.relnamespace
-                JOIN pg_proc p ON p.oid = tr.tgfoid
-                JOIN pg_namespace pn ON pn.oid = p.pronamespace
-                JOIN pg_language lang ON lang.oid = p.prolang
-                WHERE n.nspname = $2 AND c.relname = $1
-                  AND tr.tgname = $3 AND NOT tr.tgisinternal
-                  AND tr.tgenabled = 'O'
-                  AND tr.tgtype = 27
+            "SELECT p.prosrc FROM pg_catalog.pg_trigger tr
+                JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) tr.tgrelid
+                JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+                JOIN pg_catalog.pg_proc p ON p.oid OPERATOR(pg_catalog.=) tr.tgfoid
+                JOIN pg_catalog.pg_namespace pn ON pn.oid OPERATOR(pg_catalog.=) p.pronamespace
+                JOIN pg_catalog.pg_language lang ON lang.oid OPERATOR(pg_catalog.=) p.prolang
+                WHERE n.nspname OPERATOR(pg_catalog.=) $2 AND c.relname OPERATOR(pg_catalog.=) $1
+                  AND tr.tgname OPERATOR(pg_catalog.=) $3 AND NOT tr.tgisinternal
+                  AND tr.tgenabled OPERATOR(pg_catalog.=) 'O'
+                  AND tr.tgtype OPERATOR(pg_catalog.=) 27::pg_catalog.int2
                   AND tr.tgqual IS NULL
-                  AND tr.tgnargs = 0
-                  AND tr.tgconstraint = 0
+                  AND tr.tgnargs OPERATOR(pg_catalog.=) 0
+                  AND tr.tgconstraint OPERATOR(pg_catalog.=) 0::pg_catalog.oid
                   AND NOT tr.tgdeferrable
-                  AND p.proname = $3
-                  AND pn.nspname = $2
-                  AND lang.lanname = 'plpgsql'
-                  AND p.prorettype = 'trigger'::regtype
-                  AND p.pronargs = 0
-                  AND p.prokind = 'f'
+                  AND p.proname OPERATOR(pg_catalog.=) $3
+                  AND pn.nspname OPERATOR(pg_catalog.=) $2
+                  AND lang.lanname OPERATOR(pg_catalog.=) 'plpgsql'
+                  AND p.prorettype OPERATOR(pg_catalog.=) 'pg_catalog.trigger'::pg_catalog.regtype
+                  AND p.pronargs OPERATOR(pg_catalog.=) 0
+                  AND p.prokind OPERATOR(pg_catalog.=) 'f'
                   AND p.prosecdef
-                  AND p.proowner = c.relowner
-                  AND p.proconfig = ARRAY['search_path=pg_catalog']::TEXT[]
-                  AND p.provolatile = 'v'
-                  AND p.proparallel = 'u'
+                  AND p.proowner OPERATOR(pg_catalog.=) c.relowner
+                  AND p.proconfig OPERATOR(pg_catalog.=) ARRAY['search_path=pg_catalog']::pg_catalog.text[]
+                  AND p.provolatile OPERATOR(pg_catalog.=) 'v'
+                  AND p.proparallel OPERATOR(pg_catalog.=) 'u'
                   AND NOT p.proleakproof
                   AND NOT p.proisstrict
                   AND NOT EXISTS (
                       SELECT 1
-                      FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) acl
-                      WHERE acl.privilege_type = 'EXECUTE'
-                        AND acl.grantee <> p.proowner
+                      FROM pg_catalog.aclexplode(COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner))) acl
+                      WHERE acl.privilege_type OPERATOR(pg_catalog.=) 'EXECUTE'
+                        AND acl.grantee OPERATOR(pg_catalog.<>) p.proowner
                   )",
         )
         .bind(&table_name)
@@ -4269,13 +4277,13 @@ pub(super) async fn introspect_owned_postgres_connection_with_internal(
             .as_deref()
             .is_some_and(|body| postgres_retention_function_body_matches(body, &table_name));
         let check_rows = sqlx::query(
-            "SELECT con.conname AS name, pg_get_constraintdef(con.oid, false) AS definition,
-                    obj_description(con.oid, 'pg_constraint') AS comment
-             FROM pg_constraint con
-             JOIN pg_class c ON c.oid = con.conrelid
-             JOIN pg_namespace n ON n.oid = c.relnamespace
-             WHERE n.nspname = $2 AND c.relname = $1
-               AND con.contype = 'c'
+            "SELECT con.conname AS name, pg_catalog.pg_get_constraintdef(con.oid, false) AS definition,
+                    pg_catalog.obj_description(con.oid, 'pg_constraint') AS comment
+             FROM pg_catalog.pg_constraint con
+             JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) con.conrelid
+             JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+             WHERE n.nspname OPERATOR(pg_catalog.=) $2 AND c.relname OPERATOR(pg_catalog.=) $1
+               AND con.contype OPERATOR(pg_catalog.=) 'c'
              ORDER BY con.conname",
         )
         .bind(&table_name)
@@ -4325,10 +4333,10 @@ pub(super) async fn introspect_owned_postgres_connection_with_internal(
     let metadata_exists = sqlx::query(
         "SELECT EXISTS (
             SELECT 1
-            FROM pg_class c
-            JOIN pg_namespace n ON n.oid = c.relnamespace
-            WHERE n.nspname = $1
-              AND c.relname = $2
+            FROM pg_catalog.pg_class c
+            JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+            WHERE n.nspname OPERATOR(pg_catalog.=) $1
+              AND c.relname OPERATOR(pg_catalog.=) $2
         ) AS exists",
     )
     .bind(&schema_name)
@@ -4337,9 +4345,13 @@ pub(super) async fn introspect_owned_postgres_connection_with_internal(
     .await?
     .try_get::<bool, _>("exists")?;
     if metadata_exists {
-        let rows = sqlx::query(
-            "SELECT config_json::text AS config_json FROM __graphql_orm_search_metadata ORDER BY entity_name",
-        )
+        // The table the existence check found, not whatever the path
+        // resolves the bare name to first.
+        let rows = sqlx::query(&format!(
+            "SELECT config_json::pg_catalog.text AS config_json FROM {}.{} ORDER BY entity_name",
+            DatabaseBackend::Postgres.quote_identifier(&schema_name),
+            DatabaseBackend::Postgres.quote_identifier(super::search_metadata_table_name()),
+        ))
         .fetch_all(&mut *connection)
         .await?;
         let search_indexes = rows
@@ -4370,80 +4382,17 @@ impl IntrospectionBackend for super::PostgresBackend {
 #[cfg(feature = "postgres")]
 impl RlsIntrospectionBackend for super::PostgresBackend {
     async fn introspect_rls(pool: &Self::Pool) -> crate::Result<Vec<LiveRlsTable>> {
-        let table_rows = sqlx::query(
-            "SELECT n.nspname AS schema_name,
-                    c.relname AS table_name,
-                    c.relrowsecurity AS enabled,
-                    c.relforcerowsecurity AS forced
-             FROM pg_class c
-             JOIN pg_namespace n ON n.oid = c.relnamespace
-             WHERE c.relkind IN ('r', 'p')
-               AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-             ORDER BY n.nspname, c.relname",
-        )
-        .fetch_all(pool)
-        .await?;
-
-        let policy_rows = sqlx::query(
-            "SELECT schemaname,
-                    tablename,
-                    policyname,
-                    cmd,
-                    qual,
-                    with_check
-             FROM pg_policies
-             ORDER BY schemaname, tablename, policyname",
-        )
-        .fetch_all(pool)
-        .await?;
-
-        let mut policies_by_table: std::collections::BTreeMap<String, Vec<LiveRlsPolicy>> =
-            std::collections::BTreeMap::new();
-        for row in policy_rows {
-            let schema_name: String = row.try_get("schemaname")?;
-            let table_name: String = row.try_get("tablename")?;
-            let key = if schema_name == "public" {
-                table_name.clone()
-            } else {
-                format!("{schema_name}_{table_name}")
-            };
-            let cmd: String = row.try_get("cmd")?;
-            let operation = match cmd.as_str() {
-                "SELECT" => RlsOperation::Select,
-                "INSERT" => RlsOperation::Insert,
-                "UPDATE" => RlsOperation::Update,
-                "DELETE" => RlsOperation::Delete,
-                _ => continue,
-            };
-            policies_by_table
-                .entry(key)
-                .or_default()
-                .push(LiveRlsPolicy {
-                    policy_name: row.try_get("policyname")?,
-                    operation,
-                    using_expression: row.try_get("qual")?,
-                    check_expression: row.try_get("with_check")?,
-                });
-        }
-
-        table_rows
-            .into_iter()
-            .map(|row| {
-                let schema_name: String = row.try_get("schema_name")?;
-                let table_name: String = row.try_get("table_name")?;
-                let key = if schema_name == "public" {
-                    table_name.clone()
-                } else {
-                    format!("{schema_name}_{table_name}")
-                };
-                Ok(LiveRlsTable {
-                    table_name: key.clone(),
-                    enabled: row.try_get("enabled")?,
-                    forced: row.try_get("forced")?,
-                    policies: policies_by_table.remove(&key).unwrap_or_default(),
-                })
-            })
-            .collect()
+        // Read-only; the transaction only scopes the pinned search_path.
+        // The pool hands this call a connection of its own, so no caller
+        // transaction can exist on it: this is a top-level transaction, and the
+        // pinned search_path ends with its rollback, including when the future
+        // is dropped and the pool discards or resets the connection.
+        let mut tx = pool.begin().await?;
+        let result = postgres_rls_tables(&mut tx).await;
+        let rollback = tx.rollback().await;
+        let tables = result?;
+        rollback?;
+        Ok(tables)
     }
 
     async fn introspect_rls_target(
@@ -4451,6 +4400,10 @@ impl RlsIntrospectionBackend for super::PostgresBackend {
         probes: &[RlsTableProbe],
     ) -> crate::Result<LiveRlsTarget> {
         // Rendering creates temporary views; nothing of it may persist.
+        // The pool hands this call a connection of its own, so no caller
+        // transaction can exist on it: this is a top-level transaction, and the
+        // pinned search_path ends with its rollback, including when the future
+        // is dropped and the pool discards or resets the connection.
         let mut tx = pool.begin().await?;
         let result = postgres_rls_target(&mut tx, probes).await;
         let rollback = tx.rollback().await;
@@ -4462,347 +4415,542 @@ impl RlsIntrospectionBackend for super::PostgresBackend {
     async fn introspect_rls_enforcement(
         pool: &Self::Pool,
     ) -> crate::Result<Option<LiveRlsEnforcement>> {
-        fn table_key(schema_name: String, table_name: String) -> String {
-            if schema_name == "public" {
-                table_name
+        // Read-only; the transaction only scopes the pinned search_path.
+        // The pool hands this call a connection of its own, so no caller
+        // transaction can exist on it: this is a top-level transaction, and the
+        // pinned search_path ends with its rollback, including when the future
+        // is dropped and the pool discards or resets the connection.
+        let mut tx = pool.begin().await?;
+        let result = postgres_rls_enforcement(&mut tx).await;
+        let rollback = tx.rollback().await;
+        let live = result?;
+        rollback?;
+        Ok(Some(live))
+    }
+}
+
+/// Pin `search_path` to the catalog for the rest of the transaction.
+///
+/// Every catalog read after this resolves relations, functions, operators and
+/// types in `pg_catalog`, whatever the session's `search_path` puts first.
+/// Use it only in a transaction the caller of this module opened on a
+/// connection of its own.
+#[cfg(feature = "postgres")]
+pub(super) async fn pin_catalog_search_path(conn: &mut sqlx::PgConnection) -> crate::Result<()> {
+    sqlx::query("SELECT pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true)")
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+/// SQL condition, over `pg_catalog.pg_index ix`, that holds when the index
+/// uses only catalog-defined operator classes and records no dependency on an
+/// operator, function, type or collation outside `pg_catalog`.
+///
+/// It checks two things, naming every object and operator with its schema:
+///
+/// - every operator class in `ix.indclass` is the default class for its type
+///   and access method, and both the class and its operator family belong to
+///   `pg_catalog` (the runtime migration check also refuses non-default
+///   classes, so introspection and that check agree);
+/// - every `pg_catalog.pg_depend` row of the index whose referenced object is
+///   an operator, function, type or collation names an object in the
+///   `pg_catalog` namespace.
+///
+/// PostgreSQL does not record dependencies on its own pinned built-in
+/// objects, so most catalog-only indexes have no such rows at all; the
+/// condition checks namespace membership of whatever rows exist. A partial
+/// index is accepted as a closed-set predicate only when this holds and its
+/// rendering is the closed-set form.
+#[cfg(feature = "postgres")]
+pub(super) const POSTGRES_INDEX_USES_ONLY_CATALOG_OBJECTS: &str = "(NOT EXISTS (
+    SELECT 1 FROM pg_catalog.unnest(ix.indclass::pg_catalog.oid[]) AS cls(oid)
+    LEFT JOIN pg_catalog.pg_opclass opc ON opc.oid OPERATOR(pg_catalog.=) cls.oid
+    LEFT JOIN pg_catalog.pg_opfamily opf ON opf.oid OPERATOR(pg_catalog.=) opc.opcfamily
+    WHERE opc.oid IS NULL OR opf.oid IS NULL OR NOT opc.opcdefault
+       OR opc.opcnamespace OPERATOR(pg_catalog.<>) 'pg_catalog'::pg_catalog.regnamespace::pg_catalog.oid
+       OR opf.opfnamespace OPERATOR(pg_catalog.<>) 'pg_catalog'::pg_catalog.regnamespace::pg_catalog.oid
+) AND NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_depend d
+    LEFT JOIN pg_catalog.pg_operator o
+      ON d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_operator'::pg_catalog.regclass::pg_catalog.oid
+     AND o.oid OPERATOR(pg_catalog.=) d.refobjid
+    LEFT JOIN pg_catalog.pg_proc f
+      ON d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_proc'::pg_catalog.regclass::pg_catalog.oid
+     AND f.oid OPERATOR(pg_catalog.=) d.refobjid
+    LEFT JOIN pg_catalog.pg_type ty
+      ON d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_type'::pg_catalog.regclass::pg_catalog.oid
+     AND ty.oid OPERATOR(pg_catalog.=) d.refobjid
+    LEFT JOIN pg_catalog.pg_collation co
+      ON d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_collation'::pg_catalog.regclass::pg_catalog.oid
+     AND co.oid OPERATOR(pg_catalog.=) d.refobjid
+    WHERE d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass::pg_catalog.oid
+      AND d.objid OPERATOR(pg_catalog.=) ix.indexrelid
+      AND d.refclassid OPERATOR(pg_catalog.=) ANY (ARRAY[
+          'pg_catalog.pg_operator'::pg_catalog.regclass, 'pg_catalog.pg_proc'::pg_catalog.regclass,
+          'pg_catalog.pg_type'::pg_catalog.regclass, 'pg_catalog.pg_collation'::pg_catalog.regclass
+      ]::pg_catalog.oid[])
+      AND COALESCE(o.oprnamespace, f.pronamespace, ty.typnamespace, co.collnamespace, 0::pg_catalog.oid)
+          OPERATOR(pg_catalog.<>) 'pg_catalog'::pg_catalog.regnamespace::pg_catalog.oid
+))";
+
+/// The relation `path` resolves to under the session's `search_path`, as the
+/// ORM's own SQL resolves it.
+///
+/// The query names only schema-qualified functions and types and uses no
+/// operator, so the session's `search_path` affects nothing but the
+/// resolution of `path` itself.
+#[cfg(feature = "postgres")]
+async fn resolve_postgres_relation(
+    conn: &mut sqlx::PgConnection,
+    path: &str,
+) -> crate::Result<Option<sqlx::postgres::types::Oid>> {
+    sqlx::query_scalar("SELECT pg_catalog.to_regclass($1)::pg_catalog.oid")
+        .bind(path)
+        .fetch_one(&mut *conn)
+        .await
+}
+
+/// Schema and name of the relation `oid`, when it exists. Call with the
+/// catalog search path pinned.
+#[cfg(feature = "postgres")]
+async fn postgres_relation_name(
+    conn: &mut sqlx::PgConnection,
+    oid: Option<sqlx::postgres::types::Oid>,
+) -> crate::Result<Option<(String, String)>> {
+    let Some(oid) = oid else {
+        return Ok(None);
+    };
+    sqlx::query(
+        "SELECT n.nspname::pg_catalog.text AS schema_name, c.relname::pg_catalog.text AS table_name
+         FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+         WHERE c.oid = $1",
+    )
+    .bind(oid)
+    .fetch_optional(&mut *conn)
+    .await?
+    .map(|row| -> crate::Result<(String, String)> {
+        Ok((row.try_get("schema_name")?, row.try_get("table_name")?))
+    })
+    .transpose()
+}
+
+/// Every ordinary and partitioned table with its RLS flags and policies,
+/// read with the catalog search path pinned.
+#[cfg(feature = "postgres")]
+async fn postgres_rls_tables(conn: &mut sqlx::PgConnection) -> crate::Result<Vec<LiveRlsTable>> {
+    pin_catalog_search_path(conn).await?;
+    let table_rows = sqlx::query(
+        "SELECT n.nspname AS schema_name,
+                c.relname AS table_name,
+                c.relrowsecurity AS enabled,
+                c.relforcerowsecurity AS forced
+         FROM pg_catalog.pg_class c
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+         WHERE c.relkind IN ('r', 'p')
+           AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+         ORDER BY n.nspname, c.relname",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    let policy_rows = sqlx::query(
+        "SELECT schemaname,
+                tablename,
+                policyname,
+                cmd,
+                qual,
+                with_check
+         FROM pg_catalog.pg_policies
+         ORDER BY schemaname, tablename, policyname",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    let mut policies_by_table: std::collections::BTreeMap<String, Vec<LiveRlsPolicy>> =
+        std::collections::BTreeMap::new();
+    for row in policy_rows {
+        let schema_name: String = row.try_get("schemaname")?;
+        let table_name: String = row.try_get("tablename")?;
+        let key = if schema_name == "public" {
+            table_name.clone()
+        } else {
+            format!("{schema_name}_{table_name}")
+        };
+        let cmd: String = row.try_get("cmd")?;
+        let operation = match cmd.as_str() {
+            "SELECT" => RlsOperation::Select,
+            "INSERT" => RlsOperation::Insert,
+            "UPDATE" => RlsOperation::Update,
+            "DELETE" => RlsOperation::Delete,
+            _ => continue,
+        };
+        policies_by_table
+            .entry(key)
+            .or_default()
+            .push(LiveRlsPolicy {
+                policy_name: row.try_get("policyname")?,
+                operation,
+                using_expression: row.try_get("qual")?,
+                check_expression: row.try_get("with_check")?,
+            });
+    }
+
+    table_rows
+        .into_iter()
+        .map(|row| {
+            let schema_name: String = row.try_get("schema_name")?;
+            let table_name: String = row.try_get("table_name")?;
+            let key = if schema_name == "public" {
+                table_name.clone()
             } else {
                 format!("{schema_name}_{table_name}")
-            }
-        }
-        let mut conn = pool.acquire().await?;
-        let role = sqlx::query(
-            "SELECT current_user::text AS role, rolsuper, rolbypassrls
-             FROM pg_roles WHERE rolname = current_user",
-        )
-        .fetch_one(&mut *conn)
-        .await?;
-        let mut live = LiveRlsEnforcement {
-            role: role.try_get("role")?,
-            superuser: role.try_get("rolsuper")?,
-            bypass_rls: role.try_get("rolbypassrls")?,
-            ..Default::default()
-        };
-        let tables = sqlx::query(
-            "SELECT n.nspname AS schema_name, c.relname AS table_name,
-                    row_security_active(c.oid) AS active
-             FROM pg_class c
-             JOIN pg_namespace n ON n.oid = c.relnamespace
-             WHERE c.relkind IN ('r', 'p')
-               AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-               AND n.nspname NOT LIKE 'pg_toast%'",
-        )
-        .fetch_all(&mut *conn)
-        .await?;
-        for row in tables {
-            live.row_security_active.insert(
-                table_key(row.try_get("schema_name")?, row.try_get("table_name")?),
-                row.try_get("active")?,
-            );
-        }
-        let triggers = sqlx::query(
-            "SELECT n.nspname AS schema_name, c.relname AS table_name,
-                    t.tgenabled::text AS enabled, t.tgtype::int4 AS trigger_type,
-                    (pn.nspname = 'graphql_orm' AND p.proname = $2 AND p.pronargs = 0)
-                        AS calls_orm_function,
-                    t.tgnargs::int4 AS argument_count, t.tgargs AS arguments
-             FROM pg_trigger t
-             JOIN pg_class c ON c.oid = t.tgrelid
-             JOIN pg_namespace n ON n.oid = c.relnamespace
-             JOIN pg_proc p ON p.oid = t.tgfoid
-             JOIN pg_namespace pn ON pn.oid = p.pronamespace
-             WHERE NOT t.tgisinternal AND t.tgname = $1",
-        )
-        .bind(super::rls::SEARCH_DELETE_TRIGGER)
-        .bind(super::rls::SEARCH_DELETE_FUNCTION)
-        .fetch_all(&mut *conn)
-        .await?;
-        for row in triggers {
-            let argument_count: i32 = row.try_get("argument_count")?;
-            let raw: Vec<u8> = row.try_get("arguments")?;
-            // `tgargs` stores each argument NUL-terminated.
-            let arguments = raw
-                .split(|byte| *byte == 0)
-                .take(usize::try_from(argument_count).unwrap_or(0))
-                .map(|argument| String::from_utf8_lossy(argument).into_owned())
-                .collect::<Vec<_>>();
-            let target_exists = match arguments.as_slice() {
-                [schema, table, ..] => {
-                    sqlx::query_scalar::<_, bool>(
-                        "SELECT to_regclass(format('%I.%I', $1::text, $2::text)) IS NOT NULL",
-                    )
-                    .bind(schema)
-                    .bind(table)
-                    .fetch_one(&mut *conn)
-                    .await?
-                }
-                _ => false,
             };
-            live.search_delete_triggers.insert(
-                table_key(row.try_get("schema_name")?, row.try_get("table_name")?),
-                super::rls::LiveSearchDeleteTrigger {
-                    enabled: row.try_get("enabled")?,
-                    trigger_type: row.try_get("trigger_type")?,
-                    calls_orm_function: row.try_get("calls_orm_function")?,
-                    arguments,
-                    target_exists,
-                },
-            );
-        }
-        let function = sqlx::query(
-            "SELECT p.prosrc AS body, p.prosecdef AS security_definer,
-                    COALESCE(p.proconfig, ARRAY[]::text[]) AS config
-             FROM pg_proc p
-             JOIN pg_namespace n ON n.oid = p.pronamespace
-             WHERE n.nspname = 'graphql_orm' AND p.proname = $1 AND p.pronargs = 0",
+            Ok(LiveRlsTable {
+                table_name: key.clone(),
+                enabled: row.try_get("enabled")?,
+                forced: row.try_get("forced")?,
+                policies: policies_by_table.remove(&key).unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
+/// Read whether RLS is enforced for the current role, and the state of the
+/// ORM's search-document and change-journal objects.
+///
+/// The change journal and the registry's declared tables are first resolved
+/// under the session's `search_path`, as the ORM's own SQL resolves them.
+/// Everything else is read by OID with the catalog search path pinned.
+#[cfg(feature = "postgres")]
+async fn postgres_rls_enforcement(
+    conn: &mut sqlx::PgConnection,
+) -> crate::Result<LiveRlsEnforcement> {
+    use sqlx::postgres::types::Oid;
+
+    // The journal is resolved as the ORM resolves it, through the
+    // connection's search_path.
+    let journal_regclass = format!("\"{}\"", super::rls::CHANGE_LOG_TABLE);
+    let journal = resolve_postgres_relation(conn, &journal_regclass).await?;
+    let registry_present = sqlx::query_scalar::<_, bool>(
+        "SELECT pg_catalog.to_regclass('graphql_orm.change_journal_tables') IS NOT NULL",
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    let mut registry = Vec::new();
+    if registry_present {
+        let rows = sqlx::query(
+            "SELECT r.journal_schema, r.declared_table, r.entity_name, r.key_column,
+                    r.relid::pg_catalog.oid AS relid
+             FROM graphql_orm.change_journal_tables r",
         )
-        .bind(super::rls::SEARCH_DELETE_FUNCTION)
-        .fetch_optional(&mut *conn)
-        .await?;
-        if let Some(row) = function {
-            live.search_delete_function = Some(super::rls::LiveSearchDeleteFunction {
-                body: row.try_get("body")?,
-                config: row.try_get("config")?,
-                security_definer: row.try_get("security_definer")?,
-            });
-        }
-        let journal_triggers = sqlx::query(
-            "SELECT n.nspname AS schema_name, c.relname AS table_name,
-                    t.tgenabled::text AS enabled, t.tgtype::int4 AS trigger_type,
-                    t.tgqual IS NOT NULL AS conditional,
-                    (pn.nspname = 'graphql_orm' AND p.proname = $2 AND p.pronargs = 0)
-                        AS calls_orm_function,
-                    p.proowner = c.relowner AS function_owns_table,
-                    p.proowner::oid::int8 AS function_owner,
-                    t.tgnargs::int4 AS argument_count, t.tgargs AS arguments
-             FROM pg_trigger t
-             JOIN pg_class c ON c.oid = t.tgrelid
-             JOIN pg_namespace n ON n.oid = c.relnamespace
-             JOIN pg_proc p ON p.oid = t.tgfoid
-             JOIN pg_namespace pn ON pn.oid = p.pronamespace
-             WHERE NOT t.tgisinternal AND t.tgname = $1",
-        )
-        .bind(super::rls::CHANGE_JOURNAL_TRIGGER)
-        .bind(super::rls::CHANGE_JOURNAL_FUNCTION)
         .fetch_all(&mut *conn)
         .await?;
-        for row in journal_triggers {
-            let argument_count: i32 = row.try_get("argument_count")?;
-            let raw: Vec<u8> = row.try_get("arguments")?;
-            // `tgargs` stores each argument NUL-terminated.
-            let arguments = raw
-                .split(|byte| *byte == 0)
-                .take(usize::try_from(argument_count).unwrap_or(0))
-                .map(|argument| String::from_utf8_lossy(argument).into_owned())
-                .collect::<Vec<_>>();
-            let function_owner: i64 = row.try_get("function_owner")?;
-            let journal_owned_by_function_owner = match arguments.first() {
-                Some(schema) => {
-                    sqlx::query_scalar::<_, bool>(
-                        "SELECT EXISTS (SELECT 1 FROM pg_class j
-                         WHERE j.oid = to_regclass(format('%I.%I', $1::text, $2::text))
-                           AND j.relowner::oid::int8 = $3)",
-                    )
-                    .bind(schema)
-                    .bind(super::rls::CHANGE_LOG_TABLE)
-                    .bind(function_owner)
-                    .fetch_one(&mut *conn)
-                    .await?
-                }
-                None => false,
-            };
-            let relation_schema: String = row.try_get("schema_name")?;
-            let relation_name: String = row.try_get("table_name")?;
-            live.change_journal_triggers.insert(
-                super::rls::change_journal_table_key(&relation_schema, &relation_name),
-                super::rls::LiveChangeJournalTrigger {
-                    relation_schema,
-                    relation_name,
-                    enabled: row.try_get("enabled")?,
-                    trigger_type: row.try_get("trigger_type")?,
-                    conditional: row.try_get("conditional")?,
-                    calls_orm_function: row.try_get("calls_orm_function")?,
-                    function_owns_table: row.try_get("function_owns_table")?,
-                    arguments,
-                    journal_owned_by_function_owner,
-                },
-            );
-        }
-        let recorder_triggers = sqlx::query(
-            "SELECT n.nspname AS schema_name, c.relname AS table_name, t.tgname::text AS trigger_name
-             FROM pg_trigger t
-             JOIN pg_class c ON c.oid = t.tgrelid
-             JOIN pg_namespace n ON n.oid = c.relnamespace
-             WHERE t.tgfoid = to_regprocedure(format('graphql_orm.%I()', $1::text))
-             ORDER BY 1, 2, 3",
-        )
-        .bind(super::rls::CHANGE_JOURNAL_FUNCTION)
-        .fetch_all(&mut *conn)
-        .await?;
-        for row in recorder_triggers {
-            live.change_journal_recorder_triggers.push((
-                super::rls::change_journal_table_key(
-                    &row.try_get::<String, _>("schema_name")?,
-                    &row.try_get::<String, _>("table_name")?,
-                ),
-                row.try_get("trigger_name")?,
+        for row in rows {
+            let declared_table: String = row.try_get("declared_table")?;
+            // Resolve the declared path exactly as the ORM's writes do.
+            let orm_oid = resolve_postgres_relation(
+                conn,
+                &super::rls::change_journal_orm_path(&declared_table),
+            )
+            .await?;
+            registry.push((
+                row.try_get::<String, _>("journal_schema")?,
+                declared_table,
+                row.try_get::<String, _>("entity_name")?,
+                row.try_get::<String, _>("key_column")?,
+                row.try_get::<Oid, _>("relid")?,
+                orm_oid,
             ));
         }
-        // The journal is resolved as the ORM resolves it, through the
-        // connection's search_path.
-        let journal_regclass = format!("\"{}\"", super::rls::CHANGE_LOG_TABLE);
-        live.change_journal_table_triggers = sqlx::query_scalar(
-            "SELECT name FROM (
-                SELECT t.tgname::text AS name FROM pg_trigger t
-                WHERE t.tgrelid = to_regclass($1) AND NOT t.tgisinternal
-                UNION
-                SELECT r.rulename::text FROM pg_rewrite r WHERE r.ev_class = to_regclass($1)
-             ) objects ORDER BY name",
+        registry.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    }
+
+    pin_catalog_search_path(conn).await?;
+    let role = sqlx::query(
+        "SELECT CURRENT_USER::pg_catalog.text AS role, r.rolsuper, r.rolbypassrls
+         FROM pg_catalog.pg_roles r WHERE r.rolname = CURRENT_USER",
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    let mut live = LiveRlsEnforcement {
+        role: role.try_get("role")?,
+        superuser: role.try_get("rolsuper")?,
+        bypass_rls: role.try_get("rolbypassrls")?,
+        change_journal_registry_present: registry_present,
+        ..Default::default()
+    };
+    let triggers = sqlx::query(
+        "SELECT n.nspname::pg_catalog.text AS schema_name, c.relname::pg_catalog.text AS table_name,
+                t.tgenabled::pg_catalog.text AS enabled, t.tgtype::pg_catalog.int4 AS trigger_type,
+                (pn.nspname = 'graphql_orm' AND p.proname = $2 AND p.pronargs = 0)
+                    AS calls_orm_function,
+                t.tgnargs::pg_catalog.int4 AS argument_count, t.tgargs AS arguments
+         FROM pg_catalog.pg_trigger t
+         JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+         JOIN pg_catalog.pg_proc p ON p.oid = t.tgfoid
+         JOIN pg_catalog.pg_namespace pn ON pn.oid = p.pronamespace
+         WHERE NOT t.tgisinternal AND t.tgname = $1",
+    )
+    .bind(super::rls::SEARCH_DELETE_TRIGGER)
+    .bind(super::rls::SEARCH_DELETE_FUNCTION)
+    .fetch_all(&mut *conn)
+    .await?;
+    for row in triggers {
+        let argument_count: i32 = row.try_get("argument_count")?;
+        let raw: Vec<u8> = row.try_get("arguments")?;
+        let arguments = trigger_arguments(&raw, argument_count);
+        let target_exists = match arguments.as_slice() {
+            [schema, table, ..] => {
+                sqlx::query_scalar::<_, bool>(
+                    "SELECT pg_catalog.to_regclass(pg_catalog.format('%I.%I', $1::pg_catalog.text, $2::pg_catalog.text)) IS NOT NULL",
+                )
+                .bind(schema)
+                .bind(table)
+                .fetch_one(&mut *conn)
+                .await?
+            }
+            _ => false,
+        };
+        live.search_delete_triggers.insert(
+            super::rls::change_journal_table_key(
+                &row.try_get::<String, _>("schema_name")?,
+                &row.try_get::<String, _>("table_name")?,
+            ),
+            super::rls::LiveSearchDeleteTrigger {
+                enabled: row.try_get("enabled")?,
+                trigger_type: row.try_get("trigger_type")?,
+                calls_orm_function: row.try_get("calls_orm_function")?,
+                arguments,
+                target_exists,
+            },
+        );
+    }
+    let function = sqlx::query(
+        "SELECT p.prosrc AS body, p.prosecdef AS security_definer,
+                COALESCE(p.proconfig, ARRAY[]::pg_catalog.text[]) AS config
+         FROM pg_catalog.pg_proc p
+         JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+         WHERE n.nspname = 'graphql_orm' AND p.proname = $1 AND p.pronargs = 0",
+    )
+    .bind(super::rls::SEARCH_DELETE_FUNCTION)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if let Some(row) = function {
+        live.search_delete_function = Some(super::rls::LiveSearchDeleteFunction {
+            body: row.try_get("body")?,
+            config: row.try_get("config")?,
+            security_definer: row.try_get("security_definer")?,
+        });
+    }
+    let journal_triggers = sqlx::query(
+        "SELECT n.nspname::pg_catalog.text AS schema_name, c.relname::pg_catalog.text AS table_name,
+                t.tgenabled::pg_catalog.text AS enabled, t.tgtype::pg_catalog.int4 AS trigger_type,
+                t.tgqual IS NOT NULL AS conditional,
+                (pn.nspname = 'graphql_orm' AND p.proname = $2 AND p.pronargs = 0)
+                    AS calls_orm_function,
+                p.proowner = c.relowner AS function_owns_table,
+                p.proowner::pg_catalog.oid::pg_catalog.int8 AS function_owner,
+                t.tgnargs::pg_catalog.int4 AS argument_count, t.tgargs AS arguments
+         FROM pg_catalog.pg_trigger t
+         JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+         JOIN pg_catalog.pg_proc p ON p.oid = t.tgfoid
+         JOIN pg_catalog.pg_namespace pn ON pn.oid = p.pronamespace
+         WHERE NOT t.tgisinternal AND t.tgname = $1",
+    )
+    .bind(super::rls::CHANGE_JOURNAL_TRIGGER)
+    .bind(super::rls::CHANGE_JOURNAL_FUNCTION)
+    .fetch_all(&mut *conn)
+    .await?;
+    for row in journal_triggers {
+        let argument_count: i32 = row.try_get("argument_count")?;
+        let raw: Vec<u8> = row.try_get("arguments")?;
+        let arguments = trigger_arguments(&raw, argument_count);
+        let function_owner: i64 = row.try_get("function_owner")?;
+        let journal_owned_by_function_owner = match arguments.first() {
+            Some(schema) => {
+                sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class j
+                     WHERE j.oid = pg_catalog.to_regclass(pg_catalog.format('%I.%I', $1::pg_catalog.text, $2::pg_catalog.text))
+                       AND j.relowner::pg_catalog.oid::pg_catalog.int8 = $3)",
+                )
+                .bind(schema)
+                .bind(super::rls::CHANGE_LOG_TABLE)
+                .bind(function_owner)
+                .fetch_one(&mut *conn)
+                .await?
+            }
+            None => false,
+        };
+        let relation_schema: String = row.try_get("schema_name")?;
+        let relation_name: String = row.try_get("table_name")?;
+        live.change_journal_triggers.insert(
+            super::rls::change_journal_table_key(&relation_schema, &relation_name),
+            super::rls::LiveChangeJournalTrigger {
+                relation_schema,
+                relation_name,
+                enabled: row.try_get("enabled")?,
+                trigger_type: row.try_get("trigger_type")?,
+                conditional: row.try_get("conditional")?,
+                calls_orm_function: row.try_get("calls_orm_function")?,
+                function_owns_table: row.try_get("function_owns_table")?,
+                arguments,
+                journal_owned_by_function_owner,
+            },
+        );
+    }
+    let recorder_triggers = sqlx::query(
+        "SELECT n.nspname::pg_catalog.text AS schema_name, c.relname::pg_catalog.text AS table_name,
+                t.tgname::pg_catalog.text AS trigger_name
+         FROM pg_catalog.pg_trigger t
+         JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+         WHERE t.tgfoid = pg_catalog.to_regprocedure(pg_catalog.format('graphql_orm.%I()', $1::pg_catalog.text))
+         ORDER BY 1, 2, 3",
+    )
+    .bind(super::rls::CHANGE_JOURNAL_FUNCTION)
+    .fetch_all(&mut *conn)
+    .await?;
+    for row in recorder_triggers {
+        live.change_journal_recorder_triggers.push((
+            super::rls::change_journal_table_key(
+                &row.try_get::<String, _>("schema_name")?,
+                &row.try_get::<String, _>("table_name")?,
+            ),
+            row.try_get("trigger_name")?,
+        ));
+    }
+    if let Some(journal) = journal {
+        let state = sqlx::query(
+            "SELECT n.nspname::pg_catalog.text AS schema_name, c.relrowsecurity AS enabled,
+                    pg_catalog.row_security_active(c.oid) AS active,
+                    ARRAY(SELECT p.polname::pg_catalog.text FROM pg_catalog.pg_policy p
+                          WHERE p.polrelid = c.oid ORDER BY 1) AS policies,
+                    pg_catalog.pg_has_role(CURRENT_USER, c.relowner, 'MEMBER') AS owned
+             FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+             WHERE c.oid = $1",
         )
-        .bind(&journal_regclass)
-        .fetch_all(&mut *conn)
-        .await?;
-        live.change_journal_schema = sqlx::query_scalar(
-            "SELECT n.nspname::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-             WHERE c.oid = to_regclass($1)",
-        )
-        .bind(&journal_regclass)
+        .bind(journal)
         .fetch_optional(&mut *conn)
         .await?;
-        live.change_journal_registry_present = sqlx::query_scalar::<_, bool>(
-            "SELECT to_regclass('graphql_orm.change_journal_tables') IS NOT NULL",
-        )
-        .fetch_one(&mut *conn)
-        .await?;
-        if live.change_journal_registry_present {
-            live.change_journal_registry_owned_by_recorder_owner = sqlx::query_scalar(
-                "SELECT COALESCE((SELECT g.relowner = p.proowner FROM pg_class g, pg_proc p
-                                  WHERE g.oid = to_regclass('graphql_orm.change_journal_tables')
-                                    AND p.oid = to_regprocedure(format('graphql_orm.%I()', $1::text))), false)",
-            )
-            .bind(super::rls::CHANGE_JOURNAL_FUNCTION)
-            .fetch_one(&mut *conn)
-            .await?;
-            live.change_journal_registry_writers = sqlx::query_scalar(
-                "SELECT DISTINCT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee)::text END
-                 FROM pg_class c
-                 CROSS JOIN LATERAL (
-                     SELECT c.relacl AS acl
-                     UNION ALL
-                     SELECT att.attacl FROM pg_attribute att
-                     WHERE att.attrelid = c.oid AND att.attnum > 0 AND NOT att.attisdropped
-                 ) acls
-                 CROSS JOIN LATERAL aclexplode(acls.acl) a
-                 WHERE c.oid = to_regclass('graphql_orm.change_journal_tables')
-                   AND a.grantee <> c.relowner AND a.privilege_type <> 'SELECT'
-                 ORDER BY 1",
-            )
-            .fetch_all(&mut *conn)
-            .await?;
-            let rows = sqlx::query(
-                "SELECT r.journal_schema, r.declared_table, r.entity_name, r.key_column,
-                        n.nspname::text AS relation_schema, c.relname::text AS relation_name
-                 FROM graphql_orm.change_journal_tables r
-                 LEFT JOIN pg_class c ON c.oid = r.relid::oid
-                 LEFT JOIN pg_namespace n ON n.oid = c.relnamespace
-                 ORDER BY r.journal_schema, r.declared_table",
-            )
-            .fetch_all(&mut *conn)
-            .await?;
-            for row in rows {
-                let declared_table: String = row.try_get("declared_table")?;
-                let relation_schema: Option<String> = row.try_get("relation_schema")?;
-                let relation_name: Option<String> = row.try_get("relation_name")?;
-                // Resolve the declared path exactly as the ORM's writes do.
-                let orm_relation = sqlx::query(
-                    "SELECT n.nspname::text AS schema_name, c.relname::text AS table_name
-                     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-                     WHERE c.oid = to_regclass($1)",
-                )
-                .bind(super::rls::change_journal_orm_path(&declared_table))
-                .fetch_optional(&mut *conn)
-                .await?
-                .map(|row| -> crate::Result<(String, String)> {
-                    Ok((row.try_get("schema_name")?, row.try_get("table_name")?))
-                })
-                .transpose()?;
-                live.change_journal_registry
-                    .push(super::rls::LiveChangeJournalBinding {
-                        journal_schema: row.try_get("journal_schema")?,
-                        declared_table,
-                        entity_name: row.try_get("entity_name")?,
-                        key_column: row.try_get("key_column")?,
-                        relation: relation_schema.zip(relation_name),
-                        orm_relation,
-                    });
-            }
+        if let Some(state) = state {
+            let schema: String = state.try_get("schema_name")?;
+            live.change_journal_schema = Some(schema.clone());
+            live.change_journal_owned_by_current_role = state.try_get("owned")?;
+            live.change_journal_table = Some(super::rls::LiveChangeJournalTable {
+                schema,
+                enabled: state.try_get("enabled")?,
+                row_security_active: state.try_get("active")?,
+                policies: state.try_get("policies")?,
+            });
         }
-        live.change_journal_owned_by_current_role = sqlx::query_scalar(
-            "SELECT COALESCE((SELECT pg_has_role(current_user, c.relowner, 'MEMBER')
-                              FROM pg_class c WHERE c.oid = to_regclass($1)), false)",
+        live.change_journal_table_triggers = sqlx::query_scalar(
+            "SELECT name FROM (
+                SELECT t.tgname::pg_catalog.text AS name FROM pg_catalog.pg_trigger t
+                WHERE t.tgrelid = $1 AND NOT t.tgisinternal
+                UNION
+                SELECT r.rulename::pg_catalog.text FROM pg_catalog.pg_rewrite r WHERE r.ev_class = $1
+             ) objects ORDER BY name",
         )
-        .bind(&journal_regclass)
-        .fetch_one(&mut *conn)
+        .bind(journal)
+        .fetch_all(&mut *conn)
         .await?;
         live.change_journal_writers = sqlx::query_scalar(
-            "SELECT DISTINCT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee)::text END
-             FROM pg_class c
+            "SELECT DISTINCT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(a.grantee)::pg_catalog.text END
+             FROM pg_catalog.pg_class c
              CROSS JOIN LATERAL (
                  SELECT c.relacl AS acl
                  UNION ALL
-                 SELECT att.attacl FROM pg_attribute att
+                 SELECT att.attacl FROM pg_catalog.pg_attribute att
                  WHERE att.attrelid = c.oid AND att.attnum > 0 AND NOT att.attisdropped
              ) acls
-             CROSS JOIN LATERAL aclexplode(acls.acl) a
-             WHERE c.oid = to_regclass($1) AND a.grantee <> c.relowner AND a.privilege_type <> 'SELECT'
+             CROSS JOIN LATERAL pg_catalog.aclexplode(acls.acl) a
+             WHERE c.oid = $1 AND a.grantee <> c.relowner AND a.privilege_type <> 'SELECT'
              ORDER BY 1",
         )
-        .bind(&journal_regclass)
+        .bind(journal)
         .fetch_all(&mut *conn)
         .await?;
-        live.change_journal_recorder_executors = sqlx::query_scalar(
-            "SELECT DISTINCT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee)::text END
-             FROM pg_proc p CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a
-             WHERE p.oid = to_regprocedure(format('graphql_orm.%I()', $1::text))
-               AND a.grantee <> p.proowner AND a.privilege_type = 'EXECUTE'
-             ORDER BY 1",
-        )
-        .bind(super::rls::CHANGE_JOURNAL_FUNCTION)
-        .fetch_all(&mut *conn)
-        .await?;
-        let journal_function = sqlx::query(
-            "SELECT p.prosrc AS body, p.prosecdef AS security_definer,
-                    COALESCE(p.proconfig, ARRAY[]::text[]) AS config
-             FROM pg_proc p
-             JOIN pg_namespace n ON n.oid = p.pronamespace
-             WHERE n.nspname = 'graphql_orm' AND p.proname = $1 AND p.pronargs = 0",
-        )
-        .bind(super::rls::CHANGE_JOURNAL_FUNCTION)
-        .fetch_optional(&mut *conn)
-        .await?;
-        if let Some(row) = journal_function {
-            live.change_journal_function = Some(super::rls::LiveChangeJournalFunction {
-                body: row.try_get("body")?,
-                config: row.try_get("config")?,
-                security_definer: row.try_get("security_definer")?,
-            });
-        }
-        let policies = sqlx::query(
-            "SELECT schemaname, tablename, policyname FROM pg_policies
-             ORDER BY schemaname, tablename, policyname",
-        )
-        .fetch_all(&mut *conn)
-        .await?;
-        for row in policies {
-            live.policy_names
-                .entry(table_key(
-                    row.try_get("schemaname")?,
-                    row.try_get("tablename")?,
-                ))
-                .or_default()
-                .push(row.try_get("policyname")?);
-        }
-        Ok(Some(live))
     }
+    if registry_present {
+        live.change_journal_registry_owned_by_recorder_owner = sqlx::query_scalar(
+            "SELECT COALESCE((SELECT g.relowner = p.proowner FROM pg_catalog.pg_class g, pg_catalog.pg_proc p
+                              WHERE g.oid = pg_catalog.to_regclass('graphql_orm.change_journal_tables')
+                                AND p.oid = pg_catalog.to_regprocedure(pg_catalog.format('graphql_orm.%I()', $1::pg_catalog.text))), false)",
+        )
+        .bind(super::rls::CHANGE_JOURNAL_FUNCTION)
+        .fetch_one(&mut *conn)
+        .await?;
+        live.change_journal_registry_writers = sqlx::query_scalar(
+            "SELECT DISTINCT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(a.grantee)::pg_catalog.text END
+             FROM pg_catalog.pg_class c
+             CROSS JOIN LATERAL (
+                 SELECT c.relacl AS acl
+                 UNION ALL
+                 SELECT att.attacl FROM pg_catalog.pg_attribute att
+                 WHERE att.attrelid = c.oid AND att.attnum > 0 AND NOT att.attisdropped
+             ) acls
+             CROSS JOIN LATERAL pg_catalog.aclexplode(acls.acl) a
+             WHERE c.oid = pg_catalog.to_regclass('graphql_orm.change_journal_tables')
+               AND a.grantee <> c.relowner AND a.privilege_type <> 'SELECT'
+             ORDER BY 1",
+        )
+        .fetch_all(&mut *conn)
+        .await?;
+        for (journal_schema, declared_table, entity_name, key_column, relid, orm_oid) in registry {
+            let relation = postgres_relation_name(conn, Some(relid)).await?;
+            let orm_relation = postgres_relation_name(conn, orm_oid).await?;
+            live.change_journal_registry
+                .push(super::rls::LiveChangeJournalBinding {
+                    journal_schema,
+                    declared_table,
+                    entity_name,
+                    key_column,
+                    relation,
+                    orm_relation,
+                });
+        }
+    }
+    live.change_journal_recorder_executors = sqlx::query_scalar(
+        "SELECT DISTINCT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(a.grantee)::pg_catalog.text END
+         FROM pg_catalog.pg_proc p CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner))) a
+         WHERE p.oid = pg_catalog.to_regprocedure(pg_catalog.format('graphql_orm.%I()', $1::pg_catalog.text))
+           AND a.grantee <> p.proowner AND a.privilege_type = 'EXECUTE'
+         ORDER BY 1",
+    )
+    .bind(super::rls::CHANGE_JOURNAL_FUNCTION)
+    .fetch_all(&mut *conn)
+    .await?;
+    let journal_function = sqlx::query(
+        "SELECT p.prosrc AS body, p.prosecdef AS security_definer,
+                COALESCE(p.proconfig, ARRAY[]::pg_catalog.text[]) AS config
+         FROM pg_catalog.pg_proc p
+         JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+         WHERE n.nspname = 'graphql_orm' AND p.proname = $1 AND p.pronargs = 0",
+    )
+    .bind(super::rls::CHANGE_JOURNAL_FUNCTION)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if let Some(row) = journal_function {
+        live.change_journal_function = Some(super::rls::LiveChangeJournalFunction {
+            body: row.try_get("body")?,
+            config: row.try_get("config")?,
+            security_definer: row.try_get("security_definer")?,
+        });
+    }
+    Ok(live)
+}
+
+/// Trigger arguments from `pg_trigger.tgargs`, which stores each one
+/// NUL-terminated.
+#[cfg(feature = "postgres")]
+fn trigger_arguments(raw: &[u8], argument_count: i32) -> Vec<String> {
+    raw.split(|byte| *byte == 0)
+        .take(usize::try_from(argument_count).unwrap_or(0))
+        .map(|argument| String::from_utf8_lossy(argument).into_owned())
+        .collect()
 }
 
 /// Read the live RLS state of `probes` and the RLS helper functions.
@@ -4817,14 +4965,15 @@ async fn postgres_rls_target(
 
     // Resolve each declared path as the ORM's own SQL resolves it, under the
     // session's `search_path`: that is the table the runtime reads and writes.
+    // Nothing else is read before the path is pinned.
     let mut tables = Vec::with_capacity(probes.len());
     let mut bases = Vec::with_capacity(probes.len());
     for probe in probes {
-        tables.push(resolve_postgres_table(conn, &probe.table_sql).await?);
+        tables.push(resolve_postgres_relation(conn, &probe.table_sql).await?);
         let mut resolved = Vec::new();
         for expression in &probe.expressions {
             resolved.push(match &expression.search_document {
-                Some(search) => resolve_postgres_table(conn, &search.base_table_sql).await?,
+                Some(search) => resolve_postgres_relation(conn, &search.base_table_sql).await?,
                 None => None,
             });
         }
@@ -4834,9 +4983,15 @@ async fn postgres_rls_target(
     // path, so every other object renders schema-qualified and neither the
     // session's `search_path` nor a lookalike in a writable schema can make a
     // live expression and a declared predicate render alike.
-    sqlx::raw_sql("SET LOCAL search_path = pg_catalog, pg_temp")
-        .execute(&mut *conn)
-        .await?;
+    pin_catalog_search_path(conn).await?;
+    for table in &mut tables {
+        *table = postgres_ordinary_table(conn, *table).await?;
+    }
+    for resolved in &mut bases {
+        for base in resolved {
+            *base = postgres_ordinary_table(conn, *base).await?;
+        }
+    }
 
     let mut target = LiveRlsTarget::default();
     for ((probe, table), bases) in probes.iter().zip(tables).zip(bases) {
@@ -4970,18 +5125,21 @@ async fn postgres_rls_target(
     Ok(target)
 }
 
-/// The ordinary or partitioned table `path` resolves to under the session's
-/// `search_path`, as the ORM's SQL resolves it.
+/// `oid` when it is an ordinary or partitioned table. Call with the catalog
+/// search path pinned.
 #[cfg(feature = "postgres")]
-async fn resolve_postgres_table(
+async fn postgres_ordinary_table(
     conn: &mut sqlx::PgConnection,
-    path: &str,
+    oid: Option<sqlx::postgres::types::Oid>,
 ) -> crate::Result<Option<sqlx::postgres::types::Oid>> {
+    let Some(oid) = oid else {
+        return Ok(None);
+    };
     sqlx::query_scalar(
         "SELECT c.oid FROM pg_catalog.pg_class c
-         WHERE c.oid = pg_catalog.to_regclass($1) AND c.relkind IN ('r', 'p')",
+         WHERE c.oid = $1 AND c.relkind IN ('r', 'p')",
     )
-    .bind(path)
+    .bind(oid)
     .fetch_optional(&mut *conn)
     .await
 }
@@ -5213,3 +5371,169 @@ impl IntrospectionBackend for super::MssqlBackend {
 
 #[cfg(feature = "mssql")]
 impl RlsIntrospectionBackend for super::MssqlBackend {}
+
+#[cfg(all(test, feature = "postgres"))]
+#[allow(dead_code)]
+#[path = "../../../tests/support/owned_postgres.rs"]
+mod owned_postgres_support;
+
+#[cfg(all(test, feature = "postgres"))]
+mod catalog_read_cancellation_tests {
+    use super::owned_postgres_support::OwnedPostgres;
+    use crate::graphql::orm::runtime_migration::ManagedTableSet;
+    use std::future::Future;
+
+    /// Poll `future` at most `polls` times, letting the connection make
+    /// progress in between, then drop it if it has not finished. Returns
+    /// whether it was dropped after being polled while still pending.
+    async fn drop_after<F: Future>(polls: usize, future: F) -> bool {
+        let mut future = std::pin::pin!(future);
+        for _ in 0..polls {
+            if futures::poll!(future.as_mut()).is_ready() {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_micros(250)).await;
+        }
+        polls > 0
+    }
+
+    /// The caller's row count and session path, read on its transaction.
+    async fn caller_state(
+        tx: &mut sqlx::PgConnection,
+    ) -> Result<(i64, String), Box<dyn std::error::Error>> {
+        Ok(sqlx::query_as(
+            "SELECT (SELECT pg_catalog.count(*) FROM public.cancel_parents), pg_catalog.current_setting('search_path')",
+        )
+        .fetch_one(&mut *tx)
+        .await?)
+    }
+
+    /// A schema-introspection read dropped while its statement waits on a
+    /// lock held by another session leaves the caller's transaction, its
+    /// writes and the session's path as they were.
+    #[tokio::test]
+    #[ignore = "requires test-owned PostgreSQL container"]
+    async fn a_read_dropped_while_its_statement_waits_leaves_the_callers_transaction_intact()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let pool = OwnedPostgres::pool("catalog-read-blocked", 4).await?;
+        sqlx::raw_sql(
+            "CREATE TABLE cancel_parents (id text PRIMARY KEY); \
+             CREATE TABLE __graphql_orm_search_metadata (entity_name text PRIMARY KEY, config_json text NOT NULL)",
+        )
+        .execute(&pool)
+        .await?;
+        let mut tx = pool.begin().await?;
+        let caller: i32 = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
+            .fetch_one(&mut *tx)
+            .await?;
+        sqlx::query("INSERT INTO cancel_parents (id) VALUES ('written-before-the-read')")
+            .execute(&mut *tx)
+            .await?;
+        let before = caller_state(&mut tx).await?;
+        // Another session holds the table the read ends with.
+        let mut holder = pool.begin().await?;
+        sqlx::query("LOCK TABLE public.__graphql_orm_search_metadata IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *holder)
+            .await?;
+        {
+            let read = super::introspect_owned_postgres_connection_with_internal(&mut tx, true);
+            let mut read = std::pin::pin!(read);
+            let mut waiting = false;
+            for _ in 0..1_000 {
+                assert!(
+                    futures::poll!(read.as_mut()).is_pending(),
+                    "the read finished while the lock was held"
+                );
+                let wait: Option<String> = sqlx::query_scalar(
+                    "SELECT a.wait_event_type::pg_catalog.text FROM pg_catalog.pg_stat_activity a
+                     WHERE a.pid OPERATOR(pg_catalog.=) $1",
+                )
+                .bind(caller)
+                .fetch_optional(&pool)
+                .await?
+                .flatten();
+                if wait.as_deref() == Some("Lock") {
+                    waiting = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            assert!(waiting, "the read's statement never waited on the lock");
+            // The read is dropped here, with its statement still waiting.
+        }
+        holder.rollback().await?;
+        assert_eq!(caller_state(&mut tx).await?, before);
+        tx.commit().await?;
+        let committed: i64 =
+            sqlx::query_scalar("SELECT pg_catalog.count(*) FROM public.cancel_parents")
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(committed, 1);
+        Ok(())
+    }
+
+    /// Catalog reads that run on a connection the caller may hold a
+    /// transaction on leave that transaction and the session's path as they
+    /// were, whenever their futures are dropped.
+    #[tokio::test]
+    #[ignore = "requires test-owned PostgreSQL container"]
+    async fn dropped_catalog_reads_leave_the_callers_transaction_intact()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let pool = OwnedPostgres::pool("catalog-read-cancellation", 2).await?;
+        sqlx::raw_sql(
+            "CREATE TABLE cancel_parents (id text PRIMARY KEY); \
+             CREATE TABLE cancel_children (id text PRIMARY KEY, parent_id text NOT NULL REFERENCES cancel_parents(id) ON DELETE CASCADE, status text NOT NULL); \
+             CREATE INDEX cancel_children_open ON cancel_children (parent_id) WHERE status = ANY (ARRAY['open', 'held'])",
+        )
+        .execute(&pool)
+        .await?;
+        let ownership =
+            ManagedTableSet::new(["cancel_parents", "cancel_children"].map(String::from))
+                .map_err(|error| format!("{error:?}"))?;
+        let mut tx = pool.begin().await?;
+        let (_, path) = caller_state(&mut tx).await?;
+        let steps = 40;
+        let mut dropped_pending = 0;
+        for step in 0..steps {
+            sqlx::query("INSERT INTO cancel_parents (id) VALUES ($1)")
+                .bind(format!("parent-{step}"))
+                .execute(&mut *tx)
+                .await?;
+            let reads = [
+                drop_after(
+                    step,
+                    super::introspect_owned_postgres_connection_with_internal(&mut tx, true),
+                )
+                .await,
+                drop_after(
+                    step,
+                    crate::graphql::orm::owned_foreign_keys::validate_postgres(&mut tx, &ownership),
+                )
+                .await,
+                drop_after(
+                    step,
+                    crate::graphql::orm::static_deletes::postgres_dependency_reads(
+                        &mut tx, &ownership,
+                    ),
+                )
+                .await,
+            ];
+            dropped_pending += reads.iter().filter(|pending| **pending).count();
+            let (rows, current) = caller_state(&mut tx).await?;
+            assert_eq!(
+                rows,
+                i64::try_from(step + 1)?,
+                "after dropping at poll {step}"
+            );
+            assert_eq!(current, path, "after dropping at poll {step}");
+        }
+        assert!(dropped_pending > 0, "no read was dropped while pending");
+        tx.commit().await?;
+        let committed: i64 =
+            sqlx::query_scalar("SELECT pg_catalog.count(*) FROM public.cancel_parents")
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(committed, i64::try_from(steps)?);
+        Ok(())
+    }
+}

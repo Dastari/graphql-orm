@@ -612,13 +612,13 @@ async fn ensure_sqlite_migration_history_table(pool: &sqlx::SqlitePool) -> crate
 #[cfg(feature = "postgres")]
 async fn ensure_postgres_migration_history_table(pool: &sqlx::PgPool) -> crate::Result<()> {
     let mut transaction = pool.begin().await?;
-    let schema_name: String = sqlx::query_scalar("SELECT current_schema()")
+    let schema_name: String = sqlx::query_scalar("SELECT pg_catalog.current_schema()")
         .fetch_one(&mut *transaction)
         .await?;
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS (
             SELECT 1 FROM information_schema.tables
-            WHERE table_schema = $1 AND table_name = $2
+            WHERE table_schema OPERATOR(pg_catalog.=) $1 AND table_name OPERATOR(pg_catalog.=) $2
         )",
     )
     .bind(&schema_name)
@@ -655,7 +655,7 @@ async fn ensure_postgres_migration_history_table(pool: &sqlx::PgPool) -> crate::
     let rows = sqlx::query(
         "SELECT column_name, data_type, is_nullable
          FROM information_schema.columns
-         WHERE table_schema = $1 AND table_name = $2",
+         WHERE table_schema OPERATOR(pg_catalog.=) $1 AND table_name OPERATOR(pg_catalog.=) $2",
     )
     .bind(&schema_name)
     .bind(MIGRATION_HISTORY_TABLE)
@@ -683,12 +683,12 @@ async fn ensure_postgres_migration_history_table(pool: &sqlx::PgPool) -> crate::
     }
     let primary_keys: Vec<String> = sqlx::query_scalar(
         "SELECT a.attname
-         FROM pg_index i
-         JOIN pg_class t ON t.oid = i.indrelid
-         JOIN pg_namespace n ON n.oid = t.relnamespace
-         JOIN LATERAL unnest(i.indkey) AS key(attnum) ON true
-         JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = key.attnum
-         WHERE n.nspname = $1 AND t.relname = $2 AND i.indisprimary",
+         FROM pg_catalog.pg_index i
+         JOIN pg_catalog.pg_class t ON t.oid OPERATOR(pg_catalog.=) i.indrelid
+         JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) t.relnamespace
+         JOIN LATERAL pg_catalog.unnest(i.indkey) AS key(attnum) ON true
+         JOIN pg_catalog.pg_attribute a ON a.attrelid OPERATOR(pg_catalog.=) t.oid AND a.attnum OPERATOR(pg_catalog.=) key.attnum
+         WHERE n.nspname OPERATOR(pg_catalog.=) $1 AND t.relname OPERATOR(pg_catalog.=) $2 AND i.indisprimary",
     )
     .bind(&schema_name)
     .bind(MIGRATION_HISTORY_TABLE)
@@ -718,7 +718,7 @@ async fn ensure_postgres_migration_history_table(pool: &sqlx::PgPool) -> crate::
         }
     }
     let invalid_versions: i64 = sqlx::query_scalar(&format!(
-        "SELECT COUNT(*) FROM {} WHERE version = ''",
+        "SELECT pg_catalog.count(*) FROM {} WHERE version::pg_catalog.text OPERATOR(pg_catalog.=) ''::pg_catalog.text",
         MIGRATION_HISTORY_TABLE
     ))
     .fetch_one(&mut *transaction)
@@ -1196,26 +1196,41 @@ where
     if let Some(plan) = owned {
         // Cooperative migration serialization plus table locks keep catalog validation
         // and DDL on this pinned transaction. Hosts fence non-ORM external DDL.
-        sqlx::query("SELECT pg_advisory_xact_lock(718644299020133922)")
+        sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock(718644299020133922)")
             .execute(&mut *tx)
             .await?;
+        // This transaction is the migration's own. Its catalog reads are
+        // still pure and fully qualified, so they change no session or
+        // transaction state.
+        let mut existing = Vec::new();
         for table in plan.ownership().tables() {
-            let row: Option<(bool,)> = sqlx::query_as("SELECT c.relrowsecurity OR c.relforcerowsecurity FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = current_schema() AND c.relname = $1 AND c.relkind = 'r'")
-                .bind(table).fetch_optional(&mut *tx).await?;
+            let row: Option<(bool,)> = sqlx::query_as(
+                "SELECT c.relrowsecurity OR c.relforcerowsecurity FROM pg_catalog.pg_class c
+                 JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+                 WHERE n.nspname OPERATOR(pg_catalog.=) pg_catalog.current_schema()
+                   AND c.relname::pg_catalog.text OPERATOR(pg_catalog.=) $1::pg_catalog.text
+                   AND c.relkind OPERATOR(pg_catalog.=) 'r'::pg_catalog.\"char\"",
+            )
+            .bind(table)
+            .fetch_optional(&mut *tx)
+            .await?;
             if row.is_some() {
-                let identifier = table.replace('"', "\"\"");
-                sqlx::query(&format!(
-                    "LOCK TABLE \"{identifier}\" IN ACCESS EXCLUSIVE MODE"
-                ))
-                .execute(&mut *tx)
-                .await?;
+                existing.push(table);
             }
+        }
+        for table in existing {
+            let identifier = table.replace('"', "\"\"");
+            sqlx::query(&format!(
+                "LOCK TABLE \"{identifier}\" IN ACCESS EXCLUSIVE MODE"
+            ))
+            .execute(&mut *tx)
+            .await?;
         }
         let current = super::migrations::introspect_owned_postgres_connection(&mut tx).await?;
         plan.check_baseline(&current)?;
         validate_owned_postgres_plan(&mut tx, plan).await?;
         let recorded: i64 = sqlx::query_scalar(&format!(
-            "SELECT COUNT(*) FROM {MIGRATION_HISTORY_TABLE} WHERE version = $1"
+            "SELECT pg_catalog.count(*) FROM {MIGRATION_HISTORY_TABLE} WHERE version::pg_catalog.text OPERATOR(pg_catalog.=) $1::pg_catalog.text"
         ))
         .bind(version)
         .fetch_one(&mut *tx)
@@ -1505,29 +1520,57 @@ pub(super) async fn validate_owned_sqlite_plan(
     }
     Ok(())
 }
+/// Refuse an owned PostgreSQL plan whose tables carry constraints, indexes or
+/// row security the owned planner does not model.
+///
+/// Runs on the migration's transaction. Every read is pure and fully
+/// qualified, and no nested transaction is opened, so dropping the future
+/// cannot affect that transaction. A partial index is accepted only when it
+/// binds nothing outside `pg_catalog`
+/// ([`POSTGRES_INDEX_USES_ONLY_CATALOG_OBJECTS`]) and its rendering is the
+/// closed-set form.
+///
+/// [`POSTGRES_INDEX_USES_ONLY_CATALOG_OBJECTS`]: super::migrations::POSTGRES_INDEX_USES_ONLY_CATALOG_OBJECTS
 #[cfg(feature = "postgres")]
 pub(super) async fn validate_owned_postgres_plan(
     connection: &mut sqlx::PgConnection,
     plan: &OwnedPlannedMigration,
 ) -> Result<(), RuntimeMigrationError> {
-    super::owned_foreign_keys::validate_postgres(connection, plan.ownership()).await?;
     use super::runtime_migration::{RuntimeMigrationDiagnosticCode, rejection};
+    super::owned_foreign_keys::validate_postgres(connection, plan.ownership()).await?;
+    let index_sql = format!(
+        "SELECT ix.indexprs IS NOT NULL, am.amname::pg_catalog.text,
+                pg_catalog.pg_get_expr(ix.indpred, ix.indrelid),
+                {catalog_only},
+                EXISTS(SELECT 1 FROM pg_catalog.unnest(ix.indclass::pg_catalog.oid[]) cls
+                       JOIN pg_catalog.pg_opclass opc ON opc.oid OPERATOR(pg_catalog.=) cls
+                       WHERE NOT opc.opcdefault)
+                OR EXISTS(SELECT 1 FROM pg_catalog.unnest(ix.indcollation::pg_catalog.oid[]) coll
+                          WHERE coll OPERATOR(pg_catalog.<>) ALL (ARRAY[0, 100]::pg_catalog.oid[]))
+                OR ix.indnatts OPERATOR(pg_catalog.<>) ix.indnkeyatts OR i.reloptions IS NOT NULL
+                OR EXISTS(SELECT 1 FROM pg_catalog.unnest(ix.indoption::pg_catalog.int2[]) opt
+                          WHERE ((opt OPERATOR(pg_catalog.&) 1::pg_catalog.int2) OPERATOR(pg_catalog.=) 1::pg_catalog.int2)
+                                OPERATOR(pg_catalog.<>)
+                                ((opt OPERATOR(pg_catalog.&) 2::pg_catalog.int2) OPERATOR(pg_catalog.=) 2::pg_catalog.int2))
+         FROM pg_catalog.pg_class t
+         JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) t.relnamespace
+         JOIN pg_catalog.pg_index ix ON ix.indrelid OPERATOR(pg_catalog.=) t.oid
+         JOIN pg_catalog.pg_class i ON i.oid OPERATOR(pg_catalog.=) ix.indexrelid
+         JOIN pg_catalog.pg_am am ON am.oid OPERATOR(pg_catalog.=) i.relam
+         WHERE n.nspname OPERATOR(pg_catalog.=) pg_catalog.current_schema()
+           AND t.relname::pg_catalog.text OPERATOR(pg_catalog.=) $1::pg_catalog.text",
+        catalog_only = super::migrations::POSTGRES_INDEX_USES_ONLY_CATALOG_OBJECTS,
+    );
     for table in plan.ownership().tables() {
-        let indexes: Vec<(bool, String, Option<String>, bool)> = sqlx::query_as(
-            "SELECT ix.indexprs IS NOT NULL, am.amname, pg_get_expr(ix.indpred, ix.indrelid),
-                    EXISTS(SELECT 1 FROM unnest(ix.indclass::oid[]) cls JOIN pg_opclass opc ON opc.oid=cls WHERE NOT opc.opcdefault)
-                    OR EXISTS(SELECT 1 FROM unnest(ix.indcollation::oid[]) coll WHERE coll NOT IN (0, 100))
-                    OR ix.indnatts <> ix.indnkeyatts OR i.reloptions IS NOT NULL
-                    OR EXISTS(SELECT 1 FROM unnest(ix.indoption::smallint[]) opt WHERE ((opt & 1) = 1) <> ((opt & 2) = 2))
-             FROM pg_class t JOIN pg_namespace n ON n.oid=t.relnamespace
-             JOIN pg_index ix ON ix.indrelid=t.oid
-             JOIN pg_class i ON i.oid=ix.indexrelid JOIN pg_am am ON am.oid=i.relam
-             WHERE n.nspname=current_schema() AND t.relname=$1"
-        ).bind(table).fetch_all(&mut *connection).await?;
-        for (expression, method, predicate, unsupported_storage) in indexes {
+        let indexes: Vec<(bool, String, Option<String>, bool, bool)> = sqlx::query_as(&index_sql)
+            .bind(table)
+            .fetch_all(&mut *connection)
+            .await?;
+        for (expression, method, predicate, catalog_only, unsupported_storage) in indexes {
             if expression
                 || !matches!(method.as_str(), "btree" | "gist")
                 || unsupported_storage
+                || (predicate.is_some() && !catalog_only)
                 || predicate.as_deref().is_some_and(|predicate| {
                     super::migrations::parse_closed_set_index_predicate(predicate).is_none()
                 })
@@ -1538,8 +1581,16 @@ pub(super) async fn validate_owned_postgres_plan(
             }
         }
     }
-    let protected: Vec<(String,)> = sqlx::query_as("SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema() AND c.relkind='r' AND (c.relrowsecurity OR c.relforcerowsecurity OR EXISTS(SELECT 1 FROM pg_policy p WHERE p.polrelid=c.oid))")
-        .fetch_all(&mut *connection).await?;
+    let protected: Vec<(String,)> = sqlx::query_as(
+        "SELECT c.relname::pg_catalog.text FROM pg_catalog.pg_class c
+         JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+         WHERE n.nspname OPERATOR(pg_catalog.=) pg_catalog.current_schema()
+           AND c.relkind OPERATOR(pg_catalog.=) 'r'::pg_catalog.\"char\"
+           AND (c.relrowsecurity OR c.relforcerowsecurity
+                OR EXISTS(SELECT 1 FROM pg_catalog.pg_policy p WHERE p.polrelid OPERATOR(pg_catalog.=) c.oid))",
+    )
+    .fetch_all(&mut *connection)
+    .await?;
     if protected
         .iter()
         .any(|(table,)| plan.changes_protected_rls_structure(table))

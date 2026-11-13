@@ -9,6 +9,13 @@
 //! physical hashes, plans, plan hashes, live replans after apply, certified
 //! baselines and SDL for these schemas.
 //!
+//! One deliberate divergence: from 0.132.0 the PostgreSQL append-only setup
+//! names catalog objects and operators with their schema in the `DO` block
+//! that sets the trigger function's owner. That statement, and with it
+//! `plan.v1.hash` in the PostgreSQL golden, were updated by hand. Every other
+//! line, including the physical, source and target hashes, is still the
+//! 0.50.2 output.
+//!
 //! Fixtures are JSON so this file compiles unchanged against both releases.
 //! Set `GRAPHQL_ORM_CAPTURE_GOLDENS=1` only when deliberately recapturing at
 //! the pinned historical commit.

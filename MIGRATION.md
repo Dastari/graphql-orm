@@ -18,6 +18,44 @@ disclosure of the inputs a root uses; tool profiles 0.23.0 treats an input as a
 generated entity input only when its members also have the canonical generated
 shape. No API, fingerprint, schema or data migration change.
 
+## 0.131.0 to 0.132.0: PostgreSQL catalog reads
+
+Upgrade runtime and macros together. No schema or data migration is needed.
+
+- PostgreSQL catalog reads use catalog-defined objects regardless of the
+  session's `search_path`. RLS validation pins the path in a transaction of
+  its own. Schema introspection, the dependent-delete gate, the runtime
+  migration's checks and the change-journal recorder check name every catalog
+  relation, function, type and operator with its schema. No action is needed.
+- A partial index counts as a closed-set predicate only when its operator
+  classes are catalog defaults and every operator, function, type and
+  collation it depends on belongs to `pg_catalog`.
+  Introspection reports any other partial index without a predicate, which
+  plans as drift, and runtime migrations refuse the table. Recreate such an
+  index with the catalog's `=`.
+- The plan's PostgreSQL `DO` blocks (RLS, unique-constraint removal,
+  append-only storage) now name catalog objects and operators with their
+  schema. Already-applied migrations, their recorded history and the live
+  schema are unaffected, and nothing needs re-applying. **Previously stored
+  plans keep their old SQL: regenerate them to get the hardened statements.**
+  A regenerated plan for such a change has different statement text and plan
+  hash, so review it again if you compare plan hashes.
+- `RlsIntrospectionBackend::introspect_rls` is deprecated. It keys tables by a
+  flattened name and omits `FOR ALL` policies. Use `introspect_rls_target` and
+  `introspect_rls_enforcement`, which target validation already uses.
+- The change journal is validated in whichever schema the connection's
+  `search_path` resolves `__graphql_orm_change_log` to. For a journal outside
+  `public`, its policies, RLS enablement and enforcement for the validating
+  role are now checked. Re-apply the schema target with the schema owner if
+  validation reports them.
+- The search-document delete trigger must be on the table the base entity's
+  path resolves to. Re-apply the schema target if validation reports it
+  missing.
+- Code that builds the doc-hidden `LiveRlsEnforcement` directly sets
+  `change_journal_table` instead of `row_security_active` and `policy_names`,
+  and keys `search_delete_triggers` by quoted schema and table, as
+  `change_journal_triggers` already is.
+
 ## 0.130.0 to 0.131.0: native search column collisions
 
 Upgrade ORM and macros together. No schema or data migration is needed.

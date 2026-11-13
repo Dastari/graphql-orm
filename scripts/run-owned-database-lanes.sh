@@ -132,6 +132,8 @@ run_postgres_legacy() {
     --test postgres_rls_coverage --test postgres_change_journal_paths \
     --test dependent_delete_repro --test backup_roundtrip \
     -- --include-ignored --test-threads=1
+  cargo test -p graphql-orm --locked --no-default-features --features postgres,change-journal \
+    --lib catalog_read_cancellation -- --include-ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features sqlite \
     --test federation_end_to_end_fixture -- --ignored node_lookup_through_the_router_on_owned_postgres
 }

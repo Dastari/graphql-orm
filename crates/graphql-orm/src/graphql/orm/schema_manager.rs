@@ -131,7 +131,6 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         ) {
             Vec::new()
         } else {
-            let current_rls = B::introspect_rls(self.database.pool()).await?;
             let mut diagnostics =
                 validate_rls_models(B::DIALECT, self.policy(), &probed, &target.rls);
             diagnostics.extend(validate_protected_rls_tables(
@@ -144,7 +143,6 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
             diagnostics.extend(validate_change_journal(
                 B::DIALECT,
                 self.policy(),
-                &current_rls,
                 live.as_ref(),
                 target,
             ));

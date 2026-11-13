@@ -309,7 +309,9 @@
 //! See the repository `README.md` and `docs/` directory for full examples,
 //! backend notes, relation batching, schema policies, and migration guidance.
 
-#[cfg(all(test, feature = "owned-planning-replay"))]
+// In-crate tests that share the integration-test support files name the
+// crate as `graphql_orm`.
+#[cfg(all(test, any(feature = "owned-planning-replay", feature = "postgres")))]
 extern crate self as graphql_orm;
 
 pub use async_graphql;
