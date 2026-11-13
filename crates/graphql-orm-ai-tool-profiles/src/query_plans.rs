@@ -5136,11 +5136,19 @@ fn generated_shape_matches(
                 // while ordinary stored values keep RuntimeInt64/RuntimeUuid.
                 // NodeId and RecordVersion are the live module's fixed outputs.
                 if live_key_contract {
-                    generated = match generated.as_str() {
-                        "RuntimeInt64!" => "Int!".into(),
-                        "RuntimeUuid!" => "UUID!".into(),
-                        _ => generated,
+                    let alias = match generated.as_str() {
+                        "RuntimeInt64!" => Some("Int"),
+                        "RuntimeUuid!" => Some("UUID"),
+                        _ => None,
                     };
+                    if let Some(alias) = alias {
+                        let scalar = matches!(schema.types.get(alias), Some(SchemaType::Scalar))
+                            || (alias == "Int" && !schema.types.contains_key(alias));
+                        if !scalar || !runtime_scalar_type(schema, &generated) {
+                            return false;
+                        }
+                        generated = format!("{alias}!");
+                    }
                 }
                 let expected = if input_name == format!("Update{}Input", entity.entity_name) {
                     generated.strip_suffix('!').unwrap_or(&generated)

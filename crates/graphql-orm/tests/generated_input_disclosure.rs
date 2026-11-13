@@ -43,6 +43,7 @@ mod optional {
         #[filterable(type = "string")]
         pub sensitive_note: Option<String>,
         #[graphql_orm(non_exportable)]
+        #[filterable(type = "string")]
         pub internal_note: Option<String>,
         #[input_only]
         pub private_list: Option<Vec<u8>>,
@@ -88,6 +89,7 @@ mod required {
         #[filterable(type = "string")]
         pub sensitive_note: String,
         #[graphql_orm(non_exportable)]
+        #[filterable(type = "string")]
         pub internal_note: String,
     }
     schema_roots! { query_custom_ops: [], entities: [RequiredInputRecord] }
