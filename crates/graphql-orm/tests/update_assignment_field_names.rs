@@ -20,9 +20,9 @@ struct NamedConnection {
     #[primary_key]
     id: graphql_orm::uuid::Uuid,
     #[filterable(type = "string")]
+    #[sortable]
     db: String,
     ctx: Option<String>,
-    #[graphql_orm(write_policy = "connection.note.write")]
     note: String,
 }
 
