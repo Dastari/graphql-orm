@@ -143,7 +143,7 @@ async fn non_id_primary_key_orders_repository_and_generated_reads() -> graphql_o
         graphql_orm::async_graphql::EmptySubscription,
     )
     .data(db.clone())
-    .data("test-user".to_string())
+    .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
     .finish();
     let response = schema
         .execute(

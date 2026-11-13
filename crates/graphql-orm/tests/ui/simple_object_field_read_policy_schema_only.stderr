@@ -1,0 +1,6 @@
+error: SimpleObject field read_policy is not enforced by SimpleObject; place #[graphql_orm::graphql_policy_object] before the derives with #[graphql(complex)], or add #[graphql(skip)] to this field
+  --> tests/ui/simple_object_field_read_policy_schema_only.rs:16:5
+   |
+16 | /     #[graphql_orm(read_policy = "secret.read")]
+17 | |     secret: String,
+   | |__________________^

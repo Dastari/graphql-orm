@@ -3,7 +3,7 @@ title: "Authentication and authorization architecture"
 kind: architecture
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-14
+last_reviewed: 2026-11-12
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -34,9 +34,9 @@ let user_id = ctx.auth_user_id()?;
 let maybe_subject = ctx.auth_subject_opt();
 ```
 
-`ctx.auth_user()` remains as a deprecated alias for `ctx.auth_user_id()`. For compatibility,
-`auth_subject()` also accepts the legacy `String` user id from context and upgrades it to an
-`AuthSubject` with empty roles, scopes, and tenant id.
+`ctx.auth_user()` remains as a deprecated alias for `ctx.auth_user_id()`. Only a typed
+`AuthSubject` authenticates a request: other context data, including a bare `String`, is never read
+as a subject. Use `AuthSubject::new(id)` for a subject with only an id.
 
 ## Generated Resolver Modes
 
@@ -81,9 +81,18 @@ database.set_entity_policy(ScopeEntityPolicy::new(
 ));
 ```
 
-Read operations compare against `read_scopes`; create/update/delete operations compare against
-`write_scopes`. With `require_auth: true`, missing auth returns an unauthenticated GraphQL error.
-When a subject exists but lacks a required scope, the policy returns `Ok(false)`.
+Read operations check the `read` requirement; create/update/delete operations check `write`. With
+`require_auth: true`, missing auth returns an unauthenticated GraphQL error; without it, the policy
+denies. When a subject exists but lacks a required scope, the policy returns `Ok(false)`. An empty
+scope list denies. Admitting any authenticated subject is explicit:
+
+```rust
+database.set_entity_policy(ScopeEntityPolicy::authenticated());
+database.set_entity_policy(
+    ScopeEntityPolicy::new(&[], &["tickets.write"])
+        .with_read(ScopeRequirement::AnyAuthenticated),
+);
+```
 
 Matching is exact. A subject with `tickets.*` does not satisfy `tickets.read` unless the host adds a
 separate policy or future auth bridge that deliberately implements hierarchical matching.

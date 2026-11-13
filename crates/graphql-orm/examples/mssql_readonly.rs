@@ -43,7 +43,9 @@ schema_roots! {
 pub fn build_schema(pool: graphql_orm::db::mssql::MssqlPool) -> AppSchema {
     let database = graphql_orm::db::Database::<MssqlBackend>::new(pool);
     schema_builder(database)
-        .data("mssql-readonly-example".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new(
+            "mssql-readonly-example",
+        ))
         .finish()
 }
 

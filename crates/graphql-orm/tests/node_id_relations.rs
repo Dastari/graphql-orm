@@ -9,34 +9,6 @@
 use graphql_orm::async_graphql::SimpleObject;
 use graphql_orm::prelude::*;
 
-macro_rules! entity {
-    ($name:ident, $table:literal, $plural:literal, [$($attrs:tt)*], [$($derives:tt)*]) => {
-        #[derive(GraphQLEntity, GraphQLOperations, GraphQLRelations, Clone, Debug, serde::Serialize, serde::Deserialize, $($derives)*)]
-        #[cfg_attr(feature = "sqlite", graphql_entity(backend = "sqlite", table = $table, plural = $plural, node_id, auth = "none"))]
-        #[cfg_attr(feature = "postgres", graphql_entity(backend = "postgres", table = $table, plural = $plural, node_id, auth = "none"))]
-        #[cfg_attr(feature = "mssql", graphql_entity(backend = "mssql", schema_policy = "external_writable", table = $table, plural = $plural, node_id, auth = "none"))]
-        $($attrs)*
-        pub struct $name {
-            #[primary_key]
-    #[sortable]
-            #[graphql_orm(auto_generated = false)]
-            id: String,
-            parent_id: String,
-            name: String,
-            owner_id: Option<String>,
-            site_id: Option<String>,
-            #[graphql(skip)]
-            #[relation(target = "Site", from = ["owner_id", "site_id"], to = ["owner_id", "id"], emit_fk = false)]
-            site: Option<Site>,
-            #[graphql_orm(version = "managed", default = "0", read_policy = "version.read")]
-            version: i64,
-            #[graphql(skip)]
-            #[relation(target = "Parent", from = "parent_id", to = "id", emit_fk = false, propagate_change = "up")]
-            parent: Option<Parent>,
-        }
-    }
-}
-
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(
     feature = "sqlite",
@@ -132,8 +104,144 @@ impl BatchLoadEntity for Site {
     }
 }
 
-entity!(Plain, "identity_plain", "PlainRows", [#[graphql(complex, rename_fields = "PascalCase")]], [SimpleObject]);
-entity!(Composed, "identity_composed", "ComposedRows", [#[graphql(complex, rename_fields = "PascalCase")] #[graphql_orm(compose_complex_object)]], [SimpleObject]);
+// The version column's read policy is enforced by the policy object.
+#[graphql_orm::graphql_policy_object]
+#[derive(
+    GraphQLEntity,
+    GraphQLOperations,
+    GraphQLRelations,
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    SimpleObject,
+)]
+#[cfg_attr(
+    feature = "sqlite",
+    graphql_entity(
+        backend = "sqlite",
+        table = "identity_plain",
+        plural = "PlainRows",
+        node_id,
+        auth = "none"
+    )
+)]
+#[cfg_attr(
+    feature = "postgres",
+    graphql_entity(
+        backend = "postgres",
+        table = "identity_plain",
+        plural = "PlainRows",
+        node_id,
+        auth = "none"
+    )
+)]
+#[cfg_attr(
+    feature = "mssql",
+    graphql_entity(
+        backend = "mssql",
+        schema_policy = "external_writable",
+        table = "identity_plain",
+        plural = "PlainRows",
+        node_id,
+        auth = "none"
+    )
+)]
+#[graphql(complex, rename_fields = "PascalCase")]
+pub struct Plain {
+    #[primary_key]
+    #[sortable]
+    #[graphql_orm(auto_generated = false)]
+    id: String,
+    parent_id: String,
+    name: String,
+    owner_id: Option<String>,
+    site_id: Option<String>,
+    #[graphql(skip)]
+    #[relation(target = "Site", from = ["owner_id", "site_id"], to = ["owner_id", "id"], emit_fk = false)]
+    site: Option<Site>,
+    #[graphql_orm(version = "managed", default = "0", read_policy = "version.read")]
+    version: i64,
+    #[graphql(skip)]
+    #[relation(
+        target = "Parent",
+        from = "parent_id",
+        to = "id",
+        emit_fk = false,
+        propagate_change = "up"
+    )]
+    parent: Option<Parent>,
+}
+
+// The version column's read policy is enforced by the policy object.
+#[graphql_orm::graphql_policy_object]
+#[derive(
+    GraphQLEntity,
+    GraphQLOperations,
+    GraphQLRelations,
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    SimpleObject,
+)]
+#[cfg_attr(
+    feature = "sqlite",
+    graphql_entity(
+        backend = "sqlite",
+        table = "identity_composed",
+        plural = "ComposedRows",
+        node_id,
+        auth = "none"
+    )
+)]
+#[cfg_attr(
+    feature = "postgres",
+    graphql_entity(
+        backend = "postgres",
+        table = "identity_composed",
+        plural = "ComposedRows",
+        node_id,
+        auth = "none"
+    )
+)]
+#[cfg_attr(
+    feature = "mssql",
+    graphql_entity(
+        backend = "mssql",
+        schema_policy = "external_writable",
+        table = "identity_composed",
+        plural = "ComposedRows",
+        node_id,
+        auth = "none"
+    )
+)]
+#[graphql(complex, rename_fields = "PascalCase")]
+#[graphql_orm(compose_complex_object)]
+pub struct Composed {
+    #[primary_key]
+    #[sortable]
+    #[graphql_orm(auto_generated = false)]
+    id: String,
+    parent_id: String,
+    name: String,
+    owner_id: Option<String>,
+    site_id: Option<String>,
+    #[graphql(skip)]
+    #[relation(target = "Site", from = ["owner_id", "site_id"], to = ["owner_id", "id"], emit_fk = false)]
+    site: Option<Site>,
+    #[graphql_orm(version = "managed", default = "0", read_policy = "version.read")]
+    version: i64,
+    #[graphql(skip)]
+    #[relation(
+        target = "Parent",
+        from = "parent_id",
+        to = "id",
+        emit_fk = false,
+        propagate_change = "up"
+    )]
+    parent: Option<Parent>,
+}
 
 #[graphql_complex_object]
 impl Composed {

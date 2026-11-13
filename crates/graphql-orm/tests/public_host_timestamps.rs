@@ -93,7 +93,7 @@ async fn generated_graphql_writes_preserve_source_values_without_clock_conversio
 -> graphql_orm::Result<()> {
     let database = setup().await?;
     let schema = schema_builder(database.clone())
-        .data("test-user".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
         .finish();
     let response = schema.execute("mutation { createSourceStampedRecord(input: {id: \"source-2\", updatedTimestamp: \"2026-03-04T05:06:07-03:00\"}) { success } }").await;
     assert!(response.errors.is_empty(), "{:?}", response.errors);

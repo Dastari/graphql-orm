@@ -187,6 +187,7 @@ async fn lifecycle_hooks_expose_before_after_and_roll_back_on_failure()
 
     let schema = schema_builder(db.clone())
         .data("test-user".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
         .finish();
     let created_graphql = schema
         .execute(

@@ -10,13 +10,146 @@ supersedes: []
 
 # Migration Guide
 
+## 0.129.0 to 0.130.0: fail-closed authority defaults
+
+Upgrade runtime and macros together. No schema or data migration is needed.
+
+**Single-row reads use list-read row visibility.** Generated get-by-key roots,
+`NodeId` lookups and Federation `_entities` now resolve
+`RowPolicy::read_visibility` as generated list reads do. The SQL predicate
+restricts the row; `can_read_row` runs only for `CallbackOnly` and `Prefilter`
+decisions. A provider that returns `Complete` and keeps `can_read_row`
+permissive now hides rows outside the predicate on these reads too. A provider
+that returns `Complete` or `Unrestricted` but relied on `can_read_row` to refuse
+single-row reads must return `Prefilter` (or `CallbackOnly`) instead, so the
+callback keeps running. Providers that implement only `can_read_row` are
+unchanged: the default decision is `CallbackOnly`.
+
+**Mutation payloads use it too.** A generated create, update or upsert releases
+its committed row only when the caller could read it in a list: after the
+commit the row is re-read by key under the `GraphqlMutation`-surface predicate,
+and that re-read row is the one `can_read_row` checks (for a residual decision)
+and the payload carries, so a concurrent change after the commit shows in the
+payload. Otherwise the payload's entity
+field is `null` and `success` stays `true`. A caller that may write a row it
+cannot read under a `Complete` predicate no longer receives it. Read the row
+through a query the caller may make instead.
+
+**Repository reads apply the repository predicate.** `find_by_key`, `find_by_id`,
+`RepositoryQuery` reads and transactional entity reads
+(`MutationContext::query().fetch_all` / `fetch_one`) add the
+`Repository`-surface predicate from `read_visibility` to their SQL and still
+call `can_read_row` for every row. Typed projections already applied it.
+Generated writes look up their target rows with an internal locking fetch that
+checks `can_read_row` only, and
+`MutationContextFindByKey::find_by_key_in_mutation_context` wraps the same
+fetch for hosts, so it stays a trusted host surface. A
+provider whose `read_visibility` returns a narrower predicate for the
+`Repository` surface than its row callback allows now narrows these reads.
+
+**Provider errors are sanitized.** An error that an `EntityPolicy`,
+`read_visibility` or `can_read_row` propagates with `?` (a database failure, for
+example) is now mapped to a safe public error on these reads, including
+Federation `_entities` and `NodeId`, as on other callback paths. An authored
+refusal with an ORM public `code` extension still renders as written.
+`_entities` and `NodeId` resolve the read decision before they look at the
+loaded row, so a refusal is the same for an existing and a missing key.
+
+**A declared read key needs a row provider outside `LegacyPermissive`.** Without
+a `RowPolicy`, an entity with an entity-level `read_policy` key no longer reads
+as `Unrestricted`:
+
+- Under `DeclaredPoliciesRequired`, the default, every read of the entity fails
+  with `AUTHORIZATION_MISCONFIGURED` before its row decision is applied: lists,
+  single-row reads, relation loads, relation filters and counts, generated
+  search roots, aggregates and group pages, typed projections, repository reads
+  and counts, and Keyset roots. On get-by-key, `_entities` and `NodeId` an
+  existing and a missing key answer alike.
+- Under `ExplicitPolicyForAllExposedOperations`, every read defers to
+  `can_read_row`, which refuses. Single-row reads return `null`, a list or
+  search root with an authorized scan configuration returns no rows, and paths
+  that need SQL-only visibility (offset lists and search roots without a scan
+  configuration, relation filters and counts, aggregates and group pages,
+  projections, repository counts and Keyset roots) fail with
+  `AUTHORIZATION_MISCONFIGURED`.
+- **Generated `Changed` subscriptions for such an entity silently deliver
+  nothing** in either strict mode. Each event's authorization fails and the
+  event is dropped; the subscriber sees no error. The runtime prints one
+  warning per process to standard error the first time it drops an event this
+  way. Install a row provider before relying on these subscriptions.
+- Generated schema builders refuse an exposed Keyset root for such an entity
+  (`KeysetReadPolicyReason::MissingRowPolicy`).
+
+This fallback is separate from the relation-target and search authority added
+in [0.129.0](#01280-to-01290-field-authority-for-filters-ordering-search-and-relation-targets): relation traversal and search sources still need the
+target's auth mode, operation scopes and field policies when a row provider is
+installed.
+
+Install a `RowPolicy` for these entities. One whose `read_visibility` returns
+`Unrestricted`, and whose `can_read_row` allows, for entities without row
+isolation is enough; the default `CallbackOnly` decision would still need an
+authorized scan configuration for offset lists.
+
+**Residual decisions on SQL-only paths are typed.** Typed projections,
+repository counts, aggregates and group pages that get a `CallbackOnly` or
+`Prefilter` decision now fail with `OrmErrorCode::AuthorizationMisconfigured`
+instead of an untyped `sqlx::Error::Protocol`. Read the code with
+`OrmPublicError::from`, not the message text.
+
+**`SimpleObject` column read policies need `graphql_policy_object`.** On a
+`GraphQLEntity` + `SimpleObject` entity with `#[graphql(complex)]` or
+`schema_only = true`, a field `#[graphql_orm(read_policy = "...")]` is a compile
+error unless the struct has `#[graphql_orm::graphql_policy_object]` before its
+derives. The `SimpleObject` getter served the field without checking the
+policy. Add the attribute (it requires `#[graphql(complex)]`), or
+`#[graphql(skip)]` the field. The attribute leaves an inert `#[graphql_orm_policy_object]`
+marker and a hidden witness trait impl that the derives assert, so writing the
+marker by hand does not satisfy the check. The attribute cannot be applied when
+`SimpleObject` reaches the derive list through a `macro_rules!` argument; name
+`SimpleObject` in the macro body or write such entities out directly.
+
+**`ScopeEntityPolicy` empty scope lists deny.** The policy now holds
+`read: ScopeRequirement` and `write: ScopeRequirement`. `new` and `optional`
+build `ScopeRequirement::AnyOf(scopes)`; an empty list admits no subject. To
+admit any authenticated subject, use `ScopeEntityPolicy::authenticated()` or
+`.with_read(ScopeRequirement::AnyAuthenticated)` /
+`.with_write(ScopeRequirement::AnyAuthenticated)`. A request without a subject
+is never admitted: `optional` now denies it rather than allowing an empty list.
+Code that read `read_scopes`/`write_scopes`, or used `Default` (which was
+`authenticated()`), must switch to these names. `ScopeEntityPolicy` is the entity-access scope
+mechanism; generated roots and relation traversal also check
+`operation_authorization` scopes, and a request must satisfy both (see
+[the 0.129.0 scope note](#01280-to-01290-field-authority-for-filters-ordering-search-and-relation-targets)).
+
+```rust
+// Before: any authenticated subject could read.
+ScopeEntityPolicy::new(&[], &["records.write"]);
+// After:
+ScopeEntityPolicy::new(&[], &["records.write"])
+    .with_read(ScopeRequirement::AnyAuthenticated);
+```
+
+**Attach a typed `AuthSubject`.** `AuthExt::auth_subject`, `auth_subject_opt`
+and `auth_user_id` no longer read a bare `String` from GraphQL context data, so
+generated resolvers treat a request carrying only a `String` id as
+unauthenticated. Attach the subject instead:
+
+```rust
+// Before
+let request = request.data(user_id.clone());
+// After
+let request = request.data(AuthSubject::new(user_id.clone()));
+```
+
+Hosts that also read the `String` in their own policies can keep attaching it
+beside the subject.
+
 ## 0.128.0 to 0.129.0: field authority for filters, ordering, search and relation targets
 
 Upgrade runtime and macros together. No schema or data migration is needed.
 
-Authority defaults are also being made fail closed
-([#647](https://github.com/Dastari/graphql-orm/pull/647)); see the fail-closed
-authority defaults section of this guide.
+Authority defaults are made fail closed in 0.130.0; see
+[0.129.0 to 0.130.0: fail-closed authority defaults](#01290-to-01300-fail-closed-authority-defaults).
 Two scope mechanisms then apply side by side. `ScopeEntityPolicy` is an entity
 access policy that runs on every surface, including relation traversal through
 the target's entity access check. `operation_authorization` scopes guard the

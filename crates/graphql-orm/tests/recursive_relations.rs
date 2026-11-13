@@ -165,7 +165,9 @@ async fn self_referential_relations_work_with_boxed_parent_fields()
     )
     .await?;
 
-    let schema = schema_builder(database).data("viewer".to_string()).finish();
+    let schema = schema_builder(database)
+        .data(graphql_orm::graphql::auth::AuthSubject::new("viewer"))
+        .finish();
     let response = schema
         .execute(format!(
             "query {{

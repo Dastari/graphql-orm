@@ -478,7 +478,9 @@ async fn sqlite_spatial_fields_and_predicates_round_trip() -> Result<(), Box<dyn
     assert!(SqlitePlace::get(&pool, &beta.id).await?.is_none());
 
     let schema = schema_builder(database.clone())
-        .data("sqlite-spatial-test-user".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new(
+            "sqlite-spatial-test-user",
+        ))
         .finish();
     let graph_response = schema
         .execute(Request::new(

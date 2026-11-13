@@ -132,6 +132,46 @@ impl EntityPolicy for AllowEntityReads {
 }
 
 #[derive(Clone, Default)]
+/// Explicitly unrestricted rows: the entity's read key needs a row provider.
+struct AllowRows;
+
+impl RowPolicy for AllowRows {
+    fn read_visibility<'a>(
+        &'a self,
+        _ctx: Option<&'a async_graphql::Context<'_>>,
+        _db: &'a Database,
+        _entity_name: &'static str,
+        _policy_key: Option<&'static str>,
+        _surface: EntityAccessSurface,
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<ReadVisibility>> {
+        Box::pin(async { Ok(ReadVisibility::Unrestricted) })
+    }
+
+    fn can_read_row<'a>(
+        &'a self,
+        _ctx: Option<&'a async_graphql::Context<'_>>,
+        _db: &'a Database,
+        _entity_name: &'static str,
+        _policy_key: Option<&'static str>,
+        _surface: EntityAccessSurface,
+        _row: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(true) })
+    }
+
+    fn can_write_row<'a>(
+        &'a self,
+        _ctx: Option<&'a async_graphql::Context<'_>>,
+        _db: &'a Database,
+        _entity_name: &'static str,
+        _policy_key: Option<&'static str>,
+        _surface: EntityAccessSurface,
+        _row: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(true) })
+    }
+}
+
 struct DenyRows;
 
 impl RowPolicy for DenyRows {
@@ -210,6 +250,7 @@ async fn projections_are_typed_bounded_transaction_visible_and_authorized()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut database = database().await?;
     database.set_entity_policy(AllowEntityReads);
+    database.set_row_policy(AllowRows);
     database.set_authorization_mode(AuthorizationMode::DeclaredPoliciesRequired);
     database.set_pagination_config(
         PaginationConfig::secure()
@@ -350,7 +391,10 @@ async fn projections_are_typed_bounded_transaction_visible_and_authorized()
         .fetch_first()
         .await
         .expect_err("application row policy cannot be bypassed by a projection");
-    assert!(denied.to_string().contains("projection reads are denied"));
+    assert_eq!(
+        graphql_orm::graphql::errors::OrmPublicError::from(denied).code,
+        graphql_orm::graphql::errors::OrmErrorCode::AuthorizationMisconfigured
+    );
     Ok(())
 }
 
@@ -425,6 +469,7 @@ async fn sqlite_undecodable_excluded_value_is_never_decoded()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut database = database().await?;
     database.set_entity_policy(AllowEntityReads);
+    database.set_row_policy(AllowRows);
     let entities = [ProjectionCertificate::metadata()];
     let plan = database
         .schema()

@@ -221,12 +221,15 @@ async fn row_policy_filters_reads_and_write_transform_injects_server_fields()
 
     let actor_a_schema = schema_builder(db.clone())
         .data("actor-a".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("actor-a"))
         .finish();
     let actor_b_schema = schema_builder(db.clone())
         .data("actor-b".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("actor-b"))
         .finish();
     let admin_schema = schema_builder(db.clone())
         .data("admin".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("admin"))
         .finish();
 
     let created = actor_a_schema
