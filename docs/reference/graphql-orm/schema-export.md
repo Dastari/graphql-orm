@@ -47,3 +47,13 @@ bounds still undergo ordinary Rust type checking.
 Run `scripts/check-schema-export.sh` to compile panic/witness and diagnostic probes
 and compare full-stack fixture SDL bytes with the feature off/on for SQLite and
 PostgreSQL. This script is an owned CI lane and does not connect to a database.
+
+Run `scripts/compare-generated-schema.sh <base-ref>` before merging a change to
+what the derives emit when it must not alter the schema. It compiles the
+full-stack fixture against the base revision and against the working tree, and
+compares the SDL, the operation catalogue and the semantic catalogue byte for
+byte, for SQLite and PostgreSQL. It needs no database and is not a CI lane.
+The script adds a temporary Git worktree of the base revision under the system
+temporary directory and removes it when it exits. The base build is not
+`--locked`, because the base revision can carry other package versions, so
+Cargo may use the network to resolve it.

@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.137.0 changes nothing a host can observe. The derives emit the
+per-field UPDATE assignment list once per entity instead of once per generated
+update path, which removes about 2.5% of the expanded code of a 15-field
+entity ([#677](https://github.com/Dastari/graphql-orm/issues/677)).
+
 Version 0.136.0 (placeholder) keeps runtime and macros aligned. PostgreSQL
 backup export and search rebuild fail when RLS would filter rows. Use a role
 exempt from RLS; see the [migration guide](../../MIGRATION.md).
