@@ -10,6 +10,26 @@ supersedes: []
 
 # Migration Guide
 
+## 0.15.0 to 0.16.0: storage 0.11.0
+
+Update the backup requirement to 0.16.0 and storage to 0.11.0 together, then
+refresh the consumer lockfile. Repository layout, manifest format and the
+public API are unchanged.
+
+- Follow the storage [0.11.0 migration](../graphql-orm-storage/MIGRATION.md):
+  remove `require_signing = false` from SMB configurations. The SMB share must
+  support hard links, which Samba and NTFS shares do.
+- An SMB content write whose publishing link has an unknown outcome now fails
+  with a non-retryable error; treat it like any other failed backup and
+  verify the repository before relying on it.
+- When the outcome is unknown while acquiring the repository lock, the lock
+  may hold this run's record, and nothing releases it: the operation fails
+  without a lock to release. The next operation then fails with
+  `BackupError::RepositoryLocked` naming this run. Confirm that the run and
+  every other writer have stopped, inspect the lock, and remove it with
+  `break_repository_lock` for that run. This could already happen before this
+  release, when a `FILE_CREATE` response was lost.
+
 ## 0.14.0 to 0.15.0: storage 0.10.0
 
 Update the backup requirement to 0.15.0 and storage to 0.10.0 together, then

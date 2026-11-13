@@ -1035,3 +1035,252 @@ async fn samba_refuses_a_dialect_below_the_minimum() {
     .expect("probe with SMB 3.0 allowed");
     assert_eq!(probe.negotiated_dialect, SmbDialect::Smb3_0);
 }
+
+/// Waits until the backend's SMB WRITE responses acknowledge more than
+/// `before` bytes, so a stalled upload has reached the server.
+async fn wait_for_uploaded_bytes(store: &SmbStorageBackend, before: u64) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while store.diagnostics().await.bytes_uploaded <= before {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the stalled upload's first write was acknowledged");
+}
+
+/// A body that yields `head`, then waits for `release` before yielding `tail`.
+fn held_body(
+    head: Bytes,
+    tail: Bytes,
+    release: tokio::sync::oneshot::Receiver<()>,
+) -> StorageByteStream {
+    let body = stream::once(async move { Ok(head) }).chain(stream::once(async move {
+        let _ = release.await;
+        Ok(tail)
+    }));
+    StorageByteStream::new(Box::pin(body))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the managed Samba container harness"]
+async fn samba_conditional_create_is_invisible_until_published() {
+    let root = format!("graphql-orm-storage-tests/{}", Uuid::new_v4());
+    let store = Arc::new(
+        SmbStorageBackend::connect(test_config(root))
+            .await
+            .expect("connect"),
+    );
+    let key = "content/identical.bin";
+    let content = Bytes::from_static(b"identical content that two writers store at once");
+    let before = store.diagnostics().await.bytes_uploaded;
+    let (release, released) = tokio::sync::oneshot::channel();
+    let first_store = Arc::clone(&store);
+    let first_body = held_body(content.slice(..8), content.slice(8..), released);
+    let first = tokio::spawn(async move {
+        first_store
+            .put_blob_if_not_exists(key, first_body, BlobPutOptions::default())
+            .await
+    });
+    wait_for_uploaded_bytes(&store, before).await;
+
+    // Part of the first object is on the server, but the key is not taken.
+    assert!(!store.blob_exists(key).await.expect("exists"));
+    assert!(store.head_blob(key).await.expect("head").is_none());
+    assert!(store.list_blobs("content/").await.expect("list").is_empty());
+    // A second writer of the same content creates the key.
+    let second = store
+        .put_blob_if_not_exists(
+            key,
+            StorageByteStream::from_bytes(content.clone()),
+            BlobPutOptions::default(),
+        )
+        .await
+        .expect("second conditional create")
+        .expect("the second writer creates the key");
+    assert_eq!(second.size_bytes, content.len() as u64);
+
+    // The first writer completes its object and finds the key taken.
+    release.send(()).expect("release the first writer");
+    let first = first
+        .await
+        .expect("first writer task")
+        .expect("first conditional create");
+    assert!(first.is_none(), "the second writer already holds the key");
+    let stored = store.get_blob(key).await.expect("get");
+    assert_eq!(
+        collect_storage_stream(stored.body).await.expect("collect"),
+        content
+    );
+    assert_eq!(store.list_blobs("content/").await.expect("list"), [key]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the managed Samba container harness"]
+async fn samba_stalled_transfers_release_their_permits() {
+    let root = format!("graphql-orm-storage-tests/{}", Uuid::new_v4());
+    let mut config = test_config(root);
+    config.max_transfer_concurrency = 1;
+    let store = Arc::new(SmbStorageBackend::connect(config).await.expect("connect"));
+    let large = Bytes::from(
+        (0..(2 * 1024 * 1024 + 11))
+            .map(|index| u8::try_from(index % 241).expect("bounded byte"))
+            .collect::<Vec<_>>(),
+    );
+    for (key, bytes) in [
+        ("stalled/read.bin", large.clone()),
+        ("other/read.bin", Bytes::from_static(b"other object")),
+    ] {
+        store
+            .put_blob(
+                key,
+                StorageByteStream::from_bytes(bytes),
+                BlobPutOptions::default(),
+            )
+            .await
+            .expect("seed");
+    }
+
+    // A download whose consumer stops after its first chunk.
+    let mut stalled_read = store
+        .get_blob("stalled/read.bin")
+        .await
+        .expect("open stalled download")
+        .body
+        .into_inner();
+    let mut downloaded = stalled_read
+        .next()
+        .await
+        .expect("first chunk")
+        .expect("first chunk")
+        .to_vec();
+    assert!(downloaded.len() < large.len());
+
+    // An upload whose body stops after its first chunk.
+    let before = store.diagnostics().await.bytes_uploaded;
+    let (release, released) = tokio::sync::oneshot::channel();
+    let upload_store = Arc::clone(&store);
+    let upload = tokio::spawn(async move {
+        upload_store
+            .put_blob(
+                "stalled/write.bin",
+                held_body(
+                    Bytes::from_static(b"stalled upload, "),
+                    Bytes::from_static(b"resumed"),
+                    released,
+                ),
+                BlobPutOptions::default(),
+            )
+            .await
+    });
+    wait_for_uploaded_bytes(&store, before).await;
+
+    // With one transfer permit, other transfers still run while both stall.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let other = store.get_blob("other/read.bin").await.expect("get other");
+        assert_eq!(
+            collect_storage_stream(other.body).await.expect("collect"),
+            Bytes::from_static(b"other object")
+        );
+        store
+            .put_blob(
+                "other/write.bin",
+                StorageByteStream::from_bytes(Bytes::from_static(b"written meanwhile")),
+                BlobPutOptions::default(),
+            )
+            .await
+            .expect("put other");
+    })
+    .await
+    .expect("a stalled transfer must not hold the transfer permit");
+
+    // The stalled transfers complete once they resume.
+    while let Some(chunk) = stalled_read.next().await {
+        downloaded.extend_from_slice(&chunk.expect("resumed chunk"));
+    }
+    assert_eq!(downloaded, large);
+    release.send(()).expect("release the stalled upload");
+    upload
+        .await
+        .expect("upload task")
+        .expect("resumed upload completes");
+    let written = store.get_blob("stalled/write.bin").await.expect("get");
+    assert_eq!(
+        collect_storage_stream(written.body).await.expect("collect"),
+        Bytes::from_static(b"stalled upload, resumed")
+    );
+}
+
+/// Writers on separate connections, as separate hosts would be, race to
+/// publish the same key. Their bodies finish together, so the publishes
+/// meet at the server. Exactly one may create the key, and it must hold that
+/// writer's complete content.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the managed Samba container harness"]
+async fn samba_racing_conditional_creates_have_exactly_one_winner() {
+    const WRITERS: usize = 4;
+    const ROUNDS: usize = 25;
+    let root = format!("graphql-orm-storage-tests/{}", Uuid::new_v4());
+    let mut stores = Vec::new();
+    for _ in 0..WRITERS {
+        stores.push(Arc::new(
+            SmbStorageBackend::connect(test_config(root.clone()))
+                .await
+                .expect("connect writer"),
+        ));
+    }
+    for round in 0..ROUNDS {
+        let key = format!("race/lock-{round}.bin");
+        let ready = Arc::new(tokio::sync::Barrier::new(WRITERS));
+        let mut writers = Vec::new();
+        for (writer, store) in stores.iter().enumerate() {
+            let store = Arc::clone(store);
+            let ready = Arc::clone(&ready);
+            let key = key.clone();
+            let content = Bytes::from(
+                format!("round {round} writer {writer} ")
+                    .repeat(2_048)
+                    .into_bytes(),
+            );
+            writers.push(tokio::spawn(async move {
+                let head = content.slice(..content.len() / 2);
+                let tail = content.slice(content.len() / 2..);
+                let body = stream::once(async move { Ok(head) }).chain(stream::once(async move {
+                    // Every writer has started before any finishes its body.
+                    ready.wait().await;
+                    Ok(tail)
+                }));
+                let created = store
+                    .put_blob_if_not_exists(
+                        &key,
+                        StorageByteStream::new(Box::pin(body)),
+                        BlobPutOptions::default(),
+                    )
+                    .await
+                    .expect("conditional create");
+                (created.is_some(), content)
+            }));
+        }
+        let mut winners = Vec::new();
+        for writer in writers {
+            let (created, content) = writer.await.expect("writer task");
+            if created {
+                winners.push(content);
+            }
+        }
+        assert_eq!(
+            winners.len(),
+            1,
+            "round {round}: exactly one writer creates the key"
+        );
+        let stored = stores[0].get_blob(&key).await.expect("get");
+        assert_eq!(
+            collect_storage_stream(stored.body).await.expect("collect"),
+            winners[0],
+            "round {round}: the key holds the winner's complete content"
+        );
+    }
+    assert_eq!(
+        stores[0].list_blobs("race/").await.expect("list").len(),
+        ROUNDS
+    );
+}

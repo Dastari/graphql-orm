@@ -1,7 +1,10 @@
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, SystemTime},
 };
 
@@ -231,23 +234,15 @@ impl BlobStore for LocalStorageBackend {
     ) -> Result<BlobWriteOutcome, StorageError> {
         self.ensure_internal_dir();
         let path = self.path_for(key)?;
-        let temp_path = temp_path_for(&path, key)?;
+        let temp = TempFile::new(temp_path_for(&path, key)?);
         self.create_parent_dir(&path).await?;
 
-        let write_result = write_stream_to_temp(&temp_path, body).await;
-        let outcome = match write_result {
-            Ok(outcome) => outcome,
-            Err(err) => {
-                let _ = tokio::fs::remove_file(&temp_path).await;
-                return Err(err);
-            }
-        };
-
-        if let Err(source) = tokio::fs::rename(&temp_path, &path).await {
-            let _ = tokio::fs::remove_file(&temp_path).await;
+        let outcome = write_stream_to_temp(&temp, body).await?;
+        if let Err(source) = tokio::fs::rename(temp.path(), &path).await {
             return Err(StorageError::io(&path, source));
         }
-        trace_published(Some(&temp_path), &path);
+        trace_published(Some(temp.path()), &path);
+        temp.published();
         sync_entry(&path).await?;
 
         Ok(outcome)
@@ -261,21 +256,14 @@ impl BlobStore for LocalStorageBackend {
     ) -> Result<Option<BlobWriteOutcome>, StorageError> {
         self.ensure_internal_dir();
         let path = self.path_for(key)?;
-        let temp_path = temp_path_for(&path, key)?;
+        let temp = TempFile::new(temp_path_for(&path, key)?);
         self.create_parent_dir(&path).await?;
 
-        let outcome = match write_stream_to_temp(&temp_path, body).await {
-            Ok(outcome) => outcome,
-            Err(err) => {
-                let _ = tokio::fs::remove_file(&temp_path).await;
-                return Err(err);
-            }
-        };
-
-        match tokio::fs::hard_link(&temp_path, &path).await {
+        let outcome = write_stream_to_temp(&temp, body).await?;
+        match tokio::fs::hard_link(temp.path(), &path).await {
             Ok(()) => {
-                trace_published(Some(&temp_path), &path);
-                let _ = tokio::fs::remove_file(&temp_path).await;
+                trace_published(Some(temp.path()), &path);
+                temp.remove().await;
                 // One directory sync covers the new link and the temp removal.
                 // The key now exists, so a retry would find it taken: a failed
                 // sync reports a non-retryable, outcome-unknown error.
@@ -285,13 +273,13 @@ impl BlobStore for LocalStorageBackend {
                 Ok(Some(outcome))
             }
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                let _ = tokio::fs::remove_file(&temp_path).await;
+                temp.remove().await;
                 // Make the existing entry this call observed durable too.
                 sync_entry(&path).await?;
                 Ok(None)
             }
             Err(source) => {
-                let _ = tokio::fs::remove_file(&temp_path).await;
+                temp.remove().await;
                 Err(StorageError::io(&path, source))
             }
         }
@@ -414,32 +402,29 @@ impl BlobStore for LocalStorageBackend {
         self.ensure_internal_dir();
         let from_path = self.path_for(from)?;
         let to_path = self.path_for(to)?;
-        let temp_path = temp_path_for(&to_path, to)?;
+        let temp = TempFile::new(temp_path_for(&to_path, to)?);
         self.create_parent_dir(&to_path).await?;
 
-        match tokio::fs::copy(&from_path, &temp_path).await {
+        let source = from_path.clone();
+        match temp
+            .run_blocking(move |temp_path| std::fs::copy(&source, temp_path))
+            .await
+        {
             Ok(_) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                let _ = tokio::fs::remove_file(&temp_path).await;
                 return Err(StorageError::MissingBlob {
                     key: from.to_string(),
                 });
             }
-            Err(source) => {
-                let _ = tokio::fs::remove_file(&temp_path).await;
-                return Err(StorageError::io(&from_path, source));
-            }
+            Err(source) => return Err(StorageError::io(&from_path, source)),
         }
-        if let Err(err) = sync_written_file(&temp_path).await {
-            let _ = tokio::fs::remove_file(&temp_path).await;
-            return Err(err);
-        }
+        sync_written_file(temp.path()).await?;
 
-        if let Err(source) = tokio::fs::rename(&temp_path, &to_path).await {
-            let _ = tokio::fs::remove_file(&temp_path).await;
+        if let Err(source) = tokio::fs::rename(temp.path(), &to_path).await {
             return Err(StorageError::io(&to_path, source));
         }
-        trace_published(Some(&temp_path), &to_path);
+        trace_published(Some(temp.path()), &to_path);
+        temp.published();
         sync_entry(&to_path).await
     }
 
@@ -522,13 +507,11 @@ impl StreamingObjectStore for LocalStorageBackend {
         self.ensure_internal_dir();
         let object_path = self.object_path_for(bucket, key)?;
         let metadata_path = self.object_metadata_path_for(bucket, key)?;
-        let temp_path = temp_path_for(&object_path, key)?;
-        let metadata_temp_path = temp_path_for(&metadata_path, key)?;
+        let temp = TempFile::new(temp_path_for(&object_path, key)?);
+        let metadata_temp = TempFile::new(temp_path_for(&metadata_path, key)?);
         self.create_parent_dir(&object_path).await?;
         self.create_parent_dir(&metadata_path).await?;
-        let file = tokio::fs::File::create(&temp_path)
-            .await
-            .map_err(|source| StorageError::io(&temp_path, source))?;
+        let file = temp.create().await?;
 
         Ok(Box::new(LocalMultipartWriter {
             bucket: bucket.to_string(),
@@ -536,9 +519,9 @@ impl StreamingObjectStore for LocalStorageBackend {
             content_type,
             metadata,
             object_path,
-            temp_path,
+            temp,
             metadata_path,
-            metadata_temp_path,
+            metadata_temp,
             file,
             hasher: Sha256::new(),
             size_bytes: 0,
@@ -678,9 +661,11 @@ struct LocalMultipartWriter {
     content_type: Option<String>,
     metadata: ObjectMetadata,
     object_path: PathBuf,
-    temp_path: PathBuf,
+    /// Removes the staged object if the writer is dropped unfinished.
+    temp: TempFile,
     metadata_path: PathBuf,
-    metadata_temp_path: PathBuf,
+    /// Removes the staged metadata if the writer is dropped unfinished.
+    metadata_temp: TempFile,
     file: tokio::fs::File,
     hasher: Sha256,
     size_bytes: u64,
@@ -696,15 +681,15 @@ impl MultipartWriter for LocalMultipartWriter {
         self.file
             .write_all(&bytes)
             .await
-            .map_err(|source| StorageError::io(&self.temp_path, source))
+            .map_err(|source| StorageError::io(self.temp.path(), source))
     }
 
     async fn complete(mut self: Box<Self>) -> Result<ObjectInfo, StorageError> {
         self.file
             .flush()
             .await
-            .map_err(|source| StorageError::io(&self.temp_path, source))?;
-        sync_file(&self.file, &self.temp_path).await?;
+            .map_err(|source| StorageError::io(self.temp.path(), source))?;
+        sync_file(&self.file, self.temp.path()).await?;
 
         let sha256_hex = format!("{:x}", self.hasher.finalize());
         let object = ObjectInfo {
@@ -718,20 +703,21 @@ impl MultipartWriter for LocalMultipartWriter {
             last_modified: OffsetDateTime::now_utc(),
         };
 
-        write_object_metadata(&self.metadata_temp_path, &object).await?;
+        write_object_metadata(&self.metadata_temp, &object).await?;
 
-        if let Err(source) = tokio::fs::rename(&self.temp_path, &self.object_path).await {
-            let _ = tokio::fs::remove_file(&self.temp_path).await;
-            let _ = tokio::fs::remove_file(&self.metadata_temp_path).await;
+        // A failure or cancellation before each rename removes the staged
+        // files that remain.
+        if let Err(source) = tokio::fs::rename(self.temp.path(), &self.object_path).await {
             return Err(StorageError::io(&self.object_path, source));
         }
-        trace_published(Some(&self.temp_path), &self.object_path);
-        if let Err(source) = tokio::fs::rename(&self.metadata_temp_path, &self.metadata_path).await
+        self.temp.mark_published();
+        trace_published(Some(self.temp.path()), &self.object_path);
+        if let Err(source) = tokio::fs::rename(self.metadata_temp.path(), &self.metadata_path).await
         {
-            let _ = tokio::fs::remove_file(&self.metadata_temp_path).await;
             return Err(StorageError::io(&self.metadata_path, source));
         }
-        trace_published(Some(&self.metadata_temp_path), &self.metadata_path);
+        self.metadata_temp.mark_published();
+        trace_published(Some(self.metadata_temp.path()), &self.metadata_path);
         sync_entry(&self.object_path).await?;
         sync_entry(&self.metadata_path).await?;
 
@@ -739,19 +725,20 @@ impl MultipartWriter for LocalMultipartWriter {
     }
 
     async fn abort(self: Box<Self>) -> Result<(), StorageError> {
-        drop(self.file);
-        let temp_result = tokio::fs::remove_file(&self.temp_path).await;
-        let metadata_result = tokio::fs::remove_file(&self.metadata_temp_path).await;
+        let writer = *self;
+        drop(writer.file);
+        let temp_result = tokio::fs::remove_file(writer.temp.path()).await;
+        let metadata_result = tokio::fs::remove_file(writer.metadata_temp.path()).await;
 
         match temp_result {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(source) => return Err(StorageError::io(&self.temp_path, source)),
+            Err(source) => return Err(StorageError::io(writer.temp.path(), source)),
         }
         match metadata_result {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(source) => Err(StorageError::io(&self.metadata_temp_path, source)),
+            Err(source) => Err(StorageError::io(writer.metadata_temp.path(), source)),
         }
     }
 }
@@ -983,6 +970,95 @@ impl LocalStorageBackend {
 /// A target whose name is itself a temporary name is refused, so that listing
 /// and [`LocalStorageBackend::sweep_temp_files`] never mistake a caller's
 /// object for an interrupted upload.
+/// A temporary file a write owns until it publishes it. Dropping the guard
+/// before then, as a failed write or a cancelled or dropped write future does,
+/// removes the file, so an abandoned write leaves nothing behind.
+pub(crate) struct TempFile {
+    path: PathBuf,
+    /// Set once the file is renamed into place or removed on purpose.
+    released: bool,
+    /// Set when the guard is dropped while it still owns the file; a blocking
+    /// operation still running then removes what it created.
+    abandoned: Arc<AtomicBool>,
+}
+
+impl TempFile {
+    pub(crate) fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            released: false,
+            abandoned: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Runs `operation`, which may create the file, on the blocking pool. A
+    /// blocking task cannot be cancelled, so if this guard is dropped while
+    /// it runs, the task removes the file once `operation` returns.
+    pub(crate) async fn run_blocking<T, F>(&self, operation: F) -> std::io::Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Path) -> std::io::Result<T> + Send + 'static,
+    {
+        let path = self.path.clone();
+        let abandoned = Arc::clone(&self.abandoned);
+        tokio::task::spawn_blocking(move || {
+            let result = operation(&path);
+            // Pairs with the store in `Drop`: either the guard sees this
+            // file and removes it, or this task sees the guard gone.
+            if abandoned.load(Ordering::SeqCst) {
+                let _ = std::fs::remove_file(&path);
+            }
+            result
+        })
+        .await
+        .map_err(std::io::Error::other)?
+    }
+
+    /// Creates the file for writing.
+    pub(crate) async fn create(&self) -> Result<tokio::fs::File, StorageError> {
+        self.run_blocking(|path| std::fs::File::create(path))
+            .await
+            .map(tokio::fs::File::from_std)
+            .map_err(|source| StorageError::io(&self.path, source))
+    }
+
+    /// Records that the file was renamed into place, so dropping the guard
+    /// leaves the published path alone.
+    pub(crate) fn mark_published(&mut self) {
+        self.released = true;
+    }
+
+    /// Consumes the guard after the file was renamed into place.
+    pub(crate) fn published(mut self) {
+        self.mark_published();
+    }
+
+    /// Removes the file, ignoring a failure. If this is cancelled, dropping
+    /// the guard still removes it.
+    pub(crate) async fn remove(mut self) {
+        let _ = tokio::fs::remove_file(&self.path).await;
+        self.released = true;
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+        self.abandoned.store(true, Ordering::SeqCst);
+        // Blocking on purpose: `Drop` cannot await, and a spawned removal
+        // may never run if the runtime is shutting down. It is one unlink of a
+        // unique name; a write still in flight keeps its descriptor and
+        // finishes harmlessly.
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 pub(crate) fn temp_path_for(path: &Path, key: &str) -> Result<PathBuf, StorageError> {
     let invalid = || StorageError::InvalidStorageKey {
         key: key.to_string(),
@@ -998,12 +1074,11 @@ pub(crate) fn temp_path_for(path: &Path, key: &str) -> Result<PathBuf, StorageEr
 }
 
 async fn write_stream_to_temp(
-    temp_path: &Path,
+    temp: &TempFile,
     body: StorageByteStream,
 ) -> Result<BlobWriteOutcome, StorageError> {
-    let mut file = tokio::fs::File::create(temp_path)
-        .await
-        .map_err(|source| StorageError::io(temp_path, source))?;
+    let temp_path = temp.path();
+    let mut file = temp.create().await?;
     let mut stream = body.into_inner();
     let mut hasher = Sha256::new();
     let mut size_bytes = 0_u64;
@@ -1028,15 +1103,14 @@ async fn write_stream_to_temp(
     })
 }
 
-async fn write_object_metadata(path: &Path, object: &ObjectInfo) -> Result<(), StorageError> {
+async fn write_object_metadata(temp: &TempFile, object: &ObjectInfo) -> Result<(), StorageError> {
+    let path = temp.path();
     let bytes = serde_json::to_vec(object).map_err(|source| StorageError::Provider {
         backend: StorageBackend::Local.as_str().to_string(),
         message: format!("local object metadata could not be serialized: {source}"),
         retryable: false,
     })?;
-    let mut file = tokio::fs::File::create(path)
-        .await
-        .map_err(|source| StorageError::io(path, source))?;
+    let mut file = temp.create().await?;
     file.write_all(&bytes)
         .await
         .map_err(|source| StorageError::io(path, source))?;

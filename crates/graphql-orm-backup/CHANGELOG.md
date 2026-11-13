@@ -10,6 +10,19 @@ supersedes: []
 
 # Changelog
 
+## 0.16.0 (unreleased)
+
+Requires `graphql-orm-storage` 0.11.0. See [MIGRATION.md](MIGRATION.md).
+
+- On native SMB, content objects and locks written with
+  `put_blob_if_not_exists` appear only once complete. Two backups that store
+  the same content object at once no longer race on a partly written object:
+  the second backup found the key taken while the first was still writing
+  it, and could fail if it then read the object, or if the first write failed
+  and removed it. ([#475](https://github.com/Dastari/graphql-orm/issues/475))
+- The SMB guide describes the lock primitive as a non-replacing hard link of
+  a complete temporary file instead of `FILE_CREATE`.
+
 ## 0.15.0 (unreleased)
 
 Requires `graphql-orm-storage` 0.10.0. See [MIGRATION.md](MIGRATION.md).

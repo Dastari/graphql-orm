@@ -1074,3 +1074,133 @@ async fn local_keys_may_contain_colons_outside_windows() {
     assert_eq!(objects.len(), 1);
     assert_eq!(objects[0].key, "a:b");
 }
+
+/// Every file under `root`, relative to it, the internal directory included.
+fn files_under(root: &std::path::Path) -> Vec<String> {
+    let mut files = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).expect("read dir") {
+            let entry = entry.expect("entry");
+            let path = entry.path();
+            if entry.file_type().expect("file type").is_dir() {
+                pending.push(path);
+            } else {
+                files.push(
+                    path.strip_prefix(root)
+                        .expect("under root")
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+/// A body that yields one chunk, signals that it was taken, then never ends.
+fn stalled_body() -> (StorageByteStream, tokio::sync::oneshot::Receiver<()>) {
+    use futures_util::{StreamExt, stream};
+    let (taken_tx, taken_rx) = tokio::sync::oneshot::channel();
+    let body = stream::once(async move {
+        let _ = taken_tx.send(());
+        Ok(Bytes::from_static(b"first chunk of an abandoned upload"))
+    })
+    .chain(stream::pending());
+    (StorageByteStream::new(Box::pin(body)), taken_rx)
+}
+
+/// Polls `write` until its body has handed over the first chunk, then drops
+/// it, as a cancelled request or an aborted task does.
+async fn abandon_mid_write<F: std::future::Future>(
+    write: F,
+    taken: tokio::sync::oneshot::Receiver<()>,
+) {
+    tokio::select! {
+        _ = write => panic!("a stalled write must not complete"),
+        taken = taken => taken.expect("body polled"),
+    }
+    // Give the first chunk's write time to reach the file.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+}
+
+#[tokio::test]
+async fn local_blob_writes_abandoned_mid_stream_leave_no_temp_files() {
+    let temp = TempDir::new().expect("temp dir");
+    let backend = LocalStorageBackend::new(temp.path());
+
+    let (body, taken) = stalled_body();
+    abandon_mid_write(
+        backend.put_blob("nested/put.bin", body, BlobPutOptions::default()),
+        taken,
+    )
+    .await;
+    assert_eq!(files_under(temp.path()), Vec::<String>::new(), "put_blob");
+
+    let (body, taken) = stalled_body();
+    abandon_mid_write(
+        backend.put_blob_if_not_exists("nested/create.bin", body, BlobPutOptions::default()),
+        taken,
+    )
+    .await;
+    assert_eq!(
+        files_under(temp.path()),
+        Vec::<String>::new(),
+        "put_blob_if_not_exists"
+    );
+    // Neither abandoned write took its key.
+    assert!(
+        backend
+            .put_blob_if_not_exists(
+                "nested/create.bin",
+                StorageByteStream::from_bytes(Bytes::from_static(b"whole")),
+                BlobPutOptions::default(),
+            )
+            .await
+            .expect("create")
+            .is_some()
+    );
+    assert_eq!(files_under(temp.path()), ["nested/create.bin"]);
+}
+
+#[tokio::test]
+async fn local_object_writes_abandoned_mid_stream_leave_no_temp_files() {
+    use graphql_orm_storage::StreamingObjectStore;
+
+    let temp = TempDir::new().expect("temp dir");
+    let backend = LocalStorageBackend::new(temp.path());
+
+    let (body, taken) = stalled_body();
+    abandon_mid_write(
+        backend.put_object_stream("bucket", "streamed.bin", None, Default::default(), body),
+        taken,
+    )
+    .await;
+    assert_eq!(
+        files_under(temp.path()),
+        Vec::<String>::new(),
+        "put_object_stream"
+    );
+
+    // A multipart writer dropped without completing or aborting.
+    let mut writer = backend
+        .create_multipart_object("bucket", "dropped.bin", None, Default::default())
+        .await
+        .expect("writer");
+    writer
+        .write_chunk(Bytes::from_static(b"part of a dropped writer"))
+        .await
+        .expect("chunk");
+    assert_eq!(
+        files_under(temp.path()).len(),
+        1,
+        "the writer stages a file"
+    );
+    drop(writer);
+    assert_eq!(
+        files_under(temp.path()),
+        Vec::<String>::new(),
+        "dropped multipart writer"
+    );
+}
