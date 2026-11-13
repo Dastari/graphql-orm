@@ -12,9 +12,13 @@ supersedes: []
 
 ## 0.17.0 (unreleased)
 
-- `AcceptSealedLegacy` migrates authenticated format-2 repositories without accepting
-  unsealed format 1. `TrustPinned` now requires a sealed format-2 manifest; only
-  the explicitly unsafe `TrustUnauthenticated` policy accepts format 1.
+- `AcceptSealedLegacy` authenticates format-2 content without repository binding;
+  use it only with keys never shared across repositories and legacy snapshot ids
+  known from host records. Compaction requires an individual `TrustPinned`
+  checksum for every format-2 input before creating a format-3 synthetic full.
+- `TrustPinned` accepts format 1 and format 2 against independent host-held
+  checksums; format 2 also requires its original seal. `TrustUnauthenticated`
+  alone accepts format 1 without host-held authentication.
 - Backup, incremental and compaction validate the repository identity under the
   lock before exporting or writing payloads. Incremental indexes derive object
   references from the exported changes and fail closed without that contract.

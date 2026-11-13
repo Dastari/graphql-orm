@@ -308,11 +308,7 @@ pub fn verify_manifest_authenticity(
         }
         (LEGACY_BACKUP_FORMAT_VERSION, None) => {
             verify_manifest_checksum(manifest)?;
-            let trusted = matches!(
-                authenticator.legacy_manifest_policy(),
-                crate::LegacyManifestPolicy::TrustUnauthenticated
-            );
-            if !trusted {
+            if !trusts_legacy_manifest(authenticator, manifest) {
                 return Err(BackupError::LegacyManifestRefused {
                     snapshot_id: manifest.snapshot_id,
                 });
@@ -807,8 +803,8 @@ fn trusts_legacy_manifest(
         crate::LegacyManifestPolicy::TrustPinned(pins) => {
             pins.get(&manifest.snapshot_id) == Some(&manifest.checksum)
         }
-        crate::LegacyManifestPolicy::AcceptSealedLegacy
-        | crate::LegacyManifestPolicy::TrustUnauthenticated => true,
+        crate::LegacyManifestPolicy::AcceptSealedLegacy => manifest.format_version == 2,
+        crate::LegacyManifestPolicy::TrustUnauthenticated => true,
         crate::LegacyManifestPolicy::Refuse => false,
     }
 }

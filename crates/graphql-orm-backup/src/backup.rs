@@ -512,6 +512,9 @@ async fn create_incremental_backup_inner(
 /// the merged synthetic full against the repository's capacity limits before
 /// writing it, and removes its payloads if it fails or is cancelled before the
 /// manifest write.
+/// Every format-2 input requires its own host-held checksum in
+/// [`crate::LegacyManifestPolicy::TrustPinned`]. A valid unbound seal alone
+/// cannot establish the repository provenance of the synthetic full.
 ///
 /// # Errors
 ///
@@ -560,7 +563,21 @@ async fn compact_chain_inner(
     options.cancellation.check()?;
     let limits = repository.capacity_limits();
     let chain = load_manifest_chain(repository, request.source_snapshot_id).await?;
+    let legacy_pins = match required_authenticator(repository)?.legacy_manifest_policy() {
+        crate::LegacyManifestPolicy::TrustPinned(pins) => Some(pins),
+        _ => None,
+    };
     for manifest in &chain {
+        if manifest.format_version == 2
+            && legacy_pins.and_then(|pins| pins.get(&manifest.snapshot_id))
+                != Some(&manifest.checksum)
+        {
+            // A format-2 seal authenticates content, not its repository. Only
+            // independent host records may authorize binding it to this one.
+            return Err(BackupError::LegacyManifestRefused {
+                snapshot_id: manifest.snapshot_id,
+            });
+        }
         crate::verify::verify_manifest_and_objects_unlocked(
             repository,
             manifest,

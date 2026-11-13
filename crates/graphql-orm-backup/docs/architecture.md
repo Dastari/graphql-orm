@@ -29,7 +29,8 @@ key and an independently retained repository identity:
   (`BackupRepository::manifest_authenticator`), the same way capacity limits
   do. A handle without one fails closed: no manifest is read, sealed or
   written, and backups refuse to start.
-- Every path that reads a manifest verifies its seal before using it: restore,
+- Every path that reads a manifest verifies its seal or enforces the configured
+  legacy trust policy described below before use: restore,
   object restore (which re-checks a caller-supplied manifest), verification,
   compaction, pruning and snapshot deletion. Payload digests are trusted only
   because a verified manifest names them.
@@ -56,14 +57,26 @@ key and an independently retained repository identity:
   `BlobStoreRestoreObjectSink` writes only inside an explicit
   `RestoreKeyScope` and never overwrites existing content.
 
-Legacy manifests (format version 1, written before sealing existed) carry no
-seal. Only the explicit `TrustUnauthenticated` policy accepts this unauthenticated
-content. The
-snapshot-path, content-key and restore-target checks still apply to them.
-Format 2 seals are authenticated but lack repository binding, so they also
-require `AcceptSealedLegacy` (or trusted format-2 checksum pins). Their original MAC is still checked; accepted
-older formats do not require an identity record. See the
-[migration guide](../MIGRATION.md).
+Format 1 has no seal. `TrustPinned` authenticates its content against an
+independently retained checksum; `TrustUnauthenticated` is the only policy that
+accepts it without host-held authentication. Snapshot-path, content-key and
+restore-target checks still apply.
+
+Format 2 has a host-keyed seal but no repository binding. `AcceptSealedLegacy`
+authenticates content with the key, but does not bind it to this repository.
+Use it only when that key was never shared across repositories; otherwise use
+`TrustPinned` with independently recorded checksums. A format-2 manifest copied
+between repositories sharing a key can load, verify and restore under
+`AcceptSealedLegacy`. Code cannot detect that provenance, and format 2 cannot
+be bound after the fact. Its original MAC is always checked.
+
+Do not compact or prune legacy snapshots based on `AcceptSealedLegacy` unless
+their ids are known from host records. A copied snapshot can count toward
+retention's `keep_last`. Compaction additionally requires `TrustPinned` for
+every format-2 input before producing a format-3 synthetic full, including all
+format-2 parents. The resulting seal binds the new artifact, not the historical
+provenance of its inputs. Accepted legacy reads need no repository identity
+record. See the [migration policy table](../MIGRATION.md).
 
 Residual risks the host owns: a repository writer can still delete snapshots,
 withhold the newest ones, or replace an entire repository including its identity
@@ -72,7 +85,8 @@ storage with `with_repository_identity` to detect replacement of the record
 itself; the identity record is not a trust anchor. Unpinned format 3 operations
 fail closed. Keep independent copies, and choose the snapshot id to restore from host
 records rather than from the repository listing alone. Sealed manifests are
-not encrypted.
+not encrypted. Previously valid pruned snapshots can be replayed; there is no
+host-held revocation or live-snapshot index in this implementation.
 
 ## Collaborating Components
 

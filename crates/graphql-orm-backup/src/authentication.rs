@@ -102,7 +102,8 @@ impl std::fmt::Debug for ManifestKey {
 
 /// How manifests written before repository identity binding are treated.
 ///
-/// Format 1 has no seal; accepting it trusts the repository's contents.
+/// Format 1 has no seal; it needs a host-held checksum pin or explicit trust
+/// in unauthenticated repository contents.
 /// Format 2 has a host-keyed seal but no repository identity. Repository reads
 /// require explicit legacy trust for either format, and still authenticate a
 /// format 2 seal. Content-key and restore-target checks always apply.
@@ -114,10 +115,19 @@ pub enum LegacyManifestPolicy {
     Refuse,
     /// Accept only format-2 manifests whose original host-keyed seal verifies.
     /// Refuses unsealed format 1 and never adopts a repository identity.
+    ///
+    /// This authenticates content with the key, but does not bind it to this
+    /// repository. Use it only if the key was never shared across repositories;
+    /// otherwise use [`Self::TrustPinned`] with independently recorded checksums.
+    /// Do not prune legacy snapshots unless their ids are known from host records.
+    /// Compaction refuses format-2 inputs under this policy: every such input
+    /// must instead be individually pinned through [`Self::TrustPinned`].
     AcceptSealedLegacy,
-    /// Accept only the listed sealed format-2 snapshots, each with the manifest
+    /// Accept only the listed format-1 or format-2 snapshots, each with the manifest
     /// `checksum` the host recorded while it still trusted the repository.
     /// A manifest whose contents differ from the pinned checksum is refused.
+    /// The independent checksum authenticates format 1 even though it has no
+    /// seal; format 2 must also pass its original host-keyed seal verification.
     TrustPinned(BTreeMap<Uuid, String>),
     /// Accept unauthenticated format-1 content as well as sealed format 2.
     ///
@@ -125,7 +135,9 @@ pub enum LegacyManifestPolicy {
     /// A repository writer can forge a format-1 manifest and recompute its plain
     /// checksum. This policy accepts that unauthenticated content. Use it only
     /// after an explicit host decision to trust historical unsealed data. For
-    /// sealed backups use [`LegacyManifestPolicy::AcceptSealedLegacy`] instead.
+    /// Prefer [`Self::TrustPinned`] with independent checksum records. Sealed
+    /// backups whose key was never shared across repositories can also use
+    /// [`Self::AcceptSealedLegacy`], subject to its provenance restrictions.
     TrustUnauthenticated,
 }
 
