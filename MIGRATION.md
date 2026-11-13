@@ -10,6 +10,153 @@ supersedes: []
 
 # Migration Guide
 
+## 0.132.0 to 0.133.0: reserved runtime table names
+
+Upgrade runtime and macros together, and AI to 0.136.0 if you use it. No data
+migration is needed.
+
+### Reserved table names
+
+`RuntimeSchema::validate` now refuses a collection `physical_table` or a
+join-table `physical_table` that starts with `pg_`, `sqlite_`, `pragma_`,
+`__graphql_orm_` or `graphql_orm_` (`RESERVED_PHYSICAL_TABLE_PREFIXES`), or that
+is one of the exact names in `RESERVED_PHYSICAL_TABLE_NAMES`: SQLite's
+table-valued functions `dbstat`, `generate_series`, `json_each`, `json_tree`,
+`jsonb_each` and `jsonb_tree`, and SQL Server's backward-compatibility views
+such as `sysobjects`, `syscolumns`, `sysindexes`, `sysusers`, `syslogins` and
+`sysdatabases` (the constant's documentation has the full list). Collections
+report `InvalidPhysicalName`; join relations report `InvalidJoinTable`. A
+prefix is reserved only at the start of a name, and the exact names only
+exactly, so `app_pg_roles`, `system_settings` and `sysobjects_archive` are
+unaffected.
+
+Companion packages and repository-only code that describe their own
+`graphql_orm_` tables use
+`RuntimeSchema::validate_with_reserved_tables(&["graphql_orm_…", …])` with the
+exact table names. The allowance is a code argument and is never read from a
+stored definition. It cannot admit any other reserved prefix or name.
+
+A stored catalog with any other reserved name no longer validates. There is no
+rename in the runtime planner, so move the data first:
+
+1. Change the definition to a new, unreserved `physical_table`.
+2. Plan and apply the owned migration, which creates the new table.
+3. Copy the rows from the old table with host SQL, then drop the old table
+   when nothing else uses it. `ManagedTableSet::new` is host-trusted ownership,
+   not a definition, and still accepts the old reserved-prefixed name (other
+   than `__graphql_orm_`), so you can keep it in the set to review the guarded
+   drop, or leave it out afterwards.
+
+### Runtime schemas carry table authority
+
+This is unchanged by design. `physical_table` is authority-bearing: a runtime
+schema can name any other application table and read or write it with the
+host connection's privileges, and PostgreSQL names are not schema-qualified.
+Accept runtime schema definitions only from trusted sources, and share a table
+with a static entity or another schema only on purpose.
+
+### Literal defaults
+
+PostgreSQL runtime literal defaults that contain a backslash are now written
+as `E'…'` escape strings, and every bytes default as `E'\\x…'::bytea`, so
+default values are preserved exactly under either `standard_conforming_strings`
+setting. Owned PostgreSQL introspection reads the session's setting with the
+catalog and interprets deparsed defaults accordingly, so plans do not depend on
+it. Introspection changes no session state. Columns that earlier releases created
+with the plain `'…'` spelling compare equal to the new target, so replanning an
+existing database plans no change. Target schema and plan hashes for schemas
+with such defaults change. No action is needed.
+
+A string default that contains a NUL character is now refused at validation
+on every backend: `RuntimeSchema::validate` reports `InvalidDefault` with
+`RuntimeDefaultProblem::NulCharacter`, and no physical schema is produced for
+it. Remove the NUL character from the default.
+
+## 0.132.0 to 0.133.0: repository limits and offsets count visible rows
+
+Upgrade runtime and macros together. No schema or data migration is needed.
+
+When the row policy decides rows in Rust, `limit(n)` and `offset(k)` count the
+rows `can_read_row` allows, and a page is either complete or the read fails.
+The row policy decides rows in Rust when a row policy is installed and
+`RowPolicy::read_visibility` returns `CallbackOnly` or `Prefilter` for the
+Repository surface (the default `read_visibility` returns `CallbackOnly`).
+`Entity::query(&db)` and `tx.query::<T>()` add a `Prefilter` or `Complete`
+predicate to their SQL, so a `Complete` decision keeps one SQL query. The
+search executors do not receive the predicate, so `search_db` also counts
+visible hits under `Complete`. This applies to
+`Entity::query(&db)` (`RepositoryQuery`), `tx.query::<T>()` (`fetch_all` and
+`fetch_one`) and `search_db` (`RepositorySearchQuery`), including
+`fetch_first` and `fetch_optional_one`:
+
+- A page holds up to `n` visible rows; a shorter page means no more visible
+  rows match.
+- `offset(k)` skips `k` visible rows, so consecutive pages cover the visible
+  rows.
+- `fetch_optional_one` fails when two rows are visible.
+
+The read scans ordered batches of candidate rows until the page is complete.
+A scan, limited or not, takes at most `PaginationConfig::max_scanned_rows`
+candidate rows, `10_000` by default, plus one look-ahead row. Unlimited reads
+under a residual decision are bounded as follows:
+
+- `Entity::query(&db)` and `tx.query::<T>()`: both the existing `max_limit`
+  rule (counting matching rows after the skipped ones, before row policy) and
+  the candidate budget apply, and whichever is reached first refuses the read
+  with `PAGE_LIMIT_EXCEEDED`.
+- `search_db`: only the candidate budget applies. Unlimited search has no
+  `max_limit` refusal, as before; an unlimited search that needs no scan stays
+  unbounded.
+
+The budget bounds scans only: reads
+with no row policy, or with an `Unrestricted` (or, outside `search_db`,
+`Complete`) decision, run as one query as before and are not refused by it.
+If the row callback refuses a row of such a bounded page, the read rescans,
+and the first query's rows count against that rescan's budget. When that budget runs out before the page
+is complete and more rows remain, the read fails with `PAGE_LIMIT_EXCEEDED`.
+Skipped rows count, so a deep `offset` can reach it. Fallback (Rust-scored)
+search reads at most `max_scanned_rows + 1` candidates once and fails with
+`PAGE_LIMIT_EXCEEDED` when more exist. If a trusted read reaches the budget:
+
+- raise it for that read: `.with_max_scanned_rows(n)`;
+- raise it for a handle:
+  `database.clone().with_pagination_config(database.pagination_config().with_max_scanned_rows(Some(n)))`;
+- or narrow the read with a filter.
+
+`PaginationConfig` has a new public field, `max_scanned_rows`. Code that builds
+it with a struct literal must set the field; prefer the constructors
+(`default()`, `secure()`, `legacy()`, `explicit_only`, `unbounded()`) and the
+`with_*` methods. `unbounded()` sets no scan budget.
+
+Batches are separate SQL reads continued by offset, so rows written between
+them can be skipped or returned twice. Read inside a
+`TransactionMode::StateMachine` transaction when a page must be stable.
+
+Reads without a per-row Rust check are unchanged: with no row policy installed,
+or an `Unrestricted` decision, `LIMIT` and `OFFSET` stay in SQL. Unlimited
+`fetch_all` keeps its fail-closed refusal, which counts rows before row policy.
+
+The primary-key tiebreak appended to ordered reads now counts only a term that
+orders directly by the key column. An order such as `CASE WHEN id > 0 THEN 0
+END ASC` now also gets the key tiebreak; orders that already had a direct key
+term are unchanged.
+
+`limit(0)` on `Entity::query(&db)`, `tx.query::<T>()` and `search_db` now
+returns an empty page without reading, after entity authorization, the read
+decision and limit validation.
+
+Two changes apply even with no row policy installed:
+
+- MySQL renders an unlimited read with an offset as
+  `LIMIT 18446744073709551615 OFFSET n`, and SQLite as `LIMIT -1 OFFSET n`,
+  because both reject a bare `OFFSET`.
+- `search_db` now resolves the Repository-surface read decision before it
+  runs the search. Under `AuthorizationMode::DeclaredPoliciesRequired`, an
+  entity that declares a read policy but has no row policy provider is refused
+  with `AUTHORIZATION_MISCONFIGURED` before any read, even when the search
+  would have returned no hits. It was previously refused only when a hit was
+  checked.
+
 ## 0.131.0 to 0.132.0: PostgreSQL catalog reads
 
 Upgrade runtime and macros together. No schema or data migration is needed.

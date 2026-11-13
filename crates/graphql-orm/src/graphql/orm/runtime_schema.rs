@@ -56,6 +56,88 @@ use super::core::{
 /// backends (PostgreSQL truncates at 63 bytes).
 pub const MAX_PHYSICAL_IDENTIFIER_LEN: usize = 63;
 
+/// Physical table-name prefixes a runtime schema may not use: database catalogs
+/// and SQLite pragma functions (`pg_`, `sqlite_`, `pragma_`), ORM
+/// infrastructure (`__graphql_orm_`) and companion-package tables
+/// (`graphql_orm_`). Runtime reads and writes address their tables by bare
+/// name, so a reserved name would address a table the schema does not own.
+///
+/// Only [`ALLOWABLE_RESERVED_TABLE_PREFIX`] names can be admitted, and only
+/// through [`RuntimeSchema::validate_with_reserved_tables`].
+pub const RESERVED_PHYSICAL_TABLE_PREFIXES: &[&str] = &[
+    "pg_",
+    "sqlite_",
+    "pragma_",
+    "__graphql_orm_",
+    "graphql_orm_",
+];
+
+/// Exact physical table names a runtime schema may not use, because they
+/// resolve by bare name to a database object:
+///
+/// - SQLite's built-in table-valued functions (`dbstat`, `generate_series`,
+///   `json_each`, `json_tree`, `jsonb_each`, `jsonb_tree`).
+/// - SQL Server's backward-compatibility views, the SQL Server 2000 system
+///   table names listed in "Mapping System Tables to System Views"
+///   (<https://learn.microsoft.com/en-us/sql/relational-databases/system-tables/mapping-system-tables-to-system-views-transact-sql>)
+///   and described in "System Compatibility Views"
+///   (<https://learn.microsoft.com/en-us/sql/relational-databases/system-compatibility-views/system-compatibility-views-transact-sql>).
+pub const RESERVED_PHYSICAL_TABLE_NAMES: &[&str] = &[
+    "dbstat",
+    "generate_series",
+    "json_each",
+    "json_tree",
+    "jsonb_each",
+    "jsonb_tree",
+    "sysaltfiles",
+    "syscacheobjects",
+    "syscharsets",
+    "syscolumns",
+    "syscomments",
+    "sysconfigures",
+    "sysconstraints",
+    "syscurconfigs",
+    "sysdatabases",
+    "sysdepends",
+    "sysdevices",
+    "sysfilegroups",
+    "sysfiles",
+    "sysforeignkeys",
+    "sysfulltextcatalogs",
+    "sysindexes",
+    "sysindexkeys",
+    "syslanguages",
+    "syslockinfo",
+    "syslocks",
+    "syslogins",
+    "sysmembers",
+    "sysmessages",
+    "sysobjects",
+    "sysoledbusers",
+    "sysopentapes",
+    "sysperfinfo",
+    "syspermissions",
+    "sysprocesses",
+    "sysprotects",
+    "sysreferences",
+    "sysremotelogins",
+    "sysservers",
+    "systypes",
+    "sysusers",
+];
+
+/// The one reserved prefix that host code may admit for exact table names with
+/// [`RuntimeSchema::validate_with_reserved_tables`].
+pub const ALLOWABLE_RESERVED_TABLE_PREFIX: &str = "graphql_orm_";
+
+fn reserved_physical_table(name: &str, allowed: &BTreeSet<&str>) -> bool {
+    let reserved = RESERVED_PHYSICAL_TABLE_PREFIXES
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+        || RESERVED_PHYSICAL_TABLE_NAMES.contains(&name);
+    reserved && !(name.starts_with(ALLOWABLE_RESERVED_TABLE_PREFIX) && allowed.contains(name))
+}
+
 const MAX_STABLE_ID_LEN: usize = 128;
 
 fn valid_stable_id(value: &str) -> bool {
@@ -430,7 +512,8 @@ pub struct RuntimeRelation {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeJoinTable {
-    /// Physical link table identifier.
+    /// Physical link table identifier. Authority-bearing like
+    /// [`RuntimeCollection::physical_table`]; reserved names are refused.
     pub physical_table: String,
     /// The source collection's primary-key fields, in key order, with their link columns.
     pub source: Vec<RuntimeJoinColumn>,
@@ -476,6 +559,14 @@ pub struct RuntimeCollection {
     /// Public plural name used for list roots and connections.
     pub api_plural_name: String,
     /// Physical table identifier.
+    ///
+    /// Authority-bearing: runtime reads, writes and migrations address this
+    /// table by bare name with the host connection's privileges, so only trusted
+    /// definitions may choose it: it can name any other application table, and
+    /// PostgreSQL names are not schema-qualified. Validation refuses
+    /// [`RESERVED_PHYSICAL_TABLE_PREFIXES`] and [`RESERVED_PHYSICAL_TABLE_NAMES`];
+    /// a table shared with another schema or a static entity must be the host's
+    /// deliberate choice.
     pub physical_table: String,
     /// Ordered primary-key fields; at least one is required and none may be nullable.
     pub primary_key: Vec<FieldId>,
@@ -1136,9 +1227,40 @@ impl RuntimeSchema {
     /// Validates the schema, returning every diagnostic found rather than the first.
     ///
     /// A valid schema yields a [`ValidatedRuntimeSchema`], the only type that can produce
-    /// canonical bytes and fingerprints.
+    /// canonical bytes and fingerprints. Every reserved table name is refused
+    /// ([`RESERVED_PHYSICAL_TABLE_PREFIXES`], [`RESERVED_PHYSICAL_TABLE_NAMES`]).
     pub fn validate(self) -> Result<ValidatedRuntimeSchema, RuntimeSchemaDiagnostics> {
+        self.validate_with_reserved_tables(&[])
+    }
+
+    /// [`Self::validate`], admitting the listed exact table names that use
+    /// [`ALLOWABLE_RESERVED_TABLE_PREFIX`].
+    ///
+    /// For trusted host or companion-package code that describes its own
+    /// tables. The allowance is an argument, never part of the schema, so a
+    /// stored or deserialized definition cannot grant it to itself. Every other
+    /// reserved prefix and name stays refused, and an allowance entry outside
+    /// `graphql_orm_` is reported as `InvalidPhysicalName`.
+    pub fn validate_with_reserved_tables(
+        self,
+        allowed_reserved_tables: &[&str],
+    ) -> Result<ValidatedRuntimeSchema, RuntimeSchemaDiagnostics> {
         let mut diagnostics = Vec::new();
+        let allowed = allowed_reserved_tables
+            .iter()
+            .copied()
+            .collect::<BTreeSet<&str>>();
+        for table in &allowed {
+            if !valid_physical_name(table) || !table.starts_with(ALLOWABLE_RESERVED_TABLE_PREFIX) {
+                diagnostics.push(RuntimeSchemaDiagnostic::bare(
+                    RuntimeSchemaDiagnosticCode::InvalidPhysicalName,
+                    format!(
+                        "reserved-table allowance `{}` must be a portable `{ALLOWABLE_RESERVED_TABLE_PREFIX}` table name",
+                        table.escape_debug()
+                    ),
+                ));
+            }
+        }
 
         if self.format_version != RUNTIME_SCHEMA_FORMAT_VERSION {
             diagnostics.push(RuntimeSchemaDiagnostic::bare(
@@ -1365,6 +1487,16 @@ impl RuntimeSchema {
                     format!(
                         "physical_table `{}` is not a portable identifier",
                         collection.physical_table.escape_debug()
+                    ),
+                    cid,
+                    None,
+                ));
+            } else if reserved_physical_table(&collection.physical_table, &allowed) {
+                diagnostics.push(RuntimeSchemaDiagnostic::scoped(
+                    RuntimeSchemaDiagnosticCode::InvalidPhysicalName,
+                    format!(
+                        "physical_table `{}` uses a reserved table prefix or name",
+                        collection.physical_table
                     ),
                     cid,
                     None,
@@ -1992,7 +2124,7 @@ impl RuntimeSchema {
             }
         }
 
-        validate_join_tables(&self, &physical_tables, &mut diagnostics);
+        validate_join_tables(&self, &physical_tables, &allowed, &mut diagnostics);
 
         if diagnostics.is_empty() {
             Ok(ValidatedRuntimeSchema { schema: self })
@@ -2006,6 +2138,7 @@ impl RuntimeSchema {
 fn validate_join_tables(
     schema: &RuntimeSchema,
     collection_tables: &BTreeSet<String>,
+    allowed: &BTreeSet<&str>,
     diagnostics: &mut Vec<RuntimeSchemaDiagnostic>,
 ) {
     let by_id = schema
@@ -2063,13 +2196,15 @@ fn validate_join_tables(
             }
             let mut columns = BTreeSet::new();
             if !valid_physical_name(&join.physical_table)
-                || join.physical_table.starts_with("__graphql_orm_")
+                || reserved_physical_table(&join.physical_table, allowed)
                 || join.source.iter().chain(&join.target).any(|c| {
                     !valid_physical_name(&c.column)
                         || !columns.insert(c.column.to_ascii_lowercase())
                 })
             {
-                problem("join table and column names must be distinct portable identifiers");
+                problem(
+                    "join table and column names must be distinct portable identifiers without a reserved table prefix or name",
+                );
             }
             // The planner also names the link table's target index and PostgreSQL
             // names its primary key `<table>_pkey`; neither may collide.

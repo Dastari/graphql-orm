@@ -162,6 +162,80 @@ fn timestamptz(text: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
     naive.and_local_timezone(offset).single()
 }
 
+/// Rewrites deparsed default text to the spelling it has with
+/// `standard_conforming_strings` on.
+///
+/// PostgreSQL deparses defaults under the session setting. With it on, a plain
+/// `'…'` literal is taken literally and the text is returned unchanged. With it
+/// off, a plain literal processes backslash escapes exactly like an escape
+/// string, so a plain literal that contains a backslash is returned as the
+/// same `E'…'` literal. Escape strings, prefixed literals (`B'…'`, `X'…'`),
+/// quoted identifiers and literals without a backslash are copied unchanged,
+/// so the result means the same value under either setting.
+#[cfg_attr(not(feature = "postgres"), allow(dead_code))]
+pub(super) fn postgres_session_independent_literals(
+    expression: &str,
+    standard_conforming_strings: bool,
+) -> String {
+    if standard_conforming_strings || !expression.contains('\\') {
+        return expression.to_owned();
+    }
+    let bytes = expression.as_bytes();
+    let mut out = String::with_capacity(expression.len() + 4);
+    let mut index = 0;
+    // Copies one quoted run starting at the opening quote; returns its end.
+    let scan = |start: usize, escapes: bool, quote: u8| {
+        let mut end = start + 1;
+        while end < bytes.len() {
+            match bytes[end] {
+                b'\\' if escapes => end += 2,
+                byte if byte == quote => {
+                    if bytes.get(end + 1) == Some(&quote) {
+                        end += 2;
+                    } else {
+                        return end + 1;
+                    }
+                }
+                _ => end += 1,
+            }
+        }
+        bytes.len()
+    };
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => {
+                let end = scan(index, false, b'"');
+                out.push_str(&expression[index..end]);
+                index = end;
+            }
+            b'\'' => {
+                let previous = index.checked_sub(1).map(|i| bytes[i]);
+                let before = index.checked_sub(2).map(|i| bytes[i]);
+                let word = |byte: Option<u8>| {
+                    byte.is_some_and(|b| {
+                        b.is_ascii_alphanumeric() || matches!(b, b'_' | b'&' | b'$')
+                    })
+                };
+                let escape_prefix = matches!(previous, Some(b'e' | b'E')) && !word(before);
+                let other_prefix = !escape_prefix && word(previous);
+                let end = scan(index, !other_prefix, b'\'');
+                let literal = &expression[index..end];
+                if !escape_prefix && !other_prefix && literal.contains('\\') {
+                    out.push('E');
+                }
+                out.push_str(literal);
+                index = end;
+            }
+            _ => {
+                let character = expression[index..].chars().next().expect("in bounds");
+                out.push(character);
+                index += character.len_utf8();
+            }
+        }
+    }
+    out
+}
+
 /// The unescaped constant text, or `None` for any non-constant expression.
 fn constant(class: Class, expression: &str) -> Option<String> {
     if expression.len() > MAX_COMPARED_DEFAULT_BYTES {
@@ -218,6 +292,59 @@ fn constant(class: Class, expression: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::postgres_typed_defaults_equal as equal;
+
+    #[test]
+    fn deparsed_literals_read_the_same_under_either_string_setting() {
+        use super::postgres_session_independent_literals as read;
+        // With the setting on, text is already setting-independent.
+        for text in [
+            r"'a\b'::text",
+            r"E'a\\b'::text",
+            "'plain'::text",
+            r"'\x00ff'::bytea",
+        ] {
+            assert_eq!(read(text, true), text);
+        }
+        // With it off, plain literals that contain a backslash become escape strings.
+        for (off, expected) in [
+            (r"'a\\b'::text", r"E'a\\b'::text"),
+            (r"'it''s \\ x'::text", r"E'it''s \\ x'::text"),
+            (r"'tail\\'' || ''x\\'::text", r"E'tail\\'' || ''x\\'::text"),
+            (r"'a\'b'::text", r"E'a\'b'::text"),
+            (r"'\\x00ff'::bytea", r"E'\\x00ff'::bytea"),
+            (
+                r#"'{"a": "x\\\\y"}'::jsonb"#,
+                r#"E'{"a": "x\\\\y"}'::jsonb"#,
+            ),
+            // Escape strings, prefixed literals, identifiers and literals
+            // without a backslash are unchanged.
+            (r"E'a\\b'::text", r"E'a\\b'::text"),
+            (r"e'a\\b'::text", r"e'a\\b'::text"),
+            ("'plain'::text", "'plain'::text"),
+            (r#"("we'ird\" || 'a\\b')"#, r#"("we'ird\" || E'a\\b')"#),
+            ("B'0101'::\"bit\"", "B'0101'::\"bit\""),
+            (r"concat('a', 'b\\c')", r"concat('a', E'b\\c')"),
+        ] {
+            assert_eq!(read(off, false), expected, "{off}");
+        }
+        // The rewritten text compares by value with the target spelling.
+        assert_eq!(
+            super::postgres_typed_defaults_equal(
+                "bytea",
+                &read(r"'\\x0102'::bytea", false),
+                r"E'\\x0102'::bytea"
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            super::postgres_typed_defaults_equal(
+                "jsonb",
+                &read(r#"'{"a": "x\\\\y"}'::jsonb"#, false),
+                r#"E'{"a":"x\\\\y"}'::jsonb"#
+            ),
+            Some(true)
+        );
+    }
 
     #[test]
     fn deparsed_postgres_constants_compare_by_value() {

@@ -10,6 +10,16 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.133.0 stays aligned with ORM 0.133.0, which refuses reserved runtime
+schema table names and quotes PostgreSQL runtime literal defaults with escape
+strings. Generated code is unchanged. Upgrade ORM/macros together; see the
+[root migration guide](../../MIGRATION.md#01320-to-01330-reserved-runtime-table-names).
+
+Version 0.133.0 also stays aligned with ORM 0.133.0, which makes Rust repository
+`limit` and `offset` count visible rows when the row policy decides rows in
+Rust. Generated code is unchanged. Upgrade ORM/macros together; see the
+[root migration guide](../../MIGRATION.md#01320-to-01330-repository-limits-and-offsets-count-visible-rows).
+
 Version 0.132.0 hardens PostgreSQL catalog reads: they use catalog-defined
 objects regardless of the session's `search_path`. RLS validation pins the
 path to `pg_catalog, pg_temp` in a transaction of its own. Schema

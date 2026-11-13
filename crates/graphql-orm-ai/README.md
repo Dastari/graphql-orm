@@ -12,6 +12,8 @@ supersedes: []
 
 Version `0.138.0` keeps run recovery, claims and session retention going when one row is malformed, refuses to retry a cancelled run whose mutation may have run, settles budget reservations of closed attempts, and retries serialization conflicts in run transitions. Apply AI schema module `0.78.0`; it adds one defaulted column and needs no data migration. See the [migration guide](MIGRATION.md#01370-to-01380).
 
+Version `0.136.0` adopts ORM 0.133.0, which reserves runtime schema table names; the internal session-activity query admits its own tables by exact name, so session listing is unchanged. No data migration is needed. See the [migration guide](MIGRATION.md#01350-to-01360-orm-01330-reserved-runtime-table-names).
+
 Version `0.135.0` bounds attachment uploads while they stream, applies a crate-level tenant predicate to approval and proposal lookups, refuses trusted-worker entity access without a host entity policy unless the host opts in, and limits provider endpoints: plain `http` only for loopback unless the endpoint policy opts in, a policy recheck before every request, and no proxy environment unless the host opts in. Several of these are breaking defaults; AI schema is unchanged and no data migration is needed. See the [migration guide](MIGRATION.md#01340-to-01350).
 
 Version `0.134.0` adopts ORM 0.128.0 and makes the runtime's internal reads honour their own bounds rather than the host's GraphQL page maximum, so recovery, reconciliation, retention and pruning passes no longer stop at 100 rows on a default database. Client page sizes still follow the host maximum. AI schema is unchanged; no data migration is needed. See the [migration guide](MIGRATION.md#01330-to-01340-internal-reads-honour-their-own-bounds).

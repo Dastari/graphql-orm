@@ -441,6 +441,14 @@ pub trait GeneratedComplexObjectMounted {}
 /// The bound never truncates silently: an explicit [`Self::limit`] above the
 /// maximum, or an unlimited [`Self::fetch_all`] that matches more rows than the
 /// maximum, fails with `PAGE_LIMIT_EXCEEDED`.
+///
+/// When the row policy decides rows in Rust (a row policy is installed and its
+/// Repository-surface decision is `CallbackOnly` or `Prefilter`; a `Complete`
+/// predicate is added to the SQL and keeps one query),
+/// [`Self::limit`] and [`Self::offset`] count visible rows: the read scans
+/// candidate batches in order until the page is complete, reading at most
+/// [`PaginationConfig::max_scanned_rows`] candidates, and fails with
+/// `PAGE_LIMIT_EXCEEDED` rather than return a short page.
 pub struct RepositoryQuery<'a, T, F, O, B: OrmBackend = DefaultBackend> {
     db: &'a crate::db::Database<B>,
     auth: Option<DbAuthContext>,
@@ -448,7 +456,16 @@ pub struct RepositoryQuery<'a, T, F, O, B: OrmBackend = DefaultBackend> {
     limit: Option<i64>,
     offset: i64,
     max_limit: Option<i64>,
+    max_scanned_rows: Option<i64>,
     _inputs: PhantomData<(F, O)>,
+}
+
+/// Which repository read is being served.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RepositoryRead {
+    All,
+    First,
+    OptionalOne,
 }
 
 impl<'a, T, F, O, B> RepositoryQuery<'a, T, F, O, B>
@@ -467,6 +484,7 @@ where
             limit: None,
             offset: 0,
             max_limit: None,
+            max_scanned_rows: None,
             _inputs: PhantomData,
         }
     }
@@ -520,7 +538,20 @@ where
         self
     }
 
+    /// Override the row scan budget for this read only; see
+    /// [`PaginationConfig::max_scanned_rows`].
+    ///
+    /// It applies only when the row policy decides rows in Rust. A negative
+    /// `budget` is treated as `0`.
+    pub fn with_max_scanned_rows(mut self, budget: i64) -> Self {
+        self.max_scanned_rows = Some(budget.max(0));
+        self
+    }
+
     /// Skip `offset` matching rows. A negative offset is treated as `0`.
+    ///
+    /// When the row policy decides rows in Rust, the skipped rows are visible
+    /// rows.
     pub fn offset(mut self, offset: i64) -> Self {
         self.offset = offset.max(0);
         self
@@ -541,76 +572,194 @@ where
         Ok((self, metadata))
     }
 
-    async fn fetch_visible(
-        self,
-        bound: impl FnOnce(PaginationConfig, Option<i64>) -> crate::Result<RepositoryBound>,
-    ) -> crate::Result<Vec<T>> {
+    async fn row_is_readable(&self, metadata: &EntityMetadata, row: &T) -> crate::Result<bool> {
+        self.db
+            .can_read_row(
+                None,
+                metadata.entity_name,
+                metadata.read_policy,
+                super::core::EntityAccessSurface::Repository,
+                row as &(dyn Any + Send + Sync),
+            )
+            .await
+            .map_err(crate::graphql::errors::sqlx_error_from_graphql)
+    }
+
+    async fn ensure_fields_readable(
+        &self,
+        metadata: &EntityMetadata,
+        row: &T,
+    ) -> crate::Result<()> {
+        for field in T::repository_field_policies() {
+            self.db
+                .ensure_repository_readable_field(
+                    None,
+                    metadata.entity_name,
+                    field.api_name,
+                    field.read_policy,
+                    Some(row as &(dyn Any + Send + Sync)),
+                )
+                .await
+                .map_err(crate::graphql::errors::sqlx_error_from_public)?;
+        }
+        Ok(())
+    }
+
+    /// Read one SQL window and keep its readable rows. Also reports whether
+    /// the row check refused any row of the window, and how many rows the
+    /// window read.
+    async fn fetch_window(
+        &self,
+        metadata: &EntityMetadata,
+        bound: RepositoryBound,
+        offset: i64,
+    ) -> crate::Result<(Vec<T>, bool, usize)> {
+        // The bound is resolved by the caller, so the SQL read applies it exactly.
+        let (rows, read) = if self.query.requires_in_memory_filtering() {
+            // As on the plain path, every candidate is read and the residual
+            // in-memory predicates filter them before the page is sliced; the
+            // candidate count is kept for a later rescan's budget.
+            let candidates = self
+                .query
+                .fetch_candidates_with_auth(self.db, self.auth.as_ref(), 0, None)
+                .await?;
+            let read = candidates.len();
+            (
+                slice_matching_candidates(candidates, bound.sql_limit(), offset),
+                read,
+            )
+        } else {
+            let rows = self
+                .query
+                .clone()
+                .paginate(&PageInput {
+                    limit: bound.sql_limit(),
+                    offset: Some(offset),
+                })
+                .fetch_all_with_auth_and_pagination(
+                    self.db,
+                    self.auth.as_ref(),
+                    PaginationConfig::unbounded(),
+                )
+                .await?;
+            let read = rows.len();
+            (rows, read)
+        };
+        bound.check_overflow(rows.len())?;
+        let mut visible = Vec::with_capacity(rows.len());
+        let mut refused = false;
+        for row in rows {
+            if self.row_is_readable(metadata, &row).await? {
+                self.ensure_fields_readable(metadata, &row).await?;
+                visible.push(row);
+            } else {
+                refused = true;
+            }
+        }
+        Ok((visible, refused, read))
+    }
+
+    async fn fetch_visible(self, read: RepositoryRead) -> crate::Result<Vec<T>> {
         let (mut this, metadata) = self.authorize().await?;
-        // The Repository-surface predicate narrows the SQL; every row still
-        // passes `can_read_row` below.
-        this.query = super::with_repository_read_visibility(this.db, this.query).await?;
+        // Resolve the read decision once. Its predicate narrows the base query,
+        // so the initial SQL window and the scan both carry it.
+        let mode = repository_read_plan::<T, B>(this.db, Some(&mut this.query)).await?;
         let config = this
             .db
             .pagination_config()
-            .with_read_maximum(this.max_limit);
-        let bound = bound(config, this.limit)?;
-        // The bound is resolved above, so the SQL read applies it exactly.
-        let rows = this
-            .query
-            .paginate(&PageInput {
-                limit: bound.sql_limit(),
-                offset: Some(this.offset),
-            })
-            .fetch_all_with_auth_and_pagination(
-                this.db,
-                this.auth.as_ref(),
-                PaginationConfig::unbounded(),
-            )
-            .await?;
-        bound.check_overflow(rows.len())?;
-        let mut visible = Vec::with_capacity(rows.len());
-        for row in rows {
-            if this
-                .db
-                .can_read_row(
-                    None,
-                    metadata.entity_name,
-                    metadata.read_policy,
-                    super::core::EntityAccessSurface::Repository,
-                    &row as &(dyn Any + Send + Sync),
-                )
-                .await
-                .map_err(crate::graphql::errors::sqlx_error_from_graphql)?
-            {
-                for field in T::repository_field_policies() {
-                    this.db
-                        .ensure_repository_readable_field(
-                            None,
-                            metadata.entity_name,
-                            field.api_name,
-                            field.read_policy,
-                            Some(&row as &(dyn Any + Send + Sync)),
-                        )
-                        .await
-                        .map_err(crate::graphql::errors::sqlx_error_from_public)?;
-                }
-                visible.push(row);
+            .with_read_maximum(this.max_limit)
+            .with_read_scan_budget(this.max_scanned_rows);
+        let bound = match read {
+            RepositoryRead::All => config.repository_bound(this.limit)?,
+            RepositoryRead::First => config.repository_scan_bound(this.limit)?,
+            // Cardinality checks always use one bounded look-ahead row. This
+            // must not be clamped to a configured maximum of one, or a second
+            // matching row could be mistaken for a unique result.
+            RepositoryRead::OptionalOne => RepositoryBound::Exact(2),
+        };
+        // How many visible rows a bounded read returns.
+        let take = match (read, bound) {
+            (RepositoryRead::First, RepositoryBound::Exact(limit)) => Some(limit.min(1)),
+            (_, RepositoryBound::Exact(limit)) => Some(limit),
+            _ => None,
+        };
+        // An empty page needs no read. Authorization, the read decision and
+        // the limit are already checked, so a refused read is still refused.
+        if take == Some(0) {
+            return Ok(Vec::new());
+        }
+        // Without a residual check, the read is one window, as it always was.
+        // The scan budget applies only once a scan is needed.
+        let mut budget = config.max_scanned_rows;
+        if mode != RowCheckMode::Residual {
+            let (rows, refused, read) = this.fetch_window(metadata, bound, this.offset).await?;
+            if !(mode == RowCheckMode::Authoritative && refused && take.is_some()) {
+                return Ok(rows);
             }
+            // The rescan shares one budget with the window already read.
+            budget =
+                budget.map(|budget| budget.saturating_sub(i64::try_from(read).unwrap_or(i64::MAX)));
+        }
+
+        // One budget covers the whole scan. An unlimited read also keeps its
+        // fail-closed maximum, counted before row policy; whichever bound is
+        // reached first refuses the read.
+        let overflow = match (take, bound) {
+            (None, RepositoryBound::FailClosed(maximum)) => Some(maximum),
+            _ => None,
+        };
+        let mut scan =
+            VisibleRowScan::new(this.offset, take, budget).with_overflow_after_skip(overflow);
+        let mut visible = Vec::new();
+        while let Some(batch) = scan.next_batch()? {
+            let rows = this
+                .query
+                .fetch_candidates_with_auth(
+                    this.db,
+                    this.auth.as_ref(),
+                    batch.offset,
+                    Some(batch.fetch),
+                )
+                .await?;
+            let fetched = rows.len();
+            let mut examined = 0;
+            for (row, matches) in rows.into_iter().take(batch.examine) {
+                if !scan.wants_more() {
+                    break;
+                }
+                examined += 1;
+                scan.count_candidate(matches)?;
+                let readable = matches && this.row_is_readable(metadata, &row).await?;
+                if scan.record(readable) {
+                    this.ensure_fields_readable(metadata, &row).await?;
+                    visible.push(row);
+                }
+            }
+            scan.finish_batch(batch, fetched, examined);
         }
         Ok(visible)
     }
 
     /// Fetch every visible matching row, never a silently truncated subset.
     ///
-    /// With [`Self::limit`], at most that many rows are read. Without one, at
-    /// most [`PaginationConfig::max_limit`] rows are read, and the fetch fails
-    /// with `PAGE_LIMIT_EXCEEDED` when more rows match; page explicitly with
-    /// [`Self::limit`] and [`Self::offset`] to read a larger set. The
+    /// With [`Self::limit`], at most that many rows are returned. Without one,
+    /// at most [`PaginationConfig::max_limit`] rows are read, and the fetch
+    /// fails with `PAGE_LIMIT_EXCEEDED` when more rows match; page explicitly
+    /// with [`Self::limit`] and [`Self::offset`] to read a larger set. The
     /// configured `default_limit` does not apply to repository reads.
+    ///
+    /// When the row policy decides rows in Rust, the limit and offset count
+    /// visible rows and the read may take more candidate rows than it
+    /// returns, up to [`PaginationConfig::max_scanned_rows`] for the whole
+    /// scan, with or without a limit; it fails with `PAGE_LIMIT_EXCEEDED`
+    /// when that budget runs out before the read is complete.
     ///
     /// The overflow check counts matching rows before row policy is applied,
     /// so it fails safe: a caller can be refused because of rows it cannot
-    /// see. The error does not say how many rows matched.
+    /// see. The error does not say how many rows matched. With an offset and a
+    /// row policy that decides rows in Rust, the count starts after the
+    /// skipped visible rows, and the scan budget applies as well; whichever
+    /// bound is reached first refuses the read.
     ///
     /// # Errors
     ///
@@ -619,23 +768,25 @@ where
     /// row-decoding error. Declared policies without the required provider
     /// fail closed.
     pub async fn fetch_all(self) -> crate::Result<Vec<T>> {
-        self.fetch_visible(|config, limit| config.repository_bound(limit))
-            .await
+        self.fetch_visible(RepositoryRead::All).await
     }
 
     /// Fetch the first visible row.
     ///
     /// Reads at most [`Self::limit`] rows, or [`PaginationConfig::max_limit`]
     /// rows without one, and returns the first that passes row policy. More
-    /// matching rows are not an error.
+    /// matching rows are not an error. When the row policy decides rows in
+    /// Rust, it returns the first visible row after the [`Self::offset`]
+    /// visible rows, scanning within [`PaginationConfig::max_scanned_rows`].
     ///
     /// # Errors
     ///
     /// Returns the same safe errors as [`Self::fetch_all`], except that an
-    /// omitted limit never fails with `PAGE_LIMIT_EXCEEDED`.
+    /// omitted limit fails with `PAGE_LIMIT_EXCEEDED` only when the row scan
+    /// budget runs out first.
     pub async fn fetch_first(self) -> crate::Result<Option<T>> {
         Ok(self
-            .fetch_visible(|config, limit| config.repository_scan_bound(limit))
+            .fetch_visible(RepositoryRead::First)
             .await?
             .into_iter()
             .next())
@@ -648,12 +799,7 @@ where
     /// Returns a cardinality error for multiple visible rows, or the same safe
     /// errors as [`Self::fetch_all`].
     pub async fn fetch_optional_one(self) -> crate::Result<Option<T>> {
-        // Cardinality checks always use one bounded look-ahead row. This must not
-        // be clamped to a configured maximum of one, or a second matching row
-        // could be mistaken for a unique result.
-        let rows = self
-            .fetch_visible(|_, _| Ok(RepositoryBound::Exact(2)))
-            .await?;
+        let rows = self.fetch_visible(RepositoryRead::OptionalOne).await?;
         if rows.len() > 1 {
             return Err(sqlx::Error::Protocol(
                 "repository optional-one query matched more than one row".to_string(),
@@ -733,18 +879,130 @@ impl SortExpression {
     }
 }
 
-pub(crate) fn sort_clause_mentions_column(clause: &str, column: &str) -> bool {
-    let expected = column.trim_matches(|character| matches!(character, '"' | '[' | ']'));
-    clause
-        .split(|character: char| character.is_whitespace() || character == ',')
-        .any(|token| {
-            token
-                .rsplit('.')
-                .next()
-                .unwrap_or(token)
-                .trim_matches(|character| matches!(character, '"' | '[' | ']'))
-                == expected
-        })
+/// Whether one term of `clause` orders directly by `column`.
+///
+/// A term counts only when its expression is exactly the column, optionally
+/// qualified and quoted, followed by an optional direction and `NULLS` clause.
+/// An expression that merely mentions the column, such as
+/// `CASE WHEN id > 0 THEN 0 ELSE 1 END`, does not order by it, so callers that
+/// append a primary-key tiebreak still append one.
+pub(crate) fn sort_clause_orders_by_column(clause: &str, column: &str) -> bool {
+    let expected = unquote_identifier(column);
+    split_sort_terms(clause)
+        .into_iter()
+        .any(|term| sort_term_column(term).is_some_and(|name| name == expected))
+}
+
+fn unquote_identifier(identifier: &str) -> &str {
+    identifier.trim_matches(|character| matches!(character, '"' | '[' | ']' | '`'))
+}
+
+/// Split an `ORDER BY` list on top-level commas, outside parentheses and
+/// quoted text.
+fn split_sort_terms(clause: &str) -> Vec<&str> {
+    let mut terms = Vec::new();
+    let mut depth = 0_usize;
+    let mut quote: Option<char> = None;
+    let mut start = 0;
+    for (index, character) in clause.char_indices() {
+        match quote {
+            Some(open) => {
+                let close = if open == '[' { ']' } else { open };
+                if character == close {
+                    quote = None;
+                }
+            }
+            None => match character {
+                '\'' | '"' | '`' | '[' => quote = Some(character),
+                '(' => depth += 1,
+                ')' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    terms.push(&clause[start..index]);
+                    start = index + 1;
+                }
+                _ => {}
+            },
+        }
+    }
+    terms.push(&clause[start..]);
+    terms
+}
+
+/// The unquoted column name of a sort term that is a plain column reference.
+///
+/// The reference may be qualified, with whitespace around each `.`, and each
+/// segment may be bare (`id`), double-quoted (`"id"`, with `""` escapes),
+/// bracketed (`[id]`, with `]]` escapes and trailing spaces ignored, as SQL
+/// Server does) or backticked. Anything else is an expression.
+fn sort_term_column(term: &str) -> Option<String> {
+    let mut expression = term.trim();
+    let ends_with = |text: &str, suffix: &str| {
+        text.len() >= suffix.len()
+            && text.is_char_boundary(text.len() - suffix.len())
+            && text[text.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+            && text[..text.len() - suffix.len()]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_whitespace)
+    };
+    for suffix in ["NULLS FIRST", "NULLS LAST"] {
+        if ends_with(expression, suffix) {
+            expression = expression[..expression.len() - suffix.len()].trim_end();
+            break;
+        }
+    }
+    for suffix in ["ASC", "DESC"] {
+        if ends_with(expression, suffix) {
+            expression = expression[..expression.len() - suffix.len()].trim_end();
+            break;
+        }
+    }
+    let mut rest = expression;
+    loop {
+        let (segment, after) = identifier_segment(rest.trim_start())?;
+        rest = after.trim_start();
+        if rest.is_empty() {
+            return Some(segment);
+        }
+        rest = rest.strip_prefix('.')?;
+    }
+}
+
+/// Parse one identifier segment from the start of `text`, returning its
+/// unquoted name and the remaining text.
+fn identifier_segment(text: &str) -> Option<(String, &str)> {
+    let quoted = |open: char, close: char| -> Option<(String, &str)> {
+        let body = text.strip_prefix(open)?;
+        let mut name = String::new();
+        let mut characters = body.char_indices().peekable();
+        while let Some((index, character)) = characters.next() {
+            if character == close {
+                if characters.peek().is_some_and(|(_, next)| *next == close) {
+                    characters.next();
+                    name.push(close);
+                    continue;
+                }
+                return Some((name, &body[index + close.len_utf8()..]));
+            }
+            name.push(character);
+        }
+        None
+    };
+    let (name, rest) = match text.chars().next()? {
+        '"' => quoted('"', '"')?,
+        '`' => quoted('`', '`')?,
+        '[' => {
+            let (name, rest) = quoted('[', ']')?;
+            (name.trim_end().to_owned(), rest)
+        }
+        _ => {
+            let end = text
+                .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+                .unwrap_or(text.len());
+            (text[..end].to_owned(), &text[end..])
+        }
+    };
+    (!name.is_empty()).then_some((name, rest))
 }
 
 /// Named bind values returned by an entity-owned computed-order provider.
@@ -1127,6 +1385,18 @@ pub struct PaginationConfig {
     pub default_limit: Option<i64>,
     /// Maximum accepted explicit or default limit.
     pub max_limit: Option<i64>,
+    /// Maximum candidate rows one visible-row scan of a Rust repository read
+    /// takes from the database, plus one look-ahead row. A read scans when its
+    /// row checks run in Rust (a row policy whose Repository-surface decision
+    /// is `CallbackOnly` or `Prefilter`, or `Complete` for repository search),
+    /// or rescans when the row callback refuses a row of a page its decision
+    /// should have served. `limit` and `offset` then count visible rows, and a
+    /// scan that would need more candidates fails with `PAGE_LIMIT_EXCEEDED`
+    /// rather than return a short page. It does not bound or refuse a read
+    /// that needs no scan. Whether the budget runs out depends on
+    /// rows the caller cannot see, so set it in trusted code. `None` removes
+    /// the bound.
+    pub max_scanned_rows: Option<i64>,
 }
 
 impl Default for PaginationConfig {
@@ -1134,6 +1404,7 @@ impl Default for PaginationConfig {
         Self {
             default_limit: Some(Self::DEFAULT_LIMIT),
             max_limit: Some(Self::DEFAULT_MAX_LIMIT),
+            max_scanned_rows: Some(Self::DEFAULT_MAX_SCANNED_ROWS),
         }
     }
 }
@@ -1160,6 +1431,9 @@ impl PaginationConfig {
     /// **Current default:** [`Self::SECURE_MAX_LIMIT`] (`100`).
     /// **Previous default:** [`Self::LEGACY_MAX_LIMIT`] (`1000`).
     pub const DEFAULT_MAX_LIMIT: i64 = Self::SECURE_MAX_LIMIT;
+    /// Default row scan budget of a Rust repository read whose row checks run
+    /// in Rust; see [`Self::max_scanned_rows`].
+    pub const DEFAULT_MAX_SCANNED_ROWS: i64 = 10_000;
 
     /// Create a config that does not add a default limit and does not cap limits.
     ///
@@ -1168,6 +1442,7 @@ impl PaginationConfig {
         Self {
             default_limit: None,
             max_limit: None,
+            max_scanned_rows: None,
         }
     }
 
@@ -1176,6 +1451,7 @@ impl PaginationConfig {
         Self {
             default_limit: Some(Self::LEGACY_DEFAULT_LIMIT),
             max_limit: Some(Self::LEGACY_MAX_LIMIT),
+            max_scanned_rows: Some(Self::DEFAULT_MAX_SCANNED_ROWS),
         }
     }
 
@@ -1184,6 +1460,7 @@ impl PaginationConfig {
         Self {
             default_limit: Some(Self::SECURE_DEFAULT_LIMIT),
             max_limit: Some(Self::SECURE_MAX_LIMIT),
+            max_scanned_rows: Some(Self::DEFAULT_MAX_SCANNED_ROWS),
         }
     }
 
@@ -1192,6 +1469,7 @@ impl PaginationConfig {
         Self {
             default_limit: None,
             max_limit: Some(max_limit),
+            max_scanned_rows: Some(Self::DEFAULT_MAX_SCANNED_ROWS),
         }
     }
 
@@ -1204,6 +1482,13 @@ impl PaginationConfig {
     /// Return a copy with a different maximum limit.
     pub fn with_max_limit(mut self, max_limit: Option<i64>) -> Self {
         self.max_limit = max_limit;
+        self
+    }
+
+    /// Return a copy with a different row scan budget; see
+    /// [`Self::max_scanned_rows`].
+    pub fn with_max_scanned_rows(mut self, max_scanned_rows: Option<i64>) -> Self {
+        self.max_scanned_rows = max_scanned_rows;
         self
     }
 
@@ -1260,6 +1545,14 @@ impl PaginationConfig {
     pub(crate) fn with_read_maximum(mut self, maximum: Option<i64>) -> Self {
         if let Some(maximum) = maximum {
             self.max_limit = Some(maximum);
+        }
+        self
+    }
+
+    /// Apply a per-read scan budget set with a builder's `with_max_scanned_rows`.
+    pub(crate) fn with_read_scan_budget(mut self, budget: Option<i64>) -> Self {
+        if let Some(budget) = budget {
+            self.max_scanned_rows = Some(budget);
         }
         self
     }
@@ -1370,6 +1663,264 @@ impl RepositoryBound {
         }
         Ok(())
     }
+}
+
+/// Keep the candidates that satisfy the residual in-memory predicates and
+/// slice `offset`/`limit` from them, as in-memory filtering does.
+pub(crate) fn slice_matching_candidates<T>(
+    candidates: Vec<(T, bool)>,
+    limit: Option<i64>,
+    offset: i64,
+) -> Vec<T> {
+    let rows = candidates
+        .into_iter()
+        .filter_map(|(row, matches)| matches.then_some(row))
+        .skip(usize::try_from(offset.max(0)).unwrap_or(usize::MAX));
+    match limit {
+        Some(limit) => rows
+            .take(usize::try_from(limit.max(0)).unwrap_or(usize::MAX))
+            .collect(),
+        None => rows.collect(),
+    }
+}
+
+/// How a Rust repository read's row checks relate to its SQL.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RowCheckMode {
+    /// No row policy is installed, so the row check gives the same answer for
+    /// every row and SQL `LIMIT`/`OFFSET` already count the rows returned.
+    Fixed,
+    /// The SQL read carries the row authority (`Unrestricted`, or a
+    /// `Complete` predicate the read applies to its query). `LIMIT`/`OFFSET` stay in SQL. If
+    /// the row callback still refuses a row of a bounded page, the page is
+    /// read again as a visible-row scan so it is never short.
+    Authoritative,
+    /// Rows are decided in Rust, so `limit` and `offset` count visible rows
+    /// through a [`VisibleRowScan`].
+    Residual,
+}
+
+/// Resolve the Repository-surface read decision for `T` once and classify the
+/// read's row checks.
+///
+/// With `query`, the decision's SQL predicate (`Prefilter` or `Complete`) is
+/// added to that query, so both the initial SQL window and any visible-row
+/// scan carry it, and a `Complete` decision keeps the single SQL path. Without
+/// one, the read's executor does not receive the predicate, so the row
+/// callback stays the authority and `Complete` is residual for paging.
+pub(crate) async fn repository_read_plan<T, B>(
+    db: &crate::db::Database<B>,
+    query: Option<&mut EntityQuery<T, B>>,
+) -> crate::Result<RowCheckMode>
+where
+    T: Entity + FromSqlRow<B> + Clone + Send + Sync + 'static,
+    B: OrmBackend,
+{
+    let visibility = db
+        .read_visibility::<T>(None, super::core::EntityAccessSurface::Repository)
+        .await
+        .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
+    let applies_predicate = query.is_some();
+    if let Some(query) = query {
+        *query = query
+            .clone()
+            .with_read_visibility(&visibility)
+            .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
+    }
+    Ok(if db.row_policy().is_none() {
+        RowCheckMode::Fixed
+    } else {
+        match visibility {
+            super::ReadVisibility::Unrestricted => RowCheckMode::Authoritative,
+            super::ReadVisibility::Complete(_) if applies_predicate => RowCheckMode::Authoritative,
+            _ => RowCheckMode::Residual,
+        }
+    })
+}
+
+/// One SQL batch of a [`VisibleRowScan`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ScanBatch {
+    /// SQL `OFFSET` of the batch, in candidate rows.
+    pub(crate) offset: i64,
+    /// SQL `LIMIT` of the batch. The last batch the budget allows reads one
+    /// row more than it examines, to learn whether more rows remain.
+    pub(crate) fetch: i64,
+    /// How many fetched rows the scan may examine.
+    pub(crate) examine: usize,
+}
+
+/// Applies `offset` and `limit` to the visible rows of a read whose row checks
+/// run in Rust.
+///
+/// The scan reads batches of candidate rows in the query's order, checks each
+/// row, skips the first `skip` visible rows and collects up to `take` visible
+/// rows, or every remaining visible row when `take` is `None`. It reads at
+/// most `budget` candidate rows in total, plus one look-ahead row that is
+/// never examined, so the budget covers the whole scan. When the budget runs out before the page is
+/// complete and more rows remain, [`Self::next_batch`] fails with
+/// `PAGE_LIMIT_EXCEEDED` instead of letting the read return a short page. The
+/// error names no row count.
+#[derive(Debug)]
+pub(crate) struct VisibleRowScan {
+    skip: u64,
+    take: Option<u64>,
+    budget: Option<u64>,
+    position: u64,
+    batch: u64,
+    collected: u64,
+    exhausted: bool,
+    /// Whether a look-ahead row has already shown that rows remain past the
+    /// budget.
+    looked_ahead: bool,
+    /// An unlimited read's `max_limit`: matching rows after the skipped ones
+    /// are counted before row policy, and more than this many fail closed.
+    overflow_after_skip: Option<u64>,
+    matched_after_skip: u64,
+}
+
+impl VisibleRowScan {
+    /// Batches grow up to this size while visible rows are sparse.
+    const MAX_GROWN_BATCH: u64 = 1_000;
+
+    /// Skip `skip` visible rows, then collect `take` of them, or all of the
+    /// remaining visible rows when `take` is `None`.
+    pub(crate) fn new(skip: i64, take: Option<i64>, budget: Option<i64>) -> Self {
+        let count = |value: i64| u64::try_from(value).unwrap_or(0);
+        Self {
+            skip: count(skip),
+            take: take.map(count),
+            budget: budget.map(count),
+            position: 0,
+            batch: 0,
+            collected: 0,
+            exhausted: false,
+            looked_ahead: false,
+            overflow_after_skip: None,
+            matched_after_skip: 0,
+        }
+    }
+
+    /// Apply an unlimited read's fail-closed `max_limit` to the matching rows
+    /// after the skipped visible rows, counted before row policy.
+    pub(crate) fn with_overflow_after_skip(mut self, maximum: Option<i64>) -> Self {
+        self.overflow_after_skip = maximum.map(|maximum| u64::try_from(maximum).unwrap_or(0));
+        self
+    }
+
+    fn complete(&self) -> bool {
+        // An empty page needs no rows, whatever the offset. An unlimited read
+        // completes only when the rows run out.
+        self.take == Some(0)
+            || (self.skip == 0 && self.take.is_some_and(|take| self.collected >= take))
+    }
+
+    /// Whether the scan still needs rows.
+    pub(crate) fn wants_more(&self) -> bool {
+        !self.exhausted && !self.complete()
+    }
+
+    /// The next batch to read, or `None` when the page is complete or the
+    /// matching rows are exhausted.
+    ///
+    /// # Errors
+    ///
+    /// `PAGE_LIMIT_EXCEEDED` when the scan budget is spent and more rows remain.
+    pub(crate) fn next_batch(&mut self) -> crate::Result<Option<ScanBatch>> {
+        if !self.wants_more() {
+            return Ok(None);
+        }
+        let needed = self.skip.saturating_add(match self.take {
+            Some(take) => take - self.collected,
+            // An unlimited read first asks for its whole fail-closed window.
+            None => self
+                .overflow_after_skip
+                .map_or(Self::MAX_GROWN_BATCH, |maximum| maximum.saturating_add(1)),
+        });
+        let wanted = needed.max(self.batch).max(1);
+        self.batch = wanted.saturating_mul(2).min(Self::MAX_GROWN_BATCH);
+        let (examine, fetch) = match self.budget {
+            // A spent budget still reads one row to learn whether any remain,
+            // so an empty result is not refused.
+            Some(0) if self.looked_ahead => return Err(scan_budget_exhausted()),
+            Some(remaining) if wanted >= remaining => {
+                self.looked_ahead = true;
+                (remaining, remaining.saturating_add(1))
+            }
+            _ => (wanted, wanted),
+        };
+        let as_i64 = |value: u64| i64::try_from(value).unwrap_or(i64::MAX);
+        Ok(Some(ScanBatch {
+            offset: as_i64(self.position),
+            fetch: as_i64(fetch),
+            examine: usize::try_from(examine).unwrap_or(usize::MAX),
+        }))
+    }
+
+    /// Count one examined candidate against an unlimited read's fail-closed
+    /// `max_limit`, before row policy decides whether it is visible.
+    ///
+    /// # Errors
+    ///
+    /// `PAGE_LIMIT_EXCEEDED`, naming no row count, when more matching rows
+    /// than the maximum follow the skipped rows.
+    pub(crate) fn count_candidate(&mut self, matches: bool) -> crate::Result<()> {
+        if let Some(maximum) = self.overflow_after_skip
+            && matches
+            && self.skip == 0
+        {
+            self.matched_after_skip += 1;
+            let maximum = i64::try_from(maximum).unwrap_or(i64::MAX);
+            RepositoryBound::FailClosed(maximum)
+                .check_overflow(usize::try_from(self.matched_after_skip).unwrap_or(usize::MAX))?;
+        }
+        Ok(())
+    }
+
+    /// Record one examined row. Returns whether the caller keeps it.
+    pub(crate) fn record(&mut self, visible: bool) -> bool {
+        self.position += 1;
+        if !visible {
+            return false;
+        }
+        if self.skip > 0 {
+            self.skip -= 1;
+            return false;
+        }
+        self.collected += 1;
+        true
+    }
+
+    /// Account for a finished batch that returned `fetched` rows, of which
+    /// the caller examined `examined`.
+    ///
+    /// The rows ran out only when the batch came back short and every fetched
+    /// row was examined. A scan that completed part-way through a batch has
+    /// not run out of rows, so the rows after it are not lost.
+    pub(crate) fn finish_batch(&mut self, batch: ScanBatch, fetched: usize, examined: usize) {
+        if let Some(budget) = &mut self.budget {
+            let read = fetched.min(batch.examine);
+            *budget = budget.saturating_sub(u64::try_from(read).unwrap_or(u64::MAX));
+        }
+        if i64::try_from(fetched).unwrap_or(i64::MAX) < batch.fetch && examined == fetched {
+            self.exhausted = true;
+        }
+    }
+
+    /// Offset, in candidate rows, of the first row after the rows examined so
+    /// far.
+    #[cfg(test)]
+    pub(crate) fn position(&self) -> i64 {
+        i64::try_from(self.position).unwrap_or(i64::MAX)
+    }
+}
+
+pub(crate) fn scan_budget_exhausted() -> sqlx::Error {
+    use crate::graphql::errors::{OrmErrorCode, OrmPublicError, sqlx_error_from_public};
+    sqlx_error_from_public(OrmPublicError::with_message(
+        OrmErrorCode::PageLimitExceeded,
+        "the row scan budget ran out before the page was complete; raise it with with_max_scanned_rows",
+    ))
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -3572,7 +4123,7 @@ where
         for primary_key in <P::Entity as DatabaseEntity>::PRIMARY_KEYS {
             if !sorts
                 .iter()
-                .any(|sort| sort_clause_mentions_column(&sort.clause, primary_key))
+                .any(|sort| sort_clause_orders_by_column(&sort.clause, primary_key))
             {
                 sorts.push(SortExpression {
                     clause: format!("{} ASC", B::DIALECT.render_identifier_path(primary_key)),
@@ -4087,7 +4638,7 @@ where
         for primary_key in T::PRIMARY_KEYS {
             if !sorts
                 .iter()
-                .any(|sort| sort_clause_mentions_column(&sort.clause, primary_key))
+                .any(|sort| sort_clause_orders_by_column(&sort.clause, primary_key))
             {
                 sorts.push(SortExpression::unbound(format!(
                     "{} ASC",
@@ -4269,6 +4820,70 @@ where
             B::fetch_rows_with_auth(provider.pool(), &rendered.sql, &rendered.values, auth).await?;
         provider.observe_read(&rendered.sql, rows.len());
         self.apply_in_memory_filtering(rows, pagination_config, false)
+    }
+
+    /// The `SELECT` of one page of candidate rows: the SQL filter, the order
+    /// with its key tiebreak, and `offset`/`limit` applied in SQL even when
+    /// residual in-memory predicates remain.
+    fn candidate_select(&self, offset: i64, limit: Option<i64>) -> crate::Result<SelectQuery> {
+        let mut query =
+            self.build_select_query_with_config(PaginationConfig::unbounded(), false)?;
+        query.pagination = (limit.is_some() || offset > 0).then_some(PaginationRequest {
+            limit,
+            offset: offset.max(0),
+        });
+        Ok(query)
+    }
+
+    /// Decode candidate rows, pairing each with whether it satisfies the
+    /// residual in-memory predicates. Rows are never dropped, so a caller can
+    /// count every candidate it read.
+    fn decode_candidates(&self, rows: &[B::Row]) -> crate::Result<Vec<(T, bool)>> {
+        let calendar_today =
+            chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now()).date_naive();
+        rows.iter()
+            .map(|row| {
+                let entity = T::from_row(row)?;
+                let matches = self.matches_entity(&entity, calendar_today)?;
+                Ok((entity, matches))
+            })
+            .collect()
+    }
+
+    /// Read one page of candidate rows, at most `limit` rows from database
+    /// offset `offset`, each with whether it satisfies the residual in-memory
+    /// predicates.
+    pub(crate) async fn fetch_candidates_with_auth<P>(
+        &self,
+        provider: &P,
+        auth: Option<&DbAuthContext>,
+        offset: i64,
+        limit: Option<i64>,
+    ) -> crate::Result<Vec<(T, bool)>>
+    where
+        P: PoolProvider<B> + ?Sized,
+    {
+        let rendered = render_select_query(B::DIALECT, &self.candidate_select(offset, limit)?);
+        let rows =
+            B::fetch_rows_with_auth(provider.pool(), &rendered.sql, &rendered.values, auth).await?;
+        provider.observe_read(&rendered.sql, rows.len());
+        self.decode_candidates(&rows)
+    }
+
+    /// [`Self::fetch_candidates_with_auth`] on a pinned transaction.
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    pub(crate) async fn fetch_candidates_in_transaction(
+        &self,
+        context: &mut MutationContext<'_, B>,
+        offset: i64,
+        limit: Option<i64>,
+    ) -> crate::Result<Vec<(T, bool)>>
+    where
+        B: WriteBackend,
+    {
+        let rendered = render_select_query(B::DIALECT, &self.candidate_select(offset, limit)?);
+        let rows = context.fetch_rows(&rendered.sql, &rendered.values).await?;
+        self.decode_candidates(&rows)
     }
 
     pub(crate) async fn fetch_all_with_auth_and_pagination<P>(
@@ -5533,5 +6148,206 @@ mod grouped_aggregate_tests {
                 .sql
                 .contains("CASE WHEN \"team\" IS NULL THEN 0 ELSE 1 END ASC")
         );
+    }
+}
+
+#[cfg(test)]
+mod visible_row_scan_tests {
+    use super::*;
+
+    #[test]
+    fn key_tiebreak_needs_a_direct_key_term() {
+        // A direct key term, in any quoting, qualification or direction.
+        for clause in [
+            "id ASC",
+            "\"id\" DESC",
+            "[id] ASC",
+            "`id`",
+            "t.\"id\" DESC NULLS LAST",
+            "rank ASC, id ASC",
+            "\"rank\" desc, \"id\" asc",
+        ] {
+            assert!(sort_clause_orders_by_column(clause, "id"), "{clause}");
+            assert!(sort_clause_orders_by_column(clause, "\"id\""), "{clause}");
+        }
+        // Expressions that only mention the key do not order by it.
+        for clause in [
+            "CASE WHEN id > 0 THEN 0 ELSE 1 END ASC",
+            "LOWER(id) ASC",
+            "id + 1 ASC",
+            "COALESCE(label, id) DESC",
+            "CASE WHEN rank IN (1, 2) THEN id END ASC, rank ASC",
+            "'id' ASC",
+            "grid ASC",
+        ] {
+            assert!(!sort_clause_orders_by_column(clause, "id"), "{clause}");
+        }
+    }
+
+    #[test]
+    fn qualified_key_terms_allow_spaces_quotes_and_brackets() {
+        // SQLite, PostgreSQL and SQL Server spellings of a qualified key term.
+        for clause in [
+            "page_rows . id DESC",
+            "page_rows.id DESC",
+            "main . page_rows . id ASC",
+            "\"page_rows\" . \"id\" DESC",
+            "\"public\".\"page_rows\".\"id\"",
+            "[dbo] . [page_rows] . [id] DESC",
+            "[page_rows].[id ] ASC",
+            "rank ASC, page_rows . id DESC",
+        ] {
+            assert!(sort_clause_orders_by_column(clause, "id"), "{clause}");
+        }
+        // Quoted names keep their exact text and escapes.
+        assert!(sort_clause_orders_by_column(
+            "\"odd\"\"key\" ASC",
+            "odd\"key"
+        ));
+        assert!(sort_clause_orders_by_column("[odd]]key] ASC", "odd]key"));
+        assert!(!sort_clause_orders_by_column("\"id \" ASC", "id"));
+        // Expressions stay expressions, however they are spaced.
+        for clause in [
+            "page_rows . id + 1 DESC",
+            "page_rows . LOWER(id) ASC",
+            "page_rows . . id ASC",
+            ". id ASC",
+            "page_rows . ASC",
+            "\"page_rows\" . \"id ASC",
+        ] {
+            assert!(!sort_clause_orders_by_column(clause, "id"), "{clause}");
+        }
+    }
+
+    #[test]
+    fn composite_keys_and_nullable_sort_columns_keep_missing_key_terms() {
+        // One component of a composite key present: only the other is missing.
+        let clause = "\"tenant\" ASC";
+        assert!(sort_clause_orders_by_column(clause, "tenant"));
+        assert!(!sort_clause_orders_by_column(clause, "id"));
+        // A nullable sort column orders by itself, not by the key.
+        let clause = "\"label\" ASC NULLS FIRST";
+        assert!(sort_clause_orders_by_column(clause, "label"));
+        assert!(!sort_clause_orders_by_column(clause, "id"));
+    }
+
+    #[test]
+    fn an_unlimited_offset_renders_on_every_dialect() {
+        assert_eq!(
+            DatabaseBackend::Sqlite.render_pagination(None, 5),
+            " LIMIT -1 OFFSET 5"
+        );
+        assert_eq!(
+            DatabaseBackend::Postgres.render_pagination(None, 5),
+            " OFFSET 5"
+        );
+        assert_eq!(
+            DatabaseBackend::Mssql.render_pagination(None, 5),
+            " OFFSET 5 ROWS"
+        );
+        assert_eq!(
+            DatabaseBackend::Sqlite.render_pagination(Some(2), 5),
+            " LIMIT 2 OFFSET 5"
+        );
+        assert_eq!(DatabaseBackend::Sqlite.render_pagination(None, 0), "");
+    }
+
+    /// Drive a scan over in-memory rows the way repository reads do.
+    fn scan(
+        visible: &[bool],
+        skip: i64,
+        take: Option<i64>,
+        budget: Option<i64>,
+    ) -> crate::Result<(Vec<usize>, i64, usize)> {
+        scan_with_overflow(visible, skip, take, budget, None)
+    }
+
+    fn scan_with_overflow(
+        visible: &[bool],
+        skip: i64,
+        take: Option<i64>,
+        budget: Option<i64>,
+        overflow: Option<i64>,
+    ) -> crate::Result<(Vec<usize>, i64, usize)> {
+        let mut scan = VisibleRowScan::new(skip, take, budget).with_overflow_after_skip(overflow);
+        let mut kept = Vec::new();
+        let mut reads = 0;
+        while let Some(batch) = scan.next_batch()? {
+            reads += 1;
+            let start = usize::try_from(batch.offset).unwrap();
+            let end = (start + usize::try_from(batch.fetch).unwrap()).min(visible.len());
+            let rows = (start.min(end)..end).collect::<Vec<_>>();
+            let fetched = rows.len();
+            let mut examined = 0;
+            for row in rows.into_iter().take(batch.examine) {
+                if !scan.wants_more() {
+                    break;
+                }
+                examined += 1;
+                scan.count_candidate(true)?;
+                if scan.record(visible[row]) {
+                    kept.push(row);
+                }
+            }
+            scan.finish_batch(batch, fetched, examined);
+        }
+        Ok((kept, scan.position(), reads))
+    }
+
+    #[test]
+    fn an_unlimited_read_keeps_rows_after_the_skip_in_a_short_batch() {
+        // hidden, hidden, hidden, visible, visible: batches of 1, 2 and 4.
+        let rows = [false, false, false, true, true];
+        let (kept, position, _) = scan(&rows, 1, None, None).unwrap();
+        assert_eq!(kept, vec![4]);
+        assert_eq!(position, 5);
+    }
+
+    #[test]
+    fn one_budget_covers_an_unlimited_read() {
+        let rows = [true, false, false, true, false, false, true];
+        // Every row fits: all visible rows after the skip.
+        assert_eq!(scan(&rows, 1, None, Some(7)).unwrap().0, vec![3, 6]);
+        // More rows than the budget remain: refused, not truncated.
+        assert!(scan(&rows, 1, None, Some(6)).is_err());
+        // A zero budget looks ahead once, then refuses.
+        assert!(scan(&rows, 0, None, Some(0)).is_err());
+        assert!(scan(&[], 0, None, Some(0)).unwrap().0.is_empty());
+        // The fail-closed maximum counts rows after the skip before row
+        // policy, and whichever bound is reached first refuses.
+        assert_eq!(
+            scan_with_overflow(&rows, 1, None, Some(7), Some(6))
+                .unwrap()
+                .0,
+            vec![3, 6]
+        );
+        assert!(scan_with_overflow(&rows, 1, None, Some(7), Some(5)).is_err());
+        assert!(scan_with_overflow(&rows, 1, None, None, Some(5)).is_err());
+    }
+
+    #[test]
+    fn an_empty_page_reads_nothing() {
+        let (kept, _, reads) = scan(&[false, true, true], 5, Some(0), Some(0)).unwrap();
+        assert!(kept.is_empty());
+        assert_eq!(reads, 0);
+    }
+
+    #[test]
+    fn a_zero_budget_refuses_only_when_rows_exist() {
+        let (kept, _, reads) = scan(&[], 0, Some(3), Some(0)).unwrap();
+        assert!(kept.is_empty());
+        assert_eq!(reads, 1);
+        assert!(scan(&[true], 0, Some(3), Some(0)).is_err());
+    }
+
+    #[test]
+    fn the_budget_bounds_candidate_rows_and_looks_ahead_once() {
+        let rows = [true, false, false, true, false, false, true];
+        // Two visible rows need four candidates.
+        assert_eq!(scan(&rows, 0, Some(2), Some(4)).unwrap().0, vec![0, 3]);
+        assert!(scan(&rows, 0, Some(2), Some(3)).is_err());
+        // A budget that covers every row ends with a short look-ahead.
+        assert_eq!(scan(&rows, 0, Some(9), Some(7)).unwrap().0, vec![0, 3, 6]);
+        assert!(scan(&rows, 0, Some(9), Some(6)).is_err());
     }
 }

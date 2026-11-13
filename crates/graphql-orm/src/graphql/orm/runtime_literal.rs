@@ -64,6 +64,9 @@ pub enum RuntimeDefaultProblem {
     UnsupportedPrecision,
     /// The default form is not valid for the field's value kind.
     KindMismatch,
+    /// A string default contains a NUL character, which no backend stores in
+    /// text and which cannot appear in a literal.
+    NulCharacter,
 }
 
 impl RuntimeDefaultProblem {
@@ -80,6 +83,7 @@ impl RuntimeDefaultProblem {
             Self::ImpossibleDateTime => "impossible_date_time",
             Self::UnsupportedPrecision => "unsupported_precision",
             Self::KindMismatch => "kind_mismatch",
+            Self::NulCharacter => "nul_character",
         }
     }
 }
@@ -266,6 +270,7 @@ fn typed_literal(text: &str, kind: RuntimeValueKind) -> Checked<RuntimeValue> {
                 .map(RuntimeValue::Float)
                 .map_err(|_| RuntimeDefaultError::new(P::Nonfinite))
         }
+        RuntimeValueKind::String if text.contains('\0') => fail(P::NulCharacter),
         RuntimeValueKind::String => Ok(RuntimeValue::String(text.to_owned())),
         RuntimeValueKind::Uuid => uuid::Uuid::parse_str(text)
             .map(RuntimeValue::Uuid)

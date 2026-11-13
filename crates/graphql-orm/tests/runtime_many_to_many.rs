@@ -197,6 +197,21 @@ fn join_relations_are_validated_fingerprinted_and_planned() {
         .unwrap()
         .physical_table = "mm_post".into();
     assert_eq!(codes(collision), [C::InvalidJoinTable]);
+    // Catalog, ORM infrastructure and companion-package prefixes are reserved.
+    for table in [
+        "pg_node_links",
+        "sqlite_node_links",
+        "__graphql_orm_node_links",
+        "graphql_orm_node_links",
+    ] {
+        let mut reserved = definition();
+        reserved.collections[2].relations[0]
+            .join
+            .as_mut()
+            .unwrap()
+            .physical_table = table.into();
+        assert_eq!(codes(reserved), [C::InvalidJoinTable], "{table}");
+    }
     let mut columns = definition();
     columns.collections[2].relations[0]
         .join
