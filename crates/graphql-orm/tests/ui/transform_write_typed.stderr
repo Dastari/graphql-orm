@@ -1,0 +1,5 @@
+error: field `value`: #[transform(write = ...)] is unsupported with generated entity APIs; use a WriteInputTransform on Database instead. Existing rows were stored untransformed; #[transform(read = ...)] is still supported
+  --> tests/ui/transform_write_typed.rs:10:17
+   |
+10 |     #[transform(write = "protect")]
+   |                 ^^^^^

@@ -1711,9 +1711,6 @@ pub(crate) struct FieldMetadata {
     pub(crate) search: Option<SearchFieldMetadata>,
     pub(crate) search_json: Vec<SearchJsonPathMetadata>,
     pub(crate) search_relation: Option<SearchRelationMetadata>,
-    /// Async write transform: fn(&Context, String) -> Result<String>
-    /// Applied before INSERT/UPDATE to transform the value (e.g., encryption)
-    pub(crate) transform_write: Option<String>,
     /// Sync read transform: fn(T) -> T
     /// Applied after reading from the database row (e.g., decryption)
     pub(crate) transform_read: Option<String>,
@@ -1895,7 +1892,6 @@ impl Default for FieldMetadata {
             search: None,
             search_json: Vec::new(),
             search_relation: None,
-            transform_write: None,
             transform_read: None,
             default: None,
             suppress_implicit_default: false,
@@ -2895,9 +2891,11 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                 "transform" => {
                     attr.parse_nested_meta(|nested| {
                         if nested.path.is_ident("write") {
-                            let value = nested.value()?;
-                            let lit: syn::LitStr = value.parse()?;
-                            meta.transform_write = Some(lit.value());
+                            let name = field.ident.as_ref().map(ToString::to_string).unwrap_or_default();
+                            return Err(syn::Error::new_spanned(
+                                &nested.path,
+                                format!("field `{name}`: #[transform(write = ...)] is unsupported with generated entity APIs; use a WriteInputTransform on Database instead. Existing rows were stored untransformed; #[transform(read = ...)] is still supported"),
+                            ));
                         } else if nested.path.is_ident("read") {
                             let value = nested.value()?;
                             let lit: syn::LitStr = value.parse()?;
@@ -3292,31 +3290,6 @@ fn validate_relation_delete_policy(
     }
 
     Ok(())
-}
-
-/// Wrap a value expression with an async, context-aware write transform.
-///
-/// The transform function must have the signature:
-///   `async fn(&::graphql_orm::async_graphql::Context<'_>, String) -> ::graphql_orm::async_graphql::Result<String>`
-///
-/// If `transform_write` is None, returns the original expression unchanged.
-pub(crate) fn maybe_wrap_write_transform(
-    expr: proc_macro2::TokenStream,
-    transform_write: &Option<String>,
-) -> proc_macro2::TokenStream {
-    match transform_write {
-        Some(path_str) => {
-            let path: syn::Path = syn::parse_str(path_str)
-                .unwrap_or_else(|_| syn::parse_str("unknown_transform").unwrap());
-            quote! {
-                {
-                    let __raw_val: String = #expr;
-                    #path(ctx, __raw_val).await?
-                }
-            }
-        }
-        None => expr,
-    }
 }
 
 /// Wrap a value expression with a synchronous read transform.

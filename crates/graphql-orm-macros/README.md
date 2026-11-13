@@ -10,6 +10,12 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.141.0 (placeholder) rejects `#[transform(write = "path")]` on
+fields. If the entity compiled, that transform never ran and generated writes
+stored the field's supplied values. Replace it with `WriteInputTransform` on
+`Database` and remediate existing rows; upgrade runtime and macros together.
+See the [migration guide](../../MIGRATION.md#01390-to-01410-write-transforms-fail-closed).
+
 Version 0.139.0 (placeholder) adds optional
 `#[graphql_entity(stable_type_id = "old_crate::models::Record")]` to preserve
 the entity identity across Rust module/crate moves. Type and relation-target
