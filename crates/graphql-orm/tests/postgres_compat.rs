@@ -300,7 +300,7 @@ async fn current_macros_work_against_graphql_orm_runtime() -> Result<(), Box<dyn
 
     let database = graphql_orm::db::Database::new(pool.clone());
     let schema: TestSchema = schema_builder(database)
-        .data("test-user".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
         .finish();
 
     let create_user = schema
@@ -417,7 +417,7 @@ async fn relation_resolvers_batch_for_pages_of_parents() -> Result<(), Box<dyn s
     let pool = setup_pool().await?;
     let database = graphql_orm::db::Database::new(pool);
     let schema: TestSchema = schema_builder(database)
-        .data("test-user".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
         .finish();
 
     let mut user_ids = Vec::new();
@@ -577,7 +577,7 @@ async fn page_limit_cap_applies_to_top_level_and_nested_relation_lists()
         .max_page_limit(Some(2))
         .build();
     let schema: TestSchema = schema_builder(database)
-        .data("test-user".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
         .finish();
 
     let mut user_ids = Vec::new();

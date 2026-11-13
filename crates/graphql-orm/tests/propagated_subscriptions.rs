@@ -379,7 +379,7 @@ async fn setup_pool() -> Result<TestPool, Box<dyn std::error::Error>> {
 
 fn schema(database: graphql_orm::db::Database) -> TestSchema {
     schema_builder(database)
-        .data("test-user".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
         .finish()
 }
 
@@ -504,7 +504,7 @@ async fn direct_entity_mutation_emits_direct_change_event() -> Result<(), Box<dy
                     }
                 }",
             )
-            .data("test-user".to_string()),
+            .data(graphql_orm::graphql::auth::AuthSubject::new("test-user")),
         ),
     );
     wait_until_pending(&mut stream).await;
@@ -519,7 +519,7 @@ async fn direct_entity_mutation_emits_direct_change_event() -> Result<(), Box<dy
                     }
                 }",
             )
-            .data("test-user".to_string()),
+            .data(graphql_orm::graphql::auth::AuthSubject::new("test-user")),
         )
         .await;
     assert!(created.errors.is_empty(), "{:?}", created.errors);
@@ -563,7 +563,7 @@ async fn child_mutation_emits_parent_propagated_event() -> Result<(), Box<dyn st
                     }
                 }",
             )
-            .data("test-user".to_string()),
+            .data(graphql_orm::graphql::auth::AuthSubject::new("test-user")),
         )
         .await;
     assert!(
@@ -591,7 +591,7 @@ async fn child_mutation_emits_parent_propagated_event() -> Result<(), Box<dyn st
                     }
                 }",
             )
-            .data("test-user".to_string()),
+            .data(graphql_orm::graphql::auth::AuthSubject::new("test-user")),
         ),
     );
     wait_until_pending(&mut stream).await;
@@ -606,7 +606,7 @@ async fn child_mutation_emits_parent_propagated_event() -> Result<(), Box<dyn st
                     }}
                 }}"
             ))
-            .data("test-user".to_string()),
+            .data(graphql_orm::graphql::auth::AuthSubject::new("test-user")),
         )
         .await;
     assert!(
@@ -668,7 +668,7 @@ async fn multi_parent_propagation_retains_distinct_paths_to_same_parent()
                     }
                 }",
             )
-            .data("test-user".to_string()),
+            .data(graphql_orm::graphql::auth::AuthSubject::new("test-user")),
         )
         .await;
     assert!(collection.errors.is_empty(), "{:?}", collection.errors);
@@ -686,7 +686,7 @@ async fn multi_parent_propagation_retains_distinct_paths_to_same_parent()
                     }}
                 }}"
             ))
-            .data("test-user".to_string()),
+            .data(graphql_orm::graphql::auth::AuthSubject::new("test-user")),
         )
         .await;
     assert!(first_record.errors.is_empty(), "{:?}", first_record.errors);
@@ -704,7 +704,7 @@ async fn multi_parent_propagation_retains_distinct_paths_to_same_parent()
                     }}
                 }}"
             ))
-            .data("test-user".to_string()),
+            .data(graphql_orm::graphql::auth::AuthSubject::new("test-user")),
         )
         .await;
     assert!(
@@ -731,7 +731,7 @@ async fn multi_parent_propagation_retains_distinct_paths_to_same_parent()
                     }
                 }",
             )
-            .data("test-user".to_string()),
+            .data(graphql_orm::graphql::auth::AuthSubject::new("test-user")),
         ),
     );
     wait_until_pending(&mut stream).await;
@@ -749,7 +749,7 @@ async fn multi_parent_propagation_retains_distinct_paths_to_same_parent()
                     }}
                 }}"
             ))
-            .data("test-user".to_string()),
+            .data(graphql_orm::graphql::auth::AuthSubject::new("test-user")),
         )
         .await;
     assert!(relationship.errors.is_empty(), "{:?}", relationship.errors);
@@ -805,7 +805,7 @@ async fn multi_parent_propagation_retains_distinct_paths_to_same_parent()
                     }
                 }",
             )
-            .data("test-user".to_string()),
+            .data(graphql_orm::graphql::auth::AuthSubject::new("test-user")),
         ),
     );
     tokio::pin!(duplicate_stream);
@@ -824,7 +824,7 @@ async fn multi_parent_propagation_retains_distinct_paths_to_same_parent()
                     }}
                 }}"
             ))
-            .data("test-user".to_string()),
+            .data(graphql_orm::graphql::auth::AuthSubject::new("test-user")),
         )
         .await;
     assert!(
@@ -910,7 +910,7 @@ async fn delete_propagation_requires_a_current_parent() -> Result<(), Box<dyn st
                     }
                 }",
             )
-            .data("test-user".to_string()),
+            .data(graphql_orm::graphql::auth::AuthSubject::new("test-user")),
         ),
     );
     wait_until_pending(&mut stream).await;
@@ -925,7 +925,7 @@ async fn delete_propagation_requires_a_current_parent() -> Result<(), Box<dyn st
                 }}",
                 graphql_uuid(note.id)
             ))
-            .data("test-user".to_string()),
+            .data(graphql_orm::graphql::auth::AuthSubject::new("test-user")),
         )
         .await;
     assert!(deleted.errors.is_empty(), "{:?}", deleted.errors);
@@ -982,7 +982,7 @@ async fn propagation_cycles_do_not_reemit_source_indefinitely()
                     }
                 }",
             )
-            .data("test-user".to_string()),
+            .data(graphql_orm::graphql::auth::AuthSubject::new("test-user")),
         ),
     );
     wait_until_pending(&mut stream).await;
@@ -997,7 +997,7 @@ async fn propagation_cycles_do_not_reemit_source_indefinitely()
                 }}",
                 a.id
             ))
-            .data("test-user".to_string()),
+            .data(graphql_orm::graphql::auth::AuthSubject::new("test-user")),
         )
         .await;
     assert!(deleted.errors.is_empty(), "{:?}", deleted.errors);
@@ -1044,13 +1044,16 @@ async fn propagation_stops_at_sixteen_authorized_hops() -> Result<(), Box<dyn st
     }
     let database = graphql_orm::db::Database::new(pool);
     let schema = schema(database);
-    let mut stream = Box::pin(schema.execute_stream(
-        Request::new("subscription { nodeChanged { id path } }").data("test-user".to_string()),
-    ));
+    let mut stream = Box::pin(
+        schema.execute_stream(
+            Request::new("subscription { nodeChanged { id path } }")
+                .data(graphql_orm::graphql::auth::AuthSubject::new("test-user")),
+        ),
+    );
     wait_until_pending(&mut stream).await;
     let updated = schema.execute(Request::new(
         "mutation { updateNode(id: \"bounded-node-39\", input: {name: \"Updated\"}) { success } }"
-    ).data("test-user".to_string())).await;
+    ).data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))).await;
     assert!(updated.errors.is_empty(), "{:?}", updated.errors);
     for depth in 0..=16 {
         let event = next_json(&mut stream).await;

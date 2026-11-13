@@ -23,9 +23,9 @@ pub struct AuthAssurance {
 /// Project-agnostic request principal understood by `graphql-orm`.
 ///
 /// Applications inject this value into an `async-graphql` request with
-/// `request.data(subject)`. When only the legacy `String` user id is present,
-/// [`AuthExt::auth_subject`] upgrades it to an `AuthSubject` with empty roles,
-/// scopes, and optional fields.
+/// `request.data(subject)`. Only this typed value authenticates a request;
+/// other context data, such as a bare `String` id, is not read as a subject.
+/// Use [`AuthSubject::new`] for a subject with only an id.
 ///
 /// This type must never contain raw tokens, cookies, authorization headers, or
 /// other secrets. Optional claim JSON is treated as application-owned metadata
@@ -380,8 +380,10 @@ pub trait AuthExt {
     /// Return the authenticated subject id.
     fn auth_user_id(&self) -> async_graphql::Result<String>;
 
-    /// Return the authenticated subject, upgrading a legacy `String` id when
-    /// a full [`AuthSubject`] is not present in the GraphQL context.
+    /// Return the authenticated [`AuthSubject`] from the GraphQL context.
+    ///
+    /// Only a typed `AuthSubject` authenticates a request. Other context data,
+    /// including a bare `String`, is never read as a subject.
     fn auth_subject(&self) -> async_graphql::Result<AuthSubject>;
 
     /// Return the authenticated subject when present.
@@ -400,9 +402,7 @@ impl AuthExt for async_graphql::Context<'_> {
     }
 
     fn auth_subject_opt(&self) -> Option<AuthSubject> {
-        self.data_opt::<AuthSubject>()
-            .cloned()
-            .or_else(|| self.data_opt::<String>().cloned().map(AuthSubject::new))
+        self.data_opt::<AuthSubject>().cloned()
     }
 }
 

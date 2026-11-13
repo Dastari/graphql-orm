@@ -116,6 +116,11 @@ pub(crate) fn expand(mut input: ItemStruct) -> syn::Result<proc_macro2::TokenStr
         quote!(::graphql_orm::graphql::orm::EntityFieldPolicyGuard::<_, #backend>::new(self));
     let object_guard = guard(&input.attrs)?;
     install_guard(&mut input.attrs, combine(object_guard, &generated))?;
+    // Inert derive helper: tells the ORM derives the field policy guard is
+    // installed, without matching on the guard expression.
+    input
+        .attrs
+        .push(syn::parse_quote!(#[graphql_orm_policy_object]));
     for field in input.fields.iter_mut() {
         let metadata = parse_field_metadata(field)?;
         if metadata.graphql_skip || has_graphql_object_skip(field) {
@@ -132,7 +137,14 @@ pub(crate) fn expand(mut input: ItemStruct) -> syn::Result<proc_macro2::TokenStr
             install_guard(&mut field.attrs, combine(Some(existing), &generated))?;
         }
     }
-    Ok(quote!(#input))
+    let ident = &input.ident;
+    let (impl_generics, type_generics, where_clause) = input.generics.split_for_impl();
+    Ok(quote! {
+        #input
+        #[doc(hidden)]
+        impl #impl_generics ::graphql_orm::graphql::__policy_object::Installed
+            for #ident #type_generics #where_clause {}
+    })
 }
 
 #[cfg(all(test, feature = "sqlite"))]
@@ -161,6 +173,9 @@ mod tests {
         assert!(expanded.contains("GuardExt :: and (FieldGuard"));
         assert!(expanded.contains("PascalCase"));
         assert!(expanded.contains("graphql (skip)"));
+        // The marker comes with the witness the ORM derives assert on.
+        assert!(expanded.contains("graphql_orm_policy_object"));
+        assert!(expanded.contains("__policy_object :: Installed for Record"));
     }
 
     #[test]
@@ -185,7 +200,10 @@ mod tests {
             "#
             ))
             .unwrap();
-            let expanded: ItemStruct = syn::parse2(expand(input).unwrap()).unwrap();
+            let file: syn::File = syn::parse2(expand(input).unwrap()).unwrap();
+            let Some(syn::Item::Struct(expanded)) = file.items.into_iter().next() else {
+                panic!("expansion starts with the struct");
+            };
             let hidden = expanded
                 .fields
                 .iter()

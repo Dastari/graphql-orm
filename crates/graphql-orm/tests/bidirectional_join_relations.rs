@@ -315,7 +315,9 @@ async fn reverse_join_relations_support_nested_queries_and_counts()
     insert_staff_policy(&pool, "link-1", "policy-1", "staff-1").await?;
     insert_staff_policy(&pool, "link-2", "policy-1", "staff-2").await?;
 
-    let schema = schema_builder(database).data("viewer".to_string()).finish();
+    let schema = schema_builder(database)
+        .data(graphql_orm::graphql::auth::AuthSubject::new("viewer"))
+        .finish();
     let response = schema
         .execute(
             r#"

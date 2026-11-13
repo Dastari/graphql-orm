@@ -322,12 +322,12 @@ async fn zero_input_entities_omit_only_the_mutations_that_need_the_input() {
 async fn append_only_rows_without_public_create_fields_are_appended_privately() {
     let database = entities::database().await;
     let schema = entities::schema_builder(database.clone())
-        .data("test-user".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
         .finish();
     let mut stream = Box::pin(
         schema.execute_stream(
             Request::new("subscription { heartbeatChanged { action heartbeat { observedAt } } }")
-                .data("test-user".to_string()),
+                .data(graphql_orm::graphql::auth::AuthSubject::new("test-user")),
         ),
     );
     registered(&mut stream).await;
@@ -351,7 +351,7 @@ async fn append_only_rows_without_public_create_fields_are_appended_privately() 
     let response = schema
         .execute(
             Request::new("{ heartbeats { edges { node { observedAt } } } }")
-                .data("test-user".to_string()),
+                .data(graphql_orm::graphql::auth::AuthSubject::new("test-user")),
         )
         .await;
     assert!(response.errors.is_empty(), "{:?}", response.errors);
@@ -365,7 +365,7 @@ async fn append_only_rows_without_public_create_fields_are_appended_privately() 
 async fn generated_mutations_none_keeps_reads_relations_and_changed() {
     let database = entities::database().await;
     let schema = read_only_roots::schema_builder(database.clone())
-        .data("test-user".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
         .finish();
     let sdl = schema.sdl();
     assert!(mutation_fields(&sdl).is_empty(), "{sdl}");
@@ -376,7 +376,7 @@ async fn generated_mutations_none_keeps_reads_relations_and_changed() {
     let mut stream = Box::pin(
         schema.execute_stream(
             Request::new("subscription { accountChanged { action id account { refreshedAt } } }")
-                .data("test-user".to_string()),
+                .data(graphql_orm::graphql::auth::AuthSubject::new("test-user")),
         ),
     );
     registered(&mut stream).await;
@@ -467,7 +467,7 @@ async fn generated_mutations_none_keeps_reads_relations_and_changed() {
                 "{ accounts { edges { node { id refreshedAt devices { edges { node { name account { refreshedAt } } } } } } } \
                  badges { edges { node { code issuedAt } } } }",
             )
-            .data("test-user".to_string()),
+            .data(graphql_orm::graphql::auth::AuthSubject::new("test-user")),
         )
         .await;
     assert!(response.errors.is_empty(), "{:?}", response.errors);

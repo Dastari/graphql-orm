@@ -223,7 +223,7 @@ async fn hook_related_writes_are_transactional_for_app_and_graphql_paths()
     .await?;
 
     let schema = schema_builder(db.clone())
-        .data("test-user".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
         .finish();
     let update_result = schema
         .execute(format!(

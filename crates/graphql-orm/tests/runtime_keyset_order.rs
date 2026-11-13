@@ -314,7 +314,9 @@ async fn unselected_sort_field_denial_prevents_order_leak_and_database_select() 
     let mut db = setup().await;
     db.set_field_policy(TitlePolicy(false));
     let db = db.with_read_query_observer(Observe(reads.clone()));
-    let schema = schema_builder(db).data("owned-user".to_string()).finish();
+    let schema = schema_builder(db)
+        .data(graphql_orm::graphql::auth::AuthSubject::new("owned-user"))
+        .finish();
     let response = schema.execute("{ runtimeOrderRowsKeyset(orderBy: [{title: ASC}], page: {limit: 2}) { edges { node { id } } } }").await;
     assert!(!response.errors.is_empty());
     assert_eq!(reads.load(Ordering::Relaxed), 0);
@@ -323,7 +325,7 @@ async fn unselected_sort_field_denial_prevents_order_leak_and_database_select() 
 #[tokio::test]
 async fn generated_sdl_catalogue_and_typed_order_agree() {
     let schema = schema_builder(setup().await)
-        .data("owned-user".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("owned-user"))
         .finish();
     let sdl = schema.sdl();
     assert!(sdl.contains("orderBy: [RuntimeOrderRowKeysetOrderByInput!]"));

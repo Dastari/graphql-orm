@@ -209,7 +209,7 @@ async fn graphql_updates_distinguish_omitted_set_and_clear_for_nullable_fields()
     let pool = setup_pool().await?;
     let db = graphql_orm::db::Database::with_mutation_hook(pool.clone(), ClearNullableFieldsHook);
     let schema = schema_builder(db.clone())
-        .data("test-user".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
         .finish();
 
     let initial_cover_id = graphql_orm::uuid::Uuid::new_v4();

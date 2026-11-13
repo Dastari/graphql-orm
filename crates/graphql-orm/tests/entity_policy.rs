@@ -215,7 +215,7 @@ async fn host_declared_entity_policy_gates_generated_surfaces()
     let mut database = graphql_orm::db::Database::with_entity_policy(pool.clone(), policy.clone());
     database.set_row_policy(CollectionRows);
     let schema = schema_builder(database.clone())
-        .data("test-user".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
         .finish();
 
     let denied_graphql_create = schema

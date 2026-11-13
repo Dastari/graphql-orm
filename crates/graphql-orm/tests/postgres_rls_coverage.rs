@@ -428,7 +428,7 @@ async fn missing_db_auth_context_fails_closed_for_rls_entities()
             .connect_lazy("postgres://nobody:nothing@127.0.0.1:1/none")
     };
     let schema: CoverageSchema = schema_builder(graphql_orm::db::Database::new(unreachable()?))
-        .data("test-user".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
         .finish();
 
     for query in [
@@ -512,7 +512,7 @@ async fn missing_db_auth_context_fails_closed_for_rls_entities()
             .authorization_mode(AuthorizationMode::LegacyPermissive)
             .build(),
     )
-    .data("test-user".to_string())
+    .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
     .finish();
     let legacy = legacy
         .execute(Request::new("{ rlsCovDocs { edges { node { id } } } }"))
@@ -786,7 +786,7 @@ async fn runtime_role_cannot_reach_other_tenant_search_documents_or_change_log()
         .change_journal_enabled(true)
         .build();
     let schema: CoverageSchema = schema_builder(runtime_database.clone())
-        .data("test-user".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
         .finish();
 
     let alpha = create_doc(&schema, "tenant-a", "Quarterly alpha report").await?;
@@ -1017,7 +1017,7 @@ fn coverage_schema(pool: sqlx::PgPool) -> CoverageSchema {
     .register::<RlsCovFile>()
     .expect("register file");
     schema_builder(graphql_orm::db::Database::new(pool))
-        .data("test-user".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
         .data(registry)
         .finish()
 }
@@ -1415,7 +1415,7 @@ async fn runtime_role_cannot_write_change_journal_entries() -> Result<(), Box<dy
         .change_journal_enabled(true)
         .build();
     let schema: CoverageSchema = schema_builder(runtime_database.clone())
-        .data("test-user".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
         .finish();
     let tenant_a = tenant("tenant-a");
     let tenant_b = tenant("tenant-b");
@@ -1650,7 +1650,7 @@ async fn dependent_deletes_journal_through_the_recorder() -> Result<(), Box<dyn 
             .change_journal_enabled(true)
             .build();
         let schema: CoverageSchema = schema_builder(database)
-            .data("test-user".to_string())
+            .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
             .data(registry)
             .finish();
         schema
@@ -1759,7 +1759,7 @@ async fn journal_privileges_beyond_select_are_refused() -> Result<(), Box<dyn st
         .change_journal_enabled(true)
         .build();
     let schema: CoverageSchema = schema_builder(runtime_database.clone())
-        .data("test-user".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
         .finish();
     let tenant_a = tenant("tenant-a");
     let create_plain = |label: &str| {

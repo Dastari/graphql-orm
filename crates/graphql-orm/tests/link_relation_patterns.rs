@@ -305,7 +305,7 @@ fn request(query: impl Into<String>) -> Request {
         .into()
         .replace("edges {", &format!("{} {{", f("edges")))
         .replace("node {", &format!("{} {{", f("node")));
-    Request::new(query).data("test-user".to_owned())
+    Request::new(query).data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
 }
 
 async fn run(schema: &TestSchema, query: String) -> Value {

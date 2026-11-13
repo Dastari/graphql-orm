@@ -580,7 +580,9 @@ impl<B: OrmBackend> Database<B> {
     /// [`crate::graphql::orm::ReadVisibilityCapability::Unknown`], which may
     /// refuse every GraphQL request. Hosts can log these at startup, or treat
     /// a non-empty result as an error for a strict check. With no row policy
-    /// installed, only missing entity metadata is reported.
+    /// installed, missing entity metadata is reported, and outside
+    /// `LegacyPermissive` so is every root whose entity declares a read policy
+    /// key.
     pub fn keyset_read_policy_diagnostics(
         &self,
         catalog: &crate::graphql::orm::GraphqlOperationCatalog,
@@ -588,6 +590,7 @@ impl<B: OrmBackend> Database<B> {
     ) -> Vec<crate::graphql::orm::KeysetReadPolicyError> {
         crate::graphql::orm::keyset_read_policy_findings(
             self.row_policy.as_deref(),
+            self.authorization_mode != AuthorizationMode::LegacyPermissive,
             catalog,
             entities,
         )
@@ -1274,6 +1277,24 @@ impl<B: OrmBackend> Database<B> {
                     surface,
                 )
                 .await?
+        } else if metadata.read_policy.is_some()
+            && self.authorization_mode == AuthorizationMode::DeclaredPoliciesRequired
+        {
+            // A declared row policy key without a provider is a misconfiguration.
+            // Refuse before any row is read, so an existing and a missing key
+            // answer alike.
+            return Err(OrmPublicError::new(OrmErrorCode::AuthorizationMisconfigured)
+                .with_internal(format!(
+                    "entity {} declares a row policy key but no row policy provider is registered",
+                    metadata.entity_name
+                ))
+                .into_graphql_error());
+        } else if metadata.read_policy.is_some()
+            && self.authorization_mode == AuthorizationMode::ExplicitPolicyForAllExposedOperations
+        {
+            // Defer every row to `can_read_row`, which refuses it in this mode,
+            // so list and point reads share one decision.
+            ReadVisibility::CallbackOnly
         } else {
             // No RowPolicy is installed: retain the existing entity-policy-only contract.
             ReadVisibility::Unrestricted
@@ -1464,19 +1485,32 @@ impl<B: OrmBackend> Database<B> {
     /// Release a committed row in a generated mutation payload only when the
     /// caller may read it. Write access does not imply read access.
     ///
-    /// Returns `None` when the payload does not select `result_field` or
-    /// [`Self::can_read_row`] withholds the row. Entity read denial and policy
+    /// Returns `None` when the payload does not select `result_field` or the
+    /// row fails the read authority a generated list read would apply: the
+    /// `GraphqlMutation`-surface read visibility predicate (re-read by key after
+    /// the commit), then [`Self::can_read_row`] when that decision requires
+    /// residual checks. Entity read denial and policy
     /// errors fail the field with `extensions.outcome = "committed"`, because the
     /// write has already committed.
     #[doc(hidden)]
-    pub async fn __release_graphql_mutation_output<T: Any + Send + Sync>(
+    pub async fn __release_graphql_mutation_output<T>(
         &self,
         ctx: &async_graphql::Context<'_>,
-        entity_name: &'static str,
-        read_policy: Option<&'static str>,
         result_field: &str,
         entity: Option<T>,
-    ) -> async_graphql::Result<Option<T>> {
+        key_clause: &str,
+        key_values: fn(&T) -> Vec<crate::graphql::orm::SqlValue>,
+    ) -> async_graphql::Result<Option<T>>
+    where
+        T: crate::graphql::orm::Entity
+            + crate::graphql::orm::FromSqlRow<B>
+            + Clone
+            + Send
+            + Sync
+            + 'static,
+    {
+        let entity_name = T::entity_name();
+        let read_policy = T::metadata().read_policy;
         use async_graphql::ErrorExtensions as _;
         let Some(entity) = entity else {
             return Ok(None);
@@ -1504,18 +1538,22 @@ impl<B: OrmBackend> Database<B> {
             )
             .await
             .map_err(committed)?;
-            let visible = self
-                .can_read_row(Some(ctx), entity_name, read_policy, surface, &entity)
+            // The same row authority as a generated list read of the row.
+            let key_query = crate::graphql::orm::EntityQuery::<T, B>::new()
+                .where_values(key_clause, key_values(&entity));
+            // The row checked is the row released: the post-commit re-read
+            // under a predicate, or the committed copy without one.
+            let released = crate::graphql::orm::mutation_output_row(self, ctx, key_query, entity)
                 .await
                 .map_err(committed)?;
-            Ok::<_, async_graphql::Error>(visible)
+            Ok::<_, async_graphql::Error>(released)
         }
         .await;
         // A withheld row must not release private host diagnostics either.
-        if !matches!(output, Ok(true)) {
+        if !matches!(output, Ok(Some(_))) {
             ctx.query_env.errors.lock().unwrap().truncate(errors_before);
         }
-        Ok(output?.then_some(entity))
+        output
     }
 
     #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]

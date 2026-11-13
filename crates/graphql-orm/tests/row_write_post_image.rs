@@ -215,7 +215,10 @@ async fn database() -> (graphql_orm::db::Database, sqlx::SqlitePool) {
 }
 
 fn schema(db: &graphql_orm::db::Database, actor: &str) -> AppSchema {
-    schema_builder(db.clone()).data(actor.to_string()).finish()
+    schema_builder(db.clone())
+        .data(actor.to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new(actor))
+        .finish()
 }
 
 async fn count(pool: &sqlx::SqlitePool, table: &str, owner: &str) -> i64 {

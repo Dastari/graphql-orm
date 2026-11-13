@@ -218,7 +218,7 @@ async fn generated_graphql_keyset_connection_uses_opaque_cursors() -> graphql_or
         KeysetItem::insert(&database, input(Some(1), rank, "item")).await?;
     }
     let schema = schema_builder(database)
-        .data("test-user".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
         .finish();
     let response = schema
         .execute(

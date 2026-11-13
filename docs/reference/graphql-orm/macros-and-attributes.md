@@ -139,8 +139,17 @@ SDL silently. `graphql_policy_object` installs these skips automatically.
 Generated relation getters also honor `input_only`. `skip = false` does not
 satisfy the object-skip requirement; combined attributes such as
 `#[graphql(visible = false, skip)]` do.
-`read_policy` is conditional authorization, not a static hiding declaration;
-use `graphql_policy_object` to enforce scalar policies with SimpleObject.
+`read_policy` is conditional authorization, not a static hiding declaration.
+A `SimpleObject` getter applies no ORM column policy, so on a `GraphQLEntity` +
+`SimpleObject` entity (with `#[graphql(complex)]` or `schema_only = true`) a
+field `read_policy` without `graphql_policy_object` is a compile error. Place
+`#[graphql_orm::graphql_policy_object]` before the derives, or add
+`#[graphql(skip)]` to the field. `graphql_policy_object` leaves an inert
+`#[graphql_orm_policy_object]` marker and a hidden witness trait impl that the
+derives assert, so a hand-written marker does not satisfy the check. It cannot be
+applied when `SimpleObject` reaches the derive list through a `macro_rules!`
+argument; name `SimpleObject` in the macro body or declare such entities
+directly.
 `skip_input`, `write = false`, `filter = false`, `order = false`, and
 `subscribe = false` restrict their named surfaces and do not hide object getters.
 `#[graphql(skip)]` already removes a SimpleObject getter. `sensitive`, `classification`,
@@ -474,9 +483,10 @@ mounts `NodeId` and `RecordVersion` itself, with the same encoding,
 `GraphQLRelations` on it as well is accepted and adds nothing.
 
 The scalar fields of this shape come from `SimpleObject`, which applies no ORM
-column read policy. When any column declares `read_policy`, or the database has a
-field policy, place `#[graphql_orm::graphql_policy_object]` before the derives so
-every scalar field is checked too. Skipping the managed version column with
+column read policy. A column `read_policy` without
+`#[graphql_orm::graphql_policy_object]` is a compile error. When the database has
+a field policy but no column declares a key, place the attribute before the
+derives too, so every scalar field is checked. Skipping the managed version column with
 `#[graphql(skip)]` instead also removes `RecordVersion`.
 
 ```rust,ignore
