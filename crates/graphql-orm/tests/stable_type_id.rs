@@ -81,6 +81,11 @@ fn default_fingerprint_from_main() {
 fn stable_identity_survives_module_moves() {
     let original = original::Record::generated_graphql_operations();
     let moved = moved::Record::generated_graphql_operations();
+    assert_ne!(original[0].fingerprint(), moved[0].fingerprint());
+    assert_eq!(
+        original[0].entity_rust_type(),
+        original[0].diagnostic_rust_type()
+    );
     let a = stable_a::Record::generated_graphql_operations();
     let b = stable_b::Record::generated_graphql_operations();
     assert_eq!(
