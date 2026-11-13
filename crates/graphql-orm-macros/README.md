@@ -3,7 +3,7 @@ title: "graphql-orm-macros"
 kind: reference
 status: active
 owner: graphql-orm-macros-maintainers
-last_reviewed: 2026-11-13
+last_reviewed: 2026-11-12
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -14,12 +14,13 @@ Version 0.142.0 adds test coverage for complete AI capabilities compiled from
 macro-generated and runtime-generated input SDL, including supported field
 cases, search, links, projections and pagination. Runtime and macro behaviour,
 GraphQL SDL and stored data are unchanged. See the
-[root migration guide](../../MIGRATION.md#01390-to-01420-test-only-release).
+[root migration guide](../../MIGRATION.md#01410-to-01420-test-only-release).
 
-Version 0.137.0 changes nothing a host can observe. The derives emit the
-per-field UPDATE assignment list once per entity instead of once per generated
-update path, which removes about 2.5% of the expanded code of a 15-field
-entity ([#677](https://github.com/Dastari/graphql-orm/issues/677)).
+Version 0.141.0 (placeholder) rejects `#[transform(write = "path")]` on
+fields. If the entity compiled, that transform never ran and generated writes
+stored the field's supplied values. Replace it with `WriteInputTransform` on
+`Database` and remediate existing rows; upgrade runtime and macros together.
+See the [migration guide](../../MIGRATION.md#01390-to-01410-write-transforms-fail-closed).
 
 Version 0.139.0 (placeholder) adds optional
 `#[graphql_entity(stable_type_id = "old_crate::models::Record")]` to preserve
@@ -27,6 +28,11 @@ the entity identity across Rust module/crate moves. Type and relation-target
 spellings must also remain unchanged to preserve fingerprints. Default identities and
 fingerprint algorithms are unchanged. Upgrade ORM/macros together; see the
 [migration recipe](../../MIGRATION.md#01370-to-01390-optional-stable-entity-identity).
+
+Version 0.137.0 changes nothing a host can observe. The derives emit the
+per-field UPDATE assignment list once per entity instead of once per generated
+update path, which removes about 2.5% of the expanded code of a 15-field
+entity ([#677](https://github.com/Dastari/graphql-orm/issues/677)).
 
 Version 0.136.0 (placeholder) keeps runtime and macros aligned. PostgreSQL
 backup export and search rebuild fail when RLS would filter rows. Use a role
