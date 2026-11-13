@@ -378,7 +378,10 @@ an automatic consequence of migrations:
 
 1. Apply and verify the exact AI schema module.
 2. Call `OrmAiRunService::recover_expired_leases` to bounded convergence before
-   accepting work; keep it scheduled while running.
+   accepting work; keep it scheduled while running. Alert on its
+   `quarantined` and `skipped` counts: a malformed row is closed for manual
+   recovery and a failing row is retried, without stopping the pass. The same
+   pass settles expired budget reservations of closed attempts.
 3. Reconcile approval and subscription waits so cancellation and terminal
    events converge before claims resume.
 4. Drain provider-session cleanup. For every `claim_cleanup`, select the

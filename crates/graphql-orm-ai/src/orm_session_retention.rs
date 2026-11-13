@@ -1537,6 +1537,31 @@ impl OrmAiSessionRetentionService {
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
+                        // A retained provider-side thread holds every message
+                        // at or below its watermark. Purging such a message
+                        // must also retire that thread, or the provider keeps
+                        // the purged content in context until the binding
+                        // expires. A thread in use by a run is left alone and
+                        // the purge waits.
+                        let bindings = tx
+                            .query::<AiProviderSessionBindingRecord>()
+                            .filter(AiProviderSessionBindingRecordWhereInput {
+                                session_id: Some(UuidFilter {
+                                    eq: Some(session.id),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .internal_limit(2)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        let retained_binding = match bindings.as_slice() {
+                            [] => None,
+                            [binding] => Some(binding.clone()),
+                            _ => return Err(OrmPublicError::new(OrmErrorCode::InternalError)),
+                        };
+                        let mut retained_content_purged = false;
                         let mut previous_message_sequence = None;
                         for message in messages {
                             validate_message(&message, &session, previous_message_sequence)?;
@@ -1611,6 +1636,18 @@ impl OrmAiSessionRetentionService {
                                 })
                             {
                                 return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                            }
+                            if let Some(binding) = retained_binding.as_ref()
+                                && message.sequence <= binding.through_message_sequence
+                            {
+                                match binding.state.as_str() {
+                                    "active" => retained_content_purged = true,
+                                    "claimed" | "parked_wait" => {
+                                        messages_blocked += 1;
+                                        continue;
+                                    }
+                                    _ => {}
+                                }
                             }
                             let checkpoints = bounded_retention_rows!(
                                 tx,
@@ -1695,6 +1732,10 @@ impl OrmAiSessionRetentionService {
                                 blocks_deleted += 1;
                             }
                             messages_purged += 1;
+                        }
+                        if retained_content_purged && let Some(binding) = retained_binding.as_ref()
+                        {
+                            retire_purged_provider_session(tx, binding, now).await?;
                         }
                     }
 
@@ -2075,7 +2116,7 @@ impl OrmAiSessionRetentionService {
                     }
                     let record = &records[0];
                     match record.state.as_str() {
-                        "active" | "claimed" => {
+                        "active" | "claimed" | "parked_wait" => {
                             let outcome = tx
                                 .compare_and_swap::<AiProviderSessionBindingRecord>(
                                     &record.id,
@@ -2089,6 +2130,12 @@ impl OrmAiSessionRetentionService {
                                     },
                                     UpdateAiProviderSessionBindingRecordInput {
                                         state: Some("cleanup_required".to_owned()),
+                                        // A claimed or parked cursor belongs to
+                                        // that run; the same run must not be
+                                        // offered a fresh rebind afterwards.
+                                        last_run_id: Some(
+                                            record.claimed_run_id.or(record.last_run_id),
+                                        ),
                                         claimed_run_id: Some(None),
                                         claimed_attempt_id: Some(None),
                                         claimed_run_lease_generation: Some(None),
@@ -2153,7 +2200,9 @@ impl OrmAiSessionRetentionService {
                         | "cleanup_exhausted"
                         | "restore_quarantined"
                         | "deleted" => Ok(ProviderSessionCleanupOutcome::Blocked),
-                        _ => Err(OrmPublicError::new(OrmErrorCode::InternalError)),
+                        // An unknown state cannot be proved safe to delete;
+                        // keep this session blocked without failing the pass.
+                        _ => Ok(ProviderSessionCleanupOutcome::Blocked),
                     }
                 })
             })
@@ -3693,256 +3742,275 @@ impl AiSessionRetentionService for OrmAiSessionRetentionService {
         };
         let now = self.clock.now().unix_timestamp();
         for session in candidates.sessions {
-            let session_id = session.id;
-            if session.state == "deleting" {
-                match self
-                    .request_provider_session_cleanup(session_id, now)
-                    .await?
-                {
-                    ProviderSessionCleanupOutcome::Absent => {}
-                    ProviderSessionCleanupOutcome::Requested => {
-                        report.deleting_session_provider_cleanups_requested = report
-                            .deleting_session_provider_cleanups_requested
-                            .checked_add(1)
-                            .ok_or(AiError::PersistenceFailed)?;
-                        report.provider_session_cleanups_blocked = report
-                            .provider_session_cleanups_blocked
-                            .checked_add(1)
-                            .ok_or(AiError::PersistenceFailed)?;
-                    }
-                    ProviderSessionCleanupOutcome::Blocked => {
-                        report.provider_session_cleanups_blocked = report
-                            .provider_session_cleanups_blocked
-                            .checked_add(1)
-                            .ok_or(AiError::PersistenceFailed)?;
-                    }
-                }
-            }
-            let checkpoint_purge_ready;
-            let mut session_changed = false;
-            match self.prune_session(session, now).await? {
-                SessionPruneOutcome::NotReady => {
-                    report.sessions_not_ready += 1;
-                    continue;
-                }
-                SessionPruneOutcome::Conflict => {
-                    report.sessions_conflicted += 1;
-                    continue;
-                }
-                SessionPruneOutcome::Noop {
-                    messages_blocked,
-                    proposal_payload_purge_blocked,
-                    tool_payload_purge_blocked,
-                    raw_payload_purge_blocked,
-                    attachment_cleanup_blocked,
-                    run_checkpoint_purge_ready,
-                    run_checkpoint_purge_blocked,
-                } => {
-                    report.messages_blocked = add_count(report.messages_blocked, messages_blocked)?;
-                    if proposal_payload_purge_blocked {
-                        report.proposal_payload_purges_blocked = report
-                            .proposal_payload_purges_blocked
-                            .checked_add(1)
-                            .ok_or(AiError::PersistenceFailed)?;
-                    }
-                    if tool_payload_purge_blocked {
-                        report.tool_payload_purges_blocked = report
-                            .tool_payload_purges_blocked
-                            .checked_add(1)
-                            .ok_or(AiError::PersistenceFailed)?;
-                    }
-                    if raw_payload_purge_blocked {
-                        report.raw_payload_purges_blocked = report
-                            .raw_payload_purges_blocked
-                            .checked_add(1)
-                            .ok_or(AiError::PersistenceFailed)?;
-                    }
-                    if attachment_cleanup_blocked {
-                        report.attachment_cleanups_blocked = report
-                            .attachment_cleanups_blocked
-                            .checked_add(1)
-                            .ok_or(AiError::PersistenceFailed)?;
-                    }
-                    checkpoint_purge_ready = run_checkpoint_purge_ready;
-                    if run_checkpoint_purge_blocked {
-                        report.run_checkpoint_purges_blocked = report
-                            .run_checkpoint_purges_blocked
-                            .checked_add(1)
-                            .ok_or(AiError::PersistenceFailed)?;
-                    }
-                }
-                SessionPruneOutcome::Changed {
-                    live_delta_events_deleted,
-                    deleting_session_events_deleted,
-                    deleting_session_inbox_payloads_purged,
-                    deleting_session_context_checkpoints_deleted,
-                    context_checkpoints_invalidated,
-                    proposal_payloads_purged,
-                    proposal_payload_purge_blocked,
-                    deleting_tool_payloads_purged,
-                    deleting_approval_payloads_purged,
-                    expired_tool_payloads_purged,
-                    expired_approval_payloads_purged,
-                    tool_payload_purge_blocked,
-                    raw_payload_purge_blocked,
-                    attachment_cleanups_requested,
-                    attachments_deleted,
-                    attachment_artifact_cleanups_requested,
-                    attachment_artifacts_deleted,
-                    attachment_cleanup_blocked,
-                    messages_purged,
-                    blocks_deleted,
-                    messages_blocked,
-                    run_checkpoint_references_cleared,
-                    run_checkpoint_purge_ready,
-                    run_checkpoint_purge_blocked,
-                } => {
-                    session_changed = true;
-                    checkpoint_purge_ready = run_checkpoint_purge_ready;
-                    report.live_delta_events_deleted =
-                        add_count(report.live_delta_events_deleted, live_delta_events_deleted)?;
-                    report.deleting_session_events_deleted = add_count(
-                        report.deleting_session_events_deleted,
-                        deleting_session_events_deleted,
-                    )?;
-                    report.deleting_session_inbox_payloads_purged = add_count(
-                        report.deleting_session_inbox_payloads_purged,
-                        deleting_session_inbox_payloads_purged,
-                    )?;
-                    report.deleting_session_context_checkpoints_deleted = add_count(
-                        report.deleting_session_context_checkpoints_deleted,
-                        deleting_session_context_checkpoints_deleted,
-                    )?;
-                    report.context_checkpoints_invalidated = add_count(
-                        report.context_checkpoints_invalidated,
-                        context_checkpoints_invalidated,
-                    )?;
-                    report.deleting_session_proposal_payloads_purged = add_count(
-                        report.deleting_session_proposal_payloads_purged,
-                        proposal_payloads_purged,
-                    )?;
-                    if proposal_payload_purge_blocked {
-                        report.proposal_payload_purges_blocked = report
-                            .proposal_payload_purges_blocked
-                            .checked_add(1)
-                            .ok_or(AiError::PersistenceFailed)?;
-                    }
-                    report.deleting_session_tool_payloads_purged = add_count(
-                        report.deleting_session_tool_payloads_purged,
-                        deleting_tool_payloads_purged,
-                    )?;
-                    report.deleting_session_approval_payloads_purged = add_count(
-                        report.deleting_session_approval_payloads_purged,
-                        deleting_approval_payloads_purged,
-                    )?;
-                    report.expired_tool_payloads_purged = add_count(
-                        report.expired_tool_payloads_purged,
-                        expired_tool_payloads_purged,
-                    )?;
-                    report.expired_approval_payloads_purged = add_count(
-                        report.expired_approval_payloads_purged,
-                        expired_approval_payloads_purged,
-                    )?;
-                    if tool_payload_purge_blocked {
-                        report.tool_payload_purges_blocked = report
-                            .tool_payload_purges_blocked
-                            .checked_add(1)
-                            .ok_or(AiError::PersistenceFailed)?;
-                    }
-                    if raw_payload_purge_blocked {
-                        report.raw_payload_purges_blocked = report
-                            .raw_payload_purges_blocked
-                            .checked_add(1)
-                            .ok_or(AiError::PersistenceFailed)?;
-                    }
-                    report.deleting_session_attachment_cleanups_requested = add_count(
-                        report.deleting_session_attachment_cleanups_requested,
-                        attachment_cleanups_requested,
-                    )?;
-                    report.deleting_session_attachments_deleted = add_count(
-                        report.deleting_session_attachments_deleted,
-                        attachments_deleted,
-                    )?;
-                    report.deleting_session_attachment_artifact_cleanups_requested = add_count(
-                        report.deleting_session_attachment_artifact_cleanups_requested,
-                        attachment_artifact_cleanups_requested,
-                    )?;
-                    report.deleting_session_attachment_artifacts_deleted = add_count(
-                        report.deleting_session_attachment_artifacts_deleted,
-                        attachment_artifacts_deleted,
-                    )?;
-                    report.message_contents_purged =
-                        add_count(report.message_contents_purged, messages_purged)?;
-                    report.message_blocks_deleted =
-                        add_count(report.message_blocks_deleted, blocks_deleted)?;
-                    report.messages_blocked = add_count(report.messages_blocked, messages_blocked)?;
-                    if attachment_cleanup_blocked {
-                        report.attachment_cleanups_blocked = report
-                            .attachment_cleanups_blocked
-                            .checked_add(1)
-                            .ok_or(AiError::PersistenceFailed)?;
-                    }
-                    report.deleting_session_run_checkpoint_references_cleared = add_count(
-                        report.deleting_session_run_checkpoint_references_cleared,
-                        run_checkpoint_references_cleared,
-                    )?;
-                    if run_checkpoint_purge_blocked {
-                        report.run_checkpoint_purges_blocked = report
-                            .run_checkpoint_purges_blocked
-                            .checked_add(1)
-                            .ok_or(AiError::PersistenceFailed)?;
-                    }
-                }
-            }
-            if checkpoint_purge_ready {
-                match self.purge_run_checkpoints(session_id, now).await? {
-                    DeletingRunCheckpointPurgeOutcome::Verified { deleted } => {
-                        if deleted > 0 {
-                            session_changed = true;
-                            report.deleting_session_run_checkpoints_deleted = add_count(
-                                report.deleting_session_run_checkpoints_deleted,
-                                deleted,
-                            )?;
-                        }
-                        if self.finalize_deleted_session(session_id, now).await? {
-                            session_changed = true;
-                            report.deleting_sessions_finalized = report
-                                .deleting_sessions_finalized
-                                .checked_add(1)
-                                .ok_or(AiError::PersistenceFailed)?;
-                        }
-                    }
-                    DeletingRunCheckpointPurgeOutcome::Blocked => {
-                        report.run_checkpoint_purges_blocked = report
-                            .run_checkpoint_purges_blocked
-                            .checked_add(1)
-                            .ok_or(AiError::PersistenceFailed)?;
-                    }
-                }
-            } else {
-                match self.purge_expired_run_checkpoints(session_id, now).await? {
-                    RawCheckpointPurgeOutcome::Deleted(deleted) => {
-                        session_changed = true;
-                        report.expired_run_checkpoints_deleted =
-                            add_count(report.expired_run_checkpoints_deleted, deleted)?;
-                    }
-                    RawCheckpointPurgeOutcome::Blocked => {
-                        report.raw_checkpoint_purges_blocked = report
-                            .raw_checkpoint_purges_blocked
-                            .checked_add(1)
-                            .ok_or(AiError::PersistenceFailed)?;
-                    }
-                    RawCheckpointPurgeOutcome::NotApplicable | RawCheckpointPurgeOutcome::Noop => {}
-                }
-            }
-            if session_changed {
-                report.sessions_changed = report
-                    .sessions_changed
-                    .checked_add(1)
-                    .ok_or(AiError::PersistenceFailed)?;
+            // One session's malformed rows or failed transaction must not stop
+            // the rest of the page from being pruned; it is counted and
+            // retried on a later pass.
+            if self
+                .prune_one_session(session, now, &mut report)
+                .await
+                .is_err()
+            {
+                report.sessions_failed = report.sessions_failed.saturating_add(1);
             }
         }
         Ok(report)
+    }
+}
+
+impl OrmAiSessionRetentionService {
+    async fn prune_one_session(
+        &self,
+        session: AiSessionRecord,
+        now: i64,
+        report: &mut AiSessionRetentionReport,
+    ) -> Result<(), AiError> {
+        let session_id = session.id;
+        if session.state == "deleting" {
+            match self
+                .request_provider_session_cleanup(session_id, now)
+                .await?
+            {
+                ProviderSessionCleanupOutcome::Absent => {}
+                ProviderSessionCleanupOutcome::Requested => {
+                    report.deleting_session_provider_cleanups_requested = report
+                        .deleting_session_provider_cleanups_requested
+                        .checked_add(1)
+                        .ok_or(AiError::PersistenceFailed)?;
+                    report.provider_session_cleanups_blocked = report
+                        .provider_session_cleanups_blocked
+                        .checked_add(1)
+                        .ok_or(AiError::PersistenceFailed)?;
+                }
+                ProviderSessionCleanupOutcome::Blocked => {
+                    report.provider_session_cleanups_blocked = report
+                        .provider_session_cleanups_blocked
+                        .checked_add(1)
+                        .ok_or(AiError::PersistenceFailed)?;
+                }
+            }
+        }
+        let checkpoint_purge_ready;
+        let mut session_changed = false;
+        match self.prune_session(session, now).await? {
+            SessionPruneOutcome::NotReady => {
+                report.sessions_not_ready += 1;
+                return Ok(());
+            }
+            SessionPruneOutcome::Conflict => {
+                report.sessions_conflicted += 1;
+                return Ok(());
+            }
+            SessionPruneOutcome::Noop {
+                messages_blocked,
+                proposal_payload_purge_blocked,
+                tool_payload_purge_blocked,
+                raw_payload_purge_blocked,
+                attachment_cleanup_blocked,
+                run_checkpoint_purge_ready,
+                run_checkpoint_purge_blocked,
+            } => {
+                report.messages_blocked = add_count(report.messages_blocked, messages_blocked)?;
+                if proposal_payload_purge_blocked {
+                    report.proposal_payload_purges_blocked = report
+                        .proposal_payload_purges_blocked
+                        .checked_add(1)
+                        .ok_or(AiError::PersistenceFailed)?;
+                }
+                if tool_payload_purge_blocked {
+                    report.tool_payload_purges_blocked = report
+                        .tool_payload_purges_blocked
+                        .checked_add(1)
+                        .ok_or(AiError::PersistenceFailed)?;
+                }
+                if raw_payload_purge_blocked {
+                    report.raw_payload_purges_blocked = report
+                        .raw_payload_purges_blocked
+                        .checked_add(1)
+                        .ok_or(AiError::PersistenceFailed)?;
+                }
+                if attachment_cleanup_blocked {
+                    report.attachment_cleanups_blocked = report
+                        .attachment_cleanups_blocked
+                        .checked_add(1)
+                        .ok_or(AiError::PersistenceFailed)?;
+                }
+                checkpoint_purge_ready = run_checkpoint_purge_ready;
+                if run_checkpoint_purge_blocked {
+                    report.run_checkpoint_purges_blocked = report
+                        .run_checkpoint_purges_blocked
+                        .checked_add(1)
+                        .ok_or(AiError::PersistenceFailed)?;
+                }
+            }
+            SessionPruneOutcome::Changed {
+                live_delta_events_deleted,
+                deleting_session_events_deleted,
+                deleting_session_inbox_payloads_purged,
+                deleting_session_context_checkpoints_deleted,
+                context_checkpoints_invalidated,
+                proposal_payloads_purged,
+                proposal_payload_purge_blocked,
+                deleting_tool_payloads_purged,
+                deleting_approval_payloads_purged,
+                expired_tool_payloads_purged,
+                expired_approval_payloads_purged,
+                tool_payload_purge_blocked,
+                raw_payload_purge_blocked,
+                attachment_cleanups_requested,
+                attachments_deleted,
+                attachment_artifact_cleanups_requested,
+                attachment_artifacts_deleted,
+                attachment_cleanup_blocked,
+                messages_purged,
+                blocks_deleted,
+                messages_blocked,
+                run_checkpoint_references_cleared,
+                run_checkpoint_purge_ready,
+                run_checkpoint_purge_blocked,
+            } => {
+                session_changed = true;
+                checkpoint_purge_ready = run_checkpoint_purge_ready;
+                report.live_delta_events_deleted =
+                    add_count(report.live_delta_events_deleted, live_delta_events_deleted)?;
+                report.deleting_session_events_deleted = add_count(
+                    report.deleting_session_events_deleted,
+                    deleting_session_events_deleted,
+                )?;
+                report.deleting_session_inbox_payloads_purged = add_count(
+                    report.deleting_session_inbox_payloads_purged,
+                    deleting_session_inbox_payloads_purged,
+                )?;
+                report.deleting_session_context_checkpoints_deleted = add_count(
+                    report.deleting_session_context_checkpoints_deleted,
+                    deleting_session_context_checkpoints_deleted,
+                )?;
+                report.context_checkpoints_invalidated = add_count(
+                    report.context_checkpoints_invalidated,
+                    context_checkpoints_invalidated,
+                )?;
+                report.deleting_session_proposal_payloads_purged = add_count(
+                    report.deleting_session_proposal_payloads_purged,
+                    proposal_payloads_purged,
+                )?;
+                if proposal_payload_purge_blocked {
+                    report.proposal_payload_purges_blocked = report
+                        .proposal_payload_purges_blocked
+                        .checked_add(1)
+                        .ok_or(AiError::PersistenceFailed)?;
+                }
+                report.deleting_session_tool_payloads_purged = add_count(
+                    report.deleting_session_tool_payloads_purged,
+                    deleting_tool_payloads_purged,
+                )?;
+                report.deleting_session_approval_payloads_purged = add_count(
+                    report.deleting_session_approval_payloads_purged,
+                    deleting_approval_payloads_purged,
+                )?;
+                report.expired_tool_payloads_purged = add_count(
+                    report.expired_tool_payloads_purged,
+                    expired_tool_payloads_purged,
+                )?;
+                report.expired_approval_payloads_purged = add_count(
+                    report.expired_approval_payloads_purged,
+                    expired_approval_payloads_purged,
+                )?;
+                if tool_payload_purge_blocked {
+                    report.tool_payload_purges_blocked = report
+                        .tool_payload_purges_blocked
+                        .checked_add(1)
+                        .ok_or(AiError::PersistenceFailed)?;
+                }
+                if raw_payload_purge_blocked {
+                    report.raw_payload_purges_blocked = report
+                        .raw_payload_purges_blocked
+                        .checked_add(1)
+                        .ok_or(AiError::PersistenceFailed)?;
+                }
+                report.deleting_session_attachment_cleanups_requested = add_count(
+                    report.deleting_session_attachment_cleanups_requested,
+                    attachment_cleanups_requested,
+                )?;
+                report.deleting_session_attachments_deleted = add_count(
+                    report.deleting_session_attachments_deleted,
+                    attachments_deleted,
+                )?;
+                report.deleting_session_attachment_artifact_cleanups_requested = add_count(
+                    report.deleting_session_attachment_artifact_cleanups_requested,
+                    attachment_artifact_cleanups_requested,
+                )?;
+                report.deleting_session_attachment_artifacts_deleted = add_count(
+                    report.deleting_session_attachment_artifacts_deleted,
+                    attachment_artifacts_deleted,
+                )?;
+                report.message_contents_purged =
+                    add_count(report.message_contents_purged, messages_purged)?;
+                report.message_blocks_deleted =
+                    add_count(report.message_blocks_deleted, blocks_deleted)?;
+                report.messages_blocked = add_count(report.messages_blocked, messages_blocked)?;
+                if attachment_cleanup_blocked {
+                    report.attachment_cleanups_blocked = report
+                        .attachment_cleanups_blocked
+                        .checked_add(1)
+                        .ok_or(AiError::PersistenceFailed)?;
+                }
+                report.deleting_session_run_checkpoint_references_cleared = add_count(
+                    report.deleting_session_run_checkpoint_references_cleared,
+                    run_checkpoint_references_cleared,
+                )?;
+                if run_checkpoint_purge_blocked {
+                    report.run_checkpoint_purges_blocked = report
+                        .run_checkpoint_purges_blocked
+                        .checked_add(1)
+                        .ok_or(AiError::PersistenceFailed)?;
+                }
+            }
+        }
+        if checkpoint_purge_ready {
+            match self.purge_run_checkpoints(session_id, now).await? {
+                DeletingRunCheckpointPurgeOutcome::Verified { deleted } => {
+                    if deleted > 0 {
+                        session_changed = true;
+                        report.deleting_session_run_checkpoints_deleted =
+                            add_count(report.deleting_session_run_checkpoints_deleted, deleted)?;
+                    }
+                    if self.finalize_deleted_session(session_id, now).await? {
+                        session_changed = true;
+                        report.deleting_sessions_finalized = report
+                            .deleting_sessions_finalized
+                            .checked_add(1)
+                            .ok_or(AiError::PersistenceFailed)?;
+                    }
+                }
+                DeletingRunCheckpointPurgeOutcome::Blocked => {
+                    report.run_checkpoint_purges_blocked = report
+                        .run_checkpoint_purges_blocked
+                        .checked_add(1)
+                        .ok_or(AiError::PersistenceFailed)?;
+                }
+            }
+        } else {
+            match self.purge_expired_run_checkpoints(session_id, now).await? {
+                RawCheckpointPurgeOutcome::Deleted(deleted) => {
+                    session_changed = true;
+                    report.expired_run_checkpoints_deleted =
+                        add_count(report.expired_run_checkpoints_deleted, deleted)?;
+                }
+                RawCheckpointPurgeOutcome::Blocked => {
+                    report.raw_checkpoint_purges_blocked = report
+                        .raw_checkpoint_purges_blocked
+                        .checked_add(1)
+                        .ok_or(AiError::PersistenceFailed)?;
+                }
+                RawCheckpointPurgeOutcome::NotApplicable | RawCheckpointPurgeOutcome::Noop => {}
+            }
+        }
+        if session_changed {
+            report.sessions_changed = report
+                .sessions_changed
+                .checked_add(1)
+                .ok_or(AiError::PersistenceFailed)?;
+        }
+        Ok(())
     }
 }
 
@@ -4125,6 +4193,56 @@ fn proposal_state_is_terminal(proposal: &AiProposalRecord, now: i64) -> bool {
             && proposal
                 .expires_at
                 .is_some_and(|expires_at| expires_at <= now))
+}
+
+/// Moves an idle retained provider-side thread to exact-reference cleanup
+/// because retention purged content it still holds.
+async fn retire_purged_provider_session(
+    tx: &mut graphql_orm::graphql::orm::MutationContext<'_, DefaultWriteBackend>,
+    binding: &AiProviderSessionBindingRecord,
+    now: i64,
+) -> Result<(), OrmPublicError> {
+    const REASON: &str = "provider_session_content_purged";
+    let outcome = tx
+        .compare_and_swap::<AiProviderSessionBindingRecord>(
+            &binding.id,
+            binding.row_version,
+            AiProviderSessionBindingRecordWhereInput {
+                state: Some(StringFilter {
+                    eq: Some("active".to_owned()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            UpdateAiProviderSessionBindingRecordInput {
+                state: Some("cleanup_required".to_owned()),
+                cleanup_owner: Some(None),
+                cleanup_lease_expires_at: Some(None),
+                cleanup_next_attempt_at: Some(Some(now)),
+                cleanup_reason_code: Some(Some(REASON.to_owned())),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(OrmPublicError::from)?;
+    if !matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
+        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+    }
+    tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
+        actor_principal_kind: "system".to_owned(),
+        actor_subject: "session-retention".to_owned(),
+        action: "require_provider_session_cleanup".to_owned(),
+        resource_kind: "ai_provider_session".to_owned(),
+        resource_reference: binding.id.to_string(),
+        outcome: "allowed".to_owned(),
+        reason_code: REASON.to_owned(),
+        correlation_id: Uuid::new_v4().to_string(),
+        causation_id: Some(binding.session_id.to_string()),
+        policy_version: None,
+    })
+    .await
+    .map_err(OrmPublicError::from)?;
+    Ok(())
 }
 
 async fn purge_terminal_subscription_waits(
@@ -5231,6 +5349,7 @@ mod tests {
                 latest_checkpoint_id: None,
                 cancellation_request_id: None,
                 cancellation_requested_at: None,
+                recovery_examined_at: 0,
             },
         )
         .await
@@ -5412,6 +5531,7 @@ mod tests {
                 latest_checkpoint_id: None,
                 cancellation_request_id: None,
                 cancellation_requested_at: None,
+                recovery_examined_at: 0,
             },
         )
         .await
@@ -5834,6 +5954,7 @@ mod tests {
                 state: "committed".to_owned(),
                 expires_at: wall_clock + 3_600,
                 reconciled_at: Some(wall_clock),
+                settlement_examined_at: 0,
             },
         )
         .await
@@ -6182,6 +6303,209 @@ mod tests {
             .expect("finalized shell should leave the candidate set");
         assert_eq!(replay.sessions_scanned, 0);
         assert_eq!(replay.deleting_sessions_finalized, 0);
+    }
+
+    async fn seed_provider_binding(
+        database: &Database<SqliteBackend>,
+        session_id: Uuid,
+        state: &str,
+        through_message_sequence: i64,
+        claimed_run: Option<Uuid>,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        let claimed = matches!(state, "claimed" | "parked_wait");
+        let parked = state == "parked_wait";
+        crate::orm_provider_session::AiProviderSessionBindingRecord::insert(
+            database,
+            crate::orm_provider_session::CreateAiProviderSessionBindingRecordInput {
+                id,
+                session_id,
+                owner_principal_kind: "user".to_owned(),
+                owner_subject: "retention-user".to_owned(),
+                principal_reference: serde_json::json!({}),
+                scope_key: "retention".to_owned(),
+                scope_kind: "tenant".to_owned(),
+                scope_id: "retention".to_owned(),
+                tenant_id: Some("retention".to_owned()),
+                provider_kind: "mock".to_owned(),
+                provider_profile_id: "retention".to_owned(),
+                provider_model: "retention-test".to_owned(),
+                registration_fingerprint: "a".repeat(64),
+                protocol_version: "test/v1".to_owned(),
+                policy_fingerprint: "b".repeat(64),
+                cursor_kind: "test.thread".to_owned(),
+                cursor_fingerprint: "c".repeat(64),
+                installed_offering_fingerprint: None,
+                protected_cursor: Some(serde_json::json!({"protected":true})),
+                through_message_sequence,
+                transcript_fingerprint: "d".repeat(64),
+                last_run_id: None,
+                last_assistant_message_id: None,
+                state: state.to_owned(),
+                claimed_run_id: claimed.then_some(claimed_run).flatten(),
+                claimed_attempt_id: claimed.then(Uuid::new_v4),
+                claimed_run_lease_generation: claimed.then_some(1),
+                claim_owner: (state == "claimed").then(|| "worker".to_owned()),
+                claim_generation: 1,
+                claim_expires_at: (state == "claimed").then_some(now().unix_timestamp() + 60),
+                parked_wait_kind: parked.then(|| "approval".to_owned()),
+                parked_wait_id: parked.then(Uuid::new_v4),
+                park_generation: i64::from(parked),
+                parked_source_checkpoint_id: parked.then(Uuid::new_v4),
+                parked_source_checkpoint_fingerprint: parked.then(|| "e".repeat(64)),
+                parked_checkpoint_id: parked.then(Uuid::new_v4),
+                parked_checkpoint_fingerprint: parked.then(|| "f".repeat(64)),
+                parked_continuation_fingerprint: parked.then(|| "0".repeat(64)),
+                parked_confirmed_at: parked.then_some(now().unix_timestamp() - 10),
+                parked_expires_at: parked.then_some(now().unix_timestamp() + 600),
+                parked_reclaimed_at: None,
+                provider_expires_at: None,
+                idle_expires_at: now().unix_timestamp() + 600,
+                absolute_expires_at: now().unix_timestamp() + 1_200,
+                cleanup_owner: None,
+                cleanup_generation: 0,
+                cleanup_lease_expires_at: None,
+                cleanup_retry_count: 0,
+                cleanup_next_attempt_at: None,
+                cleanup_reason_code: None,
+                provider_absence_observed_at: None,
+            },
+        )
+        .await
+        .expect("provider binding should seed");
+        id
+    }
+
+    #[tokio::test]
+    async fn deleting_session_with_a_parked_provider_binding_does_not_abort_the_pass() {
+        for host_policy in [false, true] {
+            deleting_session_with_a_parked_provider_binding(host_policy).await;
+        }
+    }
+
+    /// A host entity policy that grants the repository surface only, as a
+    /// strict host would. The retention worker must need nothing else.
+    #[derive(Clone)]
+    struct RepositoryOnlyHostPolicy;
+
+    impl EntityPolicy<DefaultWriteBackend> for RepositoryOnlyHostPolicy {
+        fn can_access_entity<'a>(
+            &'a self,
+            _context: Option<&'a async_graphql::Context<'_>>,
+            _database: &'a Database<DefaultWriteBackend>,
+            _entity_name: &'static str,
+            _policy_key: Option<&'static str>,
+            _kind: EntityAccessKind,
+            surface: EntityAccessSurface,
+        ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+            let allowed = surface == EntityAccessSurface::Repository;
+            Box::pin(async move { Ok(allowed) })
+        }
+    }
+
+    async fn retention_database(host_policy: bool) -> Database<SqliteBackend> {
+        let mut database = database().await;
+        if host_policy {
+            database.set_entity_policy(RepositoryOnlyHostPolicy);
+        }
+        database
+    }
+
+    async fn deleting_session_with_a_parked_provider_binding(host_policy: bool) {
+        let database = retention_database(host_policy).await;
+        let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
+        seed_policy(&database, &scope).await;
+        let deleting = seed_empty_session(&database, &scope).await;
+        let parked_run = Uuid::new_v4();
+        seed_run_record(&database, deleting, parked_run, "waiting_approval").await;
+        let binding =
+            seed_provider_binding(&database, deleting, "parked_wait", 0, Some(parked_run)).await;
+        mark_session_deleting(&database, deleting, 10).await;
+        let other = seed_session(&database, &scope).await;
+        let (message_id, _) = seed_message(&database, other, "completed", false).await;
+        let service = OrmAiSessionRetentionService::new(
+            database.clone(),
+            Arc::new(FixedClock::new(now())),
+            AiSessionRetentionLimits::default(),
+        );
+
+        let report = service
+            .prune_session_content(None)
+            .await
+            .expect("a parked binding must not abort the retention pass");
+        assert_eq!(report.sessions_scanned, 2);
+        assert_eq!(report.deleting_session_provider_cleanups_requested, 1);
+        assert_eq!(report.message_contents_purged, 1);
+        let binding = crate::orm_provider_session::AiProviderSessionBindingRecord::find_by_id(
+            &database, &binding,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(binding.state, "cleanup_required");
+        assert_eq!(
+            binding.cleanup_reason_code.as_deref(),
+            Some("owning_session_deleting")
+        );
+        assert_eq!(binding.last_run_id, Some(parked_run));
+        assert!(binding.claimed_run_id.is_none());
+        let message = AiMessageRecord::find_by_id(&database, &message_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(message.content_purged_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn purging_retained_message_content_retires_the_idle_provider_thread() {
+        for (state, host_policy) in [
+            ("active", false),
+            ("claimed", false),
+            ("active", true),
+            ("claimed", true),
+        ] {
+            let database = retention_database(host_policy).await;
+            let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
+            seed_policy(&database, &scope).await;
+            let session_id = seed_session(&database, &scope).await;
+            let (message_id, _) = seed_message(&database, session_id, "completed", false).await;
+            let binding =
+                seed_provider_binding(&database, session_id, state, 1, Some(Uuid::new_v4())).await;
+            let service = OrmAiSessionRetentionService::new(
+                database.clone(),
+                Arc::new(FixedClock::new(now())),
+                AiSessionRetentionLimits::default(),
+            );
+            let report = service
+                .prune_session_content(None)
+                .await
+                .expect("retention pass should succeed");
+            let binding = crate::orm_provider_session::AiProviderSessionBindingRecord::find_by_id(
+                &database, &binding,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let message = AiMessageRecord::find_by_id(&database, &message_id)
+                .await
+                .unwrap()
+                .unwrap();
+            if state == "active" {
+                assert_eq!(report.message_contents_purged, 1);
+                assert!(message.content_purged_at.is_some());
+                assert_eq!(binding.state, "cleanup_required");
+                assert_eq!(
+                    binding.cleanup_reason_code.as_deref(),
+                    Some("provider_session_content_purged")
+                );
+            } else {
+                // A thread in use by a run keeps the content until it is idle.
+                assert_eq!(report.message_contents_purged, 0, "state={state}");
+                assert_eq!(report.messages_blocked, 1, "state={state}");
+                assert!(message.content_purged_at.is_none());
+                assert_eq!(binding.state, "claimed");
+            }
+        }
     }
 
     #[tokio::test]
@@ -7038,6 +7362,7 @@ mod tests {
                 latest_checkpoint_id: None,
                 cancellation_request_id: None,
                 cancellation_requested_at: None,
+                recovery_examined_at: 0,
             },
         )
         .await
@@ -7064,6 +7389,7 @@ mod tests {
                 latest_checkpoint_id: None,
                 cancellation_request_id: None,
                 cancellation_requested_at: None,
+                recovery_examined_at: 0,
             },
         )
         .await
@@ -7208,6 +7534,7 @@ mod tests {
                 latest_checkpoint_id: None,
                 cancellation_request_id: None,
                 cancellation_requested_at: None,
+                recovery_examined_at: 0,
             },
         )
         .await
@@ -8025,6 +8352,7 @@ mod tests {
                 latest_checkpoint_id: None,
                 cancellation_request_id: None,
                 cancellation_requested_at: None,
+                recovery_examined_at: 0,
             },
         )
         .await
@@ -8238,6 +8566,7 @@ mod tests {
                 state: "committed".to_owned(),
                 expires_at: wall + 3600,
                 reconciled_at: Some(wall),
+                settlement_examined_at: 0,
             },
         )
         .await
@@ -9095,8 +9424,11 @@ mod tests {
                 .unwrap()
                 .unwrap();
             if invalid_link.is_some() {
+                // The session fails closed and is counted; the pass continues.
                 assert!(
-                    result.is_err(),
+                    result
+                        .as_ref()
+                        .is_ok_and(|report| report.sessions_failed == 1),
                     "mismatched native retention graph must fail closed"
                 );
                 assert!(candidate.protected_preparation.is_some());

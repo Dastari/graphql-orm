@@ -125,6 +125,15 @@ impl AiApprovalBinding {
 /// This is a representation limit, including JSON escaping, not an execution limit.
 pub const AI_APPROVAL_PREVIEW_DETAILS_MAX_BYTES: usize = 2 * 1024 * 1024;
 
+/// Stable `InvalidInput` message for a decision (approve, deny or revoke) on
+/// an approval whose run is no longer waiting for it.
+///
+/// Every transition out of `WaitingApproval` closes the run's open
+/// approvals, so this is returned only for an approval left open by an
+/// earlier release, or when the run closed between read and decision.
+pub const AI_APPROVAL_RUN_NOT_WAITING: &str =
+    "approval decision refused: the run is no longer waiting for this approval";
+
 pub(crate) fn validate_preview_resources(
     preview: &AiCanonicalActionPreview,
     resources: &[AiApprovalResourceBinding],

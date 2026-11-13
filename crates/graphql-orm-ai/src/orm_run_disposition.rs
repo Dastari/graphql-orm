@@ -3,6 +3,7 @@
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
 use crate::orm_read_bounds::InternalReadBound as _;
+use crate::orm_runs::retry_transaction;
 use std::sync::Arc;
 
 use agql_auth::{
@@ -18,7 +19,10 @@ use time::Duration;
 use uuid::Uuid;
 
 use crate::orm_inbox::{PreparedAiInboxEvent, append_inbox_event};
-use crate::orm_runs::{run_produced_assistant_output, run_provider_dispatch_possible};
+use crate::orm_runs::{
+    run_consequential_tool_dispatch_possible, run_produced_assistant_output,
+    run_provider_dispatch_possible,
+};
 use crate::orm_sessions::{
     content_context, map_orm, map_protection, map_transaction, principal_identity, record_scope,
 };
@@ -327,194 +331,212 @@ impl OrmAiRunDispositionService {
         let owner_kind = principal_kind.clone();
         let owner_subject = principal_subject.clone();
 
-        let record = self
-            .database
-            .transaction(TransactionMode::StateMachine, move |tx| {
-                let principal_reference = principal_reference.clone();
-                let protected_event = protected_event.clone();
-                let protected_inbox_event = protected_inbox_event.clone();
-                let owner_kind = owner_kind.clone();
-                let owner_subject = owner_subject.clone();
-                let source_state = source_state.clone();
-                let source_outcome_code = source_outcome_code.clone();
-                let expected_run = expected_run.clone();
-                Box::pin(async move {
-                    let session = tx
-                        .find_by_id::<AiSessionRecord>(&session_id)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    if !matches!(session.state.as_str(), "active") || session.deleted_at.is_some() {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let run = tx
-                        .find_by_id::<AiRunRecord>(&run_id)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    // The run must not have changed between admission and the
-                    // commit; a terminal run should be immutable, and anything
-                    // else means the decision was made against stale evidence.
-                    if run != expected_run {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    // At most one disposition wins per source run.
-                    let existing = tx
-                        .query::<AiRunFailureDispositionRecord>()
-                        .filter(AiRunFailureDispositionRecordWhereInput {
-                            source_run_id: Some(UuidFilter {
-                                eq: Some(run_id),
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        })
-                        .internal_limit(1)
-                        .fetch_all()
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    if !existing.is_empty() {
-                        // No writes precede this refusal. Carry the closed reason
-                        // through a successful read-only transaction; commit failures
-                        // still use the ordinary persistence error path.
-                        return Ok(Err(crate::AiRunRetryRefusal::AlreadyDisposed));
-                    }
-
-                    if let Some(retry_run_id) = retry_run_id {
-                        // Re-decide admission from committed rows inside the
-                        // same transaction that authors the new run.
-                        let evidence = AiRunRetryEvidence {
-                            terminal,
-                            produced_assistant_output: run_produced_assistant_output(
-                                tx, session_id, run_id,
-                            )
-                            .await?,
-                            provider_dispatch_possible: run_provider_dispatch_possible(tx, run_id)
-                                .await?,
-                        };
-                        let admission = classify_run_retry(evidence, run.error_code.as_deref());
-                        if admission != AiRunRetryAdmission::Allowed {
-                            return Ok(Err(crate::AiRunRetryRefusal::from_admission(admission)
-                                .expect("refusing admission has a reason")));
-                        }
-                        let message = tx
-                            .find_by_id::<AiMessageRecord>(&input_message_id)
+        let record = retry_transaction(crate::orm_runs::DEFAULT_TRANSACTION_RETRIES, || {
+            let expected_run = expected_run.clone();
+            let owner_kind = owner_kind.clone();
+            let owner_subject = owner_subject.clone();
+            let principal_reference = principal_reference.clone();
+            let protected_event = protected_event.clone();
+            let protected_inbox_event = protected_inbox_event.clone();
+            let source_outcome_code = source_outcome_code.clone();
+            let source_state = source_state.clone();
+            self.database
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    let principal_reference = principal_reference.clone();
+                    let protected_event = protected_event.clone();
+                    let protected_inbox_event = protected_inbox_event.clone();
+                    let owner_kind = owner_kind.clone();
+                    let owner_subject = owner_subject.clone();
+                    let source_state = source_state.clone();
+                    let source_outcome_code = source_outcome_code.clone();
+                    let expected_run = expected_run.clone();
+                    Box::pin(async move {
+                        let session = tx
+                            .find_by_id::<AiSessionRecord>(&session_id)
                             .await
                             .map_err(OrmPublicError::from)?
                             .ok_or_else(OrmPublicError::not_found)?;
-                        // Retry reuses the durable user message; it never
-                        // rewrites one, and it refuses a purged one because the
-                        // prompt no longer exists.
-                        if message.session_id != session_id
-                            || message.message_role != "user"
-                            || message.content_purged_at.is_some()
+                        if !matches!(session.state.as_str(), "active")
+                            || session.deleted_at.is_some()
                         {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }
-                        tx.insert::<AiRunRecord>(CreateAiRunRecordInput {
-                            recovery_epoch_id: None,
-                            execution_selection: run.execution_selection.clone(),
-                            id: retry_run_id,
+                        let run = tx
+                            .find_by_id::<AiRunRecord>(&run_id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        // The run must not have changed between admission and the
+                        // commit; a terminal run should be immutable, and anything
+                        // else means the decision was made against stale evidence.
+                        if run != expected_run {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        // At most one disposition wins per source run.
+                        let existing = tx
+                            .query::<AiRunFailureDispositionRecord>()
+                            .filter(AiRunFailureDispositionRecordWhereInput {
+                                source_run_id: Some(UuidFilter {
+                                    eq: Some(run_id),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .internal_limit(1)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if !existing.is_empty() {
+                            // No writes precede this refusal. Carry the closed reason
+                            // through a successful read-only transaction; commit failures
+                            // still use the ordinary persistence error path.
+                            return Ok(Err(crate::AiRunRetryRefusal::AlreadyDisposed));
+                        }
+
+                        if let Some(retry_run_id) = retry_run_id {
+                            // Re-decide admission from committed rows inside the
+                            // same transaction that authors the new run.
+                            let evidence = AiRunRetryEvidence {
+                                terminal,
+                                produced_assistant_output: run_produced_assistant_output(
+                                    tx, session_id, run_id,
+                                )
+                                .await?,
+                                provider_dispatch_possible: run_provider_dispatch_possible(
+                                    tx, run_id,
+                                )
+                                .await?,
+                                consequential_tool_dispatch_possible:
+                                    run_consequential_tool_dispatch_possible(tx, run_id).await?,
+                            };
+                            let admission = classify_run_retry(evidence, run.error_code.as_deref());
+                            if admission != AiRunRetryAdmission::Allowed {
+                                return Ok(Err(crate::AiRunRetryRefusal::from_admission(
+                                    admission,
+                                )
+                                .expect("refusing admission has a reason")));
+                            }
+                            let message = tx
+                                .find_by_id::<AiMessageRecord>(&input_message_id)
+                                .await
+                                .map_err(OrmPublicError::from)?
+                                .ok_or_else(OrmPublicError::not_found)?;
+                            // Retry reuses the durable user message; it never
+                            // rewrites one, and it refuses a purged one because the
+                            // prompt no longer exists.
+                            if message.session_id != session_id
+                                || message.message_role != "user"
+                                || message.content_purged_at.is_some()
+                            {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                            tx.insert::<AiRunRecord>(CreateAiRunRecordInput {
+                                recovery_epoch_id: None,
+                                execution_selection: run.execution_selection.clone(),
+                                id: retry_run_id,
+                                session_id,
+                                input_message_id,
+                                principal_reference,
+                                state: AiRunState::Queued.as_str().to_owned(),
+                                attempt_id: None,
+                                lease_owner: None,
+                                lease_generation: 0,
+                                lease_expires_at: None,
+                                lease_heartbeat_at: None,
+                                retry_count: 0,
+                                next_attempt_at: Some(now_unix),
+                                error_code: None,
+                                latest_checkpoint_id: None,
+                                cancellation_request_id: None,
+                                cancellation_requested_at: None,
+                                recovery_examined_at: 0,
+                            })
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        }
+
+                        let sequence = session
+                            .stream_head
+                            .checked_add(1)
+                            .filter(|sequence| *sequence <= i64::from(i32::MAX))
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                        if !matches!(
+                            tx.compare_and_swap::<AiSessionRecord>(
+                                &session.id,
+                                session.row_version,
+                                AiSessionRecordWhereInput::default(),
+                                UpdateAiSessionRecordInput {
+                                    stream_head: Some(sequence),
+                                    last_activity_at: Some(now_unix),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?,
+                            ConditionalUpdateOutcome::Updated(_)
+                        ) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+
+                        let record = tx
+                            .insert::<AiRunFailureDispositionRecord>(
+                                CreateAiRunFailureDispositionRecordInput {
+                                    id: client_request_id,
+                                    session_id,
+                                    source_run_id: run_id,
+                                    input_message_id,
+                                    disposition: disposition.as_str().to_owned(),
+                                    retry_run_id,
+                                    source_state,
+                                    source_outcome_code,
+                                    principal_kind: owner_kind.clone(),
+                                    principal_subject: owner_subject.clone(),
+                                    decided_at: now_unix,
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
+                            id: event_id,
                             session_id,
-                            input_message_id,
-                            principal_reference,
-                            state: AiRunState::Queued.as_str().to_owned(),
-                            attempt_id: None,
-                            lease_owner: None,
-                            lease_generation: 0,
-                            lease_expires_at: None,
-                            lease_heartbeat_at: None,
-                            retry_count: 0,
-                            next_attempt_at: Some(now_unix),
-                            error_code: None,
-                            latest_checkpoint_id: None,
-                            cancellation_request_id: None,
-                            cancellation_requested_at: None,
+                            sequence,
+                            event_type: event_type.to_owned(),
+                            run_id: Some(run_id),
+                            causation_id: Some(client_request_id.to_string()),
+                            correlation_id: client_request_id.to_string(),
+                            protected_payload: protected_event,
                         })
                         .await
                         .map_err(OrmPublicError::from)?;
-                    }
-
-                    let sequence = session
-                        .stream_head
-                        .checked_add(1)
-                        .filter(|sequence| *sequence <= i64::from(i32::MAX))
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
-                    if !matches!(
-                        tx.compare_and_swap::<AiSessionRecord>(
-                            &session.id,
-                            session.row_version,
-                            AiSessionRecordWhereInput::default(),
-                            UpdateAiSessionRecordInput {
-                                stream_head: Some(sequence),
-                                last_activity_at: Some(now_unix),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?,
-                        ConditionalUpdateOutcome::Updated(_)
-                    ) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-
-                    let record = tx
-                        .insert::<AiRunFailureDispositionRecord>(
-                            CreateAiRunFailureDispositionRecordInput {
-                                id: client_request_id,
-                                session_id,
-                                source_run_id: run_id,
-                                input_message_id,
-                                disposition: disposition.as_str().to_owned(),
-                                retry_run_id,
-                                source_state,
-                                source_outcome_code,
-                                principal_kind: owner_kind.clone(),
-                                principal_subject: owner_subject.clone(),
-                                decided_at: now_unix,
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
-                        id: event_id,
-                        session_id,
-                        sequence,
-                        event_type: event_type.to_owned(),
-                        run_id: Some(run_id),
-                        causation_id: Some(client_request_id.to_string()),
-                        correlation_id: client_request_id.to_string(),
-                        protected_payload: protected_event,
-                    })
-                    .await
-                    .map_err(OrmPublicError::from)?;
-                    tx.queue_event(AiSessionWakeup {
-                        session_id,
-                        sequence,
-                    });
-                    append_inbox_event(
-                        tx,
-                        PreparedAiInboxEvent {
-                            id: inbox_event_id,
-                            principal_kind: owner_kind,
-                            principal_subject: owner_subject,
-                            scope: AiScope {
-                                kind: session.scope_kind.clone(),
-                                id: session.scope_id.clone(),
-                                tenant_id: session.tenant_id.clone(),
-                            },
+                        tx.queue_event(AiSessionWakeup {
                             session_id,
-                            event_type: event_type.to_owned(),
-                            protected_payload: protected_inbox_event,
-                            created_at: now_unix,
-                        },
-                    )
-                    .await?;
-                    Ok(Ok(record))
+                            sequence,
+                        });
+                        append_inbox_event(
+                            tx,
+                            PreparedAiInboxEvent {
+                                id: inbox_event_id,
+                                principal_kind: owner_kind,
+                                principal_subject: owner_subject,
+                                scope: AiScope {
+                                    kind: session.scope_kind.clone(),
+                                    id: session.scope_id.clone(),
+                                    tenant_id: session.tenant_id.clone(),
+                                },
+                                session_id,
+                                event_type: event_type.to_owned(),
+                                protected_payload: protected_inbox_event,
+                                created_at: now_unix,
+                            },
+                        )
+                        .await?;
+                        Ok(Ok(record))
+                    })
                 })
-            })
-            .await
-            .map_err(map_transaction)?
-            .map_err(|reason| disposition_refusal(disposition, reason))?;
+        })
+        .await
+        .map_err(map_transaction)?
+        .map_err(|reason| disposition_refusal(disposition, reason))?;
         disposition_view(&record)
     }
 }

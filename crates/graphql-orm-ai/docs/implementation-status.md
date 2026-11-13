@@ -10,9 +10,10 @@ supersedes: []
 
 # Implementation Status
 
-Current package versions are recorded in each crate's `Cargo.toml`, and the
-released versions and dependency selectors are recorded in the generated release
-manifest; see the [release process](../../../docs/operations/release/process.md).
+This crate's current version is in its
+[`Cargo.toml`](../Cargo.toml), like every workspace package's. Released
+versions and their locked dependencies are recorded in the release manifest;
+see the [release process](../../../docs/operations/release/process.md).
 The AI schema module is `0.67.0`, including protected native approval candidates
 and optional trusted tool-call provenance. External `agql-auth` uses the published
 `v0.19.1` tag with its full resolved commit retained in `Cargo.lock`.

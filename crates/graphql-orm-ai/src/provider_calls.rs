@@ -7039,6 +7039,7 @@ mod tests {
                 latest_checkpoint_id: None,
                 cancellation_request_id: None,
                 cancellation_requested_at: None,
+                recovery_examined_at: 0,
             },
         )
         .await
@@ -13144,6 +13145,7 @@ mod tests {
                 state: "committed".to_owned(),
                 expires_at: (now + Duration::hours(1)).unix_timestamp(),
                 reconciled_at: Some(now.unix_timestamp()),
+                settlement_examined_at: 0,
             },
         )
         .await
@@ -13830,20 +13832,120 @@ mod tests {
 
     #[tokio::test]
     async fn native_prepared_receipt_blocks_later_writes_but_allows_read_and_exact_accounting() {
-        native_approval_lifecycle(false, false).await;
+        native_approval_lifecycle(false, false, NativeRecovery::Adopt).await;
+    }
+
+    #[tokio::test]
+    async fn native_outcome_graph_defect_quarantines_but_a_refused_read_skips() {
+        native_approval_lifecycle(false, false, NativeRecovery::CorruptGraph).await;
+        native_approval_lifecycle(false, false, NativeRecovery::RefusedRead).await;
+    }
+
+    #[tokio::test]
+    async fn a_partially_filtered_native_cohort_skips_but_a_missing_call_quarantines() {
+        // Call index 0 is an earlier automatic call of the same turn.
+        native_approval_lifecycle(false, true, NativeRecovery::HiddenFirstCall).await;
+        native_approval_lifecycle(false, true, NativeRecovery::MissingFirstCall).await;
+    }
+
+    #[tokio::test]
+    async fn approved_claim_still_expires_an_unverifiable_native_approval_and_continues() {
+        native_approval_lifecycle(false, true, NativeRecovery::ClaimWithHiddenFirstCall).await;
     }
 
     #[tokio::test]
     async fn native_approved_effect_without_outcome_checkpoint_stays_recovery_required() {
-        native_approval_lifecycle(true, true).await;
+        native_approval_lifecycle(true, true, NativeRecovery::Adopt).await;
     }
 
     #[tokio::test]
     async fn native_approval_resume_preserves_earlier_automatic_effect_without_replay() {
-        native_approval_lifecycle(false, true).await;
+        native_approval_lifecycle(false, true, NativeRecovery::Adopt).await;
     }
 
-    async fn native_approval_lifecycle(fail_outcome: bool, earlier_automatic: bool) {
+    /// What happens to the native outcome checkpoint after it is written.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum NativeRecovery {
+        /// Adopt it on a replacement attempt.
+        Adopt,
+        /// Expire the lease after corrupting a persisted graph fact.
+        CorruptGraph,
+        /// Expire the lease and recover through a handle that refuses to read
+        /// the native candidate.
+        RefusedRead,
+        /// Expire the lease and recover under a row policy that hides tool
+        /// call index 0 of the native cohort.
+        HiddenFirstCall,
+        /// Expire the lease after deleting tool call index 0, with no row
+        /// policy or backend row security.
+        MissingFirstCall,
+        /// Claim the approved wait under a row policy that hides tool call
+        /// index 0, before any recovery.
+        ClaimWithHiddenFirstCall,
+    }
+
+    /// Hides tool call index 0 from every read.
+    struct HideFirstToolCall;
+
+    impl graphql_orm::graphql::orm::RowPolicy<graphql_orm::graphql::orm::DefaultWriteBackend>
+        for HideFirstToolCall
+    {
+        fn can_read_row<'a>(
+            &'a self,
+            _ctx: Option<&'a async_graphql::Context<'_>>,
+            _db: &'a Database<graphql_orm::graphql::orm::DefaultWriteBackend>,
+            _entity_name: &'static str,
+            _policy_key: Option<&'static str>,
+            _surface: graphql_orm::graphql::orm::EntityAccessSurface,
+            row: &'a (dyn std::any::Any + Send + Sync),
+        ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+            let visible = row
+                .downcast_ref::<AiToolCallRecord>()
+                .is_none_or(|call| call.tool_call_index != 0);
+            Box::pin(async move { Ok(visible) })
+        }
+
+        fn can_write_row<'a>(
+            &'a self,
+            _ctx: Option<&'a async_graphql::Context<'_>>,
+            _db: &'a Database<graphql_orm::graphql::orm::DefaultWriteBackend>,
+            _entity_name: &'static str,
+            _policy_key: Option<&'static str>,
+            _surface: graphql_orm::graphql::orm::EntityAccessSurface,
+            _row: &'a (dyn std::any::Any + Send + Sync),
+        ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+            Box::pin(async { Ok(true) })
+        }
+    }
+
+    /// Refuses repository reads of native approval candidates.
+    #[derive(Clone)]
+    struct RefuseCandidateReads;
+
+    impl graphql_orm::graphql::orm::EntityPolicy<graphql_orm::graphql::orm::DefaultWriteBackend>
+        for RefuseCandidateReads
+    {
+        fn can_access_entity<'a>(
+            &'a self,
+            _context: Option<&'a async_graphql::Context<'_>>,
+            _database: &'a Database<graphql_orm::graphql::orm::DefaultWriteBackend>,
+            entity_name: &'static str,
+            _policy_key: Option<&'static str>,
+            kind: graphql_orm::graphql::orm::EntityAccessKind,
+            surface: graphql_orm::graphql::orm::EntityAccessSurface,
+        ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+            let allowed = surface == graphql_orm::graphql::orm::EntityAccessSurface::Repository
+                && !(entity_name == "AiNativeApprovalCandidateRecord"
+                    && kind == graphql_orm::graphql::orm::EntityAccessKind::Read);
+            Box::pin(async move { Ok(allowed) })
+        }
+    }
+
+    async fn native_approval_lifecycle(
+        fail_outcome: bool,
+        earlier_automatic: bool,
+        recovery: NativeRecovery,
+    ) {
         let pending_index = usize::from(earlier_automatic);
         let call_count = u32::try_from(3 + pending_index).unwrap();
         let outcome_failure = Arc::new(AtomicBool::new(false));
@@ -14175,6 +14277,30 @@ mod tests {
             )
             .await
             .unwrap();
+        if recovery == NativeRecovery::ClaimWithHiddenFirstCall {
+            // The cohort check sees an incomplete set and reports `Conflict`,
+            // so the claim expires this approval and continues.
+            let mut database = fixture.database.clone();
+            database.set_row_policy(HideFirstToolCall);
+            let runs = OrmAiRunService::new(
+                database,
+                Arc::new(agql_auth::SystemClock),
+                crate::AiRunServiceLimits::new(Duration::seconds(60), Duration::hours(1), 16, 2, 8)
+                    .unwrap(),
+            );
+            let claimed = runs
+                .claim_next_approved("native-filtered-claim")
+                .await
+                .expect("an unverifiable approval must not fail the claim");
+            assert!(claimed.is_none());
+            let expired = AiApprovalRecord::find_by_id(&fixture.database, &approval.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(expired.state, "expired");
+            assert_eq!(expired.consumed_uses, 0);
+            return;
+        }
         let claimed = fixture
             .run_service
             .claim_next_approved("native-resume")
@@ -14298,6 +14424,106 @@ mod tests {
             pending_index + 1,
             "earlier effects are not replayed and later write stays paused"
         );
+        if recovery != NativeRecovery::Adopt {
+            let run_id = protected.lease().run_id().0;
+            let approval_id = approval.id;
+            let corrupt = matches!(
+                recovery,
+                NativeRecovery::CorruptGraph | NativeRecovery::MissingFirstCall
+            );
+            let missing_first = recovery == NativeRecovery::MissingFirstCall;
+            fixture
+                .database
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        tx.update_by_id::<AiRunRecord>(
+                            &run_id,
+                            UpdateAiRunRecordInput {
+                                lease_expires_at: Some(Some(0)),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                        if missing_first {
+                            let first = tx
+                                .query::<AiToolCallRecord>()
+                                .filter(AiToolCallRecordWhereInput {
+                                    run_id: Some(UuidFilter {
+                                        eq: Some(run_id),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                })
+                                .limit(16)
+                                .fetch_all()
+                                .await
+                                .map_err(OrmPublicError::from)?
+                                .into_iter()
+                                .find(|call| call.tool_call_index == 0)
+                                .expect("call index 0 should exist");
+                            tx.delete_by_id::<AiToolCallRecord>(&first.id)
+                                .await
+                                .map_err(OrmPublicError::from)?;
+                        } else if corrupt {
+                            // The approval no longer matches its candidate's
+                            // binding: two persisted rows disagree.
+                            tx.update_by_id::<AiApprovalRecord>(
+                                &approval_id,
+                                crate::persistence::UpdateAiApprovalRecordInput {
+                                    binding_hash: Some("0".repeat(64)),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        }
+                        Ok(())
+                    })
+                })
+                .await
+                .expect("test fixture update should commit");
+            let before = AiRunRecord::find_by_id(&fixture.database, &run_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let mut database = fixture.database.clone();
+            if recovery == NativeRecovery::RefusedRead {
+                database.set_entity_policy(RefuseCandidateReads);
+            }
+            if recovery == NativeRecovery::HiddenFirstCall {
+                database.set_row_policy(HideFirstToolCall);
+            }
+            let runs = OrmAiRunService::new(
+                database,
+                Arc::new(agql_auth::SystemClock),
+                crate::AiRunServiceLimits::new(Duration::seconds(60), Duration::hours(1), 16, 2, 8)
+                    .unwrap(),
+            );
+            let report = runs
+                .recover_expired_leases()
+                .await
+                .expect("native recovery should complete its pass");
+            let after = AiRunRecord::find_by_id(&fixture.database, &run_id)
+                .await
+                .unwrap()
+                .unwrap();
+            if corrupt {
+                assert_eq!(report.quarantined, 1, "{report:?}");
+                assert_eq!(after.state, "recovery_required");
+                assert_eq!(
+                    after.error_code.as_deref(),
+                    Some("lease_recovery_state_invalid")
+                );
+            } else {
+                assert_eq!(report.skipped, 1, "{report:?}");
+                assert_eq!(report.quarantined, 0);
+                assert_eq!(after.state, before.state);
+                assert_eq!(after.attempt_id, before.attempt_id);
+                assert!(after.recovery_examined_at > 0);
+            }
+            return;
+        }
         let adopted = checkpoints
             .adopt_classified_mutation_batch(protected.lease())
             .await

@@ -26,15 +26,61 @@ pub(crate) struct NativeTurn<'a> {
 pub(crate) async fn candidate(
     tx: &mut MutationContext<'_, DefaultWriteBackend>,
     id: Uuid,
-) -> Result<AiNativeApprovalCandidateRecord, OrmPublicError> {
+) -> Result<AiNativeApprovalCandidateRecord, NativeCheckError> {
     tx.find_by_id::<AiNativeApprovalCandidateRecord>(&id)
         .await
         .map_err(OrmPublicError::from)?
-        .ok_or_else(OrmPublicError::not_found)
+        .ok_or_else(missing)
 }
 
-fn conflict() -> OrmPublicError {
-    OrmPublicError::new(OrmErrorCode::Conflict)
+/// Why a native checkpoint graph check failed.
+///
+/// Only lease recovery inspects the kind. Every other caller converts it with
+/// `From`, which yields exactly the outward error these checks always
+/// returned: `Conflict` for a graph check, `NotFound` for a row read, and the
+/// operational error unchanged.
+#[derive(Debug)]
+pub(crate) enum NativeCheckError {
+    /// Two rows that were both read, or a row's own fields, contradict each
+    /// other. Filtering cannot cause this.
+    Contradiction,
+    /// A check that needs the complete set of rows failed (a count, index
+    /// sequence, membership or position). A filtered read can cause this.
+    Incomplete,
+    /// A linked row was not returned. A filtered read can cause this.
+    Missing,
+    /// A read or other operational failure.
+    Operational(OrmPublicError),
+}
+
+impl From<OrmPublicError> for NativeCheckError {
+    fn from(error: OrmPublicError) -> Self {
+        Self::Operational(error)
+    }
+}
+
+impl From<NativeCheckError> for OrmPublicError {
+    fn from(error: NativeCheckError) -> Self {
+        match error {
+            NativeCheckError::Contradiction | NativeCheckError::Incomplete => {
+                OrmPublicError::new(OrmErrorCode::Conflict)
+            }
+            NativeCheckError::Missing => OrmPublicError::not_found(),
+            NativeCheckError::Operational(error) => error,
+        }
+    }
+}
+
+fn conflict() -> NativeCheckError {
+    NativeCheckError::Contradiction
+}
+
+fn incomplete() -> NativeCheckError {
+    NativeCheckError::Incomplete
+}
+
+fn missing() -> NativeCheckError {
+    NativeCheckError::Missing
 }
 
 /// Checks all callback rows, including no-effect control receipts, under one transaction.
@@ -45,7 +91,7 @@ pub(crate) async fn cohort(
     candidate: &AiNativeApprovalCandidateRecord,
     phase: PendingPhase,
     expected_shape: Option<(usize, usize)>,
-) -> Result<BTreeSet<Uuid>, OrmPublicError> {
+) -> Result<BTreeSet<Uuid>, NativeCheckError> {
     let prepared = matches!(phase, PendingPhase::Prepared);
     if candidate.id.is_nil()
         || candidate.run_id != turn.run_id
@@ -101,22 +147,24 @@ pub(crate) async fn cohort(
         .await
         .map_err(OrmPublicError::from)?;
     if rows.len() >= 4_097 {
-        return Err(conflict());
+        return Err(incomplete());
     }
     let mut rows = rows
         .into_iter()
         .filter(|call| call.budget_reservation_id == Some(turn.budget.id))
         .collect::<Vec<_>>();
     rows.sort_by_key(|call| call.tool_call_index);
+    // An empty cohort, or one without the candidate's own call, may be a
+    // filtered read rather than a stored defect.
     if rows.is_empty() || rows.len() > 256 {
-        return Err(conflict());
+        return Err(incomplete());
     }
     let pending_index = rows
         .iter()
         .position(|call| call.id == candidate.id)
-        .ok_or_else(conflict)?;
+        .ok_or_else(incomplete)?;
     if expected_shape.is_some_and(|(index, count)| index != pending_index || count != rows.len()) {
-        return Err(conflict());
+        return Err(incomplete());
     }
     let mut ordinary = BTreeSet::new();
     let mut provider_ids = BTreeSet::new();
@@ -134,13 +182,16 @@ pub(crate) async fn cohort(
             .find_by_id::<AiRunStepRecord>(&call.id)
             .await
             .map_err(OrmPublicError::from)?
-            .ok_or_else(OrmPublicError::not_found)?;
+            .ok_or_else(missing)?;
+        // The index sequence is derived from enumerating the visible set.
+        if call.tool_call_index != i64::try_from(index).map_err(|_| incomplete())? {
+            return Err(incomplete());
+        }
         if call.run_id != turn.run_id
             || call.lease_generation != generation
             || call.provider_response_id.as_deref() != Some(turn.response_id)
             || call.provider_kind.as_deref() != Some(turn.budget.provider_kind.as_str())
             || call.provider_model.as_deref() != Some(turn.budget.provider_model.as_str())
-            || call.tool_call_index != i64::try_from(index).map_err(|_| conflict())?
             || !provider_ids.insert(call.provider_call_id.as_str())
             || call.protected_arguments.is_none()
             || call.payload_purged_at.is_some()
@@ -210,8 +261,11 @@ pub(crate) async fn cohort(
                 return Err(conflict());
             }
             if call.state == "control_blocked" {
-                if index <= pending_index || call.risk == "read_only" {
+                if call.risk == "read_only" {
                     return Err(conflict());
+                }
+                if index <= pending_index {
+                    return Err(incomplete());
                 }
             } else {
                 if !matches!(call.state.as_str(), "completed" | "execution_failed")
@@ -219,9 +273,11 @@ pub(crate) async fn cohort(
                         call.risk.as_str(),
                         "read_only" | "low_risk_write" | "non_idempotent_write"
                     )
-                    || (index > pending_index && call.risk != "read_only")
                 {
                     return Err(conflict());
+                }
+                if index > pending_index && call.risk != "read_only" {
+                    return Err(incomplete());
                 }
                 ordinary.insert(call.id);
             }
@@ -240,7 +296,7 @@ async fn validate_egress(
     budget: &AiBudgetReservationRecord,
     decision_id: Option<Uuid>,
     manifest_hash: Option<&str>,
-) -> Result<(), OrmPublicError> {
+) -> Result<(), NativeCheckError> {
     let id = decision_id.filter(|id| !id.is_nil()).ok_or_else(conflict)?;
     let hash = manifest_hash
         .filter(|hash| valid_digest(hash))
@@ -258,7 +314,7 @@ async fn validate_egress(
         .fetch_one()
         .await
         .map_err(OrmPublicError::from)?
-        .ok_or_else(OrmPublicError::not_found)?;
+        .ok_or_else(missing)?;
     if event.run_id != Some(budget.run_id)
         || event.principal_subject != budget.principal_subject
         || event.scope_kind != budget.scope_kind
@@ -277,7 +333,7 @@ pub(crate) async fn source(
     candidate: &AiNativeApprovalCandidateRecord,
     budget: &AiBudgetReservationRecord,
     response_id: Option<&str>,
-) -> Result<AiRunCheckpointRecord, OrmPublicError> {
+) -> Result<AiRunCheckpointRecord, NativeCheckError> {
     let id = candidate.settled_checkpoint_id.ok_or_else(conflict)?;
     let source = tx
         .query::<AiRunCheckpointRecord>()
@@ -292,7 +348,7 @@ pub(crate) async fn source(
         .fetch_one()
         .await
         .map_err(OrmPublicError::from)?
-        .ok_or_else(OrmPublicError::not_found)?;
+        .ok_or_else(missing)?;
     let protected = source
         .protected_state
         .as_ref()
@@ -342,7 +398,7 @@ pub(crate) async fn outcome(
     candidate_id: Uuid,
     expected_source: Option<Uuid>,
     expected_shape: Option<(usize, usize)>,
-) -> Result<(), OrmPublicError> {
+) -> Result<(), NativeCheckError> {
     let candidate = candidate(tx, candidate_id).await?;
     let source = source(tx, &candidate, budget, response_id).await?;
     if source.run_id != run_id
@@ -356,12 +412,12 @@ pub(crate) async fn outcome(
         .find_by_id::<AiApprovalRecord>(&approval_id)
         .await
         .map_err(OrmPublicError::from)?
-        .ok_or_else(OrmPublicError::not_found)?;
+        .ok_or_else(missing)?;
     let call = tx
         .find_by_id::<AiToolCallRecord>(&candidate_id)
         .await
         .map_err(OrmPublicError::from)?
-        .ok_or_else(OrmPublicError::not_found)?;
+        .ok_or_else(missing)?;
     if approval.tool_call_id != candidate_id
         || approval.session_id != session_id
         || approval.binding_hash != candidate.binding_hash
@@ -393,7 +449,7 @@ pub(crate) async fn outcome(
         .fetch_one()
         .await
         .map_err(OrmPublicError::from)?
-        .ok_or_else(OrmPublicError::not_found)?;
+        .ok_or_else(missing)?;
     if attempt.run_id != run_id
         || attempt.lease_generation != source.lease_generation
         || attempt.final_state != "waiting_approval"
@@ -426,7 +482,7 @@ pub(crate) async fn waiting(
     checkpoint: &AiRunCheckpointRecord,
     budget: &AiBudgetReservationRecord,
     approval: &AiApprovalRecord,
-) -> Result<(), OrmPublicError> {
+) -> Result<(), NativeCheckError> {
     let source = source(
         tx,
         candidate,
@@ -478,124 +534,128 @@ impl OrmAiRunService {
         self.database
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
-                    let run = load_and_validate_active_lease(tx, &lease, now).await?;
-                    if persisted_state(&run)? != AiRunState::WaitingTool {
-                        return Err(conflict());
-                    }
-                    let candidate = candidate(tx, tool_call_id.0).await?;
-                    let budget = tx
-                        .find_by_id::<AiBudgetReservationRecord>(&budget_id)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    let approval = tx
-                        .find_by_id::<AiApprovalRecord>(&approval_id.0)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    let call = tx
-                        .find_by_id::<AiToolCallRecord>(&tool_call_id.0)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    let source = source(
-                        tx,
-                        &candidate,
-                        &budget,
-                        call.provider_response_id.as_deref(),
-                    )
-                    .await?;
-                    if source.run_id != run.id
-                        || source.lease_generation.checked_add(1) != Some(lease.lease_generation)
-                        || source.attempt_id == lease.attempt_id
-                        || budget.session_id != run.session_id
-                        || candidate.final_approval_id != Some(approval.id)
-                        || candidate.binding_hash != approval.binding_hash
-                        || candidate.preview_hash != approval.action_preview_hash
-                        || approval.tool_call_id != call.id
-                        || approval.session_id != run.session_id
-                        || approval.state != "resume_claimed"
-                        || approval.maximum_uses != 1
-                        || approval.consumed_uses != 0
-                        || approval.consumed_at.is_some()
-                        || approval.decided_at.is_none()
-                        || approval.approver_subject.is_none()
-                        || approval.expires_at <= now.unix_timestamp()
-                        || approval.argument_hash != call.argument_hash
-                        || approval.tool_fingerprint != call.tool_fingerprint
-                        || call.budget_reservation_id != Some(budget_id)
-                    {
-                        return Err(conflict());
-                    }
-                    let parked = tx
-                        .query::<AiRunCheckpointRecord>()
-                        .filter(AiRunCheckpointRecordWhereInput {
-                            id: Some(UuidFilter {
-                                eq: Some(run.latest_checkpoint_id.ok_or_else(conflict)?),
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        })
-                        .internal_limit(1)
-                        .fetch_one()
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    let protected = parked
-                        .protected_state
-                        .as_ref()
-                        .filter(|value| {
-                            serde_json::to_vec(value)
-                                .is_ok_and(|bytes| bytes.len() <= 64 * 1024 * 1024)
-                        })
-                        .ok_or_else(conflict)?;
-                    if parked.run_id != run.id
-                        || parked.attempt_id != source.attempt_id
-                        || parked.lease_generation != source.lease_generation
-                        || parked.checkpoint_kind != "approval_wait_parked"
-                        || parked.budget_reservation_id != Some(budget_id)
-                        || parked.assistant_message_id.is_some()
-                        || parked.provider_response_id != source.provider_response_id
-                        || coordinator_checkpoint_hash(
-                            lease.run_id,
-                            parked.attempt_id,
-                            parked.lease_generation,
-                            parked.id,
-                            &parked.checkpoint_kind,
-                            &budget.provider_kind,
-                            &budget.provider_model,
-                            parked.provider_response_id.as_deref(),
-                            budget_id,
-                            protected,
+                    // Graph checks report their kind; this caller keeps the
+                    // outward errors they always produced.
+                    let checked: Result<(), NativeCheckError> = async {
+                        let run = load_and_validate_active_lease(tx, &lease, now).await?;
+                        if persisted_state(&run)? != AiRunState::WaitingTool {
+                            return Err(conflict());
+                        }
+                        let candidate = candidate(tx, tool_call_id.0).await?;
+                        let budget = tx
+                            .find_by_id::<AiBudgetReservationRecord>(&budget_id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(missing)?;
+                        let approval = tx
+                            .find_by_id::<AiApprovalRecord>(&approval_id.0)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(missing)?;
+                        let call = tx
+                            .find_by_id::<AiToolCallRecord>(&tool_call_id.0)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(missing)?;
+                        let source = source(
+                            tx,
+                            &candidate,
+                            &budget,
+                            call.provider_response_id.as_deref(),
                         )
-                        .map_err(|_| conflict())?
-                            != parked.checkpoint_hash
-                    {
-                        return Err(conflict());
-                    }
-                    let original = tx
-                        .query::<AiRunAttemptOutcomeRecord>()
-                        .filter(AiRunAttemptOutcomeRecordWhereInput {
-                            attempt_id: Some(UuidFilter {
-                                eq: Some(source.attempt_id),
+                        .await?;
+                        if source.run_id != run.id
+                            || source.lease_generation.checked_add(1)
+                                != Some(lease.lease_generation)
+                            || source.attempt_id == lease.attempt_id
+                            || budget.session_id != run.session_id
+                            || candidate.final_approval_id != Some(approval.id)
+                            || candidate.binding_hash != approval.binding_hash
+                            || candidate.preview_hash != approval.action_preview_hash
+                            || approval.tool_call_id != call.id
+                            || approval.session_id != run.session_id
+                            || approval.state != "resume_claimed"
+                            || approval.maximum_uses != 1
+                            || approval.consumed_uses != 0
+                            || approval.consumed_at.is_some()
+                            || approval.decided_at.is_none()
+                            || approval.approver_subject.is_none()
+                            || approval.expires_at <= now.unix_timestamp()
+                            || approval.argument_hash != call.argument_hash
+                            || approval.tool_fingerprint != call.tool_fingerprint
+                            || call.budget_reservation_id != Some(budget_id)
+                        {
+                            return Err(conflict());
+                        }
+                        let parked = tx
+                            .query::<AiRunCheckpointRecord>()
+                            .filter(AiRunCheckpointRecordWhereInput {
+                                id: Some(UuidFilter {
+                                    eq: Some(run.latest_checkpoint_id.ok_or_else(conflict)?),
+                                    ..Default::default()
+                                }),
                                 ..Default::default()
-                            }),
-                            ..Default::default()
-                        })
-                        .internal_limit(1)
-                        .fetch_one()
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    if original.run_id != run.id
-                        || original.lease_generation != source.lease_generation
-                        || original.final_state != "waiting_approval"
-                        || original.outcome_code != "approval_wait_parked"
-                        || original.provider_response_id != source.provider_response_id
-                    {
-                        return Err(conflict());
-                    }
-                    let bindings = tx
+                            })
+                            .internal_limit(1)
+                            .fetch_one()
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(missing)?;
+                        let protected = parked
+                            .protected_state
+                            .as_ref()
+                            .filter(|value| {
+                                serde_json::to_vec(value)
+                                    .is_ok_and(|bytes| bytes.len() <= 64 * 1024 * 1024)
+                            })
+                            .ok_or_else(conflict)?;
+                        if parked.run_id != run.id
+                            || parked.attempt_id != source.attempt_id
+                            || parked.lease_generation != source.lease_generation
+                            || parked.checkpoint_kind != "approval_wait_parked"
+                            || parked.budget_reservation_id != Some(budget_id)
+                            || parked.assistant_message_id.is_some()
+                            || parked.provider_response_id != source.provider_response_id
+                            || coordinator_checkpoint_hash(
+                                lease.run_id,
+                                parked.attempt_id,
+                                parked.lease_generation,
+                                parked.id,
+                                &parked.checkpoint_kind,
+                                &budget.provider_kind,
+                                &budget.provider_model,
+                                parked.provider_response_id.as_deref(),
+                                budget_id,
+                                protected,
+                            )
+                            .map_err(|_| conflict())?
+                                != parked.checkpoint_hash
+                        {
+                            return Err(conflict());
+                        }
+                        let original = tx
+                            .query::<AiRunAttemptOutcomeRecord>()
+                            .filter(AiRunAttemptOutcomeRecordWhereInput {
+                                attempt_id: Some(UuidFilter {
+                                    eq: Some(source.attempt_id),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .internal_limit(1)
+                            .fetch_one()
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(missing)?;
+                        if original.run_id != run.id
+                            || original.lease_generation != source.lease_generation
+                            || original.final_state != "waiting_approval"
+                            || original.outcome_code != "approval_wait_parked"
+                            || original.provider_response_id != source.provider_response_id
+                        {
+                            return Err(conflict());
+                        }
+                        let bindings = tx
                         .query::<AiProviderSessionBindingRecord>()
                         .filter(
                             crate::orm_provider_session::AiProviderSessionBindingRecordWhereInput {
@@ -610,44 +670,47 @@ impl OrmAiRunService {
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
-                    if bindings.len() != 1 {
-                        return Err(conflict());
+                        if bindings.len() != 1 {
+                            return Err(conflict());
+                        }
+                        let binding = &bindings[0];
+                        if binding.state != "parked_wait"
+                            || binding.parked_wait_kind.as_deref() != Some("approval")
+                            || binding.parked_wait_id != Some(approval.id)
+                            || binding.claimed_run_id != Some(run.id)
+                            || binding.parked_confirmed_at.is_none()
+                            || binding.parked_checkpoint_id != Some(parked.id)
+                            || binding.parked_checkpoint_fingerprint.as_deref()
+                                != Some(parked.checkpoint_hash.as_str())
+                            || binding
+                                .parked_expires_at
+                                .is_none_or(|expiry| expiry <= now.unix_timestamp())
+                        {
+                            return Err(conflict());
+                        }
+                        cohort(
+                            tx,
+                            NativeTurn {
+                                run_id: run.id,
+                                attempt_id: source.attempt_id,
+                                generation: source.lease_generation,
+                                response_id: source
+                                    .provider_response_id
+                                    .as_deref()
+                                    .ok_or_else(conflict)?,
+                                budget: &budget,
+                            },
+                            &candidate,
+                            PendingPhase::Claimed {
+                                generation: lease.lease_generation,
+                            },
+                            None,
+                        )
+                        .await?;
+                        Ok(())
                     }
-                    let binding = &bindings[0];
-                    if binding.state != "parked_wait"
-                        || binding.parked_wait_kind.as_deref() != Some("approval")
-                        || binding.parked_wait_id != Some(approval.id)
-                        || binding.claimed_run_id != Some(run.id)
-                        || binding.parked_confirmed_at.is_none()
-                        || binding.parked_checkpoint_id != Some(parked.id)
-                        || binding.parked_checkpoint_fingerprint.as_deref()
-                            != Some(parked.checkpoint_hash.as_str())
-                        || binding
-                            .parked_expires_at
-                            .is_none_or(|expiry| expiry <= now.unix_timestamp())
-                    {
-                        return Err(conflict());
-                    }
-                    cohort(
-                        tx,
-                        NativeTurn {
-                            run_id: run.id,
-                            attempt_id: source.attempt_id,
-                            generation: source.lease_generation,
-                            response_id: source
-                                .provider_response_id
-                                .as_deref()
-                                .ok_or_else(conflict)?,
-                            budget: &budget,
-                        },
-                        &candidate,
-                        PendingPhase::Claimed {
-                            generation: lease.lease_generation,
-                        },
-                        None,
-                    )
-                    .await?;
-                    Ok(())
+                    .await;
+                    checked.map_err(OrmPublicError::from)
                 })
             })
             .await
