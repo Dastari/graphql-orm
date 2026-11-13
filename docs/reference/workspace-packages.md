@@ -23,7 +23,7 @@ requirements and pinned revisions from the release manifest.
 | Package | Path | Default features | Direct internal dependencies |
 | --- | --- | --- | --- |
 | `graphql-orm` | `crates/graphql-orm` | `sqlite` | `graphql-orm-ai-tool-profiles` (dev-only), `graphql-orm-macros`, `graphql-orm-operation-catalog`, `graphql-orm-router-protocol` (dev-only) |
-| `graphql-orm-ai` | `crates/graphql-orm-ai` | `sqlite` | `graphql-orm`, `graphql-orm` (dev-only), `graphql-orm-ai-tool-profiles`, `graphql-orm-storage` |
+| `graphql-orm-ai` | `crates/graphql-orm-ai` | `sqlite` | `graphql-orm`, `graphql-orm` (dev-only), `graphql-orm-ai-tool-profiles`, `graphql-orm-operation-catalog`, `graphql-orm-storage` |
 | `graphql-orm-ai-tool-profiles` | `crates/graphql-orm-ai-tool-profiles` | none | `graphql-orm-operation-catalog`, `graphql-orm-router-protocol` (dev-only) |
 | `graphql-orm-backup` | `crates/graphql-orm-backup` | `local` | `graphql-orm` (optional), `graphql-orm-storage` |
 | `graphql-orm-macros` | `crates/graphql-orm-macros` | `sqlite` | none |

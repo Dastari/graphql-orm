@@ -21,7 +21,7 @@ re-exported `AiGraphqlQueryCapabilityOptions` carries custom disclosure and is
 no longer `Copy`; clone it when reusing options. Its
 `maximum_relationship_argument_depth` accessor takes `&self`.
 
-AI 0.140.0 requires ORM/macros 0.144.0 and catalogue 0.7.5, which supply the
+AI 0.140.0 requires ORM/macros 0.144.0 and catalogue 0.8.0, which supply the
 host-only generated input contracts. It does not support ORM/macros 0.133.0.
 See the [contract migration](../../MIGRATION.md#01410-to-01440-host-only-generated-input-contracts).
 

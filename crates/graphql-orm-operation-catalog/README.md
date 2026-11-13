@@ -10,7 +10,7 @@ supersedes: []
 
 # `graphql-orm-operation-catalog`
 
-Version `0.7.5` adds the host-only `generated_input_members` contract to entity
+Version `0.8.0` (**breaking Rust API**) adds the host-only `generated_input_members` contract to entity
 metadata. ORM/macros 0.144.0 supplies exact types for generated members that
 remain undisclosed. The sidecar is omitted from serde, Debug output, SDL and
 router extensions, so existing public catalogue bytes and fingerprints stay

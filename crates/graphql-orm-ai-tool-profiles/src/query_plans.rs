@@ -4928,6 +4928,34 @@ fn generated_shape_matches(
     }) {
         return false;
     }
+    // The runtime emits stored scalar keys without live subscriptions and
+    // derived key scalars with live subscriptions. Select one complete mode.
+    let live_key_contract = input_name == format!("{}KeyInput", entity.entity_name)
+        && entity.record_version.as_ref().is_some_and(|version| {
+            version.mode == graphql_orm_operation_catalog::GraphqlRecordVersionMode::Managed
+        })
+        && entity
+            .fields
+            .iter()
+            .any(|field| field.field_name == "NodeId" && render_type_ref(&field.type_ref) == "ID!")
+        && entity.fields.iter().any(|field| {
+            field.field_name == "RecordVersion" && render_type_ref(&field.type_ref) == "Int!"
+        })
+        && fields.iter().any(|(name, field)| {
+            entity.fields.iter().any(|semantic| {
+                semantic.field_name == *name
+                    && matches!(
+                        (
+                            render_type_ref(&semantic.type_ref).as_str(),
+                            field.ty.as_str()
+                        ),
+                        ("RuntimeInt64!", "Int!") | ("RuntimeUuid!", "UUID!")
+                    )
+            }) || hidden.iter().any(|member| {
+                member.field_name == *name
+                    && matches!(render_type_ref(&member.type_ref).as_str(), "Int!" | "UUID!")
+            })
+        });
     let public_fields = fields
         .iter()
         .filter(|(name, _)| !hidden.iter().any(|member| member.field_name == **name))
@@ -5107,19 +5135,7 @@ fn generated_shape_matches(
                 // Runtime live composite keys use the derived key scalars,
                 // while ordinary stored values keep RuntimeInt64/RuntimeUuid.
                 // NodeId and RecordVersion are the live module's fixed outputs.
-                if input_name == format!("{}KeyInput", entity.entity_name)
-                    && entity.record_version.as_ref().is_some_and(|version| {
-                        version.mode
-                            == graphql_orm_operation_catalog::GraphqlRecordVersionMode::Managed
-                    })
-                    && entity.fields.iter().any(|field| {
-                        field.field_name == "NodeId" && render_type_ref(&field.type_ref) == "ID!"
-                    })
-                    && entity.fields.iter().any(|field| {
-                        field.field_name == "RecordVersion"
-                            && render_type_ref(&field.type_ref) == "Int!"
-                    })
-                {
+                if live_key_contract {
                     generated = match generated.as_str() {
                         "RuntimeInt64!" => "Int!".into(),
                         "RuntimeUuid!" => "UUID!".into(),

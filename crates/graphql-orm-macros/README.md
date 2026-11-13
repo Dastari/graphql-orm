@@ -13,7 +13,7 @@ supersedes: []
 Version 0.144.0 emits host-only generated input member contracts for AI
 capability compilation. Readable members remain available; undisclosed members
 stay closed, and a required undisclosed member omits only its capability with a
-host diagnostic. Upgrade ORM/macros together and use catalogue 0.7.5. Existing
+host diagnostic. Upgrade ORM/macros together and use catalogue 0.8.0. Existing
 SDL and public catalogue bytes/fingerprints are unchanged; no data migration is
 needed. See the [migration guide](../../MIGRATION.md#01410-to-01440-host-only-generated-input-contracts).
 

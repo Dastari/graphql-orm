@@ -20,7 +20,8 @@ It does not enable resolvers, mint authority, perform introspection, execute
 GraphQL, grant provider egress, or make a generated resolver an AI tool. Those
 are separate runtime decisions and must remain default-deny.
 
-Version `0.23.0` closes handwritten input objects by default. Every input object
+Version `0.23.0` requires operation catalogue 0.8.0 and ORM/macros 0.144.0
+producer metadata. It closes handwritten input objects by default. Every input object
 outside canonical generated entity and service inputs and their proved filter,
 operand and page helpers is handwritten, wherever it is reached. Generated
 recognition requires canonical identities and member types together with

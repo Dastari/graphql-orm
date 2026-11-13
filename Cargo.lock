@@ -3161,6 +3161,7 @@ dependencies = [
  "futures",
  "graphql-orm",
  "graphql-orm-ai-tool-profiles",
+ "graphql-orm-operation-catalog",
  "graphql-orm-storage",
  "hex",
  "hmac 0.12.1",
@@ -3237,7 +3238,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-operation-catalog"
-version = "0.7.5"
+version = "0.8.0"
 dependencies = [
  "graphql-orm-router-protocol",
  "serde",

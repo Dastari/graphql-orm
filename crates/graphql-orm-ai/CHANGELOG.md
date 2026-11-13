@@ -12,7 +12,7 @@ supersedes: []
 
 ## Unreleased - 0.140.0
 
-- **Breaking:** require ORM/macros 0.144.0 and catalogue 0.7.5 for generated input contracts. Re-exported query options are non-`Copy`, and their relationship-depth accessor takes `&self`. Hosts can inspect capability-specific omission diagnostics without disclosing producer-hidden members.
+- **Breaking:** require ORM/macros 0.144.0 and catalogue 0.8.0 for generated input contracts. Re-exported query options are non-`Copy`, and their relationship-depth accessor takes `&self`. Hosts can inspect capability-specific omission diagnostics without disclosing producer-hidden members.
 
 - **Documentation:** backend-neutral API descriptions name optional database-backed services without unconditional links.
 

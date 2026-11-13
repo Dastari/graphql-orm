@@ -12,7 +12,7 @@ supersedes: []
 
 ## 0.141.0 to 0.144.0: host-only generated input contracts
 
-Upgrade ORM/macros together to 0.144.0 and operation catalogue to 0.7.5.
+Upgrade ORM/macros together to 0.144.0 and operation catalogue to 0.8.0.
 `GraphqlEntitySemanticMetadata` gains `generated_input_members`. Macros and
 runtime producers supply the exact input identity, member, type and required
 flag for generated members that remain undisclosed. Handwritten struct
@@ -41,7 +41,14 @@ coordinates to a model, and do not declare undisclosed generated members with
 Generated input shape drift returns a host configuration error naming the type
 and first mismatching member; rebuild matching producer metadata and SDL.
 
-## Operation catalogue 0.7.5: generated catalogue trust boundary
+## Operation catalogue 0.8.0 (breaking): generated catalogue trust boundary
+
+`GraphqlEntitySemanticMetadata` adds the public `generated_input_members`
+field; existing struct literals must add it. ORM, tool-profiles and AI select
+catalogue 0.8.0 through their workspace requirements (AI also declares it
+directly). The router and router-protocol crates neither depend on the catalogue
+nor re-export its structs. Their generic descriptor extension can carry its
+public JSON payload; that encoding excludes the host-only sidecar.
 
 `GraphqlSemanticOperationDescriptor::generated` asserts that the resolver is
 the ORM generated resolver. Generated reach also follows relationship arguments
