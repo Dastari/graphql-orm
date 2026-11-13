@@ -756,6 +756,7 @@ mod tests {
                 latest_checkpoint_id: None,
                 cancellation_request_id: None,
                 cancellation_requested_at: None,
+                recovery_examined_at: 0,
             },
         )
         .await
@@ -805,6 +806,7 @@ mod tests {
                 state: "committed".to_owned(),
                 expires_at: (fixture.now + Duration::minutes(5)).unix_timestamp(),
                 reconciled_at: Some(fixture.now.unix_timestamp()),
+                settlement_examined_at: 0,
             },
         )
         .await

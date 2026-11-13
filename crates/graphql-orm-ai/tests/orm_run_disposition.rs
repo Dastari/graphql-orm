@@ -449,6 +449,7 @@ fn recovery_required_with_possible_provider_dispatch_remains_non_retryable() {
                 terminal: AiRunTerminalEvent::RecoveryRequired,
                 produced_assistant_output: false,
                 provider_dispatch_possible: true,
+                consequential_tool_dispatch_possible: false,
             },
             Some("provider_turn_uncertain"),
         ),
@@ -641,6 +642,7 @@ fn initial_planning_failure_codes_require_evidence_and_known_shapes() {
         terminal: AiRunTerminalEvent::Failed,
         produced_assistant_output: false,
         provider_dispatch_possible,
+        consequential_tool_dispatch_possible: false,
     };
     for code in [
         "supervised_initial_plan_failed",
@@ -1149,6 +1151,7 @@ fn a_clean_last_turn_does_not_prove_the_whole_run_was_unstarted() {
                         terminal: AiRunTerminalEvent::Failed,
                         produced_assistant_output: false,
                         provider_dispatch_possible: dispatch_possible,
+                        consequential_tool_dispatch_possible: false,
                     },
                     Some(code)
                 ),

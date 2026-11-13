@@ -154,6 +154,7 @@ pub(crate) struct PreparedNativeApprovalCandidate {
 // custody ceiling is separate from the 2 MiB plaintext preview-details limit.
 const MAXIMUM_PROTECTED_NATIVE_PREPARATION_BYTES: usize = 4 * 1024 * 1024;
 
+#[derive(Clone)]
 pub(crate) struct PreparedNativeApprovalReceipt {
     pub protected_receipt: serde_json::Value,
     pub receipt_hash: String,

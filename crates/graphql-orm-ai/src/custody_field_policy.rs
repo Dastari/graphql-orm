@@ -136,3 +136,156 @@ pub(crate) fn custody_database(
     }
     database
 }
+
+#[cfg(all(test, feature = "sqlite"))]
+mod tests {
+    use super::*;
+    use crate::persistence::{AiBudgetReservationRecord, AiRunRecord, AiSessionRecord};
+    use graphql_orm::graphql::errors::OrmErrorCode;
+    use graphql_orm::graphql::orm::Entity;
+
+    /// A host policy that refuses every field decision on every surface.
+    struct DenyEverything;
+    impl FieldPolicy<DefaultWriteBackend> for DenyEverything {
+        fn can_read_field<'a>(
+            &'a self,
+            _: &'a async_graphql::Context<'_>,
+            _: &'a Database<DefaultWriteBackend>,
+            _: &'static str,
+            _: &'static str,
+            _: Option<&'static str>,
+            _: Option<&'a (dyn Any + Send + Sync)>,
+        ) -> BoxFuture<'a, async_graphql::Result<bool>> {
+            Box::pin(async { Ok(false) })
+        }
+        fn can_write_field<'a>(
+            &'a self,
+            _: &'a async_graphql::Context<'_>,
+            _: &'a Database<DefaultWriteBackend>,
+            _: &'static str,
+            _: &'static str,
+            _: Option<&'static str>,
+            _: Option<&'a (dyn Any + Send + Sync)>,
+            _: Option<&'a (dyn Any + Send + Sync)>,
+        ) -> BoxFuture<'a, async_graphql::Result<bool>> {
+            Box::pin(async { Ok(false) })
+        }
+        fn can_read_repository_field<'a>(
+            &'a self,
+            _: Option<AccessContext<'a>>,
+            _: &'a Database<DefaultWriteBackend>,
+            _: &'static str,
+            _: &'static str,
+            _: Option<&'static str>,
+            _: Option<&'a (dyn Any + Send + Sync)>,
+        ) -> BoxFuture<'a, async_graphql::Result<bool>> {
+            Box::pin(async { Ok(false) })
+        }
+        fn can_write_repository_field<'a>(
+            &'a self,
+            _: Option<AccessContext<'a>>,
+            _: &'a Database<DefaultWriteBackend>,
+            _: &'static str,
+            _: &'static str,
+            _: Option<&'static str>,
+            _: Option<&'a (dyn Any + Send + Sync)>,
+            _: Option<&'a (dyn Any + Send + Sync)>,
+        ) -> BoxFuture<'a, async_graphql::Result<bool>> {
+            Box::pin(async { Ok(false) })
+        }
+    }
+
+    async fn host() -> Database<DefaultWriteBackend> {
+        let mut database = Database::connect_sqlite("sqlite::memory:")
+            .await
+            .expect("in-memory SQLite should open");
+        database.set_field_policy(DenyEverything);
+        database
+    }
+
+    /// Every field of the crate's own entities is granted on the repository
+    /// surface, including the progress stamps recovery writes through
+    /// ordinary updates, and nothing else is.
+    #[tokio::test]
+    async fn custody_covers_every_field_of_the_crates_own_entities_and_nothing_else() {
+        let host = host().await;
+        let custody = custody_database(host.clone());
+        let entities = [
+            (
+                AiRunRecord::entity_name(),
+                AiRunRecord::repository_field_policies(),
+                Some("recoveryExaminedAt"),
+            ),
+            (
+                AiBudgetReservationRecord::entity_name(),
+                AiBudgetReservationRecord::repository_field_policies(),
+                Some("settlementExaminedAt"),
+            ),
+            (
+                AiSessionRecord::entity_name(),
+                AiSessionRecord::repository_field_policies(),
+                None,
+            ),
+        ];
+        for (entity, fields, stamp) in entities {
+            assert!(is_custody_entity(entity), "{entity}");
+            if let Some(stamp) = stamp {
+                assert!(
+                    fields.iter().any(|field| field.api_name == stamp),
+                    "{entity} has the stamp field {stamp}"
+                );
+            }
+            for field in fields {
+                assert_eq!(field.write_policy, None, "{entity}.{}", field.api_name);
+                custody
+                    .ensure_repository_writable_field(
+                        None,
+                        entity,
+                        field.api_name,
+                        field.write_policy,
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap_or_else(|_| panic!("custody writes {entity}.{}", field.api_name));
+                custody
+                    .ensure_repository_readable_field(
+                        None,
+                        entity,
+                        field.api_name,
+                        field.read_policy,
+                        None,
+                    )
+                    .await
+                    .unwrap_or_else(|_| panic!("custody reads {entity}.{}", field.api_name));
+                // The host's own handle keeps the host's answer.
+                let refused = host
+                    .ensure_repository_writable_field(None, entity, field.api_name, None, None, None)
+                    .await
+                    .expect_err("the host handle is not granted");
+                assert_eq!(refused.code, OrmErrorCode::Forbidden);
+            }
+        }
+
+        // An entity the crate does not own, and a declared key on one it
+        // does, stay with the host policy.
+        for (entity, key) in [
+            ("HostEntity", None),
+            (AiRunRecord::entity_name(), Some("host.declared.key")),
+        ] {
+            let refused = custody
+                .ensure_repository_writable_field(None, entity, "anyField", key, None, None)
+                .await
+                .expect_err("delegated to the host policy");
+            assert_eq!(refused.code, OrmErrorCode::Forbidden, "{entity}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_database_without_a_field_policy_is_used_unchanged() {
+        let database = Database::<DefaultWriteBackend>::connect_sqlite("sqlite::memory:")
+            .await
+            .expect("in-memory SQLite should open");
+        assert!(custody_database(database).field_policy().is_none());
+    }
+}

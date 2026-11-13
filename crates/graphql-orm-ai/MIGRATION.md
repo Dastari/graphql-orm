@@ -37,6 +37,71 @@ services answer repository field decisions for their own records themselves:
 The entity policy is unchanged: the crate still needs the host entity policy
 (or the documented trusted-worker fallback) to allow its repository access.
 
+## 0.137.0 to 0.138.0
+
+### Run and session lifecycle fixes
+
+Apply `AiSchemaModule` version `0.78.0` with the normal module migration. It
+adds two columns, `graphql_orm_ai_budget_reservations.settlement_examined_at`
+and `graphql_orm_ai_runs.recovery_examined_at` (integers, not null, default
+`0`). The stranded-reservation sweep and lease recovery use them to rotate rows
+they leave unresolved, so no row can hold their bounded scans. Existing rows
+take the default; no data migration is needed. A stamp is written as
+`max(now, previous + 1)`, so repeated passes within one second still rotate.
+After a clock rollback, a row stamped in the future waits until the clock
+passes its stamp. The scans sort the active (expired or unresolved) set by the
+stamp; no index is added for this order in this release.
+
+Under database row security, make the recovery role exempt from it on the AI
+tables (a superuser, a `BYPASSRLS` role, or the table owner without
+`FORCE ROW LEVEL SECURITY`). Recovery reads PostgreSQL's `row_security_active`
+for its role on every AI table once per pass. When row security is active,
+or a host ORM row policy is registered, or the check fails, a row recovery
+cannot read is skipped and counted in `skipped`, never quarantined, so a
+defect hidden that way stays in place until the row is readable. The run
+service is not built for SQL Server, so no SQL Server security policy
+applies to recovery. It also changes generated filter metadata (see the
+last item below).
+
+- `AiRunRecoveryReport` has three new public fields: `quarantined`,
+  `skipped` and `budget_reservations_settled`. `AiSessionRetentionReport` has
+  `sessions_failed`. Code that builds these structs with a literal must set
+  them (`0` or `..Default::default()`). Monitor `quarantined` and
+  `sessions_failed`: they count rows that need operator attention, which used
+  to fail the whole pass.
+- `AiRunRetryEvidence` has a new public field,
+  `consequential_tool_dispatch_possible`. Code that builds it must set it;
+  `false` keeps the previous classification. `classify_run_retry` now refuses
+  a `Cancelled` run when it is `true`.
+- `AiRunServiceLimits::with_lease_recovery_grace` is new and optional. Set it
+  to your maximum expected clock skew between workers and the process that
+  runs `recover_expired_leases`; it must not exceed the lease TTL.
+- Behaviour changes hosts can observe: a malformed expired or queued run is
+  closed as `RecoveryRequired` (`lease_recovery_state_invalid` or
+  `claim_state_invalid`) instead of failing the pass or claim; every terminal
+  transition and cancellation expires the run's open approvals, and any
+  decision on an approval whose run is no longer waiting returns
+  `InvalidInput` with `AI_APPROVAL_RUN_NOT_WAITING` (match on that constant);
+  budget reconciliation requires the live recovery epoch, also for a
+  cancelled attempt; lease recovery quarantines a run only for a durable
+  defect of its own stored state and otherwise leaves it unchanged and counts
+  it in `skipped` (when reads can be filtered, a linked row recovery cannot
+  read is never treated as absent; a progress stamp the host refuses fails
+  the pass) (a host row policy whose candidate budget refuses a recovery
+  scan fails the pass instead, and quarantines nothing); a run
+  that closes while its provider session is parked moves that binding to
+  `cleanup_required` (`provider_session_parked_wait_closed`); a provider-session binding that fails validation is
+  moved to `cleanup_exhausted` (`provider_session_state_invalid`) and audited; lease recovery commits the reserved
+  estimate of an expired `reserved` or `uncertain` reservation whose attempt
+  is closed; retention moves an idle retained provider thread to cleanup when
+  it purges content the thread holds.
+- The internal provider-session binding entity's timestamp filters
+  (`claimExpiresAt`, `parkedExpiresAt`, `providerExpiresAt`, `idleExpiresAt`,
+  `absoluteExpiresAt`, `cleanupLeaseExpiresAt`, `cleanupNextAttemptAt`) now
+  use `Int64Filter`, and the internal run entity gains `leaseExpiresAt` and
+  `nextAttemptAt` filters. These entities are not part of the AI GraphQL
+  surface.
+
 ## 0.135.0 to 0.136.0: ORM 0.133.0 reserved runtime table names
 
 Upgrade with ORM/macros 0.133.0. No API, AI schema or data migration change.

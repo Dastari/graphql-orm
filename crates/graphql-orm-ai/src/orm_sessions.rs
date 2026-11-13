@@ -409,6 +409,7 @@ impl AiSessionService for OrmAiSessionService {
                             })
                             .order_by(AiRunRecordOrderByInput {
                                 created_at: Some(OrderDirection::Asc),
+                                ..Default::default()
                             })
                             .internal_limit(101)
                             .fetch_all()
@@ -446,6 +447,7 @@ impl AiSessionService for OrmAiSessionService {
                             })
                             .order_by(AiRunRecordOrderByInput {
                                 created_at: Some(OrderDirection::Desc),
+                                ..Default::default()
                             })
                             .internal_limit(terminal_run_limit)
                             .fetch_all()
@@ -1837,6 +1839,7 @@ impl AiSessionService for OrmAiSessionService {
                         latest_checkpoint_id: None,
                         cancellation_request_id: None,
                         cancellation_requested_at: None,
+                        recovery_examined_at: 0,
                     })
                     .await
                     .map_err(OrmPublicError::from)?;

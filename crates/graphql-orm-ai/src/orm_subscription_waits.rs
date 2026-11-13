@@ -3,6 +3,7 @@
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
 use crate::orm_read_bounds::InternalReadBound as _;
+use crate::orm_runs::retry_transaction;
 use std::sync::Arc;
 
 use agql_auth::{Clock, PrincipalReference, ResolvedPrincipal};
@@ -328,6 +329,7 @@ struct OpenedWait {
     position: AiSubscriptionReplayPosition,
 }
 
+#[derive(Clone)]
 struct PreparedWaitAdoption {
     id: Uuid,
     outcome_kind: String,
@@ -938,133 +940,138 @@ impl OrmAiSubscriptionWaitService {
             .ok_or(AiError::PersistenceFailed)?;
         let maximum = i64::try_from(self.limits.maximum_candidate_scan)
             .map_err(|_| AiError::InvalidConfiguration("invalid waiter scan bound".to_owned()))?;
-        self.custody_database()
-            .transaction(TransactionMode::StateMachine, move |tx| {
-                Box::pin(async move {
-                    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
-                    let candidates = tx
-                        .query::<AiSubscriptionWaiterRecord>()
-                        .filter(AiSubscriptionWaiterRecordWhereInput {
-                            state: Some(StringFilter {
-                                in_list: Some(vec!["waiting".to_owned(), "claimed".to_owned()]),
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        })
-                        .default_order()
-                        .internal_limit(maximum)
-                        .fetch_all()
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    for waiter in candidates {
-                        if waiter.state == "claimed"
-                            && waiter
-                                .claim_expires_at
-                                .is_some_and(|expires| expires > now.unix_timestamp())
-                        {
-                            continue;
-                        }
-                        if waiter.events_examined < 0
-                            || waiter.maximum_events <= 0
-                            || waiter.events_examined > waiter.maximum_events
-                            || waiter.claim_generation < 0
-                            || waiter.protected_request.is_none()
-                            || waiter.protected_cursor.is_none()
-                        {
-                            quarantine_waiter_candidate(tx, &waiter, None).await?;
-                            continue;
-                        }
-                        let Some(run) = tx
-                            .find_by_id::<AiRunRecord>(&waiter.run_id)
-                            .await
-                            .map_err(OrmPublicError::from)?
-                        else {
-                            quarantine_waiter_candidate(tx, &waiter, None).await?;
-                            continue;
-                        };
-                        let Some(session) = tx
-                            .find_by_id::<AiSessionRecord>(&waiter.session_id)
-                            .await
-                            .map_err(OrmPublicError::from)?
-                        else {
-                            quarantine_waiter_candidate(tx, &waiter, Some(&run)).await?;
-                            continue;
-                        };
-                        let Some(call) = tx
-                            .find_by_id::<AiToolCallRecord>(&waiter.tool_call_id)
-                            .await
-                            .map_err(OrmPublicError::from)?
-                        else {
-                            quarantine_waiter_candidate(tx, &waiter, Some(&run)).await?;
-                            continue;
-                        };
-                        let adoptions = tx
-                            .query::<AiSubscriptionWaitAdoptionRecord>()
-                            .filter(AiSubscriptionWaitAdoptionRecordWhereInput {
-                                waiter_id: Some(UuidFilter {
-                                    eq: Some(waiter.id),
+        retry_transaction(self.limits.maximum_transaction_retries, || {
+            let worker_id = worker_id.clone();
+            self.custody_database()
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        crate::orm_runtime_recovery::require_live_epoch(tx).await?;
+                        let candidates = tx
+                            .query::<AiSubscriptionWaiterRecord>()
+                            .filter(AiSubscriptionWaiterRecordWhereInput {
+                                state: Some(StringFilter {
+                                    in_list: Some(vec!["waiting".to_owned(), "claimed".to_owned()]),
                                     ..Default::default()
                                 }),
                                 ..Default::default()
                             })
-                            .internal_limit(1)
+                            .default_order()
+                            .internal_limit(maximum)
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
-                        if run.session_id != waiter.session_id
-                            || run.state != AiRunState::WaitingSubscription.as_str()
-                            || run.attempt_id.is_some()
-                            || run.lease_owner.is_some()
-                            || run.lease_expires_at.is_some()
-                            || run.latest_checkpoint_id != Some(waiter.parked_checkpoint_id)
-                            || session.id != waiter.session_id
-                            || session.state != "active"
-                            || session.deleted_at.is_some()
-                            || session.owner_principal_kind != waiter.owner_principal_kind
-                            || session.owner_subject != waiter.owner_subject
-                            || call.run_id != waiter.run_id
-                            || call.state != "waiting_subscription"
-                            || call.completed_at.is_some()
-                            || !adoptions.is_empty()
-                        {
-                            quarantine_waiter_candidate(tx, &waiter, Some(&run)).await?;
-                            continue;
-                        }
-                        let generation = waiter
-                            .claim_generation
-                            .checked_add(1)
-                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                        let updated = tx
-                            .compare_and_swap::<AiSubscriptionWaiterRecord>(
-                                &waiter.id,
-                                waiter.row_version,
-                                AiSubscriptionWaiterRecordWhereInput::default(),
-                                UpdateAiSubscriptionWaiterRecordInput {
-                                    state: Some("claimed".to_owned()),
-                                    claim_owner: Some(Some(worker_id.clone())),
-                                    claim_generation: Some(generation),
-                                    claim_expires_at: Some(Some(claim_expires_at.unix_timestamp())),
+                        for waiter in candidates {
+                            if waiter.state == "claimed"
+                                && waiter
+                                    .claim_expires_at
+                                    .is_some_and(|expires| expires > now.unix_timestamp())
+                            {
+                                continue;
+                            }
+                            if waiter.events_examined < 0
+                                || waiter.maximum_events <= 0
+                                || waiter.events_examined > waiter.maximum_events
+                                || waiter.claim_generation < 0
+                                || waiter.protected_request.is_none()
+                                || waiter.protected_cursor.is_none()
+                            {
+                                quarantine_waiter_candidate(tx, &waiter, None).await?;
+                                continue;
+                            }
+                            let Some(run) = tx
+                                .find_by_id::<AiRunRecord>(&waiter.run_id)
+                                .await
+                                .map_err(OrmPublicError::from)?
+                            else {
+                                quarantine_waiter_candidate(tx, &waiter, None).await?;
+                                continue;
+                            };
+                            let Some(session) = tx
+                                .find_by_id::<AiSessionRecord>(&waiter.session_id)
+                                .await
+                                .map_err(OrmPublicError::from)?
+                            else {
+                                quarantine_waiter_candidate(tx, &waiter, Some(&run)).await?;
+                                continue;
+                            };
+                            let Some(call) = tx
+                                .find_by_id::<AiToolCallRecord>(&waiter.tool_call_id)
+                                .await
+                                .map_err(OrmPublicError::from)?
+                            else {
+                                quarantine_waiter_candidate(tx, &waiter, Some(&run)).await?;
+                                continue;
+                            };
+                            let adoptions = tx
+                                .query::<AiSubscriptionWaitAdoptionRecord>()
+                                .filter(AiSubscriptionWaitAdoptionRecordWhereInput {
+                                    waiter_id: Some(UuidFilter {
+                                        eq: Some(waiter.id),
+                                        ..Default::default()
+                                    }),
                                     ..Default::default()
-                                },
-                            )
-                            .await
-                            .map_err(OrmPublicError::from)?;
-                        if let ConditionalUpdateOutcome::Updated(updated) = updated {
-                            return Ok(Some(AiSubscriptionWaitClaim {
-                                waiter_id: AiSubscriptionWaiterId(updated.id),
-                                run_id: crate::AiRunId(updated.run_id),
-                                claim_generation: updated.claim_generation,
-                                claim_expires_at,
-                                row_version: updated.row_version,
-                                worker_id,
-                            }));
+                                })
+                                .internal_limit(1)
+                                .fetch_all()
+                                .await
+                                .map_err(OrmPublicError::from)?;
+                            if run.session_id != waiter.session_id
+                                || run.state != AiRunState::WaitingSubscription.as_str()
+                                || run.attempt_id.is_some()
+                                || run.lease_owner.is_some()
+                                || run.lease_expires_at.is_some()
+                                || run.latest_checkpoint_id != Some(waiter.parked_checkpoint_id)
+                                || session.id != waiter.session_id
+                                || session.state != "active"
+                                || session.deleted_at.is_some()
+                                || session.owner_principal_kind != waiter.owner_principal_kind
+                                || session.owner_subject != waiter.owner_subject
+                                || call.run_id != waiter.run_id
+                                || call.state != "waiting_subscription"
+                                || call.completed_at.is_some()
+                                || !adoptions.is_empty()
+                            {
+                                quarantine_waiter_candidate(tx, &waiter, Some(&run)).await?;
+                                continue;
+                            }
+                            let generation = waiter
+                                .claim_generation
+                                .checked_add(1)
+                                .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                            let updated = tx
+                                .compare_and_swap::<AiSubscriptionWaiterRecord>(
+                                    &waiter.id,
+                                    waiter.row_version,
+                                    AiSubscriptionWaiterRecordWhereInput::default(),
+                                    UpdateAiSubscriptionWaiterRecordInput {
+                                        state: Some("claimed".to_owned()),
+                                        claim_owner: Some(Some(worker_id.clone())),
+                                        claim_generation: Some(generation),
+                                        claim_expires_at: Some(Some(
+                                            claim_expires_at.unix_timestamp(),
+                                        )),
+                                        ..Default::default()
+                                    },
+                                )
+                                .await
+                                .map_err(OrmPublicError::from)?;
+                            if let ConditionalUpdateOutcome::Updated(updated) = updated {
+                                return Ok(Some(AiSubscriptionWaitClaim {
+                                    waiter_id: AiSubscriptionWaiterId(updated.id),
+                                    run_id: crate::AiRunId(updated.run_id),
+                                    claim_generation: updated.claim_generation,
+                                    claim_expires_at,
+                                    row_version: updated.row_version,
+                                    worker_id,
+                                }));
+                            }
                         }
-                    }
-                    Ok(None)
+                        Ok(None)
+                    })
                 })
-            })
-            .await
-            .map_err(map_transaction)
+        })
+        .await
+        .map_err(map_transaction)
     }
 
     /// Processes at most one durable waiter through replay-then-live.
@@ -1439,38 +1446,41 @@ impl OrmAiSubscriptionWaitService {
     async fn release_claim(&self, claim: &AiSubscriptionWaitClaim) -> Result<(), AiError> {
         let now = canonical_second(self.clock.now());
         let claim = claim.clone();
-        self.custody_database()
-            .transaction(TransactionMode::StateMachine, move |tx| {
-                Box::pin(async move {
-                    let waiter = tx
-                        .find_by_id::<AiSubscriptionWaiterRecord>(&claim.waiter_id.0)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    validate_claimed_waiter(&waiter, &claim, now)?;
-                    if !matches!(
-                        tx.compare_and_swap::<AiSubscriptionWaiterRecord>(
-                            &waiter.id,
-                            waiter.row_version,
-                            waiter_exact_state(&waiter.state),
-                            UpdateAiSubscriptionWaiterRecordInput {
-                                state: Some("waiting".to_owned()),
-                                claim_owner: Some(None),
-                                claim_expires_at: Some(None),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?,
-                        ConditionalUpdateOutcome::Updated(_)
-                    ) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    Ok(())
+        retry_transaction(self.limits.maximum_transaction_retries, || {
+            let claim = claim.clone();
+            self.custody_database()
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        let waiter = tx
+                            .find_by_id::<AiSubscriptionWaiterRecord>(&claim.waiter_id.0)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        validate_claimed_waiter(&waiter, &claim, now)?;
+                        if !matches!(
+                            tx.compare_and_swap::<AiSubscriptionWaiterRecord>(
+                                &waiter.id,
+                                waiter.row_version,
+                                waiter_exact_state(&waiter.state),
+                                UpdateAiSubscriptionWaiterRecordInput {
+                                    state: Some("waiting".to_owned()),
+                                    claim_owner: Some(None),
+                                    claim_expires_at: Some(None),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?,
+                            ConditionalUpdateOutcome::Updated(_)
+                        ) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        Ok(())
+                    })
                 })
-            })
-            .await
-            .map_err(map_transaction)
+        })
+        .await
+        .map_err(map_transaction)
     }
 
     async fn advance_cursor_and_release(
@@ -1512,46 +1522,51 @@ impl OrmAiSubscriptionWaitService {
             .ok_or(AiError::PersistenceFailed)?;
         let now = canonical_second(self.clock.now());
         let claim = claim.clone();
-        self.custody_database()
-            .transaction(TransactionMode::StateMachine, move |tx| {
-                Box::pin(async move {
-                    let waiter = tx
-                        .find_by_id::<AiSubscriptionWaiterRecord>(&claim.waiter_id.0)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    validate_claimed_waiter(&waiter, &claim, now)?;
-                    if waiter.events_examined.checked_add(1) != Some(events_examined)
-                        || events_examined >= waiter.maximum_events
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    if !matches!(
-                        tx.compare_and_swap::<AiSubscriptionWaiterRecord>(
-                            &waiter.id,
-                            waiter.row_version,
-                            waiter_exact_state(&waiter.state),
-                            UpdateAiSubscriptionWaiterRecordInput {
-                                cursor_fingerprint: Some(cursor_fingerprint),
-                                protected_cursor: Some(Some(protected_cursor)),
-                                events_examined: Some(events_examined),
-                                state: Some("waiting".to_owned()),
-                                claim_owner: Some(None),
-                                claim_expires_at: Some(None),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?,
-                        ConditionalUpdateOutcome::Updated(_)
-                    ) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    Ok(())
+        retry_transaction(self.limits.maximum_transaction_retries, || {
+            let claim = claim.clone();
+            let cursor_fingerprint = cursor_fingerprint.clone();
+            let protected_cursor = protected_cursor.clone();
+            self.custody_database()
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        let waiter = tx
+                            .find_by_id::<AiSubscriptionWaiterRecord>(&claim.waiter_id.0)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        validate_claimed_waiter(&waiter, &claim, now)?;
+                        if waiter.events_examined.checked_add(1) != Some(events_examined)
+                            || events_examined >= waiter.maximum_events
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        if !matches!(
+                            tx.compare_and_swap::<AiSubscriptionWaiterRecord>(
+                                &waiter.id,
+                                waiter.row_version,
+                                waiter_exact_state(&waiter.state),
+                                UpdateAiSubscriptionWaiterRecordInput {
+                                    cursor_fingerprint: Some(cursor_fingerprint),
+                                    protected_cursor: Some(Some(protected_cursor)),
+                                    events_examined: Some(events_examined),
+                                    state: Some("waiting".to_owned()),
+                                    claim_owner: Some(None),
+                                    claim_expires_at: Some(None),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?,
+                            ConditionalUpdateOutcome::Updated(_)
+                        ) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        Ok(())
+                    })
                 })
-            })
-            .await
-            .map_err(map_transaction)
+        })
+        .await
+        .map_err(map_transaction)
     }
 
     async fn queue_event_outcome(
@@ -1792,158 +1807,164 @@ impl OrmAiSubscriptionWaitService {
     ) -> Result<(), AiError> {
         let claim = claim.clone();
         let now = canonical_second(self.clock.now());
-        self.custody_database()
-            .transaction(TransactionMode::StateMachine, move |tx| {
-                Box::pin(async move {
-                    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
-                    let waiter = tx
-                        .find_by_id::<AiSubscriptionWaiterRecord>(&claim.waiter_id.0)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    validate_claimed_waiter(&waiter, &claim, now)?;
-                    let run = tx
-                        .find_by_id::<AiRunRecord>(&waiter.run_id)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    let call = tx
-                        .find_by_id::<AiToolCallRecord>(&waiter.tool_call_id)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    if run.state != AiRunState::WaitingSubscription.as_str()
-                        || run.attempt_id.is_some()
-                        || run.lease_owner.is_some()
-                        || run.latest_checkpoint_id != Some(waiter.parked_checkpoint_id)
-                        || call.run_id != run.id
-                        || call.state != "waiting_subscription"
-                        || call.completed_at.is_some()
-                        || adoption.events_examined > waiter.maximum_events
-                        || adoption.events_examined
-                            != waiter
-                                .events_examined
-                                .checked_add(if adoption.outcome_kind == "timeout" {
-                                    0
-                                } else {
-                                    1
-                                })
-                                .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let existing = tx
-                        .query::<AiSubscriptionWaitAdoptionRecord>()
-                        .filter(AiSubscriptionWaitAdoptionRecordWhereInput {
-                            waiter_id: Some(UuidFilter {
-                                eq: Some(waiter.id),
+        retry_transaction(self.limits.maximum_transaction_retries, || {
+            let adoption = adoption.clone();
+            let claim = claim.clone();
+            self.custody_database()
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        crate::orm_runtime_recovery::require_live_epoch(tx).await?;
+                        let waiter = tx
+                            .find_by_id::<AiSubscriptionWaiterRecord>(&claim.waiter_id.0)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        validate_claimed_waiter(&waiter, &claim, now)?;
+                        let run = tx
+                            .find_by_id::<AiRunRecord>(&waiter.run_id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        let call = tx
+                            .find_by_id::<AiToolCallRecord>(&waiter.tool_call_id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if run.state != AiRunState::WaitingSubscription.as_str()
+                            || run.attempt_id.is_some()
+                            || run.lease_owner.is_some()
+                            || run.latest_checkpoint_id != Some(waiter.parked_checkpoint_id)
+                            || call.run_id != run.id
+                            || call.state != "waiting_subscription"
+                            || call.completed_at.is_some()
+                            || adoption.events_examined > waiter.maximum_events
+                            || adoption.events_examined
+                                != waiter
+                                    .events_examined
+                                    .checked_add(if adoption.outcome_kind == "timeout" {
+                                        0
+                                    } else {
+                                        1
+                                    })
+                                    .ok_or_else(|| {
+                                        OrmPublicError::new(OrmErrorCode::InternalError)
+                                    })?
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let existing = tx
+                            .query::<AiSubscriptionWaitAdoptionRecord>()
+                            .filter(AiSubscriptionWaitAdoptionRecordWhereInput {
+                                waiter_id: Some(UuidFilter {
+                                    eq: Some(waiter.id),
+                                    ..Default::default()
+                                }),
                                 ..Default::default()
-                            }),
-                            ..Default::default()
-                        })
-                        .internal_limit(1)
-                        .fetch_all()
+                            })
+                            .internal_limit(1)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if !existing.is_empty() {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        if !matches!(
+                            tx.compare_and_swap::<AiSubscriptionWaiterRecord>(
+                                &waiter.id,
+                                waiter.row_version,
+                                waiter_exact_state(&waiter.state),
+                                UpdateAiSubscriptionWaiterRecordInput {
+                                    cursor_fingerprint: Some(adoption.cursor_fingerprint.clone()),
+                                    protected_cursor: Some(Some(adoption.protected_cursor.clone())),
+                                    events_examined: Some(adoption.events_examined),
+                                    state: Some("adopted".to_owned()),
+                                    claim_owner: Some(None),
+                                    claim_expires_at: Some(None),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?,
+                            ConditionalUpdateOutcome::Updated(_)
+                        ) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        tx.insert::<AiSubscriptionWaitAdoptionRecord>(
+                            CreateAiSubscriptionWaitAdoptionRecordInput {
+                                id: adoption.id,
+                                waiter_id: waiter.id,
+                                run_id: run.id,
+                                tool_call_id: waiter.tool_call_id,
+                                outcome_kind: adoption.outcome_kind,
+                                source_event_fingerprint: adoption.source_event_fingerprint,
+                                cursor_fingerprint: adoption.cursor_fingerprint,
+                                outcome_fingerprint: adoption.outcome_fingerprint,
+                                checkpoint_fingerprint: adoption.checkpoint_fingerprint.clone(),
+                                protected_outcome: Some(adoption.protected_outcome),
+                                state: "queued".to_owned(),
+                                queued_at: now.unix_timestamp(),
+                                claimed_attempt_id: None,
+                                claimed_lease_generation: None,
+                                consumed_at: None,
+                            },
+                        )
                         .await
                         .map_err(OrmPublicError::from)?;
-                    if !existing.is_empty() {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    if !matches!(
-                        tx.compare_and_swap::<AiSubscriptionWaiterRecord>(
-                            &waiter.id,
-                            waiter.row_version,
-                            waiter_exact_state(&waiter.state),
-                            UpdateAiSubscriptionWaiterRecordInput {
-                                cursor_fingerprint: Some(adoption.cursor_fingerprint.clone()),
-                                protected_cursor: Some(Some(adoption.protected_cursor.clone())),
-                                events_examined: Some(adoption.events_examined),
-                                state: Some("adopted".to_owned()),
-                                claim_owner: Some(None),
-                                claim_expires_at: Some(None),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?,
-                        ConditionalUpdateOutcome::Updated(_)
-                    ) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    tx.insert::<AiSubscriptionWaitAdoptionRecord>(
-                        CreateAiSubscriptionWaitAdoptionRecordInput {
+                        tx.insert::<AiRunCheckpointRecord>(CreateAiRunCheckpointRecordInput {
                             id: adoption.id,
-                            waiter_id: waiter.id,
                             run_id: run.id,
-                            tool_call_id: waiter.tool_call_id,
-                            outcome_kind: adoption.outcome_kind,
-                            source_event_fingerprint: adoption.source_event_fingerprint,
-                            cursor_fingerprint: adoption.cursor_fingerprint,
-                            outcome_fingerprint: adoption.outcome_fingerprint,
-                            checkpoint_fingerprint: adoption.checkpoint_fingerprint.clone(),
-                            protected_outcome: Some(adoption.protected_outcome),
-                            state: "queued".to_owned(),
-                            queued_at: now.unix_timestamp(),
-                            claimed_attempt_id: None,
-                            claimed_lease_generation: None,
-                            consumed_at: None,
-                        },
-                    )
-                    .await
-                    .map_err(OrmPublicError::from)?;
-                    tx.insert::<AiRunCheckpointRecord>(CreateAiRunCheckpointRecordInput {
-                        id: adoption.id,
-                        run_id: run.id,
-                        attempt_id: waiter.source_attempt_id,
-                        lease_generation: waiter.source_lease_generation,
-                        checkpoint_kind: "subscription_wait_adopted".to_owned(),
-                        provider_response_id: None,
-                        budget_reservation_id: call.budget_reservation_id,
-                        assistant_message_id: None,
-                        protected_state: Some(adoption.protected_checkpoint),
-                        checkpoint_hash: adoption.checkpoint_fingerprint,
-                    })
-                    .await
-                    .map_err(OrmPublicError::from)?;
-                    if !matches!(
-                        tx.compare_and_swap::<AiRunRecord>(
-                            &run.id,
-                            run.row_version,
-                            exact_state(&run.state),
-                            UpdateAiRunRecordInput {
-                                state: Some(AiRunState::Queued.as_str().to_owned()),
-                                next_attempt_at: Some(Some(now.unix_timestamp())),
-                                latest_checkpoint_id: Some(Some(adoption.id)),
-                                error_code: Some(Some("checkpoint_adoption_ready".to_owned())),
-                                ..Default::default()
-                            },
-                        )
+                            attempt_id: waiter.source_attempt_id,
+                            lease_generation: waiter.source_lease_generation,
+                            checkpoint_kind: "subscription_wait_adopted".to_owned(),
+                            provider_response_id: None,
+                            budget_reservation_id: call.budget_reservation_id,
+                            assistant_message_id: None,
+                            protected_state: Some(adoption.protected_checkpoint),
+                            checkpoint_hash: adoption.checkpoint_fingerprint,
+                        })
                         .await
-                        .map_err(OrmPublicError::from)?,
-                        ConditionalUpdateOutcome::Updated(_)
-                    ) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
-                        actor_principal_kind: waiter.owner_principal_kind,
-                        actor_subject: waiter.owner_subject,
-                        action: "ai.subscription_wait.adopt".to_owned(),
-                        resource_kind: "ai_subscription_waiter".to_owned(),
-                        resource_reference: waiter.id.to_string(),
-                        outcome: "queued".to_owned(),
-                        reason_code: "bounded_outcome_adopted".to_owned(),
-                        correlation_id: call
-                            .correlation_id
-                            .unwrap_or_else(|| waiter.id.to_string()),
-                        causation_id: Some(adoption.id.to_string()),
-                        policy_version: None,
+                        .map_err(OrmPublicError::from)?;
+                        if !matches!(
+                            tx.compare_and_swap::<AiRunRecord>(
+                                &run.id,
+                                run.row_version,
+                                exact_state(&run.state),
+                                UpdateAiRunRecordInput {
+                                    state: Some(AiRunState::Queued.as_str().to_owned()),
+                                    next_attempt_at: Some(Some(now.unix_timestamp())),
+                                    latest_checkpoint_id: Some(Some(adoption.id)),
+                                    error_code: Some(Some("checkpoint_adoption_ready".to_owned())),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?,
+                            ConditionalUpdateOutcome::Updated(_)
+                        ) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
+                            actor_principal_kind: waiter.owner_principal_kind,
+                            actor_subject: waiter.owner_subject,
+                            action: "ai.subscription_wait.adopt".to_owned(),
+                            resource_kind: "ai_subscription_waiter".to_owned(),
+                            resource_reference: waiter.id.to_string(),
+                            outcome: "queued".to_owned(),
+                            reason_code: "bounded_outcome_adopted".to_owned(),
+                            correlation_id: call
+                                .correlation_id
+                                .unwrap_or_else(|| waiter.id.to_string()),
+                            causation_id: Some(adoption.id.to_string()),
+                            policy_version: None,
+                        })
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                        Ok(())
                     })
-                    .await
-                    .map_err(OrmPublicError::from)?;
-                    Ok(())
                 })
-            })
-            .await
-            .map_err(map_transaction)
+        })
+        .await
+        .map_err(map_transaction)
     }
 
     async fn close_claim(
@@ -1961,120 +1982,125 @@ impl OrmAiSubscriptionWaitService {
         let claim = claim.clone();
         let reason_code = reason_code.to_owned();
         let now = canonical_second(self.clock.now());
-        self.custody_database()
-            .transaction(TransactionMode::StateMachine, move |tx| {
-                Box::pin(async move {
-                    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
-                    let waiter = tx
-                        .find_by_id::<AiSubscriptionWaiterRecord>(&claim.waiter_id.0)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    validate_claimed_waiter(&waiter, &claim, now)?;
-                    let run = tx
-                        .find_by_id::<AiRunRecord>(&waiter.run_id)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    let call = tx
-                        .find_by_id::<AiToolCallRecord>(&waiter.tool_call_id)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    let step = tx
-                        .find_by_id::<AiRunStepRecord>(&waiter.tool_call_id)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    if run.state != AiRunState::WaitingSubscription.as_str()
-                        || !AiRunState::WaitingSubscription.can_transition_to(final_state)
-                        || call.state != "waiting_subscription"
-                        || step.state != "waiting_subscription"
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let waiter_state = match final_state {
-                        AiRunState::Cancelled => "cancelled",
-                        AiRunState::RecoveryRequired => "recovery_required",
-                        _ => "failed",
-                    };
-                    if !matches!(
-                        tx.compare_and_swap::<AiSubscriptionWaiterRecord>(
-                            &waiter.id,
-                            waiter.row_version,
-                            waiter_exact_state(&waiter.state),
-                            UpdateAiSubscriptionWaiterRecordInput {
-                                state: Some(waiter_state.to_owned()),
-                                claim_owner: Some(None),
-                                claim_expires_at: Some(None),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?,
-                        ConditionalUpdateOutcome::Updated(_)
-                    ) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    if !matches!(
-                        tx.compare_and_swap::<AiToolCallRecord>(
-                            &call.id,
-                            call.row_version,
-                            tool_call_exact_state(&call.state),
-                            UpdateAiToolCallRecordInput {
-                                state: Some(waiter_state.to_owned()),
-                                authorization_code: Some(Some(reason_code.clone())),
-                                completed_at: Some(Some(now.unix_timestamp())),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?,
-                        ConditionalUpdateOutcome::Updated(_)
-                    ) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    if !matches!(
-                        tx.compare_and_swap::<AiRunStepRecord>(
-                            &step.id,
-                            step.row_version,
-                            run_step_row_version_only(),
-                            UpdateAiRunStepRecordInput {
-                                state: Some(waiter_state.to_owned()),
-                                finished_at: Some(Some(now.unix_timestamp())),
-                                error_code: Some(Some(reason_code.clone())),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?,
-                        ConditionalUpdateOutcome::Updated(_)
-                    ) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    if !matches!(
-                        tx.compare_and_swap::<AiRunRecord>(
-                            &run.id,
-                            run.row_version,
-                            exact_state(&run.state),
-                            UpdateAiRunRecordInput {
-                                state: Some(final_state.as_str().to_owned()),
-                                next_attempt_at: Some(None),
-                                error_code: Some(Some(reason_code.clone())),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?,
-                        ConditionalUpdateOutcome::Updated(_)
-                    ) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    append_terminal_run_event(tx, &run, final_state, Some(&reason_code), now).await
+        retry_transaction(self.limits.maximum_transaction_retries, || {
+            let claim = claim.clone();
+            let reason_code = reason_code.clone();
+            self.custody_database()
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        crate::orm_runtime_recovery::require_live_epoch(tx).await?;
+                        let waiter = tx
+                            .find_by_id::<AiSubscriptionWaiterRecord>(&claim.waiter_id.0)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        validate_claimed_waiter(&waiter, &claim, now)?;
+                        let run = tx
+                            .find_by_id::<AiRunRecord>(&waiter.run_id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        let call = tx
+                            .find_by_id::<AiToolCallRecord>(&waiter.tool_call_id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        let step = tx
+                            .find_by_id::<AiRunStepRecord>(&waiter.tool_call_id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if run.state != AiRunState::WaitingSubscription.as_str()
+                            || !AiRunState::WaitingSubscription.can_transition_to(final_state)
+                            || call.state != "waiting_subscription"
+                            || step.state != "waiting_subscription"
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let waiter_state = match final_state {
+                            AiRunState::Cancelled => "cancelled",
+                            AiRunState::RecoveryRequired => "recovery_required",
+                            _ => "failed",
+                        };
+                        if !matches!(
+                            tx.compare_and_swap::<AiSubscriptionWaiterRecord>(
+                                &waiter.id,
+                                waiter.row_version,
+                                waiter_exact_state(&waiter.state),
+                                UpdateAiSubscriptionWaiterRecordInput {
+                                    state: Some(waiter_state.to_owned()),
+                                    claim_owner: Some(None),
+                                    claim_expires_at: Some(None),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?,
+                            ConditionalUpdateOutcome::Updated(_)
+                        ) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        if !matches!(
+                            tx.compare_and_swap::<AiToolCallRecord>(
+                                &call.id,
+                                call.row_version,
+                                tool_call_exact_state(&call.state),
+                                UpdateAiToolCallRecordInput {
+                                    state: Some(waiter_state.to_owned()),
+                                    authorization_code: Some(Some(reason_code.clone())),
+                                    completed_at: Some(Some(now.unix_timestamp())),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?,
+                            ConditionalUpdateOutcome::Updated(_)
+                        ) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        if !matches!(
+                            tx.compare_and_swap::<AiRunStepRecord>(
+                                &step.id,
+                                step.row_version,
+                                run_step_row_version_only(),
+                                UpdateAiRunStepRecordInput {
+                                    state: Some(waiter_state.to_owned()),
+                                    finished_at: Some(Some(now.unix_timestamp())),
+                                    error_code: Some(Some(reason_code.clone())),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?,
+                            ConditionalUpdateOutcome::Updated(_)
+                        ) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        if !matches!(
+                            tx.compare_and_swap::<AiRunRecord>(
+                                &run.id,
+                                run.row_version,
+                                exact_state(&run.state),
+                                UpdateAiRunRecordInput {
+                                    state: Some(final_state.as_str().to_owned()),
+                                    next_attempt_at: Some(None),
+                                    error_code: Some(Some(reason_code.clone())),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?,
+                            ConditionalUpdateOutcome::Updated(_)
+                        ) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        append_terminal_run_event(tx, &run, final_state, Some(&reason_code), now)
+                            .await
+                    })
                 })
-            })
-            .await
-            .map_err(map_transaction)
+        })
+        .await
+        .map_err(map_transaction)
     }
 
     async fn adopt_wait(
@@ -2094,11 +2120,10 @@ impl OrmAiSubscriptionWaitService {
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::NotFound)?;
-        let waiter =
-            AiSubscriptionWaiterRecord::find_by_id(self.custody_database(), &adoption.waiter_id)
-                .await
-                .map_err(|error| map_orm(OrmPublicError::from(error)))?
-                .ok_or(AiError::NotFound)?;
+        let waiter = AiSubscriptionWaiterRecord::find_by_id(self.custody_database(), &adoption.waiter_id)
+            .await
+            .map_err(|error| map_orm(OrmPublicError::from(error)))?
+            .ok_or(AiError::NotFound)?;
         let session = AiSessionRecord::find_by_id(self.custody_database(), &lease.session_id().0)
             .await
             .map_err(|error| map_orm(OrmPublicError::from(error)))?
@@ -2346,39 +2371,42 @@ impl OrmAiSubscriptionWaitService {
         let lease = lease.clone();
         let adoption = adoption.clone();
         let now = canonical_second(self.clock.now());
-        self.custody_database()
-            .transaction(TransactionMode::StateMachine, move |tx| {
-                Box::pin(async move {
-                    load_and_validate_active_lease(tx, &lease, now).await?;
-                    if !matches!(
-                        tx.compare_and_swap::<AiSubscriptionWaitAdoptionRecord>(
-                            &adoption.id,
-                            adoption.row_version,
-                            AiSubscriptionWaitAdoptionRecordWhereInput {
-                                state: Some(StringFilter {
-                                    eq: Some("queued".to_owned()),
+        retry_transaction(self.limits.maximum_transaction_retries, || {
+            let lease = lease.clone();
+            self.custody_database()
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        load_and_validate_active_lease(tx, &lease, now).await?;
+                        if !matches!(
+                            tx.compare_and_swap::<AiSubscriptionWaitAdoptionRecord>(
+                                &adoption.id,
+                                adoption.row_version,
+                                AiSubscriptionWaitAdoptionRecordWhereInput {
+                                    state: Some(StringFilter {
+                                        eq: Some("queued".to_owned()),
+                                        ..Default::default()
+                                    }),
                                     ..Default::default()
-                                }),
-                                ..Default::default()
-                            },
-                            UpdateAiSubscriptionWaitAdoptionRecordInput {
-                                state: Some("claimed".to_owned()),
-                                claimed_attempt_id: Some(Some(lease.attempt_id())),
-                                claimed_lease_generation: Some(Some(lease.lease_generation())),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?,
-                        ConditionalUpdateOutcome::Updated(_)
-                    ) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    Ok(())
+                                },
+                                UpdateAiSubscriptionWaitAdoptionRecordInput {
+                                    state: Some("claimed".to_owned()),
+                                    claimed_attempt_id: Some(Some(lease.attempt_id())),
+                                    claimed_lease_generation: Some(Some(lease.lease_generation())),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?,
+                            ConditionalUpdateOutcome::Updated(_)
+                        ) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        Ok(())
+                    })
                 })
-            })
-            .await
-            .map_err(map_transaction)
+        })
+        .await
+        .map_err(map_transaction)
     }
 
     async fn consume_wait_adoption(
@@ -2389,125 +2417,126 @@ impl OrmAiSubscriptionWaitService {
         let lease = lease.clone();
         let now = canonical_second(self.clock.now());
         let ttl = self.run_service.lease_ttl();
-        let updated = self
-            .custody_database()
-            .transaction(TransactionMode::StateMachine, move |tx| {
-                Box::pin(async move {
-                    let run = load_and_validate_active_lease(tx, &lease, now).await?;
-                    let adoption = tx
-                        .find_by_id::<AiSubscriptionWaitAdoptionRecord>(&checkpoint_id)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    let waiter = tx
-                        .find_by_id::<AiSubscriptionWaiterRecord>(&adoption.waiter_id)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    let call = tx
-                        .find_by_id::<AiToolCallRecord>(&adoption.tool_call_id)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    let step = tx
-                        .find_by_id::<AiRunStepRecord>(&adoption.tool_call_id)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    if run.latest_checkpoint_id != Some(checkpoint_id)
-                        || adoption.state != "claimed"
-                        || adoption.claimed_attempt_id != Some(lease.attempt_id())
-                        || adoption.claimed_lease_generation != Some(lease.lease_generation())
-                        || adoption.consumed_at.is_some()
-                        || waiter.state != "adopted"
-                        || call.state != "waiting_subscription"
-                        || step.state != "waiting_subscription"
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    if !matches!(
-                        tx.compare_and_swap::<AiSubscriptionWaitAdoptionRecord>(
-                            &adoption.id,
-                            adoption.row_version,
-                            AiSubscriptionWaitAdoptionRecordWhereInput::default(),
-                            UpdateAiSubscriptionWaitAdoptionRecordInput {
-                                state: Some("consumed".to_owned()),
-                                consumed_at: Some(Some(now.unix_timestamp())),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?,
-                        ConditionalUpdateOutcome::Updated(_)
-                    ) || !matches!(
-                        tx.compare_and_swap::<AiToolCallRecord>(
-                            &call.id,
-                            call.row_version,
-                            tool_call_exact_state(&call.state),
-                            UpdateAiToolCallRecordInput {
-                                state: Some("completed".to_owned()),
-                                authorization_code: Some(Some(
-                                    "subscription_wait_adopted".to_owned()
-                                )),
-                                completed_at: Some(Some(now.unix_timestamp())),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?,
-                        ConditionalUpdateOutcome::Updated(_)
-                    ) || !matches!(
-                        tx.compare_and_swap::<AiRunStepRecord>(
-                            &step.id,
-                            step.row_version,
-                            run_step_row_version_only(),
-                            UpdateAiRunStepRecordInput {
-                                state: Some("completed".to_owned()),
-                                finished_at: Some(Some(now.unix_timestamp())),
-                                error_code: Some(None),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?,
-                        ConditionalUpdateOutcome::Updated(_)
-                    ) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let expires = now
-                        .checked_add(ttl)
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                    match tx
-                        .compare_and_swap::<AiRunRecord>(
-                            &run.id,
-                            run.row_version,
-                            exact_state(&run.state),
-                            UpdateAiRunRecordInput {
-                                latest_checkpoint_id: Some(None),
-                                lease_expires_at: Some(Some(expires.unix_timestamp())),
-                                lease_heartbeat_at: Some(Some(now.unix_timestamp())),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?
-                    {
-                        ConditionalUpdateOutcome::Updated(run) => Ok(run),
-                        _ => Err(OrmPublicError::new(OrmErrorCode::Conflict)),
-                    }
+        let updated = retry_transaction(self.limits.maximum_transaction_retries, || {
+            let lease = lease.clone();
+            self.custody_database()
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        let run = load_and_validate_active_lease(tx, &lease, now).await?;
+                        let adoption = tx
+                            .find_by_id::<AiSubscriptionWaitAdoptionRecord>(&checkpoint_id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        let waiter = tx
+                            .find_by_id::<AiSubscriptionWaiterRecord>(&adoption.waiter_id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        let call = tx
+                            .find_by_id::<AiToolCallRecord>(&adoption.tool_call_id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        let step = tx
+                            .find_by_id::<AiRunStepRecord>(&adoption.tool_call_id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if run.latest_checkpoint_id != Some(checkpoint_id)
+                            || adoption.state != "claimed"
+                            || adoption.claimed_attempt_id != Some(lease.attempt_id())
+                            || adoption.claimed_lease_generation != Some(lease.lease_generation())
+                            || adoption.consumed_at.is_some()
+                            || waiter.state != "adopted"
+                            || call.state != "waiting_subscription"
+                            || step.state != "waiting_subscription"
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        if !matches!(
+                            tx.compare_and_swap::<AiSubscriptionWaitAdoptionRecord>(
+                                &adoption.id,
+                                adoption.row_version,
+                                AiSubscriptionWaitAdoptionRecordWhereInput::default(),
+                                UpdateAiSubscriptionWaitAdoptionRecordInput {
+                                    state: Some("consumed".to_owned()),
+                                    consumed_at: Some(Some(now.unix_timestamp())),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?,
+                            ConditionalUpdateOutcome::Updated(_)
+                        ) || !matches!(
+                            tx.compare_and_swap::<AiToolCallRecord>(
+                                &call.id,
+                                call.row_version,
+                                tool_call_exact_state(&call.state),
+                                UpdateAiToolCallRecordInput {
+                                    state: Some("completed".to_owned()),
+                                    authorization_code: Some(Some(
+                                        "subscription_wait_adopted".to_owned()
+                                    )),
+                                    completed_at: Some(Some(now.unix_timestamp())),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?,
+                            ConditionalUpdateOutcome::Updated(_)
+                        ) || !matches!(
+                            tx.compare_and_swap::<AiRunStepRecord>(
+                                &step.id,
+                                step.row_version,
+                                run_step_row_version_only(),
+                                UpdateAiRunStepRecordInput {
+                                    state: Some("completed".to_owned()),
+                                    finished_at: Some(Some(now.unix_timestamp())),
+                                    error_code: Some(None),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?,
+                            ConditionalUpdateOutcome::Updated(_)
+                        ) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let expires = now
+                            .checked_add(ttl)
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        match tx
+                            .compare_and_swap::<AiRunRecord>(
+                                &run.id,
+                                run.row_version,
+                                exact_state(&run.state),
+                                UpdateAiRunRecordInput {
+                                    latest_checkpoint_id: Some(None),
+                                    lease_expires_at: Some(Some(expires.unix_timestamp())),
+                                    lease_heartbeat_at: Some(Some(now.unix_timestamp())),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?
+                        {
+                            ConditionalUpdateOutcome::Updated(run) => Ok(run),
+                            _ => Err(OrmPublicError::new(OrmErrorCode::Conflict)),
+                        }
+                    })
                 })
-            })
-            .await
-            .map_err(map_transaction)?;
+        })
+        .await
+        .map_err(map_transaction)?;
         crate::orm_runs::lease_from_record(&updated).map_err(map_orm)
     }
 
     async fn open_claim(&self, claim: &AiSubscriptionWaitClaim) -> Result<OpenedWait, AiError> {
-        let waiter =
-            AiSubscriptionWaiterRecord::find_by_id(self.custody_database(), &claim.waiter_id.0)
-                .await
-                .map_err(|error| map_orm(OrmPublicError::from(error)))?
-                .ok_or(AiError::NotFound)?;
+        let waiter = AiSubscriptionWaiterRecord::find_by_id(self.custody_database(), &claim.waiter_id.0)
+            .await
+            .map_err(|error| map_orm(OrmPublicError::from(error)))?
+            .ok_or(AiError::NotFound)?;
         let now = self.clock.now().unix_timestamp();
         if waiter.run_id != claim.run_id.0
             || waiter.state != "claimed"
@@ -2531,20 +2560,16 @@ impl OrmAiSubscriptionWaitService {
             .await
             .map_err(|error| map_orm(OrmPublicError::from(error)))?
             .ok_or(AiError::NotFound)?;
-        let source_checkpoint = AiRunCheckpointRecord::find_by_id(
-            self.custody_database(),
-            &waiter.source_checkpoint_id,
-        )
-        .await
-        .map_err(|error| map_orm(OrmPublicError::from(error)))?
-        .ok_or(AiError::NotFound)?;
-        let parked_checkpoint = AiRunCheckpointRecord::find_by_id(
-            self.custody_database(),
-            &waiter.parked_checkpoint_id,
-        )
-        .await
-        .map_err(|error| map_orm(OrmPublicError::from(error)))?
-        .ok_or(AiError::NotFound)?;
+        let source_checkpoint =
+            AiRunCheckpointRecord::find_by_id(self.custody_database(), &waiter.source_checkpoint_id)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
+        let parked_checkpoint =
+            AiRunCheckpointRecord::find_by_id(self.custody_database(), &waiter.parked_checkpoint_id)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
         if run.session_id != waiter.session_id
             || run.state != AiRunState::WaitingSubscription.as_str()
             || run.attempt_id.is_some()
@@ -2958,262 +2983,277 @@ impl OrmAiSubscriptionWaitService {
         now: OffsetDateTime,
     ) -> Result<(), AiError> {
         let lease = lease.clone();
-        self.custody_database()
-            .transaction(TransactionMode::StateMachine, move |tx| {
-                Box::pin(async move {
-                    let run = load_and_validate_active_lease(tx, &lease, now).await?;
-                    if run.state != AiRunState::Running.as_str() {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let session = tx
-                        .find_by_id::<AiSessionRecord>(&lease.session_id().0)
-                        .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    if session.state != "active"
-                        || session.deleted_at.is_some()
-                        || session.owner_principal_kind
-                            != registration.expected_owner_principal_kind
-                        || session.owner_subject != registration.expected_owner_subject
-                        || record_scope(&session) != registration.scope
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let checkpoint_id = run
-                        .latest_checkpoint_id
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
-                    let checkpoint = tx
-                        .query::<AiRunCheckpointRecord>()
-                        .filter(AiRunCheckpointRecordWhereInput {
-                            id: Some(UuidFilter {
-                                eq: Some(checkpoint_id),
+        retry_transaction(self.limits.maximum_transaction_retries, || {
+            let lease = lease.clone();
+            let registration = registration.clone();
+            self.custody_database()
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        let run = load_and_validate_active_lease(tx, &lease, now).await?;
+                        if run.state != AiRunState::Running.as_str() {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let session = tx
+                            .find_by_id::<AiSessionRecord>(&lease.session_id().0)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if session.state != "active"
+                            || session.deleted_at.is_some()
+                            || session.owner_principal_kind
+                                != registration.expected_owner_principal_kind
+                            || session.owner_subject != registration.expected_owner_subject
+                            || record_scope(&session) != registration.scope
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let checkpoint_id = run
+                            .latest_checkpoint_id
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                        let checkpoint = tx
+                            .query::<AiRunCheckpointRecord>()
+                            .filter(AiRunCheckpointRecordWhereInput {
+                                id: Some(UuidFilter {
+                                    eq: Some(checkpoint_id),
+                                    ..Default::default()
+                                }),
                                 ..Default::default()
-                            }),
-                            ..Default::default()
+                            })
+                            .internal_limit(1)
+                            .fetch_one()
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if checkpoint.id != registration.source_checkpoint_id
+                            || checkpoint.checkpoint_hash
+                                != registration.source_checkpoint_fingerprint
+                            || checkpoint.run_id != run.id
+                            || checkpoint.attempt_id != lease.attempt_id()
+                            || checkpoint.lease_generation != lease.lease_generation()
+                            || checkpoint.checkpoint_kind != "provider_turn_persisted"
+                            || checkpoint.provider_response_id != registration.provider_response_id
+                            || checkpoint.budget_reservation_id
+                                != Some(registration.budget_reservation_id)
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let expected_parked_checkpoint_fingerprint = coordinator_checkpoint_hash(
+                            lease.run_id(),
+                            lease.attempt_id(),
+                            lease.lease_generation(),
+                            registration.parked_checkpoint_id,
+                            "subscription_wait_parked",
+                            &registration.provider_kind,
+                            &registration.provider_model,
+                            registration.provider_response_id.as_deref(),
+                            registration.budget_reservation_id,
+                            &registration.protected_parked_checkpoint,
+                        )
+                        .map_err(|_| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                        if expected_parked_checkpoint_fingerprint
+                            != registration.parked_checkpoint_fingerprint
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        if !matches!(
+                            tx.compare_and_swap::<AiRunRecord>(
+                                &run.id,
+                                run.row_version,
+                                exact_state(AiRunState::Running.as_str()),
+                                UpdateAiRunRecordInput {
+                                    state: Some(
+                                        AiRunState::WaitingSubscription.as_str().to_owned()
+                                    ),
+                                    attempt_id: Some(None),
+                                    lease_owner: Some(None),
+                                    lease_expires_at: Some(None),
+                                    lease_heartbeat_at: Some(None),
+                                    next_attempt_at: Some(None),
+                                    latest_checkpoint_id: Some(Some(
+                                        registration.parked_checkpoint_id,
+                                    )),
+                                    error_code: Some(Some(
+                                        "subscription_wait_registered".to_owned()
+                                    )),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?,
+                            ConditionalUpdateOutcome::Updated(_)
+                        ) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        tx.insert::<AiRunCheckpointRecord>(CreateAiRunCheckpointRecordInput {
+                            id: registration.parked_checkpoint_id,
+                            run_id: run.id,
+                            attempt_id: lease.attempt_id(),
+                            lease_generation: lease.lease_generation(),
+                            checkpoint_kind: "subscription_wait_parked".to_owned(),
+                            provider_response_id: registration.provider_response_id.clone(),
+                            budget_reservation_id: Some(registration.budget_reservation_id),
+                            assistant_message_id: None,
+                            protected_state: Some(registration.protected_parked_checkpoint),
+                            checkpoint_hash: registration.parked_checkpoint_fingerprint.clone(),
                         })
-                        .internal_limit(1)
-                        .fetch_one()
                         .await
-                        .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
-                    if checkpoint.id != registration.source_checkpoint_id
-                        || checkpoint.checkpoint_hash != registration.source_checkpoint_fingerprint
-                        || checkpoint.run_id != run.id
-                        || checkpoint.attempt_id != lease.attempt_id()
-                        || checkpoint.lease_generation != lease.lease_generation()
-                        || checkpoint.checkpoint_kind != "provider_turn_persisted"
-                        || checkpoint.provider_response_id != registration.provider_response_id
-                        || checkpoint.budget_reservation_id
-                            != Some(registration.budget_reservation_id)
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    let expected_parked_checkpoint_fingerprint = coordinator_checkpoint_hash(
-                        lease.run_id(),
-                        lease.attempt_id(),
-                        lease.lease_generation(),
-                        registration.parked_checkpoint_id,
-                        "subscription_wait_parked",
-                        &registration.provider_kind,
-                        &registration.provider_model,
-                        registration.provider_response_id.as_deref(),
-                        registration.budget_reservation_id,
-                        &registration.protected_parked_checkpoint,
-                    )
-                    .map_err(|_| OrmPublicError::new(OrmErrorCode::Conflict))?;
-                    if expected_parked_checkpoint_fingerprint
-                        != registration.parked_checkpoint_fingerprint
-                    {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    if !matches!(
-                        tx.compare_and_swap::<AiRunRecord>(
-                            &run.id,
-                            run.row_version,
-                            exact_state(AiRunState::Running.as_str()),
-                            UpdateAiRunRecordInput {
-                                state: Some(AiRunState::WaitingSubscription.as_str().to_owned()),
-                                attempt_id: Some(None),
-                                lease_owner: Some(None),
-                                lease_expires_at: Some(None),
-                                lease_heartbeat_at: Some(None),
-                                next_attempt_at: Some(None),
-                                latest_checkpoint_id: Some(
-                                    Some(registration.parked_checkpoint_id,)
-                                ),
-                                error_code: Some(Some("subscription_wait_registered".to_owned())),
-                                ..Default::default()
+                        .map_err(OrmPublicError::from)?;
+                        tx.insert::<AiRunStepRecord>(CreateAiRunStepRecordInput {
+                            id: registration.tool_call_id,
+                            run_id: run.id,
+                            step_index: registration.tool_step_index,
+                            step_kind: "subscription_wait".to_owned(),
+                            state: "waiting_subscription".to_owned(),
+                            lease_generation: lease.lease_generation(),
+                            started_at: Some(now.unix_timestamp()),
+                            finished_at: None,
+                            error_code: None,
+                        })
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                        tx.insert::<AiToolCallRecord>(CreateAiToolCallRecordInput {
+                            id: registration.tool_call_id,
+                            run_id: run.id,
+                            provider_call_key: registration.provider_call_key,
+                            provider_call_id: registration.provider_call_id,
+                            provider_kind: Some(registration.provider_kind),
+                            provider_model: Some(registration.provider_model),
+                            provider_response_id: registration.provider_response_id,
+                            budget_reservation_id: Some(registration.budget_reservation_id),
+                            provider_turn_index: registration.provider_turn_index,
+                            tool_call_index: 0,
+                            tool_id: registration.tool_id,
+                            tool_fingerprint: registration.tool_fingerprint,
+                            execution_provenance: None,
+                            protected_arguments: Some(registration.protected_arguments),
+                            argument_hash: registration.argument_hash,
+                            protected_result: None,
+                            protected_result_source: None,
+                            payload_purged_at: None,
+                            risk: "read_only".to_owned(),
+                            authorization_code: Some("waiting_subscription".to_owned()),
+                            authorization_policy_version: Some(
+                                registration.authorization_policy_version,
+                            ),
+                            authorization_state_digest: Some(
+                                registration.authorization_state_digest,
+                            ),
+                            disclosure_schema_fingerprint: Some(
+                                registration.disclosure_schema_fingerprint.clone(),
+                            ),
+                            result_classification: None,
+                            result_egress_decision_id: None,
+                            result_egress_manifest_hash: None,
+                            application_audit_ref: None,
+                            approval_id: None,
+                            idempotency_key: None,
+                            correlation_id: Some(registration.correlation_id.clone()),
+                            causation_id: Some(registration.causation_id),
+                            delegation_reference: None,
+                            lease_generation: lease.lease_generation(),
+                            state: "waiting_subscription".to_owned(),
+                            completed_at: None,
+                        })
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                        tx.insert::<AiSubscriptionWaiterRecord>(
+                            CreateAiSubscriptionWaiterRecordInput {
+                                id: registration.waiter_id,
+                                run_id: run.id,
+                                session_id: session.id,
+                                tool_call_id: registration.tool_call_id,
+                                source_attempt_id: lease.attempt_id(),
+                                source_lease_generation: lease.lease_generation(),
+                                source_checkpoint_id: registration.source_checkpoint_id,
+                                source_checkpoint_fingerprint: registration
+                                    .source_checkpoint_fingerprint,
+                                parked_checkpoint_id: registration.parked_checkpoint_id,
+                                parked_checkpoint_fingerprint: registration
+                                    .parked_checkpoint_fingerprint,
+                                owner_principal_kind: registration
+                                    .expected_owner_principal_kind
+                                    .clone(),
+                                owner_subject: registration.expected_owner_subject.clone(),
+                                principal_reference: registration.principal_reference,
+                                principal_reference_fingerprint: registration
+                                    .principal_reference_fingerprint,
+                                scope_key: ai_scope_key(&registration.scope),
+                                scope_kind: registration.scope.kind,
+                                scope_id: registration.scope.id,
+                                tenant_id: registration.scope.tenant_id,
+                                target_id: registration.target_id,
+                                source_id: registration.source_id,
+                                source_registration_fingerprint: registration
+                                    .source_registration_fingerprint,
+                                semantic_catalog_fingerprint: registration
+                                    .semantic_catalog_fingerprint,
+                                operation_fingerprint: registration.operation_fingerprint,
+                                target_schema_fingerprint: registration.target_schema_fingerprint,
+                                capability_fingerprint: registration.capability_fingerprint,
+                                plan_fingerprint: registration.plan_fingerprint,
+                                compiled_descriptor_fingerprint: registration
+                                    .compiled_descriptor_fingerprint,
+                                operation_name: registration.operation_name,
+                                operation_document_hash: registration.operation_document_hash,
+                                result_projection_fingerprint: registration
+                                    .result_projection_fingerprint,
+                                disclosure_schema_fingerprint: registration
+                                    .disclosure_schema_fingerprint,
+                                variables_fingerprint: registration.variables_fingerprint,
+                                condition_fingerprint: registration.condition_fingerprint,
+                                waiter_fingerprint: registration.waiter_fingerprint,
+                                protected_request: Some(registration.protected_request),
+                                cursor_fingerprint: registration.cursor_fingerprint,
+                                protected_cursor: Some(registration.protected_cursor),
+                                events_examined: 0,
+                                maximum_events: registration.maximum_events,
+                                expires_at: registration.expires_at,
+                                state: "waiting".to_owned(),
+                                claim_owner: None,
+                                claim_generation: 0,
+                                claim_expires_at: None,
                             },
                         )
                         .await
-                        .map_err(OrmPublicError::from)?,
-                        ConditionalUpdateOutcome::Updated(_)
-                    ) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
-                    tx.insert::<AiRunCheckpointRecord>(CreateAiRunCheckpointRecordInput {
-                        id: registration.parked_checkpoint_id,
-                        run_id: run.id,
-                        attempt_id: lease.attempt_id(),
-                        lease_generation: lease.lease_generation(),
-                        checkpoint_kind: "subscription_wait_parked".to_owned(),
-                        provider_response_id: registration.provider_response_id.clone(),
-                        budget_reservation_id: Some(registration.budget_reservation_id),
-                        assistant_message_id: None,
-                        protected_state: Some(registration.protected_parked_checkpoint),
-                        checkpoint_hash: registration.parked_checkpoint_fingerprint.clone(),
+                        .map_err(OrmPublicError::from)?;
+                        tx.insert::<AiRunAttemptOutcomeRecord>(
+                            CreateAiRunAttemptOutcomeRecordInput {
+                                attempt_id: lease.attempt_id(),
+                                run_id: run.id,
+                                lease_generation: lease.lease_generation(),
+                                worker_id: lease.worker_id().to_owned(),
+                                final_state: AiRunState::WaitingSubscription.as_str().to_owned(),
+                                outcome_code: "subscription_wait_registered".to_owned(),
+                                provider_response_id: checkpoint.provider_response_id,
+                                finished_at: now.unix_timestamp(),
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                        tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
+                            actor_principal_kind: registration.expected_owner_principal_kind,
+                            actor_subject: registration.expected_owner_subject,
+                            action: "ai.subscription_wait.register".to_owned(),
+                            resource_kind: "ai_subscription_waiter".to_owned(),
+                            resource_reference: registration.waiter_id.to_string(),
+                            outcome: "waiting".to_owned(),
+                            reason_code: "replay_then_live_registered".to_owned(),
+                            correlation_id: registration.correlation_id,
+                            causation_id: Some(registration.tool_call_id.to_string()),
+                            policy_version: None,
+                        })
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                        Ok(())
                     })
-                    .await
-                    .map_err(OrmPublicError::from)?;
-                    tx.insert::<AiRunStepRecord>(CreateAiRunStepRecordInput {
-                        id: registration.tool_call_id,
-                        run_id: run.id,
-                        step_index: registration.tool_step_index,
-                        step_kind: "subscription_wait".to_owned(),
-                        state: "waiting_subscription".to_owned(),
-                        lease_generation: lease.lease_generation(),
-                        started_at: Some(now.unix_timestamp()),
-                        finished_at: None,
-                        error_code: None,
-                    })
-                    .await
-                    .map_err(OrmPublicError::from)?;
-                    tx.insert::<AiToolCallRecord>(CreateAiToolCallRecordInput {
-                        id: registration.tool_call_id,
-                        run_id: run.id,
-                        provider_call_key: registration.provider_call_key,
-                        provider_call_id: registration.provider_call_id,
-                        provider_kind: Some(registration.provider_kind),
-                        provider_model: Some(registration.provider_model),
-                        provider_response_id: registration.provider_response_id,
-                        budget_reservation_id: Some(registration.budget_reservation_id),
-                        provider_turn_index: registration.provider_turn_index,
-                        tool_call_index: 0,
-                        tool_id: registration.tool_id,
-                        tool_fingerprint: registration.tool_fingerprint,
-                        execution_provenance: None,
-                        protected_arguments: Some(registration.protected_arguments),
-                        argument_hash: registration.argument_hash,
-                        protected_result: None,
-                        protected_result_source: None,
-                        payload_purged_at: None,
-                        risk: "read_only".to_owned(),
-                        authorization_code: Some("waiting_subscription".to_owned()),
-                        authorization_policy_version: Some(
-                            registration.authorization_policy_version,
-                        ),
-                        authorization_state_digest: Some(registration.authorization_state_digest),
-                        disclosure_schema_fingerprint: Some(
-                            registration.disclosure_schema_fingerprint.clone(),
-                        ),
-                        result_classification: None,
-                        result_egress_decision_id: None,
-                        result_egress_manifest_hash: None,
-                        application_audit_ref: None,
-                        approval_id: None,
-                        idempotency_key: None,
-                        correlation_id: Some(registration.correlation_id.clone()),
-                        causation_id: Some(registration.causation_id),
-                        delegation_reference: None,
-                        lease_generation: lease.lease_generation(),
-                        state: "waiting_subscription".to_owned(),
-                        completed_at: None,
-                    })
-                    .await
-                    .map_err(OrmPublicError::from)?;
-                    tx.insert::<AiSubscriptionWaiterRecord>(
-                        CreateAiSubscriptionWaiterRecordInput {
-                            id: registration.waiter_id,
-                            run_id: run.id,
-                            session_id: session.id,
-                            tool_call_id: registration.tool_call_id,
-                            source_attempt_id: lease.attempt_id(),
-                            source_lease_generation: lease.lease_generation(),
-                            source_checkpoint_id: registration.source_checkpoint_id,
-                            source_checkpoint_fingerprint: registration
-                                .source_checkpoint_fingerprint,
-                            parked_checkpoint_id: registration.parked_checkpoint_id,
-                            parked_checkpoint_fingerprint: registration
-                                .parked_checkpoint_fingerprint,
-                            owner_principal_kind: registration
-                                .expected_owner_principal_kind
-                                .clone(),
-                            owner_subject: registration.expected_owner_subject.clone(),
-                            principal_reference: registration.principal_reference,
-                            principal_reference_fingerprint: registration
-                                .principal_reference_fingerprint,
-                            scope_key: ai_scope_key(&registration.scope),
-                            scope_kind: registration.scope.kind,
-                            scope_id: registration.scope.id,
-                            tenant_id: registration.scope.tenant_id,
-                            target_id: registration.target_id,
-                            source_id: registration.source_id,
-                            source_registration_fingerprint: registration
-                                .source_registration_fingerprint,
-                            semantic_catalog_fingerprint: registration.semantic_catalog_fingerprint,
-                            operation_fingerprint: registration.operation_fingerprint,
-                            target_schema_fingerprint: registration.target_schema_fingerprint,
-                            capability_fingerprint: registration.capability_fingerprint,
-                            plan_fingerprint: registration.plan_fingerprint,
-                            compiled_descriptor_fingerprint: registration
-                                .compiled_descriptor_fingerprint,
-                            operation_name: registration.operation_name,
-                            operation_document_hash: registration.operation_document_hash,
-                            result_projection_fingerprint: registration
-                                .result_projection_fingerprint,
-                            disclosure_schema_fingerprint: registration
-                                .disclosure_schema_fingerprint,
-                            variables_fingerprint: registration.variables_fingerprint,
-                            condition_fingerprint: registration.condition_fingerprint,
-                            waiter_fingerprint: registration.waiter_fingerprint,
-                            protected_request: Some(registration.protected_request),
-                            cursor_fingerprint: registration.cursor_fingerprint,
-                            protected_cursor: Some(registration.protected_cursor),
-                            events_examined: 0,
-                            maximum_events: registration.maximum_events,
-                            expires_at: registration.expires_at,
-                            state: "waiting".to_owned(),
-                            claim_owner: None,
-                            claim_generation: 0,
-                            claim_expires_at: None,
-                        },
-                    )
-                    .await
-                    .map_err(OrmPublicError::from)?;
-                    tx.insert::<AiRunAttemptOutcomeRecord>(CreateAiRunAttemptOutcomeRecordInput {
-                        attempt_id: lease.attempt_id(),
-                        run_id: run.id,
-                        lease_generation: lease.lease_generation(),
-                        worker_id: lease.worker_id().to_owned(),
-                        final_state: AiRunState::WaitingSubscription.as_str().to_owned(),
-                        outcome_code: "subscription_wait_registered".to_owned(),
-                        provider_response_id: checkpoint.provider_response_id,
-                        finished_at: now.unix_timestamp(),
-                    })
-                    .await
-                    .map_err(OrmPublicError::from)?;
-                    tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
-                        actor_principal_kind: registration.expected_owner_principal_kind,
-                        actor_subject: registration.expected_owner_subject,
-                        action: "ai.subscription_wait.register".to_owned(),
-                        resource_kind: "ai_subscription_waiter".to_owned(),
-                        resource_reference: registration.waiter_id.to_string(),
-                        outcome: "waiting".to_owned(),
-                        reason_code: "replay_then_live_registered".to_owned(),
-                        correlation_id: registration.correlation_id,
-                        causation_id: Some(registration.tool_call_id.to_string()),
-                        policy_version: None,
-                    })
-                    .await
-                    .map_err(OrmPublicError::from)?;
-                    Ok(())
                 })
-            })
-            .await
-            .map_err(map_transaction)
+        })
+        .await
+        .map_err(map_transaction)
     }
 }
 
+#[derive(Clone)]
 struct PreparedWaitRegistration {
     waiter_id: Uuid,
     tool_call_id: Uuid,
@@ -3286,11 +3326,10 @@ impl crate::AiAgentCheckpointAdopter for AiSubscriptionCheckpointAdopter {
         lease: &AiRunLease,
         checkpoint_id: Uuid,
     ) -> Result<AiRunLease, AiError> {
-        let checkpoint =
-            AiRunCheckpointRecord::find_by_id(self.waits.custody_database(), &checkpoint_id)
-                .await
-                .map_err(|error| map_orm(OrmPublicError::from(error)))?
-                .ok_or(AiError::NotFound)?;
+        let checkpoint = AiRunCheckpointRecord::find_by_id(self.waits.custody_database(), &checkpoint_id)
+            .await
+            .map_err(|error| map_orm(OrmPublicError::from(error)))?
+            .ok_or(AiError::NotFound)?;
         if checkpoint.checkpoint_kind == "subscription_wait_adopted" {
             self.waits.consume_wait_adoption(lease, checkpoint_id).await
         } else {
@@ -4408,6 +4447,7 @@ mod tests {
                     latest_checkpoint_id: None,
                     cancellation_request_id: None,
                     cancellation_requested_at: None,
+                    recovery_examined_at: 0,
                 },
             )
             .await
@@ -4498,6 +4538,7 @@ mod tests {
                     state: "committed".to_owned(),
                     expires_at: (self.clock.now() + Duration::hours(1)).unix_timestamp(),
                     reconciled_at: Some(self.clock.now().unix_timestamp()),
+                    settlement_examined_at: 0,
                 },
             )
             .await

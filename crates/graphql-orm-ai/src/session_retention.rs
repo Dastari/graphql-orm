@@ -16,6 +16,10 @@ use crate::AiError;
 pub struct AiSessionRetentionReport {
     /// Session rows considered in this scan page.
     pub sessions_scanned: u32,
+    /// Sessions whose pruning failed in this pass, for example because of a
+    /// malformed row or a failed transaction. Each is left as it was and
+    /// retried by a later pass; the rest of the page is still pruned.
+    pub sessions_failed: u32,
     /// Sessions whose protected content, attachment state, or checkpoint
     /// references changed.
     pub sessions_changed: u32,
