@@ -643,11 +643,13 @@ mod collision_schema {
 }
 
 #[tokio::test]
+#[cfg_attr(feature = "postgres", ignore = "owned PostgreSQL lane")]
 async fn native_search_sort_collisions_repository() -> Result<(), Box<dyn std::error::Error>> {
     native_search_sort_collisions(false).await
 }
 
 #[tokio::test]
+#[cfg_attr(feature = "postgres", ignore = "owned PostgreSQL lane")]
 async fn native_search_sort_collisions_graphql() -> Result<(), Box<dyn std::error::Error>> {
     native_search_sort_collisions(true).await
 }
@@ -731,5 +733,215 @@ async fn native_search_sort_collisions(graphql: bool) -> Result<(), Box<dyn std:
         assert_eq!(filtered[0].entity.rank, 2);
     }
     pool.close().await;
+    Ok(())
+}
+
+#[derive(GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[cfg_attr(
+    feature = "sqlite",
+    graphql_entity(
+        table = "expression_articles",
+        backend = "sqlite",
+        auth = "none",
+        default_sort = "(SELECT name FROM sort_authors WHERE sort_authors.id = author_id) ASC, date('2024-01-01') ASC"
+    )
+)]
+#[cfg_attr(
+    feature = "postgres",
+    graphql_entity(
+        table = "expression_articles",
+        backend = "postgres",
+        auth = "none",
+        default_sort = "(SELECT name FROM sort_authors WHERE sort_authors.id = author_id) ASC, date '2024-01-01' ASC"
+    )
+)]
+#[graphql_orm(search(index = true, fallback = "disabled"))]
+struct ExpressionArticle {
+    #[primary_key]
+    id: String,
+    #[sortable]
+    name: String,
+    date: String,
+    author_id: i64,
+    #[graphql_orm(searchable(weight = "A"))]
+    title: String,
+}
+
+#[cfg(feature = "sqlite")]
+struct SearchFixtureOwner;
+#[cfg(feature = "postgres")]
+type SearchFixtureOwner = owned_postgres::OwnedPostgres;
+
+async fn search_fixture() -> Result<(Database, SearchFixtureOwner), Box<dyn std::error::Error>> {
+    #[cfg(feature = "sqlite")]
+    let (pool, owner) = (
+        sqlx::SqlitePool::connect("sqlite::memory:").await?,
+        SearchFixtureOwner,
+    );
+    #[cfg(feature = "postgres")]
+    let (pool, owner) = {
+        let owner = SearchFixtureOwner::start("native-search-expressions")?;
+        (sqlx::PgPool::connect(&owner.url).await?, owner)
+    };
+    let target =
+        SchemaModel::from_entities(&[ExpressionArticle::metadata(), SortCollision::metadata()]);
+    let plan = build_migration_plan(
+        DefaultBackend::DIALECT,
+        &SchemaModel {
+            extensions: vec![],
+            tables: vec![],
+        },
+        &target,
+    );
+    for statement in &plan.statements {
+        sqlx::query(statement).execute(&pool).await?;
+    }
+    Ok((Database::new(pool), owner))
+}
+
+#[tokio::test]
+#[cfg_attr(feature = "postgres", ignore = "owned PostgreSQL lane")]
+async fn native_search_preserves_default_sort_expressions() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (db, _owner) = search_fixture().await?;
+    sqlx::query("CREATE TABLE sort_authors (id BIGINT PRIMARY KEY, name TEXT NOT NULL)")
+        .execute(db.pool())
+        .await?;
+    sqlx::query("INSERT INTO sort_authors VALUES (1, 'Zulu'), (2, 'Alpha')")
+        .execute(db.pool())
+        .await?;
+    for (name, author_id) in [("Alpha", 1), ("Zulu", 2)] {
+        ExpressionArticle::insert(
+            &db,
+            CreateExpressionArticleInput {
+                name: name.into(),
+                date: "2020-01-01".into(),
+                author_id,
+                title: "identical search text".into(),
+            },
+        )
+        .await?;
+    }
+    let listed = EntityQuery::<ExpressionArticle>::new()
+        .default_order()
+        .fetch_all(&db)
+        .await?;
+    assert_eq!(
+        listed
+            .iter()
+            .map(|article| article.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Zulu", "Alpha"]
+    );
+    let searched = ExpressionArticle::search_db(
+        &db,
+        SearchInput {
+            query: "identical".into(),
+            mode: Some(SearchMode::Plain),
+            min_score: None,
+        },
+    )
+    .limit(4)
+    .fetch_all()
+    .await?;
+    assert_eq!(
+        searched
+            .iter()
+            .map(|hit| &hit.entity.id)
+            .collect::<Vec<_>>(),
+        listed.iter().map(|article| &article.id).collect::<Vec<_>>()
+    );
+    Ok(())
+}
+
+struct SearchVisibility;
+impl RowPolicy for SearchVisibility {
+    fn read_visibility<'a>(
+        &'a self,
+        _: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessSurface,
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<ReadVisibility>> {
+        Box::pin(async {
+            Ok(ReadVisibility::Complete(ReadPredicate::column::<
+                DefaultBackend,
+                SortCollision,
+            >(
+                "entity_pk",
+                ReadPredicateOp::Eq,
+                SqlValue::Int(7),
+            )?))
+        })
+    }
+    fn can_read_row<'a>(
+        &'a self,
+        _: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessSurface,
+        _: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { panic!("complete SQL visibility must not use the row callback") })
+    }
+    fn can_write_row<'a>(
+        &'a self,
+        _: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessSurface,
+        _: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(true) })
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(feature = "postgres", ignore = "owned PostgreSQL lane")]
+async fn native_search_binds_visibility_filter_and_limit() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (mut db, _owner) = search_fixture().await?;
+    let mut eligible = Vec::new();
+    for (rank, entity_pk, title) in [
+        (0, 7, "needle text"),
+        (16, 7, "needle text"),
+        (17, 9, "needle text"),
+        (17, 7, "needle text"),
+        (18, 7, "needle text"),
+        (19, 7, "unmatched text"),
+    ] {
+        let record = SortCollision::insert(
+            &db,
+            CreateSortCollisionInput {
+                rank,
+                entity_pk,
+                title: title.into(),
+            },
+        )
+        .await?;
+        if entity_pk == 7 && rank >= 17 && title == "needle text" {
+            eligible.push(record);
+        }
+    }
+    #[cfg(feature = "sqlite")]
+    eligible.sort_by_key(|record| record.rank);
+    #[cfg(feature = "postgres")]
+    eligible.sort_by(|a, b| a.id.cmp(&b.id));
+    db.set_row_policy(SearchVisibility);
+    // A portable/callback scan is unavailable, so success requires native SQL.
+    assert!(db.authorized_scan_config().is_none());
+    let schema = collision_schema::schema_builder(db).finish();
+    let response = schema.execute("{ sortCollisionsSearch(search: {query: \"needle\"}, where: {rank: {gte: 17}}, page: {limit: 1}) { edges { score node { id rank } } pageInfo { totalCount hasNextPage } } }").await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let json = response.data.into_json()?;
+    let connection = &json["sortCollisionsSearch"];
+    assert_eq!(connection["pageInfo"]["totalCount"], 2);
+    assert_eq!(connection["pageInfo"]["hasNextPage"], true);
+    assert_eq!(connection["edges"].as_array().unwrap().len(), 1);
+    assert_eq!(connection["edges"][0]["node"]["id"], eligible[0].id);
+    assert!(connection["edges"][0]["score"].as_f64().unwrap() > 0.0);
     Ok(())
 }
