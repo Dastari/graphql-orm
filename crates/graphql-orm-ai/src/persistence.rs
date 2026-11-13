@@ -523,6 +523,14 @@ pub(crate) struct AiBudgetReservationRecord {
     #[sortable]
     pub created_at: i64,
     pub reconciled_at: Option<i64>,
+    /// When the stranded-reservation sweeper last examined this reservation
+    /// and left it unresolved (still owned by a live attempt or a background
+    /// submission, or failed to settle). The sweeper scans in this order, so
+    /// rows it cannot settle yet rotate behind the rest across passes and
+    /// restarts. Zero for a reservation never examined.
+    #[sortable]
+    #[graphql_orm(default = "0")]
+    pub settlement_examined_at: i64,
     #[graphql_orm(version, default = "0")]
     pub row_version: i64,
 }
@@ -1134,12 +1142,14 @@ pub(crate) struct AiRunRecord {
     /// Monotonic lease generation/fencing token.
     pub lease_generation: i64,
     /// Lease expiry timestamp.
+    #[filterable(type = "int64")]
     pub lease_expires_at: Option<i64>,
     /// Last heartbeat timestamp.
     pub lease_heartbeat_at: Option<i64>,
     /// Retry count.
     pub retry_count: i64,
     /// Next eligible attempt timestamp.
+    #[filterable(type = "int64")]
     pub next_attempt_at: Option<i64>,
     /// Safe error code.
     pub error_code: Option<String>,
@@ -1152,6 +1162,14 @@ pub(crate) struct AiRunRecord {
     pub cancellation_request_id: Option<graphql_orm::uuid::Uuid>,
     /// Server timestamp at which cancellation became terminal.
     pub cancellation_requested_at: Option<i64>,
+    /// When lease recovery last examined this expired run and left it
+    /// unchanged after an operational failure (a host policy refusal, a
+    /// refused read, a database error). Recovery scans in this order, so such
+    /// a run rotates behind the rest across passes and restarts without its
+    /// own state changing. Zero for a run never left behind.
+    #[sortable]
+    #[graphql_orm(default = "0")]
+    pub recovery_examined_at: i64,
     /// Created timestamp.
     #[sortable]
     pub created_at: i64,
@@ -2541,7 +2559,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.77.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.78.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 

@@ -357,6 +357,14 @@ pub struct AiRunRetryEvidence {
     /// conservative and includes reserved, committed, uncertain, or unknown
     /// states.
     pub provider_dispatch_possible: bool,
+    /// Whether committed tool-call rows leave a consequential (non-read-only)
+    /// application tool effect possible for this run.
+    ///
+    /// `false` is a positive absence proof: every non-read-only call of the
+    /// run is still awaiting approval or preparation, was refused before
+    /// execution, or was cancelled before its approval was ever consumed.
+    /// Every other state, including an unknown one, is `true`.
+    pub consequential_tool_dispatch_possible: bool,
 }
 
 /// Classifies whether a terminal run may be retried as a new run.
@@ -369,9 +377,11 @@ pub struct AiRunRetryEvidence {
 ///   fail-closed boundary for an actually possible external effect.
 /// - `Completed` is never retryable; the message already has its answer.
 /// - `Cancelled` is retryable only when the run produced no durable assistant
-///   output. Cancellation observed *after* a provider turn was persisted
-///   leaves a fully answered message, and authoring a second run over it would
-///   produce a second answer.
+///   output and committed rows prove that no consequential (non-read-only)
+///   tool effect was possible. Cancellation observed *after* a provider turn
+///   was persisted leaves a fully answered message, and authoring a second run
+///   over it would produce a second answer. A mutation that executed, or may
+///   have, before the cancel would be applied again by the new run.
 /// - `Failed` is retryable only for an explicitly proven-clean code. An absent
 ///   or unrecognized code is refused, because an unclassified failure is
 ///   exactly the case where safety cannot be proven. A failure while building
@@ -409,6 +419,10 @@ pub fn classify_run_retry(
         AiRunTerminalEvent::Cancelled => {
             if evidence.produced_assistant_output {
                 AiRunRetryAdmission::RefusedAlreadyAnswered
+            } else if evidence.consequential_tool_dispatch_possible {
+                // Mutations carry no idempotency key, so a new run over the
+                // same message could apply an earlier effect twice.
+                AiRunRetryAdmission::RefusedUncertain
             } else {
                 AiRunRetryAdmission::Allowed
             }

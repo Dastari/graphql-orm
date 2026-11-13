@@ -358,6 +358,9 @@ pub struct AiRunRecoveryTelemetry {
     recovery_required: u64,
     failed: u64,
     completed: u64,
+    quarantined: u64,
+    skipped: u64,
+    budget_reservations_settled: u64,
 }
 
 impl AiRunRecoveryTelemetry {
@@ -376,6 +379,9 @@ impl AiRunRecoveryTelemetry {
             recovery_required: u64::from(report.recovery_required),
             failed: u64::from(report.failed),
             completed: u64::from(report.completed),
+            quarantined: u64::from(report.quarantined),
+            skipped: u64::from(report.skipped),
+            budget_reservations_settled: u64::from(report.budget_reservations_settled),
         }
     }
 
@@ -413,6 +419,21 @@ impl AiRunRecoveryTelemetry {
     pub const fn completed(self) -> u64 {
         self.completed
     }
+
+    /// Expired claims with malformed durable state, closed for manual recovery.
+    pub const fn quarantined(self) -> u64 {
+        self.quarantined
+    }
+
+    /// Rows or reservations left unchanged for a later pass after a failure.
+    pub const fn skipped(self) -> u64 {
+        self.skipped
+    }
+
+    /// Closed-attempt budget reservations settled at their reserved estimate.
+    pub const fn budget_reservations_settled(self) -> u64 {
+        self.budget_reservations_settled
+    }
 }
 
 /// Content-free aggregate for one bounded session-retention pass.
@@ -429,6 +450,7 @@ pub struct AiRetentionTelemetry {
     cleanups_requested: u64,
     blocked: u64,
     conflicted: u64,
+    failed: u64,
     has_more: bool,
 }
 
@@ -497,6 +519,7 @@ impl AiRetentionTelemetry {
             cleanups_requested,
             blocked,
             conflicted: u64::from(report.sessions_conflicted),
+            failed: u64::from(report.sessions_failed),
             has_more: report.next_session_cursor.is_some(),
         }
     }
@@ -509,6 +532,11 @@ impl AiRetentionTelemetry {
     /// Completed pass duration.
     pub const fn duration(self) -> Duration {
         self.duration
+    }
+
+    /// Sessions whose pruning failed and is retried by a later pass.
+    pub const fn failed(self) -> u64 {
+        self.failed
     }
 
     /// Sessions scanned.

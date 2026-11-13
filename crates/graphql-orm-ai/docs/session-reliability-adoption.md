@@ -122,7 +122,7 @@ authored for the same durable user message", not a state-machine transition:
 | --- | --- |
 | `RecoveryRequired` | Never. Re-execution is what the guardrail forbids |
 | `Completed` | Never. The message already has its answer |
-| `Cancelled` | Only when the run produced no durable assistant message |
+| `Cancelled` | Only when the run produced no durable assistant message and no non-read-only tool call may have reached its resolver |
 | `Failed` | Only for an explicitly allowlisted, proven-clean code |
 
 `Cancelled` is deliberately not a class. Cancellation is observed at two

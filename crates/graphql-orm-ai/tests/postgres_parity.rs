@@ -1496,3 +1496,256 @@ async fn owned_postgres_upgrades_a_prior_store_to_the_recovery_ledger() {
     assert_eq!(lease.run_id().0, fresh);
     assert_eq!(lease.recovery_epoch_id(), Some(proof.epoch_id()));
 }
+
+/// Concurrent fenced terminal transitions of one owner's runs contend on the
+/// owner's inbox stream row. Under SERIALIZABLE the losers see a retryable
+/// serialization failure, which must be retried rather than reported as a
+/// persistence failure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn owned_postgres_retries_serialization_failures_in_concurrent_run_transitions() {
+    let Some(container) = OwnedPostgres::start().expect("owned PostgreSQL should start") else {
+        return;
+    };
+    let database = Database::<PostgresBackend>::connect_postgres(container.connection_url())
+        .await
+        .expect("ORM should connect only to the owned container");
+    let migration = database
+        .schema()
+        .plan_migration_to_entities(
+            "ai-postgres-concurrency-v1",
+            "graphql-orm-ai concurrent transition parity",
+            AiSchemaModule.entities(),
+        )
+        .await
+        .expect("AI schema should plan for PostgreSQL");
+    database
+        .schema()
+        .apply_migration(&migration, ApplyOptions::default())
+        .await
+        .expect("AI schema should apply to the owned PostgreSQL database");
+    graphql_orm_ai::OrmAiRuntimeRecoveryService::new(
+        database.clone(),
+        std::sync::Arc::new(agql_auth::SystemClock),
+    )
+    .readiness_proof()
+    .await
+    .expect("a test store should record its first live epoch");
+    let sessions = OrmAiSessionService::new(
+        database.clone(),
+        Arc::new(AllowAll),
+        Arc::new(ProtectionPolicy),
+        Arc::new(DatabaseManagedContentProtector),
+    );
+    let now = OffsetDateTime::from_unix_timestamp(OffsetDateTime::now_utc().unix_timestamp())
+        .expect("current whole-second test time should validate");
+    let principal = principal(now);
+    const RUNS: usize = 8;
+    for index in 0..RUNS {
+        let session = sessions
+            .create_session(
+                &principal,
+                CreateAiSessionInput {
+                    execution_selection: None,
+                    scope: AiScopeInput {
+                        kind: "postgres-parity".to_owned(),
+                        id: "scope-1".to_owned(),
+                        tenant_id: Some("postgres-parity-tenant".to_owned()),
+                    },
+                    title: Some(format!("Concurrent transition {index}")),
+                },
+            )
+            .await
+            .expect("session should be inserted");
+        sessions
+            .send_message(
+                &principal,
+                SendAiMessageInput {
+                    session_id: session.id,
+                    text: "Synthetic concurrent transition".to_owned(),
+                    attachment_ids: vec![],
+                    client_message_id: Uuid::new_v4(),
+                },
+            )
+            .await
+            .expect("message should queue a run");
+    }
+    let runs = Arc::new(OrmAiRunService::new(
+        database.clone(),
+        Arc::new(SystemClock),
+        AiRunServiceLimits::new(Duration::seconds(60), Duration::minutes(5), 16, 2, 16)
+            .expect("run limits should validate"),
+    ));
+    let mut leases = Vec::new();
+    for _ in 0..RUNS {
+        let claimed = runs
+            .claim_next("postgres-concurrency-worker")
+            .await
+            .expect("claim should succeed")
+            .expect("queued run should be claimable");
+        leases.push(runs.start(&claimed).await.expect("run should start"));
+    }
+    let barrier = Arc::new(tokio::sync::Barrier::new(RUNS));
+    let tasks = leases.into_iter().map(|lease| {
+        let runs = Arc::clone(&runs);
+        let barrier = Arc::clone(&barrier);
+        tokio::spawn(async move {
+            barrier.wait().await;
+            runs.finish(
+                &lease,
+                AiRunCompletion::new(
+                    AiRunState::Failed,
+                    "provider_failed",
+                    Some("provider_failed".to_owned()),
+                    None,
+                )
+                .expect("completion should validate"),
+            )
+            .await
+        })
+    });
+    for task in tasks.collect::<Vec<_>>() {
+        task.await
+            .expect("transition task should join")
+            .expect("a serialization conflict must be retried, not surfaced");
+    }
+    drop(runs);
+    drop(sessions);
+    drop(container);
+}
+
+/// PostgreSQL row-level security that hides a run's session from the
+/// recovery role must not make the run look corrupt: the run is skipped and
+/// left as it is, never quarantined, and is recovered once the row is
+/// readable again.
+#[tokio::test]
+async fn owned_postgres_row_security_hiding_a_session_skips_instead_of_quarantining() {
+    let Some(container) = OwnedPostgres::start().expect("owned PostgreSQL should start") else {
+        return;
+    };
+    let database = Database::<PostgresBackend>::connect_postgres(container.connection_url())
+        .await
+        .expect("ORM should connect only to the owned container");
+    let migration = database
+        .schema()
+        .plan_migration_to_entities(
+            "ai-postgres-rls-recovery-v1",
+            "graphql-orm-ai row security recovery parity",
+            AiSchemaModule.entities(),
+        )
+        .await
+        .expect("AI schema should plan for PostgreSQL");
+    database
+        .schema()
+        .apply_migration(&migration, ApplyOptions::default())
+        .await
+        .expect("AI schema should apply to the owned PostgreSQL database");
+    graphql_orm_ai::OrmAiRuntimeRecoveryService::new(
+        database.clone(),
+        std::sync::Arc::new(agql_auth::SystemClock),
+    )
+    .readiness_proof()
+    .await
+    .expect("a test store should record its first live epoch");
+    let sessions = OrmAiSessionService::new(
+        database.clone(),
+        Arc::new(AllowAll),
+        Arc::new(ProtectionPolicy),
+        Arc::new(DatabaseManagedContentProtector),
+    );
+    let now = OffsetDateTime::from_unix_timestamp(OffsetDateTime::now_utc().unix_timestamp())
+        .expect("current whole-second test time should validate");
+    let principal = principal(now);
+    let session = sessions
+        .create_session(
+            &principal,
+            CreateAiSessionInput {
+                execution_selection: None,
+                scope: AiScopeInput {
+                    kind: "postgres-parity".to_owned(),
+                    id: "scope-1".to_owned(),
+                    tenant_id: Some("postgres-parity-tenant".to_owned()),
+                },
+                title: Some("Row security recovery".to_owned()),
+            },
+        )
+        .await
+        .expect("session should be inserted");
+    sessions
+        .send_message(
+            &principal,
+            SendAiMessageInput {
+                session_id: session.id,
+                text: "Synthetic row security recovery".to_owned(),
+                attachment_ids: vec![],
+                client_message_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .expect("message should queue a run");
+    let limits = AiRunServiceLimits::new(Duration::seconds(60), Duration::minutes(5), 16, 2, 8)
+        .expect("run limits should validate");
+    let owner_runs = OrmAiRunService::new(database.clone(), Arc::new(SystemClock), limits);
+    let claimed = owner_runs
+        .claim_next("postgres-rls-worker")
+        .await
+        .expect("claim should succeed")
+        .expect("queued run should be claimable");
+    owner_runs.start(&claimed).await.expect("run should start");
+    let run_id = claimed.run_id().0;
+    let pool = database.pool();
+    for statement in [
+        "UPDATE graphql_orm_ai_runs SET lease_expires_at = 0".to_owned(),
+        "CREATE ROLE ai_recovery_role LOGIN PASSWORD 'ai_recovery_password' NOSUPERUSER NOBYPASSRLS".to_owned(),
+        "GRANT USAGE ON SCHEMA public TO ai_recovery_role".to_owned(),
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ai_recovery_role"
+            .to_owned(),
+        "ALTER TABLE graphql_orm_ai_sessions ENABLE ROW LEVEL SECURITY".to_owned(),
+        "CREATE POLICY hide_every_session ON graphql_orm_ai_sessions USING (false)".to_owned(),
+    ] {
+        graphql_orm::sqlx::query(&statement)
+            .execute(pool)
+            .await
+            .unwrap_or_else(|error| panic!("{statement}: {error}"));
+    }
+    let role_url = container.connection_url().replacen(
+        &format!("{}:{}@", container.user, container.password),
+        "ai_recovery_role:ai_recovery_password@",
+        1,
+    );
+    let role_database = Database::<PostgresBackend>::connect_postgres(role_url)
+        .await
+        .expect("the recovery role should connect");
+    let role_runs = OrmAiRunService::new(role_database.clone(), Arc::new(SystemClock), limits);
+    for _ in 0..2 {
+        let report = role_runs
+            .recover_expired_leases()
+            .await
+            .expect("a hidden session must not fail the pass");
+        assert_eq!(report.skipped, 1, "{report:?}");
+        assert_eq!(report.quarantined, 0, "{report:?}");
+        let run = graphql_orm::sqlx::query_as::<_, (String, Option<String>)>(
+            "SELECT state, error_code FROM graphql_orm_ai_runs WHERE id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(pool)
+        .await
+        .expect("run should read");
+        assert_eq!(run, ("running".to_owned(), None));
+    }
+    graphql_orm::sqlx::query("ALTER TABLE graphql_orm_ai_sessions DISABLE ROW LEVEL SECURITY")
+        .execute(pool)
+        .await
+        .expect("row security should disable");
+    let report = role_runs
+        .recover_expired_leases()
+        .await
+        .expect("recovery should succeed once the session is readable");
+    assert_eq!(report.recovery_required, 1, "{report:?}");
+    assert_eq!(report.quarantined, 0, "{report:?}");
+    drop(role_runs);
+    drop(role_database);
+    drop(owner_runs);
+    drop(sessions);
+    drop(database);
+    drop(container);
+}

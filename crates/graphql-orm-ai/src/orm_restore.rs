@@ -359,6 +359,7 @@ impl OrmAiRestoreFactCollector {
                         .query::<AiRunRecord>()
                         .order_by(AiRunRecordOrderByInput {
                             created_at: Some(OrderDirection::Asc),
+                            ..Default::default()
                         })
                         .internal_limit(query_limit(limits.maximum_runs))
                         .fetch_all()
@@ -1814,6 +1815,7 @@ mod tests {
                 latest_checkpoint_id: None,
                 cancellation_request_id: None,
                 cancellation_requested_at: None,
+                recovery_examined_at: 0,
             },
         )
         .await
