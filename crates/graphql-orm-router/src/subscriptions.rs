@@ -83,6 +83,7 @@ impl std::fmt::Debug for InternalSubscriptionEndpoint {
 }
 
 pub(crate) struct SubscriptionGateway {
+    persisted_documents: Option<crate::persisted::PersistedDocuments>,
     config: SubscriptionConfig,
     authentication: Arc<dyn AuthenticationProvider>,
     internal: InternalSubscriptionEndpoint,
@@ -106,6 +107,7 @@ impl SubscriptionGateway {
         internal: InternalSubscriptionEndpoint,
         bound_address: SocketAddr,
         metrics: Arc<RouterMetrics>,
+        persisted_documents: Option<crate::persisted::PersistedDocuments>,
     ) -> Arc<Self> {
         let connect_address = loopback_connect_address(bound_address);
         let internal_url = format!("ws://localhost:{}{}", connect_address.port(), internal.path);
@@ -113,6 +115,7 @@ impl SubscriptionGateway {
             ConnectionAttemptLimiter::new(config.max_connection_attempts_per_second);
         let max_pending_connections = config.pending_connection_limit();
         Arc::new(Self {
+            persisted_documents,
             config,
             authentication,
             internal,
@@ -967,6 +970,17 @@ async fn forward_subscribe(
         if state.operations.contains_key(&id) {
             return state.terminate_with_public_close(4409, "Subscriber already exists");
         }
+        if let Some(documents) = &state.gateway.persisted_documents
+            && let Err(code) = documents.prepare_websocket_payload(&mut message)
+        {
+            return Some(ws::Message::Text(
+                json!({"id": id, "type": "error", "payload": [{
+                    "message": "Persisted document request refused", "extensions": {"code": code}
+                }]})
+                .to_string()
+                .into(),
+            ));
+        }
         let Some(subscription) = selected_subscription(&message) else {
             return Some(ws::Message::Text(
                 json!({"id": id, "type": "error", "payload": [{
@@ -1267,6 +1281,7 @@ mod tests {
             InternalSubscriptionEndpoint::generate().unwrap(),
             "127.0.0.1:12345".parse().unwrap(),
             Arc::new(RouterMetrics::default()),
+            None,
         )
     }
 
@@ -1455,6 +1470,7 @@ mod tests {
             InternalSubscriptionEndpoint::generate().unwrap(),
             "127.0.0.1:12345".parse().unwrap(),
             Arc::new(RouterMetrics::default()),
+            None,
         );
         let state = Rc::new(RefCell::new(ConnectionState {
             gateway: gateway.clone(),

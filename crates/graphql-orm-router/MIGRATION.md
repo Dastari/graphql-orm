@@ -10,6 +10,15 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.13.0 to 0.14.0: persisted documents
+
+Persisted documents remain disabled by default. Enable `persistedDocuments` or
+`RouterConfig::with_persisted_documents(path, strict)` with a local manifest.
+Strict deployments require clients to send an id for every operation. See the
+[configuration reference](docs/configuration.md#persisted-documents) for exact
+hashing, limits, wire forms, and authorization boundaries.
+
+
 ## 0.12.0 to 0.13.0: outbound transport and admin authentication
 
 ### Plaintext outbound URLs

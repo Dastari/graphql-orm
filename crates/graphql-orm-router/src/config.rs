@@ -50,6 +50,7 @@ const HOP_BY_HOP_HEADERS: &[&str] = &[
 /// provider, or explicitly opt into anonymous mode for trusted development.
 #[derive(Clone)]
 pub struct RouterConfig {
+    pub(crate) persisted_documents: Option<crate::persisted::PersistedDocuments>,
     pub(crate) listener: SocketAddr,
     pub(crate) graphql_path: String,
     pub(crate) anonymous_development_mode: bool,
@@ -88,6 +89,7 @@ impl RouterConfig {
     /// Creates a fail-closed router configuration bound to `listener`.
     pub fn new(listener: SocketAddr) -> Self {
         Self {
+            persisted_documents: None,
             listener,
             graphql_path: "/graphql".to_owned(),
             anonymous_development_mode: false,
@@ -329,7 +331,26 @@ impl RouterConfig {
         self
     }
 
+    /// Enables persisted documents from a local JSON id-to-document manifest.
+    ///
+    /// Ids are lowercase SHA-256 hashes of exact UTF-8 document bytes. Startup
+    /// validates the 16 MiB / 10,000-entry bounds and pins an immutable snapshot.
+    /// Strict mode requires a registered id for every operation; it preserves
+    /// authentication and authorization checks. Restart to change the manifest.
+    #[must_use]
+    pub fn with_persisted_documents(
+        mut self,
+        path: impl AsRef<std::path::Path>,
+        strict: bool,
+    ) -> Self {
+        self.persisted_documents = Some(crate::persisted::PersistedDocuments::new(path, strict));
+        self
+    }
+
     pub(crate) fn validate(mut self) -> Result<Self, RouterError> {
+        if let Some(documents) = &mut self.persisted_documents {
+            documents.validate()?;
+        }
         if self.authentication.is_none() && !self.anonymous_development_mode {
             return Err(RouterError::new(
                 RouterErrorKind::InvalidConfiguration,
@@ -1526,6 +1547,78 @@ mod tests {
                 "http://products.test/graphql",
                 "http://products.test/sdl",
             ))
+    }
+
+    fn check_manifest(bytes: &[u8]) -> Result<RouterConfig, RouterError> {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "router-manifest-{}-{nonce}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, bytes).unwrap();
+        let result = base().with_persisted_documents(&path, true).validate();
+        std::fs::remove_file(path).unwrap();
+        result
+    }
+
+    #[test]
+    fn persisted_manifest_bad_hash() {
+        let error = check_manifest(br#"{"bad":"secret document"}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("secret document"));
+    }
+
+    #[test]
+    fn persisted_manifest_oversized() {
+        assert!(check_manifest(&vec![b' '; 16 * 1024 * 1024 + 1]).is_err());
+    }
+
+    #[test]
+    fn persisted_manifest_too_many_entries() {
+        use sha2::{Digest, Sha256};
+        let entries = (0..10_001)
+            .map(|n| {
+                let doc = format!("query Q{n} {{ __typename }}");
+                (format!("{:x}", Sha256::digest(doc.as_bytes())), doc)
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert!(check_manifest(&serde_json::to_vec(&entries).unwrap()).is_err());
+    }
+
+    #[test]
+    fn persisted_manifest_remote_storage_refused() {
+        for path in [
+            "hive://manifest",
+            "https://example.test/manifest",
+            "s3://bucket/manifest",
+        ] {
+            assert!(
+                base()
+                    .with_persisted_documents(path, false)
+                    .validate()
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn persisted_manifest_exact_hash_and_immutable_snapshot() {
+        use sha2::{Digest, Sha256};
+        let doc = "{ __typename }";
+        let config = check_manifest(
+            &serde_json::to_vec(&BTreeMap::from([(
+                format!("{:x}", Sha256::digest(doc.as_bytes())),
+                doc,
+            )]))
+            .unwrap(),
+        )
+        .unwrap();
+        // The source has been removed. Revalidation must retain the snapshot.
+        assert!(config.validate().is_ok());
     }
 
     #[test]

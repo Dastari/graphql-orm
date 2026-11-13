@@ -370,6 +370,12 @@ impl PreparedRouter {
             internal_subscription: internal_subscription.clone(),
             request_limits: self.config.request_limits.clone(),
             introspection: self.config.introspection,
+            persisted_documents_enabled: self.config.persisted_documents.is_some(),
+            strict_persisted_documents: self
+                .config
+                .persisted_documents
+                .as_ref()
+                .is_some_and(|documents| documents.strict),
         };
         plugin_runtimes()
             .lock()
@@ -444,6 +450,7 @@ impl PreparedRouter {
                     .expect("subscription configuration has a private endpoint"),
                 listener,
                 self.lifecycle.metrics(),
+                self.config.persisted_documents.clone(),
             )
         });
         let public_graphql_path = self.config.graphql_path.clone();
@@ -585,6 +592,8 @@ struct PluginRuntime {
     internal_subscription: Option<InternalSubscriptionEndpoint>,
     request_limits: crate::RequestLimits,
     introspection: bool,
+    strict_persisted_documents: bool,
+    persisted_documents_enabled: bool,
 }
 
 fn plugin_runtimes() -> &'static Mutex<BTreeMap<u64, PluginRuntime>> {
@@ -717,6 +726,30 @@ impl RouterPlugin for StaticGraphPlugin {
                 }
             }
         })
+    }
+
+    async fn on_graphql_params<'execution>(
+        &'execution self,
+        payload: hive_router::plugins::hooks::on_graphql_params::OnGraphQLParamsStartHookPayload<
+            'execution,
+        >,
+    ) -> hive_router::plugins::hooks::on_graphql_params::OnGraphQLParamsStartHookResult<'execution>
+    {
+        // The pinned runtime accepts one operation object, never an HTTP batch.
+        // Refuse arrays before decoding, with a stable persistence error and
+        // without exposing the decoder's input excerpt in the response.
+        if self.runtime.strict_persisted_documents
+            && payload.body.iter().find(|byte| !byte.is_ascii_whitespace()) == Some(&b'[')
+        {
+            return payload.end_with_graphql_error(
+                GraphQLError::from_message_and_code(
+                    "Persisted document extraction failed",
+                    "PERSISTED_DOCUMENT_EXTRACTION_FAILED",
+                ),
+                hive_router::http::StatusCode::BAD_REQUEST,
+            );
+        }
+        payload.proceed()
     }
 
     // Hive also negotiates `text/event-stream` and `multipart/mixed`
@@ -993,9 +1026,21 @@ impl RouterPlugin for StaticGraphPlugin {
 
     fn on_graphql_error<'request>(
         &'request self,
-        payload: OnGraphQLErrorHookPayload<'request>,
+        mut payload: OnGraphQLErrorHookPayload<'request>,
     ) -> OnGraphQLErrorHookResult<'request> {
         self.runtime.lifecycle.metrics().graphql_error();
+        if self.runtime.persisted_documents_enabled
+            && matches!(
+                payload.error.extensions.code.as_deref(),
+                Some(
+                    "PERSISTED_DOCUMENT_NOT_FOUND"
+                        | "PERSISTED_DOCUMENT_ID_REQUIRED"
+                        | "PERSISTED_DOCUMENT_EXTRACTION_FAILED"
+                )
+            )
+        {
+            payload.error.message = "Persisted document request refused".to_owned();
+        }
         payload.proceed()
     }
 }
@@ -1192,6 +1237,7 @@ fn build_graph_options(
     options.headers = hive.headers;
     options.subscriptions = (&hive.subscriptions).into();
     options.error_masking = hive.error_masking;
+    options.persisted_documents = hive.persisted_documents;
     Ok(options)
 }
 
@@ -1250,6 +1296,8 @@ fn build_hive_config(
         .as_ref()
         .map_or(1_000, |subscriptions| subscriptions.max_connections);
     let value = json!({
+        "persisted_documents": config.persisted_documents.as_ref().map_or_else(
+            || json!({"enabled": false}), |documents| documents.hive_config()),
         "supergraph": {"source": "plugin"},
         "http": {
             "host": config.listener.ip().to_string(),

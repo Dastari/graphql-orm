@@ -553,3 +553,39 @@ Prometheus is opt-in with a distinct `port` and absolute non-root `path`. That
 scrape listener has no application authentication; bind and protect it with
 deployment network policy. The authenticated administrative metrics route is
 `GET /_router/metrics`.
+
+## Persisted documents
+
+The default is off. Enable a local JSON manifest using
+`"persistedDocuments": {"path": "/etc/graphql-orm/operations.json", "strict": true}`
+or `RouterConfig::with_persisted_documents(path, strict)`. Only local files are
+accepted; Hive CDN and remote storage are refused. The manifest is a JSON object
+mapping each id to its GraphQL document string, limited to 16 MiB and 10,000
+entries. Every key must be the bare 64-character lowercase hexadecimal SHA-256
+of the exact UTF-8 document bytes. Whitespace and line endings are not normalized.
+Invalid manifests fail startup without echoing document text.
+
+Send an id as `{"documentId":"<hash>"}` or
+`{"extensions":{"persistedQuery":{"version":1,"sha256Hash":"<hash>"}}}`.
+Both forms work in POST bodies and WebSocket subscribe payloads. GET accepts
+`documentId` and Apollo's JSON `extensions` parameters. Additional URL path
+and query-parameter selectors are disabled to keep one wire convention and avoid
+alternate selectors on guarded GraphQL sub-paths. Existing HTTP subscription guards still apply.
+
+Non-strict mode accepts registered ids and ordinary document text. Strict mode
+requires an id on every operation. The pinned Hive runtime does not support
+batches; strict mode refuses them with an extraction error. Registered text
+without an id is also refused. With both id and text, the registered document wins in strict
+mode. Missing ids, unknown ids, and failed extraction use Hive's stable
+`PERSISTED_DOCUMENT_ID_REQUIRED`, `PERSISTED_DOCUMENT_NOT_FOUND`, and
+`PERSISTED_DOCUMENT_EXTRACTION_FAILED` codes. Clients cannot register operations.
+The manifest uses `watch: false`: restart the router to change the allow-list;
+schema refresh does not reload it. Startup creates a private snapshot in the
+process temporary directory, which must be writable. The snapshot is removed
+when the configuration is dropped.
+
+Strict mode limits which documents execute. It does not replace authentication,
+preflight checks, catalogue policy, resolver authorization, or variable-level
+validation. Possession of an id grants no authority. The administrative service
+has no GraphQL execution endpoint, and the internal WebSocket endpoint requires
+its router-owned secret.

@@ -243,6 +243,12 @@ fn router_child_entrypoint() {
                 } else {
                     config.allow_anonymous_development(true)
                 };
+                if let Ok(path) = env::var("PERSISTED_MANIFEST") {
+                    config = config.with_persisted_documents(
+                        path,
+                        env::var("PERSISTED_STRICT").unwrap() == "true",
+                    );
+                }
                 let clock_seconds = match mode.to_str() {
                     Some("auth-subscriptions-clock-past") => Some(Some(1_600_000_000)),
                     Some("auth-subscriptions-clock-ahead") => Some(Some(4_102_444_800)),
@@ -352,6 +358,7 @@ async fn run_wire_app() {
         internal,
         listener.local_addr().unwrap(),
         Arc::new(crate::metrics::RouterMetrics::default()),
+        None,
     );
     let public_path = config.websocket_path().unwrap().to_owned();
     web::HttpServer::new(async move || {
@@ -604,6 +611,259 @@ fn static_children_bind_their_own_ports_even_when_the_old_choice_is_occupied() {
     second.wait_until_ready();
     assert_ne!(first.address, second.address);
     assert_ne!(first.address, occupied.local_addr().unwrap());
+}
+
+fn persisted_documents_wire_case(case: &str) {
+    use sha2::{Digest, Sha256};
+    let products = LoopbackSubgraph::start(SubgraphKind::Products);
+    let reviews = LoopbackSubgraph::start(SubgraphKind::Reviews);
+    let products_sdl = LoopbackSdl::start(PRODUCTS_V1);
+    let reviews_sdl = LoopbackSdl::start(REVIEWS);
+    let products_protocol = LoopbackProtocol::start(protocol_descriptor(
+        "products",
+        products.endpoint(),
+        products_sdl.endpoint(),
+        authenticated_product_operations(false),
+    ));
+    let reviews_protocol = LoopbackProtocol::start(protocol_descriptor(
+        "reviews",
+        reviews.endpoint(),
+        reviews_sdl.endpoint(),
+        Vec::new(),
+    ));
+    let temp = TemporaryConfig::new();
+    let manifest = temp.directory.join("manifest.json");
+    let query = "query { __typename }";
+    let mutation = "mutation { __typename }";
+    let subscription = r#"subscription { productChanged(id: "p1") { id } }"#;
+    let hash = |text: &str| format!("{:x}", Sha256::digest(text.as_bytes()));
+    let documents = [query, mutation, subscription]
+        .map(|text| (hash(text), text))
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    fs::write(&manifest, serde_json::to_vec(&documents).unwrap()).unwrap();
+    let mut command = Command::new(env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "federation::wire_tests::router_child_entrypoint",
+            "--nocapture",
+        ])
+        .env(CHILD_ENV, "auth-subscriptions")
+        .env(PRODUCTS_ENDPOINT_ENV, products.endpoint())
+        .env(REVIEWS_ENDPOINT_ENV, reviews.endpoint())
+        .env(PRODUCTS_SDL_ENDPOINT_ENV, products_sdl.endpoint())
+        .env(REVIEWS_SDL_ENDPOINT_ENV, reviews_sdl.endpoint())
+        .env(PRODUCTS_PROTOCOL_ENDPOINT_ENV, products_protocol.endpoint())
+        .env(REVIEWS_PROTOCOL_ENDPOINT_ENV, reviews_protocol.endpoint());
+    if case != "disabled" {
+        command
+            .env("PERSISTED_MANIFEST", &manifest)
+            .env("PERSISTED_STRICT", (case != "non_strict").to_string());
+    }
+    let child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let mut router = TestRouter::from_child(child, false).0;
+    router.wait_until_ready();
+    let headers = [("authorization", "Bearer product-events")];
+    let graphql = |payload| {
+        router
+            .graphql_response_at("/api/graphql", payload, &headers)
+            .1
+    };
+    match case {
+        "non_strict" | "disabled" => {
+            let plain = graphql(json!({"query": query}));
+            assert_eq!(plain["data"]["__typename"], "Query", "{plain}");
+            let result = graphql(json!({"documentId": hash(query)}));
+            if case == "disabled" {
+                assert!(result.get("errors").is_some(), "{result}");
+            } else {
+                assert_eq!(result["data"]["__typename"], "Query", "{result}");
+            }
+        }
+        "post" => {
+            let plain = graphql(json!({"query": query}));
+            assert_eq!(
+                plain["errors"][0]["extensions"]["code"], "PERSISTED_DOCUMENT_ID_REQUIRED",
+                "{plain}"
+            );
+            for payload in [
+                json!({"documentId": hash(query)}),
+                json!({"extensions": {"persistedQuery": {"version": 1, "sha256Hash": hash(query)}}}),
+            ] {
+                let result = graphql(payload);
+                assert_eq!(result["data"]["__typename"], "Query", "{result}");
+            }
+            let body = serde_json::to_vec(&json!({"documentId": hash(subscription)})).unwrap();
+            for path in ["/api/graphql", "/api/graphql/x", "/api/graphql/sha256:abc"] {
+                let result = raw_http_within(
+                    router.address,
+                    "POST",
+                    path,
+                    &headers,
+                    Some(&body),
+                    HTTP_STREAM_PROBE,
+                )
+                .unwrap();
+                assert_http_subscription_refused(path, &result);
+            }
+            // Rewriting the operator file cannot change the prepared allow-list.
+            fs::write(&manifest, b"{}").unwrap();
+            let result = graphql(json!({"documentId": hash(query)}));
+            assert_eq!(result["data"]["__typename"], "Query", "{result}");
+        }
+        "redaction" => {
+            let result = graphql(json!({"documentId": query, "query": query}));
+            assert_eq!(
+                result["errors"][0]["extensions"]["code"], "PERSISTED_DOCUMENT_NOT_FOUND",
+                "{result}"
+            );
+            assert!(
+                !result.to_string().contains(query),
+                "persisted errors must not echo document text: {result}"
+            );
+        }
+        "unknown" => {
+            let result = graphql(json!({"documentId": hash("unknown"), "query": query}));
+            assert_eq!(
+                result["errors"][0]["extensions"]["code"], "PERSISTED_DOCUMENT_NOT_FOUND",
+                "{result}"
+            );
+        }
+        "both" => {
+            let result = graphql(json!({"documentId": hash(query), "query": mutation}));
+            assert_eq!(result["data"]["__typename"], "Query", "{result}");
+        }
+        "batch" => {
+            let result = graphql(json!([{"documentId": hash(query)}, {"query": query}]));
+            assert_eq!(
+                result["errors"][0]["extensions"]["code"], "PERSISTED_DOCUMENT_EXTRACTION_FAILED",
+                "{result}"
+            );
+        }
+        "get" => {
+            let result = raw_http_within(
+                router.address,
+                "GET",
+                "/api/graphql?query=query%20%7B%20__typename%20%7D",
+                &headers,
+                None,
+                HTTP_STREAM_PROBE,
+            )
+            .unwrap();
+            assert!(
+                String::from_utf8_lossy(&result.body).contains("PERSISTED_DOCUMENT_ID_REQUIRED")
+            );
+            let path = format!("/api/graphql?documentId={}", hash(query));
+            let result = raw_http_within(
+                router.address,
+                "GET",
+                &path,
+                &headers,
+                None,
+                HTTP_STREAM_PROBE,
+            )
+            .unwrap();
+            let result: Value = serde_json::from_slice(&result.body).unwrap();
+            assert_eq!(result["data"]["__typename"], "Query", "{result}");
+        }
+        "ws_query" | "ws_mutation" | "ws_subscription" => {
+            let text = match case {
+                "ws_query" => query,
+                "ws_mutation" => mutation,
+                _ => subscription,
+            };
+            let mut socket = TestWebSocket::connect_at(router.address, "/api/graphql");
+            socket.connection_init_bearer("product-events");
+            socket.subscribe("denied", text);
+            let error = socket.next_message();
+            assert_eq!(error["type"], "error", "{error}");
+            assert_eq!(
+                error["payload"][0]["extensions"]["code"], "PERSISTED_DOCUMENT_ID_REQUIRED",
+                "{error}"
+            );
+            socket.send_json(&json!({"id": "unknown", "type": "subscribe", "payload": {"documentId": hash("unknown"), "query": text}}));
+            let error = socket.next_message();
+            assert_eq!(
+                error["payload"][0]["extensions"]["code"], "PERSISTED_DOCUMENT_NOT_FOUND",
+                "{error}"
+            );
+            socket.close();
+            for payload in [
+                json!({"documentId": hash(text), "query": "query { unregistered }"}),
+                json!({"extensions": {"persistedQuery": {"version": 1, "sha256Hash": hash(text)}}}),
+            ] {
+                let mut socket = TestWebSocket::connect_at(router.address, "/api/graphql");
+                socket.connection_init_bearer("product-events");
+                socket
+                    .send_json(&json!({"id": "allowed", "type": "subscribe", "payload": payload}));
+                let result = socket.next_message();
+                assert_eq!(result["type"], "next", "{result}");
+                assert!(result["payload"].get("data").is_some(), "{result}");
+                socket.close();
+            }
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn persisted_wire_redaction() {
+    persisted_documents_wire_case("redaction");
+}
+
+#[test]
+fn persisted_wire_non_strict() {
+    persisted_documents_wire_case("non_strict");
+}
+
+#[test]
+fn persisted_wire_disabled() {
+    persisted_documents_wire_case("disabled");
+}
+
+#[test]
+fn persisted_wire_post() {
+    persisted_documents_wire_case("post");
+}
+
+#[test]
+fn persisted_wire_unknown() {
+    persisted_documents_wire_case("unknown");
+}
+
+#[test]
+fn persisted_wire_both() {
+    persisted_documents_wire_case("both");
+}
+
+#[test]
+fn persisted_wire_batch() {
+    persisted_documents_wire_case("batch");
+}
+
+#[test]
+fn persisted_wire_get() {
+    persisted_documents_wire_case("get");
+}
+
+#[test]
+fn persisted_wire_ws_query() {
+    persisted_documents_wire_case("ws_query");
+}
+
+#[test]
+fn persisted_wire_ws_mutation() {
+    persisted_documents_wire_case("ws_mutation");
+}
+
+#[test]
+fn persisted_wire_ws_subscription() {
+    persisted_documents_wire_case("ws_subscription");
 }
 
 #[test]

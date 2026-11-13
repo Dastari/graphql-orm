@@ -58,8 +58,17 @@ pub struct RouterFileConfig {
     subgraph_request_timeout_ms: Option<u64>,
     max_subgraph_connections_per_host: Option<usize>,
     node_lookup: Option<FileNodeLookup>,
+    persisted_documents: Option<FilePersistedDocuments>,
     #[serde(default)]
     byte_routes: Vec<FileByteRoute>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FilePersistedDocuments {
+    path: std::path::PathBuf,
+    #[serde(default)]
+    strict: bool,
 }
 
 impl RouterFileConfig {
@@ -108,6 +117,9 @@ impl RouterFileConfig {
             .with_introspection(self.introspection)
             .allow_plaintext_http(self.allow_plaintext_http)
             .use_environment_proxy(self.use_environment_proxy);
+        if let Some(documents) = self.persisted_documents {
+            config = config.with_persisted_documents(documents.path, documents.strict);
+        }
         if let Some(scope_matcher) = self.scope_matcher {
             config = scope_matcher.apply(config)?;
         }
@@ -1068,6 +1080,19 @@ mod tests {
                 .into_router_config_with(|_| Ok(None))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn persisted_documents_file_option_is_local_only() {
+        let json = FILE.replacen("\"publicRequestTimeoutMs\"", r#""persistedDocuments": {"path": "/tmp/operations.json", "strict": true}, "publicRequestTimeoutMs""#, 1);
+        assert!(RouterFileConfig::from_json(&json).is_ok());
+        for storage in ["hive", "s3", "storage"] {
+            let remote = json.replace(
+                r#""path": "/tmp/operations.json""#,
+                &format!(r#""storage": {{"type": "{storage}"}}"#),
+            );
+            assert!(RouterFileConfig::from_json(&remote).is_err());
+        }
     }
 
     #[test]
