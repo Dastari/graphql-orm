@@ -587,6 +587,68 @@ The fail-closed check of an unlimited `fetch_all` counts matching rows before ro
 It fails safe: a caller can be refused because of rows it cannot see. Its `PAGE_LIMIT_EXCEEDED`
 message therefore names no row count.
 
+### Repository limits and offsets count visible rows
+
+When a row policy is installed and `RowPolicy::read_visibility` returns `CallbackOnly` or
+`Prefilter` for the Repository surface, `can_read_row` decides rows in Rust. `Entity::query(&db)`
+and `tx.query::<T>()` resolve the decision once and add its `Prefilter` or `Complete` predicate to
+the base query, so both the initial SQL window and the scan carry it, and `Complete` keeps one SQL
+query. The search executors do not receive the predicate, so `search_db` treats `Complete` like
+`Prefilter`. `limit(n)` and `offset(k)` on
+`Entity::query(&db)`, `tx.query::<T>()` (`fetch_all`, `fetch_one`) and `search_db` then count
+visible rows, and a page is either complete or the read fails:
+
+- The read fetches batches of candidate rows in the query's order, checks each row, skips `k`
+  visible rows and returns up to `n`. A short page means no more visible rows match. `fetch_first`
+  and `fetch_optional_one` use the same window. `limit(0)` returns an empty page without reading,
+  with or without a row policy, after authorization, the read decision and limit validation.
+- A primary-key tiebreak is appended to the order unless a term already orders directly by each
+  key column. A term that only mentions a key column, such as `CASE WHEN id > 0 THEN 0 END`, does
+  not count.
+- `PaginationConfig::max_scanned_rows` (default `PaginationConfig::DEFAULT_MAX_SCANNED_ROWS`,
+  `10_000`) bounds visible-row scans: the candidate rows a scan takes from the database, plus one
+  look-ahead row that shows whether more remain. Skipped rows count. It does not bound, or refuse,
+  a read that needs no scan. When the budget runs out before the page is
+  complete and more rows remain, the read fails with `PAGE_LIMIT_EXCEEDED`; the message names no
+  row count. A zero budget still reads the look-ahead row, so an empty result is not refused.
+  Raise the budget for one read with `with_max_scanned_rows(n)`, for a handle with
+  `PaginationConfig::with_max_scanned_rows`, or remove it with `None`.
+- Candidates are the rows the SQL filter selects. Residual in-memory predicates, such as SQLite
+  spatial checks, are evaluated on each candidate, so they do not make the read load every
+  candidate. Fallback (Rust-scored) search must rank every candidate, so a scanning fallback search
+  reads at most `max_scanned_rows + 1` candidates once, fails with `PAGE_LIMIT_EXCEEDED` when more
+  exist, and pages the ranked hits in memory. Native search scans ranked hits in SQL batches.
+- A scan covers unlimited reads too. Without a limit, `fetch_all` skips `k` visible rows and
+  returns every visible row after them, reading at most `max_scanned_rows + 1` candidates in all;
+  it fails with `PAGE_LIMIT_EXCEEDED` if more remain. On `Entity::query(&db)` and
+  `tx.query::<T>()` the fail-closed `max_limit` check above still applies, counting the matching
+  rows after the skipped ones before row policy, and whichever bound is reached first refuses the
+  read. `search_db` has no `max_limit` refusal for unlimited searches: under a residual decision
+  only the candidate budget bounds it, and an unlimited search that needs no scan is unbounded, as
+  before.
+- With an `Unrestricted` decision (or `Complete` outside `search_db`) a read is one SQL query, as
+  with no row policy, and the budget does not apply to it; fallback search still loads its
+  candidates as before. Only if the row callback refuses a row of a bounded page does the read
+  rescan. The rows that first query read count against the rescan's budget, and the rescan is a
+  scan as above.
+
+Continuation uses SQL offsets over separate reads. Rows inserted, deleted or re-sorted between
+batches can be skipped or returned twice. Inside a transaction, what the batches see depends on
+its isolation level; `TransactionMode::StateMachine` raises it. Read inside such a transaction when
+a page must be stable.
+
+These reads still depend on rows the caller cannot see. Whether the budget runs out, how long the
+read takes, and whether an unlimited read is refused all vary with hidden rows. Set
+`max_scanned_rows` and decide whether to read without a limit in trusted code, not from untrusted
+input.
+
+Reads without a per-row Rust check keep one SQL `LIMIT`/`OFFSET` query: no row policy is
+installed, the decision is `Unrestricted`, or (outside `search_db`) it is `Complete`. If the row callback still refuses a row of such a
+bounded page, the read rescans as above, so the page is still complete. Projections refuse
+residual decisions, and `write_ctx.query::<T>()` and the pool-bound `Entity::query(pool)` apply no
+row policy, so their limits stay in SQL. GraphQL connections and search roots use their own
+authorized pagination.
+
 The generated `search_similar(pool, field, query, threshold, filter, limit)` helper scores five
 candidates per requested result. The candidate bound is that read's own maximum, so it is not
 reduced to the page maximum. `limit` may be at most `SIMILAR_SEARCH_MAX_LIMIT` (`1_000`); a larger

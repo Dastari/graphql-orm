@@ -428,9 +428,13 @@ pub struct EntitySearchQuery<'a, T, W, B: OrmBackend> {
 
 /// A policy-aware full-text search builder for repository entities.
 ///
-/// Limit/offset bound returned hits. This explicit `fetch_all` boundary can
-/// materialize fallback candidates before authorization; it is not the bounded
-/// generated GraphQL search executor.
+/// Limit/offset bound returned hits. When the row policy decides rows in Rust,
+/// they count visible hits, and a page is complete or the search fails with
+/// `PAGE_LIMIT_EXCEEDED`. Native search reads ranked batches, at most
+/// [`PaginationConfig::max_scanned_rows`] hits; fallback search reads at most
+/// that many candidates plus one, once, and pages the ranked set in memory. This explicit
+/// `fetch_all` boundary can materialize fallback candidates before
+/// authorization; it is not the bounded generated GraphQL search executor.
 ///
 /// This wrapper keeps the raw backend pool out of the generated repository
 /// surface and applies entity, row, and field authorization to every returned
@@ -440,6 +444,9 @@ pub struct RepositorySearchQuery<'a, T, W, B: OrmBackend> {
     db: &'a crate::db::Database<B>,
     auth: Option<DbAuthContext>,
     query: EntitySearchQuery<'a, T, W, B>,
+    limit: Option<i64>,
+    offset: i64,
+    max_scanned_rows: Option<i64>,
 }
 
 impl<'a, T, W, B> RepositorySearchQuery<'a, T, W, B>
@@ -455,6 +462,9 @@ where
             auth: None,
             query: EntitySearchQuery::new(db.pool(), search)
                 .pagination_config(db.pagination_config()),
+            limit: None,
+            offset: 0,
+            max_scanned_rows: None,
         }
     }
 
@@ -490,13 +500,85 @@ where
     /// reduced.
     pub fn limit(mut self, limit: i64) -> Self {
         self.query = self.query.limit(limit);
+        self.limit = Some(limit);
         self
     }
 
-    /// Set a non-negative offset.
+    /// Set a non-negative offset, counted over visible hits when the row
+    /// policy decides rows in Rust.
     pub fn offset(mut self, offset: i64) -> Self {
         self.query = self.query.offset(offset.max(0));
+        self.offset = offset.max(0);
         self
+    }
+
+    /// Override the row scan budget for this search only; see
+    /// [`PaginationConfig::max_scanned_rows`]. A negative `budget` is treated
+    /// as `0`.
+    pub fn with_max_scanned_rows(mut self, budget: i64) -> Self {
+        self.max_scanned_rows = Some(budget.max(0));
+        self
+    }
+
+    async fn hit_readable(&self, hit: &SearchHit<T>) -> crate::Result<bool> {
+        let metadata = T::metadata();
+        let record = hit.entity.repository_policy_record();
+        if self.db.row_policy().is_some() && record.is_none() {
+            return Err(crate::graphql::errors::sqlx_error_from_public(
+                crate::graphql::errors::OrmPublicError::new(
+                    crate::graphql::errors::OrmErrorCode::AuthorizationMisconfigured,
+                )
+                .with_internal(
+                    "entity does not expose the generated repository policy-record capability",
+                ),
+            ));
+        }
+        self.db
+            .can_read_row(
+                None,
+                metadata.entity_name,
+                metadata.read_policy,
+                super::EntityAccessSurface::Repository,
+                record.unwrap_or(&hit.entity as &(dyn Any + Send + Sync)),
+            )
+            .await
+            .map_err(crate::graphql::errors::sqlx_error_from_graphql)
+    }
+
+    async fn ensure_hit_fields(&self, hit: &SearchHit<T>) -> crate::Result<()> {
+        let metadata = T::metadata();
+        let record = hit.entity.repository_policy_record();
+        for field in T::repository_field_policies() {
+            self.db
+                .ensure_repository_readable_field(
+                    None,
+                    metadata.entity_name,
+                    field.api_name,
+                    field.read_policy,
+                    record,
+                )
+                .await
+                .map_err(crate::graphql::errors::sqlx_error_from_public)?;
+        }
+        Ok(())
+    }
+
+    /// Keep the readable hits. Also reports whether any hit was refused.
+    async fn readable_hits(
+        &self,
+        hits: Vec<SearchHit<T>>,
+    ) -> crate::Result<(Vec<SearchHit<T>>, bool)> {
+        let mut visible = Vec::with_capacity(hits.len());
+        let mut refused = false;
+        for hit in hits {
+            if self.hit_readable(&hit).await? {
+                self.ensure_hit_fields(&hit).await?;
+                visible.push(hit);
+            } else {
+                refused = true;
+            }
+        }
+        Ok((visible, refused))
     }
 
     /// Execute the search and return only policy-visible records.
@@ -519,50 +601,148 @@ where
             .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
         super::read_authorization::authorize_repository_search_sources::<T, B>(self.db).await?;
 
-        let hits = self.query.fetch_all_with_auth(self.auth.as_ref()).await?;
-        let mut visible = Vec::with_capacity(hits.len());
-        for hit in hits {
-            let record = hit.entity.repository_policy_record();
-            if self.db.row_policy().is_some() && record.is_none() {
-                return Err(crate::graphql::errors::sqlx_error_from_public(
-                    crate::graphql::errors::OrmPublicError::new(
-                        crate::graphql::errors::OrmErrorCode::AuthorizationMisconfigured,
-                    )
-                    .with_internal(
-                        "entity does not expose the generated repository policy-record capability",
-                    ),
-                ));
+        use super::query::{RowCheckMode, VisibleRowScan};
+        // The search executors do not receive the read predicate, so the row
+        // callback stays the authority.
+        let mode = super::query::repository_read_plan::<T, B>(self.db, None).await?;
+        self.query.check_explicit_limit()?;
+        // An empty page needs no read. Authorization, the read decision and
+        // the limit are already checked, so a refused search is still refused.
+        if self.limit == Some(0) {
+            return Ok(Vec::new());
+        }
+        // Without a row check, or when no limit could make the page short, one
+        // executor read serves the search, as before.
+        if mode == RowCheckMode::Fixed
+            || (mode == RowCheckMode::Authoritative && self.limit.is_none())
+        {
+            let hits = self
+                .query
+                .copy_with_page(self.query.query.page.clone(), self.query.pagination_config)
+                .fetch_all_with_auth(self.auth.as_ref())
+                .await?;
+            return Ok(self.readable_hits(hits).await?.0);
+        }
+
+        let mut budget = self
+            .db
+            .pagination_config()
+            .with_read_scan_budget(self.max_scanned_rows)
+            .max_scanned_rows;
+        if mode == RowCheckMode::Authoritative {
+            // A bounded page under an SQL-authoritative decision is one
+            // executor read, as without a row check. The scan budget applies
+            // only if the row callback refuses a hit and the page is rescanned.
+            let (hits, read) = self
+                .query
+                .copy_with_page(self.query.query.page.clone(), self.query.pagination_config)
+                .fetch_all_with_auth_counted(self.auth.as_ref())
+                .await?;
+            let (visible, refused) = self.readable_hits(hits).await?;
+            if !refused {
+                return Ok(visible);
             }
-            if !self
-                .db
-                .can_read_row(
-                    None,
-                    metadata.entity_name,
-                    metadata.read_policy,
-                    super::EntityAccessSurface::Repository,
-                    record.unwrap_or(&hit.entity as &(dyn Any + Send + Sync)),
-                )
+            // The rescan shares one budget with the window already read.
+            budget =
+                budget.map(|budget| budget.saturating_sub(i64::try_from(read).unwrap_or(i64::MAX)));
+        }
+
+        // One budget covers the whole scan, with or without a limit.
+        let mut scan = VisibleRowScan::new(self.offset, self.limit, budget);
+        let mut visible = Vec::new();
+        let mut native = false;
+        while let Some(batch) = scan.next_batch()? {
+            let page = self.query.copy_with_page(
+                Some(PageInput {
+                    limit: Some(batch.fetch),
+                    offset: Some(batch.offset),
+                }),
+                PaginationConfig::unbounded(),
+            );
+            let hits = match page
+                .try_fetch_native_observed(self.auth.as_ref(), Some(self.db))
                 .await
-                .map_err(crate::graphql::errors::sqlx_error_from_graphql)?
             {
+                Some(result) => result?,
+                // Fallback ranking scores every candidate, so it cannot page
+                // candidates in SQL. It reads a bounded candidate set once.
+                None if !native => return self.fetch_fallback_visible(budget).await,
+                None => return Err(search_strategy_changed()),
+            };
+            native = true;
+            let fetched = hits.len();
+            let mut examined = 0;
+            for hit in hits.into_iter().take(batch.examine) {
+                if !scan.wants_more() {
+                    break;
+                }
+                examined += 1;
+                let readable = self.hit_readable(&hit).await?;
+                if scan.record(readable) {
+                    self.ensure_hit_fields(&hit).await?;
+                    visible.push(hit);
+                }
+            }
+            scan.finish_batch(batch, fetched, examined);
+        }
+        Ok(visible)
+    }
+
+    /// Apply `offset` and `limit` to the visible hits of a fallback search.
+    ///
+    /// Fallback ranking needs every candidate, so the search reads at most
+    /// `budget + 1` candidate rows once, refuses with `PAGE_LIMIT_EXCEEDED`
+    /// when more than `budget` exist, and scans the ranked set in memory.
+    async fn fetch_fallback_visible(
+        &self,
+        budget: Option<i64>,
+    ) -> crate::Result<Vec<SearchHit<T>>> {
+        let cap = budget.map(|budget| budget.max(0).saturating_add(1));
+        let candidates = self
+            .query
+            .query
+            .fetch_candidates_with_auth(self.db, self.auth.as_ref(), 0, cap)
+            .await?;
+        if budget.is_some_and(|budget| {
+            i64::try_from(candidates.len()).unwrap_or(i64::MAX) > budget.max(0)
+        }) {
+            return Err(super::query::scan_budget_exhausted());
+        }
+        let entities = candidates
+            .into_iter()
+            .filter_map(|(entity, matches)| matches.then_some(entity))
+            .collect();
+        let mut skip = self.offset;
+        let mut visible = Vec::new();
+        for hit in self.query.score_entities(entities) {
+            if self
+                .limit
+                .is_some_and(|limit| i64::try_from(visible.len()).unwrap_or(i64::MAX) >= limit)
+            {
+                break;
+            }
+            if !self.hit_readable(&hit).await? {
                 continue;
             }
-            for field in T::repository_field_policies() {
-                self.db
-                    .ensure_repository_readable_field(
-                        None,
-                        metadata.entity_name,
-                        field.api_name,
-                        field.read_policy,
-                        record,
-                    )
-                    .await
-                    .map_err(crate::graphql::errors::sqlx_error_from_public)?;
+            if skip > 0 {
+                skip -= 1;
+                continue;
             }
+            self.ensure_hit_fields(&hit).await?;
             visible.push(hit);
         }
         Ok(visible)
     }
+}
+
+/// A scanned search switched between native and fallback execution.
+fn search_strategy_changed() -> sqlx::Error {
+    crate::graphql::errors::sqlx_error_from_public(
+        crate::graphql::errors::OrmPublicError::new(
+            crate::graphql::errors::OrmErrorCode::InternalError,
+        )
+        .with_internal("search execution strategy changed during a visible-row scan"),
+    )
 }
 
 impl<'a, T, W, B> EntitySearchQuery<'a, T, W, B>
@@ -578,6 +758,20 @@ where
             query: EntityQuery::new(),
             pagination_config: PaginationConfig::default(),
             explicit_limit: None,
+            _where: PhantomData,
+        }
+    }
+
+    /// A copy of this search with another page and pagination configuration.
+    fn copy_with_page(&self, page: Option<PageInput>, pagination_config: PaginationConfig) -> Self {
+        let mut query = self.query.clone();
+        query.page = page;
+        Self {
+            pool: self.pool,
+            search: self.search.clone(),
+            query,
+            pagination_config,
+            explicit_limit: self.explicit_limit,
             _where: PhantomData,
         }
     }
@@ -855,7 +1049,7 @@ where
                 sql.push_str(T::DEFAULT_SORT);
             }
             for column in T::PRIMARY_KEYS {
-                if !crate::graphql::orm::sort_clause_mentions_column(T::DEFAULT_SORT, column) {
+                if !crate::graphql::orm::sort_clause_orders_by_column(T::DEFAULT_SORT, column) {
                     sql.push_str(&format!(", {} ASC", self.entity_column(column)));
                 }
             }
@@ -908,7 +1102,7 @@ where
                 sql.push_str(T::DEFAULT_SORT);
             }
             for column in T::PRIMARY_KEYS {
-                if !crate::graphql::orm::sort_clause_mentions_column(T::DEFAULT_SORT, column) {
+                if !crate::graphql::orm::sort_clause_orders_by_column(T::DEFAULT_SORT, column) {
                     sql.push_str(&format!(", {} ASC", self.entity_column(column)));
                 }
             }
@@ -1199,6 +1393,31 @@ where
             .fetch_all_with_auth(&PoolRef { pool: self.pool }, auth)
             .await?;
         Ok(self.slice_hits(self.score_entities(entities)))
+    }
+
+    /// [`Self::fetch_all_with_auth`], also reporting how many candidate rows
+    /// the search read: the native hits, or every fallback candidate.
+    async fn fetch_all_with_auth_counted(
+        &self,
+        auth: Option<&DbAuthContext>,
+    ) -> crate::Result<(Vec<SearchHit<T>>, usize)> {
+        self.check_explicit_limit()?;
+        if let Some(result) = self.try_fetch_native(auth).await {
+            let hits = result?;
+            let read = hits.len();
+            return Ok((hits, read));
+        }
+        // The same candidate read as the fallback path above, counted.
+        let candidates = self
+            .query
+            .fetch_candidates_with_auth(&PoolRef { pool: self.pool }, auth, 0, None)
+            .await?;
+        let read = candidates.len();
+        let entities = candidates
+            .into_iter()
+            .filter_map(|(entity, matches)| matches.then_some(entity))
+            .collect();
+        Ok((self.slice_hits(self.score_entities(entities)), read))
     }
 
     /// Execute the search and return a GraphQL-style connection.

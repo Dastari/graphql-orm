@@ -34,6 +34,11 @@ No data migration is needed, and no GraphQL SDL or persistent schema changes.
   application target.
 - Handwritten operation inputs now need explicit disclosure declarations. See
   the [tool-profiles 0.23.0 migration](../graphql-orm-ai-tool-profiles/MIGRATION.md#0220-to-0230-explicit-handwritten-input-disclosure).
+## 0.135.0 to 0.136.0: ORM 0.133.0 reserved runtime table names
+
+Upgrade with ORM/macros 0.133.0. No API, AI schema or data migration change.
+The internal session-activity query admits its own `graphql_orm_ai_*` tables
+by exact name, so session listing is unchanged.
 
 ## 0.134.0 to 0.135.0
 

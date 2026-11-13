@@ -18,6 +18,10 @@ supersedes: []
 - Adopt tool profiles 0.23.0: handwritten input objects disclose only host-declared fields, and aggregate plans use exact field names. See the tool-profiles migration guide.
 
 No GraphQL SDL, persistent schema or data migration change; `AI_SCHEMA_MODULE_VERSION` is unchanged. See the migration guide.
+## Unreleased - 0.136.0
+
+- **Changed:** the session-activity query declares the reserved tables it uses. ORM 0.133.0 reserves `graphql_orm_` table names in runtime schemas, and the query's schema describes this crate's own session, event, message, run and failure-disposition tables, so it admits exactly those five names through `RuntimeSchema::validate_with_reserved_tables`. Session listing is unchanged.
+- Adopt ORM 0.133.0.
 
 ## Unreleased - 0.135.0
 

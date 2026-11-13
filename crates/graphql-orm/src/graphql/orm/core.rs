@@ -981,7 +981,9 @@ pub struct RetentionContext<'tx, B: WriteBackend = DefaultWriteBackend> {
 /// It follows the [`RepositoryQuery`](super::query::RepositoryQuery) row-bound
 /// contract: an explicit [`Self::limit`] is exact or refused with
 /// `PAGE_LIMIT_EXCEEDED`, and an unlimited [`Self::fetch_all`] fails closed
-/// when more rows than the database's maximum page limit match.
+/// when more rows than the database's maximum page limit match. When the row
+/// policy decides rows in Rust, [`Self::limit`] and [`Self::offset`] count
+/// visible rows, as on `RepositoryQuery`.
 pub struct MutationQuery<'ctx, 'tx, T, B: WriteBackend = DefaultWriteBackend>
 where
     T: Entity + FromSqlRow<B> + Clone + Send + Sync + 'static,
@@ -991,6 +993,7 @@ where
     limit: Option<i64>,
     offset: i64,
     max_limit: Option<i64>,
+    max_scanned_rows: Option<i64>,
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
@@ -1006,6 +1009,7 @@ where
             limit: None,
             offset: 0,
             max_limit: None,
+            max_scanned_rows: None,
         }
     }
 
@@ -1051,7 +1055,16 @@ where
         self
     }
 
-    /// Skip `offset` matching rows. A negative offset is treated as `0`.
+    /// Override the row scan budget for this read only; see
+    /// [`PaginationConfig::max_scanned_rows`](super::query::PaginationConfig::max_scanned_rows).
+    /// A negative `budget` is treated as `0`.
+    pub fn with_max_scanned_rows(mut self, budget: i64) -> Self {
+        self.max_scanned_rows = Some(budget.max(0));
+        self
+    }
+
+    /// Skip `offset` matching rows, counted over visible rows when the row
+    /// policy decides rows in Rust. A negative offset is treated as `0`.
     pub fn offset(mut self, offset: i64) -> Self {
         self.offset = offset.max(0);
         self
@@ -1097,13 +1110,129 @@ where
         })
     }
 
+    /// Read one SQL window and keep its readable rows. Also reports whether
+    /// the row check refused any row of the window, and how many rows the
+    /// window read.
+    async fn fetch_window(
+        &mut self,
+        bound: super::query::RepositoryBound,
+        offset: i64,
+    ) -> crate::Result<(Vec<T>, bool, usize)> {
+        let (rows, read) = if self.query.requires_in_memory_filtering() {
+            // As on the plain path, every candidate is read and the residual
+            // in-memory predicates filter them before the page is sliced; the
+            // candidate count is kept for a later rescan's budget.
+            let candidates = self
+                .query
+                .fetch_candidates_in_transaction(self.hook_ctx, 0, None)
+                .await?;
+            let read = candidates.len();
+            (
+                super::query::slice_matching_candidates(candidates, bound.sql_limit(), offset),
+                read,
+            )
+        } else {
+            let rows = Self::bounded(self.query.clone(), bound, offset)
+                .fetch_all_in_transaction(self.hook_ctx)
+                .await?;
+            let read = rows.len();
+            (rows, read)
+        };
+        bound.check_overflow(rows.len())?;
+        let database = self.hook_ctx.database();
+        let mut visible = Vec::with_capacity(rows.len());
+        let mut refused = false;
+        for row in rows {
+            if repository_row_readable::<T, B>(database, &row).await? {
+                ensure_repository_row_fields::<T, B>(database, &row).await?;
+                visible.push(row);
+            } else {
+                refused = true;
+            }
+        }
+        Ok((visible, refused, read))
+    }
+
+    /// Serve one read. `take` is how many visible rows a bounded read returns.
+    async fn fetch_visible(
+        mut self,
+        bound: super::query::RepositoryBound,
+        take: Option<i64>,
+    ) -> crate::Result<Vec<T>> {
+        use super::query::{RowCheckMode, VisibleRowScan};
+        // Resolve the read decision once. Its predicate narrows the base query,
+        // so the initial SQL window and the scan both carry it.
+        let mode = super::query::repository_read_plan::<T, B>(
+            self.hook_ctx.database(),
+            Some(&mut self.query),
+        )
+        .await?;
+        // An empty page needs no read. Authorization, the read decision and
+        // the limit are already checked, so a refused read is still refused.
+        if take == Some(0) {
+            return Ok(Vec::new());
+        }
+        // Without a residual check, the read is one window, as it always was.
+        // The scan budget applies only once a scan is needed.
+        let mut budget = self
+            .hook_ctx
+            .database()
+            .pagination_config()
+            .with_read_scan_budget(self.max_scanned_rows)
+            .max_scanned_rows;
+        if mode != RowCheckMode::Residual {
+            let (rows, refused, read) = self.fetch_window(bound, self.offset).await?;
+            if !(mode == RowCheckMode::Authoritative && refused && take.is_some()) {
+                return Ok(rows);
+            }
+            // The rescan shares one budget with the window already read.
+            budget =
+                budget.map(|budget| budget.saturating_sub(i64::try_from(read).unwrap_or(i64::MAX)));
+        }
+
+        // One budget covers the whole scan. An unlimited read also keeps its
+        // fail-closed maximum, counted before row policy; whichever bound is
+        // reached first refuses the read.
+        let overflow = match (take, bound) {
+            (None, super::query::RepositoryBound::FailClosed(maximum)) => Some(maximum),
+            _ => None,
+        };
+        let mut scan =
+            VisibleRowScan::new(self.offset, take, budget).with_overflow_after_skip(overflow);
+        let mut visible = Vec::new();
+        while let Some(batch) = scan.next_batch()? {
+            let rows = self
+                .query
+                .fetch_candidates_in_transaction(self.hook_ctx, batch.offset, Some(batch.fetch))
+                .await?;
+            let fetched = rows.len();
+            let mut examined = 0;
+            let database = self.hook_ctx.database();
+            for (row, matches) in rows.into_iter().take(batch.examine) {
+                if !scan.wants_more() {
+                    break;
+                }
+                examined += 1;
+                scan.count_candidate(matches)?;
+                let readable = matches && repository_row_readable::<T, B>(database, &row).await?;
+                if scan.record(readable) {
+                    ensure_repository_row_fields::<T, B>(database, &row).await?;
+                    visible.push(row);
+                }
+            }
+            scan.finish_batch(batch, fetched, examined);
+        }
+        Ok(visible)
+    }
+
     /// Fetch every visible matching row, never a silently truncated subset.
     ///
     /// # Errors
     ///
     /// Returns `PAGE_LIMIT_EXCEEDED` for an explicit limit above the maximum,
-    /// or when no limit is set and more rows than the maximum match, plus the
-    /// usual safe authorization and backend errors.
+    /// when no limit is set and more rows than the maximum match, or when the
+    /// row scan budget runs out before the page is complete, plus the usual
+    /// safe authorization and backend errors.
     pub async fn fetch_all(self) -> crate::Result<Vec<T>> {
         Self::ensure_read_access(self.hook_ctx.database()).await?;
         let bound = self
@@ -1112,17 +1241,14 @@ where
             .pagination_config()
             .with_read_maximum(self.max_limit)
             .repository_bound(self.limit)?;
-        // The Repository-surface predicate narrows the SQL, as for repository
-        // reads outside a transaction; every row still passes `can_read_row`.
-        let query =
-            super::with_repository_read_visibility(self.hook_ctx.database(), self.query).await?;
-        let rows = Self::bounded(query, bound, self.offset)
-            .fetch_all_in_transaction(self.hook_ctx)
-            .await?;
-        bound.check_overflow(rows.len())?;
-        authorize_repository_rows::<T, B>(self.hook_ctx.database(), rows).await
+        let take = match bound {
+            super::query::RepositoryBound::Exact(limit) => Some(limit),
+            _ => None,
+        };
+        self.fetch_visible(bound, take).await
     }
 
+    /// Fetch the first visible row after [`Self::offset`].
     pub async fn fetch_one(self) -> crate::Result<Option<T>> {
         Self::ensure_read_access(self.hook_ctx.database()).await?;
         let bound = self
@@ -1132,19 +1258,11 @@ where
             .with_read_maximum(self.max_limit)
             .repository_bound(self.limit)?
             .capped(1);
-        let query =
-            super::with_repository_read_visibility(self.hook_ctx.database(), self.query).await?;
-        let row = Self::bounded(query, bound, self.offset)
-            .fetch_one_in_transaction(self.hook_ctx)
-            .await?;
-        let Some(row) = row else {
-            return Ok(None);
+        let take = match bound {
+            super::query::RepositoryBound::Exact(limit) => Some(limit.min(1)),
+            _ => Some(1),
         };
-        if authorize_repository_row::<T, B>(self.hook_ctx.database(), &row).await? {
-            Ok(Some(row))
-        } else {
-            Ok(None)
-        }
+        Ok(self.fetch_visible(bound, take).await?.into_iter().next())
     }
 
     pub async fn count(self) -> crate::Result<i64> {
@@ -2389,6 +2507,21 @@ where
     T: Entity,
     B: WriteBackend,
 {
+    if !repository_row_readable::<T, B>(db, row).await? {
+        return Ok(false);
+    }
+    ensure_repository_row_fields::<T, B>(db, row).await?;
+    Ok(true)
+}
+
+/// The row half of [`authorize_repository_row`]: whether the row policy lets
+/// the repository surface read `row`.
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+async fn repository_row_readable<T, B>(db: &crate::db::Database<B>, row: &T) -> crate::Result<bool>
+where
+    T: Entity,
+    B: WriteBackend,
+{
     let metadata = T::metadata();
     let record = row.repository_policy_record();
     if db.row_policy().is_some() {
@@ -2416,6 +2549,21 @@ where
             return Ok(false);
         }
     }
+    Ok(true)
+}
+
+/// The field half of [`authorize_repository_row`], for a row already readable.
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+async fn ensure_repository_row_fields<T, B>(
+    db: &crate::db::Database<B>,
+    row: &T,
+) -> crate::Result<()>
+where
+    T: Entity,
+    B: WriteBackend,
+{
+    let metadata = T::metadata();
+    let record = row.repository_policy_record();
     for field in T::repository_field_policies() {
         db.ensure_repository_readable_field(
             None,
@@ -2427,25 +2575,7 @@ where
         .await
         .map_err(crate::graphql::errors::sqlx_error_from_public)?;
     }
-    Ok(true)
-}
-
-#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
-async fn authorize_repository_rows<T, B>(
-    db: &crate::db::Database<B>,
-    rows: Vec<T>,
-) -> crate::Result<Vec<T>>
-where
-    T: Entity,
-    B: WriteBackend,
-{
-    let mut visible = Vec::with_capacity(rows.len());
-    for row in rows {
-        if authorize_repository_row::<T, B>(db, &row).await? {
-            visible.push(row);
-        }
-    }
-    Ok(visible)
+    Ok(())
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]

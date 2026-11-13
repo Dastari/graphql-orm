@@ -183,6 +183,14 @@ fn matrix() -> Vec<(&'static str, RuntimeValueKind, bool, RuntimeDefault)> {
             false,
             RuntimeDefault::string("O'Reilly \\ 雪🦀\n\t"),
         ),
+        // A backslash next to quotes keeps its exact value under either
+        // `standard_conforming_strings` setting.
+        (
+            "string_escape_quote",
+            String,
+            false,
+            RuntimeDefault::string("tail\\' || 'x\\"),
+        ),
         ("bool_true", Boolean, false, RuntimeDefault::boolean(true)),
         (
             "bool_nullable",
@@ -545,6 +553,161 @@ async fn typed_literals_apply_replan_certify_and_create_actual_values() {
     store.finish();
 }
 
+/// Literal defaults keep their exact values when the database reads ordinary
+/// string literals with backslash escapes (`standard_conforming_strings = off`).
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn literal_defaults_do_not_depend_on_standard_conforming_strings() {
+    let store = Store::new();
+    let db = store.open().await;
+    let name: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    sqlx::query(&format!(
+        "ALTER DATABASE \"{name}\" SET standard_conforming_strings TO off"
+    ))
+    .execute(db.pool())
+    .await
+    .unwrap();
+    db.pool().close().await;
+
+    let db = store.open().await;
+    let setting: String = sqlx::query_scalar("SHOW standard_conforming_strings")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(setting, "off");
+    let schema = definition().validate().unwrap();
+    let target = schema
+        .physical_schema::<Backend>(Default::default())
+        .unwrap();
+    let ownership = ManagedTableSet::new([TABLE.into()]).unwrap();
+    let plan = db
+        .schema()
+        .plan_owned_migration("v1", "escapes", &target, &ownership, PlanOptions::strict())
+        .await
+        .unwrap();
+    db.schema()
+        .apply_owned_migration(&plan, ApplyOptions::default())
+        .await
+        .unwrap();
+    sqlx::query(&format!("INSERT INTO {TABLE} (id) VALUES (1)"))
+        .execute(db.pool())
+        .await
+        .unwrap();
+    let (quoted, escape_quote, json, bytes): (String, String, String, Vec<u8>) = sqlx::query_as(
+        &format!(
+            "SELECT string_quoted, string_escape_quote, json_object::text, bytes_binary FROM {TABLE}"
+        ),
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    let expected = |column: &str| {
+        let (_, kind, _, default) = matrix().into_iter().find(|(c, ..)| *c == column).unwrap();
+        match default.typed(kind).unwrap() {
+            RuntimeTypedDefault::Value(value) => value,
+            other => panic!("{other:?}"),
+        }
+    };
+    assert_eq!(RuntimeValue::String(quoted), expected("string_quoted"));
+    assert_eq!(
+        RuntimeValue::String(escape_quote),
+        expected("string_escape_quote")
+    );
+    assert_eq!(
+        RuntimeValue::Json(serde_json::from_str(&json).unwrap()),
+        expected("json_object")
+    );
+    assert_eq!(RuntimeValue::Bytes(bytes), expected("bytes_binary"));
+    // Introspection reads the defaults while the session setting stays `off`
+    // and interprets them under it, so the replan is empty and the setting is
+    // unchanged afterwards.
+    replan_is_empty(&db, &target, &ownership, "v1-off").await;
+    let setting: String = sqlx::query_scalar("SHOW standard_conforming_strings")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(setting, "off");
+    sqlx::query(&format!(
+        "ALTER DATABASE \"{name}\" RESET standard_conforming_strings"
+    ))
+    .execute(db.pool())
+    .await
+    .unwrap();
+    db.pool().close().await;
+
+    // With the default setting restored, the live defaults match the target.
+    let db = store.open().await;
+    replan_is_empty(&db, &target, &ownership, "v2").await;
+    db.pool().close().await;
+    store.finish();
+}
+
+/// The plain `'…'` spelling earlier releases wrote for a backslash value.
+#[cfg(feature = "postgres")]
+fn legacy_spelling(statement: &str) -> String {
+    let mut out = String::new();
+    let mut rest = statement;
+    while let Some(start) = rest.find(" E'") {
+        out.push_str(&rest[..=start]);
+        let body = &rest[start + 3..];
+        let mut end = 0;
+        loop {
+            let quote = body[end..].find('\'').unwrap() + end;
+            if body[quote + 1..].starts_with('\'') {
+                end = quote + 2;
+            } else {
+                end = quote;
+                break;
+            }
+        }
+        out.push('\'');
+        out.push_str(&body[..end].replace("\\\\", "\\"));
+        out.push('\'');
+        rest = &body[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Tables created with the earlier plain spelling of backslash defaults match
+/// the escape-string target without planning a change.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn earlier_plain_backslash_defaults_replan_without_changes() {
+    let store = Store::new();
+    let db = store.open().await;
+    let schema = definition().validate().unwrap();
+    let target = schema
+        .physical_schema::<Backend>(Default::default())
+        .unwrap();
+    let ownership = ManagedTableSet::new([TABLE.into()]).unwrap();
+    let plan = db
+        .schema()
+        .plan_owned_migration("v1", "legacy", &target, &ownership, PlanOptions::strict())
+        .await
+        .unwrap();
+    let statements = plan
+        .statements()
+        .iter()
+        .map(|statement| legacy_spelling(statement))
+        .collect::<Vec<_>>();
+    assert!(
+        statements
+            .iter()
+            .any(|s| s.contains(r"'\x000102275cff'::bytea"))
+    );
+    assert!(!statements.iter().any(|s| s.contains(" E'")));
+    for statement in &statements {
+        sqlx::query(statement).execute(db.pool()).await.unwrap();
+    }
+    replan_is_empty(&db, &target, &ownership, "v2").await;
+    db.pool().close().await;
+    store.finish();
+}
+
 #[test]
 fn every_backend_target_renders_new_kinds_without_io() {
     let schema = definition().validate().unwrap();
@@ -572,16 +735,23 @@ fn every_backend_target_renders_new_kinds_without_io() {
         assert_eq!(default("bytes_empty"), "X''");
         assert_eq!(default("dt_offset"), "'2026-10-20T12:30:00.123456Z'");
         assert_eq!(default("json_string"), r#"'"plain ''text''"'"#);
+        assert_eq!(default("string_quoted"), "'O''Reilly \\ 雪🦀\n\t'");
+        assert_eq!(default("string_escape_quote"), r"'tail\'' || ''x\'");
     }
     #[cfg(feature = "postgres")]
     {
-        assert_eq!(default("bytes_binary"), r"'\x000102275cff'::bytea");
-        assert_eq!(default("bytes_empty"), r"'\x'::bytea");
+        // Values with a backslash use escape-string syntax, which PostgreSQL
+        // reads the same way whatever `standard_conforming_strings` says.
+        assert_eq!(default("bytes_binary"), r"E'\\x000102275cff'::bytea");
+        assert_eq!(default("bytes_empty"), r"E'\\x'::bytea");
         assert_eq!(
             default("dt_offset"),
             "'2026-10-20T12:30:00.123456Z'::timestamptz"
         );
         assert_eq!(default("json_string"), r#"'"plain ''text''"'::jsonb"#);
+        assert_eq!(default("string_quoted"), "E'O''Reilly \\\\ 雪🦀\n\t'");
+        assert_eq!(default("string_escape_quote"), r"E'tail\\'' || ''x\\'");
+        assert!(default("json_object").starts_with("E'{"));
     }
     // Pre-existing kinds keep their exact earlier rendering.
     assert_eq!(
@@ -590,5 +760,4 @@ fn every_backend_target_renders_new_kinds_without_io() {
     );
     assert_eq!(default("int_negative"), "-1");
     assert_eq!(default("float_legacy_negzero"), "-0.0");
-    assert_eq!(default("string_quoted"), "'O''Reilly \\ 雪🦀\n\t'");
 }

@@ -19,6 +19,9 @@ const RUNS: &str = "graphql_orm_ai_runs";
 const DISPOSITIONS: &str = "graphql_orm_ai_run_failure_dispositions";
 const REQUESTS: &str = "session_activity_requests";
 const MAX_SESSIONS: usize = 200;
+/// This crate's own `graphql_orm_` tables, admitted by exact name; the ORM
+/// refuses that companion-package prefix in every other runtime schema.
+const OWN_TABLES: [&str; 5] = [SESSIONS, EVENTS, MESSAGES, RUNS, DISPOSITIONS];
 
 fn safe<T, E>(result: Result<T, E>) -> Result<T, AiError> {
     result.map_err(|_| AiError::PersistenceFailed)
@@ -101,7 +104,7 @@ fn query_schema() -> Result<ValidatedRuntimeSchema, AiError> {
         on_delete: None,
         join: None,
     });
-    safe(schema.validate())
+    safe(schema.validate_with_reserved_tables(&OWN_TABLES))
 }
 
 pub(crate) fn activity_state(state: &str) -> Option<AiSessionActivityState> {
@@ -597,6 +600,24 @@ mod tests {
             node: crate::orm_sessions::session_view(&session).unwrap(),
             cursor: "unused".to_owned(),
         }
+    }
+
+    #[test]
+    fn activity_query_schema_admits_only_this_crates_reserved_tables() {
+        let schema = query_schema().unwrap();
+        let mut tables = schema.owned_table_names();
+        tables.sort();
+        let mut own = OWN_TABLES.map(str::to_owned).to_vec();
+        own.sort();
+        assert_eq!(tables, own);
+        // Without the exact allowance the same definition is refused.
+        let refused = schema.into_schema().validate().unwrap_err();
+        assert!(
+            refused
+                .diagnostics()
+                .iter()
+                .any(|d| d.code == RuntimeSchemaDiagnosticCode::InvalidPhysicalName)
+        );
     }
 
     #[test]
