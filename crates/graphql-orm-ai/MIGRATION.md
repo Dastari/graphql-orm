@@ -19,7 +19,11 @@ adds two columns, `graphql_orm_ai_budget_reservations.settlement_examined_at`
 and `graphql_orm_ai_runs.recovery_examined_at` (integers, not null, default
 `0`). The stranded-reservation sweep and lease recovery use them to rotate rows
 they leave unresolved, so no row can hold their bounded scans. Existing rows
-take the default; no data migration is needed. It also changes generated filter metadata (see the
+take the default; no data migration is needed. A stamp is written as
+`max(now, previous + 1)`, so repeated passes within one second still rotate.
+After a clock rollback, a row stamped in the future waits until the clock
+passes its stamp. The scans sort the active (expired or unresolved) set by the
+stamp; no index is added for this order in this release. It also changes generated filter metadata (see the
 last item below).
 
 - `AiRunRecoveryReport` has three new public fields: `quarantined`,
@@ -44,7 +48,9 @@ last item below).
   budget reconciliation requires the live recovery epoch, also for a
   cancelled attempt; lease recovery quarantines a run only for a durable
   defect of its own stored state and otherwise leaves it unchanged and counts
-  it in `skipped` (a host row policy whose candidate budget refuses a recovery
+  it in `skipped` (with a host row policy registered, a linked row recovery
+  cannot read is never treated as absent; a progress stamp the host refuses
+  fails the pass) (a host row policy whose candidate budget refuses a recovery
   scan fails the pass instead, and quarantines nothing); a run
   that closes while its provider session is parked moves that binding to
   `cleanup_required` (`provider_session_parked_wait_closed`); a provider-session binding that fails validation is

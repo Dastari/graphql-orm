@@ -1235,6 +1235,10 @@ impl OrmAiRunService {
             .unix_timestamp();
         let scan = limits.maximum_candidate_scan;
         let mut report = AiRunRecoveryReport::default();
+        // The first progress-stamp failure other than a stale-row miss. The
+        // pass finishes its other work, then fails with it: a row that cannot
+        // be stamped would otherwise hold the head of every later page.
+        let mut stamp_failure: Option<TransactionError> = None;
         // Two bounded pages: active rows with no expiry (malformed, so they
         // are quarantined rather than skipped forever) and expired rows, each
         // least recently examined first. A row is recovered, quarantined for
@@ -1331,7 +1335,7 @@ impl OrmAiRunService {
                     Err(_) => {
                         report.skipped = report.skipped.saturating_add(1);
                         let observed_state = observed_state.clone();
-                        let _ = retry_transaction(limits.maximum_transaction_retries, || {
+                        let stamped = retry_transaction(limits.maximum_transaction_retries, || {
                             let observed_state = observed_state.clone();
                             self.database
                                 .transaction(TransactionMode::StateMachine, move |tx| {
@@ -1348,12 +1352,18 @@ impl OrmAiRunService {
                                 })
                         })
                         .await;
+                        if let Err(error) = stamped {
+                            stamp_failure.get_or_insert(error);
+                        }
                     }
                 }
             }
         }
-        self.settle_stranded_budget_reservations(now, &mut report)
+        self.settle_stranded_budget_reservations(now, &mut report, &mut stamp_failure)
             .await?;
+        if let Some(error) = stamp_failure {
+            return Err(map_transaction(error));
+        }
         Ok(report)
     }
 
@@ -1375,6 +1385,7 @@ impl OrmAiRunService {
         &self,
         now: OffsetDateTime,
         report: &mut AiRunRecoveryReport,
+        stamp_failure: &mut Option<TransactionError>,
     ) -> Result<(), AiError> {
         let limits = self.limits;
         let scan = limits.maximum_candidate_scan;
@@ -1448,7 +1459,7 @@ impl OrmAiRunService {
                     // Fenced by the live epoch and the observed version and
                     // state; a refusal leaves the row for the next pass.
                     let observed_state = observed_state.clone();
-                    let _ = retry_transaction(limits.maximum_transaction_retries, || {
+                    let stamped = retry_transaction(limits.maximum_transaction_retries, || {
                         let observed_state = observed_state.clone();
                         self.database
                             .transaction(TransactionMode::StateMachine, move |tx| {
@@ -1465,6 +1476,9 @@ impl OrmAiRunService {
                             })
                     })
                     .await;
+                    if let Err(error) = stamped {
+                        stamp_failure.get_or_insert(error);
+                    }
                 }
             }
         }
@@ -5613,6 +5627,10 @@ async fn classify_expired_lease(
     now: OffsetDateTime,
     limits: AiRunServiceLimits,
 ) -> Result<ExpiredLeaseTransition, OrmPublicError> {
+    // A registered row policy can hide an existing row, and the ORM offers
+    // no read that tells hidden from absent. Absence is then not proof of a
+    // stored defect.
+    let absence_proven = tx.database().row_policy().is_none();
     let current_state = persisted_state(current)?;
     let (final_checkpoint, adoptable_tool_batch, inherited_checkpoint) =
         if let Some(checkpoint_id) = current.latest_checkpoint_id {
@@ -5629,7 +5647,7 @@ async fn classify_expired_lease(
                 .fetch_one()
                 .await
                 .map_err(OrmPublicError::from)?
-                .ok_or_else(recovery_state_invalid)?;
+                .ok_or_else(|| missing_linked_row(absence_proven))?;
             // A checkpoint written by an earlier attempt is inherited only by an
             // adoption requeue: `claim_once` keeps the pointer for the adopting
             // attempt, which clears it when it consumes the batch. Validate it
@@ -5661,7 +5679,7 @@ async fn classify_expired_lease(
                     .find_by_id::<AiBudgetReservationRecord>(&budget_reservation_id)
                     .await
                     .map_err(OrmPublicError::from)?
-                    .ok_or_else(recovery_state_invalid)?;
+                    .ok_or_else(|| missing_linked_row(absence_proven))?;
                 if reservation.session_id != current.session_id
                     || reservation.run_id != current.id
                     || reservation.attempt_id != source_attempt_id
@@ -5687,7 +5705,7 @@ async fn classify_expired_lease(
                     .find_by_id::<AiMessageRecord>(&message_id)
                     .await
                     .map_err(OrmPublicError::from)?
-                    .ok_or_else(recovery_state_invalid)?;
+                    .ok_or_else(|| missing_linked_row(absence_proven))?;
                 if message.session_id != current.session_id
                     || message.run_id != Some(current.id)
                     || message.message_role != "assistant"
@@ -5714,6 +5732,11 @@ async fn classify_expired_lease(
                     .await
                     .map_err(OrmPublicError::from)?;
                 blocks.sort_by_key(|block| block.block_index);
+                if !absence_proven
+                    && i64::try_from(blocks.len()).is_ok_and(|len| len < message.block_count)
+                {
+                    return Err(missing_linked_row(false));
+                }
                 if i64::try_from(blocks.len()).ok() != Some(message.block_count)
                     || blocks.iter().enumerate().any(|(index, block)| {
                         i64::try_from(index).ok() != Some(block.block_index)
@@ -5755,7 +5778,7 @@ async fn classify_expired_lease(
                     .find_by_id::<AiBudgetReservationRecord>(&budget_reservation_id)
                     .await
                     .map_err(OrmPublicError::from)?
-                    .ok_or_else(recovery_state_invalid)?;
+                    .ok_or_else(|| missing_linked_row(absence_proven))?;
                 if reservation.session_id != current.session_id
                     || reservation.run_id != current.id
                     || (!native_outcome
@@ -5806,6 +5829,9 @@ async fn classify_expired_lease(
                             && call.budget_reservation_id == Some(budget_reservation_id)
                     })
                     .collect::<Vec<_>>();
+                if relevant.is_empty() && !absence_proven {
+                    return Err(missing_linked_row(false));
+                }
                 if relevant.is_empty()
                     || relevant.len() > 4_096
                     || (supervised && relevant.len() != 1)
@@ -5831,7 +5857,16 @@ async fn classify_expired_lease(
                         None,
                         None,
                     )
-                    .await?;
+                    .await
+                    .map_err(|error| {
+                        if native_checkpoints::is_graph_invalid(&error) {
+                            recovery_state_invalid()
+                        } else if native_checkpoints::is_row_missing(&error) {
+                            missing_linked_row(absence_proven)
+                        } else {
+                            error
+                        }
+                    })?;
                 }
                 for call in relevant {
                     let authorization_matches = if supervised {
@@ -5842,7 +5877,7 @@ async fn classify_expired_lease(
                             .find_by_id::<AiApprovalRecord>(&approval_id)
                             .await
                             .map_err(OrmPublicError::from)?
-                            .ok_or_else(recovery_state_invalid)?;
+                            .ok_or_else(|| missing_linked_row(absence_proven))?;
                         matches!(
                             call.risk.as_str(),
                             "low_risk_write" | "non_idempotent_write" | "high_impact"
@@ -5865,7 +5900,7 @@ async fn classify_expired_lease(
                         .find_by_id::<AiRunStepRecord>(&call.id)
                         .await
                         .map_err(OrmPublicError::from)?
-                        .ok_or_else(recovery_state_invalid)?;
+                        .ok_or_else(|| missing_linked_row(absence_proven))?;
                     if step.run_id != current.id
                         || step.lease_generation != source_generation
                         || step.state != call.state
@@ -6017,6 +6052,13 @@ async fn recover_expired_run(
         Ok(transition) if AiRunTerminalEvent::from_run_state(transition.next_state).is_some() => {
             match terminal_event_session(tx, &current).await? {
                 Ok(_) => Ok(transition),
+                // A session a registered row policy hides is not proven absent.
+                Err(defect)
+                    if defect.code == OrmErrorCode::NotFound
+                        && tx.database().row_policy().is_some() =>
+                {
+                    Err(missing_linked_row(false))
+                }
                 Err(_) => Err(recovery_state_invalid()),
             }
         }
@@ -6225,6 +6267,19 @@ fn recovery_state_invalid() -> OrmPublicError {
     OrmPublicError::with_message(OrmErrorCode::InternalError, RECOVERY_STATE_INVALID)
 }
 
+/// Safe message for a linked row that recovery could not read while a row
+/// policy is registered: an operational skip, never a quarantine.
+const LINKED_ROW_NOT_VISIBLE: &str = "AI run recovery could not read a linked row";
+
+/// A linked row recovery could not read. Durable only when `absence_proven`.
+fn missing_linked_row(absence_proven: bool) -> OrmPublicError {
+    if absence_proven {
+        recovery_state_invalid()
+    } else {
+        OrmPublicError::with_message(OrmErrorCode::ServiceUnavailable, LINKED_ROW_NOT_VISIBLE)
+    }
+}
+
 fn is_recovery_state_invalid(error: &OrmPublicError) -> bool {
     error.code == OrmErrorCode::InternalError && error.message == RECOVERY_STATE_INVALID
 }
@@ -6285,8 +6340,10 @@ async fn terminal_event_session(
 /// Records that recovery examined `run_id` and left it unchanged, so the run
 /// rotates behind the rest of the scan. Fenced like every runtime write: it
 /// requires the live recovery epoch and the exact row version and state the
-/// scan observed, and changes nothing else. Returns `false` when the run
-/// changed since it was scanned.
+/// scan observed, and changes nothing else. The stamp is
+/// `max(now, previous + 1)`, so repeated passes within one second still
+/// rotate. Returns `false` when the run changed since it was scanned (someone
+/// else progressed it); any other failure is returned as an error.
 async fn stamp_run_recovery_progress(
     tx: &mut MutationContext<'_, DefaultWriteBackend>,
     run_id: Uuid,
@@ -6295,13 +6352,24 @@ async fn stamp_run_recovery_progress(
     now: i64,
 ) -> Result<bool, OrmPublicError> {
     crate::orm_runtime_recovery::require_live_epoch(tx).await?;
+    let Some(current) = tx
+        .find_by_id::<AiRunRecord>(&run_id)
+        .await
+        .map_err(OrmPublicError::from)?
+    else {
+        return Ok(false);
+    };
+    if current.row_version != observed_version || current.state != observed_state {
+        return Ok(false);
+    }
+    let stamp = now.max(current.recovery_examined_at.saturating_add(1));
     let outcome = tx
         .compare_and_swap::<AiRunRecord>(
             &run_id,
             observed_version,
             exact_state(observed_state),
             UpdateAiRunRecordInput {
-                recovery_examined_at: Some(now),
+                recovery_examined_at: Some(stamp),
                 ..Default::default()
             },
         )
@@ -6311,7 +6379,8 @@ async fn stamp_run_recovery_progress(
 }
 
 /// Records that the settlement sweep examined a reservation and left it
-/// unresolved, under the same fencing as [`stamp_run_recovery_progress`].
+/// unresolved, under the same fencing and stamp rule as
+/// [`stamp_run_recovery_progress`].
 async fn stamp_reservation_settlement_progress(
     tx: &mut MutationContext<'_, DefaultWriteBackend>,
     reservation_id: Uuid,
@@ -6320,6 +6389,17 @@ async fn stamp_reservation_settlement_progress(
     now: i64,
 ) -> Result<bool, OrmPublicError> {
     crate::orm_runtime_recovery::require_live_epoch(tx).await?;
+    let Some(current) = tx
+        .find_by_id::<AiBudgetReservationRecord>(&reservation_id)
+        .await
+        .map_err(OrmPublicError::from)?
+    else {
+        return Ok(false);
+    };
+    if current.row_version != observed_version || current.state != observed_state {
+        return Ok(false);
+    }
+    let stamp = now.max(current.settlement_examined_at.saturating_add(1));
     let outcome = tx
         .compare_and_swap::<AiBudgetReservationRecord>(
             &reservation_id,
@@ -6332,7 +6412,7 @@ async fn stamp_reservation_settlement_progress(
                 ..Default::default()
             },
             UpdateAiBudgetReservationRecordInput {
-                settlement_examined_at: Some(now),
+                settlement_examined_at: Some(stamp),
                 ..Default::default()
             },
         )
@@ -9019,6 +9099,157 @@ mod tests {
             .expect("recovery under a callback row policy should succeed");
         assert_eq!(report.recovery_required, 3, "{report:?}");
         assert_eq!(report.quarantined, 0);
+    }
+
+    /// A host row policy that hides session rows while `hide` is set.
+    struct HideSessions {
+        hide: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl graphql_orm::graphql::orm::RowPolicy<DefaultWriteBackend> for HideSessions {
+        fn can_read_row<'a>(
+            &'a self,
+            _ctx: Option<&'a async_graphql::Context<'_>>,
+            _db: &'a Database<DefaultWriteBackend>,
+            entity_name: &'static str,
+            _policy_key: Option<&'static str>,
+            _surface: graphql_orm::graphql::orm::EntityAccessSurface,
+            _row: &'a (dyn std::any::Any + Send + Sync),
+        ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+            let visible = !(entity_name == "AiSessionRecord"
+                && self.hide.load(std::sync::atomic::Ordering::SeqCst));
+            Box::pin(async move { Ok(visible) })
+        }
+
+        fn can_write_row<'a>(
+            &'a self,
+            _ctx: Option<&'a async_graphql::Context<'_>>,
+            _db: &'a Database<DefaultWriteBackend>,
+            _entity_name: &'static str,
+            _policy_key: Option<&'static str>,
+            _surface: graphql_orm::graphql::orm::EntityAccessSurface,
+            _row: &'a (dyn std::any::Any + Send + Sync),
+        ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+            Box::pin(async { Ok(true) })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_session_hidden_by_a_row_policy_is_skipped_not_quarantined() {
+        let fixture = fixture().await;
+        let run = started_run(&fixture, Uuid::new_v4()).await;
+        let hide = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut database = fixture.database.clone();
+        database.set_row_policy(HideSessions { hide: hide.clone() });
+        fixture.clock.advance_seconds(61);
+        for _ in 0..3 {
+            let report = service_on(&fixture, database.clone(), 16)
+                .recover_expired_leases()
+                .await
+                .expect("a hidden linked row must not fail the pass");
+            assert_eq!(report.skipped, 1, "{report:?}");
+            assert_eq!(report.quarantined, 0);
+            let untouched = run_record(&fixture, run).await;
+            assert_eq!(untouched.state, AiRunState::Running.as_str());
+            assert!(untouched.error_code.is_none());
+        }
+        hide.store(false, std::sync::atomic::Ordering::SeqCst);
+        let recovered = service_on(&fixture, database, 16)
+            .recover_expired_leases()
+            .await
+            .expect("recovery should succeed once the session is visible");
+        assert_eq!(recovered.recovery_required, 1, "{recovered:?}");
+        assert_eq!(recovered.quarantined, 0);
+    }
+
+    /// A host update hook that refuses every recovery progress stamp.
+    struct RefuseRecoveryStamps;
+
+    impl graphql_orm::graphql::orm::WriteInputTransform<DefaultWriteBackend> for RefuseRecoveryStamps {
+        fn before_update<'a>(
+            &'a self,
+            _ctx: Option<&'a async_graphql::Context<'_>>,
+            _db: &'a Database<DefaultWriteBackend>,
+            _entity_name: &'static str,
+            _existing_row: Option<&'a (dyn std::any::Any + Send + Sync)>,
+            input: &'a mut (dyn std::any::Any + Send + Sync),
+        ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<()>> {
+            let stamp = input
+                .downcast_ref::<UpdateAiRunRecordInput>()
+                .is_some_and(|update| update.recovery_examined_at.is_some());
+            Box::pin(async move {
+                if stamp {
+                    Err(async_graphql::Error::new("stamp refused"))
+                } else {
+                    Ok(())
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_progress_stamp_fails_the_pass_after_its_other_work() {
+        let fixture = fixture().await;
+        let refused = started_run(&fixture, Uuid::from_u128(1)).await;
+        let healthy = seed_queued_with_id(&fixture, Uuid::from_u128(u128::MAX)).await;
+        fixture
+            .service
+            .claim_next("worker-healthy")
+            .await
+            .expect("claim should succeed")
+            .expect("run should be eligible");
+        let mut database = fixture.database.clone();
+        database.set_entity_policy(RefuseSessionEvents {
+            refuse: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        });
+        database.set_write_input_transform(RefuseRecoveryStamps);
+        fixture.clock.advance_seconds(61);
+        let result = service_on(&fixture, database, 16)
+            .recover_expired_leases()
+            .await;
+        assert!(result.is_err(), "a refused stamp must fail the pass");
+        // The rest of the page was still processed.
+        assert_eq!(
+            run_record(&fixture, healthy).await.state,
+            AiRunState::RetryScheduled.as_str()
+        );
+        let untouched = run_record(&fixture, refused).await;
+        assert_eq!(untouched.state, AiRunState::Running.as_str());
+        assert_eq!(untouched.recovery_examined_at, 0);
+    }
+
+    #[tokio::test]
+    async fn progress_stamps_rotate_every_row_within_one_second() {
+        let fixture = fixture().await;
+        let mut runs = Vec::new();
+        for index in 1..=3u128 {
+            runs.push(started_run(&fixture, Uuid::from_u128(index)).await);
+        }
+        let mut database = fixture.database.clone();
+        database.set_entity_policy(RefuseSessionEvents {
+            refuse: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        });
+        fixture.clock.advance_seconds(61);
+        // The clock stays fixed for every pass; each pass sees two rows.
+        let mut examined = [0u32; 3];
+        for _ in 0..6 {
+            let mut before = Vec::new();
+            for run in &runs {
+                before.push(run_record(&fixture, *run).await.recovery_examined_at);
+            }
+            let report = service_on(&fixture, database.clone(), 2)
+                .recover_expired_leases()
+                .await
+                .expect("an operational refusal must not fail the pass");
+            assert_eq!(report.skipped, 2, "{report:?}");
+            for (index, run) in runs.iter().enumerate() {
+                if run_record(&fixture, *run).await.recovery_examined_at != before[index] {
+                    examined[index] += 1;
+                }
+            }
+        }
+        assert_eq!(examined.iter().sum::<u32>(), 12);
+        assert!(examined.iter().all(|count| *count >= 3), "{examined:?}");
     }
 
     #[tokio::test]

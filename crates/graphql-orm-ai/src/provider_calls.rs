@@ -13827,20 +13827,65 @@ mod tests {
 
     #[tokio::test]
     async fn native_prepared_receipt_blocks_later_writes_but_allows_read_and_exact_accounting() {
-        native_approval_lifecycle(false, false).await;
+        native_approval_lifecycle(false, false, NativeRecovery::Adopt).await;
+    }
+
+    #[tokio::test]
+    async fn native_outcome_graph_defect_quarantines_but_a_refused_read_skips() {
+        native_approval_lifecycle(false, false, NativeRecovery::CorruptGraph).await;
+        native_approval_lifecycle(false, false, NativeRecovery::RefusedRead).await;
     }
 
     #[tokio::test]
     async fn native_approved_effect_without_outcome_checkpoint_stays_recovery_required() {
-        native_approval_lifecycle(true, true).await;
+        native_approval_lifecycle(true, true, NativeRecovery::Adopt).await;
     }
 
     #[tokio::test]
     async fn native_approval_resume_preserves_earlier_automatic_effect_without_replay() {
-        native_approval_lifecycle(false, true).await;
+        native_approval_lifecycle(false, true, NativeRecovery::Adopt).await;
     }
 
-    async fn native_approval_lifecycle(fail_outcome: bool, earlier_automatic: bool) {
+    /// What happens to the native outcome checkpoint after it is written.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum NativeRecovery {
+        /// Adopt it on a replacement attempt.
+        Adopt,
+        /// Expire the lease after corrupting a persisted graph fact.
+        CorruptGraph,
+        /// Expire the lease and recover through a handle that refuses to read
+        /// the native candidate.
+        RefusedRead,
+    }
+
+    /// Refuses repository reads of native approval candidates.
+    #[derive(Clone)]
+    struct RefuseCandidateReads;
+
+    impl graphql_orm::graphql::orm::EntityPolicy<graphql_orm::graphql::orm::DefaultWriteBackend>
+        for RefuseCandidateReads
+    {
+        fn can_access_entity<'a>(
+            &'a self,
+            _context: Option<&'a async_graphql::Context<'_>>,
+            _database: &'a Database<graphql_orm::graphql::orm::DefaultWriteBackend>,
+            entity_name: &'static str,
+            _policy_key: Option<&'static str>,
+            kind: graphql_orm::graphql::orm::EntityAccessKind,
+            surface: graphql_orm::graphql::orm::EntityAccessSurface,
+        ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+            let allowed = surface == graphql_orm::graphql::orm::EntityAccessSurface::Repository
+                && !(entity_name == "AiNativeApprovalCandidateRecord"
+                    && kind == graphql_orm::graphql::orm::EntityAccessKind::Read);
+            Box::pin(async move { Ok(allowed) })
+        }
+    }
+
+    async fn native_approval_lifecycle(
+        fail_outcome: bool,
+        earlier_automatic: bool,
+        recovery: NativeRecovery,
+    ) {
         let pending_index = usize::from(earlier_automatic);
         let call_count = u32::try_from(3 + pending_index).unwrap();
         let outcome_failure = Arc::new(AtomicBool::new(false));
@@ -14295,6 +14340,79 @@ mod tests {
             pending_index + 1,
             "earlier effects are not replayed and later write stays paused"
         );
+        if recovery != NativeRecovery::Adopt {
+            let run_id = protected.lease().run_id().0;
+            let approval_id = approval.id;
+            let corrupt = recovery == NativeRecovery::CorruptGraph;
+            fixture
+                .database
+                .transaction(TransactionMode::StateMachine, move |tx| {
+                    Box::pin(async move {
+                        tx.update_by_id::<AiRunRecord>(
+                            &run_id,
+                            UpdateAiRunRecordInput {
+                                lease_expires_at: Some(Some(0)),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                        if corrupt {
+                            // The approval no longer matches its candidate's
+                            // binding: two persisted rows disagree.
+                            tx.update_by_id::<AiApprovalRecord>(
+                                &approval_id,
+                                crate::persistence::UpdateAiApprovalRecordInput {
+                                    binding_hash: Some("0".repeat(64)),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        }
+                        Ok(())
+                    })
+                })
+                .await
+                .expect("test fixture update should commit");
+            let before = AiRunRecord::find_by_id(&fixture.database, &run_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let mut database = fixture.database.clone();
+            if recovery == NativeRecovery::RefusedRead {
+                database.set_entity_policy(RefuseCandidateReads);
+            }
+            let runs = OrmAiRunService::new(
+                database,
+                Arc::new(agql_auth::SystemClock),
+                crate::AiRunServiceLimits::new(Duration::seconds(60), Duration::hours(1), 16, 2, 8)
+                    .unwrap(),
+            );
+            let report = runs
+                .recover_expired_leases()
+                .await
+                .expect("native recovery should complete its pass");
+            let after = AiRunRecord::find_by_id(&fixture.database, &run_id)
+                .await
+                .unwrap()
+                .unwrap();
+            if corrupt {
+                assert_eq!(report.quarantined, 1, "{report:?}");
+                assert_eq!(after.state, "recovery_required");
+                assert_eq!(
+                    after.error_code.as_deref(),
+                    Some("lease_recovery_state_invalid")
+                );
+            } else {
+                assert_eq!(report.skipped, 1, "{report:?}");
+                assert_eq!(report.quarantined, 0);
+                assert_eq!(after.state, before.state);
+                assert_eq!(after.attempt_id, before.attempt_id);
+                assert!(after.recovery_examined_at > 0);
+            }
+            return;
+        }
         let adopted = checkpoints
             .adopt_classified_mutation_batch(protected.lease())
             .await

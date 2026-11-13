@@ -30,11 +30,35 @@ pub(crate) async fn candidate(
     tx.find_by_id::<AiNativeApprovalCandidateRecord>(&id)
         .await
         .map_err(OrmPublicError::from)?
-        .ok_or_else(OrmPublicError::not_found)
+        .ok_or_else(missing)
 }
 
+/// Safe message marking a native checkpoint graph whose rows, read in one
+/// transaction, disagree with each other. Callers still see `Conflict`; lease
+/// recovery reads the marker as a durable defect of the run's stored state.
+const NATIVE_GRAPH_INVALID: &str = "native checkpoint graph is invalid";
+
+/// Safe message marking a native checkpoint graph row that the transaction
+/// could not read. Callers still see `NotFound`; lease recovery treats it as a
+/// durable defect only when absence is provable (no row policy is registered).
+const NATIVE_ROW_MISSING: &str = "native checkpoint graph row is missing";
+
 fn conflict() -> OrmPublicError {
-    OrmPublicError::new(OrmErrorCode::Conflict)
+    OrmPublicError::with_message(OrmErrorCode::Conflict, NATIVE_GRAPH_INVALID)
+}
+
+fn missing() -> OrmPublicError {
+    OrmPublicError::with_message(OrmErrorCode::NotFound, NATIVE_ROW_MISSING)
+}
+
+/// Whether a graph check compared persisted rows and found them inconsistent.
+pub(crate) fn is_graph_invalid(error: &OrmPublicError) -> bool {
+    error.code == OrmErrorCode::Conflict && error.message == NATIVE_GRAPH_INVALID
+}
+
+/// Whether a graph check could not read a linked row.
+pub(crate) fn is_row_missing(error: &OrmPublicError) -> bool {
+    error.code == OrmErrorCode::NotFound && error.message == NATIVE_ROW_MISSING
 }
 
 /// Checks all callback rows, including no-effect control receipts, under one transaction.
@@ -108,13 +132,18 @@ pub(crate) async fn cohort(
         .filter(|call| call.budget_reservation_id == Some(turn.budget.id))
         .collect::<Vec<_>>();
     rows.sort_by_key(|call| call.tool_call_index);
-    if rows.is_empty() || rows.len() > 256 {
+    // An empty cohort, or one without the candidate's own call, may be a
+    // filtered read rather than a stored defect.
+    if rows.is_empty() {
+        return Err(missing());
+    }
+    if rows.len() > 256 {
         return Err(conflict());
     }
     let pending_index = rows
         .iter()
         .position(|call| call.id == candidate.id)
-        .ok_or_else(conflict)?;
+        .ok_or_else(missing)?;
     if expected_shape.is_some_and(|(index, count)| index != pending_index || count != rows.len()) {
         return Err(conflict());
     }
@@ -134,7 +163,7 @@ pub(crate) async fn cohort(
             .find_by_id::<AiRunStepRecord>(&call.id)
             .await
             .map_err(OrmPublicError::from)?
-            .ok_or_else(OrmPublicError::not_found)?;
+            .ok_or_else(missing)?;
         if call.run_id != turn.run_id
             || call.lease_generation != generation
             || call.provider_response_id.as_deref() != Some(turn.response_id)
@@ -258,7 +287,7 @@ async fn validate_egress(
         .fetch_one()
         .await
         .map_err(OrmPublicError::from)?
-        .ok_or_else(OrmPublicError::not_found)?;
+        .ok_or_else(missing)?;
     if event.run_id != Some(budget.run_id)
         || event.principal_subject != budget.principal_subject
         || event.scope_kind != budget.scope_kind
@@ -292,7 +321,7 @@ pub(crate) async fn source(
         .fetch_one()
         .await
         .map_err(OrmPublicError::from)?
-        .ok_or_else(OrmPublicError::not_found)?;
+        .ok_or_else(missing)?;
     let protected = source
         .protected_state
         .as_ref()
@@ -356,12 +385,12 @@ pub(crate) async fn outcome(
         .find_by_id::<AiApprovalRecord>(&approval_id)
         .await
         .map_err(OrmPublicError::from)?
-        .ok_or_else(OrmPublicError::not_found)?;
+        .ok_or_else(missing)?;
     let call = tx
         .find_by_id::<AiToolCallRecord>(&candidate_id)
         .await
         .map_err(OrmPublicError::from)?
-        .ok_or_else(OrmPublicError::not_found)?;
+        .ok_or_else(missing)?;
     if approval.tool_call_id != candidate_id
         || approval.session_id != session_id
         || approval.binding_hash != candidate.binding_hash
@@ -393,7 +422,7 @@ pub(crate) async fn outcome(
         .fetch_one()
         .await
         .map_err(OrmPublicError::from)?
-        .ok_or_else(OrmPublicError::not_found)?;
+        .ok_or_else(missing)?;
     if attempt.run_id != run_id
         || attempt.lease_generation != source.lease_generation
         || attempt.final_state != "waiting_approval"
@@ -487,17 +516,17 @@ impl OrmAiRunService {
                         .find_by_id::<AiBudgetReservationRecord>(&budget_id)
                         .await
                         .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
+                        .ok_or_else(missing)?;
                     let approval = tx
                         .find_by_id::<AiApprovalRecord>(&approval_id.0)
                         .await
                         .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
+                        .ok_or_else(missing)?;
                     let call = tx
                         .find_by_id::<AiToolCallRecord>(&tool_call_id.0)
                         .await
                         .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
+                        .ok_or_else(missing)?;
                     let source = source(
                         tx,
                         &candidate,
@@ -540,7 +569,7 @@ impl OrmAiRunService {
                         .fetch_one()
                         .await
                         .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
+                        .ok_or_else(missing)?;
                     let protected = parked
                         .protected_state
                         .as_ref()
@@ -586,7 +615,7 @@ impl OrmAiRunService {
                         .fetch_one()
                         .await
                         .map_err(OrmPublicError::from)?
-                        .ok_or_else(OrmPublicError::not_found)?;
+                        .ok_or_else(missing)?;
                     if original.run_id != run.id
                         || original.lease_generation != source.lease_generation
                         || original.final_state != "waiting_approval"
