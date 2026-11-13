@@ -732,6 +732,52 @@ async fn generated_input_families_compile_complete_capabilities() {
                 assert!(input["properties"].get("TargetCount").is_none());
             }
         }
+        if covered
+            .iter()
+            .any(|name| name == "ConformanceCountSourceOrderByInput")
+        {
+            let source = semantic
+                .entities
+                .iter()
+                .find(|entity| entity.entity_name == "ConformanceCountSource")
+                .unwrap();
+            assert!(
+                source
+                    .generated_input_members
+                    .iter()
+                    .any(|member| member.kind == GraphqlGeneratedInputKind::OrderBy
+                        && member.input_type == "ConformanceCountSourceOrderByInput"
+                        && member.field_name == "TargetCount"
+                        && !member.required)
+            );
+            assert!(
+                !serde_json::to_string(&semantic)
+                    .unwrap()
+                    .contains("\"TargetCount\"")
+            );
+            let identity = "input ConformanceCountSourceOrderByInput {";
+            let malformed = sdl.replacen(
+                identity,
+                &format!("{identity}\n HostAlias: OrderDirection"),
+                1,
+            );
+            assert_ne!(malformed, sdl);
+            let error = match AiGraphqlQueryCapabilityCatalog::compile(
+                "generated-inputs",
+                GraphqlExecutionTargetId::parse("generated.inputs").unwrap(),
+                &malformed,
+                &semantic,
+                AiGraphqlQueryCapabilityLimits::default(),
+            ) {
+                Err(error) => error,
+                Ok(_) => panic!("order aliases require an exact producer contract"),
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("ConformanceCountSourceOrderByInput.HostAlias")
+            );
+        }
         all_covered.extend(covered);
     }
     for suffix in [

@@ -2995,7 +2995,27 @@ fn generated_hidden_input_members(
     let mut members = Vec::new();
     for field in fields {
         let meta = parse_field_metadata(field)?;
-        if meta.is_relation || meta.skip_db {
+        if meta.is_relation {
+            if meta.graphql_readable()
+                && let Some(order) = &meta.relation_order_aggregate
+            {
+                let input = format!("{struct_name}OrderByInput");
+                let name = &order.name;
+                members.push(quote! {
+                    ::graphql_orm::graphql::orm::GraphqlGeneratedInputMember {
+                        kind: ::graphql_orm::graphql::orm::GraphqlGeneratedInputKind::OrderBy,
+                        input_type: ::std::string::String::from(#input),
+                        field_name: ::std::string::String::from(#name),
+                        type_ref: ::graphql_orm::graphql::orm::GraphqlSemanticTypeRef::named(
+                            "OrderDirection", ::graphql_orm::graphql::orm::GraphqlSemanticTypeKind::Enum, true,
+                        ),
+                        required: false,
+                    }
+                });
+            }
+            continue;
+        }
+        if meta.skip_db {
             continue;
         }
         let hidden = !meta.graphql_readable()

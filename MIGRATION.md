@@ -15,7 +15,8 @@ supersedes: []
 Upgrade ORM/macros together to 0.144.0 and operation catalogue to 0.8.0.
 `GraphqlEntitySemanticMetadata` gains `generated_input_members`. Macros and
 runtime producers supply the exact input identity, member, type and required
-flag for generated members that remain undisclosed. Handwritten struct
+flag for generated members that remain undisclosed, including configured
+relation-count ordering aliases. Handwritten struct
 literals initialize this field with `Vec::new()` unless the host supplies a
 producer contract. This is a breaking Rust struct-literal change.
 

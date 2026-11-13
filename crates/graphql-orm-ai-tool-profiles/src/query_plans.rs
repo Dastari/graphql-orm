@@ -5116,15 +5116,9 @@ fn generated_shape_matches(
         SemanticInputKind::OrderBy | SemanticInputKind::KeysetOrderBy => {
             exact_enum(schema, "OrderDirection", &["ASC", "DESC"])
                 && fields.iter().all(|(name, field)| {
-                    // Static relation-count ordering emits host-configured
-                    // aliases. Their fixed direction type is canonical, but
-                    // only scalar semantic fields are disclosed below.
-                    (entity_field(name).is_some()
-                        || (kind == SemanticInputKind::OrderBy
-                            && entity
-                                .fields
-                                .iter()
-                                .any(|field| field.relationship.is_some())))
+                    // Producer-listed relation-count aliases were removed as
+                    // undisclosed members before checking public scalar fields.
+                    entity_field(name).is_some()
                         && field.ty == "OrderDirection"
                         && !field.has_default
                 })
