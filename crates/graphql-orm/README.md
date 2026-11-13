@@ -10,6 +10,22 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.133.0 refuses reserved runtime schema physical table names (catalog,
+pragma, ORM and companion-package prefixes, and the exact names of SQLite
+table-valued functions and SQL Server compatibility views), adds `validate_with_reserved_tables` for trusted code
+that describes its own `graphql_orm_` tables, refuses NUL in string defaults,
+and makes PostgreSQL runtime literal defaults independent of
+`standard_conforming_strings`. See the
+[root migration guide](../../MIGRATION.md#01320-to-01330-reserved-runtime-table-names).
+
+Version 0.133.0 also makes Rust repository `limit` and `offset` count visible rows
+when the row policy decides rows in Rust. `RepositoryQuery`, `tx.query::<T>()`
+and `search_db` scan ordered batches until the page is complete, within
+`PaginationConfig::max_scanned_rows` (default `10_000`), and fail with
+`PAGE_LIMIT_EXCEEDED` instead of returning a short page. Reads without a
+per-row Rust check keep one SQL query. Upgrade ORM/macros together; see the
+[root migration guide](../../MIGRATION.md#01320-to-01330-repository-limits-and-offsets-count-visible-rows).
+
 Version 0.132.0 hardens PostgreSQL catalog reads: they use catalog-defined
 objects regardless of the session's `search_path`. RLS validation pins the
 path to `pg_catalog, pg_temp` in a transaction of its own. Schema

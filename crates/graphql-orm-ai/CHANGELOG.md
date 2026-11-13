@@ -10,6 +10,11 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.136.0
+
+- **Changed:** the session-activity query declares the reserved tables it uses. ORM 0.133.0 reserves `graphql_orm_` table names in runtime schemas, and the query's schema describes this crate's own session, event, message, run and failure-disposition tables, so it admits exactly those five names through `RuntimeSchema::validate_with_reserved_tables`. Session listing is unchanged.
+- Adopt ORM 0.133.0.
+
 ## Unreleased - 0.135.0
 
 - **Security:** attachment uploads are bounded while they stream. `AiAttachmentUploadService::upload` checked only the optional size hint before storage and compared the stored size afterwards, so a body without a hint was stored in full whatever its ticket said. The body is now counted as storage reads it, and the chunk that would pass the ticket's expected byte count is never handed to storage. The write fails, any partial quarantine object is deleted, the call returns `InvalidInput`, and the attachment is rejected with reason code `upload_size_exceeded`.

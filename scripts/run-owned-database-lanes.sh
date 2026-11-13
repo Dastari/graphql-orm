@@ -59,7 +59,7 @@ run_postgres() {
     --test migration_composite_uniques -- --include-ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
     --test static_related_filter -- --ignored --test-threads=1
-  cargo test -p graphql-orm --locked --no-default-features --features postgres --test read_predicate -- --include-ignored --test-threads=1
+  cargo test -p graphql-orm --locked --no-default-features --features postgres --test read_predicate --test visible_row_pages -- --include-ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features postgres,runtime-graphql \
     --lib --test runtime_graphql --test runtime_mutations --test runtime_migrations --test runtime_schema_ir --test runtime_migration_memory \
     --test migration_planner --test migration_apply --test legacy_migration_history \
@@ -143,7 +143,7 @@ run_mssql() {
     --test migration_composite_uniques -- --include-ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features mssql --test dependent_delete_ui
   cargo test -p graphql-orm --no-default-features --features mssql \
-    --test mssql_writes --test mssql_trigger_writes --test mssql_integration --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial --test implicit_timestamp_defaults --test read_predicate --test point_read_visibility_backends --locked -- --ignored --test-threads=1
+    --test mssql_writes --test mssql_trigger_writes --test mssql_integration --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial --test implicit_timestamp_defaults --test read_predicate --test point_read_visibility_backends --test visible_row_pages --locked -- --ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features sqlite \
     --test federation_end_to_end_fixture -- --ignored node_lookup_through_the_router_on_owned_mssql
 }

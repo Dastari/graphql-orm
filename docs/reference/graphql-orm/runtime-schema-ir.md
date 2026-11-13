@@ -3,7 +3,7 @@ title: "Owned runtime schema IR"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-31
+last_reviewed: 2026-11-12
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -54,6 +54,41 @@ keys/indexes/unique groups/relation key pairs, key-pair type mismatches, misplac
 behavior, set-null over non-nullable keys, foreign keys whose referenced target fields are not
 provably unique (primary key, unique field, unique index, or composite-unique group), and
 defaults that do not fit their field's value kind. Invalid runtime definitions never panic.
+
+Physical table names are authority-bearing. Runtime reads, writes and migrations address a
+collection or link table by its bare name with the host connection's privileges. A runtime
+schema can name any other application table and act on it, and PostgreSQL names are not
+schema-qualified, so they resolve through the session's search path. Runtime schema
+definitions must therefore come only from trusted sources.
+
+Validation refuses a table name that starts with one of `RESERVED_PHYSICAL_TABLE_PREFIXES` or
+equals one of `RESERVED_PHYSICAL_TABLE_NAMES`:
+
+- `pg_`, `sqlite_` and `pragma_`: database catalogs and SQLite pragma functions. PostgreSQL
+  resolves `pg_catalog` before the search path.
+- `dbstat`, `generate_series`, `json_each`, `json_tree`, `jsonb_each` and `jsonb_tree`:
+  SQLite table-valued functions that resolve as tables by bare name.
+- SQL Server's backward-compatibility views, which resolve without a schema: the SQL Server
+  2000 system table names in Microsoft's
+  [mapping of system tables to system views](https://learn.microsoft.com/en-us/sql/relational-databases/system-tables/mapping-system-tables-to-system-views-transact-sql),
+  such as `sysobjects`, `syscolumns`, `sysindexes`, `sysusers`, `syslogins` and
+  `sysdatabases`. Only these exact names are reserved, so `system_settings` is valid.
+- `__graphql_orm_`: ORM infrastructure.
+- `graphql_orm_`: companion-package tables.
+
+Collections report `InvalidPhysicalName` and link tables `InvalidJoinTable`.
+
+Trusted code that describes its own companion or repository-only tables can admit exact
+`graphql_orm_` names with `RuntimeSchema::validate_with_reserved_tables(&[...])`. The allowance
+is an argument, not part of the schema, so a serialized or stored definition cannot grant it to
+itself. It admits only the `graphql_orm_` prefix (`ALLOWABLE_RESERVED_TABLE_PREFIX`). Every
+other reserved prefix and name stays refused, and an allowance entry outside that prefix is an
+`InvalidPhysicalName` diagnostic.
+
+A table shared with a static entity or another runtime schema is the host's deliberate choice;
+owned migrations still refuse duplicate target tables. `ManagedTableSet::new` is host-trusted
+ownership, not a definition. It still accepts reserved-prefixed names other than
+`__graphql_orm_`, so a host can keep an old table in its ownership set to review a guarded drop.
 
 SQL reserved words are valid physical names: a table `order` or a column `join` or `select` is
 accepted. Generated DDL and DML delimit such names (`DatabaseBackend::render_identifier`) and
@@ -113,10 +148,18 @@ no trailing fractional zero except `X.0`, no negative zero and at most 17 signif
 Bounds are 16 KiB, depth 32 and 1024 values. PostgreSQL `jsonb` preserves these spellings, so
 SQLite and PostgreSQL return the same typed JSON value.
 
-Every literal accepted by earlier releases is still accepted with identical serialized form,
-canonical bytes and physical rendering. A rejected default reports
+Every literal accepted by earlier releases is still accepted with identical serialized form and
+canonical bytes. Physical rendering quotes each literal for its backend: quotes are doubled,
+and on PostgreSQL a value that contains a backslash, and every bytes default
+(`E'\\x…'::bytea`), is an escape string (`E'…'`), which PostgreSQL reads the same way under
+either `standard_conforming_strings` setting. Other literals keep their earlier rendering,
+and the owned planner compares the plain and escape spellings by value, so columns created by
+earlier releases plan no change. Owned PostgreSQL introspection reads the session's
+`standard_conforming_strings` with the catalog and interprets deparsed defaults under it, so
+default values are preserved exactly, and plans are the same, under either setting. A rejected default reports
 `RuntimeSchemaDiagnosticCode::InvalidDefault` with `detail:
-RuntimeSchemaDiagnosticDetail::Default(RuntimeDefaultProblem)`; neither the message nor the
+RuntimeSchemaDiagnosticDetail::Default(RuntimeDefaultProblem)`. A string default that contains a
+NUL character is refused on every backend with `RuntimeDefaultProblem::NulCharacter`; neither the message nor the
 detail contains the submitted literal. `CurrentTimestamp` remains a database-evaluated
 expression and is valid only for datetime and epoch-second integer fields.
 
@@ -345,7 +388,7 @@ link column (`RuntimeJoinColumn { field, column }`). Validation (`InvalidJoinTab
 - the shape above, with the columns covering the complete source and target primary keys;
 - distinct, portable table and column names. The table, its generated primary-key constraint
   name (`<table>_pkey`) and its generated target-column index name must not collide with a
-  collection table or index name, and must not use the reserved `__graphql_orm_` prefix;
+  collection table or index name, and must not use a reserved table prefix;
 - at most two relations per link table, and two only as exact inverses (target and source
   swapped), so `posts.tags` and `tags.posts` share one table. A self-relation (source =
   target) uses two different columns.
