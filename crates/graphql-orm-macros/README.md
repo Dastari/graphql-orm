@@ -10,6 +10,12 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.134.0 changes no runtime or macro behaviour. One semantic-catalogue
+test now builds its stand-in for an entity's generated read with
+`GraphqlSemanticOperationDescriptor::generated`, as the AI tool-profile compiler
+treats a generated input as generated only when a generated root reaches it. No
+data migration is needed.
+
 Version 0.132.0 hardens PostgreSQL catalog reads: they use catalog-defined
 objects regardless of the session's `search_path`. RLS validation pins the
 path to `pg_catalog, pg_temp` in a transaction of its own. Schema

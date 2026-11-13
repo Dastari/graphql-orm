@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.135.0 to 0.136.0: exact tool registration and derived control-plane roots
+## 0.136.0 to 0.137.0: exact tool registration and derived control-plane roots
 
 No data migration is needed, and no GraphQL SDL or persistent schema changes.
 

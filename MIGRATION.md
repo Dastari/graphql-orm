@@ -10,6 +10,12 @@ supersedes: []
 
 # Migration Guide
 
+## 0.133.0 to 0.134.0: test-only release
+
+No code, SDL, schema or data migration is needed. The release changes one test
+fixture to build its generated stand-in root with
+`GraphqlSemanticOperationDescriptor::generated`.
+
 ## Operation catalogue 0.7.4: generated label documentation
 
 Documentation only. `GraphqlSemanticOperationDescriptor::generated` now states

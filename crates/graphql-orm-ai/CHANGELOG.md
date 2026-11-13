@@ -10,7 +10,7 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.136.0
+## Unreleased - 0.137.0
 
 - **Changed (security):** the AI control-plane root set is now derived from this crate's own composable GraphQL roots: sessions, messages, approvals, proposals, skills, rules, budgets, configuration, attachments, usage and subscriptions. It is exposed as `ai_control_plane_root_fields()` and matched ignoring case and underscores. A test fails if a new GraphQL object type is added without being classified as a control-plane root or a non-root output.
 - **Changed (security):** `register_query_capability_catalog`, `register_mutation_capability_catalog` and `register_subscription_capability_catalog` now refuse a whole capability set that contains a control-plane root.
