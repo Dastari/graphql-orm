@@ -10,6 +10,15 @@ supersedes: []
 
 # Changelog
 
+## 0.14.0 (unreleased)
+
+- Add opt-in local persisted documents with exact SHA-256 manifest validation and
+  strict allow-list enforcement over HTTP and the public WebSocket gateway.
+  Accept documents up to 256 KiB and check actual serialized WebSocket forwarding
+  size, returning an operation error when the internal message budget is exceeded.
+  Verify snapshot permissions and ownership, and retry transient snapshot failures
+  separately from composition failures.
+
 ## 0.13.0 (unreleased)
 
 - **Breaking:** outbound `http` URLs are accepted only for `localhost` and

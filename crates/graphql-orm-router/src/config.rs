@@ -50,6 +50,7 @@ const HOP_BY_HOP_HEADERS: &[&str] = &[
 /// provider, or explicitly opt into anonymous mode for trusted development.
 #[derive(Clone)]
 pub struct RouterConfig {
+    pub(crate) persisted_documents: Option<crate::persisted::PersistedDocuments>,
     pub(crate) listener: SocketAddr,
     pub(crate) graphql_path: String,
     pub(crate) anonymous_development_mode: bool,
@@ -88,6 +89,7 @@ impl RouterConfig {
     /// Creates a fail-closed router configuration bound to `listener`.
     pub fn new(listener: SocketAddr) -> Self {
         Self {
+            persisted_documents: None,
             listener,
             graphql_path: "/graphql".to_owned(),
             anonymous_development_mode: false,
@@ -329,7 +331,34 @@ impl RouterConfig {
         self
     }
 
+    /// Requires registered ids from a local JSON id-to-document manifest.
+    ///
+    /// Keys are lowercase SHA-256 hashes of exact UTF-8 document bytes. Startup
+    /// validates the 16 MiB / 10,000-entry manifest and 256 KiB document bounds.
+    /// A private snapshot is checked on every graph candidate; restart with a
+    /// new configuration to adopt operator-file changes. Authorization remains
+    /// mandatory according to the operation's existing policy.
+    #[must_use]
+    pub fn with_persisted_allow_list(mut self, path: impl AsRef<std::path::Path>) -> Self {
+        self.persisted_documents = Some(crate::persisted::PersistedDocuments::new(path, true));
+        self
+    }
+
+    /// Enables registered ids and also permits ordinary document text.
+    ///
+    /// Uses the same validated local manifest and bounds as
+    /// [`Self::with_persisted_allow_list`]. When a request supplies both an id
+    /// and text, its text runs. This mode does not enforce an allow-list.
+    #[must_use]
+    pub fn with_persisted_ids_or_text(mut self, path: impl AsRef<std::path::Path>) -> Self {
+        self.persisted_documents = Some(crate::persisted::PersistedDocuments::new(path, false));
+        self
+    }
+
     pub(crate) fn validate(mut self) -> Result<Self, RouterError> {
+        if let Some(documents) = &mut self.persisted_documents {
+            documents.validate()?;
+        }
         if self.authentication.is_none() && !self.anonymous_development_mode {
             return Err(RouterError::new(
                 RouterErrorKind::InvalidConfiguration,
@@ -1526,6 +1555,182 @@ mod tests {
                 "http://products.test/graphql",
                 "http://products.test/sdl",
             ))
+    }
+
+    fn check_manifest(bytes: &[u8]) -> Result<RouterConfig, RouterError> {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "router-manifest-{}-{nonce}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, bytes).unwrap();
+        let result = base().with_persisted_allow_list(&path).validate();
+        std::fs::remove_file(path).unwrap();
+        result
+    }
+
+    #[test]
+    fn persisted_manifest_accepts_documents_up_to_256_kib() {
+        use sha2::{Digest, Sha256};
+        for size in [20 * 1024, 70 * 1024, 256 * 1024] {
+            let query = "query { __typename }";
+            let doc = format!("{query}{}", " ".repeat(size - query.len()));
+            let bytes = serde_json::to_vec(&BTreeMap::from([(
+                format!("{:x}", Sha256::digest(doc.as_bytes())),
+                doc,
+            )]))
+            .unwrap();
+            check_manifest(&bytes).unwrap();
+        }
+    }
+
+    #[test]
+    fn persisted_manifest_document_size_is_bounded() {
+        use sha2::{Digest, Sha256};
+        let doc = format!("{}query {{ __typename }}", " ".repeat(256 * 1024));
+        let bytes = serde_json::to_vec(&BTreeMap::from([(
+            format!("{:x}", Sha256::digest(doc.as_bytes())),
+            doc,
+        )]))
+        .unwrap();
+        let error = check_manifest(&bytes).unwrap_err().to_string();
+        assert!(error.contains("262144"), "{error}");
+    }
+
+    #[test]
+    fn persisted_snapshot_revalidation_refuses_changes_and_removal() {
+        use sha2::{Digest, Sha256};
+        let doc = "query { __typename }";
+        let config = check_manifest(
+            &serde_json::to_vec(&BTreeMap::from([(
+                format!("{:x}", Sha256::digest(doc.as_bytes())),
+                doc,
+            )]))
+            .unwrap(),
+        )
+        .unwrap();
+        let hive = config.persisted_documents.as_ref().unwrap().hive_config();
+        let path = std::path::Path::new(hive["storage"]["path"].as_str().unwrap());
+        std::fs::write(path, b"{}").unwrap();
+        assert!(config.clone().validate().is_err());
+        std::fs::remove_file(path).unwrap();
+        assert!(config.validate().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persisted_snapshot_directory_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let config = check_manifest(b"{}").unwrap();
+        let hive = config.persisted_documents.as_ref().unwrap().hive_config();
+        let path = std::path::Path::new(hive["storage"]["path"].as_str().unwrap());
+        assert_eq!(
+            std::fs::metadata(path.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persisted_snapshot_permissions_reject_group_or_other_access() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let config = check_manifest(b"{}").unwrap();
+        let hive = config.persisted_documents.as_ref().unwrap().hive_config();
+        let path = std::path::Path::new(hive["storage"]["path"].as_str().unwrap());
+        for target in [path.parent().unwrap(), path] {
+            let metadata = std::fs::metadata(target).unwrap();
+            crate::persisted::verify_private_metadata(&metadata, metadata.uid()).unwrap();
+            for access in [0o040, 0o004, 0o020, 0o002, 0o010, 0o001] {
+                std::fs::set_permissions(
+                    target,
+                    std::fs::Permissions::from_mode(metadata.mode() | access),
+                )
+                .unwrap();
+                let unsafe_metadata = std::fs::metadata(target).unwrap();
+                let result =
+                    crate::persisted::verify_private_metadata(&unsafe_metadata, metadata.uid());
+                std::fs::set_permissions(target, metadata.permissions()).unwrap();
+                assert!(result.is_err(), "group/other access must refuse startup");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persisted_snapshot_permissions_reject_another_owner() {
+        use std::os::unix::fs::MetadataExt;
+        let config = check_manifest(b"{}").unwrap();
+        let hive = config.persisted_documents.as_ref().unwrap().hive_config();
+        let path = std::path::Path::new(hive["storage"]["path"].as_str().unwrap());
+        for target in [path.parent().unwrap(), path] {
+            let metadata = std::fs::metadata(target).unwrap();
+            assert!(
+                crate::persisted::verify_private_metadata(
+                    &metadata,
+                    metadata.uid().wrapping_add(1)
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn persisted_manifest_bad_hash() {
+        let error = check_manifest(br#"{"bad":"secret document"}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("secret document"));
+    }
+
+    #[test]
+    fn persisted_manifest_oversized() {
+        assert!(check_manifest(&vec![b' '; 16 * 1024 * 1024 + 1]).is_err());
+    }
+
+    #[test]
+    fn persisted_manifest_too_many_entries() {
+        use sha2::{Digest, Sha256};
+        let entries = (0..10_001)
+            .map(|n| {
+                let doc = format!("query Q{n} {{ __typename }}");
+                (format!("{:x}", Sha256::digest(doc.as_bytes())), doc)
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert!(check_manifest(&serde_json::to_vec(&entries).unwrap()).is_err());
+    }
+
+    #[test]
+    fn persisted_manifest_remote_storage_refused() {
+        for path in [
+            "hive://manifest",
+            "https://example.test/manifest",
+            "s3://bucket/manifest",
+        ] {
+            assert!(base().with_persisted_ids_or_text(path).validate().is_err());
+        }
+    }
+
+    #[test]
+    fn persisted_manifest_exact_hash_and_immutable_snapshot() {
+        use sha2::{Digest, Sha256};
+        let doc = "{ __typename }";
+        let config = check_manifest(
+            &serde_json::to_vec(&BTreeMap::from([(
+                format!("{:x}", Sha256::digest(doc.as_bytes())),
+                doc,
+            )]))
+            .unwrap(),
+        )
+        .unwrap();
+        // The source has been removed. Revalidation must retain the snapshot.
+        assert!(config.validate().is_ok());
     }
 
     #[test]
