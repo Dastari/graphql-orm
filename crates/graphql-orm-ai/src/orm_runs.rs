@@ -4697,8 +4697,8 @@ impl OrmAiRunService {
                             }, &candidate, native_checkpoints::PendingPhase::Waiting, None).await?;
                         }
                             Ok(ApprovedHandoff::Proceed {
-                                call,
-                                run,
+                                call: Box::new(call),
+                                run: Box::new(run),
                                 parked_wait,
                             })
                         }
@@ -4708,7 +4708,7 @@ impl OrmAiRunService {
                                 call,
                                 run,
                                 parked_wait,
-                            }) => (call, run, parked_wait),
+                            }) => (*call, *run, parked_wait),
                             Ok(ApprovedHandoff::Skip) => continue,
                             Ok(ApprovedHandoff::Expire(reason)) => {
                                 expire_unclaimable_approval(tx, &approval, &worker_id, reason)
@@ -5539,7 +5539,7 @@ async fn classify_expired_lease(
     now: OffsetDateTime,
     limits: AiRunServiceLimits,
 ) -> Result<ExpiredLeaseTransition, OrmPublicError> {
-    let current_state = persisted_state(&current)?;
+    let current_state = persisted_state(current)?;
     let (final_checkpoint, adoptable_tool_batch, inherited_checkpoint) =
         if let Some(checkpoint_id) = current.latest_checkpoint_id {
             let checkpoint = tx
@@ -6102,8 +6102,8 @@ const EXPIRED_LEASE_RECOVERY_STATES: [AiRunState; 4] = [
 enum ApprovedHandoff {
     /// The exact wait graph is current and may be claimed.
     Proceed {
-        call: AiToolCallRecord,
-        run: AiRunRecord,
+        call: Box<AiToolCallRecord>,
+        run: Box<AiRunRecord>,
         parked_wait: bool,
     },
     /// The graph is repairable by other maintenance; leave it eligible.
