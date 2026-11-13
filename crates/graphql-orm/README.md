@@ -10,6 +10,16 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.143.0 gives authorization one contract: every generated read path
+asks the field policy about a field with or without a policy key;
+`#[graphql_orm_custom_operations]` enforces the authorization it declares;
+`schema_roots!` rejects a handwritten root field that collides with a generated
+operation at compile time, and legacy `extra_*` roots declare their fields
+with `#[graphql_orm_root_fields]`; repository field policy refusals keep their
+public code; and diagnostics go through `tracing`. Upgrade ORM/macros
+together; see the
+[root migration guide](../../MIGRATION.md#01410-to-01430-one-authorization-contract).
+
 Version 0.141.0 (placeholder) rejects `#[transform(write = "path")]` on
 fields. If the entity compiled, that transform never ran and generated writes
 stored the field's supplied values. Replace it with `WriteInputTransform` on

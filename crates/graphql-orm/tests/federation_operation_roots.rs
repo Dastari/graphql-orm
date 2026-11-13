@@ -63,6 +63,7 @@ mod zero_subscription {
     #[derive(Default)]
     pub struct ProviderQueries;
 
+    #[graphql_orm::graphql_orm_root_fields]
     #[graphql_orm::async_graphql::Object]
     impl ProviderQueries {
         #[graphql(name = "NinjaDevices")]

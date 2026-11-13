@@ -10,6 +10,16 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.143.0 gives authorization one contract: every generated read path
+asks the field policy about a field with or without a policy key;
+`#[graphql_orm_custom_operations]` enforces the authorization it declares;
+`schema_roots!` rejects a handwritten root field that collides with a generated
+operation at compile time, and legacy `extra_*` roots declare their fields
+with `#[graphql_orm_root_fields]`; repository field policy refusals keep their
+public code; and diagnostics go through `tracing`. Upgrade ORM/macros
+together; see the
+[root migration guide](../../MIGRATION.md#01410-to-01430-one-authorization-contract).
+
 Version 0.141.0 (placeholder) rejects `#[transform(write = "path")]` on
 fields. If the entity compiled, that transform never ran and generated writes
 stored the field's supplied values. Replace it with `WriteInputTransform` on
@@ -556,7 +566,8 @@ for deleted preimages, raw event observers, propagation limits and action filter
 | `graphql_complex_object` | handwritten complex fields composed with generated relations |
 | `GraphQLOperations` | generated GraphQL root operation types and operation metadata |
 | `schema_roots!` | query/mutation/subscription roots, schema builders, metadata, and resolved catalog |
-| `graphql_orm_custom_operations` | semantic metadata emitted beside a handwritten root impl |
+| `graphql_orm_custom_operations` | semantic metadata beside a handwritten root impl, plus its enforced authorization and assurance guards |
+| `graphql_orm_root_fields` | root field names of a handwritten root in a legacy `extra_*` list, for the `schema_roots!` collision check |
 | `GraphQLSemanticObject` | classified public field metadata for a handwritten result object |
 | `mutation_result!` | a simple GraphQL mutation result object |
 | `backend_selected_graphql_entity` | emits cfg-selected entity definitions for a multi-backend consumer |
@@ -567,7 +578,9 @@ the matching `described_query_types`, `described_mutation_types`, or
 root and automatically includes its operation descriptors and direct
 `GraphQLSemanticObject` result metadata. The older `extra_*` plus
 `semantic_custom_operations`/`semantic_types` lists remain compatible for
-incremental migration, but a described root cannot also appear in them.
+incremental migration, but a described root cannot also appear in them. A root
+in an `extra_*` list or `query_custom_ops` carries `#[graphql_orm_root_fields]`
+so `schema_roots!` can reject a field that collides with a generated operation.
 
 `GraphQLOperations` also owns Federation entity keys. An entity declaring
 `#[graphql_entity(federation_key)]` receives one `#[graphql(entity)]` resolver

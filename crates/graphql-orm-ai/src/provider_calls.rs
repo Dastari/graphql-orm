@@ -5475,7 +5475,7 @@ impl AiProviderCallExecutor {
                         let claim = claim.lock().await;
                         if origin.provider_session_binding_id() == Some(claim.binding_id()) {
                             let binding = crate::orm_provider_session::AiProviderSessionBindingRecord::find_by_id(
-                                service.run_service().database(), &claim.binding_id()).await.map_err(|_| AiError::PersistenceFailed)?
+                                service.run_service().custody_database(), &claim.binding_id()).await.map_err(|_| AiError::PersistenceFailed)?
                                 .ok_or(AiError::Conflict)?;
                             context.original_provider_cursor_fingerprint()
                                 == Some(binding.cursor_fingerprint.as_str())

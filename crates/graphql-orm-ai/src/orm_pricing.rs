@@ -118,6 +118,7 @@ impl OrmAiPricingService {
         clock: Arc<dyn Clock>,
         limits: AiPricingCatalogManagementLimits,
     ) -> Self {
+        let database = crate::custody_field_policy::custody_database(database);
         Self {
             database,
             access_policy,

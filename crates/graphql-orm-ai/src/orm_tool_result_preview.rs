@@ -41,6 +41,7 @@ impl OrmAiToolCallResultPreviewService {
         runtime: Arc<crate::AiRuntime>,
         authorizer: Arc<dyn AiToolResultPreviewAuthorizer>,
     ) -> Self {
+        let database = crate::custody_field_policy::custody_database(database);
         Self {
             database,
             runtime,

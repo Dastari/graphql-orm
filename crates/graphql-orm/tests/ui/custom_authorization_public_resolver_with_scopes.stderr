@@ -1,0 +1,5 @@
+error: `authorization = false` declares a public resolver and cannot be combined with all_scopes or any_scopes
+  --> tests/ui/custom_authorization_public_resolver_with_scopes.rs:10:35
+   |
+10 |     #[graphql_orm(authorization = false, all_scopes = ["reports.read"])]
+   |                                   ^^^^^

@@ -159,6 +159,7 @@ impl OrmAiBudgetPolicyProvisioner {
         actor: AiDeploymentActor,
         limits: AiBudgetPolicyManagementLimits,
     ) -> Self {
+        let database = crate::custody_field_policy::custody_database(database);
         Self {
             database,
             actor,

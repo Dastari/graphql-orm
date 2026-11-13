@@ -1,0 +1,5 @@
+error: `authorization(replace, ...)` states the resolver's whole requirement and cannot be combined with `authorization = ...`, `all_scopes` or `any_scopes`
+  --> tests/ui/custom_authorization_replace_combined.rs:10:19
+   |
+10 |     #[graphql_orm(authorization(replace), all_scopes = ["notes.read"])]
+   |                   ^^^^^^^^^^^^^

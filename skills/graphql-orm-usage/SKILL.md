@@ -323,7 +323,7 @@ Behaviour to design around:
 - **Committed data is visible.** A read through the `Database` the closure receives sees the write.
 - **A failure doesn't fail the mutation**, because it has committed, and it doesn't stop the other
   actions. The error goes to the `PostCommitErrorHandler` from `set_post_commit_error_handler`, or to
-  stderr if none is set.
+  a `tracing` error event (`graphql_orm::post_commit`) if none is set.
 - The closure gets a `Database`, not the request. Copy what it needs from the event first.
 - A call that times out may still have happened. Give external calls an idempotency key, and
   reconcile an uncertain result rather than retrying it as if it never ran.
@@ -571,6 +571,11 @@ with no policy. Nothing separates "open to every user" from "nobody decided"
   when no entity provider is installed.
 - On an entity with `SimpleObject`, `read_policy` on a scalar field isn't enforced until you add
   `#[graphql_orm::graphql_policy_object]` **before** the derives. Generated objects enforce it already.
+- A `FieldPolicy` is asked about every field on every generated read and write path, with the
+  field's key or `None`. Return `Ok(true)` for `None` unless you mean to deny fields that declare no
+  key. Repository writes ask `can_write_repository_field`, whose default denies a declared key.
+  A plain `SimpleObject` entity's scalar getters are the exception: add `graphql_policy_object` if
+  a name-based policy must cover them.
 - Installing a `RowPolicy` affects every entity. One that only implements row callbacks makes paged
   reads fail closed until you add `with_authorized_scan_config`, or return a complete
   `read_visibility` predicate; see [bounded scans](../../docs/reference/graphql-orm/pagination-migration.md#opt-in-bounded-scans).
@@ -587,8 +592,11 @@ See [strict authorization](../../docs/reference/graphql-orm/strict-authorization
   Tenant isolation needs a row policy, and scopes in a token are a snapshot. Sensitive operations need a
   [current-authority check](../../docs/reference/graphql-orm/agql-auth-bridge.md#accepted-request-and-current-authority)
   that fails closed.
-- **Metadata grants nothing.** Operation catalogues, fingerprints, directives and
-  `authorization = true` describe a contract and enforce none of it. Assurance requirements do nothing
+- **Metadata grants nothing.** Operation catalogues, fingerprints and directives describe a contract
+  and enforce none of it. The exception is a described custom root: `#[graphql_orm_custom_operations]`
+  enforces what it declares (an `AuthSubject` by default, plus `all_scopes`/`any_scopes`) before the
+  resolver body, and only `authorization = false` makes it public. A resolver-level declaration adds
+  to the root's; `authorization(replace, ...)` is the only way to state a different one. Assurance requirements do nothing
   until `AssuranceEnforcement` is installed, and they supplement authorization rather than replace it.
   The registry only knows what it was built from: add runtime roots with
   `RuntimeGraphqlComposer::register_assurance_operations` and check static schemas with
@@ -704,7 +712,7 @@ Only for services that use them:
 | Wrong | Why it fails | Right |
 | --- | --- | --- |
 | Hand-written twin of a generated mutation | The generated mutation stays callable and skips the domain logic | Put the logic in a hook on the generated mutation |
-| Custom resolver with a generated name | It compiles, the generated resolver wins, and yours never runs. The only signal is a panic from `graphql_orm_semantic_catalog()` ([#282](https://github.com/Dastari/graphql-orm/issues/282)) | Hook or transform. Pick a distinct name only for a genuine action |
+| Custom resolver with a generated name | `schema_roots!` refuses to compile it, naming both sides: a merged root would serve only one of them | Hook or transform. Pick a distinct name only for a genuine action |
 | Validation inside a custom resolver | Generated writes and repository writes bypass it | Field validators or the transform |
 | Irreversible or slow side effect in a hook | A rollback can't undo it, and it holds locks | `hook_ctx.defer`, or a job row |
 | Treating `defer` as background or guaranteed | It delays the response, and a crash loses it | A job row in the transaction for anything that must happen, with `defer` only to wake the worker |
@@ -733,9 +741,10 @@ Run this against any graphql-orm service. The commands use `rg` from the service
       `#[Object]` and every entry in `described_*`, `extra_*` and `query_custom_ops`:
       `rg -n -A14 'schema_roots!' src` and `rg -n '#\[(\w+::)*(Object|Subscription)\b|graphql_orm_custom_operations' src`.
       `schema.sdl()` lists everything that's actually exposed.
-- [ ] **Look for names that collide with generated ones.** Add a test that calls
-      `graphql_orm_semantic_catalog()`: it panics with `ordering is not canonical` on a collision among
-      `described_*` roots. Check `extra_*` roots by eye against the table at the top.
+- [ ] **Let the compiler find names that collide with generated ones.** `schema_roots!` rejects a
+      custom root field with a generated operation's name. Every root in `extra_*` and
+      `query_custom_ops` needs `#[graphql_orm_root_fields]` before `#[Object]` for that; a missing
+      attribute is a compile error too. Hand-built schemas (`Schema::build`) get no such check.
 - [ ] **Look for side effects that exist only in custom resolvers or services.** Read each custom
       write and ask what happens if the generated mutation is called instead:
       `rg -n '::(insert|update_by_id|update_where|delete_by_id|delete_where|upsert)\(' src`.

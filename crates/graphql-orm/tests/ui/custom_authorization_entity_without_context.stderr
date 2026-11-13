@@ -1,0 +1,5 @@
+error: this `#[graphql(entity)]` resolver declares authorization, which is enforced in its body: give it a named `&Context<'_>` argument and a `Result` return type, or declare it public with `#[graphql_orm(authorization = false)]`
+  --> tests/ui/custom_authorization_entity_without_context.rs:20:5
+   |
+20 |     async fn find_widget_by_id(&self, id: String) -> Widget {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -415,6 +415,8 @@ impl AiApprovedRunClaim {
 #[derive(Clone)]
 pub struct OrmAiRunService {
     database: Database<DefaultWriteBackend>,
+    /// The handle the host supplied, returned by `database()`.
+    host_database: Database<DefaultWriteBackend>,
     clock: Arc<dyn Clock>,
     limits: AiRunServiceLimits,
     cancellation_hub: Option<Arc<AiRunCancellationHub>>,
@@ -780,7 +782,10 @@ impl OrmAiRunService {
         clock: Arc<dyn Clock>,
         limits: AiRunServiceLimits,
     ) -> Self {
+        let host_database = database.clone();
+        let database = crate::custody_field_policy::custody_database(database);
         Self {
+            host_database,
             database,
             clock,
             limits,
@@ -797,7 +802,15 @@ impl OrmAiRunService {
     }
 
     /// Returns the ORM database handle for host schema composition.
+    // The public accessor returns the host's handle; `database` is the
+    // crate's internal handle and never leaves the crate.
+    #[allow(clippy::misnamed_getters)]
     pub fn database(&self) -> &Database<DefaultWriteBackend> {
+        &self.host_database
+    }
+
+    /// The crate's internal handle: the host handle behind the custody field policy.
+    pub(crate) fn custody_database(&self) -> &Database<DefaultWriteBackend> {
         &self.database
     }
 
@@ -8949,6 +8962,190 @@ mod tests {
             .await
             .expect("run should start");
         run
+    }
+
+    /// A host field policy that refuses every repository field decision.
+    struct DenyEveryRepositoryField;
+    impl graphql_orm::graphql::orm::FieldPolicy<DefaultWriteBackend> for DenyEveryRepositoryField {
+        fn can_read_field<'a>(
+            &'a self,
+            _: &'a async_graphql::Context<'_>,
+            _: &'a Database<DefaultWriteBackend>,
+            _: &'static str,
+            _: &'static str,
+            _: Option<&'static str>,
+            _: Option<&'a (dyn std::any::Any + Send + Sync)>,
+        ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+            Box::pin(async { Ok(false) })
+        }
+        fn can_write_field<'a>(
+            &'a self,
+            _: &'a async_graphql::Context<'_>,
+            _: &'a Database<DefaultWriteBackend>,
+            _: &'static str,
+            _: &'static str,
+            _: Option<&'static str>,
+            _: Option<&'a (dyn std::any::Any + Send + Sync)>,
+            _: Option<&'a (dyn std::any::Any + Send + Sync)>,
+        ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+            Box::pin(async { Ok(false) })
+        }
+        fn can_read_repository_field<'a>(
+            &'a self,
+            _: Option<graphql_orm::graphql::auth::AccessContext<'a>>,
+            _: &'a Database<DefaultWriteBackend>,
+            _: &'static str,
+            _: &'static str,
+            _: Option<&'static str>,
+            _: Option<&'a (dyn std::any::Any + Send + Sync)>,
+        ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+            Box::pin(async { Ok(false) })
+        }
+        fn can_write_repository_field<'a>(
+            &'a self,
+            _: Option<graphql_orm::graphql::auth::AccessContext<'a>>,
+            _: &'a Database<DefaultWriteBackend>,
+            _: &'static str,
+            _: &'static str,
+            _: Option<&'static str>,
+            _: Option<&'a (dyn std::any::Any + Send + Sync)>,
+            _: Option<&'a (dyn std::any::Any + Send + Sync)>,
+        ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+            Box::pin(async { Ok(false) })
+        }
+    }
+
+    /// The recovery progress stamp is an ordinary ORM update of one of the
+    /// crate's own records. A host field policy that refuses every repository
+    /// field decision must not stop it, or the run recovery pass could never
+    /// rotate past a run it leaves behind.
+    #[tokio::test]
+    async fn the_recovery_stamp_is_written_under_a_host_field_policy_that_denies_every_repository_field()
+     {
+        let fixture = fixture().await;
+        let run = started_run(&fixture, Uuid::new_v4()).await;
+        let refuse = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut database = fixture.database.clone();
+        database.set_entity_policy(RefuseSessionEvents {
+            refuse: refuse.clone(),
+        });
+        database.set_field_policy(DenyEveryRepositoryField);
+        fixture.clock.advance_seconds(61);
+        let service = service_on(&fixture, database.clone(), 16);
+        let refused = service
+            .recover_expired_leases()
+            .await
+            .expect("the pass runs under the denying field policy");
+        assert_eq!(refused.skipped, 1, "{refused:?}");
+        assert_eq!(refused.quarantined, 0);
+        assert!(run_record(&fixture, run).await.recovery_examined_at > 0);
+        // The handle host code receives still carries the host's answer.
+        let exposed = service
+            .database()
+            .ensure_repository_writable_field(
+                None,
+                "AiRunRecord",
+                "recoveryExaminedAt",
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect_err("the host handle does not carry the custody grant");
+        assert_eq!(exposed.code, OrmErrorCode::Forbidden);
+        // The host recovers; the run is then recovered normally.
+        refuse.store(false, std::sync::atomic::Ordering::SeqCst);
+        let recovered = service_on(&fixture, database, 16)
+            .recover_expired_leases()
+            .await
+            .expect("recovery completes under the denying field policy");
+        assert_eq!(recovered.skipped, 0, "{recovered:?}");
+    }
+
+    async fn expired_reservation(
+        fixture: &Fixture,
+        run: &AiRunRecord,
+        session_id: Uuid,
+        key: &str,
+    ) -> AiBudgetReservationRecord {
+        AiBudgetReservationRecord::insert(
+            &fixture.database,
+            CreateAiBudgetReservationRecordInput {
+                budget_counter_ids: serde_json::json!([]),
+                scope_kind: "tenant".to_owned(),
+                scope_id: "tenant-run".to_owned(),
+                tenant_id: Some("tenant-run".to_owned()),
+                principal_kind: "user".to_owned(),
+                principal_subject: "run-user".to_owned(),
+                session_id,
+                run_id: run.id,
+                attempt_id: run.attempt_id.expect("a started run has an attempt"),
+                lease_generation: run.lease_generation,
+                provider_kind: "openai".to_owned(),
+                provider_model: "custody-test".to_owned(),
+                reasoning_effort: "unspecified".to_owned(),
+                pricing_policy_version: "pricing-v1".to_owned(),
+                reserved_input_tokens: 1,
+                reserved_output_tokens: 1,
+                reserved_tool_units: 0,
+                reserved_image_units: 0,
+                reserved_cost_microunits: 1,
+                reserved_runs: 1,
+                actual_input_tokens: None,
+                actual_cached_input_tokens: None,
+                actual_output_tokens: None,
+                actual_tool_units: None,
+                actual_image_units: None,
+                actual_cost_microunits: None,
+                actual_runs: None,
+                idempotency_key: key.to_owned(),
+                state: "reserved".to_owned(),
+                expires_at: fixture.clock.now().unix_timestamp(),
+                reconciled_at: None,
+                settlement_examined_at: 0,
+            },
+        )
+        .await
+        .expect("test reservation should insert")
+    }
+
+    /// The settlement sweep stamps a reservation it leaves behind, both when
+    /// a live attempt still owns it and when settling it fails. Both stamps
+    /// are ORM updates of the crate's own record and must be written under a
+    /// host field policy that refuses every repository field decision, or
+    /// the sweep could never rotate past such a reservation.
+    #[tokio::test]
+    async fn the_settlement_stamp_is_written_under_a_host_field_policy_that_denies_every_repository_field()
+     {
+        let fixture = fixture().await;
+        let run = started_run(&fixture, Uuid::new_v4()).await;
+        let record = run_record(&fixture, run).await;
+        // Owned: the run's lease is live, so the sweep stamps and moves on.
+        let owned = expired_reservation(&fixture, &record, record.session_id, "owned").await;
+        // Refused: the reservation names another session, so settlement
+        // fails and the sweep stamps it as skipped.
+        let refused = expired_reservation(&fixture, &record, Uuid::new_v4(), "refused").await;
+        let mut database = fixture.database.clone();
+        database.set_field_policy(DenyEveryRepositoryField);
+        fixture.clock.advance_seconds(1);
+        let report = service_on(&fixture, database, 16)
+            .recover_expired_leases()
+            .await
+            .expect("the pass runs under the denying field policy");
+        assert_eq!(report.skipped, 1, "{report:?}");
+        assert_eq!(report.budget_reservations_settled, 0, "{report:?}");
+        for reservation in [&owned, &refused] {
+            let stamped = AiBudgetReservationRecord::find_by_id(&fixture.database, &reservation.id)
+                .await
+                .expect("reservation lookup should succeed")
+                .expect("reservation should exist");
+            assert!(
+                stamped.settlement_examined_at > 0,
+                "{} was not stamped",
+                stamped.idempotency_key
+            );
+            assert_eq!(stamped.state, "reserved");
+        }
     }
 
     #[tokio::test]

@@ -480,6 +480,60 @@ pub fn enforce_resolver_scopes(
     }
 }
 
+/// Enforce the authorization a handwritten root declares with
+/// `#[graphql_orm_custom_operations]`.
+///
+/// This is the check a generated operation with `auth = "required"` and the
+/// same fixed `operation_authorization` scopes runs: the request must carry a
+/// typed [`AuthSubject`], and with `alternatives` non-empty the subject must
+/// hold every scope of at least one alternative. Unlike a generated
+/// operation, it never follows the schema-level [`ResolverAuthConfig`]: a
+/// declared requirement is enforced whatever the schema default is.
+///
+/// # Errors
+///
+/// Returns `UNAUTHENTICATED` without a subject and `FORBIDDEN` when no scope
+/// alternative is satisfied.
+pub fn enforce_declared_authorization(
+    ctx: &async_graphql::Context<'_>,
+    alternatives: &[&[&str]],
+) -> async_graphql::Result<AuthSubject> {
+    if alternatives.is_empty() {
+        ctx.auth_subject()
+    } else {
+        enforce_resolver_scopes(ctx, alternatives)
+    }
+}
+
+/// Guard that `#[graphql_orm_custom_operations]` installs on every described
+/// root that declares authorization.
+///
+/// It runs [`enforce_declared_authorization`] before the operation-assurance
+/// guard, any host guard and the resolver body.
+#[derive(Clone, Copy, Debug)]
+pub struct DeclaredAuthorizationGuard {
+    alternatives: &'static [&'static [&'static str]],
+}
+
+impl DeclaredAuthorizationGuard {
+    /// Require an authenticated subject.
+    pub const fn authenticated() -> Self {
+        Self { alternatives: &[] }
+    }
+
+    /// Require an authenticated subject holding every scope of at least one
+    /// alternative. An empty alternative never matches.
+    pub const fn scopes(alternatives: &'static [&'static [&'static str]]) -> Self {
+        Self { alternatives }
+    }
+}
+
+impl async_graphql::Guard for DeclaredAuthorizationGuard {
+    async fn check(&self, ctx: &async_graphql::Context<'_>) -> async_graphql::Result<()> {
+        enforce_declared_authorization(ctx, self.alternatives).map(drop)
+    }
+}
+
 /// Require an authenticated subject that satisfies one scope-template
 /// alternative after substituting already-coerced root-field arguments.
 ///

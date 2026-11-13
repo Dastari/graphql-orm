@@ -100,6 +100,53 @@ pub fn decode_node_id(
     Some(key_parts)
 }
 
+/// Ask the field read decision for a generated `NodeId` field: for the field
+/// itself and for every primary-key field it encodes.
+///
+/// A key field is asked under a field context of its own name, nested below
+/// the `NodeId` field, so a policy sees the same field name in its arguments
+/// and in `ctx.field()`, as it does when the key field itself is selected.
+///
+/// # Errors
+///
+/// Returns `FORBIDDEN` when a decision denies, and the sanitized callback
+/// error when the field policy fails.
+#[doc(hidden)]
+pub async fn authorize_node_id_fields<B>(
+    db: &crate::db::Database<B>,
+    ctx: &async_graphql::Context<'_>,
+    entity_name: &'static str,
+    key_fields: &[&'static str],
+    record: &(dyn std::any::Any + Send + Sync),
+) -> async_graphql::Result<()>
+where
+    B: crate::graphql::orm::OrmBackend,
+{
+    use async_graphql::Positioned;
+    use async_graphql::parser::types::{Field, SelectionSet};
+    db.ensure_readable_field(ctx, entity_name, "NodeId", None, Some(record))
+        .await
+        .map_err(crate::graphql::errors::graphql_error_from_callback)?;
+    let pos = ctx.item.pos;
+    for field in key_fields {
+        let key_field = Positioned::new(
+            Field {
+                alias: None,
+                name: Positioned::new(async_graphql::Name::new(*field), pos),
+                arguments: Vec::new(),
+                directives: Vec::new(),
+                selection_set: Positioned::new(SelectionSet::default(), pos),
+            },
+            pos,
+        );
+        let key_ctx = ctx.with_field(&key_field);
+        db.ensure_readable_field(&key_ctx, entity_name, field, None, Some(record))
+            .await
+            .map_err(crate::graphql::errors::graphql_error_from_callback)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod node_id_tests {
     use super::{decode_node_id, encode_node_id};

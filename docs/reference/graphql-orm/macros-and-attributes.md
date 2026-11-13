@@ -647,14 +647,15 @@ AI catalogue:
 ```rust,ignore
 #[graphql_orm_custom_operations(
     kind = "mutation",
-    authorization = true,
+    all_scopes = ["changes.apply"],
     ai_execution = "approval_required"
 )]
 #[async_graphql::Object]
 impl ApplicationMutations {
     /// Applies one reviewed bounded change.
     async fn apply_change(&self, input: ApplyChangeInput) -> ApplyChangeResult {
-        // Ordinary application authorization remains authoritative.
+        // The declared scope was enforced before this body. Row, tenant and
+        // business authorization remain the application's.
     }
 }
 ```
@@ -695,10 +696,68 @@ in a legacy composition/semantic list.
 needed only by a subgraph that declares no resolvable `@key` of its own and
 participates in Federation purely through `unresolvable` reference stubs.
 
-A handwritten root with the same name as a generated operation compiles, and the generated resolver
-wins: the handwritten one never runs. The only signal is a panic from `graphql_orm_semantic_catalog()`
-for roots in a `described_*` list. [#282](https://github.com/Dastari/graphql-orm/issues/282) tracks
-rejecting the collision.
+`schema_roots!` rejects root field name collisions at compile time. A merged root serves a field from
+only one of its members, so a handwritten field with the name of a generated operation would replace
+that operation, or be replaced by it, together with its validation and authorization. The build fails
+with an error that names both sides:
+
+```text
+graphql-orm: handwritten Mutation root field `deleteItem` of `ApplicationMutations` collides with
+the generated operation `deleteItem` of entity `Item`. A merged root serves only one of them, so one
+would silently replace the other. Rename the handwritten field with `#[graphql(name = "...")]`, or
+remove the generated operation with the entity's `query_shapes`/`mutation_shapes` or
+`generated_mutations` in `schema_roots!`.
+```
+
+The check compares the exposed names: generated names follow the `resolver-case-*` features and the
+entity's selected shapes, and handwritten names follow `#[graphql(name = "...")]` and the root's
+`rename_fields`, derived with the same routines async-graphql uses (so `fn s3bucket` is checked as
+`s3Bucket`, the name it is served under). It covers the Query, Mutation and Subscription roots
+separately, every `described_*` list, the legacy `extra_*` lists and `query_custom_ops`, two
+handwritten roots that declare the same field, two entities whose generated operations share a
+name (for example the same `plural`), and one entity that generates the same root field twice (a
+`plural` equal to the entity's name). Every handwritten root therefore declares its field names:
+`#[graphql_orm_custom_operations]` does it for a described root, and a root in a legacy list carries
+`#[graphql_orm_root_fields]` directly before its `#[Object]` or `#[Subscription]` attribute:
+
+```rust,ignore
+#[graphql_orm_root_fields]
+#[async_graphql::Object]
+impl ManualMutations {
+    async fn archive_everything(&self) -> bool {
+        todo!()
+    }
+}
+```
+
+`#[graphql_orm_root_fields]` takes no arguments and adds no guard, description or metadata. It needs
+a recognised root attribute (not an import alias) and a single `#[graphql(...)]` attribute per
+resolver. `skip` and `entity` resolvers contribute no root field, `derived(name = "...")` contributes
+its extra name, and a `flatten` resolver is refused because the flattened fields can't be named. A
+`graphql` attribute applied through `cfg_attr` is refused on both kinds of handwritten root: it is
+expanded after the macro has read the resolver, so its name would go unchecked. Put the whole
+resolver under `#[cfg(...)]` instead; the declared name then follows the same condition. A legacy
+root without the attribute fails to compile with a message that names it.
+
+A root that is not an `#[Object]` or `#[Subscription]` impl, such as a `#[derive(MergedObject)]`
+struct, implements `graphql::orm::GraphqlRootFieldNames` by hand and lists the root fields of every
+member:
+
+```rust,ignore
+#[derive(async_graphql::MergedObject, Default)]
+struct ReportingQueries(StatusQueries, ReportQueries);
+
+impl graphql_orm::graphql::orm::GraphqlRootFieldNames for ReportingQueries {
+    const ROOT_FIELD_NAMES: &'static [&'static str] = &["status", "report"];
+}
+```
+
+A declaration is checked against the type when the schema is built: `schema_builder`,
+`schema_builder_with_limits` and their `try_` forms compare every handwritten root's declared names
+with the fields the type really exposes, and panic, naming the root and the fields, when one is
+missing. An empty or incomplete manual list therefore cannot hide a collision, although it is found
+at start-up rather than at compile time. A schema assembled by hand with `Schema::build` gets neither
+check.
 
 `generated_mutations` defaults to `"all"`; it accepts
 `"all"`, `"none"`, `"allowlist"`, or `"denylist"`. An allowlist/denylist
@@ -730,7 +789,7 @@ kind mismatch or a second root attribute fails to compile, because the macro
 must read the root's `guard` and `rename_fields`:
 
 ```rust,ignore
-#[graphql_orm_custom_operations(kind = "query", authorization = true)]
+#[graphql_orm_custom_operations(kind = "query")]
 #[async_graphql::Object]
 impl ApplicationQueries {
     /// Returns one bounded public status value.
@@ -751,9 +810,7 @@ impl ApplicationQueries {
 }
 ```
 
-`kind` is required. `authorization` defaults to `true` and records only that an
-authoritative resolver policy exists; it does not describe or execute that
-policy. Resolver and argument names honor explicit `#[graphql(name = "…")]`
+`kind` is required. Resolver and argument names honor explicit `#[graphql(name = "…")]`
 attributes, then `async-graphql`'s default camel-case convention. Descriptions
 use the same explicit/doc/fallback rules and are emitted into SDL. A generated
 argument description is merged into the argument's existing `#[graphql(...)]`
@@ -761,16 +818,121 @@ options, so the argument keeps a single `graphql` attribute. Unknown attributes,
 unbounded descriptions, malformed GraphQL types, duplicate root coordinates,
 and stale fingerprints fail closed.
 
+### Declared authorization is enforced
+
+A described root is either explicitly public or carries a requirement that the
+generated code enforces before the resolver body runs. The catalogue's
+`has_authorization_policy` is `true` exactly when a requirement is enforced.
+
+| Declaration | Enforced before the resolver body | `has_authorization_policy` |
+| --- | --- | --- |
+| none, or `authorization = true` | a typed `AuthSubject` in the GraphQL context, else `UNAUTHENTICATED` | `true` |
+| `all_scopes = ["a", "b"]` | an `AuthSubject` holding every listed scope, else `FORBIDDEN` | `true` |
+| `any_scopes = [["a"], ["b", "c"]]` | an `AuthSubject` satisfying one alternative, else `FORBIDDEN` | `true` |
+| `authorization = false` | nothing: the root is public | `false` |
+
+These are the admission checks a generated operation with `auth = "required"`
+and the same fixed `operation_authorization` scopes runs, in the same order:
+authentication and scopes, then operation assurance, then any host guard, then
+the resolver. Entity, row and field policies are not part of a handwritten
+root; they remain the resolver's work. A declared requirement does not follow the schema-level `auth`
+default, so `auth: "none"` in `schema_roots!` never opens a described root.
+Scope strings follow the `operation_authorization` rules; scope templates are
+not available on handwritten roots. `authorization = false` cannot be combined
+with scopes.
+
+A resolver's own declaration can only narrow its root's requirement. A
+requirement that is weaker than, or different from, the root's must say so at
+the resolver:
+
+| Resolver declaration | Requirement the resolver carries |
+| --- | --- |
+| none | the root's |
+| `#[graphql_orm(authorization = true)]` | the root's (authentication when the root is public) |
+| `#[graphql_orm(all_scopes = [...])]` or `any_scopes = [[...]]` | the root's **and** these scopes |
+| `#[graphql_orm(authorization(replace))]` | authentication only, instead of the root's |
+| `#[graphql_orm(authorization(replace, all_scopes = [...]))]` (or `any_scopes`) | these scopes instead of the root's |
+| `#[graphql_orm(authorization = false)]` | none: the resolver is public |
+
+`authorization(...)` without `replace` does not compile, and neither does
+`authorization(replace, ...)` combined with another authorization option.
+
+```rust,ignore
+#[graphql_orm_custom_operations(kind = "query", all_scopes = ["reports.read"])]
+#[async_graphql::Object]
+impl ReportQueries {
+    /// Requires `reports.read`, from the root.
+    async fn report(&self) -> Report { todo!() }
+
+    /// Requires `reports.read` and `reports.export`.
+    #[graphql_orm(all_scopes = ["reports.export"])]
+    async fn exported_report(&self) -> Report { todo!() }
+
+    /// Requires `reports.catalogue` only: an explicit replacement.
+    #[graphql_orm(authorization(replace, all_scopes = ["reports.catalogue"]))]
+    async fn report_catalogue(&self) -> Vec<String> { todo!() }
+
+    /// Public.
+    #[graphql_orm(authorization = false)]
+    async fn report_formats(&self) -> Vec<String> { todo!() }
+}
+```
+
+async-graphql applies no guard to a `#[graphql(entity)]` resolver, so a
+declared requirement is enforced as the first statement of its body. Such a
+resolver needs a named `&Context<'_>` argument and a `Result` return type, or
+`#[graphql_orm(authorization = false)]`; otherwise it does not compile.
+The check is `graphql::auth::enforce_declared_authorization`, and the guard is
+`graphql::auth::DeclaredAuthorizationGuard`; both are public for handwritten
+roots that are not described. Row, tenant and business authorization remain
+the resolver's own work, and `authorization = false` leaves a host guard or a
+check in the body in place while recording that the ORM enforces nothing.
+
+A described subscription's guard is evaluated again while its stream is open.
+async-graphql evaluates it once, when the stream is created; the macro then
+evaluates the same composed guard (declared authorization, operation assurance
+and the resolver's or root's host guard) before each item is released and on a
+jittered timer (`DEFAULT_SUBSCRIPTION_AUTHORITY_RECHECK_INTERVAL`), so an idle
+stream is closed too. What that does and does not cover:
+
+- The declared authorization reads the `AuthSubject` accepted for the request
+  or connection. That subject does not change while the stream is open, so a
+  revoked session or a removed scope does **not** end the stream through the
+  declaration alone: the subscriber keeps receiving items until the connection
+  ends or the host closes it.
+- Operation assurance is re-evaluated against the installed evaluator, and a
+  host guard is re-evaluated as written. A guard that consults live authority,
+  such as `AgqlCurrentAuthorityGuard` from the
+  [current-authority bridge](agql-auth-bridge.md#accepted-request-and-current-authority),
+  therefore ends the stream at the next item or timer tick after revocation.
+  This is the route for revoking an open described subscription.
+- A host guard that reads a resolver argument (or `self`) is evaluated once
+  only, because the arguments belong to the resolver body by then; the
+  generated guards are still re-evaluated.
+- A handwritten stream has no error channel, so the stream ends without an
+  error frame on the first refusal, and the pending item is not released.
+- The timer uses the default interval, not
+  `Database::subscription_authority_recheck_interval`, because a handwritten
+  root is not bound to a database.
+
+The macro moves the resolver's body into a hidden inherent method and gives
+the resolver a `Context` argument if it had none; the GraphQL signature does
+not change.
+
+### Operation assurance
+
 Each described root, except `#[graphql(entity)]` resolvers, also gets
 `DeclaredAssuranceGuard::new(GraphqlOperationKind::…)` with the root's own kind,
 so it enforces an installed `AssuranceEnforcement`. A root's own `guard` is kept
-and composed after it, as `DeclaredAssuranceGuard::new(…).and(<host guard>)`.
+and composed after the generated guards, as
+`DeclaredAuthorizationGuard::authenticated().and(DeclaredAssuranceGuard::new(…).and(<host guard>))`.
 A root-level `guard` on the `Object` or `Subscription` attribute is composed the
 same way into resolvers without their own guard. A described root takes a single
 `#[graphql(...)]` attribute; async-graphql reads only the first, so the macro
 rejects others. It also rejects `flatten` and `derived(...)` on described
-resolvers, and `rename_fields` on the root attribute, because each would serve a
-field without its guard or under an uncatalogued coordinate. See
+resolvers, and `rename_fields` and `rename_args` on the root attribute, because
+each would serve a field without its guard or under an uncatalogued field or
+argument name. See
 [operation assurance](../../architecture/operation-assurance.md).
 
 Custom scalar and enum result leaves carry an explicit project-neutral
@@ -821,7 +983,6 @@ observation metadata:
 ```rust,ignore
 #[graphql_orm_custom_operations(
     kind = "subscription",
-    authorization = true,
     observation = "replay_then_live",
     maximum_duration_seconds = 300,
     maximum_events = 100

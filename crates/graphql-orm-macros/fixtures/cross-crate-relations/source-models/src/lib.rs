@@ -233,6 +233,11 @@ mod tests {
                 {
                     return Err(async_graphql::Error::new("private entity policy details"));
                 }
+                if entity == "Endpoint"
+                    && identity.is_some_and(|identity| identity.owner == "entity-failure")
+                {
+                    return Err(std::io::Error::other("private entity policy failure").into());
+                }
                 if identity.is_some_and(|identity| !identity.current) {
                     return Ok(false);
                 }
@@ -395,12 +400,13 @@ mod tests {
             _: &'a Database<DefaultBackend>,
             _: &'static str,
             field: &'static str,
-            _: Option<&'static str>,
+            key: Option<&'static str>,
             _: Option<&'a (dyn std::any::Any + Send + Sync)>,
         ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
             Box::pin(async move {
                 assert_eq!(ctx.field().name(), field);
-                Ok(ctx.data_unchecked::<Identity>().name_allowed)
+                // Every selected field is asked; only the keyed one is restricted.
+                Ok(key.is_none() || ctx.data_unchecked::<Identity>().name_allowed)
             })
         }
         fn can_write_field<'a>(
@@ -784,6 +790,21 @@ mod tests {
                     "policy provider diagnostics must stay private"
                 );
             }
+            // A failure the provider propagated (it has a source) keeps its
+            // failure class at the relation boundary, still without its text.
+            let failed = schema
+                .execute(async_graphql::Request::new(CHILD).data(identity("entity-failure")))
+                .await;
+            assert_eq!(failed.data.into_json()?["sessions"][0]["id"], "parent");
+            assert!(!failed.errors.is_empty());
+            assert!(
+                failed
+                    .errors
+                    .iter()
+                    .all(|error| error.message == "internal error"),
+                "{:?}",
+                failed.errors
+            );
 
             // Reuse the schema/loader and all preloaded snapshots after ownership changes.
             Endpoint::update_by_id(

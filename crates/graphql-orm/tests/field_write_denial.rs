@@ -58,6 +58,7 @@ struct WriteRecord {
     #[graphql_orm(write_policy = "guard")]
     optional: Option<String>,
     other: String,
+    note: Option<String>,
 }
 #[cfg(feature = "sqlite")]
 schema_roots! { backend: "sqlite", query_custom_ops: [], entities: [WriteRecord] }
@@ -179,15 +180,15 @@ async fn execute(db: &Database, sql: &str) -> graphql_orm::Result<()> {
 async fn run(operation: &str, field: &str, legacy: bool, fail: bool) {
     let (mut db, mut owner) = fixture().await.unwrap();
     #[cfg(feature = "sqlite")]
-    let ddl = "CREATE TABLE write_records (id TEXT PRIMARY KEY, record_key TEXT UNIQUE NOT NULL, required TEXT NOT NULL, optional TEXT, other TEXT NOT NULL)";
+    let ddl = "CREATE TABLE write_records (id TEXT PRIMARY KEY, record_key TEXT UNIQUE NOT NULL, required TEXT NOT NULL, optional TEXT, other TEXT NOT NULL, note TEXT)";
     #[cfg(feature = "postgres")]
-    let ddl = "CREATE TABLE write_records (id UUID PRIMARY KEY, record_key TEXT UNIQUE NOT NULL, required TEXT NOT NULL, optional TEXT, other TEXT NOT NULL)";
+    let ddl = "CREATE TABLE write_records (id UUID PRIMARY KEY, record_key TEXT UNIQUE NOT NULL, required TEXT NOT NULL, optional TEXT, other TEXT NOT NULL, note TEXT)";
     #[cfg(feature = "mssql")]
-    let ddl = "CREATE TABLE write_records (id UNIQUEIDENTIFIER PRIMARY KEY, record_key NVARCHAR(100) UNIQUE NOT NULL, required NVARCHAR(100) NOT NULL, optional NVARCHAR(100), other NVARCHAR(100) NOT NULL)";
+    let ddl = "CREATE TABLE write_records (id UNIQUEIDENTIFIER PRIMARY KEY, record_key NVARCHAR(100) UNIQUE NOT NULL, required NVARCHAR(100) NOT NULL, optional NVARCHAR(100), other NVARCHAR(100) NOT NULL, note NVARCHAR(100))";
     execute(&db, ddl).await.unwrap();
     let id = graphql_orm::uuid::Uuid::new_v4();
     let seed = DefaultBackend::normalize_sql(
-        "INSERT INTO write_records VALUES (?, 'existing', 'before', 'before', 'before')",
+        "INSERT INTO write_records VALUES (?, 'existing', 'before', 'before', 'before', 'before')",
         1,
     );
     <DefaultBackend as WriteBackend>::execute_with_binds(db.pool(), &seed, &[SqlValue::Uuid(id)])
@@ -195,7 +196,7 @@ async fn run(operation: &str, field: &str, legacy: bool, fail: bool) {
         .unwrap();
     if operation.starts_with("bulk") {
         let seed = DefaultBackend::normalize_sql(
-            "INSERT INTO write_records VALUES (?, 'allowed', 'before', 'before', 'before')",
+            "INSERT INTO write_records VALUES (?, 'allowed', 'before', 'before', 'before', 'before')",
             1,
         );
         <DefaultBackend as WriteBackend>::execute_with_binds(
@@ -218,6 +219,8 @@ async fn run(operation: &str, field: &str, legacy: bool, fail: bool) {
             "new"
         };
         format!("recordKey: \"{key}\", required: \"after\", optional: \"after\", other: \"after\"")
+    } else if field == "other" {
+        "other: \"after\"".to_string()
     } else {
         format!("{field}: \"after\", other: \"after\"")
     };
@@ -248,8 +251,37 @@ async fn run(operation: &str, field: &str, legacy: bool, fail: bool) {
         ))
         .await;
     let data = response.data.into_json().unwrap();
-    let ignored =
-        legacy && !fail && (field == "optional" || matches!(operation, "update" | "bulk"));
+    let notes = <DefaultBackend as OrmBackend>::fetch_rows(
+        db.pool(),
+        "SELECT note FROM write_records WHERE record_key = 'existing'",
+        &[],
+    )
+    .await
+    .unwrap();
+    let existing_note = DefaultBackend::try_get_optional_string(&notes[0], "note").unwrap();
+    // No field is denied (`none`), or the denied key-less optional field was
+    // left out of an upsert that inserts: the insert branch asks only about
+    // client-supplied fields.
+    if field == "none" || (field == "note" && operation == "upsert_new") {
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+        assert!(
+            data.as_object()
+                .unwrap()
+                .values()
+                .all(|v| v["success"] == true),
+            "{data}"
+        );
+        // The conflict update still clears the omitted optional field: the
+        // statement is unchanged, only the decision is now asked.
+        let expected = (operation != "upsert_existing").then(|| "before".to_string());
+        assert_eq!(existing_note, expected);
+        owner.cleanup().unwrap();
+        return;
+    }
+    if !ignored_operation(operation, field, legacy, fail) {
+        assert_eq!(existing_note.as_deref(), Some("before"));
+    }
+    let ignored = ignored_operation(operation, field, legacy, fail);
     if ignored {
         assert!(response.errors.is_empty(), "{:?}", response.errors);
         assert!(
@@ -328,6 +360,9 @@ async fn run(operation: &str, field: &str, legacy: bool, fail: bool) {
     }
     owner.cleanup().unwrap();
 }
+fn ignored_operation(operation: &str, field: &str, legacy: bool, fail: bool) -> bool {
+    legacy && !fail && (field == "optional" || matches!(operation, "update" | "bulk"))
+}
 macro_rules! case {
     ($name:ident, $op:literal, $field:literal) => {
         #[tokio::test]
@@ -374,5 +409,25 @@ async fn explicit_opt_out_never_swallows_policy_errors() {
     }
 }
 
+// `other` declares no `write_policy`: the write decision is asked for it with
+// `None`, and a policy that denies it by name is obeyed on every write path.
+case!(create_keyless, "create", "other");
+case!(update_keyless, "update", "other");
+case!(upsert_new_keyless, "upsert_new", "other");
+case!(upsert_existing_keyless, "upsert_existing", "other");
+case!(bulk_keyless, "bulk", "other");
+
 case!(update_optional_null, "update_null", "optional");
 case!(bulk_optional_null, "bulk_null", "optional");
+
+// `note` is key-less, optional and left out of every upsert input here. The
+// conflict update writes it as NULL on an existing row, so the decision is
+// asked with the current row and `None`; an upsert that inserts does not ask
+// about a field the client did not supply.
+case!(
+    upsert_existing_omitted_keyless_optional,
+    "upsert_existing",
+    "note"
+);
+case!(upsert_new_omitted_keyless_optional, "upsert_new", "note");
+case!(upsert_existing_allowed, "upsert_existing", "none");

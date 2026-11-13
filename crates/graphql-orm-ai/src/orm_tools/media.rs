@@ -37,7 +37,7 @@ impl OrmAiApplicationToolCallService {
             .await?;
         let fingerprint = if let Some(binding_id) = provenance.provider_session_binding_id() {
             let binding = crate::orm_provider_session::AiProviderSessionBindingRecord::find_by_id(
-                self.run_service.database(),
+                self.run_service.custody_database(),
                 &binding_id,
             )
             .await
@@ -201,7 +201,7 @@ impl OrmAiApplicationToolCallService {
             .await?;
         // Query only small source-address rows. Never scan entire protected result/argument bodies
         // to discover history. An incomplete bounded source list cannot admit a retained cursor.
-        let rows = AiToolResultSourceRecord::query(self.run_service.database().pool())
+        let rows = AiToolResultSourceRecord::query(self.run_service.custody_database().pool())
             .filter(AiToolResultSourceRecordWhereInput {
                 session_id: Some(UuidFilter {
                     eq: Some(lease.session_id().0),
@@ -284,11 +284,13 @@ impl OrmAiApplicationToolCallService {
             .content_protection_policy_resolver()
             .resolve(principal.principal(), scope)
             .await?;
-        let message =
-            AiMessageRecord::find_by_id(self.run_service.database(), &lease.input_message_id())
-                .await
-                .map_err(|_| AiError::PersistenceFailed)?
-                .ok_or(AiError::NotFound)?;
+        let message = AiMessageRecord::find_by_id(
+            self.run_service.custody_database(),
+            &lease.input_message_id(),
+        )
+        .await
+        .map_err(|_| AiError::PersistenceFailed)?
+        .ok_or(AiError::NotFound)?;
         if message.session_id != lease.session_id().0
             || message.run_id != Some(lease.run_id().0)
             || message.message_role != "user"
@@ -302,7 +304,7 @@ impl OrmAiApplicationToolCallService {
         {
             return Err(AiError::Conflict);
         }
-        let blocks = AiMessageBlockRecord::query(self.run_service.database().pool())
+        let blocks = AiMessageBlockRecord::query(self.run_service.custody_database().pool())
             .filter(AiMessageBlockRecordWhereInput {
                 message_id: Some(UuidFilter {
                     eq: Some(message.id),
@@ -382,20 +384,21 @@ impl OrmAiApplicationToolCallService {
         self.run_service
             .validate_tool_disclosure_fence(lease)
             .await?;
-        let call = AiToolCallRecord::find_by_id(self.run_service.database(), &id.0)
+        let call = AiToolCallRecord::find_by_id(self.run_service.custody_database(), &id.0)
             .await
             .map_err(|_| AiError::PersistenceFailed)?
             .ok_or(AiError::NotFound)?;
-        let step = AiRunStepRecord::find_by_id(self.run_service.database(), &id.0)
+        let step = AiRunStepRecord::find_by_id(self.run_service.custody_database(), &id.0)
             .await
             .map_err(|_| AiError::PersistenceFailed)?
             .ok_or(AiError::NotFound)?;
-        let original_run = AiRunRecord::find_by_id(self.run_service.database(), &call.run_id)
-            .await
-            .map_err(|_| AiError::PersistenceFailed)?
-            .ok_or(AiError::NotFound)?;
+        let original_run =
+            AiRunRecord::find_by_id(self.run_service.custody_database(), &call.run_id)
+                .await
+                .map_err(|_| AiError::PersistenceFailed)?
+                .ok_or(AiError::NotFound)?;
         let session =
-            AiSessionRecord::find_by_id(self.run_service.database(), &lease.session_id().0)
+            AiSessionRecord::find_by_id(self.run_service.custody_database(), &lease.session_id().0)
                 .await
                 .map_err(|_| AiError::PersistenceFailed)?
                 .ok_or(AiError::NotFound)?;

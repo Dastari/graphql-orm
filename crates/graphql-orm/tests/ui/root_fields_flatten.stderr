@@ -1,0 +1,5 @@
+error: `#[graphql_orm_root_fields]` cannot name the fields of a `#[graphql(flatten)]` resolver; declare them as resolvers of this root
+  --> tests/ui/root_fields_flatten.rs:16:14
+   |
+16 |     async fn inner(&self) -> Inner {
+   |              ^^^^^

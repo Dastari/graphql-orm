@@ -193,6 +193,8 @@ mod service {
     /// run/session fencing.
     pub struct OrmAiProviderSessionService {
         database: Database<DefaultWriteBackend>,
+        /// The handle the host supplied, returned by `database()`.
+        host_database: Database<DefaultWriteBackend>,
         access_policy: Arc<dyn AiAccessPolicy>,
         protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
         content_protector: Arc<dyn AiContentProtector>,
@@ -226,12 +228,15 @@ mod service {
             limits: AiProviderSessionLimits,
             maximum_principal_age: Duration,
         ) -> Result<Self, AiError> {
+            let host_database = database.clone();
+            let database = crate::custody_field_policy::custody_database(database);
             if !maximum_principal_age.is_positive() || maximum_principal_age > Duration::hours(1) {
                 return Err(AiError::InvalidConfiguration(
                     "invalid provider-session principal freshness".to_owned(),
                 ));
             }
             Ok(Self {
+                host_database,
                 database,
                 access_policy,
                 protection_policy,
@@ -245,8 +250,11 @@ mod service {
         }
 
         /// Returns the underlying database for host-scheduled composition.
+        // The public accessor returns the host's handle; `database` is the
+        // crate's internal handle and never leaves the crate.
+        #[allow(clippy::misnamed_getters)]
         pub const fn database(&self) -> &Database<DefaultWriteBackend> {
-            &self.database
+            &self.host_database
         }
 
         async fn resolve_current(

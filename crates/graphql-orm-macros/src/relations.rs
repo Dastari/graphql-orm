@@ -578,18 +578,24 @@ pub(crate) fn generate_graphql_relations(
         .map(|r| -> syn::Result<proc_macro2::TokenStream> {
         let field_name = &r.field_name;
         let graphql_name = &r.graphql_name;
-        let relation_read_check = if let Some(policy) = &r.read_policy {
+        // The relation field's read decision is asked with its declared key
+        // or `None`, as for every other generated field.
+        let relation_read_check = {
             let record = if legacy_graphql_complex && entity_meta.compose_complex_object {
                 quote! { &**self }
             } else {
                 quote! { self }
             };
+            let policy = match &r.read_policy {
+                Some(policy) => quote! { Some(#policy) },
+                None => quote! { None },
+            };
             quote! {
                 db.ensure_readable_field(ctx, stringify!(#struct_name), #graphql_name,
-                    Some(#policy), Some(#record)).await
+                    #policy, Some(#record)).await
                     .map_err(::graphql_orm::graphql::loaders::relation_authorization_error)?;
             }
-        } else { quote! {} };
+        };
         let relation_loader_identity = format!("{struct_name}::{graphql_name}");
         let description = &r.description;
         let fk_columns_sql = r

@@ -320,16 +320,18 @@ fn is_misconfigured(error: &async_graphql::Error) -> bool {
 
 /// Generated `Changed` subscriptions drop an event whose authorization fails,
 /// so a misconfigured entity would otherwise never deliver one, silently.
-/// Report the first such entity per process on standard error.
+/// Report the first such entity per process as a `tracing` warning.
 fn warn_undeliverable_changed_events(entity_name: &'static str) {
     use std::sync::atomic::{AtomicBool, Ordering};
     static REPORTED: AtomicBool = AtomicBool::new(false);
     if !REPORTED.swap(true, Ordering::Relaxed) {
-        eprintln!(
-            "graphql-orm warning: Changed subscription events for entity {entity_name} are being \
-             dropped because its read decision reported an authorization misconfiguration. See \
-             the strict-authorization reference (docs/reference/graphql-orm/strict-authorization.md). \
-             Reported once per process."
+        tracing::warn!(
+            target: "graphql_orm::subscriptions",
+            entity = entity_name,
+            "Changed subscription events for this entity are being dropped because its read \
+             decision reported an authorization misconfiguration. See the strict-authorization \
+             reference (docs/reference/graphql-orm/strict-authorization.md). Reported once per \
+             process."
         );
     }
 }
@@ -1005,6 +1007,88 @@ where
     watch_authority_with_delay(stream, authorize, move || authority_recheck_delay(interval))
 }
 
+/// Re-evaluate a described custom subscription's guard while its stream is
+/// open.
+///
+/// `#[graphql_orm_custom_operations]` wraps every described subscription
+/// resolver's stream with this. `authorize` evaluates the resolver's composed
+/// guard: its declared authorization, operation assurance and host guard. It
+/// is awaited before each item is released and on the same jittered timer
+/// generated `Changed` subscriptions use
+/// ([`crate::db::DEFAULT_SUBSCRIPTION_AUTHORITY_RECHECK_INTERVAL`]), so an idle
+/// stream is closed too. A handwritten stream has no error channel, so the
+/// stream ends without a frame on the first refusal; the item that was pending
+/// is not released.
+///
+/// The declared authorization reads the `AuthSubject` accepted for the
+/// request or connection, which does not change while the stream is open.
+/// Revocation therefore reaches an open stream through operation assurance or
+/// a host guard that consults live authority.
+#[doc(hidden)]
+pub fn watch_declared_subscription<S, A, F>(
+    stream: S,
+    authorize: A,
+) -> impl futures::Stream<Item = S::Item>
+where
+    S: futures::Stream,
+    A: FnMut() -> F,
+    F: std::future::Future<Output = async_graphql::Result<()>>,
+{
+    watch_declared_with_delay(stream, authorize, || {
+        authority_recheck_delay(crate::db::DEFAULT_SUBSCRIPTION_AUTHORITY_RECHECK_INTERVAL)
+    })
+}
+
+pub(crate) fn watch_declared_with_delay<S, A, F, D>(
+    stream: S,
+    authorize: A,
+    mut next_delay: D,
+) -> impl futures::Stream<Item = S::Item>
+where
+    S: futures::Stream,
+    A: FnMut() -> F,
+    F: std::future::Future<Output = async_graphql::Result<()>>,
+    D: FnMut() -> std::time::Duration,
+{
+    use futures::{
+        StreamExt,
+        future::{Either, select},
+    };
+    let deadline = tokio::time::Instant::now() + next_delay();
+    futures::stream::unfold(
+        Some((
+            Box::pin(stream),
+            Box::pin(tokio::time::sleep_until(deadline)),
+            authorize,
+            next_delay,
+        )),
+        move |state| async move {
+            let (mut stream, mut timer, mut authorize, mut next_delay) = state?;
+            loop {
+                match select(timer.as_mut(), stream.next()).await {
+                    Either::Left(((), _)) => {
+                        if authorize().await.is_err() {
+                            return None;
+                        }
+                        timer
+                            .as_mut()
+                            .reset(tokio::time::Instant::now() + next_delay());
+                    }
+                    Either::Right((item, _)) => {
+                        let item = item?;
+                        if authorize().await.is_err() {
+                            return None;
+                        }
+                        return Some((item, Some((stream, timer, authorize, next_delay))));
+                    }
+                }
+            }
+        },
+    )
+    // An ended stream stays ended however often it is polled.
+    .fuse()
+}
+
 pub(crate) fn watch_authority_with_delay<S, T, A, F, D>(
     stream: S,
     authorize: A,
@@ -1125,6 +1209,43 @@ mod authority_timer_tests {
             assert!(stream.next().await.is_none());
         }
         assert_eq!(checks.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_declared_subscription_ends_when_its_authority_is_lost() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let allowed = std::sync::Arc::new(AtomicBool::new(true));
+        let authority = allowed.clone();
+        let authorize = move || {
+            std::future::ready(if authority.load(Ordering::SeqCst) {
+                Ok(())
+            } else {
+                Err(crate::graphql::errors::OrmPublicError::forbidden().into_graphql_error())
+            })
+        };
+
+        // An item is released only while the authority holds.
+        let mut stream = Box::pin(watch_declared_with_delay(
+            futures::stream::iter([1, 2, 3]),
+            authorize.clone(),
+            || Duration::from_secs(60),
+        ));
+        assert_eq!(stream.next().await, Some(1));
+        allowed.store(false, Ordering::SeqCst);
+        assert_eq!(stream.next().await, None, "a pending item was released");
+        assert_eq!(stream.next().await, None);
+
+        // An idle source is closed by the timer.
+        allowed.store(true, Ordering::SeqCst);
+        let mut idle = Box::pin(watch_declared_with_delay(
+            futures::stream::pending::<i32>(),
+            authorize,
+            || Duration::from_secs(1),
+        ));
+        let pending = tokio::time::timeout(Duration::from_millis(1500), idle.next()).await;
+        assert!(pending.is_err(), "an authorized idle stream stays open");
+        allowed.store(false, Ordering::SeqCst);
+        assert_eq!(idle.next().await, None);
     }
 
     #[tokio::test(start_paused = true)]

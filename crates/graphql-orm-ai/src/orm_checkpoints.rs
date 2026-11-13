@@ -500,7 +500,7 @@ impl OrmAiCoordinatorCheckpointService {
         }
         let checkpoint_id = lease.latest_checkpoint_id().ok_or(AiError::Conflict)?;
         let session =
-            AiSessionRecord::find_by_id(self.run_service.database(), &lease.session_id().0)
+            AiSessionRecord::find_by_id(self.run_service.custody_database(), &lease.session_id().0)
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::NotFound)?;
@@ -512,14 +512,14 @@ impl OrmAiCoordinatorCheckpointService {
         validate_session_binding(&session, lease, &scope)?;
         let (principal, policy) = self.current_policy(lease, &scope).await?;
         let checkpoint =
-            AiRunCheckpointRecord::find_by_id(self.run_service.database(), &checkpoint_id)
+            AiRunCheckpointRecord::find_by_id(self.run_service.custody_database(), &checkpoint_id)
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::NotFound)?;
         if checkpoint.checkpoint_kind == native::SOURCE_KIND
             || (checkpoint.checkpoint_kind == "approval_wait_parked"
                 && AiNativeApprovalCandidateRecord::find_by_id(
-                    self.run_service.database(),
+                    self.run_service.custody_database(),
                     &claim.tool_call_id().0,
                 )
                 .await
@@ -548,7 +548,7 @@ impl OrmAiCoordinatorCheckpointService {
         }
         enforce_size(protected_state, self.limits.maximum_state_bytes)?;
         let reservation = AiBudgetReservationRecord::find_by_id(
-            self.run_service.database(),
+            self.run_service.custody_database(),
             &budget_reservation_id,
         )
         .await
@@ -645,16 +645,20 @@ impl OrmAiCoordinatorCheckpointService {
             return Err(AiError::Conflict);
         }
         let route = AiToolResultEgressRoute::from_checkpoint_value(payload.result_egress_route)?;
-        let call =
-            AiToolCallRecord::find_by_id(self.run_service.database(), &claim.tool_call_id().0)
-                .await
-                .map_err(|error| map_orm(OrmPublicError::from(error)))?
-                .ok_or(AiError::NotFound)?;
-        let approval =
-            AiApprovalRecord::find_by_id(self.run_service.database(), &claim.approval_id().0)
-                .await
-                .map_err(|error| map_orm(OrmPublicError::from(error)))?
-                .ok_or(AiError::NotFound)?;
+        let call = AiToolCallRecord::find_by_id(
+            self.run_service.custody_database(),
+            &claim.tool_call_id().0,
+        )
+        .await
+        .map_err(|error| map_orm(OrmPublicError::from(error)))?
+        .ok_or(AiError::NotFound)?;
+        let approval = AiApprovalRecord::find_by_id(
+            self.run_service.custody_database(),
+            &claim.approval_id().0,
+        )
+        .await
+        .map_err(|error| map_orm(OrmPublicError::from(error)))?
+        .ok_or(AiError::NotFound)?;
         let expected_turn_index = i64::from(
             payload
                 .provider_turns
@@ -802,11 +806,13 @@ impl OrmAiCoordinatorCheckpointService {
         if completed.provider_call_id() != provider_tool.call_id {
             return Err(AiError::Conflict);
         }
-        let approval =
-            AiApprovalRecord::find_by_id(self.run_service.database(), &adopted.approval_id.0)
-                .await
-                .map_err(|error| map_orm(OrmPublicError::from(error)))?
-                .ok_or(AiError::NotFound)?;
+        let approval = AiApprovalRecord::find_by_id(
+            self.run_service.custody_database(),
+            &adopted.approval_id.0,
+        )
+        .await
+        .map_err(|error| map_orm(OrmPublicError::from(error)))?
+        .ok_or(AiError::NotFound)?;
         if approval.tool_call_id != completed.id().0
             || approval.session_id != lease.session_id().0
             || approval.argument_hash != canonical_json_hash(&provider_tool.arguments)?
@@ -830,7 +836,7 @@ impl OrmAiCoordinatorCheckpointService {
         )?;
         let protected_tool = completed.checkpoint_value().ok_or(AiError::EgressDenied)?;
         let session =
-            AiSessionRecord::find_by_id(self.run_service.database(), &lease.session_id().0)
+            AiSessionRecord::find_by_id(self.run_service.custody_database(), &lease.session_id().0)
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::NotFound)?;
@@ -1053,7 +1059,7 @@ impl OrmAiCoordinatorCheckpointService {
             return Ok(None);
         };
         let checkpoint =
-            AiRunCheckpointRecord::find_by_id(self.run_service.database(), &checkpoint_id)
+            AiRunCheckpointRecord::find_by_id(self.run_service.custody_database(), &checkpoint_id)
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::NotFound)?;
@@ -1102,7 +1108,7 @@ impl OrmAiCoordinatorCheckpointService {
         checkpoint_id: Uuid,
     ) -> Result<AiAdoptedSupervisedToolBatch, AiError> {
         let session =
-            AiSessionRecord::find_by_id(self.run_service.database(), &lease.session_id().0)
+            AiSessionRecord::find_by_id(self.run_service.custody_database(), &lease.session_id().0)
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::NotFound)?;
@@ -1115,7 +1121,7 @@ impl OrmAiCoordinatorCheckpointService {
         let (principal, policy) = self.current_policy(lease, &scope).await?;
         let principal_kind = principal_reference_kind(lease.principal_reference());
         let checkpoint =
-            AiRunCheckpointRecord::find_by_id(self.run_service.database(), &checkpoint_id)
+            AiRunCheckpointRecord::find_by_id(self.run_service.custody_database(), &checkpoint_id)
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::NotFound)?;
@@ -1142,7 +1148,7 @@ impl OrmAiCoordinatorCheckpointService {
         }
         enforce_size(protected_state, self.limits.maximum_state_bytes)?;
         let reservation = AiBudgetReservationRecord::find_by_id(
-            self.run_service.database(),
+            self.run_service.custody_database(),
             &budget_reservation_id,
         )
         .await
@@ -1271,7 +1277,7 @@ impl OrmAiCoordinatorCheckpointService {
         {
             return Err(AiError::EgressDenied);
         }
-        let call = AiToolCallRecord::find_by_id(self.run_service.database(), &tool.id)
+        let call = AiToolCallRecord::find_by_id(self.run_service.custody_database(), &tool.id)
             .await
             .map_err(|error| map_orm(OrmPublicError::from(error)))?
             .ok_or(AiError::NotFound)?;
@@ -1282,12 +1288,12 @@ impl OrmAiCoordinatorCheckpointService {
         {
             return Err(AiError::EgressDenied);
         }
-        let step = AiRunStepRecord::find_by_id(self.run_service.database(), &tool.id)
+        let step = AiRunStepRecord::find_by_id(self.run_service.custody_database(), &tool.id)
             .await
             .map_err(|error| map_orm(OrmPublicError::from(error)))?
             .ok_or(AiError::NotFound)?;
         let approval =
-            AiApprovalRecord::find_by_id(self.run_service.database(), &payload.approval_id)
+            AiApprovalRecord::find_by_id(self.run_service.custody_database(), &payload.approval_id)
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::NotFound)?;
@@ -1431,10 +1437,11 @@ impl OrmAiCoordinatorCheckpointService {
             return Err(AiError::Conflict);
         }
         let decision_id = call.result_egress_decision_id.ok_or(AiError::Conflict)?;
-        let event = AiEgressEventRecord::find_by_id(self.run_service.database(), &decision_id)
-            .await
-            .map_err(|error| map_orm(OrmPublicError::from(error)))?
-            .ok_or(AiError::NotFound)?;
+        let event =
+            AiEgressEventRecord::find_by_id(self.run_service.custody_database(), &decision_id)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
         if event.run_id != Some(lease.run_id().0)
             || event.principal_subject != lease.principal_reference().subject
             || event.scope_kind != scope.kind
@@ -1572,7 +1579,7 @@ impl OrmAiCoordinatorCheckpointService {
         }
 
         let session =
-            AiSessionRecord::find_by_id(self.run_service.database(), &lease.session_id().0)
+            AiSessionRecord::find_by_id(self.run_service.custody_database(), &lease.session_id().0)
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::NotFound)?;
@@ -1631,11 +1638,13 @@ impl OrmAiCoordinatorCheckpointService {
                 return Err(AiError::Conflict);
             }
             if let Some(class) = completed_class {
-                let call =
-                    AiToolCallRecord::find_by_id(self.run_service.database(), &persisted.id().0)
-                        .await
-                        .map_err(|error| map_orm(OrmPublicError::from(error)))?
-                        .ok_or(AiError::NotFound)?;
+                let call = AiToolCallRecord::find_by_id(
+                    self.run_service.custody_database(),
+                    &persisted.id().0,
+                )
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
                 if call.run_id != lease.run_id().0
                     || call.lease_generation != lease.lease_generation()
                     || call.provider_call_id != expected.call_id()
@@ -1850,7 +1859,7 @@ impl OrmAiCoordinatorCheckpointService {
         class: CompletedToolCheckpointClass,
     ) -> Result<AiAdoptedReadOnlyToolBatch, AiError> {
         let session =
-            AiSessionRecord::find_by_id(self.run_service.database(), &lease.session_id().0)
+            AiSessionRecord::find_by_id(self.run_service.custody_database(), &lease.session_id().0)
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::NotFound)?;
@@ -1863,7 +1872,7 @@ impl OrmAiCoordinatorCheckpointService {
         let (principal, policy) = self.current_policy(lease, &scope).await?;
         let principal_kind = principal_reference_kind(lease.principal_reference());
         let checkpoint =
-            AiRunCheckpointRecord::find_by_id(self.run_service.database(), &checkpoint_id)
+            AiRunCheckpointRecord::find_by_id(self.run_service.custody_database(), &checkpoint_id)
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::NotFound)?;
@@ -1884,7 +1893,7 @@ impl OrmAiCoordinatorCheckpointService {
         }
         enforce_size(protected_state, self.limits.maximum_state_bytes)?;
         let reservation = AiBudgetReservationRecord::find_by_id(
-            self.run_service.database(),
+            self.run_service.custody_database(),
             &budget_reservation_id,
         )
         .await
@@ -2058,7 +2067,7 @@ impl OrmAiCoordinatorCheckpointService {
             {
                 return Err(AiError::EgressDenied);
             }
-            let call = AiToolCallRecord::find_by_id(self.run_service.database(), &tool.id)
+            let call = AiToolCallRecord::find_by_id(self.run_service.custody_database(), &tool.id)
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::NotFound)?;
@@ -2069,7 +2078,7 @@ impl OrmAiCoordinatorCheckpointService {
             {
                 return Err(AiError::EgressDenied);
             }
-            let step = AiRunStepRecord::find_by_id(self.run_service.database(), &tool.id)
+            let step = AiRunStepRecord::find_by_id(self.run_service.custody_database(), &tool.id)
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::NotFound)?;
@@ -2136,10 +2145,11 @@ impl OrmAiCoordinatorCheckpointService {
                 return Err(AiError::Conflict);
             }
             let decision_id = call.result_egress_decision_id.ok_or(AiError::Conflict)?;
-            let event = AiEgressEventRecord::find_by_id(self.run_service.database(), &decision_id)
-                .await
-                .map_err(|error| map_orm(OrmPublicError::from(error)))?
-                .ok_or(AiError::NotFound)?;
+            let event =
+                AiEgressEventRecord::find_by_id(self.run_service.custody_database(), &decision_id)
+                    .await
+                    .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                    .ok_or(AiError::NotFound)?;
             if event.run_id != Some(lease.run_id().0)
                 || event.principal_subject != lease.principal_reference().subject
                 || event.scope_kind != scope.kind
@@ -2182,10 +2192,11 @@ impl OrmAiCoordinatorCheckpointService {
                 {
                     return Err(AiError::Conflict);
                 }
-                let call = AiToolCallRecord::find_by_id(self.run_service.database(), &tool_id)
-                    .await
-                    .map_err(|error| map_orm(OrmPublicError::from(error)))?
-                    .ok_or(AiError::NotFound)?;
+                let call =
+                    AiToolCallRecord::find_by_id(self.run_service.custody_database(), &tool_id)
+                        .await
+                        .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                        .ok_or(AiError::NotFound)?;
                 if transfer.sources[0].reference
                     != self
                         .expected_application_source(lease, &scope, &call, &item.output)
@@ -2193,13 +2204,14 @@ impl OrmAiCoordinatorCheckpointService {
                 {
                     return Err(AiError::EgressDenied);
                 }
-                let step = AiRunStepRecord::find_by_id(self.run_service.database(), &tool_id)
-                    .await
-                    .map_err(|error| map_orm(OrmPublicError::from(error)))?
-                    .ok_or(AiError::NotFound)?;
+                let step =
+                    AiRunStepRecord::find_by_id(self.run_service.custody_database(), &tool_id)
+                        .await
+                        .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                        .ok_or(AiError::NotFound)?;
                 let historical_budget_id = call.budget_reservation_id.ok_or(AiError::Conflict)?;
                 let historical_budget = AiBudgetReservationRecord::find_by_id(
-                    self.run_service.database(),
+                    self.run_service.custody_database(),
                     &historical_budget_id,
                 )
                 .await
@@ -2296,11 +2308,13 @@ impl OrmAiCoordinatorCheckpointService {
                     return Err(AiError::Conflict);
                 }
                 let decision_id = call.result_egress_decision_id.ok_or(AiError::Conflict)?;
-                let event =
-                    AiEgressEventRecord::find_by_id(self.run_service.database(), &decision_id)
-                        .await
-                        .map_err(|error| map_orm(OrmPublicError::from(error)))?
-                        .ok_or(AiError::NotFound)?;
+                let event = AiEgressEventRecord::find_by_id(
+                    self.run_service.custody_database(),
+                    &decision_id,
+                )
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
                 if event.run_id != Some(lease.run_id().0)
                     || event.principal_subject != lease.principal_reference().subject
                     || event.scope_kind != scope.kind

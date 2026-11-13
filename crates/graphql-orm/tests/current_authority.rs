@@ -78,6 +78,7 @@ impl BatchLoadEntity for SecureProject {
 }
 #[derive(Default)]
 struct CustomQuery;
+#[graphql_orm_root_fields]
 #[Object]
 impl CustomQuery {
     async fn capture_owned(&self, ctx: &Context<'_>) -> graphql_orm::async_graphql::Result<bool> {
@@ -101,6 +102,7 @@ impl CustomQuery {
 }
 #[derive(Default)]
 struct CustomMutation;
+#[graphql_orm_root_fields]
 #[Object]
 impl CustomMutation {
     #[graphql(

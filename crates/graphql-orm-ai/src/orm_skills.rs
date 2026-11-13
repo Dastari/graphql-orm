@@ -137,6 +137,8 @@ struct SkillChecksumContent<'a> {
 /// resolver, egress, provider, proposal, approval, or budget policy.
 pub struct OrmAiSkillCatalogService {
     database: Database<DefaultWriteBackend>,
+    /// The handle the host supplied, returned by `database()`.
+    host_database: Database<DefaultWriteBackend>,
     access_policy: Arc<dyn AiSkillAccessPolicy>,
     protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
     content_protector: Arc<dyn AiContentProtector>,
@@ -154,7 +156,10 @@ impl OrmAiSkillCatalogService {
         recent_mfa_policy: RecentMfaPolicy,
         clock: Arc<dyn Clock>,
     ) -> Self {
+        let host_database = database.clone();
+        let database = crate::custody_field_policy::custody_database(database);
         Self {
+            host_database,
             database,
             access_policy,
             protection_policy,
@@ -165,8 +170,11 @@ impl OrmAiSkillCatalogService {
     }
 
     /// Returns the generated ORM database handle for host wiring.
+    // The public accessor returns the host's handle; `database` is the
+    // crate's internal handle and never leaves the crate.
+    #[allow(clippy::misnamed_getters)]
     pub fn database(&self) -> &Database<DefaultWriteBackend> {
-        &self.database
+        &self.host_database
     }
 
     async fn require_access(

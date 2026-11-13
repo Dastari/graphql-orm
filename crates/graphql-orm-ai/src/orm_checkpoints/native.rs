@@ -43,11 +43,14 @@ impl OrmAiCoordinatorCheckpointService {
             .zip(result.interactive_tool_results())
             .enumerate()
         {
-            let call = AiToolCallRecord::find_by_id(self.run_service.database(), &persisted.id().0)
-                .await
-                .map_err(|error| map_orm(OrmPublicError::from(error)))?
-                .ok_or(AiError::Conflict)?;
-            let step = AiRunStepRecord::find_by_id(self.run_service.database(), &call.id)
+            let call = AiToolCallRecord::find_by_id(
+                self.run_service.custody_database(),
+                &persisted.id().0,
+            )
+            .await
+            .map_err(|error| map_orm(OrmPublicError::from(error)))?
+            .ok_or(AiError::Conflict)?;
+            let step = AiRunStepRecord::find_by_id(self.run_service.custody_database(), &call.id)
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::Conflict)?;
@@ -433,13 +436,13 @@ impl OrmAiCoordinatorCheckpointService {
             }),
         )?;
         let session =
-            AiSessionRecord::find_by_id(self.run_service.database(), &lease.session_id().0)
+            AiSessionRecord::find_by_id(self.run_service.custody_database(), &lease.session_id().0)
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::NotFound)?;
         validate_session_binding(&session, lease, &source.scope)?;
         let budget = AiBudgetReservationRecord::find_by_id(
-            self.run_service.database(),
+            self.run_service.custody_database(),
             &provider.budget_reservation_id,
         )
         .await
@@ -459,7 +462,7 @@ impl OrmAiCoordinatorCheckpointService {
             return Err(AiError::Conflict);
         }
         let candidate = AiNativeApprovalCandidateRecord::find_by_id(
-            self.run_service.database(),
+            self.run_service.custody_database(),
             &source.candidate_id,
         )
         .await
@@ -559,12 +562,14 @@ impl OrmAiCoordinatorCheckpointService {
             if call_id != &requested.call_id || tool_id != &requested.tool_id {
                 return Err(AiError::Conflict);
             }
-            let call =
-                AiToolCallRecord::find_by_id(self.run_service.database(), &outcome.tool_call_id)
-                    .await
-                    .map_err(|error| map_orm(OrmPublicError::from(error)))?
-                    .ok_or(AiError::Conflict)?;
-            let step = AiRunStepRecord::find_by_id(self.run_service.database(), &call.id)
+            let call = AiToolCallRecord::find_by_id(
+                self.run_service.custody_database(),
+                &outcome.tool_call_id,
+            )
+            .await
+            .map_err(|error| map_orm(OrmPublicError::from(error)))?
+            .ok_or(AiError::Conflict)?;
+            let step = AiRunStepRecord::find_by_id(self.run_service.custody_database(), &call.id)
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::Conflict)?;
@@ -833,10 +838,11 @@ impl OrmAiCoordinatorCheckpointService {
         manifest: &AiEgressManifest,
         decision_id: Uuid,
     ) -> Result<(), AiError> {
-        let event = AiEgressEventRecord::find_by_id(self.run_service.database(), &decision_id)
-            .await
-            .map_err(|error| map_orm(OrmPublicError::from(error)))?
-            .ok_or(AiError::EgressDenied)?;
+        let event =
+            AiEgressEventRecord::find_by_id(self.run_service.custody_database(), &decision_id)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::EgressDenied)?;
         if event.run_id != Some(lease.run_id().0)
             || event.principal_subject != lease.principal_reference().subject
             || event.scope_kind != scope.kind
@@ -891,7 +897,7 @@ impl OrmAiCoordinatorCheckpointService {
         scope: &AiScope,
         policy: &AiContentProtectionPolicy,
     ) -> Result<(AiRunCheckpointRecord, serde_json::Value), AiError> {
-        let row = AiRunCheckpointRecord::find_by_id(self.run_service.database(), &id)
+        let row = AiRunCheckpointRecord::find_by_id(self.run_service.custody_database(), &id)
             .await
             .map_err(|error| map_orm(OrmPublicError::from(error)))?
             .ok_or(AiError::Conflict)?;
@@ -904,7 +910,7 @@ impl OrmAiCoordinatorCheckpointService {
             return Err(AiError::Conflict);
         }
         let budget = AiBudgetReservationRecord::find_by_id(
-            self.run_service.database(),
+            self.run_service.custody_database(),
             &row.budget_reservation_id.ok_or(AiError::Conflict)?,
         )
         .await
@@ -961,7 +967,7 @@ impl OrmAiCoordinatorCheckpointService {
             return Err(AiError::Conflict);
         }
         let session =
-            AiSessionRecord::find_by_id(self.run_service.database(), &lease.session_id().0)
+            AiSessionRecord::find_by_id(self.run_service.custody_database(), &lease.session_id().0)
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::Conflict)?;
@@ -996,7 +1002,7 @@ impl OrmAiCoordinatorCheckpointService {
             return Err(AiError::Conflict);
         }
         let binding = crate::orm_provider_session::AiProviderSessionBindingRecord::find_by_id(
-            self.run_service.database(),
+            self.run_service.custody_database(),
             &parked.provider_session_binding_id,
         )
         .await
@@ -1040,15 +1046,18 @@ impl OrmAiCoordinatorCheckpointService {
         {
             return Err(AiError::Conflict);
         }
-        let call = AiToolCallRecord::find_by_id(self.run_service.database(), &source.candidate_id)
-            .await
-            .map_err(|error| map_orm(OrmPublicError::from(error)))?
-            .ok_or(AiError::Conflict)?;
-        let approval =
-            AiApprovalRecord::find_by_id(self.run_service.database(), &claim.approval_id().0)
+        let call =
+            AiToolCallRecord::find_by_id(self.run_service.custody_database(), &source.candidate_id)
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::Conflict)?;
+        let approval = AiApprovalRecord::find_by_id(
+            self.run_service.custody_database(),
+            &claim.approval_id().0,
+        )
+        .await
+        .map_err(|error| map_orm(OrmPublicError::from(error)))?
+        .ok_or(AiError::Conflict)?;
         validate_native_approval(lease, &proof.preparation, &call, &approval)?;
         if approval.state != "resume_claimed"
             || approval.consumed_uses != 0
@@ -1133,10 +1142,11 @@ impl OrmAiCoordinatorCheckpointService {
             )
             .await?;
         let approval_id = proof.candidate.final_approval_id.ok_or(AiError::Conflict)?;
-        let approval = AiApprovalRecord::find_by_id(self.run_service.database(), &approval_id)
-            .await
-            .map_err(|error| map_orm(OrmPublicError::from(error)))?
-            .ok_or(AiError::Conflict)?;
+        let approval =
+            AiApprovalRecord::find_by_id(self.run_service.custody_database(), &approval_id)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::Conflict)?;
         let payload = NativeApprovedOutcome {
             format_version: 1,
             checkpoint_kind: OUTCOME_KIND.to_owned(),
@@ -1155,7 +1165,7 @@ impl OrmAiCoordinatorCheckpointService {
         let (tool, _) = self
             .validate_native_outcome(lease, &payload, &policy)
             .await?;
-        let call = AiToolCallRecord::find_by_id(self.run_service.database(), &tool.id)
+        let call = AiToolCallRecord::find_by_id(self.run_service.custody_database(), &tool.id)
             .await
             .map_err(|error| map_orm(OrmPublicError::from(error)))?
             .ok_or(AiError::Conflict)?;
@@ -1277,13 +1287,15 @@ impl OrmAiCoordinatorCheckpointService {
         }
         let tool: ToolResultSnapshot = serde_json::from_value(payload.completed_tool.clone())
             .map_err(|_| AiError::Conflict)?;
-        let call =
-            AiToolCallRecord::find_by_id(self.run_service.database(), &payload.source.candidate_id)
-                .await
-                .map_err(|error| map_orm(OrmPublicError::from(error)))?
-                .ok_or(AiError::Conflict)?;
+        let call = AiToolCallRecord::find_by_id(
+            self.run_service.custody_database(),
+            &payload.source.candidate_id,
+        )
+        .await
+        .map_err(|error| map_orm(OrmPublicError::from(error)))?
+        .ok_or(AiError::Conflict)?;
         let approval =
-            AiApprovalRecord::find_by_id(self.run_service.database(), &payload.approval_id)
+            AiApprovalRecord::find_by_id(self.run_service.custody_database(), &payload.approval_id)
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::Conflict)?;
@@ -1430,7 +1442,7 @@ impl OrmAiCoordinatorCheckpointService {
             return Err(AiError::Conflict);
         }
         let session =
-            AiSessionRecord::find_by_id(self.run_service.database(), &lease.session_id().0)
+            AiSessionRecord::find_by_id(self.run_service.custody_database(), &lease.session_id().0)
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::Conflict)?;
@@ -1460,7 +1472,7 @@ impl OrmAiCoordinatorCheckpointService {
         let (tool, mut continuation) = self
             .validate_native_outcome(lease, &payload, &policy)
             .await?;
-        let call = AiToolCallRecord::find_by_id(self.run_service.database(), &tool.id)
+        let call = AiToolCallRecord::find_by_id(self.run_service.custody_database(), &tool.id)
             .await
             .map_err(|error| map_orm(OrmPublicError::from(error)))?
             .ok_or(AiError::Conflict)?;

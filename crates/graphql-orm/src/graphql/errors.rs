@@ -253,6 +253,26 @@ impl OrmPublicError {
         }
     }
 
+    /// Classify a host policy callback failure where no authored text may
+    /// reach a caller unless the callback marked it as a public refusal.
+    ///
+    /// A refusal with an ORM public `code` extension other than
+    /// `INTERNAL_ERROR`, or a typed [`OrmPublicError`] propagated with `?`,
+    /// keeps its code and message. Every other failure, including a plain
+    /// `async_graphql::Error::new(text)` without a code, reads as
+    /// `INTERNAL_ERROR` with the default message on every surface; its text is
+    /// kept as a server-side diagnostic only.
+    pub(crate) fn from_callback(error: async_graphql::Error) -> Self {
+        let mut public = Self::from(sqlx_error_from_graphql(error));
+        if public.code == OrmErrorCode::InternalError {
+            // The general classifier lets the GraphQL boundary render an
+            // uncoded authored message as written. These callbacks get no
+            // such allowance: only a known public code marks text as safe.
+            public.application_refusal = None;
+        }
+        public
+    }
+
     /// Convert into a GraphQL error, preserving explicit application callback extensions.
     /// Infrastructure failures expose only safe ORM extensions.
     pub fn into_graphql_error(self) -> async_graphql::Error {
@@ -483,12 +503,35 @@ pub fn graphql_internal_error(error: impl fmt::Display) -> async_graphql::Error 
     OrmPublicError::internal(error.to_string()).into_graphql_error()
 }
 
+/// Report an internal diagnostic through `tracing`.
+///
+/// Every report is an event on the `graphql_orm::internal_error` target that
+/// carries the public code. Failures (`INTERNAL_ERROR`, `SERVICE_UNAVAILABLE`
+/// and `AUTHORIZATION_MISCONFIGURED`) are `ERROR` events and refusals are
+/// `DEBUG` events. The diagnostic text can quote driver or host callback
+/// messages, so it is attached as the `detail` field only when the operator
+/// has set `GRAPHQL_ORM_LOG_INTERNAL_ERRORS`. The ORM never formats a row or
+/// a bound value into it.
 fn tracing_log_internal(code: &OrmErrorCode, internal: &str) {
-    // Avoid pulling a tracing dependency into the public crate surface.
-    // Hosts can install a custom panic/log hook; we emit to stderr only when
-    // the `GRAPHQL_ORM_LOG_INTERNAL_ERRORS` environment variable is set.
-    if std::env::var_os("GRAPHQL_ORM_LOG_INTERNAL_ERRORS").is_some() {
-        eprintln!("graphql-orm internal error code={code} detail={internal}");
+    let detail = std::env::var_os("GRAPHQL_ORM_LOG_INTERNAL_ERRORS").map(|_| internal);
+    let code = code.as_str();
+    if matches!(
+        code,
+        "INTERNAL_ERROR" | "SERVICE_UNAVAILABLE" | "AUTHORIZATION_MISCONFIGURED"
+    ) {
+        tracing::error!(
+            target: "graphql_orm::internal_error",
+            code,
+            detail,
+            "graphql-orm internal error"
+        );
+    } else {
+        tracing::debug!(
+            target: "graphql_orm::internal_error",
+            code,
+            detail,
+            "graphql-orm refusal"
+        );
     }
 }
 
