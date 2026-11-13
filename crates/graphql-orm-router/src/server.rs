@@ -371,6 +371,8 @@ impl PreparedRouter {
             request_limits: self.config.request_limits.clone(),
             introspection: self.config.introspection,
             persisted_documents_enabled: self.config.persisted_documents.is_some(),
+            persisted_documents: self.config.persisted_documents.clone(),
+            verified_runtimes: Arc::new(hive_router::tokio::sync::Mutex::new(BTreeMap::new())),
             strict_persisted_documents: self
                 .config
                 .persisted_documents
@@ -583,6 +585,15 @@ struct SelectedNodeLookup(Option<Arc<crate::node_lookup::NodeLookup>>);
 #[derive(Clone, Copy)]
 struct TrustedInternalSubscription;
 
+type InstallVerifiedRuntime = Arc<dyn Fn(&web::HttpRequest) + Send + Sync>;
+
+struct VerifiedRuntime {
+    owner: std::sync::Weak<ActiveGraph>,
+    // None poisons a runtime whose file changed during initialization. Hive may
+    // have cached that failed verification; never select it again in this generation.
+    install: Option<InstallVerifiedRuntime>,
+}
+
 #[derive(Clone)]
 struct PluginRuntime {
     lifecycle: Arc<GraphLifecycle>,
@@ -594,6 +605,8 @@ struct PluginRuntime {
     introspection: bool,
     strict_persisted_documents: bool,
     persisted_documents_enabled: bool,
+    persisted_documents: Option<crate::persisted::PersistedDocuments>,
+    verified_runtimes: Arc<hive_router::tokio::sync::Mutex<BTreeMap<u64, VerifiedRuntime>>>,
 }
 
 fn plugin_runtimes() -> &'static Mutex<BTreeMap<u64, PluginRuntime>> {
@@ -605,6 +618,61 @@ fn remove_plugin_runtime(runtime_id: u64) -> Option<PluginRuntime> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .remove(&runtime_id)
+}
+
+impl StaticGraphPlugin {
+    async fn pin_verified_runtime(
+        &self,
+        request: &web::HttpRequest,
+        selected: &Arc<crate::lifecycle::ActiveRouterGraph>,
+    ) -> Result<(), ()> {
+        let Some(documents) = &self.runtime.persisted_documents else {
+            return Ok(());
+        };
+        let version = selected.graph.version;
+        // Serialize first-use verification so a concurrent request cannot reuse
+        // an engine-cached runtime before its manifest has been checked.
+        let mut entries = self.runtime.verified_runtimes.lock().await;
+        entries.retain(|_, entry| entry.owner.strong_count() != 0);
+        let cached = entries.get(&version).map(|entry| entry.install.clone());
+        if let Some(cached) = cached {
+            let install = cached.ok_or(())?;
+            install(request);
+            return Ok(());
+        }
+        documents.verify_snapshot().map_err(|_| ())?;
+        let schema = request
+            .app_state::<Arc<hive_router::SchemaState>>()
+            .ok_or(())?;
+        let runtime = schema.select_supergraph(request).await;
+        let verified = documents.verify_snapshot().is_ok();
+        if !verified {
+            entries.insert(
+                version,
+                VerifiedRuntime {
+                    owner: Arc::downgrade(&selected.graph),
+                    install: None,
+                },
+            );
+            return Err(());
+        }
+        let runtime = runtime.map_err(|_| ())?.ok_or(())?;
+        let install: InstallVerifiedRuntime = Arc::new(move |request| {
+            hive_router::telemetry::logging::summary::record(|summary| {
+                summary.set_supergraph_name(&runtime.snapshot.name);
+            });
+            request.extensions_mut().insert(runtime.clone());
+        });
+        install(request);
+        entries.insert(
+            version,
+            VerifiedRuntime {
+                owner: Arc::downgrade(&selected.graph),
+                install: Some(install),
+            },
+        );
+        Ok(())
+    }
 }
 
 #[hive_router::async_trait]
@@ -684,6 +752,32 @@ impl RouterPlugin for StaticGraphPlugin {
                     payload.context.insert(TrustedInternalSubscription);
                 }
             }
+            let payload = if self.runtime.persisted_documents_enabled {
+                let (request, body) = payload.router_http_request.into_parts();
+                let verified = self.pin_verified_runtime(&request, &selected).await.is_ok();
+                // Runtime selection borrows this request; it never retains a clone.
+                // Restore the original body before the normal authentication and
+                // GraphQL pipeline continue.
+                let router_http_request = web::WebRequest::from_parts(request, body)
+                    .unwrap_or_else(|_| unreachable!("runtime selection retained an HTTP request"));
+                let payload = OnHttpRequestHookPayload {
+                    router_http_request,
+                    context: payload.context,
+                    request_context: payload.request_context,
+                };
+                if !verified {
+                    return payload.end_with_graphql_error(
+                        GraphQLError::from_message_and_code(
+                            "Persisted document runtime is unavailable",
+                            "SERVICE_UNAVAILABLE",
+                        ),
+                        hive_router::http::StatusCode::SERVICE_UNAVAILABLE,
+                    );
+                }
+                payload
+            } else {
+                payload
+            };
             let Some(provider) = &self.runtime.authentication else {
                 return payload.proceed();
             };
@@ -1230,7 +1324,7 @@ pub(crate) fn strict_bearer_token(authorization: &str) -> Option<&str> {
 // them from the same private configuration as the server, before publication.
 fn build_graph_options(
     config: &RouterConfig,
-) -> Result<hive_router::plugins::hooks::on_supergraph_load::SupergraphOptions, RouterError> {
+) -> Result<crate::lifecycle::GraphOptions, RouterError> {
     let hive = build_hive_config(config, 0, None)?;
     let mut options = hive_router::plugins::hooks::on_supergraph_load::SupergraphOptions::default();
     options.traffic_shaping = (&hive.traffic_shaping).into();
@@ -1238,7 +1332,10 @@ fn build_graph_options(
     options.subscriptions = (&hive.subscriptions).into();
     options.error_masking = hive.error_masking;
     options.persisted_documents = hive.persisted_documents;
-    Ok(options)
+    Ok(crate::lifecycle::GraphOptions {
+        hive: options,
+        persisted_documents: config.persisted_documents.clone(),
+    })
 }
 
 fn build_hive_config(
@@ -1375,6 +1472,19 @@ mod tests {
         ) -> Result<AuthenticatedPrincipal, crate::AuthenticationError> {
             Err(crate::AuthenticationError::invalid_credential("rejected"))
         }
+    }
+
+    #[test]
+    fn persisted_documents_off_matches_previous_hive_configuration() {
+        let config = RouterConfig::new("127.0.0.1:4000".parse().unwrap());
+        let actual = serde_json::to_value(build_hive_config(&config, 0, None).unwrap()).unwrap();
+        let mut previous = actual.clone();
+        previous
+            .as_object_mut()
+            .unwrap()
+            .remove("persisted_documents");
+        let previous: HiveRouterConfig = serde_json::from_value(previous).unwrap();
+        assert_eq!(actual, serde_json::to_value(previous).unwrap());
     }
 
     #[test]

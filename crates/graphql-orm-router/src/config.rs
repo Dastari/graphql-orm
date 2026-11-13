@@ -331,19 +331,27 @@ impl RouterConfig {
         self
     }
 
-    /// Enables persisted documents from a local JSON id-to-document manifest.
+    /// Requires registered ids from a local JSON id-to-document manifest.
     ///
-    /// Ids are lowercase SHA-256 hashes of exact UTF-8 document bytes. Startup
-    /// validates the 16 MiB / 10,000-entry bounds and pins an immutable snapshot.
-    /// Strict mode requires a registered id for every operation; it preserves
-    /// authentication and authorization checks. Restart to change the manifest.
+    /// Keys are lowercase SHA-256 hashes of exact UTF-8 document bytes. Startup
+    /// validates the 16 MiB / 10,000-entry manifest and 4 KiB document bounds.
+    /// A private snapshot is checked on every graph candidate; restart with a
+    /// new configuration to adopt operator-file changes. Authorization remains
+    /// mandatory according to the operation's existing policy.
     #[must_use]
-    pub fn with_persisted_documents(
-        mut self,
-        path: impl AsRef<std::path::Path>,
-        strict: bool,
-    ) -> Self {
-        self.persisted_documents = Some(crate::persisted::PersistedDocuments::new(path, strict));
+    pub fn with_persisted_allow_list(mut self, path: impl AsRef<std::path::Path>) -> Self {
+        self.persisted_documents = Some(crate::persisted::PersistedDocuments::new(path, true));
+        self
+    }
+
+    /// Enables registered ids and also permits ordinary document text.
+    ///
+    /// Uses the same validated local manifest and bounds as
+    /// [`Self::with_persisted_allow_list`]. When a request supplies both an id
+    /// and text, its text runs. This mode does not enforce an allow-list.
+    #[must_use]
+    pub fn with_persisted_ids_or_text(mut self, path: impl AsRef<std::path::Path>) -> Self {
+        self.persisted_documents = Some(crate::persisted::PersistedDocuments::new(path, false));
         self
     }
 
@@ -1559,9 +1567,59 @@ mod tests {
             std::process::id()
         ));
         std::fs::write(&path, bytes).unwrap();
-        let result = base().with_persisted_documents(&path, true).validate();
+        let result = base().with_persisted_allow_list(&path).validate();
         std::fs::remove_file(path).unwrap();
         result
+    }
+
+    #[test]
+    fn persisted_manifest_document_size_is_bounded() {
+        use sha2::{Digest, Sha256};
+        let doc = format!("{}query {{ __typename }}", " ".repeat(4096));
+        let bytes = serde_json::to_vec(&BTreeMap::from([(
+            format!("{:x}", Sha256::digest(doc.as_bytes())),
+            doc,
+        )]))
+        .unwrap();
+        let error = check_manifest(&bytes).unwrap_err().to_string();
+        assert!(error.contains("4096"), "{error}");
+    }
+
+    #[test]
+    fn persisted_snapshot_revalidation_refuses_changes_and_removal() {
+        use sha2::{Digest, Sha256};
+        let doc = "query { __typename }";
+        let config = check_manifest(
+            &serde_json::to_vec(&BTreeMap::from([(
+                format!("{:x}", Sha256::digest(doc.as_bytes())),
+                doc,
+            )]))
+            .unwrap(),
+        )
+        .unwrap();
+        let hive = config.persisted_documents.as_ref().unwrap().hive_config();
+        let path = std::path::Path::new(hive["storage"]["path"].as_str().unwrap());
+        std::fs::write(path, b"{}").unwrap();
+        assert!(config.clone().validate().is_err());
+        std::fs::remove_file(path).unwrap();
+        assert!(config.validate().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persisted_snapshot_directory_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let config = check_manifest(b"{}").unwrap();
+        let hive = config.persisted_documents.as_ref().unwrap().hive_config();
+        let path = std::path::Path::new(hive["storage"]["path"].as_str().unwrap());
+        assert_eq!(
+            std::fs::metadata(path.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
     }
 
     #[test]
@@ -1596,12 +1654,7 @@ mod tests {
             "https://example.test/manifest",
             "s3://bucket/manifest",
         ] {
-            assert!(
-                base()
-                    .with_persisted_documents(path, false)
-                    .validate()
-                    .is_err()
-            );
+            assert!(base().with_persisted_ids_or_text(path).validate().is_err());
         }
     }
 

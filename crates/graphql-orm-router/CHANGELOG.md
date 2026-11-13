@@ -15,7 +15,6 @@ supersedes: []
 - Add opt-in local persisted documents with exact SHA-256 manifest validation and
   strict allow-list enforcement over HTTP and the public WebSocket gateway.
 
-
 ## 0.13.0 (unreleased)
 
 - **Breaking:** outbound `http` URLs are accepted only for `localhost` and

@@ -9,6 +9,10 @@ use crate::{RouterError, RouterErrorKind};
 use sha2::{Digest, Sha256};
 
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
+pub(crate) const MAX_DOCUMENT_BYTES: usize = 4096;
+pub(crate) const MAX_PERSISTED_MESSAGE_BYTES: usize = 32 * 1024;
+pub(crate) const INTERNAL_FRAME_BYTES: usize = 64 * 1024;
+
 const MAX_MANIFEST_ENTRIES: usize = 10_000;
 
 #[derive(Clone)]
@@ -19,6 +23,8 @@ pub(crate) struct PersistedDocuments {
 }
 
 struct ManifestSnapshot {
+    directory: PathBuf,
+    bytes: Vec<u8>,
     path: PathBuf,
     documents: std::collections::BTreeMap<String, String>,
 }
@@ -26,6 +32,7 @@ struct ManifestSnapshot {
 impl Drop for ManifestSnapshot {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
+        let _ = std::fs::remove_dir(&self.directory);
     }
 }
 
@@ -44,7 +51,7 @@ impl PersistedDocuments {
 
     pub(crate) fn validate(&mut self) -> Result<(), RouterError> {
         if self.snapshot.is_some() {
-            return Ok(());
+            return self.verify_snapshot();
         }
         if self.path.to_string_lossy().contains("://") || self.path.as_os_str().is_empty() {
             return Err(invalid(
@@ -69,15 +76,37 @@ impl PersistedDocuments {
         if bytes.len() as u64 > MAX_MANIFEST_BYTES {
             return Err(invalid("persisted documents manifest exceeds 16 MiB"));
         }
-        let entries: ManifestEntries = serde_json::from_slice(&bytes).map_err(|_| invalid("persisted documents manifest must map exact SHA-256 ids to documents, with at most 10000 unique entries and no duplicate keys"))?;
-        // Hive reads a file when constructing each graph generation. Keep a private
-        // validated snapshot alive across refreshes, avoiding a second read of the
-        // operator's mutable source file after validation.
+        let entries: ManifestEntries = serde_json::from_slice(&bytes).map_err(|error| {
+            if error.to_string().starts_with("persisted document exceeds 4096 bytes") {
+                invalid("persisted document exceeds 4096 bytes")
+            } else {
+                invalid("persisted documents manifest must map exact SHA-256 ids to documents, with at most 10000 unique entries and no duplicate keys")
+            }
+        })?;
+        // Hive reads the file when a selected generation initializes its runtime.
+        // Keep a private snapshot alive, checking it around both planner and
+        // runtime construction instead of rereading the operator's source.
         let mut nonce = [0u8; 16];
         getrandom::fill(&mut nonce)
             .map_err(|_| invalid("failed to initialize persisted documents snapshot"))?;
         let name = nonce.iter().map(|b| format!("{b:02x}")).collect::<String>();
-        let path = std::env::temp_dir().join(format!("graphql-orm-persisted-{name}.json"));
+        let directory = std::env::temp_dir().join(format!("graphql-orm-persisted-{name}"));
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(&directory).map_err(|_| {
+            invalid("failed to create private persisted documents snapshot directory")
+        })?;
+        let path = directory.join("manifest.json");
+        let snapshot = Arc::new(ManifestSnapshot {
+            directory,
+            path,
+            documents: entries.0,
+            bytes,
+        });
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -86,16 +115,36 @@ impl PersistedDocuments {
             options.mode(0o600);
         }
         let mut output = options
-            .open(&path)
+            .open(&snapshot.path)
             .map_err(|_| invalid("failed to create persisted documents snapshot"))?;
-        let snapshot = Arc::new(ManifestSnapshot {
-            path,
-            documents: entries.0,
-        });
         output
-            .write_all(&bytes)
+            .write_all(&snapshot.bytes)
             .map_err(|_| invalid("failed to write persisted documents snapshot"))?;
         self.snapshot = Some(snapshot);
+        Ok(())
+    }
+
+    pub(crate) fn verify_snapshot(&self) -> Result<(), RouterError> {
+        let snapshot = self
+            .snapshot
+            .as_ref()
+            .ok_or_else(|| invalid("persisted documents snapshot is not initialized"))?;
+        if !std::fs::metadata(&snapshot.path).is_ok_and(|metadata| metadata.is_file()) {
+            return Err(invalid(
+                "persisted documents snapshot is missing or is not a regular file",
+            ));
+        }
+        let file = File::open(&snapshot.path)
+            .map_err(|_| invalid("persisted documents snapshot cannot be opened"))?;
+        let mut bytes = Vec::new();
+        file.take(snapshot.bytes.len() as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| invalid("persisted documents snapshot cannot be read"))?;
+        if bytes != snapshot.bytes {
+            return Err(invalid(
+                "persisted documents snapshot differs from the validated startup manifest",
+            ));
+        }
         Ok(())
     }
 
@@ -104,6 +153,12 @@ impl PersistedDocuments {
         message: &mut serde_json::Value,
     ) -> Result<(), &'static str> {
         use serde_json::Value;
+        // Measure canonical JSON before expansion: numeric/string formatting can
+        // differ from the input bytes. Keep ample headroom for the document,
+        // scalar authorization projection and internal transport metadata.
+        if message.to_string().len() > MAX_PERSISTED_MESSAGE_BYTES {
+            return Err("REQUEST_TOO_LARGE");
+        }
         let payload = message
             .get_mut("payload")
             .and_then(Value::as_object_mut)
@@ -188,6 +243,9 @@ impl<'de> serde::Deserialize<'de> for ManifestEntries {
                 while let Some((id, document)) = map.next_entry::<String, String>()? {
                     if entries.len() >= MAX_MANIFEST_ENTRIES {
                         return Err(M::Error::custom("too many manifest entries"));
+                    }
+                    if document.len() > MAX_DOCUMENT_BYTES {
+                        return Err(M::Error::custom("persisted document exceeds 4096 bytes"));
                     }
                     if id != format!("{:x}", Sha256::digest(document.as_bytes())) {
                         return Err(M::Error::custom(

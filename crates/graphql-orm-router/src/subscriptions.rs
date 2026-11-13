@@ -757,7 +757,11 @@ async fn connect_internal(
     builder
         .address(gateway.connect_address)
         .protocols([GRAPHQL_TRANSPORT_WS])
-        .max_frame_size(gateway.config.max_client_message_bytes)
+        .max_frame_size(if gateway.persisted_documents.is_some() {
+            crate::persisted::INTERNAL_FRAME_BYTES
+        } else {
+            gateway.config.max_client_message_bytes
+        })
         .timeout(gateway.config.connection_init_timeout)
         .set_header(
             INTERNAL_SUBSCRIPTION_HEADER,
@@ -1020,7 +1024,22 @@ async fn forward_subscribe(
         state.gateway.add_operation();
     }
     let internal_max_bytes = state.borrow().gateway.config.max_client_message_bytes;
-    inject_operation_variables(&mut message, internal_max_bytes);
+    if state.borrow().gateway.persisted_documents.is_some() {
+        inject_operation_variables_inner(&mut message, usize::MAX, true);
+        if message.to_string().len() > crate::persisted::INTERNAL_FRAME_BYTES {
+            state.borrow_mut().remove_operation(&id);
+            return Some(ws::Message::Text(
+                json!({"id": id, "type": "error", "payload": [{
+                    "message": "Persisted operation exceeds the internal WebSocket budget",
+                    "extensions": {"code": "REQUEST_TOO_LARGE"}
+                }]})
+                .to_string()
+                .into(),
+            ));
+        }
+    } else {
+        inject_operation_variables(&mut message, internal_max_bytes);
+    }
     let internal = state.borrow().internal_sink.clone();
     if let Some(internal) = internal
         && internal
@@ -1037,6 +1056,14 @@ async fn forward_subscribe(
 }
 
 fn inject_operation_variables(message: &mut Value, internal_max_bytes: usize) {
+    inject_operation_variables_inner(message, internal_max_bytes, false);
+}
+
+fn inject_operation_variables_inner(
+    message: &mut Value,
+    internal_max_bytes: usize,
+    exact_budget: bool,
+) {
     let Some(payload) = message.get_mut("payload").and_then(Value::as_object_mut) else {
         return;
     };
@@ -1050,14 +1077,23 @@ fn inject_operation_variables(message: &mut Value, internal_max_bytes: usize) {
         })
         .filter_map(|(name, value)| {
             let encoded = value.to_string();
+            let bytes = if exact_budget {
+                serde_json::to_string(name)
+                    .expect("JSON variable name")
+                    .len()
+                    + encoded.len()
+                    + 2
+            } else {
+                name.len() + encoded.len()
+            };
             (encoded.len() <= MAX_AUTHORIZATION_VARIABLE_VALUE_BYTES)
-                .then(|| (name.to_owned(), value.clone(), name.len() + encoded.len()))
+                .then(|| (name.to_owned(), value.clone(), bytes))
         })
         .collect::<Vec<_>>();
     candidates.sort_by(|left, right| left.0.cmp(&right.0));
 
     let mut projected = serde_json::Map::new();
-    let mut projected_bytes = 0_usize;
+    let mut projected_bytes = if exact_budget { 2_usize } else { 0_usize };
     for (name, value, encoded_bytes) in candidates {
         if projected_bytes.saturating_add(encoded_bytes) > MAX_AUTHORIZATION_VARIABLE_BYTES {
             break;

@@ -67,7 +67,6 @@ pub struct RouterFileConfig {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct FilePersistedDocuments {
     path: std::path::PathBuf,
-    #[serde(default)]
     strict: bool,
 }
 
@@ -118,7 +117,11 @@ impl RouterFileConfig {
             .allow_plaintext_http(self.allow_plaintext_http)
             .use_environment_proxy(self.use_environment_proxy);
         if let Some(documents) = self.persisted_documents {
-            config = config.with_persisted_documents(documents.path, documents.strict);
+            config = if documents.strict {
+                config.with_persisted_allow_list(documents.path)
+            } else {
+                config.with_persisted_ids_or_text(documents.path)
+            };
         }
         if let Some(scope_matcher) = self.scope_matcher {
             config = scope_matcher.apply(config)?;
@@ -1086,6 +1089,7 @@ mod tests {
     fn persisted_documents_file_option_is_local_only() {
         let json = FILE.replacen("\"publicRequestTimeoutMs\"", r#""persistedDocuments": {"path": "/tmp/operations.json", "strict": true}, "publicRequestTimeoutMs""#, 1);
         assert!(RouterFileConfig::from_json(&json).is_ok());
+        assert!(RouterFileConfig::from_json(&json.replace(r#", "strict": true"#, "")).is_err());
         for storage in ["hive", "s3", "storage"] {
             let remote = json.replace(
                 r#""path": "/tmp/operations.json""#,

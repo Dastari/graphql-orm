@@ -294,9 +294,25 @@ struct ExecutionTarget {
     policy: NetworkPolicy,
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct GraphOptions {
+    pub(crate) hive: SupergraphOptions,
+    pub(crate) persisted_documents: Option<crate::persisted::PersistedDocuments>,
+}
+
+impl GraphOptions {
+    fn verify_manifest(&self) -> Result<(), RouterError> {
+        if let Some(documents) = &self.persisted_documents {
+            documents.verify_snapshot()?;
+        }
+        Ok(())
+    }
+}
+
 pub(crate) struct GraphLifecycle {
     active: ArcSwap<ActiveRouterGraph>,
-    /// Held only for short, I/O-free critical sections.
+    /// Network fetches never hold this lock. Candidate construction may read
+    /// the bounded private manifest snapshot before atomic publication.
     state: Mutex<LifecycleState>,
     /// Serializes refresh rounds, including their network I/O.
     refresh_round: Mutex<()>,
@@ -310,7 +326,7 @@ pub(crate) struct GraphLifecycle {
     poll_interval: Duration,
     authorization_required: bool,
     subscriptions_enabled: bool,
-    graph_options: SupergraphOptions,
+    graph_options: GraphOptions,
     node_lookup: Option<NodeLookupConfig>,
     metrics: Arc<RouterMetrics>,
 }
@@ -327,7 +343,7 @@ impl GraphLifecycle {
         poll_interval: Duration,
         authorization_required: bool,
         subscriptions_enabled: bool,
-        graph_options: SupergraphOptions,
+        graph_options: GraphOptions,
         node_lookup: Option<NodeLookupConfig>,
     ) -> Result<Arc<Self>, RouterError> {
         if subgraphs.len() != fetched.len()
@@ -1193,14 +1209,16 @@ fn build_snapshot<'a>(
     version: u64,
     authorization_required: bool,
     subscriptions_enabled: bool,
-    graph_options: &SupergraphOptions,
+    graph_options: &GraphOptions,
     node_lookup: Option<&NodeLookupConfig>,
 ) -> Result<Arc<ActiveRouterGraph>, RouterError> {
+    graph_options.verify_manifest()?;
     let inputs = inputs.into_iter().cloned().collect::<Vec<_>>();
     let descriptors = descriptors.into_iter().cloned().collect::<Vec<_>>();
-    let graph =
-        build_active_graph_with_options(&inputs, version, graph_options.clone(), node_lookup)
-            .map_err(map_federation_error)?;
+    let candidate =
+        build_active_graph_with_options(&inputs, version, graph_options.hive.clone(), node_lookup);
+    graph_options.verify_manifest()?;
+    let graph = candidate.map_err(map_federation_error)?;
     if authorization_required && descriptors.len() != inputs.len() {
         return Err(RouterError::new(
             RouterErrorKind::AuthorizationMetadata,
@@ -1764,7 +1782,7 @@ mod tests {
             Duration::from_secs(60),
             false,
             false,
-            SupergraphOptions::default(),
+            GraphOptions::default(),
             None,
         )
         .unwrap()
