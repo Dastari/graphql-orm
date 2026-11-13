@@ -4390,15 +4390,17 @@ fn generate_entity_tokens(
                     let max_items = search_relation.max_items;
                     let policy = option_lit_tokens(search_relation.policy.as_deref(), field.span());
                     let search_target = syn::Ident::new(&target_type, field.span());
-                    let relation_read_source = field_meta.read_policy.as_deref().map(|key| {
-                        quote! {
-                            sources.push(::graphql_orm::graphql::orm::SearchSourcePolicy::Field {
-                                entity_name: #entity_name_lit,
-                                field_name: #graphql_name,
-                                policy_key: Some(#key),
-                            });
-                        }
-                    });
+                    // The relation field's read decision is asked with its
+                    // declared key or `None`, as its resolver asks it.
+                    let relation_read_key =
+                        option_lit_tokens(field_meta.read_policy.as_deref(), field.span());
+                    let relation_read_source = quote! {
+                        sources.push(::graphql_orm::graphql::orm::SearchSourcePolicy::Field {
+                            entity_name: #entity_name_lit,
+                            field_name: #graphql_name,
+                            policy_key: #relation_read_key,
+                        });
+                    };
                     let relation_search_source = search_relation.policy.as_deref().map(|key| {
                         quote! {
                             sources.push(::graphql_orm::graphql::orm::SearchSourcePolicy::Field {
@@ -5565,19 +5567,21 @@ fn generate_entity_tokens(
                 } else {
                     quote! { self }
                 };
-            let policy_check = if let Some(policy_key) = &field_meta.read_policy {
-                quote! {
-                    db.ensure_readable_field(
-                        ctx,
-                        #entity_name_lit,
-                        #graphql_name,
-                        Some(#policy_key),
-                        Some(#policy_record as &(dyn ::std::any::Any + Send + Sync)),
-                    ).await
-                    .map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
-                }
-            } else {
-                quote! {}
+            // One rule on every generated path: the field read decision is
+            // asked for each field, with its declared key or `None`.
+            let policy_key = match &field_meta.read_policy {
+                Some(policy_key) => quote! { Some(#policy_key) },
+                None => quote! { None },
+            };
+            let policy_check = quote! {
+                db.ensure_readable_field(
+                    ctx,
+                    #entity_name_lit,
+                    #graphql_name,
+                    #policy_key,
+                    Some(#policy_record as &(dyn ::std::any::Any + Send + Sync)),
+                ).await
+                .map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
             };
             let (return_type, return_expr) = if field_meta.spatial.is_some() {
                 if is_option_type(field_type) {
@@ -5944,7 +5948,19 @@ fn generate_entity_tokens(
             backend,
         )
     {
-        let method = crate::federation::node_id_field_tokens(&struct_name_str, &parts);
+        let record =
+            if identity_only && legacy_graphql_complex && entity_meta.compose_complex_object {
+                quote! { self.0 }
+            } else {
+                quote! { self }
+            };
+        let method = crate::federation::node_id_field_tokens(
+            &struct_name_str,
+            &quote! { #entity_name_lit },
+            &backend_marker,
+            &record,
+            &parts,
+        );
         object_field_methods.push(method.clone());
         identity_field_methods.push(method);
         identity_field_names.push("NodeId");

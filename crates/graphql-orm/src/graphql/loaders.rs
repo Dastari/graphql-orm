@@ -254,24 +254,41 @@ pub struct RelationLoadResult<T> {
     pub offset: i64,
 }
 
-/// Generated resolver support. Sanitize host policy failures at a relationship
-/// boundary while retaining the public authorization-misconfiguration code.
+/// Generated resolver support. Sanitize policy errors at a relationship
+/// boundary with the callback classification every generated path uses.
+///
+/// An error a policy callback authored itself (it has no source), with or
+/// without a host-specific code, is a refusal: `FORBIDDEN`, or
+/// `UNAUTHENTICATED` when it carries that code. An error propagated from
+/// something else (it has a source, as `?` on a database error leaves), or
+/// one that carries `INTERNAL_ERROR` or `SERVICE_UNAVAILABLE`, is a failure
+/// and keeps that class. `AUTHORIZATION_MISCONFIGURED` is kept. No authored
+/// text or extension crosses the boundary.
 #[doc(hidden)]
 pub fn relation_authorization_error(error: async_graphql::Error) -> async_graphql::Error {
     use crate::graphql::errors::{OrmErrorCode, OrmPublicError};
-    let code = if error
+    let detail = format!("{error:?}");
+    let authored = error.source.is_none();
+    let declares_internal = error
         .extensions
         .as_ref()
         .and_then(|extensions| extensions.get("code"))
-        == Some(&async_graphql::Value::String(
-            "AUTHORIZATION_MISCONFIGURED".into(),
-        )) {
-        OrmErrorCode::AuthorizationMisconfigured
-    } else {
-        OrmErrorCode::Forbidden
+        == Some(&async_graphql::Value::from(
+            OrmErrorCode::InternalError.as_str(),
+        ));
+    let code = match OrmPublicError::from_callback(error).code {
+        code @ (OrmErrorCode::Unauthenticated
+        | OrmErrorCode::AuthorizationMisconfigured
+        | OrmErrorCode::ServiceUnavailable) => code,
+        // An uncoded or host-coded authored error classifies as internal on a
+        // repository path; at this boundary it is the callback's refusal.
+        OrmErrorCode::InternalError if !authored || declares_internal => {
+            OrmErrorCode::InternalError
+        }
+        _ => OrmErrorCode::Forbidden,
     };
     OrmPublicError::new(code)
-        .with_internal(format!("{error:?}"))
+        .with_internal(detail)
         .into_graphql_error()
 }
 
@@ -380,9 +397,12 @@ where
 {
     for row in rows {
         for selection in selected {
-            let Some(field) = T::repository_field_policies().iter().find(|field| {
-                field.api_name == selection.node.name.node.as_str() && field.read_policy.is_some()
-            }) else {
+            // Key-less fields are asked too: the field read decision is the
+            // same on every generated path.
+            let Some(field) = T::repository_field_policies()
+                .iter()
+                .find(|field| field.api_name == selection.node.name.node.as_str())
+            else {
                 continue;
             };
             let field_ctx = ctx.with_field(selection);

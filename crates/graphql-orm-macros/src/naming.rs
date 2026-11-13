@@ -107,6 +107,27 @@ pub(crate) fn apply_graphql_case(name: &str, case: GraphqlNameCase) -> String {
     }
 }
 
+/// The GraphQL name async-graphql-derive gives a handwritten resolver or
+/// argument: its `rename_fields`/`rename_args` rule, camel case by default,
+/// applied with the same `Inflector` routines the derive uses.
+///
+/// `convert_case` disagrees with them where digits meet letters (`s3bucket`
+/// stays `s3bucket` here and becomes `s3Bucket` there), so names that must
+/// equal the served ones never go through it. An unknown rule is left to
+/// async-graphql to reject.
+pub(crate) fn async_graphql_rename(name: &str, rule: Option<&str>) -> String {
+    use inflector::Inflector;
+    match rule.unwrap_or("camelCase") {
+        "lowercase" => name.to_lowercase(),
+        "UPPERCASE" => name.to_uppercase(),
+        "PascalCase" => name.to_pascal_case(),
+        "camelCase" => name.to_camel_case(),
+        "snake_case" => name.to_snake_case(),
+        "SCREAMING_SNAKE_CASE" => name.to_screaming_snake_case(),
+        _ => name.to_owned(),
+    }
+}
+
 pub(crate) fn apply_rename_rule(name: &str, rule: &str) -> String {
     GraphqlNameCase::from_rule(rule)
         .map(|case| apply_graphql_case(name, case))

@@ -710,7 +710,12 @@ impl<B: OrmBackend> Database<B> {
         if let Some(handler) = self.post_commit_error_handler() {
             handler.on_post_commit_error(self, &error).await;
         } else {
-            eprintln!("graphql-orm post-commit action failed: {error}");
+            // The text is the failed action's own error, never a row.
+            tracing::error!(
+                target: "graphql_orm::post_commit",
+                error = %error,
+                "graphql-orm post-commit action failed"
+            );
         }
     }
 
@@ -815,7 +820,10 @@ impl<B: OrmBackend> Database<B> {
                     Ok(true)
                 }
             }
-            AuthorizationMode::DeclaredPoliciesRequired => {
+            // A declared key without a provider is a configuration error in
+            // both strict modes, reported before the provider would be asked.
+            AuthorizationMode::DeclaredPoliciesRequired
+            | AuthorizationMode::ExplicitPolicyForAllExposedOperations => {
                 if policy_key.is_some() && self.field_policy.is_none() {
                     return Err(OrmPublicError::new(OrmErrorCode::AuthorizationMisconfigured)
                         .with_internal(format!(
@@ -827,26 +835,6 @@ impl<B: OrmBackend> Database<B> {
                     policy
                         .can_read_field(ctx, self, entity_name, field_name, policy_key, record)
                         .await
-                } else {
-                    Ok(true)
-                }
-            }
-            AuthorizationMode::ExplicitPolicyForAllExposedOperations => {
-                if policy_key.is_none() {
-                    // Fields without an explicit policy remain readable only when
-                    // a field policy provider is present and allows the default
-                    // key-less decision. Without a provider, deny sensitive
-                    // field exposure under the strictest mode.
-                    if self.field_policy.is_none() {
-                        return Ok(true);
-                    }
-                }
-                if let Some(policy) = &self.field_policy {
-                    policy
-                        .can_read_field(ctx, self, entity_name, field_name, policy_key, record)
-                        .await
-                } else if policy_key.is_some() {
-                    Ok(false)
                 } else {
                     Ok(true)
                 }
@@ -884,7 +872,10 @@ impl<B: OrmBackend> Database<B> {
                     Ok(true)
                 }
             }
-            AuthorizationMode::DeclaredPoliciesRequired => {
+            // A declared key without a provider is a configuration error in
+            // both strict modes, reported before the provider would be asked.
+            AuthorizationMode::DeclaredPoliciesRequired
+            | AuthorizationMode::ExplicitPolicyForAllExposedOperations => {
                 if policy_key.is_some() && self.field_policy.is_none() {
                     return Err(OrmPublicError::new(OrmErrorCode::AuthorizationMisconfigured)
                         .with_internal(format!(
@@ -904,25 +895,6 @@ impl<B: OrmBackend> Database<B> {
                             value,
                         )
                         .await
-                } else {
-                    Ok(true)
-                }
-            }
-            AuthorizationMode::ExplicitPolicyForAllExposedOperations => {
-                if let Some(policy) = &self.field_policy {
-                    policy
-                        .can_write_field(
-                            ctx,
-                            self,
-                            entity_name,
-                            field_name,
-                            policy_key,
-                            record,
-                            value,
-                        )
-                        .await
-                } else if policy_key.is_some() {
-                    Ok(false)
                 } else {
                     Ok(true)
                 }
@@ -1023,12 +995,15 @@ impl<B: OrmBackend> Database<B> {
                             record,
                         )
                         .await
-                        .map_err(|error| OrmPublicError::internal(format!("{error:?}")))?
+                        .map_err(OrmPublicError::from_callback)?
                 } else {
                     true
                 }
             }
-            AuthorizationMode::DeclaredPoliciesRequired => {
+            // A declared key without a provider is a configuration error in
+            // both strict modes, reported before the provider would be asked.
+            AuthorizationMode::DeclaredPoliciesRequired
+            | AuthorizationMode::ExplicitPolicyForAllExposedOperations => {
                 if policy_key.is_some() && self.field_policy.is_none() {
                     return Err(OrmPublicError::new(OrmErrorCode::AuthorizationMisconfigured)
                         .with_internal(format!(
@@ -1046,26 +1021,9 @@ impl<B: OrmBackend> Database<B> {
                             record,
                         )
                         .await
-                        .map_err(|error| OrmPublicError::internal(format!("{error:?}")))?
+                        .map_err(OrmPublicError::from_callback)?
                 } else {
                     true
-                }
-            }
-            AuthorizationMode::ExplicitPolicyForAllExposedOperations => {
-                if let Some(policy) = &self.field_policy {
-                    policy
-                        .can_read_repository_field(
-                            access,
-                            self,
-                            entity_name,
-                            field_name,
-                            policy_key,
-                            record,
-                        )
-                        .await
-                        .map_err(|error| OrmPublicError::internal(format!("{error:?}")))?
-                } else {
-                    policy_key.is_none()
                 }
             }
         };
@@ -1082,6 +1040,8 @@ impl<B: OrmBackend> Database<B> {
     ///
     /// Returns a safe forbidden or authorization-misconfiguration error when
     /// the schema policy or configured repository field policy denies the write.
+    /// A field denial names the public field, as the GraphQL write path does
+    /// (`deniedWriteField`): the caller is trusted Rust code that chose it.
     pub async fn ensure_repository_writable_field(
         &self,
         access: Option<crate::graphql::auth::AccessContext<'_>>,
@@ -1108,12 +1068,15 @@ impl<B: OrmBackend> Database<B> {
                             value,
                         )
                         .await
-                        .map_err(|error| OrmPublicError::internal(format!("{error:?}")))?
+                        .map_err(OrmPublicError::from_callback)?
                 } else {
                     true
                 }
             }
-            AuthorizationMode::DeclaredPoliciesRequired => {
+            // A declared key without a provider is a configuration error in
+            // both strict modes, reported before the provider would be asked.
+            AuthorizationMode::DeclaredPoliciesRequired
+            | AuthorizationMode::ExplicitPolicyForAllExposedOperations => {
                 if policy_key.is_some() && self.field_policy.is_none() {
                     return Err(OrmPublicError::new(OrmErrorCode::AuthorizationMisconfigured)
                         .with_internal(format!(
@@ -1132,34 +1095,16 @@ impl<B: OrmBackend> Database<B> {
                             value,
                         )
                         .await
-                        .map_err(|error| OrmPublicError::internal(format!("{error:?}")))?
+                        .map_err(OrmPublicError::from_callback)?
                 } else {
                     true
-                }
-            }
-            AuthorizationMode::ExplicitPolicyForAllExposedOperations => {
-                if let Some(policy) = &self.field_policy {
-                    policy
-                        .can_write_repository_field(
-                            access,
-                            self,
-                            entity_name,
-                            field_name,
-                            policy_key,
-                            record,
-                            value,
-                        )
-                        .await
-                        .map_err(|error| OrmPublicError::internal(format!("{error:?}")))?
-                } else {
-                    policy_key.is_none()
                 }
             }
         };
         if allowed {
             Ok(())
         } else {
-            Err(OrmPublicError::forbidden())
+            Err(OrmPublicError::field_write_denied(field_name))
         }
     }
 

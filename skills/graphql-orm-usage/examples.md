@@ -191,7 +191,7 @@ impl RowPolicy for TenantRows {
 #[derive(Default)]
 struct OrderActions;
 
-#[graphql_orm_custom_operations(kind = "mutation", authorization = true)]
+#[graphql_orm_custom_operations(kind = "mutation")]
 #[Object]
 impl OrderActions {
     /// Sends the invoice again. A genuine action: it writes no entity.

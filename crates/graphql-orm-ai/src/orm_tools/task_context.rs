@@ -20,18 +20,20 @@ impl OrmAiApplicationToolCallService {
         use crate::persistence::{AiSessionEventRecord, AiSessionEventRecordWhereInput};
         use graphql_orm::graphql::filters::{StringFilter, UuidFilter};
         let session =
-            AiSessionRecord::find_by_id(self.run_service.database(), &lease.session_id().0)
+            AiSessionRecord::find_by_id(self.run_service.custody_database(), &lease.session_id().0)
                 .await
                 .map_err(|_| AiError::PersistenceFailed)?
                 .ok_or(AiError::Conflict)?;
         validate_session_binding(&session, lease, scope)?;
         let text = self.current_user_text(lease, scope).await?;
-        let message =
-            AiMessageRecord::find_by_id(self.run_service.database(), &lease.input_message_id())
-                .await
-                .map_err(|_| AiError::PersistenceFailed)?
-                .ok_or(AiError::Conflict)?;
-        let event = AiSessionEventRecord::query(self.run_service.database().pool())
+        let message = AiMessageRecord::find_by_id(
+            self.run_service.custody_database(),
+            &lease.input_message_id(),
+        )
+        .await
+        .map_err(|_| AiError::PersistenceFailed)?
+        .ok_or(AiError::Conflict)?;
+        let event = AiSessionEventRecord::query(self.run_service.custody_database().pool())
             .filter(AiSessionEventRecordWhereInput {
                 session_id: Some(UuidFilter {
                     eq: Some(lease.session_id().0),
@@ -72,7 +74,7 @@ impl OrmAiApplicationToolCallService {
         {
             return Err(AiError::Conflict);
         }
-        let mut calls = AiToolCallRecord::query(self.run_service.database().pool())
+        let mut calls = AiToolCallRecord::query(self.run_service.custody_database().pool())
             .filter(AiToolCallRecordWhereInput {
                 run_id: Some(UuidFilter {
                     eq: Some(lease.run_id().0),

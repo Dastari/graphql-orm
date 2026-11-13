@@ -150,7 +150,7 @@ impl AiSubscriptionService for OrmAiSubscriptionService {
         .await?;
         let mut wakeups = self
             .sessions
-            .database()
+            .custody_database()
             .ensure_event_sender::<AiSessionWakeup>()
             .subscribe();
         let sessions = self.sessions.clone();

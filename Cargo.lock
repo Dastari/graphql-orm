@@ -3143,6 +3143,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
+ "tracing",
  "trybuild",
  "unicode-normalization",
  "uuid",
@@ -3229,6 +3230,7 @@ dependencies = [
 name = "graphql-orm-macros"
 version = "0.144.0"
 dependencies = [
+ "Inflector",
  "convert_case 0.7.1",
  "proc-macro2",
  "quote",

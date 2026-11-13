@@ -335,8 +335,10 @@ impl FieldPolicy for IdentityPolicy {
     ) -> graphql_orm::futures::future::BoxFuture<'a, graphql_orm::async_graphql::Result<bool>> {
         Box::pin(async move {
             if field == "Version" {
+                // Every entity's version field is asked, with or without a
+                // policy key, and always receives the entity itself.
                 let record = record.expect("version policy receives the entity");
-                assert!(record.is::<Plain>() || record.is::<Composed>());
+                assert!(record.is::<Plain>() || record.is::<Composed>() || record.is::<Legacy>());
             }
             Ok(*self.0.lock().unwrap() != Some(field))
         })

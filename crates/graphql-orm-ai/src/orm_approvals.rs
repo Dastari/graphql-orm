@@ -338,6 +338,8 @@ impl AiConsumedApproval {
 #[derive(Clone)]
 pub struct OrmAiApprovalService {
     database: Database<DefaultWriteBackend>,
+    /// The handle the host supplied, returned by `database()`.
+    host_database: Database<DefaultWriteBackend>,
     run_service: OrmAiRunService,
     principal_resolver: Arc<dyn CurrentPrincipalResolver>,
     access_policy: Arc<dyn AiApprovalAccessPolicy>,
@@ -364,7 +366,10 @@ impl OrmAiApprovalService {
         content_protector: Arc<dyn AiContentProtector>,
         clock: Arc<dyn Clock>,
     ) -> Self {
+        let host_database = database.clone();
+        let database = crate::custody_field_policy::custody_database(database);
         Self {
+            host_database,
             database,
             run_service,
             principal_resolver,
@@ -399,8 +404,11 @@ impl OrmAiApprovalService {
     }
 
     /// Returns the ORM database handle for host schema wiring.
+    // The public accessor returns the host's handle; `database` is the
+    // crate's internal handle and never leaves the crate.
+    #[allow(clippy::misnamed_getters)]
     pub fn database(&self) -> &Database<DefaultWriteBackend> {
-        &self.database
+        &self.host_database
     }
 
     /// Persists a pending approval and atomically parks the exact current run
@@ -1611,6 +1619,8 @@ impl AiApprovalService for OrmAiApprovalService {
 #[derive(Clone)]
 pub struct OrmAiApprovalWaitReconciliationService {
     database: Database<DefaultWriteBackend>,
+    /// The handle the host supplied, returned by `database()`.
+    host_database: Database<DefaultWriteBackend>,
     run_service: OrmAiRunService,
     principal_resolver: Arc<dyn CurrentPrincipalResolver>,
     wait_policy: Arc<dyn AiApprovalWaitReconciliationPolicy>,
@@ -1632,7 +1642,10 @@ impl OrmAiApprovalWaitReconciliationService {
         content_protector: Arc<dyn AiContentProtector>,
         clock: Arc<dyn Clock>,
     ) -> Self {
+        let host_database = database.clone();
+        let database = crate::custody_field_policy::custody_database(database);
         Self {
+            host_database,
             database,
             run_service,
             principal_resolver,
@@ -1652,8 +1665,11 @@ impl OrmAiApprovalWaitReconciliationService {
     }
 
     /// Returns the ORM database handle for host schema wiring.
+    // The public accessor returns the host's handle; `database` is the
+    // crate's internal handle and never leaves the crate.
+    #[allow(clippy::misnamed_getters)]
     pub fn database(&self) -> &Database<DefaultWriteBackend> {
-        &self.database
+        &self.host_database
     }
 
     /// Reconciles one bounded window of live `WaitingApproval` runs.

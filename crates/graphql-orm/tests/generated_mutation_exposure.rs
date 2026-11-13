@@ -39,6 +39,7 @@ mod none_mode {
     #[derive(Default)]
     pub struct ManualMutations;
 
+    #[graphql_orm::graphql_orm_root_fields]
     #[graphql_orm::async_graphql::Object]
     impl ManualMutations {
         async fn manual_ping(&self) -> bool {

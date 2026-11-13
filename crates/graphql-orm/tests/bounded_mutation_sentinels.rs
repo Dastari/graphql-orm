@@ -80,7 +80,7 @@ struct BoundedSentinelComposite {
 )]
 #[graphql_entity(
     table = "bounded_sentinel_retained",
-    plural = "BoundedSentinelRetained",
+    plural = "BoundedSentinelRetainedRows",
     append_only = true,
     retention_purge = "bounded-sentinel.purge",
     default_sort = "ordinal ASC"

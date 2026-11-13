@@ -1,0 +1,13 @@
+error[E0277]: `LegacyQueries` is composed by `schema_roots!` but does not declare its root field names
+  --> tests/ui/root_fields_undeclared_extra_root.rs:28:25
+   |
+28 |     extra_query_types: [LegacyQueries],
+   |                         ^^^^^^^^^^^^^ this root's field names are unknown to `schema_roots!`
+   |
+help: the trait `GraphqlRootFieldNames` is not implemented for `LegacyQueries`
+  --> tests/ui/root_fields_undeclared_extra_root.rs:14:1
+   |
+14 | struct LegacyQueries;
+   | ^^^^^^^^^^^^^^^^^^^^
+   = note: add `#[graphql_orm_root_fields]` directly before its `#[Object]` or `#[Subscription]` attribute, or describe it with `#[graphql_orm_custom_operations(kind = "...")]`
+   = note: `schema_roots!` rejects a handwritten root field that has the name of a generated operation, because a merged root would serve only one of them

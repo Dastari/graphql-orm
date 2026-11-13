@@ -31,6 +31,7 @@ struct AssuranceRecord {
 #[derive(Default)]
 struct CustomAssuranceMutations;
 
+#[graphql_orm::graphql_orm_root_fields]
 #[graphql_orm::async_graphql::Object]
 impl CustomAssuranceMutations {
     #[graphql(guard = "DeclaredAssuranceGuard::new(GraphqlOperationKind::Mutation)")]
@@ -43,6 +44,7 @@ impl CustomAssuranceMutations {
 #[derive(Default)]
 struct DescribedAssuranceMutations;
 
+// Protected: the declared authorization guard runs before the assurance guard.
 #[graphql_orm_custom_operations(kind = "mutation")]
 #[graphql_orm::async_graphql::Object]
 impl DescribedAssuranceMutations {
@@ -75,7 +77,7 @@ impl Guard for HostGuard {
 #[derive(Default)]
 struct HostGuardedMutations;
 
-#[graphql_orm_custom_operations(kind = "mutation")]
+#[graphql_orm_custom_operations(kind = "mutation", authorization = false)]
 #[graphql_orm::async_graphql::Object]
 impl HostGuardedMutations {
     /// Runs a host-guarded action.
@@ -102,7 +104,7 @@ impl HostGuardedMutations {
 #[derive(Default)]
 struct RootGuardedMutations;
 
-#[graphql_orm_custom_operations(kind = "mutation")]
+#[graphql_orm_custom_operations(kind = "mutation", authorization = false)]
 #[graphql_orm::async_graphql::Object(guard = "HostGuard")]
 impl RootGuardedMutations {
     /// Runs under the root's host guard.
@@ -311,6 +313,30 @@ async fn unregistered_custom_mutations_apply_the_default_interactive_policy()
         assert!(step_up(&response), "{mutation}: {:?}", response.errors);
     }
     assert_eq!(calls.load(Ordering::SeqCst), 2);
+    Ok(())
+}
+
+/// A protected described root authenticates before it evaluates assurance:
+/// an unauthenticated request is refused without the evaluator being asked.
+#[tokio::test]
+async fn described_custom_roots_authenticate_before_assurance()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:").await?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let schema = AssuranceEnforcement::new(Arc::new(registry()), denying(&calls))
+        .finish_schema(schema_builder(database))?;
+    let response = schema.execute("mutation { rotateKey }").await;
+    assert_eq!(response.errors.len(), 1, "{:?}", response.errors);
+    assert_eq!(
+        response.errors[0]
+            .extensions
+            .as_ref()
+            .and_then(|extensions| extensions.get("code"))
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("\"UNAUTHENTICATED\"")
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "assurance ran first");
     Ok(())
 }
 

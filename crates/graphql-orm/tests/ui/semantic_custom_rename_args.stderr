@@ -1,0 +1,5 @@
+error: described custom roots do not support `rename_args`; name renamed arguments with `#[graphql(name = "...")]` so the catalogued and exposed argument names agree
+ --> tests/ui/semantic_custom_rename_args.rs:7:38
+  |
+7 | #[graphql_orm::async_graphql::Object(rename_args = "snake_case")]
+  |                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^

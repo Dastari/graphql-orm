@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.141.0 to 0.144.0: host-only generated input contracts
+## 0.143.0 to 0.144.0: host-only generated input contracts
 
 Upgrade ORM/macros together to 0.144.0 and operation catalogue to 0.8.0.
 `GraphqlEntitySemanticMetadata` gains `generated_input_members`. Macros and
@@ -55,6 +55,261 @@ the ORM generated resolver. Generated reach also follows relationship arguments
 and entity metadata. A custom root reusing a real generated input receives that
 entity's generated disclosure even when its resolver interprets members
 differently. Input shape checks limit disclosure, not resolver interpretation.
+
+## 0.141.0 to 0.143.0: one authorization contract
+
+Upgrade runtime and macros together. No schema or data migration is needed.
+Regenerate router descriptors and AI capability manifests if a handwritten
+root's authorization declaration changes: `has_authorization_policy` is part of
+each operation's fingerprint.
+
+**A `FieldPolicy` is asked about every field it can deny, on reads and
+writes.** Generated scalar getters, `RecordVersion`, `NodeId`, relation fields,
+the selected fields of relation targets and `search_relation` sources now call
+`can_read_field` for fields without a `read_policy` too, with
+`policy_key = None`. Filters, ordering, aggregates, search sources and
+repository reads already did. Generated writes ask with the field's
+`write_policy` key or `None` as well, and the two surfaces differ in which
+fields they ask about. The repository writes of a `GraphQLOperations` entity
+(`insert`, `insert_many`, `insert_if_absent`, `update_by_id`, `update_by_key`,
+`update_where`, `update_if`, `compare_and_swap`, `upsert`, `upsert_many` and
+their transaction forms) call `can_write_repository_field` for every field
+host code writes. GraphQL create, update, upsert and bulk update call
+`can_write_field` for a field with a `write_policy` as before, and for a
+key-less field when the client supplied it. One case goes further: an upsert
+that resolves to an existing row asks about every field its update writes,
+supplied or not (details below). Check what your provider returns for `None`:
+
+- A provider that allows key-less fields (`None => Ok(true)`) sees no change
+  in results.
+- A provider that denies unknown keys (`_ => Ok(false)`) already refused every
+  `where` and `orderBy` on key-less fields; it now refuses those fields when
+  they are selected or written as well. Allow `None` explicitly, or keep the
+  denial and give the fields you mean to protect a policy key.
+- A provider that decides by entity and field name is now obeyed on every
+  generated path. `NodeId` asks for the field name `NodeId` and for each
+  primary-key field it encodes, each under a field context of its own name.
+
+How often the provider is called for a selected field depends on the path. A
+root list or get-by-key read asks once per selected field per row. A relation
+asks twice per selected target field per row: the relation loader checks the
+loaded targets before the relation resolves, and each target field's getter
+asks again. A `Changed` event also asks twice: once when the event is checked
+before release, and once in the getter. A write asks once per field it asks
+about (per row for a bulk update).
+
+**Repository writes ask about declared keys as well.** This is the larger
+change for hosts that write through the repository. Before 0.143.0 only
+`upsert` and repository-only entities asked the repository write decision, so
+`Entity::insert` or `update_by_id` wrote a field with a `write_policy` without
+asking. They now ask about every field the host code writes (ORM-managed
+columns such as a managed version are not asked about), and the default
+`can_write_repository_field` denies a declared key, exactly as the default
+`can_read_repository_field` already denied a declared read key. A refusal is
+`FORBIDDEN` and names the field (`write denied for field <name>`, and
+`deniedWriteField` when rendered as a GraphQL error);
+`AUTHORIZATION_MISCONFIGURED` without a field provider in a strict mode.
+
+What the callback receives: generated repository reads and writes always pass
+`access: None`. The ORM has no trusted identity to give it: it does not know
+whether a hook, a worker, a migration or a custom resolver made the call. Do
+not treat `None` as system authority, and do not deny it wholesale either if
+your own hooks, jobs or seed code write through the repository. Decide on the
+entity name, field name and policy key the callback does receive: allow the
+entities and fields trusted host code writes, and keep GraphQL clients out
+through `can_write_field`, entity policy and row policy, which do see the
+request. A provider that returns `Ok(false)` whenever `access` is `None`
+refuses every generated repository write, including those of the workspace's
+companion crates on entities it knows nothing about:
+
+- **`graphql-orm-ai` 0.139.0** answers repository field decisions for its own
+  records itself, so its persistence works whatever your `FieldPolicy`
+  returns. Upgrade it with the ORM; nothing else is needed. Records the host
+  writes through the `database()` handle a service returns still follow your
+  policy.
+- **`graphql-orm-backup`** needs nothing: its ORM adapter exports and restores
+  rows through the snapshot and restore SQL, not through generated repository
+  writes, so it never asks a field decision.
+- `graphql-orm-storage`, the router packages and the tool profiles do not use
+  generated repository writes.
+
+GraphQL writes ask less than repository writes do. They ask `can_write_field`
+about a field that declares a `write_policy` exactly as before, and about a
+key-less field only when it is part of the GraphQL input type and the client
+supplied it (a required create input is always supplied). With one exception
+they never ask about a key-less field the client cannot send (`skip_input`,
+host-managed timestamps, managed versions) or about a value only an input
+transform or hook set, and they never also ask the repository decision.
+
+The exception is an upsert that resolves to an existing row. Its update sets
+every column that is neither the primary key nor part of the upsert key, so an
+optional field the client left out is written as `NULL` and a `skip_input`
+field as its default. The statement is unchanged; the decision is now asked
+for each of those fields, with the current row and the value about to be
+written (`None` for an omitted optional field), whether or not the value
+differs from the stored one. A key-less field the client omitted was not asked
+before. An upsert that inserts keeps the client-supplied rule, and a managed
+version column is never asked about. A provider that denies a key-less field
+by name now refuses an upsert onto an existing row unless it allows that field
+for the caller; send the field's current value if the client means to keep it.
+
+`ignore_denied_field_write` and the optional-field rules for fields with a
+declared key are unchanged: such optional create and upsert fields are asked
+even when absent, and an update asks the keyed fields it supplies.
+
+Without a provider nothing changes: a key-less field is readable and writable
+in every mode.
+
+**Plain `SimpleObject` entities are outside the field read rule.** An entity
+that derives `SimpleObject` (with `#[graphql(complex)]` or
+`schema_only = true`) and does not carry
+`#[graphql_orm::graphql_policy_object]` has its scalar getters generated by
+async-graphql, so the ORM cannot ask the provider when such a field is
+selected on a root read. A field `read_policy` there is already a compile
+error; a provider that denies a key-less field by name is not consulted, and
+nothing reports that at run time. If a name-based policy must cover an
+entity's fields, apply `graphql_policy_object` to it (before the derives), or
+let the ORM generate the object by dropping `SimpleObject`. The relation
+loader does check the selected fields of a `SimpleObject` target, and
+filters, ordering, aggregates and writes ask for these entities like any
+other.
+
+**A missing field provider is a misconfiguration in both strict modes.** Under
+`ExplicitPolicyForAllExposedOperations`, a field that declares a policy key
+with no `FieldPolicy` installed now fails with `AUTHORIZATION_MISCONFIGURED`,
+as it already did under `DeclaredPoliciesRequired`. It was `FORBIDDEN`. Code
+that matched `FORBIDDEN` for this case sees the new code.
+
+**Described roots enforce their declaration.** Every resolver of a
+`#[graphql_orm_custom_operations]` root now requires a typed `AuthSubject` in
+the GraphQL context unless the root says otherwise, including when the
+attribute has no `authorization` argument:
+
+```rust,ignore
+// Requires an authenticated subject (the default).
+#[graphql_orm_custom_operations(kind = "query")]
+// Requires an authenticated subject holding both scopes.
+#[graphql_orm_custom_operations(kind = "mutation", all_scopes = ["notes.write", "notes.audit"])]
+// Requires either alternative.
+#[graphql_orm_custom_operations(kind = "query", any_scopes = [["reports.admin"], ["reports.read"]])]
+// Public: the ORM checks nothing and the catalogue records no policy.
+#[graphql_orm_custom_operations(kind = "query", authorization = false)]
+```
+
+A resolver's own `#[graphql_orm(...)]` declaration can only narrow its root's
+requirement, unless it says that it replaces it or is public:
+
+```rust,ignore
+#[graphql_orm_custom_operations(kind = "mutation", all_scopes = ["notes.write"])]
+#[graphql_orm::async_graphql::Object]
+impl NoteMutations {
+    /// Requires `notes.write` and `notes.audit`: scopes are added.
+    #[graphql_orm(all_scopes = ["notes.audit"])]
+    async fn audit_note(&self) -> bool { /* ... */ }
+
+    /// Requires only `notes.read`: an explicit replacement.
+    #[graphql_orm(authorization(replace, all_scopes = ["notes.read"]))]
+    async fn peek_note(&self) -> bool { /* ... */ }
+
+    /// Public, explicitly.
+    #[graphql_orm(authorization = false)]
+    async fn health(&self) -> String { /* ... */ }
+}
+```
+
+A root whose callers authenticate through something other than `AuthSubject`
+(a host guard, a check in the resolver body) fails with `UNAUTHENTICATED`
+until it either installs the subject or declares `authorization = false`.
+With `authorization = false` the host's own checks still run; the catalogue
+then reports `has_authorization_policy: false`, because the ORM enforces
+nothing for that root. A `#[graphql(entity)]` resolver on a protected root
+needs a named `&Context<'_>` argument and a `Result` return type.
+
+A described subscription's guard is evaluated again while its stream is open:
+before each item is released and on a timer, and the stream ends, without an
+error frame, when it refuses. The guard is the declared authorization,
+operation assurance and the resolver's or root's host guard. The declared
+authorization reads the `AuthSubject` accepted for the request or connection,
+which does not change while the stream is open, so a revoked session or scope
+does not end the stream by itself: attach a host guard that consults live
+authority (for example `AgqlCurrentAuthorityGuard`), or use an assurance
+policy, and the stream ends at the next item or timer tick. Without one, a
+revoked subject keeps receiving items until the connection ends or the host
+closes it. A host guard that reads a resolver argument is evaluated once
+only. The resolver gains a `Context` argument if it had none; its GraphQL
+signature is unchanged. The returned stream now borrows the request context,
+so a described subscription whose return type opts out of that
+(`impl Stream<Item = T> + 'static` or `+ use<>`) must drop the bound.
+`#[Object(rename_args = ...)]` is refused on a described root, like
+`rename_fields`.
+
+**Handwritten roots declare their field names.** Add
+`#[graphql_orm_root_fields]` directly before `#[Object]` or `#[Subscription]`
+on every root listed in `extra_query_types`, `extra_mutation_types`,
+`extra_subscription_types` or `query_custom_ops`:
+
+```rust,ignore
+#[graphql_orm_root_fields]
+#[graphql_orm::async_graphql::Object]
+impl ManualMutations {
+    async fn archive_everything(&self) -> bool { /* ... */ }
+}
+```
+
+Without it `schema_roots!` fails with "`ManualMutations` is composed by
+`schema_roots!` but does not declare its root field names". The attribute
+needs a recognised root attribute (not an import alias), a single
+`#[graphql(...)]` attribute per resolver, no `#[graphql(flatten)]` resolver
+and no `graphql` attribute applied through `cfg_attr` (the macro would not see
+it; put the whole resolver under `#[cfg(...)]` instead). The same `cfg_attr`
+rule now applies to described roots.
+
+A root that is not an `#[Object]` or `#[Subscription]` impl, such as a
+`#[derive(MergedObject)]` struct, implements the trait by hand and lists the
+fields of every member:
+
+```rust,ignore
+#[derive(MergedObject, Default)]
+struct ReportingQueries(StatusQueries, ReportQueries);
+
+impl graphql_orm::graphql::orm::GraphqlRootFieldNames for ReportingQueries {
+    const ROOT_FIELD_NAMES: &'static [&'static str] = &["status", "report"];
+}
+```
+
+The generated schema builders compare every handwritten root's declaration
+with the fields the type really exposes, and panic when one is missing from
+it, so an incomplete manual list cannot hide a collision.
+
+If a handwritten field has the name of a generated operation, two entities
+generate the same root field (for example through the same `plural`), or one
+entity generates the same root field twice (a `plural` equal to its name), the
+build now fails with both names; before, one of the two was served and the
+other never ran. Rename the handwritten field with `#[graphql(name = "...")]`,
+give one entity another `plural`, or remove the generated operation with the
+entity's `query_shapes` or `mutation_shapes`, or `generated_mutations` in
+`schema_roots!`.
+
+**Policy callback errors keep their class and lose their text.** A
+`can_read_repository_field` or `can_write_repository_field` refusal that
+carries an ORM public `code` (or is a typed `OrmPublicError` returned with
+`?`) now reaches repository callers with that code; it was `INTERNAL_ERROR`.
+Any other error from these callbacks, including a plain
+`async_graphql::Error::new(text)`, is `INTERNAL_ERROR` with the default
+message, so its text never reaches a client, also when a custom resolver maps
+the repository error with `graphql_error_from_sqlx`. At a relation boundary
+the rule is the one `graphql_error_from_callback` and `Changed` subscriptions
+use: an error the policy authored itself (no source, with or without a
+host-specific code) is a refusal and reads `FORBIDDEN`, or `UNAUTHENTICATED`
+with that code, as before; an error propagated with `?` from something else,
+or one that carries `INTERNAL_ERROR` or `SERVICE_UNAVAILABLE`, now keeps that
+class instead of reading `FORBIDDEN`. No text crosses the boundary.
+
+**Diagnostics use `tracing`.** Install a `tracing` subscriber to keep the
+lines that went to standard error. `GRAPHQL_ORM_LOG_INTERNAL_ERRORS` still
+gates the diagnostic text: without it an internal error event carries only its
+code. Enable the `graphql_orm::internal_error` target at `ERROR` for failures
+and `DEBUG` for refusals.
 
 ## 0.139.0 to 0.141.0: write transforms fail closed
 

@@ -29,6 +29,7 @@ pub struct ZoneReference {
 #[derive(Default)]
 pub struct ReadingLinks;
 
+#[graphql_orm::graphql_orm_root_fields]
 #[graphql_orm::async_graphql::Object]
 impl ReadingLinks {
     /// The owning subgraph resolves this reference through `_entities`.

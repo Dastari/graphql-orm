@@ -853,8 +853,10 @@ async fn diagnose_unowned_sqlite_rewrite_tables(pool: &sqlx::SqlitePool) -> crat
     for name in names {
         if name.starts_with("__graphql_orm_") && name.ends_with("_new") {
             // Debug formatting escapes control characters in host-controlled names.
-            eprintln!(
-                "graphql-orm: preserving SQLite table {name:?}: no rebuild ownership evidence; inspect manually before retrying a conflicting rebuild"
+            tracing::warn!(
+                target: "graphql_orm::migrations",
+                table = ?name,
+                "preserving SQLite table: no rebuild ownership evidence; inspect manually before retrying a conflicting rebuild"
             );
         }
     }

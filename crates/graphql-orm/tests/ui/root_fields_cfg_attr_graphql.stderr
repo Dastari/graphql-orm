@@ -1,0 +1,5 @@
+error: a `graphql` attribute applied through `cfg_attr` is not visible to this macro, so the resolver's name, guard and flags could not be checked; write `#[graphql(...)]` unconditionally and put the whole resolver under `#[cfg(...)]` if it is conditional
+  --> tests/ui/root_fields_cfg_attr_graphql.rs:10:5
+   |
+10 |     #[cfg_attr(feature = "sqlite", graphql(name = "items"))]
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -193,7 +193,7 @@ impl AiLiveDeltaSink for OrmAiLiveDeltaService {
             return Err(AiError::Conflict);
         }
         let session =
-            AiSessionRecord::find_by_id(self.run_service.database(), &lease.session_id().0)
+            AiSessionRecord::find_by_id(self.run_service.custody_database(), &lease.session_id().0)
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::NotFound)?;
@@ -285,7 +285,7 @@ impl AiProviderActivitySink for OrmAiLiveDeltaService {
             return Err(AiError::Conflict);
         }
         let session =
-            AiSessionRecord::find_by_id(self.run_service.database(), &lease.session_id().0)
+            AiSessionRecord::find_by_id(self.run_service.custody_database(), &lease.session_id().0)
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::NotFound)?;

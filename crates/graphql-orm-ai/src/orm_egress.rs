@@ -20,17 +20,27 @@ use crate::{
 #[derive(Clone)]
 pub struct OrmAiEgressDecisionAudit {
     database: Database<DefaultWriteBackend>,
+    /// The handle the host supplied, returned by `database()`.
+    host_database: Database<DefaultWriteBackend>,
 }
 
 impl OrmAiEgressDecisionAudit {
     /// Creates an ORM-backed egress decision audit.
     pub fn new(database: Database<DefaultWriteBackend>) -> Self {
-        Self { database }
+        let host_database = database.clone();
+        let database = crate::custody_field_policy::custody_database(database);
+        Self {
+            host_database,
+            database,
+        }
     }
 
     /// Returns the ORM database handle for host schema composition.
+    // The public accessor returns the host's handle; `database` is the
+    // crate's internal handle and never leaves the crate.
+    #[allow(clippy::misnamed_getters)]
     pub fn database(&self) -> &Database<DefaultWriteBackend> {
-        &self.database
+        &self.host_database
     }
 }
 

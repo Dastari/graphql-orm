@@ -30,6 +30,9 @@ mod capability_delivery;
 mod configuration;
 mod content_protection;
 mod control_plane;
+// Used by the ORM persistence services, which exist for these backends only.
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod custody_field_policy;
 mod domain;
 mod egress;
 mod execution;

@@ -15,7 +15,17 @@ capability compilation. Readable members remain available; undisclosed members
 stay closed, and a required undisclosed member omits only its capability with a
 host diagnostic. Upgrade ORM/macros together and use catalogue 0.8.0. Existing
 SDL and public catalogue bytes/fingerprints are unchanged; no data migration is
-needed. See the [migration guide](../../MIGRATION.md#01410-to-01440-host-only-generated-input-contracts).
+needed. See the [migration guide](../../MIGRATION.md#01430-to-01440-host-only-generated-input-contracts).
+
+Version 0.143.0 gives authorization one contract: every generated read path
+asks the field policy about a field with or without a policy key;
+`#[graphql_orm_custom_operations]` enforces the authorization it declares;
+`schema_roots!` rejects a handwritten root field that collides with a generated
+operation at compile time, and legacy `extra_*` roots declare their fields
+with `#[graphql_orm_root_fields]`; repository field policy refusals keep their
+public code; and diagnostics go through `tracing`. Upgrade ORM/macros
+together; see the
+[root migration guide](../../MIGRATION.md#01410-to-01430-one-authorization-contract).
 
 Version 0.141.0 (placeholder) rejects `#[transform(write = "path")]` on
 fields. If the entity compiled, that transform never ran and generated writes

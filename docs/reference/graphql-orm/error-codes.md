@@ -55,9 +55,46 @@ remain `INTERNAL_ERROR`. Runtime mutations map the same cases to
 `constraint_violation`, so a referenced-row refusal has one category on SQLite
 and PostgreSQL (SQLSTATE 23503).
 
-Internal diagnostic strings are never placed in extensions. Set
-`GRAPHQL_ORM_LOG_INTERNAL_ERRORS=1` to emit internal detail to stderr for local
-debugging.
+Internal diagnostic strings are never placed in extensions.
+
+## Server-side diagnostics
+
+The ORM reports diagnostics as `tracing` events and writes nothing to standard
+output or standard error. Install a `tracing` subscriber to receive them.
+
+| Target | Level | Event |
+| --- | --- | --- |
+| `graphql_orm::internal_error` | `ERROR` | an `INTERNAL_ERROR`, `SERVICE_UNAVAILABLE` or `AUTHORIZATION_MISCONFIGURED` response; field `code` |
+| `graphql_orm::internal_error` | `DEBUG` | any other public error that carries a diagnostic; field `code` |
+| `graphql_orm::post_commit` | `ERROR` | a post-commit action failed and no `PostCommitErrorHandler` is installed; field `error` |
+| `graphql_orm::subscriptions` | `WARN` | `Changed` events are dropped for a misconfigured entity (once per process); field `entity` |
+| `graphql_orm::migrations` | `WARN` | an unowned SQLite rebuild table was preserved; field `table` |
+
+An internal error event carries the diagnostic text, in the `detail` field,
+only while `GRAPHQL_ORM_LOG_INTERNAL_ERRORS` is set. That text can quote a
+driver message or a host callback's error, so it stays an explicit opt-in. The
+ORM never formats a row or a bound value into an event.
+
+## Authorization refusals keep their code
+
+An authorization refusal reaches the caller as `UNAUTHENTICATED`, `FORBIDDEN`
+or `AUTHORIZATION_MISCONFIGURED` on every path: generated resolvers,
+repository helpers, transaction helpers and relation boundaries. It is never
+reported as `INTERNAL_ERROR`, and a host failure is never reported as a
+refusal:
+
+| Callback outcome | Repository field policy callbacks | Relation boundary |
+| --- | --- | --- |
+| `Ok(false)` | `FORBIDDEN` (a write denial names the field) | `FORBIDDEN` |
+| authored error with an ORM public `code`, or a typed `OrmPublicError` returned with `?` | that code, with its message | `UNAUTHENTICATED`, `AUTHORIZATION_MISCONFIGURED`, `INTERNAL_ERROR` and `SERVICE_UNAVAILABLE` keep their code; any other refusal is `FORBIDDEN`; no message |
+| authored error without a code, or with a host-specific code | `INTERNAL_ERROR`, default message | `FORBIDDEN`; no message |
+| propagated error (it has a source) | `INTERNAL_ERROR` or `SERVICE_UNAVAILABLE`, default message | the same failure class; no message |
+
+The text of an uncoded callback error is a server-side diagnostic only on
+these paths, also when a custom resolver maps a repository error with
+`graphql_error_from_sqlx`. The rule is stated once in
+[policy callback errors](strict-authorization.md#policy-callback-errors). A missing field policy provider for a declared key
+is `AUTHORIZATION_MISCONFIGURED` in both strict modes.
 
 Operation assurance uses the same lowercase extension key `code`. The optional
 `auth-agql` evaluator maps upstream evaluation states to `UNAUTHENTICATED`,

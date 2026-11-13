@@ -35,6 +35,7 @@ impl OrmAiRunExecutionSelectionReader {
         access_policy: Arc<dyn AiAccessPolicy>,
         clock: Arc<dyn Clock>,
     ) -> Self {
+        let database = crate::custody_field_policy::custody_database(database);
         Self {
             database,
             principal_resolver,

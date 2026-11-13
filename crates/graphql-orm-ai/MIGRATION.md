@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.138.0 to 0.140.0: exact tool registration and derived control-plane roots
+## 0.139.0 to 0.140.0: exact tool registration and derived control-plane roots
 
 No data migration is needed, and no GraphQL SDL or persistent schema changes.
 Database-backed service references in backend-neutral Rustdoc remain readable
@@ -23,7 +23,7 @@ no longer `Copy`; clone it when reusing options. Its
 
 AI 0.140.0 requires ORM/macros 0.144.0 and catalogue 0.8.0, which supply the
 host-only generated input contracts. It does not support ORM/macros 0.133.0.
-See the [contract migration](../../MIGRATION.md#01410-to-01440-host-only-generated-input-contracts).
+See the [contract migration](../../MIGRATION.md#01430-to-01440-host-only-generated-input-contracts).
 
 Static GraphQL variable definitions and the tool argument JSON Schema are both
 host-authored contracts. Registration checks the document's operation and
@@ -50,6 +50,33 @@ argument schema. Hosts keep the two declarations consistent.
   application target.
 - Handwritten operation inputs now need explicit disclosure declarations. See
   the [tool-profiles 0.23.0 migration](../graphql-orm-ai-tool-profiles/MIGRATION.md#0220-to-0230-explicit-handwritten-input-disclosure).
+
+## 0.138.0 to 0.139.0: custody of the crate's own records under a host field policy
+
+Upgrade with ORM/macros 0.143.0. No GraphQL SDL, AI schema or data migration
+change, and `AI_SCHEMA_MODULE_VERSION` is unchanged.
+
+ORM 0.143.0 asks the host `FieldPolicy` about every field a generated
+repository write touches, with the field's policy key or `None` and with no
+access context (`access` is always `None` on generated repository paths).
+This crate persists its records through those paths. From 0.139.0 its
+services answer repository field decisions for their own records themselves:
+
+- Nothing to do for a host without a `FieldPolicy`, or with one that allows
+  key-less repository fields.
+- A host whose `can_read_repository_field` or `can_write_repository_field`
+  refuses entities it does not know, or refuses whenever `access` is `None`,
+  no longer needs an exception for this crate's entities. Under ORM 0.143.0
+  without this release, such a policy refuses the crate's own writes.
+- The grant covers the repository surface only, for the entities of
+  `AiSchemaModule` and fields without a policy key. GraphQL field decisions,
+  host entities and any field that declares a key still go to the host policy.
+- `database()` on a service returns the handle you passed in. If your own code
+  writes AI records through it, your field policy decides those writes, as it
+  does for your own entities. The internal handle is not exposed.
+
+The entity policy is unchanged: the crate still needs the host entity policy
+(or the documented trusted-worker fallback) to allow its repository access.
 
 ## 0.137.0 to 0.138.0
 

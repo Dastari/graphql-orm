@@ -23,6 +23,12 @@ supersedes: []
 
 No GraphQL SDL, persistent schema or data migration change; `AI_SCHEMA_MODULE_VERSION` is unchanged. See the migration guide.
 
+## Unreleased - 0.139.0
+
+- **Fix:** the crate's own persistence no longer depends on what the host `FieldPolicy` answers for repository field decisions. ORM 0.143.0 asks `can_write_repository_field` about every field a generated repository write touches (it already asked `can_read_repository_field` on reads), with no access context, so a host policy that refuses unknown entities or every call without an access context would have refused the crate's inserts, updates and compare-and-swap writes of its own records with `FORBIDDEN`. Every service now works on an internal handle whose field policy answers repository-surface decisions for the crate's own entities (the entities of `AiSchemaModule`, for fields without a policy key) and delegates every other entity, every declared key and both GraphQL surfaces to the host policy unchanged. A database without a field policy is used as it is.
+- **Changed:** `database()` on every service returns the handle the host supplied, never the internal one. Host code that writes AI records or its own entities through that handle keeps following the host's own field policy. For the webhook receipt and background reconciliation services this was already the case for the entity policy.
+- Adopt ORM 0.143.0.
+
 ## Unreleased - 0.138.0
 
 - **Fixed (run recovery):** `OrmAiRunService::recover_expired_leases` no longer aborts for every run when one row is bad. A run requeued for checkpoint adoption whose adopting attempt also lost its lease before consuming the checkpoint returned `InternalError` on every pass, because the checkpoint belonged to the earlier attempt; no expired lease anywhere was recovered again. Such a checkpoint is now validated against the attempt and generation that wrote it and the run is requeued for adoption again, bounded by the run retry ceiling. Each candidate is reconciled in its own serialization-retried transaction. A row with malformed lease or checkpoint state is closed as `RecoveryRequired` with `lease_recovery_state_invalid` and audited (`ai.run.lease_recovery_quarantined`); a row whose transaction still fails is left for the next pass. Fixes #529.

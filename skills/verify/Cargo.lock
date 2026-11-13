@@ -862,6 +862,7 @@ dependencies = [
  "sqlx",
  "tokio",
  "tokio-stream",
+ "tracing",
  "unicode-normalization",
  "uuid",
 ]
@@ -870,6 +871,7 @@ dependencies = [
 name = "graphql-orm-macros"
 version = "0.144.0"
 dependencies = [
+ "Inflector",
  "convert_case",
  "proc-macro2",
  "quote",

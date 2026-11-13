@@ -150,6 +150,7 @@ impl OrmAiSessionTitleWorkService {
         clock: Arc<dyn Clock>,
         limits: AiSessionTitleWorkLimits,
     ) -> Self {
+        let database = crate::custody_field_policy::custody_database(database);
         Self {
             database,
             access_policy,
