@@ -271,6 +271,9 @@ type CoverageSchema = Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
 
 const SEARCH_TABLE: &str = "__graphql_orm_search_rls_cov_docs";
 const CHANGE_LOG_TABLE: &str = "__graphql_orm_change_log";
+/// The journal's `INSERT` policy created by 0.120.0 to 0.124.x.
+#[cfg(feature = "change-journal")]
+const LEGACY_JOURNAL_POLICY: &str = "graphql_orm_graphql_orm_change_log_insert";
 
 fn tenant(tenant_id: &str) -> DbAuthContext {
     DbAuthContext {
@@ -1060,18 +1063,21 @@ async fn search_delete_trigger_resists_redirection_and_drift()
     assert_eq!(count_as(&owner, &document(&privileged), None).await?, 0);
 
     // A same-named pg_temp table cannot capture the document delete.
-    let shadowed = create_doc(&schema, "tenant-a", "Shadowed secret").await?;
+    let public_first_errors = create_doc(&schema, "tenant-a", "Shadowed secret").await?;
     script_as(
         &runtime,
         &[
             // ON COMMIT DROP keeps the pooled session clean for later writes.
             &format!("CREATE TEMP TABLE {SEARCH_TABLE} (entity_pk text) ON COMMIT DROP"),
-            &format!("DELETE FROM rls_cov_docs WHERE id = '{shadowed}'"),
+            &format!("DELETE FROM rls_cov_docs WHERE id = '{public_first_errors}'"),
         ],
         Some(&tenant_a),
     )
     .await?;
-    assert_eq!(count_as(&owner, &document(&shadowed), None).await?, 0);
+    assert_eq!(
+        count_as(&owner, &document(&public_first_errors), None).await?,
+        0
+    );
 
     // A same-named pg_temp type cannot change how the trigger reads the key:
     // a `text` domain over `name` would truncate a key longer than 63 bytes,
@@ -1999,8 +2005,8 @@ async fn recorder_refuses_triggers_that_do_not_match_their_table()
         other.iter().any(|message| message.contains("journal_copy")),
         "{other:?}"
     );
-    let shadowed = recorder_check(&runtime_database, &[]).await?;
-    assert!(shadowed.is_err(), "{shadowed:?}");
+    let public_first_errors = recorder_check(&runtime_database, &[]).await?;
+    assert!(public_first_errors.is_err(), "{public_first_errors:?}");
 
     // A temporary table the role owns is refused even under the ORM's name.
     let temporary = script_as(
@@ -2385,5 +2391,254 @@ async fn change_journal_registry_protections_are_enforced() -> Result<(), Box<dy
     );
     reapply_target(&owner, "registry-missing").await?;
     assert_eq!(recorder_check(&runtime_database, &[]).await?, Ok(()));
+    Ok(())
+}
+
+/// `pool`'s role and credentials with sessions that use `search_path`, as a
+/// role can set for itself.
+#[cfg(feature = "change-journal")]
+async fn with_search_path(
+    pool: &sqlx::PgPool,
+    search_path: &str,
+) -> Result<sqlx::PgPool, Box<dyn std::error::Error>> {
+    let options = pool
+        .connect_options()
+        .as_ref()
+        .clone()
+        .options([("search_path", search_path)]);
+    Ok(sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(options)
+        .await?)
+}
+
+#[cfg(feature = "change-journal")]
+async fn all_errors(pool: &sqlx::PgPool) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let report = graphql_orm::db::Database::new(pool.clone())
+        .schema()
+        .validate_target(&graphql_orm_schema_target())
+        .await?;
+    Ok(rls_errors(&report.rls_diagnostics)
+        .into_iter()
+        .map(|diagnostic| {
+            format!(
+                "{}: {}",
+                diagnostic.table.as_deref().unwrap_or_default(),
+                diagnostic.message
+            )
+        })
+        .collect())
+}
+
+/// RLS validation reads catalog-defined relations regardless of the
+/// session's `search_path`.
+#[cfg(feature = "change-journal")]
+#[tokio::test]
+#[ignore = "requires test-owned PostgreSQL container"]
+async fn rls_validation_reads_catalog_relations_under_any_search_path()
+-> Result<(), Box<dyn std::error::Error>> {
+    let Provisioned { owner } = provision().await?;
+    let (_, runtime) = role_pool(&owner, "catalog_path", "NOSUPERUSER NOBYPASSRLS").await?;
+    // Drift validation reports: a journal policy, and the journal and search
+    // delete triggers disabled.
+    sqlx::raw_sql(&format!(
+        "CREATE POLICY stray_reads ON {CHANGE_LOG_TABLE} FOR ALL USING (true); \
+         ALTER TABLE rls_cov_docs DISABLE TRIGGER graphql_orm_change_journal; \
+         ALTER TABLE rls_cov_docs DISABLE TRIGGER graphql_orm_search_delete"
+    ))
+    .execute(&owner)
+    .await?;
+    // Same-named relations in public, which the second session searches
+    // first.
+    sqlx::raw_sql(
+        "CREATE VIEW public.pg_policies AS SELECT * FROM pg_catalog.pg_policies WHERE false; \
+         CREATE VIEW public.pg_trigger AS SELECT t.oid, t.tgrelid, t.tgparentid, t.tgname, t.tgfoid, t.tgtype, 'O'::\"char\" AS tgenabled, \
+             t.tgisinternal, t.tgconstrrelid, t.tgconstrindid, t.tgconstraint, t.tgdeferrable, t.tginitdeferred, t.tgnargs, \
+             t.tgattr, t.tgargs, t.tgqual, t.tgoldtable, t.tgnewtable FROM pg_catalog.pg_trigger t; \
+         GRANT SELECT ON public.pg_policies, public.pg_trigger TO PUBLIC",
+    )
+    .execute(&owner)
+    .await?;
+    let plain = all_errors(&runtime).await?;
+    let public_first = with_search_path(&runtime, "public,pg_catalog").await?;
+    let public_first_errors = all_errors(&public_first).await?;
+    for errors in [&plain, &public_first_errors] {
+        assert!(
+            errors.iter().any(|error| error.starts_with(&format!(
+                "{CHANGE_LOG_TABLE}: Unexpected RLS policy stray_reads"
+            ))),
+            "{errors:#?}"
+        );
+        assert!(
+            errors.iter().any(|error| error.starts_with("rls_cov_docs:")
+                && error.contains("graphql_orm_change_journal")
+                && error.contains("does not fire")),
+            "{errors:#?}"
+        );
+        assert!(
+            errors.iter().any(|error| error.starts_with(SEARCH_TABLE)
+                && error.contains("graphql_orm_search_delete")
+                && error.contains("does not fire")),
+            "{errors:#?}"
+        );
+    }
+    assert_eq!(plain, public_first_errors);
+    Ok(())
+}
+
+/// A change journal the session resolves outside `public` is validated where
+/// it resolves: its policies, its row security and its enforcement.
+#[cfg(feature = "change-journal")]
+#[tokio::test]
+#[ignore = "requires test-owned PostgreSQL container"]
+async fn a_change_journal_outside_public_is_validated_where_it_resolves()
+-> Result<(), Box<dyn std::error::Error>> {
+    let Provisioned { owner } = provision().await?;
+    let (_, runtime) = role_pool(&owner, "journal_home", "NOSUPERUSER NOBYPASSRLS").await?;
+    sqlx::raw_sql(&format!(
+        "CREATE SCHEMA journal_home; GRANT USAGE ON SCHEMA journal_home TO PUBLIC; \
+         ALTER TABLE {CHANGE_LOG_TABLE} SET SCHEMA journal_home"
+    ))
+    .execute(&owner)
+    .await?;
+    let runtime = with_search_path(&runtime, "journal_home,public").await?;
+    let journal_errors = || async {
+        Ok::<_, Box<dyn std::error::Error>>(
+            all_errors(&runtime)
+                .await?
+                .into_iter()
+                .filter(|error| error.starts_with(&format!("{CHANGE_LOG_TABLE}:")))
+                .collect::<Vec<_>>(),
+        )
+    };
+    let moved = journal_errors().await?;
+    assert!(
+        !moved
+            .iter()
+            .any(|error| error.contains("Missing change journal table")),
+        "{moved:#?}"
+    );
+    assert!(
+        !moved.iter().any(|error| error.contains("RLS")),
+        "{moved:#?}"
+    );
+
+    sqlx::raw_sql(&format!(
+        "CREATE POLICY stray_reads ON journal_home.{CHANGE_LOG_TABLE} FOR SELECT USING (true)"
+    ))
+    .execute(&owner)
+    .await?;
+    let policy = journal_errors().await?;
+    assert!(
+        policy
+            .iter()
+            .any(|error| error.contains("Unexpected RLS policy stray_reads")),
+        "{policy:#?}"
+    );
+
+    sqlx::raw_sql(&format!(
+        "DROP POLICY stray_reads ON journal_home.{CHANGE_LOG_TABLE}; \
+         ALTER TABLE journal_home.{CHANGE_LOG_TABLE} DISABLE ROW LEVEL SECURITY"
+    ))
+    .execute(&owner)
+    .await?;
+    let disabled = journal_errors().await?;
+    assert!(
+        disabled
+            .iter()
+            .any(|error| error.contains(&format!("RLS is not enabled on {CHANGE_LOG_TABLE}"))),
+        "{disabled:#?}"
+    );
+    assert!(
+        disabled
+            .iter()
+            .any(|error| error.contains(&format!("RLS is not enforced on {CHANGE_LOG_TABLE}"))),
+        "{disabled:#?}"
+    );
+    Ok(())
+}
+
+/// The journal's RLS repair and validation use the catalog's operators
+/// regardless of the session's `search_path`.
+#[cfg(feature = "change-journal")]
+#[tokio::test]
+#[ignore = "requires test-owned PostgreSQL container"]
+async fn journal_rls_repair_uses_catalog_operators_under_any_search_path()
+-> Result<(), Box<dyn std::error::Error>> {
+    let Provisioned { owner } = provision().await?;
+    let (_, runtime) = role_pool(&owner, "operator", "NOSUPERUSER NOBYPASSRLS").await?;
+    // State the repair must correct: RLS disabled, and the INSERT policy of
+    // earlier releases. Operators named `=` in public are on the second
+    // session's path.
+    sqlx::raw_sql(&format!(
+        "ALTER TABLE {CHANGE_LOG_TABLE} DISABLE ROW LEVEL SECURITY; \
+         CREATE POLICY {LEGACY_JOURNAL_POLICY} ON {CHANGE_LOG_TABLE} FOR INSERT WITH CHECK (true); \
+         CREATE FUNCTION public.never_equal(oid, regclass) RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT false'; \
+         CREATE OPERATOR public.= (LEFTARG = oid, RIGHTARG = regclass, FUNCTION = public.never_equal); \
+         CREATE FUNCTION public.never_equal_name(name, name) RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT false'; \
+         CREATE OPERATOR public.= (LEFTARG = name, RIGHTARG = name, FUNCTION = public.never_equal_name)"
+    ))
+    .execute(&owner)
+    .await?;
+    let public_first = with_search_path(&runtime, "public,pg_catalog").await?;
+    for pool in [&runtime, &public_first] {
+        let errors = all_errors(pool).await?;
+        assert!(
+            errors.iter().any(|error| error.starts_with(&format!(
+                "{CHANGE_LOG_TABLE}: RLS is not enabled on {CHANGE_LOG_TABLE}"
+            ))),
+            "{errors:#?}"
+        );
+    }
+    // Ensuring the journal from a session that searches public first
+    // enables its row security again and drops the legacy policy.
+    let public_first_owner = with_search_path(&owner, "public,pg_catalog").await?;
+    graphql_orm::db::Database::new(public_first_owner)
+        .ensure_change_journal_table()
+        .await?;
+    let (enabled, legacy): (bool, i64) = sqlx::query_as(&format!(
+        "SELECT c.relrowsecurity, (SELECT pg_catalog.count(*) FROM pg_catalog.pg_policy p \
+             WHERE p.polrelid OPERATOR(pg_catalog.=) c.oid) \
+         FROM pg_catalog.pg_class c \
+         WHERE c.oid OPERATOR(pg_catalog.=) 'public.{CHANGE_LOG_TABLE}'::pg_catalog.regclass::pg_catalog.oid"
+    ))
+    .fetch_one(&owner)
+    .await?;
+    assert!(enabled);
+    assert_eq!(legacy, 0);
+    Ok(())
+}
+
+/// Re-applying the target revokes privileges beyond SELECT on the journal
+/// regardless of the applying session's `search_path`.
+#[cfg(feature = "change-journal")]
+#[tokio::test]
+#[ignore = "requires test-owned PostgreSQL container"]
+async fn privilege_revocation_uses_catalog_operators_under_any_search_path()
+-> Result<(), Box<dyn std::error::Error>> {
+    let Provisioned { owner } = provision().await?;
+    let (role, _runtime) = role_pool(&owner, "revoke", "NOSUPERUSER NOBYPASSRLS").await?;
+    sqlx::raw_sql(&format!(
+        "GRANT INSERT, UPDATE ON {CHANGE_LOG_TABLE} TO {role}; \
+         CREATE FUNCTION public.never_equal(oid, regclass) RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT false'; \
+         CREATE OPERATOR public.= (LEFTARG = oid, RIGHTARG = regclass, FUNCTION = public.never_equal)"
+    ))
+    .execute(&owner)
+    .await?;
+    let writes = |pool: sqlx::PgPool| {
+        let role = role.clone();
+        async move {
+            sqlx::query_scalar::<_, bool>(&format!(
+                "SELECT pg_catalog.has_table_privilege('{role}', 'public.{CHANGE_LOG_TABLE}', 'INSERT') \
+                     OR pg_catalog.has_table_privilege('{role}', 'public.{CHANGE_LOG_TABLE}', 'UPDATE')"
+            ))
+            .fetch_one(&pool)
+            .await
+        }
+    };
+    assert!(writes(owner.clone()).await?);
+    let public_first_owner = with_search_path(&owner, "public,pg_catalog").await?;
+    reapply_target(&public_first_owner, "revoke-search-path").await?;
+    assert!(!writes(owner.clone()).await?);
     Ok(())
 }

@@ -1436,7 +1436,7 @@ impl<'db, B: RuntimeMigrationBackend> SchemaManager<'db, B> {
                 }
                 let rows = B::fetch_rows(
                     self.database.pool(),
-                    "SELECT 1 AS present FROM pg_ts_config WHERE cfgname = $1",
+                    "SELECT 1 AS present FROM pg_catalog.pg_ts_config WHERE cfgname OPERATOR(pg_catalog.=) $1",
                     &[SqlValue::String(index.language.clone())],
                 )
                 .await

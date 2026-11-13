@@ -429,7 +429,7 @@ async fn database_identity(pool: &DbPool) -> crate::Result<DatabaseIdentity> {
 #[cfg(feature = "postgres")]
 async fn database_identity(pool: &DbPool) -> crate::Result<DatabaseIdentity> {
     let row = sqlx::query(
-        "SELECT datname::text AS name, oid::bigint AS object_id FROM pg_database WHERE datname = current_database()",
+        "SELECT d.datname::pg_catalog.text AS name, d.oid::pg_catalog.int8 AS object_id FROM pg_catalog.pg_database d WHERE d.datname OPERATOR(pg_catalog.=) pg_catalog.current_database()",
     )
     .fetch_one(pool)
     .await?;
@@ -657,32 +657,32 @@ const RECORDER_PRIVILEGES_CLEAN: &str = "(pg_catalog.pg_has_role(CURRENT_USER, j
                   FROM (SELECT j.relacl AS acl
                         UNION ALL
                         SELECT att.attacl FROM pg_catalog.pg_attribute att
-                        WHERE att.attrelid = j.oid AND att.attnum > 0 AND NOT att.attisdropped) acls
+                        WHERE att.attrelid OPERATOR(pg_catalog.=) j.oid AND att.attnum OPERATOR(pg_catalog.>) 0 AND NOT att.attisdropped) acls
                   CROSS JOIN LATERAL pg_catalog.aclexplode(acls.acl) acl
-                  WHERE acl.privilege_type <> 'SELECT' AND acl.grantee <> j.relowner
-                    AND CASE WHEN acl.grantee = 0 THEN true
+                  WHERE acl.privilege_type OPERATOR(pg_catalog.<>) 'SELECT' AND acl.grantee OPERATOR(pg_catalog.<>) j.relowner
+                    AND CASE WHEN acl.grantee OPERATOR(pg_catalog.=) 0::pg_catalog.oid THEN true
                              ELSE pg_catalog.pg_has_role(CURRENT_USER, acl.grantee, 'MEMBER') END)
               AND NOT EXISTS (
                   SELECT 1
                   FROM pg_catalog.aclexplode(COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner))) acl
-                  WHERE acl.privilege_type = 'EXECUTE' AND acl.grantee <> p.proowner
-                    AND CASE WHEN acl.grantee = 0 THEN true
+                  WHERE acl.privilege_type OPERATOR(pg_catalog.=) 'EXECUTE' AND acl.grantee OPERATOR(pg_catalog.<>) p.proowner
+                    AND CASE WHEN acl.grantee OPERATOR(pg_catalog.=) 0::pg_catalog.oid THEN true
                              ELSE pg_catalog.pg_has_role(CURRENT_USER, acl.grantee, 'MEMBER') END)))";
 
 /// The registry is owned by the recorder's owner and grants no role other
 /// than its owner anything beyond `SELECT`, at table or column level.
 const REGISTRY_INTACT: &str = "EXISTS (
               SELECT 1 FROM pg_catalog.pg_class g
-              WHERE g.oid = pg_catalog.to_regclass('graphql_orm.change_journal_tables')
-                AND g.relowner = p.proowner
+              WHERE g.oid OPERATOR(pg_catalog.=) pg_catalog.to_regclass('graphql_orm.change_journal_tables')
+                AND g.relowner OPERATOR(pg_catalog.=) p.proowner
                 AND NOT EXISTS (
                     SELECT 1
                     FROM (SELECT g.relacl AS acl
                           UNION ALL
                           SELECT att.attacl FROM pg_catalog.pg_attribute att
-                          WHERE att.attrelid = g.oid AND att.attnum > 0 AND NOT att.attisdropped) acls
+                          WHERE att.attrelid OPERATOR(pg_catalog.=) g.oid AND att.attnum OPERATOR(pg_catalog.>) 0 AND NOT att.attisdropped) acls
                     CROSS JOIN LATERAL pg_catalog.aclexplode(acls.acl) acl
-                    WHERE acl.grantee <> g.relowner AND acl.privilege_type <> 'SELECT'))";
+                    WHERE acl.grantee OPERATOR(pg_catalog.<>) g.relowner AND acl.privilege_type OPERATOR(pg_catalog.<>) 'SELECT'))";
 
 /// The recorder check for one table.
 ///
@@ -745,46 +745,46 @@ where
     let sql = format!(
         "SELECT 1
         FROM pg_catalog.pg_trigger tr
-        JOIN pg_catalog.pg_class t ON t.oid = tr.tgrelid
-        JOIN pg_catalog.pg_namespace tn ON tn.oid = t.relnamespace
-        JOIN pg_catalog.pg_proc p ON p.oid = tr.tgfoid
-        JOIN pg_catalog.pg_namespace pn ON pn.oid = p.pronamespace
+        JOIN pg_catalog.pg_class t ON t.oid OPERATOR(pg_catalog.=) tr.tgrelid
+        JOIN pg_catalog.pg_namespace tn ON tn.oid OPERATOR(pg_catalog.=) t.relnamespace
+        JOIN pg_catalog.pg_proc p ON p.oid OPERATOR(pg_catalog.=) tr.tgfoid
+        JOIN pg_catalog.pg_namespace pn ON pn.oid OPERATOR(pg_catalog.=) p.pronamespace
         CROSS JOIN LATERAL (
             SELECT pg_catalog.convert_from(
-                pg_catalog.substr(tr.tgargs, 1, GREATEST(pg_catalog.position(tr.tgargs, '\\x00'::bytea) - 1, 0)),
+                pg_catalog.substr(tr.tgargs, 1, GREATEST(pg_catalog.position(tr.tgargs, '\\x00'::pg_catalog.bytea) OPERATOR(pg_catalog.-) 1, 0)),
                 'UTF8'
             ) AS journal_schema,
-            pg_catalog.substr(tr.tgargs, pg_catalog.position(tr.tgargs, '\\x00'::bytea) + 1) AS entry_arguments
+            pg_catalog.substr(tr.tgargs, pg_catalog.position(tr.tgargs, '\\x00'::pg_catalog.bytea) OPERATOR(pg_catalog.+) 1) AS entry_arguments
         ) args
         JOIN pg_catalog.pg_class j
-          ON j.oid = pg_catalog.to_regclass(pg_catalog.format('%I.%I', args.journal_schema, ?))
-        WHERE tr.tgrelid = pg_catalog.to_regclass(?)
-          AND tr.tgname = ? AND NOT tr.tgisinternal AND tr.tgenabled = 'O'
-          AND tr.tgtype = ? AND tr.tgqual IS NULL AND tr.tgnargs = 7
-          AND pn.nspname = 'graphql_orm' AND p.proname = ? AND p.pronargs = 0
-          AND p.prosecdef AND p.prosrc = ? AND p.proconfig = ARRAY[?]::pg_catalog.text[]
-          AND p.proowner = t.relowner AND j.relowner = p.proowner AND j.relkind = 'r'
-          AND pg_catalog.position(tr.tgargs, '\\x00'::bytea) > 1
-          AND args.entry_arguments = pg_catalog.convert_to(tn.nspname::pg_catalog.text, 'UTF8') || '\\x00'::bytea
-              || pg_catalog.convert_to(t.relname::pg_catalog.text, 'UTF8') || '\\x00'::bytea || ?
-          AND args.journal_schema NOT LIKE 'pg\\_temp%'
-          AND args.journal_schema NOT LIKE 'pg\\_toast\\_temp%'
-          AND (? OR tn.nspname::pg_catalog.text = args.journal_schema)
+          ON j.oid OPERATOR(pg_catalog.=) pg_catalog.to_regclass(pg_catalog.format('%I.%I', args.journal_schema, ?))
+        WHERE tr.tgrelid OPERATOR(pg_catalog.=) pg_catalog.to_regclass(?)
+          AND tr.tgname OPERATOR(pg_catalog.=) ? AND NOT tr.tgisinternal AND tr.tgenabled OPERATOR(pg_catalog.=) 'O'
+          AND tr.tgtype OPERATOR(pg_catalog.=) ? AND tr.tgqual IS NULL AND tr.tgnargs OPERATOR(pg_catalog.=) 7
+          AND pn.nspname OPERATOR(pg_catalog.=) 'graphql_orm' AND p.proname OPERATOR(pg_catalog.=) ? AND p.pronargs OPERATOR(pg_catalog.=) 0
+          AND p.prosecdef AND p.prosrc OPERATOR(pg_catalog.=) ? AND p.proconfig OPERATOR(pg_catalog.=) ARRAY[?]::pg_catalog.text[]
+          AND p.proowner OPERATOR(pg_catalog.=) t.relowner AND j.relowner OPERATOR(pg_catalog.=) p.proowner AND j.relkind OPERATOR(pg_catalog.=) 'r'
+          AND pg_catalog.position(tr.tgargs, '\\x00'::pg_catalog.bytea) OPERATOR(pg_catalog.>) 1
+          AND args.entry_arguments OPERATOR(pg_catalog.=) (pg_catalog.convert_to(tn.nspname::pg_catalog.text, 'UTF8') OPERATOR(pg_catalog.||) '\\x00'::pg_catalog.bytea
+              OPERATOR(pg_catalog.||) pg_catalog.convert_to(t.relname::pg_catalog.text, 'UTF8') OPERATOR(pg_catalog.||) '\\x00'::pg_catalog.bytea OPERATOR(pg_catalog.||) ?)
+          AND NOT (args.journal_schema OPERATOR(pg_catalog.~~) 'pg\\_temp%')
+          AND NOT (args.journal_schema OPERATOR(pg_catalog.~~) 'pg\\_toast\\_temp%')
+          AND (? OR tn.nspname::pg_catalog.text OPERATOR(pg_catalog.=) args.journal_schema)
           AND EXISTS (
               SELECT 1 FROM graphql_orm.change_journal_tables r
-              WHERE r.journal_schema = args.journal_schema AND r.declared_table = ?
-                AND r.entity_name = ? AND r.key_column = ? AND r.relid::pg_catalog.oid = tr.tgrelid
+              WHERE r.journal_schema OPERATOR(pg_catalog.=) args.journal_schema AND r.declared_table OPERATOR(pg_catalog.=) ?
+                AND r.entity_name OPERATOR(pg_catalog.=) ? AND r.key_column OPERATOR(pg_catalog.=) ? AND r.relid::pg_catalog.oid OPERATOR(pg_catalog.=) tr.tgrelid
           )
           AND {REGISTRY_INTACT}
           AND NOT EXISTS (
               SELECT 1 FROM pg_catalog.pg_trigger other
-              WHERE other.tgrelid = tr.tgrelid AND other.tgfoid = tr.tgfoid AND other.oid <> tr.oid
+              WHERE other.tgrelid OPERATOR(pg_catalog.=) tr.tgrelid AND other.tgfoid OPERATOR(pg_catalog.=) tr.tgfoid AND other.oid OPERATOR(pg_catalog.<>) tr.oid
           )
-          AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger jt WHERE jt.tgrelid = j.oid AND NOT jt.tgisinternal)
-          AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite jr WHERE jr.ev_class = j.oid)
+          AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger jt WHERE jt.tgrelid OPERATOR(pg_catalog.=) j.oid AND NOT jt.tgisinternal)
+          AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite jr WHERE jr.ev_class OPERATOR(pg_catalog.=) j.oid)
           AND {RECORDER_PRIVILEGES_CLEAN}
-          AND pg_catalog.current_setting(?, true) = 'on'
-          AND pg_catalog.current_setting('session_replication_role') <> 'replica'"
+          AND pg_catalog.current_setting(?, true) OPERATOR(pg_catalog.=) 'on'
+          AND pg_catalog.current_setting('session_replication_role') OPERATOR(pg_catalog.<>) 'replica'"
     );
     let values = vec![
         SqlValue::String(CHANGE_JOURNAL_TABLE.to_string()),
@@ -858,7 +858,7 @@ where
     )];
     if hook_ctx
         .fetch_rows(
-            "SELECT 1 WHERE pg_catalog.current_setting(?, true) = 'on'",
+            "SELECT 1 WHERE pg_catalog.current_setting(?, true) OPERATOR(pg_catalog.=) 'on'",
             &setting,
         )
         .await?
@@ -871,7 +871,7 @@ where
     }
     if hook_ctx
         .fetch_rows(
-            "SELECT 1 WHERE pg_catalog.current_setting('session_replication_role') <> 'replica'",
+            "SELECT 1 WHERE pg_catalog.current_setting('session_replication_role') OPERATOR(pg_catalog.<>) 'replica'",
             &[],
         )
         .await?
@@ -888,9 +888,9 @@ where
     ];
     if !hook_ctx
         .fetch_rows(
-            "SELECT 1 FROM pg_catalog.pg_class j WHERE j.oid = pg_catalog.to_regclass(?)
-               AND (EXISTS (SELECT 1 FROM pg_catalog.pg_trigger jt WHERE jt.tgrelid = j.oid AND NOT jt.tgisinternal)
-                    OR EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite jr WHERE jr.ev_class = j.oid))",
+            "SELECT 1 FROM pg_catalog.pg_class j WHERE j.oid OPERATOR(pg_catalog.=) pg_catalog.to_regclass(?)
+               AND (EXISTS (SELECT 1 FROM pg_catalog.pg_trigger jt WHERE jt.tgrelid OPERATOR(pg_catalog.=) j.oid AND NOT jt.tgisinternal)
+                    OR EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite jr WHERE jr.ev_class OPERATOR(pg_catalog.=) j.oid))",
             &journal[..1],
         )
         .await?
@@ -903,8 +903,8 @@ where
     let privileges = format!(
         "SELECT 1 FROM pg_catalog.pg_class j
          JOIN pg_catalog.pg_proc p
-           ON p.oid = pg_catalog.to_regprocedure(pg_catalog.format('graphql_orm.%I()', ?::pg_catalog.text))
-         WHERE j.oid = pg_catalog.to_regclass(?) AND NOT {RECORDER_PRIVILEGES_CLEAN}"
+           ON p.oid OPERATOR(pg_catalog.=) pg_catalog.to_regprocedure(pg_catalog.format('graphql_orm.%I()', ?::pg_catalog.text))
+         WHERE j.oid OPERATOR(pg_catalog.=) pg_catalog.to_regclass(?) AND NOT {RECORDER_PRIVILEGES_CLEAN}"
     );
     let privilege_values = vec![journal[1].clone(), journal[0].clone()];
     if !hook_ctx
@@ -919,7 +919,7 @@ where
     }
     let registry_integrity = format!(
         "SELECT 1 FROM pg_catalog.pg_proc p
-         WHERE p.oid = pg_catalog.to_regprocedure(pg_catalog.format('graphql_orm.%I()', ?::pg_catalog.text))
+         WHERE p.oid OPERATOR(pg_catalog.=) pg_catalog.to_regprocedure(pg_catalog.format('graphql_orm.%I()', ?::pg_catalog.text))
            AND {REGISTRY_INTACT}"
     );
     if hook_ctx
@@ -936,8 +936,8 @@ where
     if hook_ctx
         .fetch_rows(
             "SELECT 1 FROM pg_catalog.pg_class g
-             WHERE g.oid = pg_catalog.to_regclass('graphql_orm.change_journal_tables')
-               AND EXISTS (SELECT 1 FROM graphql_orm.change_journal_tables r WHERE r.declared_table = ?)",
+             WHERE g.oid OPERATOR(pg_catalog.=) pg_catalog.to_regclass('graphql_orm.change_journal_tables')
+               AND EXISTS (SELECT 1 FROM graphql_orm.change_journal_tables r WHERE r.declared_table OPERATOR(pg_catalog.=) ?)",
             &registry,
         )
         .await?

@@ -180,6 +180,53 @@ Custom predicates must therefore schema-qualify every function, operator, table 
 one cannot be parsed under the pinned path, and validation reports its policy as "could not be
 compared". The generated predicates and helpers already qualify `graphql_orm.*`.
 
+Tenant and owner columns of a type outside `pg_catalog` validate as PostgreSQL bound the generated
+`column = graphql_orm.current_tenant_id()` when the plan created the policy. For a `citext` column,
+from an extension in any schema, and for a domain over `text`, PostgreSQL binds the catalog's `text`
+equality: the policy reads back as `((tenant_id)::text = graphql_orm.current_tenant_id())`,
+validates clean whatever the session's `search_path`, and compares case-sensitively. When the
+column's equality with `text` resolves to an operator outside `pg_catalog` (a type with an
+implicit cast from `text` and its own `=`), the declared predicate cannot be parsed under the
+pinned path, and validation reports the policy as "could not be compared" rather than accepting
+it. Declare such a column with a custom predicate that names the operator and the type with their
+schema, for example
+`predicate = "tenant_id OPERATOR(ext.=) graphql_orm.current_tenant_id()::ext.tenant_code"`.
+
+Every other RLS validation catalog read follows the same rule. Validation first resolves the
+declared table paths, the change journal and the change journal registry's declared tables under
+the session's `search_path`, using only schema-qualified functions and no operators, then pins
+`search_path` to `pg_catalog, pg_temp` and reads everything else by OID from schema-qualified
+catalog relations and functions.
+
+The other catalog reads name every catalog relation, function, type and operator with its schema
+(`OPERATOR(pg_catalog.=)` and so on) and change no session or transaction state. These are schema
+introspection, the dependent-delete gate, the runtime migration's catalog checks, the change-journal
+recorder check, and the migration-history and search-language checks. They are safe on a connection
+that holds the caller's transaction, including when their future is dropped. Column types and
+defaults render with the session's path, as the session wrote them.
+
+A partial index counts as a closed-set predicate only when all of the following hold:
+
+- every operator class it uses (`pg_index.indclass`) is the default class for its type, and both
+  the class and its operator family belong to `pg_catalog`;
+- every operator, function, type and collation that `pg_catalog.pg_depend` records for the index
+  belongs to `pg_catalog` (PostgreSQL does not record its own pinned built-in objects, so a
+  catalog-only index usually has no such rows);
+- its predicate renders in the closed-set form.
+
+Introspection reports any other partial index without a predicate, and runtime migrations refuse
+it. A session whose `search_path` lists another schema ahead of `pg_catalog` with an operator of the
+same signature, or with a type named `text`, sees the catalog's operator or type rendered
+schema-qualified, so such an index is reported without a predicate in that session too.
+
+The plan's own `DO` blocks name catalog objects and operators with their schema too. These are the
+change journal's RLS statement, privilege revocation, the trigger installers, stray-trigger
+cleanup, unique-constraint removal and append-only function ownership. Only the declared table
+names in them resolve through the applying session's path.
+
+Every catalog read therefore uses catalog-defined objects regardless of the session's
+`search_path`.
+
 Rendering needs the `TEMP` privilege on the database, which PostgreSQL grants to `PUBLIC` by
 default, and a primary rather than a read-only standby. When PostgreSQL cannot render an expression,
 validation reports the policy as an `Error` ("could not be compared") instead of treating it as
@@ -216,14 +263,17 @@ behalf of RLS entities, and `validate_target` reports drift on them:
   the caller owns the journal. Create the journal with the schema owner, not the runtime role, or
   the runtime role owns it and validation reports it as not enforced. `SELECT` grants survive
   re-application: they cannot write or add triggers, and with no policies they read nothing unless
-  the role also has `BYPASSRLS`, as a dedicated backup export role does. See
-  [Change journal recorder](#change-journal-recorder).
+  the role also has `BYPASSRLS`, as a dedicated backup export role does. Validation checks the
+  journal the connection's `search_path` resolves `__graphql_orm_change_log` to, in whichever
+  schema that is. See [Change journal recorder](#change-journal-recorder).
 
 Validation reports a missing or altered policy, compared as described under
 [Drift Validation](#drift-validation), any additional policy on these tables (an extra
 permissive policy would widen access), any policy at all on the change journal, and a trigger that
-is missing, does not fire in ordinary sessions (for example `ENABLE REPLICA`), has the wrong type
-or arguments, targets another table, or calls a modified `graphql_orm.delete_search_document()`.
+is missing from the table the base path resolves to, does not fire in ordinary sessions (for
+example `ENABLE REPLICA`), has the wrong type or arguments, targets another table, or calls a
+modified `graphql_orm.delete_search_document()`. Only a trigger on the table the base path
+resolves to counts.
 Dependent deletes accept only a trigger that passes the same checks.
 
 ### Change journal recorder
