@@ -7597,6 +7597,10 @@ fn generate_graphql_operations_unfiltered(
         quote! {}
     };
     let backend_name = backend.name();
+    let entity_identity = match &entity_meta.stable_type_id {
+        Some(identity) => quote! { #identity },
+        None => quote! { concat!(module_path!(), "::", stringify!(#struct_name)) },
+    };
     // Argument lists are read from the resolver signatures after expansion;
     // see `catalog_arguments`. Descriptors name only their root coordinate.
     use crate::catalog_arguments::{RootKind, placeholder as root_arguments};
@@ -7618,7 +7622,7 @@ fn generate_graphql_operations_unfiltered(
         let arguments = root_arguments(kind, field_name);
         quote! {
             ::graphql_orm::graphql::orm::GeneratedGraphqlOperationDescriptor::generated_with_authorization_and_description(
-                concat!(module_path!(), "::", stringify!(#struct_name)),
+                #entity_identity,
                 stringify!(#struct_name),
                 #table_name,
                 #backend_name,
@@ -7632,7 +7636,7 @@ fn generate_graphql_operations_unfiltered(
                     ::qualified_type_name(),
                 #resolver_schema_signature,
                 #operation_authorization,
-            )
+            ).with_diagnostic_rust_type(concat!(module_path!(), "::", stringify!(#struct_name)))
         }
     };
     let with_query_shape = |descriptor: proc_macro2::TokenStream,
@@ -7663,7 +7667,7 @@ fn generate_graphql_operations_unfiltered(
             let arguments = root_arguments(RootKind::Mutation, field_name);
             quote! {
                 ::graphql_orm::graphql::orm::GeneratedGraphqlOperationDescriptor::generated_with_authorization_description_and_ai_policy(
-                    concat!(module_path!(), "::", stringify!(#struct_name)),
+                    #entity_identity,
                     stringify!(#struct_name),
                     #table_name,
                     #backend_name,
@@ -7678,7 +7682,7 @@ fn generate_graphql_operations_unfiltered(
                     #resolver_schema_signature,
                     #operation_authorization,
                     #policy,
-                )
+                ).with_diagnostic_rust_type(concat!(module_path!(), "::", stringify!(#struct_name)))
             }
         };
 

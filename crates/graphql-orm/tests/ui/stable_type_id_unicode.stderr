@@ -1,0 +1,5 @@
+error: stable_type_id must contain 1–256 printable ASCII bytes without whitespace or control characters
+ --> tests/ui/stable_type_id_unicode.rs:3:74
+  |
+3 | #[graphql_entity(table = "records", plural = "Records", stable_type_id = "é")]
+  |                                                                          ^^^

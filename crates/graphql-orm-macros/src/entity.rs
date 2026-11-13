@@ -11,6 +11,7 @@ use syn::spanned::Spanned;
 
 #[derive(Default)]
 pub(crate) struct EntityMetadata {
+    pub(crate) stable_type_id: Option<String>,
     pub(crate) backend: Option<String>,
     pub(crate) table_name: Option<String>,
     pub(crate) plural_name: Option<String>,
@@ -172,7 +173,20 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
             }
             entity_attribute = Some(attribute_name);
             attr.parse_nested_meta(|meta| {
-                if meta.path.is_ident("table") {
+                if meta.path.is_ident("stable_type_id") {
+                    if metadata.stable_type_id.is_some() {
+                        return Err(meta.error("stable_type_id may only be declared once per entity"));
+                    }
+                    let lit: syn::LitStr = meta.value()?.parse()?;
+                    let value = lit.value();
+                    if value.is_empty() || value.len() > 256
+                        || !value.bytes().all(|byte| byte.is_ascii_graphic())
+                    {
+                        return Err(syn::Error::new(lit.span(),
+                            "stable_type_id must contain 1–256 printable ASCII bytes without whitespace or control characters"));
+                    }
+                    metadata.stable_type_id = Some(value);
+                } else if meta.path.is_ident("table") {
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;
                     metadata.table_name = Some(lit.value());

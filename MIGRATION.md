@@ -10,6 +10,31 @@ supersedes: []
 
 # Migration Guide
 
+## 0.136.0 to 0.139.0: optional stable entity identity
+
+Upgrade ORM and macros together; catalogue is 0.7.4.
+
+Declare `#[graphql_entity(stable_type_id = "old_crate::old_module::Record")]`
+(or `#[repository_entity(stable_type_id = "...")]`) before or when moving an
+entity. Use the exact previous descriptor's `entity_rust_type()` value, including
+the old crate, module and type name. Keep this value after the move, even across
+crates. The value must be a string literal of 1–256 printable ASCII bytes with
+no whitespace or control characters; duplicate declarations are rejected.
+
+Omitting the option preserves the module-path identity and all existing
+fingerprints byte for byte. Choosing a new identity intentionally invalidates
+persisted operation/catalogue bindings; using the old value preserves them.
+No database migration is required. The fingerprint algorithms, names, input
+order and default module path are unchanged.
+
+Catalogue composition panics on repeated entity identities, naming both Rust
+types. Assign distinct identities to distinct entities. Generated descriptors
+retain their real Rust path as separate diagnostic metadata outside every
+fingerprint and serialized export; `entity_rust_type()` remains the identity
+used by the existing hash/sort contract, and `diagnostic_rust_type()` exposes
+the real path. Semantic catalogues and AI/router bindings consume the resulting
+operation fingerprints; they do not independently generate a Rust identity.
+
 ## 0.133.0 to 0.136.0: administrative backup and search reads
 
 Upgrade ORM and macros together; 0.136.0 is a placeholder pending sequential merges. PostgreSQL backup export, restore emptiness checks and search rebuild now fail for roles subject to RLS. `SET LOCAL row_security = off` refuses filtering; it does not bypass policies. Use a role exempt from RLS for administrative operations (superuser, `BYPASSRLS`, or an owner without forced RLS). A permissive policy does not qualify. No schema migration is required.
