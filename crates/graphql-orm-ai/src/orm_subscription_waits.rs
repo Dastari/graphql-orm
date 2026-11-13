@@ -4532,6 +4532,7 @@ mod tests {
                     state: "committed".to_owned(),
                     expires_at: (self.clock.now() + Duration::hours(1)).unix_timestamp(),
                     reconciled_at: Some(self.clock.now().unix_timestamp()),
+                    settlement_examined_at: 0,
                 },
             )
             .await

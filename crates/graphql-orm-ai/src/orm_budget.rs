@@ -387,6 +387,7 @@ impl OrmAiBudgetService {
                             state: "reserved".to_owned(),
                             expires_at: canonical_expiry.unix_timestamp(),
                             reconciled_at: None,
+                            settlement_examined_at: 0,
                         })
                         .await
                         .map_err(OrmPublicError::from)?;
@@ -2387,15 +2388,19 @@ mod tests {
         }
         // One candidate per pass, after every reservation expired but while
         // the owning leases are still live.
-        let runs = crate::OrmAiRunService::new(
-            fixture.database.clone(),
-            Arc::new(FixedClock::new(fixture.now + Duration::seconds(180))),
-            crate::AiRunServiceLimits::new(Duration::seconds(60), Duration::hours(1), 1, 2, 8)
-                .expect("run limits should validate"),
-        );
+        // Each pass uses a fresh service, as after a restart: progress must
+        // not depend on process memory.
+        let runs = || {
+            crate::OrmAiRunService::new(
+                fixture.database.clone(),
+                Arc::new(FixedClock::new(fixture.now + Duration::seconds(180))),
+                crate::AiRunServiceLimits::new(Duration::seconds(60), Duration::hours(1), 1, 2, 8)
+                    .expect("run limits should validate"),
+            )
+        };
         let mut settled = 0;
         for _ in 0..3 {
-            settled += runs
+            settled += runs()
                 .recover_expired_leases()
                 .await
                 .expect("recovery should succeed")

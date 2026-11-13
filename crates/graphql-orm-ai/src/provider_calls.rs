@@ -13139,6 +13139,7 @@ mod tests {
                 state: "committed".to_owned(),
                 expires_at: (now + Duration::hours(1)).unix_timestamp(),
                 reconciled_at: Some(now.unix_timestamp()),
+                settlement_examined_at: 0,
             },
         )
         .await

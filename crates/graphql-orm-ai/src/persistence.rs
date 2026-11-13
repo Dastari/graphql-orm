@@ -523,6 +523,14 @@ pub(crate) struct AiBudgetReservationRecord {
     #[sortable]
     pub created_at: i64,
     pub reconciled_at: Option<i64>,
+    /// When the stranded-reservation sweeper last examined this reservation
+    /// and left it unresolved (still owned by a live attempt or a background
+    /// submission, or failed to settle). The sweeper scans in this order, so
+    /// rows it cannot settle yet rotate behind the rest across passes and
+    /// restarts. Zero for a reservation never examined.
+    #[sortable]
+    #[graphql_orm(default = "0")]
+    pub settlement_examined_at: i64,
     #[graphql_orm(version, default = "0")]
     pub row_version: i64,
 }

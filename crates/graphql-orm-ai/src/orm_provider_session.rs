@@ -200,8 +200,8 @@ mod service {
         clock: Arc<dyn Clock>,
         limits: AiProviderSessionLimits,
         maximum_principal_age: Duration,
-        /// Process-local resume offset for the parked-wait fallback scan,
-        /// whose terminal-run readiness only a per-row read can prove.
+        /// Process-local resume offset for the legacy parked-wait fallback
+        /// page. An optimisation only: cleanup progress never depends on it.
         parked_scan_offset: Arc<std::sync::Mutex<usize>>,
     }
 
@@ -2443,10 +2443,14 @@ mod service {
                                     .map(|row| (row, false)),
                             );
                         }
-                        // A parked wait is also ready when its run closed,
-                        // which only a per-row read can prove. That page
-                        // resumes after the rows a previous call examined and
-                        // left unready, so they cannot hold the window.
+                        // Remaining parked waits. A run that closes moves its
+                        // parked binding to `cleanup_required` in the same
+                        // transaction, and every other park reaches an expiry
+                        // bucket above by its bounded wait or binding expiry,
+                        // so progress never depends on this page. It still
+                        // reads the run of each row for parks closed before
+                        // that rule existed; its process-local offset only
+                        // spreads that work across calls.
                         let mut fallback_offset = parked_offset;
                         let fallback = loop {
                             let rows = tx
@@ -4649,6 +4653,7 @@ mod service {
                     state: "committed".to_owned(),
                     expires_at: (now + Duration::hours(1)).unix_timestamp(),
                     reconciled_at: Some(now.unix_timestamp()),
+                    settlement_examined_at: 0,
                 },
             )
             .await
@@ -5513,6 +5518,58 @@ mod service {
                 .expect("cleanup scan should succeed")
                 .expect("the expired park must be claimed");
             assert_eq!(cleanup.binding_id(), expired);
+        }
+
+        #[tokio::test]
+        async fn closing_a_parked_run_moves_its_provider_session_to_cleanup() {
+            let fixture = parked_wait_fixture().await;
+            fixture
+                .service
+                .park_for_wait(&fixture.lease, fixture.request.clone())
+                .await
+                .expect("exact provider session should park");
+            let runs = crate::OrmAiRunService::new(
+                fixture.database.clone(),
+                fixture.clock.clone(),
+                crate::AiRunServiceLimits::new(Duration::minutes(5), Duration::hours(1), 16, 2, 8)
+                    .expect("run limits should validate"),
+            );
+            runs.finish(
+                &fixture.lease,
+                crate::AiRunCompletion::new(
+                    AiRunState::Failed,
+                    "provider_failed",
+                    Some("provider_failed".to_owned()),
+                    None,
+                )
+                .expect("completion should validate"),
+            )
+            .await
+            .expect("the parked run should finish");
+            // The binding is ready for the ordinary SQL bucket in the same
+            // transaction, so no per-row run read is needed to find it.
+            let binding =
+                AiProviderSessionBindingRecord::find_by_id(&fixture.database, &fixture.binding_id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(
+                binding.state,
+                AiProviderSessionState::CleanupRequired.as_str()
+            );
+            assert_eq!(
+                binding.cleanup_reason_code.as_deref(),
+                Some("provider_session_parked_wait_closed")
+            );
+            assert_eq!(binding.last_run_id, Some(fixture.lease.run_id().0));
+            assert!(binding.claimed_run_id.is_none());
+            // A fresh service instance, as after a restart, claims it.
+            let cleanup = service_with_host_policy(&fixture)
+                .claim_cleanup("closed-park-cleaner")
+                .await
+                .expect("cleanup scan should succeed")
+                .expect("the closed run's provider session should be claimed");
+            assert_eq!(cleanup.binding_id(), fixture.binding_id);
         }
 
         #[tokio::test]

@@ -1257,6 +1257,7 @@ impl AiConfigurationService for OrmAiConfigurationService {
                         })
                         .order_by(AiBudgetReservationRecordOrderByInput {
                             created_at: Some(OrderDirection::Asc),
+                            ..Default::default()
                         })
                         .internal_limit(scan_limit)
                         .fetch_all()
@@ -2611,6 +2612,7 @@ mod tests {
                 state: original.state,
                 expires_at: original.expires_at,
                 reconciled_at: original.reconciled_at,
+                settlement_examined_at: 0,
             },
         )
         .await

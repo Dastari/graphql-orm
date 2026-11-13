@@ -1322,6 +1322,27 @@ impl OrmAiApprovalService {
             self.require_recent_mfa(&principal)?;
         }
         let now = canonical_second(self.clock.now());
+        // Visibility (including the tenant predicate) is settled above. A
+        // decision that lost to the run's closure (cancellation, completion,
+        // recovery) gets the stable refusal, not the version conflict the
+        // closure's approval update would otherwise cause.
+        let call = AiToolCallRecord::find_by_id(&self.database, &current.tool_call_id)
+            .await
+            .map_err(|error| map_orm(OrmPublicError::from(error)))?
+            .ok_or(AiError::Conflict)?;
+        if call.approval_id == Some(current.id) {
+            let run = AiRunRecord::find_by_id(&self.database, &call.run_id)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::Conflict)?;
+            if run.session_id == current.session_id
+                && run.state != crate::AiRunState::WaitingApproval.as_str()
+            {
+                return Err(AiError::InvalidInput(
+                    crate::AI_APPROVAL_RUN_NOT_WAITING.to_owned(),
+                ));
+            }
+        }
         if current.row_version != expected_version
             || !expected_states.contains(&current.state.as_str())
             || current.expires_at <= now.unix_timestamp()
@@ -1363,12 +1384,6 @@ impl OrmAiApprovalService {
                             .await
                             .map_err(OrmPublicError::from)?
                             .ok_or_else(OrmPublicError::not_found)?;
-                        if current.row_version != expected_version
-                            || !expected_states.contains(&current.state.as_str())
-                            || current.expires_at <= now.unix_timestamp()
-                        {
-                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                        }
                         // An approval is decided for one waiting run. Once the
                         // run has left its wait no decision can take effect, so
                         // every decision is refused with a stable code rather
@@ -1393,6 +1408,15 @@ impl OrmAiApprovalService {
                                 OrmErrorCode::InvalidInput,
                                 crate::AI_APPROVAL_RUN_NOT_WAITING,
                             ));
+                        }
+                        // Checked after the run state, so a closure that wins
+                        // a serialization race against this decision is still
+                        // reported with the stable refusal on retry.
+                        if current.row_version != expected_version
+                            || !expected_states.contains(&current.state.as_str())
+                            || current.expires_at <= now.unix_timestamp()
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }
                         let session = tx
                             .find_by_id::<AiSessionRecord>(&current.session_id)
@@ -3233,6 +3257,7 @@ mod tests {
                 state: "committed".to_owned(),
                 expires_at: (fixture.clock.now() + Duration::hours(1)).unix_timestamp(),
                 reconciled_at: Some(fixture.clock.now().unix_timestamp()),
+                settlement_examined_at: 0,
             },
         )
         .await
@@ -3888,19 +3913,7 @@ mod tests {
                     .await
                     .expect("a waiting run should finish as failed"),
                 "cancel" => {
-                    let cancellation = crate::OrmAiRunCancellationService::new(
-                        fixture.database.clone(),
-                        Arc::new(AllowSessions),
-                        Arc::new(Protection(fixture.scope.clone())),
-                        Arc::new(crate::DatabaseManagedContentProtector),
-                        Arc::new(Resolver {
-                            principal: fixture.principal.clone(),
-                            clock: fixture.clock.clone(),
-                        }),
-                        fixture.clock.clone(),
-                        crate::AiRunCancellationLimits::default(),
-                        Arc::new(crate::AiRunCancellationHub::default()),
-                    );
+                    let cancellation = cancellation_service(&fixture);
                     crate::AiRunCancellationService::request_cancellation(
                         &cancellation,
                         &fixture.principal,
@@ -3938,6 +3951,232 @@ mod tests {
                 assert_eq!(approval.consumed_uses, 0);
             }
         }
+    }
+
+    fn cancellation_service(fixture: &Fixture) -> crate::OrmAiRunCancellationService {
+        crate::OrmAiRunCancellationService::new(
+            fixture.database.clone(),
+            Arc::new(AllowSessions),
+            Arc::new(Protection(fixture.scope.clone())),
+            Arc::new(crate::DatabaseManagedContentProtector),
+            Arc::new(Resolver {
+                principal: fixture.principal.clone(),
+                clock: fixture.clock.clone(),
+            }),
+            fixture.clock.clone(),
+            crate::AiRunCancellationLimits::default(),
+            Arc::new(crate::AiRunCancellationHub::default()),
+        )
+    }
+
+    async fn approval_state(fixture: &Fixture, id: crate::AiApprovalId) -> String {
+        AiApprovalRecord::find_by_id(&fixture.database, &id.0)
+            .await
+            .unwrap()
+            .unwrap()
+            .state
+    }
+
+    fn is_run_not_waiting<T: std::fmt::Debug>(result: &Result<T, AiError>) -> bool {
+        matches!(
+            result,
+            Err(AiError::InvalidInput(message)) if message == crate::AI_APPROVAL_RUN_NOT_WAITING
+        )
+    }
+
+    #[tokio::test]
+    async fn a_decision_that_loses_to_a_real_closure_gets_the_stable_refusal() {
+        for (closure, approve_first) in [
+            ("cancel", false),
+            ("finish", false),
+            ("cancel", true),
+            ("finish", true),
+        ] {
+            let fixture = fixture().await;
+            let (requested, _) = request_wait(&fixture, fixture.now + Duration::hours(3)).await;
+            if approve_first {
+                let view = fixture
+                    .approval_service
+                    .approval(&fixture.principal, requested.approval_id())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                fixture
+                    .approval_service
+                    .decide_approval(
+                        &fixture.principal,
+                        DecideAiApprovalInput {
+                            id: view.id,
+                            decision: AiApprovalDecision::Approve,
+                            expected_version: view.row_version,
+                        },
+                    )
+                    .await
+                    .expect("a waiting run's approval should be approved");
+            }
+            // The client reads the approval before the run closes.
+            let view = fixture
+                .approval_service
+                .approval(&fixture.principal, requested.approval_id())
+                .await
+                .unwrap()
+                .unwrap();
+            if closure == "cancel" {
+                crate::AiRunCancellationService::request_cancellation(
+                    &cancellation_service(&fixture),
+                    &fixture.principal,
+                    crate::CancelAiRunInput {
+                        session_id: requested.lease().session_id().0,
+                        run_id: requested.lease().run_id().0,
+                        client_request_id: Uuid::new_v4(),
+                    },
+                )
+                .await
+                .expect("the owner should cancel the waiting run");
+            } else {
+                fixture
+                    .run_service
+                    .finish(
+                        requested.lease(),
+                        crate::AiRunCompletion::new(
+                            crate::AiRunState::Failed,
+                            "provider_failed",
+                            Some("provider_failed".to_owned()),
+                            None,
+                        )
+                        .unwrap(),
+                    )
+                    .await
+                    .expect("the waiting run should finish");
+            }
+            assert!(!matches!(
+                approval_state(&fixture, requested.approval_id())
+                    .await
+                    .as_str(),
+                "pending" | "approved" | "resume_claimed"
+            ));
+            if approve_first {
+                let revoked = fixture
+                    .approval_service
+                    .revoke_approval(
+                        &fixture.principal,
+                        RevokeAiApprovalInput {
+                            id: view.id,
+                            expected_version: view.row_version,
+                        },
+                    )
+                    .await;
+                assert!(is_run_not_waiting(&revoked), "{closure}: {revoked:?}");
+            } else {
+                for decision in [AiApprovalDecision::Approve, AiApprovalDecision::Deny] {
+                    let decided = fixture
+                        .approval_service
+                        .decide_approval(
+                            &fixture.principal,
+                            DecideAiApprovalInput {
+                                id: view.id,
+                                decision,
+                                expected_version: view.row_version,
+                            },
+                        )
+                        .await;
+                    assert!(is_run_not_waiting(&decided), "{closure}: {decided:?}");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn lease_recovery_closes_a_claimed_but_unconsumed_approval() {
+        let fixture = fixture().await;
+        let (requested, _) = request_wait(&fixture, fixture.now + Duration::hours(3)).await;
+        let view = fixture
+            .approval_service
+            .approval(&fixture.principal, requested.approval_id())
+            .await
+            .unwrap()
+            .unwrap();
+        fixture
+            .approval_service
+            .decide_approval(
+                &fixture.principal,
+                DecideAiApprovalInput {
+                    id: view.id,
+                    decision: AiApprovalDecision::Approve,
+                    expected_version: view.row_version,
+                },
+            )
+            .await
+            .expect("approval should succeed");
+        let claim = fixture
+            .run_service
+            .claim_next_approved("approved-worker")
+            .await
+            .expect("approved claim should succeed")
+            .expect("the approved wait should be handed off");
+        assert_eq!(claim.approval_id(), requested.approval_id());
+        assert_eq!(
+            approval_state(&fixture, requested.approval_id()).await,
+            "resume_claimed"
+        );
+        // The worker dies before consuming the approval.
+        fixture.clock.advance_seconds(2 * 3_600);
+        let report = fixture
+            .run_service
+            .recover_expired_leases()
+            .await
+            .expect("recovery should succeed");
+        assert_eq!(report.recovery_required, 1, "{report:?}");
+        assert_eq!(
+            approval_state(&fixture, requested.approval_id()).await,
+            "expired"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_lease_quarantine_closes_the_runs_approvals() {
+        let fixture = fixture().await;
+        let (requested, _) = request_wait(&fixture, fixture.now + Duration::hours(3)).await;
+        let run_id = requested.lease().run_id().0;
+        fixture
+            .database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    tx.update_by_id::<AiRunRecord>(
+                        &run_id,
+                        UpdateAiRunRecordInput {
+                            state: Some("running".to_owned()),
+                            // A checkpoint pointer that names no checkpoint.
+                            latest_checkpoint_id: Some(Some(Uuid::new_v4())),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        fixture.clock.advance_seconds(2 * 3_600);
+        let report = fixture
+            .run_service
+            .recover_expired_leases()
+            .await
+            .expect("recovery should succeed");
+        assert_eq!(report.quarantined, 1, "{report:?}");
+        let run = AiRunRecord::find_by_id(&fixture.database, &run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            run.error_code.as_deref(),
+            Some("lease_recovery_state_invalid")
+        );
+        assert_eq!(
+            approval_state(&fixture, requested.approval_id()).await,
+            "expired"
+        );
     }
 
     async fn force_run_state(fixture: &Fixture, run_id: Uuid, state: &'static str) {

@@ -5952,6 +5952,7 @@ mod tests {
                 state: "committed".to_owned(),
                 expires_at: wall_clock + 3_600,
                 reconciled_at: Some(wall_clock),
+                settlement_examined_at: 0,
             },
         )
         .await
@@ -8559,6 +8560,7 @@ mod tests {
                 state: "committed".to_owned(),
                 expires_at: wall + 3600,
                 reconciled_at: Some(wall),
+                settlement_examined_at: 0,
             },
         )
         .await

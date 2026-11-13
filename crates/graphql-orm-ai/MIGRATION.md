@@ -15,8 +15,11 @@ supersedes: []
 ### Run and session lifecycle fixes
 
 Apply `AiSchemaModule` version `0.78.0` with the normal module migration. It
-changes only generated filter metadata (see the last item below); it adds no
-table, column or index, and no data migration is needed.
+adds one column, `graphql_orm_ai_budget_reservations.settlement_examined_at`
+(integer, not null, default `0`), which the stranded-reservation sweeper uses to
+rotate reservations it cannot settle yet. Existing rows take the default; no
+data migration is needed. It also changes generated filter metadata (see the
+last item below).
 
 - `AiRunRecoveryReport` has three new public fields: `quarantined`,
   `skipped` and `budget_reservations_settled`. `AiSessionRetentionReport` has
@@ -38,7 +41,10 @@ table, column or index, and no data migration is needed.
   decision on an approval whose run is no longer waiting returns
   `InvalidInput` with `AI_APPROVAL_RUN_NOT_WAITING` (match on that constant);
   budget reconciliation requires the live recovery epoch, also for a
-  cancelled attempt; a provider-session binding that fails validation is
+  cancelled attempt; an expired-lease run whose recovery transaction is
+  refused is closed as `RecoveryRequired` with `lease_recovery_failed`; a run
+  that closes while its provider session is parked moves that binding to
+  `cleanup_required` (`provider_session_parked_wait_closed`); a provider-session binding that fails validation is
   moved to `cleanup_exhausted` (`provider_session_state_invalid`) and audited; lease recovery commits the reserved
   estimate of an expired `reserved` or `uncertain` reservation whose attempt
   is closed; retention moves an idle retained provider thread to cleanup when

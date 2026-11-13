@@ -805,6 +805,7 @@ mod tests {
                 state: "committed".to_owned(),
                 expires_at: (fixture.now + Duration::minutes(5)).unix_timestamp(),
                 reconciled_at: Some(fixture.now.unix_timestamp()),
+                settlement_examined_at: 0,
             },
         )
         .await
