@@ -1455,16 +1455,38 @@ fn contains_question_mark(tokens: proc_macro2::TokenStream) -> bool {
     })
 }
 
-/// The first of `names` that occurs as an identifier at any depth.
+/// The first of `names` that occurs as a free-standing identifier at any depth.
+///
+/// A name that directly follows a `.` is a field or method name (`input.db`,
+/// a field the entity itself declares) and is not reported, unless it is listed
+/// in `also_after_dot` (`.await`). Raw identifiers (`r#return`) never match.
 fn first_identifier_in(
     tokens: proc_macro2::TokenStream,
     names: &[&'static str],
+    also_after_dot: &[&'static str],
 ) -> Option<&'static str> {
-    tokens.into_iter().find_map(|token| match token {
-        proc_macro2::TokenTree::Ident(ident) => names.iter().copied().find(|name| ident == name),
-        proc_macro2::TokenTree::Group(group) => first_identifier_in(group.stream(), names),
-        _ => None,
-    })
+    let mut after_dot = false;
+    for token in tokens {
+        let follows_dot = std::mem::replace(
+            &mut after_dot,
+            matches!(&token, proc_macro2::TokenTree::Punct(punct) if punct.as_char() == '.'),
+        );
+        let found = match token {
+            proc_macro2::TokenTree::Ident(ident) => names
+                .iter()
+                .copied()
+                .find(|name| ident == name)
+                .filter(|name| !follows_dot || also_after_dot.contains(name)),
+            proc_macro2::TokenTree::Group(group) => {
+                first_identifier_in(group.stream(), names, also_after_dot)
+            }
+            _ => None,
+        };
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
 }
 
 /// The per-field UPDATE assignment lists are emitted into a synchronous helper
@@ -1478,8 +1500,11 @@ fn ensure_pure_update_assignments(
     span: proc_macro2::Span,
 ) -> syn::Result<()> {
     for tokens in list {
-        if let Some(found) = first_identifier_in(tokens.clone(), &["await", "return", "ctx", "db"])
-        {
+        if let Some(found) = first_identifier_in(
+            tokens.clone(),
+            &["await", "return", "ctx", "db"],
+            &["await"],
+        ) {
             return Err(syn::Error::new(
                 span,
                 format!(
@@ -3793,7 +3818,7 @@ fn generate_graphql_operations_unfiltered(
             .all(|(graphql, repo)| graphql.to_string() == repo.to_string())
         && !update_field_checks_repo.iter().any(|tokens| {
             contains_question_mark(tokens.clone())
-                || first_identifier_in(tokens.clone(), &["return"]).is_some()
+                || first_identifier_in(tokens.clone(), &["return"], &[]).is_some()
         });
     let update_assignments_graphql_helper = if update_assignments_shared_with_graphql {
         quote! {}
@@ -11444,14 +11469,84 @@ mod update_assignment_tests {
         assert_eq!(
             first_identifier_in(
                 quote! { values.push(db_column("ctx return await", context)); },
-                &["await", "return", "ctx", "db"]
+                &["await", "return", "ctx", "db"],
+                &["await"]
             ),
             None
         );
         assert_eq!(
-            first_identifier_in(quote! { values.push({ [db] }); }, &["ctx", "db"]),
+            first_identifier_in(quote! { values.push({ [db] }); }, &["ctx", "db"], &[]),
             Some("db")
         );
+    }
+
+    /// `input.db` and `input.ctx` read fields the entity declares; a
+    /// free-standing `db` or `ctx`, and `.await`, are still reported.
+    #[test]
+    fn identifier_detection_ignores_member_names_but_not_await() {
+        let names = ["await", "return", "ctx", "db"];
+        assert_eq!(
+            first_identifier_in(
+                quote! {
+                    if let Some(ref val) = input.db { values.push(convert(val.ctx())); }
+                    if let Some(ref val) = input.r#return { values.push(convert(val)); }
+                    if let Some(ref val) = input.r#await { values.push(r#return(val)); }
+                },
+                &names,
+                &["await"]
+            ),
+            None
+        );
+        assert_eq!(
+            first_identifier_in(quote! { input.db.push(db.pool()); }, &names, &["await"]),
+            Some("db")
+        );
+        assert_eq!(
+            first_identifier_in(quote! { check(input.ctx, ctx); }, &names, &["await"]),
+            Some("ctx")
+        );
+        assert_eq!(
+            first_identifier_in(quote! { check(input.db).await; }, &names, &["await"]),
+            Some("await")
+        );
+        assert_eq!(
+            first_identifier_in(quote! { value.return_code(); return; }, &names, &["await"]),
+            Some("return")
+        );
+    }
+
+    /// An entity may name its own fields `db` and `ctx` (#680).
+    #[test]
+    fn fields_named_db_and_ctx_generate() {
+        let generated = generated(syn::parse_quote! {
+            #[graphql_entity(table = "update_assignment_names_fixture")]
+            struct UpdateAssignmentNamesFixture {
+                #[primary_key]
+                id: String,
+                db: String,
+                ctx: Option<String>,
+            }
+        });
+        assert_eq!(count(&generated, "changed_fields . push (\"db\")"), 1);
+        assert_eq!(count(&generated, "changed_fields . push (\"ctx\")"), 1);
+        assert_eq!(count(&generated, "= input . db"), 1);
+        assert_eq!(count(&generated, "= input . ctx"), 1);
+    }
+
+    /// Raw identifiers are not the keywords the purity check looks for.
+    #[test]
+    fn raw_identifier_fields_generate() {
+        let generated = generated(syn::parse_quote! {
+            #[graphql_entity(table = "update_assignment_raw_fixture")]
+            struct UpdateAssignmentRawFixture {
+                #[primary_key]
+                id: String,
+                r#return: String,
+                r#await: Option<String>,
+            }
+        });
+        assert_eq!(count(&generated, "= input . r#return"), 1);
+        assert_eq!(count(&generated, "= input . r#await"), 1);
     }
 
     #[test]
