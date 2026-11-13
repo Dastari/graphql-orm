@@ -74,7 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     db.set_field_policy(support::EndpointFixturePolicy);
     let schema = Schema::build(Query, EmptyMutation, EmptySubscription)
         .data(db.clone())
-        .data("example-user".to_owned())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("example-user"))
         .data(DataLoader::new(
             RelationLoader::<Endpoint, SqliteBackend>::new(db),
             tokio::spawn,

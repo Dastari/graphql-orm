@@ -292,7 +292,7 @@ async fn setup_schema() -> Result<TestSchema, Box<dyn std::error::Error>> {
     }
 
     Ok(schema_builder(graphql_orm::db::Database::new(pool))
-        .data("test-user".to_owned())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
         .finish())
 }
 

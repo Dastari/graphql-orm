@@ -345,7 +345,7 @@ async fn generated_queries_and_relation_preload_obey_live_rls()
     assert!(hidden_rows.is_empty());
 
     let schema: RlsSchema = schema_builder(graphql_orm::db::Database::new(reader))
-        .data("test-user".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
         .finish();
 
     let visible = schema

@@ -10,6 +10,13 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.130.0 makes four authority defaults fail closed: generated
+single-row reads apply the same row visibility as list reads, a field
+`read_policy` on a `SimpleObject` entity requires `graphql_policy_object`, an
+empty `ScopeEntityPolicy` scope list denies, and only a typed `AuthSubject`
+authenticates a request. Upgrade ORM/macros together; see the
+[root migration guide](../../MIGRATION.md#01290-to-01300-fail-closed-authority-defaults).
+
 Version 0.129.0 authorizes every field that a `where`, `orderBy`, bulk-write
 filter or full-text search source references with the same field read policy
 as a selected field, enforces `searchable(policy)` keys at query time, and

@@ -428,6 +428,10 @@ pub enum KeysetReadPolicyReason {
     /// The entity metadata passed to the check has no entry for the root's
     /// entity. Refused, since the check cannot read its policy key.
     MissingEntityMetadata,
+    /// The entity declares a read policy key, no row policy is installed and
+    /// the authorization mode is not `LegacyPermissive`, so every read of the
+    /// entity defers to `can_read_row`. Refused at registration.
+    MissingRowPolicy,
 }
 
 /// A generated Keyset root reported by the Keyset read-policy check.
@@ -494,6 +498,15 @@ impl std::fmt::Display for KeysetReadPolicyError {
                  entity, and Keyset pagination refuses GraphQL requests that get `CallbackOnly` \
                  or `Prefilter` read visibility. Declare `Complete` or `ResidualOnly`. {FIXES}"
             ),
+            KeysetReadPolicyReason::MissingRowPolicy => write!(
+                f,
+                "generated Keyset root `{root}` for entity `{entity}` ({policy}) is refused: no \
+                 RowPolicy is installed, so outside `AuthorizationMode::LegacyPermissive` every \
+                 read of this entity defers to `can_read_row`, and Keyset pagination serves \
+                 GraphQL requests only with `Complete` or `Unrestricted` read visibility. Install \
+                 a RowPolicy that declares `ReadVisibilityCapability::Complete` for this entity, \
+                 or leave `keyset` out of the entity's `query_shapes`"
+            ),
             KeysetReadPolicyReason::MissingEntityMetadata => write!(
                 f,
                 "generated Keyset root `{root}` names entity `{entity}`, which is missing from the \
@@ -509,6 +522,7 @@ impl std::error::Error for KeysetReadPolicyError {}
 /// Every exposed generated Keyset root the row policy cannot be shown to serve.
 pub(crate) fn keyset_read_policy_findings<B: OrmBackend>(
     policy: Option<&dyn RowPolicy<B>>,
+    keyed_reads_need_row_policy: bool,
     catalog: &GraphqlOperationCatalog,
     entities: &[&EntityMetadata],
 ) -> Vec<KeysetReadPolicyError> {
@@ -528,8 +542,15 @@ pub(crate) fn keyset_read_policy_findings<B: OrmBackend>(
             findings.push(finding(None, KeysetReadPolicyReason::MissingEntityMetadata));
             continue;
         };
-        // Without a row policy, reads are `Unrestricted`.
+        // Without a row policy, reads are `Unrestricted` unless a declared
+        // key defers them to `can_read_row`.
         let Some(policy) = policy else {
+            if keyed_reads_need_row_policy && entity.read_policy.is_some() {
+                findings.push(finding(
+                    entity.read_policy,
+                    KeysetReadPolicyReason::MissingRowPolicy,
+                ));
+            }
             continue;
         };
         let reason = match policy.read_visibility_capability(entity_name, entity.read_policy) {

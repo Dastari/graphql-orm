@@ -327,6 +327,7 @@ async fn trusted_internal_writes_have_explicit_origin_and_transaction_visible_va
 
     let schema = schema_builder(database.clone())
         .data("actor-1".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("actor-1"))
         .finish();
 
     let created = schema

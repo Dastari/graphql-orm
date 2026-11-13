@@ -352,7 +352,7 @@ async fn typed_json_fields_are_writable_through_generated_graphql_mutations()
         .await?;
 
     let schema = schema_builder(database.clone())
-        .data("editor-1".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("editor-1"))
         .finish();
     let sdl = schema.sdl();
     assert!(sdl.contains("input CreateRecordInput"));

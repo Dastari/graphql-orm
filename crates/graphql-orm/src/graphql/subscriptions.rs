@@ -305,6 +305,35 @@ impl<E: Clone, B: OrmBackend> SubscriptionEvent<E, B> {
     }
 }
 
+fn is_misconfigured(error: &async_graphql::Error) -> bool {
+    error
+        .extensions
+        .as_ref()
+        .and_then(|extensions| extensions.get("code"))
+        .is_some_and(|code| {
+            *code
+                == async_graphql::Value::from(
+                    crate::graphql::errors::OrmErrorCode::AuthorizationMisconfigured.as_str(),
+                )
+        })
+}
+
+/// Generated `Changed` subscriptions drop an event whose authorization fails,
+/// so a misconfigured entity would otherwise never deliver one, silently.
+/// Report the first such entity per process on standard error.
+fn warn_undeliverable_changed_events(entity_name: &'static str) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static REPORTED: AtomicBool = AtomicBool::new(false);
+    if !REPORTED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "graphql-orm warning: Changed subscription events for entity {entity_name} are being \
+             dropped because its read decision reported an authorization misconfiguration. See \
+             the strict-authorization reference (docs/reference/graphql-orm/strict-authorization.md). \
+             Reported once per process."
+        );
+    }
+}
+
 /// Resolve and authorize one current target, allowing only explicitly witnessed
 /// deleted preimages only through an explicit default-deny preimage policy under
 /// callback/unrestricted visibility. SQL-only decisions cannot be evaluated
@@ -349,7 +378,20 @@ where
     let visibility = db
         .read_visibility::<T>(Some(ctx), EntityAccessSurface::GraphqlSubscription)
         .await
-        .map_err(crate::graphql::errors::graphql_error_from_callback)?;
+        .map_err(crate::graphql::errors::graphql_error_from_callback)
+        .inspect_err(|error| {
+            if is_misconfigured(error) {
+                warn_undeliverable_changed_events(T::entity_name());
+            }
+        })?;
+    if db.row_policy().is_none()
+        && T::metadata().read_policy.is_some()
+        && db.authorization_mode()
+            == crate::graphql::auth::AuthorizationMode::ExplicitPolicyForAllExposedOperations
+    {
+        // Every row defers to `can_read_row`, which refuses without a provider.
+        warn_undeliverable_changed_events(T::entity_name());
+    }
     let mut query = EntityQuery::<T, B>::new();
     for (column, value) in T::PRIMARY_KEYS.iter().zip(keys) {
         // PRIMARY_KEYS are trusted backend-rendered column identities.

@@ -425,7 +425,7 @@ pub(crate) fn federation_entity_resolver_tokens(
                             key: #loader_identity,
                             columns: vec![#(#key_columns),*],
                             key_part_kinds: vec![#(#key_part_kinds),*],
-                            values: __gom_federation_values,
+                            values: __gom_federation_values.clone(),
                             representation: ::graphql_orm::graphql::loaders::RelationKey::from_projected_parts(
                                 __gom_federation_parts, &[#(#key_part_kinds),*],
                             ),
@@ -434,19 +434,14 @@ pub(crate) fn federation_entity_resolver_tokens(
                         .await
                         .map_err(::graphql_orm::graphql::errors::graphql_error_from_loader)?;
 
-                    let mut entity = __gom_federation_loaded.flatten();
-
-                    if let Some(ref loaded) = entity {
-                        if !db.can_read_row(
-                            Some(ctx),
-                            #entity_name_lit,
-                            <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
-                            ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
-                            loaded as &(dyn ::std::any::Any + Send + Sync),
-                        ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)? {
-                            return Ok(None);
-                        }
-                    }
+                    // The same row authority as generated list reads.
+                    let mut entity = ::graphql_orm::graphql::orm::authorize_loaded_point_row(
+                        db,
+                        ctx,
+                        &[#(#key_columns),*],
+                        __gom_federation_values,
+                        __gom_federation_loaded.flatten(),
+                    ).await?;
 
                     let _ = pool;
                     #relation_preload_single
@@ -533,10 +528,13 @@ pub(crate) fn node_id_entity_resolver_tokens(
         .iter()
         .zip(&idents)
         .map(|(part, ident)| key_value_binding(part.kind, ident));
-    let key_columns = parts.iter().map(|part| {
-        let column = &part.quoted_column;
-        quote! { #column }
-    });
+    let key_columns = parts
+        .iter()
+        .map(|part| {
+            let column = &part.quoted_column;
+            quote! { #column }
+        })
+        .collect::<Vec<_>>();
     let key_part_kinds = parts
         .iter()
         .map(|part| relation_key_part_kind_tokens(part.kind))
@@ -615,7 +613,7 @@ pub(crate) fn node_id_entity_resolver_tokens(
                     key: #loader_identity,
                     columns: vec![#(#key_columns),*],
                     key_part_kinds: vec![#(#key_part_kinds),*],
-                    values: __gom_federation_values,
+                    values: __gom_federation_values.clone(),
                     representation: ::graphql_orm::graphql::loaders::RelationKey::from_projected_parts(
                         __gom_federation_parts, &[#(#key_part_kinds),*],
                     ),
@@ -624,19 +622,14 @@ pub(crate) fn node_id_entity_resolver_tokens(
                 .await
                 .map_err(::graphql_orm::graphql::errors::graphql_error_from_loader)?;
 
-            let mut entity = __gom_federation_loaded.flatten();
-
-            if let Some(ref loaded) = entity {
-                if !db.can_read_row(
-                    Some(ctx),
-                    #entity_name_lit,
-                    <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
-                    ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
-                    loaded as &(dyn ::std::any::Any + Send + Sync),
-                ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)? {
-                    return Ok(None);
-                }
-            }
+            // The same row authority as generated list reads.
+            let mut entity = ::graphql_orm::graphql::orm::authorize_loaded_point_row(
+                db,
+                ctx,
+                &[#(#key_columns),*],
+                __gom_federation_values,
+                __gom_federation_loaded.flatten(),
+            ).await?;
 
             let _ = pool;
             #relation_preload_single

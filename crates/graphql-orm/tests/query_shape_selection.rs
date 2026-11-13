@@ -55,7 +55,7 @@ async fn selected_generated_list_coexists_with_a_differently_shaped_legacy_singl
         .await
         .unwrap();
     let schema = schema_builder(database)
-        .data("test-user".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
         .finish();
     let sdl = schema.sdl();
     let document = graphql_orm::async_graphql::parser::parse_schema(&sdl).unwrap();

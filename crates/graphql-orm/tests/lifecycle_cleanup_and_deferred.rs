@@ -448,7 +448,7 @@ async fn deferred_post_commit_actions_run_only_after_commit_and_report_failures(
     .await?;
 
     let schema = schema_builder(db.clone())
-        .data("test-user".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
         .finish();
     let deleted = schema
         .execute(format!(

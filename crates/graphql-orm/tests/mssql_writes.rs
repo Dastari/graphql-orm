@@ -307,9 +307,11 @@ async fn external_writable_mssql_dml_and_transactions_are_native_and_atomic()
         .subscribe();
     let actor_a_schema: MssqlPolicySchema = schema_builder(policy_database.clone())
         .data("actor-a".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("actor-a"))
         .finish();
     let actor_b_schema: MssqlPolicySchema = schema_builder(policy_database)
         .data("actor-b".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("actor-b"))
         .finish();
 
     let denied = actor_b_schema

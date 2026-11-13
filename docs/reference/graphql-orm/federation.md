@@ -158,7 +158,9 @@ propagation:
    field alone would miss the get-by-id root's classification;
 4. `ensure_entity_access(..., EntityAccessKind::Read, EntityAccessSurface::GraphqlQuery)`;
 5. the batched fetch, carrying the caller's `DbAuthContext`;
-6. `can_read_row` on the loaded row.
+6. the request's `RowPolicy::read_visibility`, as for generated list reads:
+   a SQL predicate re-reads the key under it, and `can_read_row` runs on the
+   row when the decision is `CallbackOnly` or `Prefilter`.
 
 Field-level policies then run in the entity's own field resolvers, exactly as
 they do for a direct read.
@@ -171,7 +173,7 @@ so **any error fails the whole fetch**, not just the one representation.
 | Outcome | Result |
 | --- | --- |
 | No row matches the representation | `null` for that representation |
-| `can_read_row` denies the loaded row | `null` for that representation — indistinguishable from a miss |
+| The row is outside the read-visibility predicate, or `can_read_row` denies it | `null` for that representation — indistinguishable from a miss |
 | A key argument is missing or unparseable in the representation | `null` for that representation |
 | `enforce_resolver_auth` denies (entity requires auth, caller anonymous) | error; the whole `_entities` fetch fails |
 | Scope enforcement denies | error; the whole `_entities` fetch fails |

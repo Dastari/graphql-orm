@@ -1355,6 +1355,14 @@ fn rls_impl_tokens(
     }
 }
 
+/// Whether `graphql_policy_object` was applied to this struct. It runs before
+/// the derives and leaves the inert `graphql_orm_policy_object` helper marker.
+pub(crate) fn has_policy_object_marker(attrs: &[syn::Attribute]) -> bool {
+    attrs
+        .iter()
+        .any(|attr| attr.path().is_ident("graphql_orm_policy_object"))
+}
+
 /// Check the effective SimpleObject skip independently of the legacy ORM
 /// input/filter exclusion metadata.
 pub(crate) fn has_graphql_object_skip(field: &Field) -> bool {
@@ -3681,6 +3689,9 @@ fn generate_entity_tokens(
     // objects opt into complex or schema_only, so check those ownership modes.
     // Pure GraphQLSchemaEntity metadata does not own a GraphQL read contract.
     let externally_owned_object = legacy_graphql_complex || entity_meta.schema_only;
+    // A `graphql_policy_object` marker must come with the guard that attribute
+    // installs; the attribute also implements this witness trait.
+    let mut policy_object_witness = quote! {};
     if !schema_only_override && externally_owned_object {
         for field in fields {
             let meta = parse_field_metadata(field)?;
@@ -3689,6 +3700,22 @@ fn generate_entity_tokens(
                     field,
                     "unreadable SimpleObject field: private, read = false, and input_only require #[graphql(skip)]; add #[graphql(skip)] to this field or place #[graphql_orm::graphql_policy_object] before the derives with #[graphql(complex)]",
                 ));
+            }
+            // SimpleObject getters apply no ORM column policy by themselves.
+            if meta.read_policy.is_some()
+                && !meta.is_relation
+                && !meta.graphql_skip
+                && !has_graphql_object_skip(field)
+            {
+                if !has_policy_object_marker(&input.attrs) {
+                    return Err(syn::Error::new_spanned(
+                        field,
+                        "SimpleObject field read_policy is not enforced by SimpleObject; place #[graphql_orm::graphql_policy_object] before the derives with #[graphql(complex)], or add #[graphql(skip)] to this field",
+                    ));
+                }
+                policy_object_witness = quote! {
+                    const _: fn() = ::graphql_orm::graphql::__policy_object::assert_installed::<#struct_name>;
+                };
             }
         }
     }
@@ -5924,6 +5951,7 @@ fn generate_entity_tokens(
         #persisted_field_names_impl
         #(#search_relation_field_checks)*
             #rls_impl
+            #policy_object_witness
             #search_schema_impl
             #searchable_entity_impl
 
@@ -6121,6 +6149,7 @@ fn generate_entity_tokens(
         #persisted_field_names_impl
         #(#search_relation_field_checks)*
         #rls_impl
+        #policy_object_witness
         #search_schema_impl
         #searchable_entity_impl
         #projection_definitions

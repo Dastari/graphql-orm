@@ -154,7 +154,7 @@ async fn backward_pages_keep_the_complete_key_tiebreaker() -> graphql_orm::Resul
 async fn generated_composite_keyset_is_admitted_without_graphql_writes() -> graphql_orm::Result<()>
 {
     let schema = schema_builder(setup().await?)
-        .data("test-user".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
         .finish();
     let sdl = schema.sdl();
     assert!(sdl.contains("compositeKeysetRecordsKeyset("));

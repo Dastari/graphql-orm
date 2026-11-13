@@ -219,7 +219,7 @@ async fn repository_writes_relations_and_changed_events_are_unaffected() {
     use graphql_orm::futures::{Stream, StreamExt};
     let database = subset::database().await;
     let schema = subset::schema_builder(database.clone())
-        .data("test-user".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
         .finish();
     let shelf = subset::Shelf::insert(&database, subset::CreateShelfInput { label: "A".into() })
         .await
@@ -261,7 +261,7 @@ async fn repository_writes_relations_and_changed_events_are_unaffected() {
     let mut stream = Box::pin(
         schema.execute_stream(
             graphql_orm::async_graphql::Request::new("subscription { parcelChanged { action } }")
-                .data("test-user".to_string()),
+                .data(graphql_orm::graphql::auth::AuthSubject::new("test-user")),
         ),
     );
     // A stream registers only once polled; nothing is pending yet.

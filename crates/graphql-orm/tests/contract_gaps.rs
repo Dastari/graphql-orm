@@ -357,7 +357,7 @@ async fn hidden_primary_key_is_excluded_from_graphql_input_but_settable_via_repo
     apply_schema(&database, &[<ExternalRecord as Entity>::metadata()]).await?;
 
     let schema = schema_builder(database.clone())
-        .data("system".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("system"))
         .finish();
     let sdl = schema.sdl();
     assert!(sdl.contains("type ExternalRecord"));
@@ -402,7 +402,7 @@ async fn skip_input_fields_remain_publicly_readable_but_stay_out_of_graphql_writ
     apply_schema(&database, &[<SyncProfile as Entity>::metadata()]).await?;
 
     let schema = schema_builder(database.clone())
-        .data("system".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("system"))
         .finish();
     let sdl = schema.sdl();
     assert!(sdl.contains("type SyncProfile"));

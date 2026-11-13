@@ -285,7 +285,7 @@ let database = graphql_orm::db::Database::<graphql_orm::MssqlBackend>::connect_a
 .await?
     .with_schema_policy(graphql_orm::graphql::orm::SchemaPolicy::ExternalReadOnly);
 let schema = schema_builder(database)
-    .data("current-user".to_string())
+    .data(graphql_orm::graphql::auth::AuthSubject::new("current-user"))
     .finish();
 ```
 

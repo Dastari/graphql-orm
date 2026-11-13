@@ -153,7 +153,7 @@ async fn setup_schema(
     let mut database = graphql_orm::db::Database::new(pool);
     database.set_field_policy(policy);
     Ok(schema_builder(database)
-        .data("test-user".to_string())
+        .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
         .finish())
 }
 
