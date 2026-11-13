@@ -30,6 +30,13 @@ for historical context.
 
 - AI 0.128.0: **breaking:** enforce AI runtime closure after a snapshot restore. The runtime start gate opens only with a proof minted from a store's live recovery epoch (AI schema module `0.77.0`), and leases are bound to that epoch. Worker claims, lease-fenced writes and approval consumption refuse while the epoch is not live. A restored store stays closed until `OrmAiRuntimeRecoveryService::reconcile_restore` expires its approvals, revokes its egress consents and moves unfinished runs to `RecoveryRequired`, and an operator acknowledges the reviewed result. An existing deployment upgraded in place opens once the operator calls `acknowledge_in_place_upgrade`, which leaves its work unchanged. Restore facts now decode strictly. See the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01270-to-01280-enforced-runtime-closure-after-restore).
 
+## 0.137.0
+
+ORM runtime/macros **0.137.0**. No host-visible change.
+
+- **Internal (compile cost):** `GraphQLOperations` and `RepositoryEntity` emit the per-field UPDATE assignment list once per entity, as a private synchronous helper, instead of splicing it into every generated update path (the GraphQL `update` resolver, `update_by_id`, `update_where`, their transaction forms, the composite-key forms and `compare_and_swap`). On synthetic crates of 8 and 32 fifteen-field entities this removes about 2.5% of the expanded lines and about 2% of rustc's peak memory; rustc time did not change measurably. See [#677](https://github.com/Dastari/graphql-orm/issues/677) for where the rest of the cost is. Generated SDL, operation and semantic catalogues, the generated public Rust API and runtime behaviour are unchanged; no authorization, policy or sanitization code moved.
+- **Tooling:** `scripts/compare-generated-schema.sh <base-ref>` compares the full-stack fixture's SDL, operation catalogue and semantic catalogue between a base revision and the working tree, for SQLite and PostgreSQL.
+
 ## 0.133.0
 
 ORM runtime/macros **0.133.0**. Repository limits and offsets count visible rows.

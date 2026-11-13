@@ -10,6 +10,16 @@ supersedes: []
 
 # Migration Guide
 
+## 0.133.0 to 0.137.0: smaller generated update code
+
+Upgrade runtime and macros together. No action is needed: no schema, data,
+SDL, catalogue, generated Rust API or behaviour change.
+
+- The derives emit the per-field UPDATE assignment list once per entity, in a
+  private helper (`__gom_push_update_assignments`), and call it from every
+  generated update path. Names starting with `__gom_` are reserved for
+  generated code; do not call them.
+
 ## 0.132.0 to 0.133.0: reserved runtime table names
 
 Upgrade runtime and macros together, and AI to 0.136.0 if you use it. No data

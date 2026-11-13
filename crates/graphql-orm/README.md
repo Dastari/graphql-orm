@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.137.0 changes nothing a host can observe. The derives emit the
+per-field UPDATE assignment list once per entity instead of once per generated
+update path, which removes about 2.5% of the expanded code of a 15-field
+entity ([#677](https://github.com/Dastari/graphql-orm/issues/677)).
+
 Version 0.133.0 refuses reserved runtime schema physical table names (catalog,
 pragma, ORM and companion-package prefixes, and the exact names of SQLite
 table-valued functions and SQL Server compatibility views), adds `validate_with_reserved_tables` for trusted code
