@@ -388,7 +388,8 @@ pub fn derive_graphql_entity(input: TokenStream) -> TokenStream {
     let result = (|| {
         let entity = entity::generate_graphql_entity(&input)?;
         let federation_witness = entity::federation_key_witness_tokens(&input.attrs, &input.ident)?;
-        Ok::<_, syn::Error>(quote! { #entity #federation_witness })
+        let relation_traversal = crate::operations::relation_traversal_authorization_tokens(&input);
+        Ok::<_, syn::Error>(quote! { #entity #federation_witness #relation_traversal })
     })();
     match result {
         Ok(tokens) => TokenStream::from(tokens),
@@ -442,7 +443,8 @@ pub fn derive_repository_entity(input: TokenStream) -> TokenStream {
             operations::generate_graphql_operations(&input)?,
         )?;
         let operations = schema_export::process(operations)?;
-        Ok::<_, syn::Error>(quote! { #entity #operations })
+        let relation_traversal = crate::operations::relation_traversal_authorization_tokens(&input);
+        Ok::<_, syn::Error>(quote! { #entity #operations #relation_traversal })
     })();
     match result {
         Ok(tokens) => tokens.into(),

@@ -878,6 +878,9 @@ pub(crate) fn generate_graphql_relations(
                         <#target_type as ::graphql_orm::graphql::orm::Entity>::entity_name(),
                     )?;
                     #relation_read_check
+                    // Traversal enforces the target's own auth mode and
+                    // operation scopes, as its root read would.
+                    ::graphql_orm::graphql::orm::authorize_relation_target::<#target_type>(ctx, true)?;
                     let auth_context = ctx
                         .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
                         .cloned();
@@ -903,6 +906,11 @@ pub(crate) fn generate_graphql_relations(
                     if let Some(order) = order_by.as_mut() {
                         order.__gom_prepare_read(ctx).await?;
                     }
+                    // Filtering and ordering reveal the target fields they
+                    // name: each needs the target's field read authority.
+                    ::graphql_orm::graphql::orm::authorize_read_arguments::<#target_type, #backend_marker, _, _>(
+                        db, ctx, where_input.as_ref(), order_by.as_slice(),
+                    ).await?;
 
                     // Use DataLoader whenever the relation key can be batched.
                     #source_binding_multiple
@@ -1024,6 +1032,7 @@ pub(crate) fn generate_graphql_relations(
                         <#target_type as ::graphql_orm::graphql::orm::Entity>::entity_name(),
                     )?;
                     #relation_read_check
+                    ::graphql_orm::graphql::orm::authorize_relation_target::<#target_type>(ctx, false)?;
                     let auth_context = ctx
                         .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
                         .cloned();

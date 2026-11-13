@@ -10,6 +10,110 @@ supersedes: []
 
 # Migration Guide
 
+## 0.128.0 to 0.129.0: field authority for filters, ordering, search and relation targets
+
+Upgrade runtime and macros together. No schema or data migration is needed.
+
+Authority defaults are also being made fail closed
+([#647](https://github.com/Dastari/graphql-orm/pull/647)); see the fail-closed
+authority defaults section of this guide.
+Two scope mechanisms then apply side by side. `ScopeEntityPolicy` is an entity
+access policy that runs on every surface, including relation traversal through
+the target's entity access check. `operation_authorization` scopes guard the
+generated roots and, from this release, relation traversal into the entity.
+A traversal must satisfy both. The single-row reads that the authority-defaults
+change moves onto list-read row visibility also keep the callback-error
+sanitization described below.
+
+### Referenced filter and order fields need read authority
+
+Generated resolvers now authorize every field that a `where`, `orderBy` or
+bulk-write filter names, with the field's read policy, before any SQL. This
+covers root list `orderBy`, to-many relation `where` and `orderBy`, the
+generated search `where`, and `updateMany`/`deleteMany`. A caller who may not
+read a field gets `FORBIDDEN` when filtering or ordering by it, even if the
+query selects other fields only; a bulk write returns the refusal in its
+payload (`success: false`) and changes nothing. Review clients that filtered
+or sorted on policy-protected fields they cannot read.
+
+These checks run before any row is read, so the field policy receives no
+record (`record` is `None`), as root list filter checks already did. A policy
+that grants a field only for particular records must also decide the
+record-less case.
+
+Host resolvers that accept generated filter or order inputs should call the
+public `graphql_orm::graphql::orm::authorize_read_fields::<Entity, Backend>(db,
+ctx, fields)` with `DatabaseFilter::referenced_fields` and
+`DatabaseOrderBy::referenced_fields` before building any SQL. Handwritten `DatabaseOrderBy`
+implementations keep the empty default. `order_expression` terms are trusted
+author SQL and are not checked field by field.
+
+### Search policies are enforced
+
+`searchable(policy = "...")` and `search_json(policy = "...")` keys are now
+checked at query time, through `FieldPolicy::can_read_field` for the
+generated `…Search` root and `FieldPolicy::can_read_repository_field` for
+`Entity::search_db`, with the search key as `policy_key`. Each local
+source also needs its field read policy. A `search_relation` source needs the
+relation's read policy and search key, read access to the target entity and
+the read policy of each copied target field; on the GraphQL search root it
+also needs the target's traversal auth mode and operation scopes. A caller denied any source can no
+longer search the entity at all (`FORBIDDEN`). Make sure the field policy
+provider grants the search keys to callers who should search. A handwritten
+`SearchableEntity` for an entity with relation search sources must implement
+`search_relation_source_policies`, or searches fail with
+`AUTHORIZATION_MISCONFIGURED`.
+
+Search source checks run before any row is read, with no record (`record` is
+`None`). A policy that grants a protected field only for particular rows must
+deny the record-less case: allowing `None` lets the caller search that field's
+text in every visible row.
+
+`Entity::search_db(&database, …)` on a `GraphQLOperations` entity now returns
+the policy-aware `RepositorySearchQuery` instead of the unchecked
+`EntitySearchQuery`, so it checks entity access, every search source, and row
+and field policies on each hit, like the repository-entity form. It offers
+`with_auth`, `filter`, `order_by`, `default_order`, `limit`, `offset` and
+`fetch_all`; `limit` is exact or refused, as for every repository builder
+since 0.128.0. Code that needs connections or unchecked access must use the
+trusted `Entity::search(pool, …)` builder, which applies no policies.
+
+`search_relation(fields = [...])` names are now checked at compile time
+against the target's persisted Rust fields. Fix or remove any name the
+compiler reports.
+
+### Relation targets apply their own auth mode and scopes
+
+A relation field, related-row filter or `order_aggregate` count now enforces
+the target entity's `auth` mode and fixed `operation_authorization` scopes:
+`list` for to-many traversal and `single_read` for to-one traversal. For
+example, a public `owners { ledgers { ... } }` now needs the scopes declared
+for the ledger entity's `list` category. Grant those scopes to callers who
+traverse the relation. If the target does not declare the mapped category but
+declares another read category (`list`, `single_read`, `keyset_list`,
+`search` or `subscription`), traversal requires every declared
+read category's requirement together; declare `list` or `single_read`
+explicitly to require exactly its scopes. A target category declared with
+scope templates refuses traversal; use fixed scopes for categories that relations reach, or
+expose the target through its root query. `GraphQLEntity` and
+`RepositoryEntity` now implement `RelationTraversalAuthorization` for every
+entity; a handwritten relation target must implement it too.
+
+### Native search refuses invalid filters
+
+Native PostgreSQL and SQLite full-text search now returns `INVALID_INPUT` for
+an invalid filter, such as a related-row filter that was not prepared for the
+request, instead of running without it. The fallback path already refused.
+
+### Sanitized host callback failures
+
+Host callback failures on generated federation `_entities`, list visibility,
+scalar field reads, filter authorization and the keyset and subscription
+helpers are sanitized like the rest of the generated surface. A failure
+propagated with `?` (one that carries a source and no `code` extension) now
+reads as `INTERNAL_ERROR` with the default message. Authored refusals with a
+public `code` are unchanged.
+
 ## 0.127.0 to 0.128.0: repository limits are exact or refused
 
 Upgrade runtime and macros together. No schema or data migration is needed.

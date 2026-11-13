@@ -21,6 +21,7 @@ mod operation_metadata;
 mod owned_foreign_keys;
 mod owned_schema;
 mod query;
+mod read_authorization;
 mod rls;
 mod runtime_backup;
 mod runtime_decimal;
@@ -88,6 +89,7 @@ pub use migrations::*;
 pub use operation_metadata::*;
 pub use owned_schema::{IndexModel, IndexPredicateModel, OwnedSchemaModel, OwnedTableModel};
 pub use query::*;
+pub use read_authorization::*;
 pub use rls::*;
 pub use runtime_backup::*;
 #[cfg(feature = "runtime-graphql")]

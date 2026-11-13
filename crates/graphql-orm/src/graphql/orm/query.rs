@@ -349,6 +349,15 @@ pub trait DatabaseOrderBy {
         Ok(())
     }
 
+    /// Public field identities this order reads.
+    ///
+    /// Generated order inputs report every scalar field they sort by so the
+    /// field's read policy is authorized before any SQL. Handwritten orders
+    /// keep the source-compatible empty default.
+    fn referenced_fields(&self) -> Vec<&'static str> {
+        Vec::new()
+    }
+
     /// Resolve an ordering expression whose bind values come from trusted
     /// server context rather than GraphQL input.
     fn to_sort_expression_with_context(
@@ -4097,7 +4106,7 @@ where
         self.build_select_query_with_config(PaginationConfig::default(), false)
     }
 
-    fn ensure_filter_valid(&self) -> crate::Result<()> {
+    pub(crate) fn ensure_filter_valid(&self) -> crate::Result<()> {
         if self.filter_is_valid {
             Ok(())
         } else {

@@ -3894,6 +3894,8 @@ fn generate_entity_tokens(
     let mut search_document_chunks = Vec::new();
     let mut sortable_columns: Vec<(syn::Ident, String)> = Vec::new();
     let mut order_expression_parameter_arms = Vec::new();
+    let mut order_referenced_field_checks = Vec::new();
+    let mut search_relation_policy_tokens = Vec::new();
     let mut order_expression_context_checks = Vec::new();
     let mut relation_order_match_arms = Vec::new();
     let mut relation_order_value_arms = Vec::new();
@@ -3909,6 +3911,9 @@ fn generate_entity_tokens(
     // `RecordVersion`; none for CAS-only versions and unversioned entities.
     let mut managed_version_api_name: Option<String> = None;
     let mut repository_field_policy_defs = Vec::new();
+    let mut persisted_field_rust_names = Vec::new();
+    let mut search_relation_field_checks = Vec::new();
+    let mut search_relation_traversal_checks = Vec::new();
     let mut subscription_field_policy_arms = Vec::new();
     let mut semantic_field_defs = Vec::new();
     let mut semantic_record_version = quote! { None };
@@ -4222,6 +4227,69 @@ fn generate_entity_tokens(
                         .collect::<Vec<_>>();
                     let max_items = search_relation.max_items;
                     let policy = option_lit_tokens(search_relation.policy.as_deref(), field.span());
+                    let search_target = syn::Ident::new(&target_type, field.span());
+                    let relation_read_source = field_meta.read_policy.as_deref().map(|key| {
+                        quote! {
+                            sources.push(::graphql_orm::graphql::orm::SearchSourcePolicy::Field {
+                                entity_name: #entity_name_lit,
+                                field_name: #graphql_name,
+                                policy_key: Some(#key),
+                            });
+                        }
+                    });
+                    let relation_search_source = search_relation.policy.as_deref().map(|key| {
+                        quote! {
+                            sources.push(::graphql_orm::graphql::orm::SearchSourcePolicy::Field {
+                                entity_name: #entity_name_lit,
+                                field_name: #graphql_name,
+                                policy_key: Some(#key),
+                            });
+                        }
+                    });
+                    // The target is another derive's output: check each copied
+                    // field against its persisted field names at compile time.
+                    for search_field in &search_fields {
+                        let message = format!(
+                            "search_relation field `{}` is not a persisted field of `{}`",
+                            search_field.value(),
+                            target_type,
+                        );
+                        search_relation_field_checks.push(
+                            ::quote::quote_spanned! {search_field.span()=>
+                                const _: () = ::std::assert!(
+                                    ::graphql_orm::graphql::orm::generated_field_names_contain(
+                                        #search_target::__GOM_PERSISTED_FIELD_NAMES,
+                                        #search_field,
+                                    ),
+                                    #message,
+                                );
+                            },
+                        );
+                    }
+                    search_relation_traversal_checks.push(quote! {
+                        ::graphql_orm::graphql::orm::authorize_relation_target::<#search_target>(ctx, #is_multiple)?;
+                    });
+                    search_relation_policy_tokens.push(quote! {
+                        #relation_read_source
+                        #relation_search_source
+                        sources.push(::graphql_orm::graphql::orm::SearchSourcePolicy::Entity {
+                            entity_name: <#search_target as ::graphql_orm::graphql::orm::Entity>::entity_name(),
+                            read_policy: <#search_target as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
+                        });
+                        for rust_name in [#(#search_fields),*] {
+                            match <#search_target as ::graphql_orm::graphql::orm::Entity>::repository_field_policies()
+                                .iter()
+                                .find(|field| field.rust_name == rust_name)
+                            {
+                                Some(field) => sources.push(::graphql_orm::graphql::orm::SearchSourcePolicy::Field {
+                                    entity_name: <#search_target as ::graphql_orm::graphql::orm::Entity>::entity_name(),
+                                    field_name: field.api_name,
+                                    policy_key: field.read_policy,
+                                }),
+                                None => sources.push(::graphql_orm::graphql::orm::SearchSourcePolicy::Unresolved),
+                            }
+                        }
+                    });
                     search_relation_defs.push(quote! {
                         ::graphql_orm::graphql::orm::SearchRelationFieldDef {
                             relation_field: #graphql_name,
@@ -4327,7 +4395,8 @@ fn generate_entity_tokens(
                                 <#target as ::graphql_orm::graphql::orm::Entity>::entity_name(),
                             )?;
                             ctx.data::<::graphql_orm::db::Database<#backend_marker>>()?
-                                .ensure_readable_field(ctx, <#struct_name as ::graphql_orm::graphql::orm::Entity>::entity_name(), #graphql_name, None, None).await?;
+                                .ensure_readable_field(ctx, <#struct_name as ::graphql_orm::graphql::orm::Entity>::entity_name(), #graphql_name, None, None).await
+                                .map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                             for filter in alternatives.iter_mut() {
                                 filter.__gom_prepare_read(ctx, depth + 1, budget).await?;
                             }
@@ -4456,7 +4525,8 @@ fn generate_entity_tokens(
                                 <#target_type as ::graphql_orm::graphql::orm::Entity>::entity_name(),
                             )?;
                             ctx.data::<::graphql_orm::db::Database<#backend_marker>>()?
-                                .ensure_readable_field(ctx, <#struct_name as ::graphql_orm::graphql::orm::Entity>::entity_name(), #graphql_name, None, None).await?;
+                                .ensure_readable_field(ctx, <#struct_name as ::graphql_orm::graphql::orm::Entity>::entity_name(), #graphql_name, None, None).await
+                                .map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                             let prepared = ::graphql_orm::graphql::orm::prepare_relation_count_order::<
                                 #backend_marker, #target_type
                             >(ctx, #relation_alias, #predicates).await?;
@@ -4643,6 +4713,7 @@ fn generate_entity_tokens(
                 .map(|policy| quote! { Some(#policy) })
                 .unwrap_or_else(|| quote! { None });
             let sensitive = field_meta.sensitive;
+            persisted_field_rust_names.push(rust_name.clone());
             repository_field_policy_defs.push(quote! {
                 ::graphql_orm::graphql::orm::RepositoryFieldPolicyDef {
                     rust_name: #rust_name,
@@ -5294,6 +5365,11 @@ fn generate_entity_tokens(
                 ));
             }
             sortable_columns.push((order_field_name.clone(), db_col_sql.clone()));
+            order_referenced_field_checks.push(quote! {
+                if self.#order_field_name.is_some() {
+                    fields.push(#graphql_name);
+                }
+            });
             order_by_fields.push(quote! {
                 #[graphql(name = #graphql_name)]
                 pub #order_field_name: Option<::graphql_orm::graphql::orm::OrderDirection>,
@@ -5335,7 +5411,8 @@ fn generate_entity_tokens(
                         #graphql_name,
                         Some(#policy_key),
                         Some(#policy_record as &(dyn ::std::any::Any + Send + Sync)),
-                    ).await?;
+                    ).await
+                    .map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                 }
             } else {
                 quote! {}
@@ -5577,6 +5654,22 @@ fn generate_entity_tokens(
                         chunks,
                     }
                 }
+
+                fn authorize_search_relation_targets(
+                    ctx: &::graphql_orm::async_graphql::Context<'_>,
+                ) -> ::graphql_orm::async_graphql::Result<()> {
+                    let _ = ctx;
+                    #(#search_relation_traversal_checks)*
+                    Ok(())
+                }
+
+                fn search_relation_source_policies(
+                ) -> Option<Vec<::graphql_orm::graphql::orm::SearchSourcePolicy>> {
+                    #[allow(unused_mut)]
+                    let mut sources = Vec::new();
+                    #(#search_relation_policy_tokens)*
+                    Some(sources)
+                }
             }
         }
     } else {
@@ -5813,12 +5906,23 @@ fn generate_entity_tokens(
         }
     };
 
+    let persisted_field_names_impl = quote! {
+        impl #struct_name {
+            /// Rust names of the entity's persisted fields, for generated
+            /// compile-time checks in other derives.
+            #[doc(hidden)]
+            pub const __GOM_PERSISTED_FIELD_NAMES: &'static [&'static str] =
+                &[#(#persisted_field_rust_names),*];
+        }
+    };
     if schema_only {
         return Ok(quote! {
             #schema_entity_composed
             #identity_field_error
             #relation_readability_impl
             #(#relation_target_checks)*
+        #persisted_field_names_impl
+        #(#search_relation_field_checks)*
             #rls_impl
             #search_schema_impl
             #searchable_entity_impl
@@ -6014,6 +6118,8 @@ fn generate_entity_tokens(
         #empty_order_diagnostic
         #relation_readability_impl
         #(#relation_target_checks)*
+        #persisted_field_names_impl
+        #(#search_relation_field_checks)*
         #rls_impl
         #search_schema_impl
         #searchable_entity_impl
@@ -6083,6 +6189,13 @@ fn generate_entity_tokens(
             fn validate_order(&self) -> ::graphql_orm::Result<()> {
                 #(#relation_order_validate)*
                 Ok(())
+            }
+
+            fn referenced_fields(&self) -> Vec<&'static str> {
+                #[allow(unused_mut)]
+                let mut fields = Vec::new();
+                #(#order_referenced_field_checks)*
+                fields
             }
 
             fn to_sort_expression(&self) -> Option<::graphql_orm::graphql::orm::SortExpression> {

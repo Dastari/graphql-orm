@@ -263,6 +263,92 @@ fn scope_template_references(scope: &syn::LitStr) -> syn::Result<Vec<String>> {
     Ok(references)
 }
 
+/// Read categories whose requirements guard relation traversal when the
+/// category a traversal maps to (`list` or `single_read`) is not declared.
+const TRAVERSAL_READ_CATEGORIES: &[&str] = &[
+    "list",
+    "single_read",
+    "keyset_list",
+    "search",
+    "subscription",
+];
+
+/// Emit the entity's relation traversal requirement.
+///
+/// Relation traversal into an entity needs the same auth mode and fixed
+/// operation scopes as the corresponding root read: `list` for to-many and
+/// `single_read` for to-one traversal. When that category is not declared but
+/// another read category is, every declared read category's requirement
+/// applies. Scope templates bind root arguments that a traversal does not
+/// have, so they refuse it. `GraphQLEntity` and
+/// `RepositoryEntity` emit this so every relation target carries it. A
+/// malformed declaration, which `GraphQLOperations` reports, refuses every
+/// traversal rather than adding a second diagnostic here.
+pub(crate) fn relation_traversal_authorization_tokens(
+    input: &DeriveInput,
+) -> proc_macro2::TokenStream {
+    let struct_name = &input.ident;
+    let requirement = (|| -> syn::Result<proc_macro2::TokenStream> {
+        let entity_meta = parse_entity_metadata(&input.attrs)?;
+        let resolver_auth_mode =
+            resolver_auth_mode_tokens(entity_meta.auth.as_deref(), struct_name.span())?;
+        let operation_authorizations = parse_operation_authorizations(&input.attrs)?;
+        let refuse = quote! {
+            return Err(::graphql_orm::graphql::errors::OrmPublicError::forbidden().into_graphql_error());
+        };
+        let enforce = |authorization: &FixedOperationAuthorization| {
+            if authorization.template_alternatives().is_some() {
+                refuse.clone()
+            } else {
+                authorization.enforcement_tokens()
+            }
+        };
+        // When the mapped category is not declared but other read categories
+        // are, fail closed: require every declared read category's
+        // requirement, so a narrower query shape cannot be bypassed.
+        let declared_reads = TRAVERSAL_READ_CATEGORIES
+            .iter()
+            .filter_map(|category| operation_authorizations.get(*category))
+            .map(&enforce)
+            .collect::<Vec<_>>();
+        let scope = |category: &str| match operation_authorizations.get(category) {
+            Some(authorization) => enforce(authorization),
+            None => quote! { #(#declared_reads)* },
+        };
+        let list_scope = scope("list");
+        let single_scope = scope("single_read");
+        Ok(quote! {
+            let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+            if multiple {
+                #list_scope
+            } else {
+                #single_scope
+            }
+            Ok(())
+        })
+    })()
+    .unwrap_or_else(|_| {
+        quote! {
+            let _ = (ctx, multiple);
+            Err(::graphql_orm::graphql::errors::OrmPublicError::forbidden().into_graphql_error())
+        }
+    });
+    let (impl_generics, type_generics, where_clause) = input.generics.split_for_impl();
+    quote! {
+        impl #impl_generics ::graphql_orm::graphql::orm::RelationTraversalAuthorization
+            for #struct_name #type_generics #where_clause
+        {
+            #[allow(unreachable_code)]
+            fn authorize_relation_traversal(
+                ctx: &::graphql_orm::async_graphql::Context<'_>,
+                multiple: bool,
+            ) -> ::graphql_orm::async_graphql::Result<()> {
+                #requirement
+            }
+        }
+    }
+}
+
 fn parse_operation_authorizations(
     attrs: &[syn::Attribute],
 ) -> syn::Result<HashMap<String, FixedOperationAuthorization>> {
@@ -5432,25 +5518,28 @@ fn generate_graphql_operations_unfiltered(
         }
 
         if let Some(filter) = where_input.as_ref() {
-            for field_name in ::graphql_orm::graphql::orm::DatabaseFilter::referenced_fields(filter) {
-                let field = <#struct_name as ::graphql_orm::graphql::orm::Entity>::repository_field_policies()
-                    .iter()
-                    .find(|field| field.api_name == field_name)
-                    .ok_or_else(|| ::graphql_orm::graphql::errors::OrmPublicError::forbidden().into_graphql_error())?;
-                db.ensure_readable_field(
-                    ctx, #entity_name_lit, field.api_name, field.read_policy, None,
-                ).await?;
-            }
+            ::graphql_orm::graphql::orm::authorize_read_fields::<#struct_name, #backend_marker>(
+                db, ctx, ::graphql_orm::graphql::orm::DatabaseFilter::referenced_fields(filter),
+            ).await?;
         }
     };
-    // Relation count ordering reveals related-row counts. Authorize each term
-    // against the target's entity access and SQL visibility before any SQL.
+    // Ordering reveals field values, and relation count ordering reveals
+    // related-row counts. Authorize each scalar term with the field's read
+    // policy, and each count against the target's access, operation scopes
+    // and SQL visibility, before any SQL.
     let order_read_authorization = quote! {
         let mut order_by = order_by;
         if let Some(orders) = order_by.as_mut() {
             for order in orders.iter_mut() {
                 order.__gom_prepare_read(ctx).await?;
             }
+            ::graphql_orm::graphql::orm::authorize_read_fields::<#struct_name, #backend_marker>(
+                db,
+                ctx,
+                orders
+                    .iter()
+                    .flat_map(::graphql_orm::graphql::orm::DatabaseOrderBy::referenced_fields),
+            ).await?;
         }
     };
     let keyset_graphql_method = if keyset_parts.is_some() {
@@ -5571,6 +5660,7 @@ fn generate_graphql_operations_unfiltered(
                     ::graphql_orm::graphql::orm::EntityAccessKind::Read,
                     ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
+                #filter_read_authorization
 
                 let mut query = #struct_name::search(pool, search)
                     .pagination_config(db.pagination_config());
@@ -5594,6 +5684,11 @@ fn generate_graphql_operations_unfiltered(
 
     let search_repository_method = if has_search {
         quote! {
+            /// Build a trusted, unchecked search over a raw pool.
+            ///
+            /// This builder has no request and no policy provider: it applies
+            /// no entity, row, field or search-source authorization. Use
+            /// `search_db` for policy-aware searches.
             pub fn search<'a>(
                 pool: &'a #pool_type,
                 search: ::graphql_orm::graphql::filters::SearchInput,
@@ -5601,13 +5696,17 @@ fn generate_graphql_operations_unfiltered(
                 ::graphql_orm::graphql::orm::EntitySearchQuery::new(pool, search)
             }
 
-            /// Build a search query from a `Database` handle without exposing the raw pool type.
+            /// Build a policy-aware search from a `Database` handle.
+            ///
+            /// The search authorizes entity access and every search source
+            /// before any SQL, and row and field policies on every hit, like
+            /// the other repository reads. `search(pool, …)` is the trusted,
+            /// unchecked builder.
             pub fn search_db<'a>(
                 db: &'a ::graphql_orm::db::Database<#backend_marker>,
                 search: ::graphql_orm::graphql::filters::SearchInput,
-            ) -> ::graphql_orm::graphql::orm::EntitySearchQuery<'a, Self, #where_input, #backend_marker> {
-                ::graphql_orm::graphql::orm::EntitySearchQuery::new(db.pool(), search)
-                    .pagination_config(db.pagination_config())
+            ) -> ::graphql_orm::graphql::orm::RepositorySearchQuery<'a, Self, #where_input, #backend_marker> {
+                ::graphql_orm::graphql::orm::RepositorySearchQuery::new(db, search)
             }
         }
     } else {
@@ -8224,7 +8323,7 @@ fn generate_graphql_operations_unfiltered(
 
                     let visibility = db.read_visibility::<#struct_name>(
                         Some(ctx), ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
-                    ).await?;
+                    ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                     if visibility.requires_residual_checks() {
                         let resolved_page = db.pagination_config().resolve_page(page.as_ref(), true);
                         let authorized_page = ::graphql_orm::graphql::loaders::scan_authorized_query(
@@ -8604,7 +8703,7 @@ fn generate_graphql_operations_unfiltered(
                     ::graphql_orm::graphql::orm::EntityAccessKind::Write,
                     ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlMutation,
                 ).await {
-                    return Ok(#update_many_result_type::from_graphql_error(error));
+                    return Ok(#update_many_result_type::from_graphql_error(::graphql_orm::graphql::errors::graphql_error_from_callback(error)));
                 }
                 if let Err(error) = db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy) {
                     return Ok(#update_many_result_type::from_graphql_error(error));
@@ -8618,6 +8717,13 @@ fn generate_graphql_operations_unfiltered(
 
                 if let Err(error) = filter.__gom_require_scalar_write_filter() {
                     return Ok(#update_many_result_type::from_graphql_error(error.into_graphql_error()));
+                }
+                // A bulk-write filter reveals the fields it names through the
+                // affected count: it needs the same read authority as a query.
+                if let Err(error) = ::graphql_orm::graphql::orm::authorize_read_fields::<#struct_name, #backend_marker>(
+                    db, ctx, ::graphql_orm::graphql::orm::DatabaseFilter::referenced_fields(filter),
+                ).await {
+                    return Ok(#update_many_result_type::from_graphql_error(error));
                 }
                 let mut notification_rows = Vec::new();
                 match #struct_name::__gom_update_where_with_auth(db, filter.clone(), input, auth_context.as_ref(), Some(ctx), Some(&mut notification_rows)).await {
@@ -8879,7 +8985,7 @@ fn generate_graphql_operations_unfiltered(
 
                 let visibility = db.read_visibility::<#struct_name>(
                     Some(ctx), ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
-                ).await?;
+                ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                 if visibility.requires_residual_checks() {
                     let resolved_page = db.pagination_config().resolve_page(page.as_ref(), true);
                     let authorized_page = ::graphql_orm::graphql::loaders::scan_authorized_query(
@@ -9169,7 +9275,7 @@ fn generate_graphql_operations_unfiltered(
                     ::graphql_orm::graphql::orm::EntityAccessKind::Write,
                     ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlMutation,
                 ).await {
-                    return Ok(#delete_many_result_type::from_graphql_error(error));
+                    return Ok(#delete_many_result_type::from_graphql_error(::graphql_orm::graphql::errors::graphql_error_from_callback(error)));
                 }
                 if let Err(error) = db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy) {
                     return Ok(#delete_many_result_type::from_graphql_error(error));
@@ -9182,6 +9288,13 @@ fn generate_graphql_operations_unfiltered(
 
                 if let Err(error) = filter.__gom_require_scalar_write_filter() {
                     return Ok(#delete_many_result_type::from_graphql_error(error.into_graphql_error()));
+                }
+                // A bulk-write filter reveals the fields it names through the
+                // affected count: it needs the same read authority as a query.
+                if let Err(error) = ::graphql_orm::graphql::orm::authorize_read_fields::<#struct_name, #backend_marker>(
+                    db, ctx, ::graphql_orm::graphql::orm::DatabaseFilter::referenced_fields(filter),
+                ).await {
+                    return Ok(#delete_many_result_type::from_graphql_error(error));
                 }
                 let mut notification_rows = Vec::new();
                 match #struct_name::__gom_delete_where_with_auth(db, filter.clone(), auth_context.as_ref(), Some(ctx), Some(&mut notification_rows)).await {

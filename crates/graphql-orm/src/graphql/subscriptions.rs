@@ -341,13 +341,15 @@ where
         EntityAccessKind::Read,
         EntityAccessSurface::GraphqlSubscription,
     )
-    .await?;
+    .await
+    .map_err(crate::graphql::errors::graphql_error_from_callback)?;
     if keys.len() != T::PRIMARY_KEYS.len() || keys.is_empty() {
         return Err(OrmPublicError::forbidden().into_graphql_error());
     }
     let visibility = db
         .read_visibility::<T>(Some(ctx), EntityAccessSurface::GraphqlSubscription)
-        .await?;
+        .await
+        .map_err(crate::graphql::errors::graphql_error_from_callback)?;
     let mut query = EntityQuery::<T, B>::new();
     for (column, value) in T::PRIMARY_KEYS.iter().zip(keys) {
         // PRIMARY_KEYS are trusted backend-rendered column identities.
@@ -410,7 +412,8 @@ where
                 EntityAccessSurface::GraphqlSubscription,
                 row,
             )
-            .await?
+            .await
+            .map_err(crate::graphql::errors::graphql_error_from_callback)?
     {
         return Err(OrmPublicError::forbidden().into_graphql_error());
     }
