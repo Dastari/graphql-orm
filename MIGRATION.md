@@ -10,6 +10,15 @@ supersedes: []
 
 # Migration Guide
 
+## 0.130.0 to 0.131.0: native search column collisions
+
+Upgrade ORM and macros together. No schema or data migration is needed.
+Native searches now accept entity sort and filter columns whose names overlap
+managed search columns: the search table's columns are no longer visible to
+entity SQL. Default-sort SQL is passed through unchanged, including correlated
+subqueries and typed literals. Existing relevance and primary-key order is
+preserved. The macros version remains aligned with the runtime.
+
 ## 0.129.0 to 0.130.0: fail-closed authority defaults
 
 Upgrade runtime and macros together. No schema or data migration is needed.
