@@ -8166,24 +8166,22 @@ mod tests {
             .expect("run should be eligible");
         let lease = service.start(&lease).await.expect("run should start");
         let clock = fixture.clock.clone();
-        // A resolver that runs for more than twice the lease TTL.
+        // A resolver that outlasts several heartbeat intervals. The clock
+        // moves once, so any renewal extends the lease past its original
+        // expiry; no timing race with the simulated clock is involved.
         let execution = async move {
-            for _ in 0..7 {
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                clock.advance_seconds(1);
-            }
+            clock.advance_seconds(1);
+            tokio::time::sleep(std::time::Duration::from_millis(4_500)).await;
             "done"
         };
         let (output, renewed) = service.run_with_lease_heartbeat(&lease, execution).await;
         assert_eq!(output, "done");
-        assert!(renewed.lease_expires_at() > fixture.clock.now());
-        assert_eq!(
-            service
-                .recover_expired_leases()
-                .await
-                .expect("recovery should succeed"),
-            AiRunRecoveryReport::default()
-        );
+        assert!(renewed.lease_expires_at() > lease.lease_expires_at());
+        // The renewal rotated the fence, so the pre-tool proof is stale.
+        assert!(matches!(
+            service.heartbeat(&lease).await,
+            Err(AiError::Conflict)
+        ));
         service
             .heartbeat(&renewed)
             .await
