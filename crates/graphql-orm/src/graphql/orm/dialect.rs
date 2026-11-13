@@ -1044,6 +1044,47 @@ impl DatabaseBackend {
         )
     }
 
+    /// One string constant as generated DDL writes it, or `None` for MySQL,
+    /// which has no executable lane and whose quoting depends on its SQL mode.
+    ///
+    /// Quotes are doubled on every backend. A PostgreSQL value that contains a
+    /// backslash is written as an escape string (`E'…'`) with doubled
+    /// backslashes, which the server reads the same way under either
+    /// `standard_conforming_strings` setting; other values keep the plain
+    /// `'…'` spelling of earlier releases. SQL Server values are Unicode
+    /// (`N'…'`), and a backslash before a line break is split into a separate
+    /// concatenated constant so it is not read as a line continuation.
+    pub(crate) fn render_string_literal(self, value: &str) -> Option<String> {
+        let quoted = |value: &str| value.replace('\'', "''");
+        Some(match self {
+            Self::Sqlite => format!("'{}'", quoted(value)),
+            Self::Postgres if value.contains('\\') => {
+                format!("E'{}'", quoted(&value.replace('\\', "\\\\")))
+            }
+            Self::Postgres => format!("'{}'", quoted(value)),
+            Self::Mysql => return None,
+            Self::Mssql => {
+                let mut parts = Vec::new();
+                let mut rest = value;
+                while let Some(index) = rest
+                    .find("\\\n")
+                    .into_iter()
+                    .chain(rest.find("\\\r\n"))
+                    .min()
+                {
+                    parts.push(format!("N'{}'", quoted(&rest[..=index])));
+                    rest = &rest[index + 1..];
+                }
+                parts.push(format!("N'{}'", quoted(rest)));
+                if parts.len() == 1 {
+                    parts.remove(0)
+                } else {
+                    format!("({})", parts.join(" + "))
+                }
+            }
+        })
+    }
+
     /// [`Self::render_identifier`] for each column of a list, joined by `, `.
     pub(crate) fn render_identifier_list<'a>(
         self,
@@ -1060,6 +1101,30 @@ impl DatabaseBackend {
 #[cfg(test)]
 mod identifier_rendering_tests {
     use super::*;
+
+    #[test]
+    fn string_literals_quote_for_each_dialect() {
+        use DatabaseBackend as B;
+        for (backend, value, expected) in [
+            (B::Sqlite, "it's", "'it''s'"),
+            (B::Sqlite, r"a\'b", r"'a\''b'"),
+            (B::Postgres, "it's", "'it''s'"),
+            (B::Postgres, "", "''"),
+            (B::Postgres, r"a\'b\", r"E'a\\''b\\'"),
+            (B::Postgres, r"\x00ff", r"E'\\x00ff'"),
+            (B::Mssql, "it's 雪", "N'it''s 雪'"),
+            (B::Mssql, "a\\\nb", "(N'a\\' + N'\nb')"),
+            (B::Mssql, "a\\\r\nb\\\nc", "(N'a\\' + N'\r\nb\\' + N'\nc')"),
+            (B::Mssql, "a\\b\n", "N'a\\b\n'"),
+        ] {
+            assert_eq!(
+                backend.render_string_literal(value).as_deref(),
+                Some(expected),
+                "{backend:?} {value:?}"
+            );
+        }
+        assert_eq!(B::Mysql.render_string_literal("plain"), None);
+    }
 
     #[test]
     fn reserved_word_lists_are_sorted_lowercase_and_unique() {

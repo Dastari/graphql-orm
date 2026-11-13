@@ -748,6 +748,148 @@ fn invalid_and_reserved_names_are_rejected() {
 }
 
 #[test]
+fn reserved_table_allowance_is_exact_code_only_and_limited_to_companion_tables() {
+    let named = |table: &str| {
+        let mut schema = fixture_runtime_schema();
+        schema.collections[0].physical_table = table.to_string();
+        schema
+    };
+    // An exact `graphql_orm_` name is admitted only when the caller lists it.
+    named("graphql_orm_notes")
+        .validate_with_reserved_tables(&["graphql_orm_notes"])
+        .unwrap();
+    assert!(
+        diagnostic_codes(named("graphql_orm_notes"))
+            .contains(&RuntimeSchemaDiagnosticCode::InvalidPhysicalName)
+    );
+    assert!(
+        named("graphql_orm_other")
+            .validate_with_reserved_tables(&["graphql_orm_notes"])
+            .is_err()
+    );
+    // The allowance lives in the call, not the definition: a serialized and
+    // reloaded definition validates without it and is refused.
+    let json = serde_json::to_string(&named("graphql_orm_notes")).unwrap();
+    assert!(!json.contains("reserved_tables"));
+    let reloaded: RuntimeSchema = serde_json::from_str(&json).unwrap();
+    assert!(reloaded.validate().is_err());
+    // No allowance admits a catalog, infrastructure or built-in name.
+    for table in [
+        "pg_roles",
+        "sqlite_master",
+        "__graphql_orm_migrations",
+        "sysobjects",
+        "json_each",
+    ] {
+        let diagnostics = named(table)
+            .validate_with_reserved_tables(&[table])
+            .expect_err(table)
+            .diagnostics()
+            .to_vec();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("reserved-table allowance")),
+            "{table}: {diagnostics:?}"
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("reserved table prefix or name")),
+            "{table}: {diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn string_defaults_with_a_nul_character_are_rejected() {
+    use graphql_orm::graphql::orm::{RuntimeDefaultProblem, RuntimeSchemaDiagnosticDetail};
+    let mut schema = fixture_runtime_schema();
+    let field = schema.collections[0]
+        .fields
+        .iter_mut()
+        .find(|field| field.value_kind == RuntimeValueKind::String)
+        .unwrap();
+    field.default = Some(RuntimeDefault::string("before\0after"));
+    let diagnostics = schema.validate().unwrap_err().diagnostics().to_vec();
+    assert!(
+        diagnostics.iter().any(|d| {
+            d.code == RuntimeSchemaDiagnosticCode::InvalidDefault
+                && d.detail
+                    == Some(RuntimeSchemaDiagnosticDetail::Default(
+                        RuntimeDefaultProblem::NulCharacter,
+                    ))
+                && d.message.contains("nul_character")
+        }),
+        "{diagnostics:?}"
+    );
+    assert_eq!(
+        RuntimeDefault::string("a\0")
+            .typed(RuntimeValueKind::String)
+            .unwrap_err()
+            .problem(),
+        RuntimeDefaultProblem::NulCharacter
+    );
+}
+
+#[test]
+fn reserved_physical_table_prefixes_are_rejected_at_definition_time() {
+    // Database catalogs, built-in table-valued functions, SQL Server
+    // compatibility views, ORM infrastructure and companion-package tables are
+    // never runtime collection tables.
+    for table in [
+        "pg_roles",
+        "pg_tables_copy",
+        "sqlite_master",
+        "sqlite_schema",
+        "__graphql_orm_migrations",
+        "graphql_orm_ai_runs",
+        "pragma_table_info",
+        "sysobjects",
+        "syscolumns",
+        "sysusers",
+        "syslogins",
+        "sysindexes",
+        "sysdatabases",
+        "json_each",
+        "json_tree",
+        "jsonb_each",
+        "dbstat",
+        "generate_series",
+    ] {
+        let mut schema = fixture_runtime_schema();
+        schema.collections[0].physical_table = table.to_string();
+        let diagnostics = schema.validate().expect_err(table).diagnostics().to_vec();
+        assert!(
+            diagnostics.iter().any(|d| {
+                d.code == RuntimeSchemaDiagnosticCode::InvalidPhysicalName
+                    && d.message.contains("reserved table prefix or name")
+            }),
+            "{table}: {diagnostics:?}"
+        );
+    }
+    // Prefixes are reserved only at the start of a name, and the exact names
+    // only exactly.
+    for table in [
+        "app_pg_roles",
+        "pgx_roles",
+        "sqlitex",
+        "orm_graphql_orm_notes",
+        "pragmatic",
+        "app_sysobjects",
+        "system_settings",
+        "sysobjects_archive",
+        "json_each_copy",
+    ] {
+        let mut schema = fixture_runtime_schema();
+        schema.collections[0].physical_table = table.to_string();
+        schema
+            .validate()
+            .unwrap_or_else(|error| panic!("{table}: {error:?}"));
+    }
+}
+
+#[test]
 fn key_and_reference_integrity_is_enforced() {
     // Key pair mixing uuid and integer.
     let mut schema = fixture_runtime_schema();

@@ -179,6 +179,10 @@ impl Default for RuntimeMigrationLimits {
 pub struct ManagedTableSet(BTreeSet<String>);
 impl ManagedTableSet {
     /// Validate portable trusted table identifiers, rejecting ORM-reserved infrastructure.
+    ///
+    /// The set is host-trusted ownership, not a runtime definition, so it
+    /// accepts names that runtime schema validation reserves (such as
+    /// `graphql_orm_` or `pg_` tables), except `__graphql_orm_` infrastructure.
     pub fn new(
         tables: impl IntoIterator<Item = String>,
     ) -> Result<Self, RuntimeMigrationDiagnostics> {
@@ -769,21 +773,22 @@ fn runtime_default(
             )),
         },
         Some(default @ RuntimeDefault::Literal(value)) => {
-            let quoted = || format!("'{}'", value.replace('\'', "''"));
+            let unsupported = || rejection(RuntimeMigrationDiagnosticCode::UnsupportedDefault);
+            let quoted = || backend.render_string_literal(value).ok_or_else(unsupported);
             Ok(Some(match (field.value_kind, backend) {
-                (RuntimeValueKind::String | RuntimeValueKind::Uuid, _) => quoted(),
+                (RuntimeValueKind::String | RuntimeValueKind::Uuid, _) => quoted()?,
                 (
                     RuntimeValueKind::Boolean | RuntimeValueKind::Integer | RuntimeValueKind::Float,
                     _,
                 ) => value.clone(),
                 (RuntimeValueKind::Json, DatabaseBackend::Postgres) => {
-                    format!("{}::jsonb", quoted())
+                    format!("{}::jsonb", quoted()?)
                 }
                 (RuntimeValueKind::DateTime, DatabaseBackend::Postgres) => {
-                    format!("{}::timestamptz", quoted())
+                    format!("{}::timestamptz", quoted()?)
                 }
                 (RuntimeValueKind::Json | RuntimeValueKind::DateTime, DatabaseBackend::Sqlite) => {
-                    quoted()
+                    quoted()?
                 }
                 // The canonical literal on PostgreSQL; the scaled mantissa on SQLite.
                 (
@@ -818,7 +823,12 @@ fn runtime_default(
                     if backend == DatabaseBackend::Sqlite {
                         format!("X'{}'", hex.to_ascii_uppercase())
                     } else {
-                        format!("'\\x{hex}'::bytea")
+                        format!(
+                            "{}::bytea",
+                            backend
+                                .render_string_literal(&format!("\\x{hex}"))
+                                .ok_or_else(unsupported)?
+                        )
                     }
                 }
                 _ => {

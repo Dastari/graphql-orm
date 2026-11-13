@@ -3933,16 +3933,27 @@ pub(super) async fn introspect_owned_postgres_connection(
 ) -> crate::Result<OwnedSchemaModel> {
     introspect_owned_postgres_connection_with_internal(connection, false).await
 }
+/// Reads the owned catalog. Default text is deparsed under the session's
+/// `standard_conforming_strings`, read in the same round trip as the schema
+/// name, and normalized to a setting-independent spelling, so plans do not
+/// depend on that setting. Introspection is a pure read: it sets nothing.
 #[cfg(feature = "postgres")]
 pub(super) async fn introspect_owned_postgres_connection_with_internal(
     connection: &mut sqlx::PgConnection,
     include_internal: bool,
 ) -> crate::Result<OwnedSchemaModel> {
-    let schema_name = sqlx::query("SELECT pg_catalog.current_schema() AS schema_name")
-        .fetch_one(&mut *connection)
-        .await?
+    let session = sqlx::query(
+        "SELECT pg_catalog.current_schema() AS schema_name,
+                pg_catalog.current_setting('standard_conforming_strings') AS standard_strings",
+    )
+    .fetch_one(&mut *connection)
+    .await?;
+    let schema_name = session
         .try_get::<Option<String>, _>("schema_name")?
         .unwrap_or_else(|| "public".to_string());
+    let standard_strings = session
+        .try_get::<String, _>("standard_strings")?
+        .eq_ignore_ascii_case("on");
     let extension_rows =
         sqlx::query("SELECT extname FROM pg_catalog.pg_extension ORDER BY extname")
             .fetch_all(&mut *connection)
@@ -4057,7 +4068,14 @@ pub(super) async fn introspect_owned_postgres_connection_with_internal(
                     sql_type,
                     spatial,
                     nullable: row.try_get::<bool, _>("nullable")?,
-                    default: row.try_get::<Option<String>, _>("column_default")?,
+                    default: row
+                        .try_get::<Option<String>, _>("column_default")?
+                        .map(|default| {
+                            super::default_equivalence::postgres_session_independent_literals(
+                                &default,
+                                standard_strings,
+                            )
+                        }),
                 })
             })
             .collect::<crate::Result<Vec<_>>>()?;

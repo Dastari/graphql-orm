@@ -10,6 +10,68 @@ supersedes: []
 
 # Migration Guide
 
+## 0.132.0 to 0.133.0: reserved runtime table names
+
+Upgrade runtime and macros together, and AI to 0.136.0 if you use it. No data
+migration is needed.
+
+### Reserved table names
+
+`RuntimeSchema::validate` now refuses a collection `physical_table` or a
+join-table `physical_table` that starts with `pg_`, `sqlite_`, `pragma_`,
+`__graphql_orm_` or `graphql_orm_` (`RESERVED_PHYSICAL_TABLE_PREFIXES`), or that
+is one of the exact names in `RESERVED_PHYSICAL_TABLE_NAMES`: SQLite's
+table-valued functions `dbstat`, `generate_series`, `json_each`, `json_tree`,
+`jsonb_each` and `jsonb_tree`, and SQL Server's backward-compatibility views
+such as `sysobjects`, `syscolumns`, `sysindexes`, `sysusers`, `syslogins` and
+`sysdatabases` (the constant's documentation has the full list). Collections
+report `InvalidPhysicalName`; join relations report `InvalidJoinTable`. A
+prefix is reserved only at the start of a name, and the exact names only
+exactly, so `app_pg_roles`, `system_settings` and `sysobjects_archive` are
+unaffected.
+
+Companion packages and repository-only code that describe their own
+`graphql_orm_` tables use
+`RuntimeSchema::validate_with_reserved_tables(&["graphql_orm_…", …])` with the
+exact table names. The allowance is a code argument and is never read from a
+stored definition. It cannot admit any other reserved prefix or name.
+
+A stored catalog with any other reserved name no longer validates. There is no
+rename in the runtime planner, so move the data first:
+
+1. Change the definition to a new, unreserved `physical_table`.
+2. Plan and apply the owned migration, which creates the new table.
+3. Copy the rows from the old table with host SQL, then drop the old table
+   when nothing else uses it. `ManagedTableSet::new` is host-trusted ownership,
+   not a definition, and still accepts the old reserved-prefixed name (other
+   than `__graphql_orm_`), so you can keep it in the set to review the guarded
+   drop, or leave it out afterwards.
+
+### Runtime schemas carry table authority
+
+This is unchanged by design. `physical_table` is authority-bearing: a runtime
+schema can name any other application table and read or write it with the
+host connection's privileges, and PostgreSQL names are not schema-qualified.
+Accept runtime schema definitions only from trusted sources, and share a table
+with a static entity or another schema only on purpose.
+
+### Literal defaults
+
+PostgreSQL runtime literal defaults that contain a backslash are now written
+as `E'…'` escape strings, and every bytes default as `E'\\x…'::bytea`, so
+default values are preserved exactly under either `standard_conforming_strings`
+setting. Owned PostgreSQL introspection reads the session's setting with the
+catalog and interprets deparsed defaults accordingly, so plans do not depend on
+it. Introspection changes no session state. Columns that earlier releases created
+with the plain `'…'` spelling compare equal to the new target, so replanning an
+existing database plans no change. Target schema and plan hashes for schemas
+with such defaults change. No action is needed.
+
+A string default that contains a NUL character is now refused at validation
+on every backend: `RuntimeSchema::validate` reports `InvalidDefault` with
+`RuntimeDefaultProblem::NulCharacter`, and no physical schema is produced for
+it. Remove the NUL character from the default.
+
 ## 0.131.0 to 0.132.0: PostgreSQL catalog reads
 
 Upgrade runtime and macros together. No schema or data migration is needed.
