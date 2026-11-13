@@ -1,0 +1,13 @@
+error: field `value`: #[transform(write = ...)] is unsupported with generated entity APIs (GraphQL operations and repository writes); repository writes have no GraphQL context and write transforms must never be skipped
+ --> tests/ui/transform_write_skipped.rs:9:5
+  |
+9 |     #[transform(write = "protect")]
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: cannot find attribute `skip_db` in this scope
+ --> tests/ui/transform_write_skipped.rs:8:7
+  |
+8 |     #[skip_db]
+  |       ^^^^^^^
+  |
+  = note: `skip_db` is an attribute that can be used by the derive macros `GraphQLEntity`, `GraphQLSchemaEntity` and `RepositoryEntity`, you might be missing a `derive` attribute

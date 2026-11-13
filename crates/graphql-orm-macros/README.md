@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.141.0 (placeholder) rejects `#[transform(write = "path")]` on
+fields because generated repository writes have no GraphQL context and typed
+binds could silently bypass the transform. Upgrade runtime and macros together;
+see the [migration guide](../../MIGRATION.md).
+
 Version 0.137.0 changes nothing a host can observe. The derives emit the
 per-field UPDATE assignment list once per entity instead of once per generated
 update path, which removes about 2.5% of the expanded code of a 15-field

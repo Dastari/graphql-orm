@@ -10,6 +10,21 @@ supersedes: []
 
 # Migration Guide
 
+## 0.137.0 to 0.141.0: write transforms fail closed
+
+Upgrade ORM and macros together (0.141.0 is a placeholder). Every generated
+entity field with `#[transform(write = "path")]` now fails compilation at the
+attribute. There is no supported generated write path for this signature;
+GraphQL operations also generate context-free repository writes. Some typed
+bind branches previously skipped the transform and stored raw values. Audit
+stored data if you relied on that attribute for hashing or encryption.
+
+Move transformation to a host-controlled write boundary before using generated
+write APIs. Removing the attribute alone is unsafe for sensitive inputs. This
+release adds no replacement signature or public API. Read-only transforms are
+unchanged; entities without write transforms need no migration and retain their
+SDL and operation catalogues.
+
 ## 0.136.0 to 0.137.0: smaller generated update code
 
 Upgrade runtime and macros together. No action is needed: no schema, data,

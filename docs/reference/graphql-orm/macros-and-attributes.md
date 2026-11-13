@@ -114,7 +114,19 @@ still subject to entity policy and backend/schema-policy restrictions.
 | `#[graphql(skip)]`, `#[graphql_orm(skip_input)]` | omits the field from generated GraphQL inputs (Rust repository inputs keep it); `graphql(skip)` also supports relation implementation fields. See [read-only and zero-input entities](#read-only-and-zero-input-entities) |
 | `#[skip_db]` | excludes a field from persisted row decoding |
 | `#[input_only]` | keeps a writable field in inputs even where it is skipped from GraphQL reads |
-| `#[graphql_orm(private)]` | removes generated read/filter/order/subscription exposure and inputs. On a `GraphQLEntity` + `SimpleObject` entity this requires `#[graphql(skip)]` or `graphql_policy_object`; otherwise compilation fails. Metadata-only `GraphQLSchemaEntity` is exempt |
+| `#[graphql_orm(private)]` | removes generated read/filter/order/subscription exposure and inputs. `#[transform(write = "path")]` is unsupported and is a compile error on any
+field, including optional, typed, skipped, non-writable, generated and
+schema-only fields. There are no supported generated write paths: GraphQL
+create/update/upsert and bulk mutations, repository insert/update/upsert,
+transaction and composite-key variants, and compare-and-swap are all covered
+by this rejection. GraphQL operation shape selection does not remove the
+context-free repository API. The former context-aware async signature cannot
+run in that API, and some typed bind branches previously silently stored raw
+values. Do not remove the attribute and continue writing sensitive raw input;
+move the transformation to a host-controlled write boundary before using these
+APIs. `#[transform(read = "path")]` remains available and does not protect writes.
+
+On a `GraphQLEntity` + `SimpleObject` entity this requires `#[graphql(skip)]` or `graphql_policy_object`; otherwise compilation fails. Metadata-only `GraphQLSchemaEntity` is exempt |
 | `#[graphql_orm(sensitive)]` | emits `Secret` plus structural `NeverExport`; it does not by itself remove the field from ordinary GraphQL |
 | `#[graphql_orm(classification = "…")]` | overrides the inherited public/internal/confidential/restricted/secret classification |
 | `#[graphql_orm(non_exportable)]` | structurally excludes the field from external-provider result projections while retaining ordinary GraphQL visibility |
@@ -128,7 +140,7 @@ still subject to entity policy and backend/schema-policy restrictions.
 | `#[graphql_orm(mssql_money)]` | SQL Server only: exact native `MONEY` field as `rust_decimal::Decimal` or `Option<Decimal>`; scale 4 and signed 64-bit scaled range; cannot be combined with `decimal(...)` |
 | `#[graphql_orm(auto_generated = bool)]` | declares whether the value is database-generated |
 | `#[date_field]`, `#[boolean_field]`, `#[json_field]`, `#[graphql_orm(json)]` | type metadata; JSON disables filter/order generation |
-| `#[transform(write = "…", read = "…")]` | names generated write/read transforms; other options are rejected |
+| `#[transform(read = "…")]` | synchronous read transform; `write` is rejected (see below) |
 | `#[backup(include | exclude | redact)]` | per-field backup treatment; exactly one policy |
 
 On a `GraphQLEntity` + `SimpleObject` entity, `private`, `read = false`, and `input_only` must

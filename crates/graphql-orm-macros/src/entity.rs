@@ -1697,8 +1697,7 @@ pub(crate) struct FieldMetadata {
     pub(crate) search: Option<SearchFieldMetadata>,
     pub(crate) search_json: Vec<SearchJsonPathMetadata>,
     pub(crate) search_relation: Option<SearchRelationMetadata>,
-    /// Async write transform: fn(&Context, String) -> Result<String>
-    /// Applied before INSERT/UPDATE to transform the value (e.g., encryption)
+    /// Legacy context-aware write transform; field validation rejects it.
     pub(crate) transform_write: Option<String>,
     /// Sync read transform: fn(T) -> T
     /// Applied after reading from the database row (e.g., decryption)
@@ -2263,6 +2262,7 @@ pub(crate) struct ParsedField {
 
 pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> {
     let mut meta = FieldMetadata::default();
+    let mut transform_write_attribute = None;
 
     for attr in &field.attrs {
         if let Some(ident) = attr.path().get_ident() {
@@ -2884,6 +2884,7 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                             let value = nested.value()?;
                             let lit: syn::LitStr = value.parse()?;
                             meta.transform_write = Some(lit.value());
+                            transform_write_attribute = Some(attr);
                         } else if nested.path.is_ident("read") {
                             let value = nested.value()?;
                             let lit: syn::LitStr = value.parse()?;
@@ -2953,6 +2954,24 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
         return Err(syn::Error::new_spanned(
             field,
             "decimal metadata is only valid on rust_decimal::Decimal fields",
+        ));
+    }
+
+    // Fail closed even for fields excluded from inputs or persistence. Otherwise
+    // changing a field's type or capabilities can silently bypass protection.
+    if meta.transform_write.is_some() {
+        let attribute =
+            transform_write_attribute.expect("write transform metadata comes from an attribute");
+        let name = field
+            .ident
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        return Err(syn::Error::new_spanned(
+            attribute,
+            format!(
+                "field `{name}`: #[transform(write = ...)] is unsupported with generated entity APIs (GraphQL operations and repository writes); repository writes have no GraphQL context and write transforms must never be skipped"
+            ),
         ));
     }
 
@@ -3280,7 +3299,8 @@ fn validate_relation_delete_policy(
     Ok(())
 }
 
-/// Wrap a value expression with an async, context-aware write transform.
+/// Legacy context-aware write binding. Field validation rejects write transforms
+/// until every generated write path can execute them, including typed binds.
 ///
 /// The transform function must have the signature:
 ///   `async fn(&::graphql_orm::async_graphql::Context<'_>, String) -> ::graphql_orm::async_graphql::Result<String>`

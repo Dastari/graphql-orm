@@ -11605,3 +11605,22 @@ mod update_assignment_tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod write_transform_rejection_tests {
+    #[test]
+    fn rejects_write_transforms_instead_of_skipping_typed_binds() {
+        let input = syn::parse_quote! {
+            #[graphql_entity(backend = "sqlite", table = "transform_records")]
+            struct TransformRecord {
+                #[primary_key]
+                id: String,
+                #[transform(write = "protect")]
+                value: i64,
+            }
+        };
+        let error = super::generate_graphql_operations(&input)
+            .expect_err("write transforms must not be silently bypassed");
+        assert!(error.to_string().contains("transform(write"));
+    }
+}
