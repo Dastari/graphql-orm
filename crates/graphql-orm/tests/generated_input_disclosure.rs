@@ -281,8 +281,7 @@ async fn generated_optional_undisclosed_members_preserve_readable_inputs() {
             plan["arguments"]["input"][&hidden.field_name] = serde_json::json!("withheld");
             let error = capability
                 .compile_compact(plan.clone())
-                .err()
-                .expect("undisclosed values are not accepted");
+                .expect_err("undisclosed values are not accepted");
             assert!(!error.to_string().contains(&hidden.field_name));
             plan["arguments"]["input"]
                 .as_object_mut()
@@ -348,9 +347,14 @@ async fn generated_optional_undisclosed_members_preserve_readable_inputs() {
         AiGraphqlQueryCapabilityLimits::default(),
         AiGraphqlQueryCapabilityOptions::default().with_custom_input_disclosure(disclosure),
     )
-    .err()
-    .expect("host disclosure does not open producer-hidden fields");
+    .expect_err("host disclosure does not open producer-hidden fields");
     assert!(error.to_string().contains("CreateOptionalInputRecordInput"));
+    let hidden = entity
+        .generated_input_members
+        .iter()
+        .find(|member| member.input_type == "CreateOptionalInputRecordInput")
+        .unwrap();
+    assert!(error.to_string().contains(&hidden.field_name));
 }
 
 #[tokio::test]
@@ -414,8 +418,7 @@ async fn malformed_generated_member_reports_its_host_coordinate() {
         let malformed = body.replace(line, &format!("\t{label}: Int"));
         changed.replace_range(start..end, &malformed);
         let error = compile(&changed, &semantic)
-            .err()
-            .expect("canonical generated mismatches are host configuration errors");
+            .expect_err("canonical generated mismatches are host configuration errors");
         let message = error.to_string();
         assert!(
             message.contains(input) && message.contains(&label),

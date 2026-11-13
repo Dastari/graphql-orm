@@ -60,8 +60,7 @@ async fn custom_schema_root_generated_name_imitation_is_handwritten() {
         )
     };
     let error = compile(AiGraphqlQueryCapabilityOptions::default())
-        .err()
-        .expect("a required handwritten field needs a declaration");
+        .expect_err("a required handwritten field needs a declaration");
     let message = error.to_string();
     assert!(
         message.contains("CreateImitationInputRecordInput")
