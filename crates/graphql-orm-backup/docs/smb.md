@@ -3,7 +3,7 @@ title: "Native and Mounted SMB Repositories"
 kind: reference
 status: active
 owner: graphql-orm-backup-maintainers
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-12
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -46,8 +46,10 @@ identity requirements.
 
 Native SMB supports create, list, verify, restore, delete, prune, and locking
 through provider-independent APIs. Normal writes use remote temporary files,
-flush, close, and rename. Locks use atomic SMB `FILE_CREATE` through
-`BlobStore::put_blob_if_not_exists`.
+flush, close, and rename. Locks use `BlobStore::put_blob_if_not_exists`,
+which publishes a complete temporary file as a hard link at the lock key.
+Creating the link fails atomically when the lock exists, so the share must
+support hard links.
 
 Large referenced objects use streaming extensions on `BackupRepository`,
 `BackupObjectIndex`, and `RestoreObjectSink`. Existing implementations remain

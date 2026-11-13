@@ -4,7 +4,8 @@ use async_trait::async_trait;
 use aws_credential_types::Credentials;
 use aws_sdk_s3::{
     Client,
-    config::{Builder as S3ConfigBuilder, Region, retry::RetryConfig},
+    config::{Builder as S3ConfigBuilder, Region, http::HttpResponse, retry::RetryConfig},
+    error::{DisplayErrorContext, ProvideErrorMetadata, SdkError},
     primitives::ByteStream,
     types::{CompletedMultipartUpload, CompletedPart},
 };
@@ -20,6 +21,10 @@ use crate::{
 };
 
 const MULTIPART_PART_SIZE: usize = 8 * 1024 * 1024;
+
+/// Most characters of a server's error message, or of a transport failure,
+/// that a provider error keeps.
+const MAX_S3_ERROR_TEXT_CHARS: usize = 256;
 
 /// Configuration for an S3-compatible storage backend.
 #[derive(Clone, PartialEq, Eq)]
@@ -231,33 +236,27 @@ impl S3StorageBackend {
                     .complete_multipart_upload(&provider_key, state, if_not_exists)
                     .await;
                 guard.disarm();
-                match completed {
-                    Ok(()) => Ok(Some(outcome)),
-                    Err(err) if if_not_exists && is_precondition_error(&err) => Ok(None),
-                    Err(err) => Err(err),
-                }
+                Ok(completed?.then_some(outcome))
             }
             None => {
                 let bytes = buffer.freeze();
-                match self
+                let written = self
                     .put_single_blob(&provider_key, bytes, options, if_not_exists)
-                    .await
-                {
-                    Ok(()) => Ok(Some(outcome)),
-                    Err(err) if if_not_exists && is_precondition_error(&err) => Ok(None),
-                    Err(err) => Err(err),
-                }
+                    .await?;
+                Ok(written.then_some(outcome))
             }
         }
     }
 
+    /// Writes one object, returning `false` when `if_not_exists` is set and
+    /// the key already exists.
     async fn put_single_blob(
         &self,
         provider_key: &str,
         bytes: Bytes,
         options: BlobPutOptions,
         if_not_exists: bool,
-    ) -> Result<(), StorageError> {
+    ) -> Result<bool, StorageError> {
         let mut request = self
             .client
             .put_object()
@@ -272,8 +271,11 @@ impl S3StorageBackend {
             request = request.if_none_match("*");
         }
 
-        request.send().await.map_err(map_s3_error)?;
-        Ok(())
+        match request.send().await {
+            Ok(_) => Ok(true),
+            Err(err) if if_not_exists && is_precondition_failed(&err) => Ok(false),
+            Err(err) => Err(map_s3_error(err)),
+        }
     }
 
     async fn create_multipart_upload(
@@ -333,12 +335,14 @@ impl S3StorageBackend {
         Ok(())
     }
 
+    /// Completes the upload, returning `false` when `if_not_exists` is set
+    /// and the key already exists. Any failure aborts the upload.
     async fn complete_multipart_upload(
         &self,
         provider_key: &str,
         state: MultipartUploadState,
         if_not_exists: bool,
-    ) -> Result<(), StorageError> {
+    ) -> Result<bool, StorageError> {
         let upload_id = state.upload_id.clone();
         let completed = CompletedMultipartUpload::builder()
             .set_parts(Some(state.completed_parts))
@@ -355,20 +359,20 @@ impl S3StorageBackend {
             request = request.if_none_match("*");
         }
 
-        match request.send().await.map_err(map_s3_error) {
-            Ok(_) => Ok(()),
-            Err(err) => {
-                let _ = self
-                    .client
-                    .abort_multipart_upload()
-                    .bucket(&self.config.bucket)
-                    .key(provider_key)
-                    .upload_id(upload_id)
-                    .send()
-                    .await;
-                Err(err)
-            }
-        }
+        let completed = match request.send().await {
+            Ok(_) => return Ok(true),
+            Err(err) if if_not_exists && is_precondition_failed(&err) => Ok(false),
+            Err(err) => Err(map_s3_error(err)),
+        };
+        let _ = self
+            .client
+            .abort_multipart_upload()
+            .bucket(&self.config.bucket)
+            .key(provider_key)
+            .upload_id(upload_id)
+            .send()
+            .await;
+        completed
     }
 }
 
@@ -730,32 +734,84 @@ struct MultipartUploadState {
     completed_parts: Vec<CompletedPart>,
 }
 
-fn is_missing_error<E>(err: &aws_sdk_s3::error::SdkError<E>) -> bool
-where
-    E: fmt::Debug,
-{
-    let error = format!("{err:?}");
-    error.contains("NoSuchKey")
-        || error.contains("NotFound")
-        || error.contains("Not Found")
-        || error.contains("status: 404")
-        || error.contains("code: 404")
+/// The service error code of `err`, if the service returned one.
+fn service_error_code<E: ProvideErrorMetadata>(err: &SdkError<E, HttpResponse>) -> Option<&str> {
+    err.as_service_error().and_then(ProvideErrorMetadata::code)
 }
 
-fn is_precondition_error(err: &StorageError) -> bool {
-    let message = err.to_string();
-    message.contains("PreconditionFailed")
-        || message.contains("Precondition Failed")
-        || message.contains("status: 412")
-        || message.contains("code: 412")
+/// The HTTP status of a service error's response.
+fn service_error_status<E>(err: &SdkError<E, HttpResponse>) -> Option<u16> {
+    match err {
+        SdkError::ServiceError(context) => Some(context.raw().status().as_u16()),
+        _ => None,
+    }
 }
 
-pub(crate) fn map_s3_error<E>(err: aws_sdk_s3::error::SdkError<E>) -> StorageError
+/// Whether `err` reports a missing key: the code `NoSuchKey` or `NotFound`,
+/// or a 404 without a code, as a body-less HEAD response returns. Another
+/// coded 404, such as `NoSuchBucket`, is a provider error.
+fn is_missing_error<E: ProvideErrorMetadata>(err: &SdkError<E, HttpResponse>) -> bool {
+    match service_error_code(err) {
+        Some(code) => matches!(code, "NoSuchKey" | "NotFound"),
+        None => service_error_status(err) == Some(404),
+    }
+}
+
+/// Whether `err` reports a failed `If-None-Match` condition.
+fn is_precondition_failed<E: ProvideErrorMetadata>(err: &SdkError<E, HttpResponse>) -> bool {
+    service_error_code(err) == Some("PreconditionFailed") || service_error_status(err) == Some(412)
+}
+
+/// Maps an SDK error to a provider error. Retryability comes from the error
+/// kind, the HTTP status and the service error code, never from message
+/// text, and the message is a bounded summary, never the SDK's debug output.
+pub(crate) fn map_s3_error<E>(err: SdkError<E, HttpResponse>) -> StorageError
 where
-    E: fmt::Debug,
+    E: ProvideErrorMetadata + std::error::Error + 'static,
 {
-    let message = format!("{err:?}");
-    let retryable = is_retryable_s3_message(&message);
+    let (message, retryable) = match &err {
+        SdkError::ServiceError(context) => {
+            let status = context.raw().status().as_u16();
+            let code = context.err().code();
+            let mut message = format!(
+                "S3 service error {} (HTTP {status}",
+                bounded_text(code.unwrap_or("without an error code"))
+            );
+            if let Some(request_id) = context.raw().headers().get("x-amz-request-id") {
+                message.push_str(", request id ");
+                message.push_str(&bounded_text(request_id));
+            }
+            message.push(')');
+            if let Some(text) = context.err().message().filter(|text| !text.is_empty()) {
+                message.push_str(": ");
+                message.push_str(&bounded_text(text));
+            }
+            (message, is_retryable_service_error(status, code))
+        }
+        SdkError::TimeoutError(_) => ("S3 request timed out".to_string(), true),
+        SdkError::DispatchFailure(failure) => (
+            format!(
+                "S3 request could not be sent: {}",
+                bounded_text(&DisplayErrorContext(&err).to_string())
+            ),
+            !failure.is_user(),
+        ),
+        SdkError::ResponseError(_) => (
+            format!(
+                "S3 response could not be read: {}",
+                bounded_text(&DisplayErrorContext(&err).to_string())
+            ),
+            true,
+        ),
+        SdkError::ConstructionFailure(_) => (
+            format!(
+                "S3 request could not be built: {}",
+                bounded_text(&DisplayErrorContext(&err).to_string())
+            ),
+            false,
+        ),
+        _ => ("S3 request failed".to_string(), false),
+    };
     StorageError::Provider {
         backend: StorageBackend::S3.as_str().to_string(),
         message,
@@ -763,15 +819,43 @@ where
     }
 }
 
-fn is_retryable_s3_message(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    lower.contains("timeout")
-        || lower.contains("timed out")
-        || lower.contains("dispatch")
-        || lower.contains("connection")
-        || lower.contains("throttl")
-        || lower.contains("slowdown")
-        || lower.contains("temporarily")
-        || lower.contains("status: 5")
-        || lower.contains("code: 5")
+/// Server failures, throttling and request timeouts may succeed on a retry.
+fn is_retryable_service_error(status: u16, code: Option<&str>) -> bool {
+    status >= 500
+        || status == 429
+        || matches!(
+            code,
+            Some(
+                "SlowDown"
+                    | "Throttling"
+                    | "ThrottlingException"
+                    | "RequestLimitExceeded"
+                    | "RequestTimeout"
+                    | "RequestTimeoutException"
+                    | "InternalError"
+                    | "ServiceUnavailable"
+                    | "OperationAborted"
+                    | "ConditionalRequestConflict"
+            )
+        )
+}
+
+/// At most [`MAX_S3_ERROR_TEXT_CHARS`] characters of `text`, with control
+/// characters replaced by spaces.
+fn bounded_text(text: &str) -> String {
+    let mut bounded: String = text
+        .chars()
+        .take(MAX_S3_ERROR_TEXT_CHARS)
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
+    if text.chars().nth(MAX_S3_ERROR_TEXT_CHARS).is_some() {
+        bounded.push('…');
+    }
+    bounded
 }
