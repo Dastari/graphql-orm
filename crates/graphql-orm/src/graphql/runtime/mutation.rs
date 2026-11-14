@@ -606,6 +606,7 @@ fn input_fields(
 pub(super) async fn prepare<B: RuntimeReadBackend>(
     modules: &[RuntimeGraphqlModule],
     context: Option<&RuntimeGraphqlRequest<B>>,
+    mut row_security: super::execution::RowSecurity<'_, B>,
     protection: Option<&super::execution::Protection>,
     planner: &mut Planner<'_>,
     selections: &SelectionSet,
@@ -634,6 +635,10 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
                     if context.write_authority.is_none() || context.mutation_environment.is_none() {
                         return Err(RuntimeGraphqlError::new("authorization_missing"));
                     }
+                    // Before any host authority call or write.
+                    row_security
+                        .admit(module, context.mutation_environment.as_deref())
+                        .await?;
                     let args = planner.resolve(&field)?;
                     if context.fingerprint != module.schema.fingerprint()
                         || args.get("expectedSchema")

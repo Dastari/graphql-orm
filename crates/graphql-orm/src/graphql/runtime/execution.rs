@@ -269,6 +269,99 @@ fn assurance_denials(
     }
     Ok(denied)
 }
+/// Fail closed for PostgreSQL row-level security without request context.
+///
+/// Runtime reads, writes and live registrations apply the request's
+/// [`DbAuthContext`] as the `app.*` settings RLS policies read. Without one, a
+/// role subject to RLS sees no rows (silently filtered) and a role that bypasses
+/// it, such as the table owner, sees every row. A runtime operation whose module
+/// includes a table with row-level security enabled is therefore refused with
+/// `authorization_misconfigured` before any host authority call or database
+/// work, unless the request carries a `DbAuthContext` or the named trusted
+/// [`SystemAccess`](crate::graphql::auth::SystemAccess), or the database runs
+/// [`AuthorizationMode::LegacyPermissive`](crate::graphql::auth::AuthorizationMode::LegacyPermissive).
+///
+/// The check covers every table a module's operations can read or write: each
+/// collection's table, its link tables and search documents, and, for writes,
+/// the tables of verified incoming dependencies. It reads `pg_class` live, so
+/// RLS enabled outside the ORM counts too. Other backends are unaffected.
+pub(super) struct RowSecurity<'a, B: RuntimeReadBackend> {
+    database: &'a Database<B>,
+    exempt: bool,
+    admitted: std::collections::BTreeSet<String>,
+}
+impl<'a, B: RuntimeReadBackend> RowSecurity<'a, B> {
+    pub(super) fn new(
+        database: &'a Database<B>,
+        auth: Option<&DbAuthContext>,
+        system_access: bool,
+    ) -> Self {
+        Self {
+            database,
+            exempt: B::DIALECT != DatabaseBackend::Postgres
+                || auth.is_some()
+                || system_access
+                || database.authorization_mode()
+                    == crate::graphql::auth::AuthorizationMode::LegacyPermissive,
+            admitted: Default::default(),
+        }
+    }
+    /// Admit one module's operation, or refuse it before any work.
+    pub(super) async fn admit(
+        &mut self,
+        module: &RuntimeGraphqlModule,
+        environment: Option<&RuntimeMutationEnvironment>,
+    ) -> Result<(), RuntimeGraphqlError> {
+        if self.exempt {
+            return Ok(());
+        }
+        let mut tables = std::collections::BTreeSet::new();
+        for c in &module.schema.schema().collections {
+            tables.insert(c.physical_table.clone());
+            if c.search.is_some() {
+                tables.insert(search_table_name(&c.physical_table));
+            }
+            for relation in &c.relations {
+                if let Some(join) = &relation.join {
+                    tables.insert(join.physical_table.clone());
+                }
+            }
+            if let Some(environment) = environment {
+                for dependency in environment.incoming_dependencies(&c.physical_table) {
+                    tables.insert(dependency.source_table.clone());
+                }
+            }
+        }
+        tables.retain(|table| !self.admitted.contains(table));
+        let tables = tables.into_iter().collect::<Vec<_>>();
+        for chunk in tables.chunks(256) {
+            let candidates = (1..=chunk.len())
+                .map(|index| {
+                    format!(
+                        "to_regclass(quote_ident({}))",
+                        B::DIALECT.placeholder(index)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT 1 AS row_security FROM pg_catalog.pg_class WHERE relrowsecurity AND oid IN ({candidates}) LIMIT 1"
+            );
+            let binds = chunk
+                .iter()
+                .map(|table| SqlValue::String(table.clone()))
+                .collect::<Vec<_>>();
+            let rows = B::fetch_rows(self.database.pool(), &sql, &binds)
+                .await
+                .map_err(|_| RuntimeGraphqlError::new("backend_execution"))?;
+            if !rows.is_empty() {
+                return Err(RuntimeGraphqlError::new("authorization_misconfigured"));
+            }
+        }
+        self.admitted.extend(tables);
+        Ok(())
+    }
+}
 pub(super) struct GuardFactory<B: RuntimeReadBackend> {
     pub database: Database<B>,
     pub modules: Vec<RuntimeGraphqlModule>,
@@ -776,6 +869,12 @@ impl<B: RuntimeReadBackend> Guard<B> {
             return super::mutation::prepare(
                 &self.modules,
                 request,
+                RowSecurity::new(
+                    &self.database,
+                    request.and_then(|request| request.auth.as_ref()),
+                    ctx.data_opt::<crate::graphql::auth::SystemAccess>()
+                        .is_some(),
+                ),
                 self.protection.as_ref(),
                 &mut planner,
                 &operation.node.selection_set.node,
@@ -861,6 +960,15 @@ impl<B: RuntimeReadBackend> Guard<B> {
             return Ok(Results(values, BTreeMap::new(), denied));
         }
         let request = request.ok_or_else(|| RuntimeGraphqlError::new("authorization_missing"))?;
+        let mut row_security = RowSecurity::new(
+            &self.database,
+            request.auth.as_ref(),
+            ctx.data_opt::<crate::graphql::auth::SystemAccess>()
+                .is_some(),
+        );
+        for plan in plans.iter().chain(nodes.iter().map(|(plan, _, _)| plan)) {
+            row_security.admit(&plan.module, None).await?;
+        }
         // Complete all layers' grants and cursor framing checks before any ORM I/O.
         for plan in &mut plans {
             authorize(plan, request, self.protection.as_ref(), limits).await?;

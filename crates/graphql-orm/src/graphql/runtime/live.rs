@@ -603,6 +603,16 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                     limits,
                 )
                 .map_err(safe)?;
+                // Before registration, admission reads or host authorization.
+                super::execution::RowSecurity::new(
+                    &database,
+                    request.auth.as_ref(),
+                    ctx.data_opt::<crate::graphql::auth::SystemAccess>()
+                        .is_some(),
+                )
+                .admit(&module, None)
+                .await
+                .map_err(safe)?;
                 let mut receiver = source
                     .0
                     .subscribe(&module.schema.fingerprint(), &c.id)
