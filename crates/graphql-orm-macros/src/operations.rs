@@ -5397,13 +5397,11 @@ fn generate_graphql_operations_unfiltered(
             });
         }
         let fingerprint = format!("v1:{}", fingerprint_parts.join(","));
-        let runtime_order_definitions = if runtime_keyset_available {
+        // Without an orderable field there is no `OrderField` enum to take.
+        let runtime_ordered_method = if runtime_ordered_arms.is_empty() {
+            quote! {}
+        } else {
             quote! {
-                    /// Scalar-only runtime keyset order. Each list entry must select
-                    /// exactly one field; NULL values sort last in either direction.
-                    #[derive(::graphql_orm::async_graphql::InputObject, Default, Clone, Debug)]
-                    pub struct #keyset_order_input { #(#runtime_fields)* }
-                    impl #keyset_order_input {
                         /// Build an ordered keyset sort from typed `(field, direction)`
                         /// pairs: the first pair is the primary sort key, and the cursor's
                         /// key order follows the list. The complete primary key is still
@@ -5428,6 +5426,16 @@ fn generate_graphql_operations_unfiltered(
                                 })
                                 .collect()
                         }
+            }
+        };
+        let runtime_order_definitions = if runtime_keyset_available {
+            quote! {
+                    /// Scalar-only runtime keyset order. Each list entry must select
+                    /// exactly one field; NULL values sort last in either direction.
+                    #[derive(::graphql_orm::async_graphql::InputObject, Default, Clone, Debug)]
+                    pub struct #keyset_order_input { #(#runtime_fields)* }
+                    impl #keyset_order_input {
+                        #runtime_ordered_method
 
                         fn __gom_columns(items: Vec<Self>) -> ::graphql_orm::async_graphql::Result<Vec<::graphql_orm::graphql::orm::KeysetOrderColumn>> {
                             let mut columns = Vec::new();
