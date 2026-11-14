@@ -341,7 +341,7 @@ pub struct OrmAiApprovalService {
     /// The handle the host supplied, returned by `database()`.
     host_database: Database<DefaultWriteBackend>,
     run_service: OrmAiRunService,
-    principal_resolver: Arc<dyn CurrentPrincipalResolver>,
+    principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver,
     access_policy: Arc<dyn AiApprovalAccessPolicy>,
     tool_catalog: Arc<AiToolCatalog>,
     recent_mfa_policy: RecentMfaPolicy,
@@ -372,7 +372,7 @@ impl OrmAiApprovalService {
             host_database,
             database,
             run_service,
-            principal_resolver,
+            principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver::from(principal_resolver).with_clock(clock.clone()),
             access_policy,
             tool_catalog,
             recent_mfa_policy,
@@ -1622,7 +1622,7 @@ pub struct OrmAiApprovalWaitReconciliationService {
     /// The handle the host supplied, returned by `database()`.
     host_database: Database<DefaultWriteBackend>,
     run_service: OrmAiRunService,
-    principal_resolver: Arc<dyn CurrentPrincipalResolver>,
+    principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver,
     wait_policy: Arc<dyn AiApprovalWaitReconciliationPolicy>,
     protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
     content_protector: Arc<dyn AiContentProtector>,
@@ -1648,7 +1648,7 @@ impl OrmAiApprovalWaitReconciliationService {
             host_database,
             database,
             run_service,
-            principal_resolver,
+            principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver::from(principal_resolver).with_clock(clock.clone()),
             wait_policy,
             protection_policy,
             content_protector,
@@ -5193,11 +5193,68 @@ mod tests {
         );
     }
 
+    struct UnreachableResolution;
+    #[async_trait]
+    impl CurrentPrincipalResolver for UnreachableResolution {
+        async fn resolve(&self, _: &PrincipalReference) -> agql_auth::AuthResult<ResolvedPrincipal> {
+            panic!("legacy references must not reach the host resolver")
+        }
+    }
+    struct UnreachableProtection;
+    #[async_trait]
+    impl AiContentProtectionPolicyResolver for UnreachableProtection {
+        async fn resolve(&self, _: &AuthPrincipal, _: &AiScope) -> Result<AiContentProtectionPolicy, AiError> {
+            panic!("legacy references must not reach the protection policy")
+        }
+    }
+
+    #[tokio::test]
+    async fn delegated_consumed_wait_requires_recovery_without_host_callbacks() {
+        let mut fixture = fixture().await;
+        let (requested, _) = request_wait(&fixture, fixture.now + Duration::hours(2)).await;
+        let reference =
+            crate::principal_projection::test_delegated_references(&fixture.principal.reference())
+                .pop()
+                .unwrap()
+                .1;
+        store_legacy_delegated_wait(
+            &fixture,
+            requested.lease().run_id(),
+            requested.approval_id(),
+            &reference,
+        )
+        .await;
+        AiApprovalRecord::update_by_id(
+            &fixture.database,
+            &requested.approval_id().0,
+            UpdateAiApprovalRecordInput {
+                state: Some("consumed".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        fixture.reconciliation_service.principal_resolver =
+            (Arc::new(UnreachableResolution) as Arc<dyn CurrentPrincipalResolver>).into();
+        fixture.reconciliation_service.protection_policy = Arc::new(UnreachableProtection);
+        let report = fixture
+            .reconciliation_service
+            .reconcile_waits("legacy-malformed")
+            .await
+            .unwrap();
+        assert_eq!(report.recovery_required, 1);
+        let run = AiRunRecord::find_by_id(&fixture.database, &requested.lease().run_id().0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.state, "recovery_required");
+    }
+
     #[tokio::test]
     async fn legacy_delegated_approved_wait_is_never_resumed() {
         let base = fixture().await.principal.reference();
         for (kind, reference) in crate::principal_projection::test_delegated_references(&base) {
-            let fixture = fixture().await;
+            let mut fixture = fixture().await;
             let (_, requested, _, _) = approved_wait(&fixture).await;
             let run_id = requested.lease().run_id();
             let approval_id = requested.approval_id();
@@ -5228,6 +5285,8 @@ mod tests {
                 .unwrap();
             assert_eq!(run.state, "waiting_approval", "{kind}");
 
+            fixture.reconciliation_service.principal_resolver = (Arc::new(UnreachableResolution) as Arc<dyn CurrentPrincipalResolver>).into();
+            fixture.reconciliation_service.protection_policy = Arc::new(UnreachableProtection);
             let report = fixture
                 .reconciliation_service
                 .reconcile_waits("delegated-wait-reconciler")

@@ -151,7 +151,7 @@ impl AiRuntimeStartGate {
 
 /// Built project-agnostic runtime.
 pub struct AiRuntime {
-    principal_resolver: Arc<dyn CurrentPrincipalResolver>,
+    principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver,
     access_policy: Arc<dyn AiAccessPolicy>,
     tool_bridge: AuthenticatedToolBridge,
     egress_policy: Arc<dyn AiEgressPolicy>,
@@ -2124,7 +2124,7 @@ impl AiRuntimeBuilder {
         }
 
         Ok(AiRuntime {
-            principal_resolver,
+            principal_resolver: principal_resolver.into(),
             access_policy,
             tool_bridge,
             egress_policy,

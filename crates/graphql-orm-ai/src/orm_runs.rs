@@ -772,6 +772,10 @@ pub(crate) struct PreparedToolCallFinish {
 }
 
 impl OrmAiRunService {
+    pub(crate) const fn maximum_transaction_retries(&self) -> usize {
+        self.limits.maximum_transaction_retries
+    }
+
     pub(crate) const fn lease_ttl(&self) -> Duration {
         self.limits.lease_ttl
     }
@@ -873,10 +877,13 @@ impl OrmAiRunService {
         self.cancellation(lease).await
     }
 
-    /// Claims the oldest eligible queued/retry-scheduled run.
+    /// Claims an eligible queued/retry-scheduled run, oldest first among rows
+    /// with the same maintenance progress stamp.
     ///
-    /// The claim and immutable attempt fact commit atomically. Concurrent
-    /// workers can never receive the same attempt/generation pair.
+    /// Each candidate's claim and immutable attempt fact commit atomically.
+    /// A failed candidate rolls back independently, is reported with the safe
+    /// `claim_candidate_skipped` tracing code and rotates behind other rows.
+    /// Concurrent workers can never receive the same attempt/generation pair.
     ///
     /// # Errors
     ///
@@ -885,18 +892,71 @@ impl OrmAiRunService {
     pub async fn claim_next(&self, worker_id: &str) -> Result<Option<AiRunLease>, AiError> {
         validate_worker_id(worker_id)?;
         let now = canonical_second(self.clock.now());
-        for retry in 0..=self.limits.maximum_transaction_retries {
-            match self.claim_once(worker_id.to_owned(), now).await {
-                Ok(result) => return result,
-                Err(TransactionError::Retryable(_))
-                    if retry < self.limits.maximum_transaction_retries =>
-                {
-                    tokio::task::yield_now().await;
+        let candidates = retry_transaction(self.limits.maximum_transaction_retries, || {
+            self.load_claim_candidates(now)
+        })
+        .await
+        .map_err(map_transaction)?;
+        let mut last_error = None;
+        for candidate in candidates {
+            let mut failed = false;
+            for retry in 0..=self.limits.maximum_transaction_retries {
+                match self.claim_once(worker_id.to_owned(), candidate.id).await {
+                    Ok(Ok(Some(lease))) => return Ok(Some(lease)),
+                    Ok(Ok(None)) => break,
+                    Ok(Err(error)) => {
+                        last_error = Some(error);
+                        failed = true;
+                        break;
+                    }
+                    Err(TransactionError::Retryable(_))
+                        if retry < self.limits.maximum_transaction_retries =>
+                    {
+                        tokio::task::yield_now().await;
+                    }
+                    Err(error) => {
+                        last_error = Some(map_transaction(error));
+                        failed = true;
+                        break;
+                    }
                 }
-                Err(error) => return Err(map_transaction(error)),
+            }
+            if failed {
+                // The failed candidate transaction rolled back. Rotate only
+                // the unchanged row, without granting a lease or authority.
+                tracing::warn!(run_id = %candidate.id, code = "claim_candidate_skipped", "AI claim candidate could not be verified");
+                let stamp = retry_transaction(self.limits.maximum_transaction_retries, || {
+                    let state = candidate.state.clone();
+                    let id = candidate.id;
+                    let version = candidate.row_version;
+                    self.database
+                        .transaction(TransactionMode::StateMachine, move |tx| {
+                            Box::pin(async move {
+                                stamp_run_recovery_progress(
+                                    tx,
+                                    id,
+                                    version,
+                                    &state,
+                                    now.unix_timestamp(),
+                                )
+                                .await
+                            })
+                        })
+                })
+                .await;
+                if let Err(error) = stamp {
+                    tracing::warn!(
+                        code = "claim_progress_stamp_failed",
+                        "AI claim progress could not be recorded"
+                    );
+                    last_error = Some(map_transaction(error));
+                }
             }
         }
-        Err(AiError::PersistenceFailed)
+        match last_error {
+            Some(error) => Err(error),
+            None => Ok(None),
+        }
     }
 
     /// Claims one approved, unconsumed `WaitingApproval` run for immediate
@@ -4387,21 +4447,15 @@ impl OrmAiRunService {
         .map_err(map_transaction)
     }
 
-    async fn claim_once(
+    async fn load_claim_candidates(
         &self,
-        worker_id: String,
         now: OffsetDateTime,
-    ) -> Result<Result<Option<AiRunLease>, AiError>, TransactionError> {
-        let database = self.database.clone();
+    ) -> Result<Vec<AiRunRecord>, TransactionError> {
         let limits = self.limits;
-        database
+        self.database
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
-                    let epoch = crate::orm_runtime_recovery::require_live_epoch(tx).await?;
-                    let expiry = match now.checked_add(limits.lease_ttl) {
-                        Some(expiry) => expiry,
-                        None => return Ok(Err(AiError::PersistenceFailed)),
-                    };
+                    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
                     // Select only eligible rows, oldest first, in SQL so rows
                     // not yet due cannot fill the bounded window.
                     let mut candidates = Vec::new();
@@ -4426,7 +4480,10 @@ impl OrmAiRunService {
                                     next_attempt_at: Some(eligible),
                                     ..Default::default()
                                 })
-                                .default_order()
+                                .order_by(AiRunRecordOrderByInput {
+                                    recovery_examined_at: Some(OrderDirection::Asc),
+                                    created_at: Some(OrderDirection::Asc),
+                                })
                                 .internal_limit(limits.maximum_candidate_scan as i64)
                                 .fetch_all()
                                 .await
@@ -4438,9 +4495,45 @@ impl OrmAiRunService {
                         run.next_attempt_at
                             .is_none_or(|eligible_at| eligible_at <= now.unix_timestamp())
                     });
-                    candidates.sort_by_key(|run| (run.created_at, run.id));
+                    candidates
+                        .sort_by_key(|run| (run.recovery_examined_at, run.created_at, run.id));
                     candidates.dedup_by_key(|run| run.id);
                     candidates.truncate(limits.maximum_candidate_scan);
+                    Ok(candidates)
+                })
+            })
+            .await
+    }
+
+    async fn claim_once(
+        &self,
+        worker_id: String,
+        run_id: Uuid,
+    ) -> Result<Result<Option<AiRunLease>, AiError>, TransactionError> {
+        let database = self.database.clone();
+        let limits = self.limits;
+        let clock = self.clock.clone();
+        database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let now = canonical_second(clock.now());
+                    let epoch = crate::orm_runtime_recovery::require_live_epoch(tx).await?;
+                    let expiry = match now.checked_add(limits.lease_ttl) {
+                        Some(expiry) => expiry,
+                        None => return Ok(Err(AiError::PersistenceFailed)),
+                    };
+                    let candidates = tx
+                        .find_by_id::<AiRunRecord>(&run_id)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .into_iter()
+                        .filter(|run| {
+                            matches!(run.state.as_str(), "queued" | "retry_scheduled")
+                                && run
+                                    .next_attempt_at
+                                    .is_none_or(|at| at <= now.unix_timestamp())
+                        })
+                        .collect::<Vec<_>>();
                     for current in candidates {
                         let generation = current.lease_generation.checked_add(1).filter(|_| {
                             current.lease_generation >= 0
@@ -6336,7 +6429,7 @@ pub(crate) async fn recovery_filtering_excluded(database: &Database<DefaultWrite
         {
             BackendRowSecurity::Inactive
         }
-        Ok(states) if states.iter().any(|state| *state == Some(true)) => BackendRowSecurity::Active,
+        Ok(states) if states.contains(&Some(true)) => BackendRowSecurity::Active,
         _ => BackendRowSecurity::Unknown,
     };
     filtering_excluded_decision(database.row_policy().is_some(), backend)
@@ -8517,6 +8610,54 @@ mod tests {
             .await
             .expect("the next pass should succeed");
         assert_eq!(next, AiRunRecoveryReport::default());
+    }
+
+    #[tokio::test]
+    async fn a_failed_legacy_terminal_event_cannot_block_a_healthy_claim() {
+        let fixture = fixture().await;
+        let one = seed_queued(&fixture).await;
+        let two = seed_queued(&fixture).await;
+        let one_row = run_record(&fixture, one).await;
+        let two_row = run_record(&fixture, two).await;
+        let (bad, healthy) = if (one_row.created_at, one_row.id) < (two_row.created_at, two_row.id)
+        {
+            (one, two)
+        } else {
+            (two, one)
+        };
+        let row = run_record(&fixture, bad).await;
+        let reference =
+            serde_json::from_value::<PrincipalReference>(row.principal_reference).unwrap();
+        let narrowed = crate::principal_projection::test_delegated_references(&reference)
+            .pop()
+            .unwrap()
+            .1;
+        AiRunRecord::update_by_id(
+            &fixture.database,
+            &bad.0,
+            UpdateAiRunRecordInput {
+                session_id: Some(Uuid::new_v4()),
+                principal_reference: Some(serde_json::to_value(narrowed).unwrap()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mut host = fixture.database.clone();
+        host.set_field_policy(crate::custody_field_policy::tests::DenyEverything);
+        let service = OrmAiRunService::new(
+            host,
+            Arc::new(fixture.clock.clone()),
+            fixture.service.limits,
+        );
+        let lease = service
+            .claim_next("healthy-after-legacy-failure")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(lease.run_id(), healthy);
+        let bad = run_record(&fixture, bad).await;
+        assert!(bad.attempt_id.is_none() && bad.lease_owner.is_none());
     }
 
     #[tokio::test]

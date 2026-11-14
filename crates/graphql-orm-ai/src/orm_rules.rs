@@ -61,7 +61,7 @@ impl AiCurrentRuleResolverLimits {
 }
 
 async fn resolve_current_rule_principal(
-    principal_resolver: &dyn CurrentPrincipalResolver,
+    principal_resolver: &crate::principal_projection::AiCurrentPrincipalResolver,
     clock: &dyn Clock,
     limits: AiCurrentRuleResolverLimits,
     lease: &AiRunLease,
@@ -92,7 +92,7 @@ async fn resolve_current_rule_principal(
 /// the decision. It returns constraint evidence only and grants no provider,
 /// tool, resolver, egress, budget, or approval authority.
 pub struct OrmAiCurrentRuleResolver {
-    principal_resolver: Arc<dyn CurrentPrincipalResolver>,
+    principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver,
     rule_service: Arc<dyn AiRulePolicyService>,
     clock: Arc<dyn Clock>,
     limits: AiCurrentRuleResolverLimits,
@@ -107,7 +107,10 @@ impl OrmAiCurrentRuleResolver {
         limits: AiCurrentRuleResolverLimits,
     ) -> Self {
         Self {
-            principal_resolver,
+            principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver::from(
+                principal_resolver,
+            )
+            .with_clock(clock.clone()),
             rule_service,
             clock,
             limits,
@@ -168,7 +171,7 @@ impl AiAgentRuleResolver for OrmAiCurrentRuleResolver {
 /// tool, GraphQL resolver, egress, budget, approval, credential, or resource
 /// authority.
 pub struct DeploymentAiCurrentRuleResolver {
-    principal_resolver: Arc<dyn CurrentPrincipalResolver>,
+    principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver,
     clock: Arc<dyn Clock>,
     current_principal_limits: AiCurrentRuleResolverLimits,
     deployment_rule_limits: AiRuleDeploymentLimits,
@@ -187,7 +190,10 @@ impl DeploymentAiCurrentRuleResolver {
         deployment_rule_limits: AiRuleDeploymentLimits,
     ) -> Self {
         Self {
-            principal_resolver,
+            principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver::from(
+                principal_resolver,
+            )
+            .with_clock(clock.clone()),
             clock,
             current_principal_limits,
             deployment_rule_limits,
