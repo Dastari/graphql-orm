@@ -74,7 +74,7 @@ fn is_input(module: &RuntimeGraphqlModule, f: &RuntimeField) -> bool {
                 .is_some_and(|o| o.actor_inputs))
 }
 /// Fields of `Create<Object>Input`.
-fn create_inputs<'a>(
+pub(super) fn create_inputs<'a>(
     module: &'a RuntimeGraphqlModule,
     c: &'a RuntimeCollection,
 ) -> impl Iterator<Item = &'a RuntimeField> + 'a {
@@ -87,7 +87,7 @@ fn create_inputs<'a>(
     })
 }
 /// Fields of `Update<Object>Input`: non-key inputs.
-fn update_inputs<'a>(
+pub(super) fn update_inputs<'a>(
     module: &'a RuntimeGraphqlModule,
     c: &'a RuntimeCollection,
 ) -> impl Iterator<Item = &'a RuntimeField> + 'a {

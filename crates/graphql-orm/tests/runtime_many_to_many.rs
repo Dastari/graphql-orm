@@ -2278,17 +2278,126 @@ mod graphql {
                 .with_mutations(options),
         )
         .unwrap();
-        let api = RuntimeGraphqlComposer::new(f.db.clone(), "Query", Default::default())
+        let (api, catalog) = RuntimeGraphqlComposer::new(f.db.clone(), "Query", Default::default())
             .unwrap()
             .mutation_root("Mutation")
             .unwrap()
             .install(module)
             .unwrap()
-            .finish()
+            .finish_with_semantic_catalog()
             .unwrap();
         let sdl = api.sdl();
         assert!(sdl.contains("links: PostLinksInput"), "{sdl}");
         assert!(sdl.contains("input PostTagsLinkChangeInput"), "{sdl}");
+        // Compile runtime-emitted links and nested target keys into a complete capability.
+        use graphql_orm_ai_tool_profiles::{
+            AiGraphqlQueryCapabilityCatalog, AiGraphqlQueryCapabilityLimits,
+            GraphqlExecutionTargetId,
+        };
+        let mut input_sdl = sdl.clone();
+        let start = input_sdl.find("type Query {").unwrap();
+        let end = start + input_sdl[start..].find("\n}").unwrap() + 2;
+        input_sdl.replace_range(
+            start..end,
+            "type Query { inspectPostLinks(input: PostLinksInput): Post }",
+        );
+        let operation = GraphqlSemanticOperationDescriptor::generated(
+            GraphqlOperationKind::Query,
+            GeneratedGraphqlOperationCategory::SingleRead,
+            "Post",
+            "inspectPostLinks",
+            "Inspect generated link input contracts.",
+            vec![GraphqlSemanticArgumentDescriptor {
+                graphql_name: "input".into(),
+                description: "Generated link changes.".into(),
+                type_ref: GraphqlSemanticTypeRef::named(
+                    "PostLinksInput",
+                    GraphqlSemanticTypeKind::Object,
+                    true,
+                ),
+            }],
+            GraphqlSemanticTypeRef::named("Post", GraphqlSemanticTypeKind::Object, true),
+            true,
+        )
+        .unwrap();
+        let mut inputs = GraphqlSemanticCatalog::compose_descriptors(
+            catalog.entities.clone(),
+            [operation.clone()],
+        )
+        .unwrap();
+        AiGraphqlQueryCapabilityCatalog::compile(
+            "runtime-links-closed",
+            GraphqlExecutionTargetId::parse("runtime.links.closed").unwrap(),
+            &input_sdl,
+            &inputs,
+            AiGraphqlQueryCapabilityLimits::default(),
+        )
+        .expect("runtime-emitted input capability compiles without handwritten declarations");
+        // The runtime catalogue omits to-many output relationships. This host
+        // composition declares the existing SDL relation's semantics so its
+        // link input can be offered, without handwritten-input declarations.
+        let arguments = catalog
+            .operations
+            .iter()
+            .find(|operation| {
+                operation.kind == GraphqlOperationKind::Query
+                    && operation.generated_entity_name.as_deref() == Some("Tag")
+            })
+            .unwrap()
+            .arguments
+            .clone();
+        let post = inputs
+            .entities
+            .iter_mut()
+            .find(|entity| entity.entity_name == "Post")
+            .unwrap();
+        let mut fields = post.fields.to_vec();
+        fields.push(GraphqlSemanticFieldMetadata {
+            field_name: "tags".into(),
+            description: "The post's related tags.".into(),
+            type_ref: GraphqlSemanticTypeRef::list(
+                false,
+                Some(10),
+                GraphqlSemanticTypeRef::named("Tag", GraphqlSemanticTypeKind::Object, false),
+            ),
+            selectable: false,
+            filter_operators: Vec::new(),
+            filter_input: None,
+            sortable: false,
+            groupable: false,
+            aggregate_operators: Vec::new(),
+            aggregate_value_kind: None,
+            relationship: Some(GraphqlSemanticRelationshipDescriptor {
+                target: "Tag".into(),
+                cardinality: GraphqlSemanticRelationshipCardinality::Many,
+                arguments,
+                collection_bound: Some(GraphqlSemanticCollectionBound::pageable("first")),
+            }),
+            classification: GraphqlSemanticClassification::Internal,
+            export: GraphqlSemanticExport::Exportable,
+            has_field_policy: true,
+        });
+        post.fields = fields.into_boxed_slice();
+        // The host publishes this relation's generated disclosure contract.
+        post.generated_input_members.retain(|member| {
+            !(member.input_type == "PostLinksInput" && member.field_name == "tags")
+                && member.input_type != "PostTagsLinkChangeInput"
+        });
+        let inputs =
+            GraphqlSemanticCatalog::compose_descriptors(inputs.entities, [operation]).unwrap();
+        let input_plan = AiGraphqlQueryCapabilityCatalog::compile(
+            "runtime-links",
+            GraphqlExecutionTargetId::parse("runtime.links").unwrap(),
+            &input_sdl,
+            &inputs,
+            AiGraphqlQueryCapabilityLimits::default(),
+        )
+        .and_then(|capabilities| {
+            capabilities.capabilities().next().unwrap().compile_compact(json!({
+            "arguments": {"input": {"tags": {"set": [{"id": "10"}]}}},
+            "selections": ["id"], "relationshipArguments": {}, "relationshipMaximumItems": {}
+        }))
+        });
         let created = run(
             &f,
             &api,
@@ -2326,6 +2435,8 @@ mod graphql {
         );
         assert_eq!(f.links("mm_post_tags").await, [(5, 11), (5, 12)]);
         f.finish().await;
+        input_plan
+            .expect("runtime links and nested target keys compile without disclosure declarations");
     }
 
     #[tokio::test]

@@ -31,6 +31,8 @@ fn duration_order_parameters(
     serde::Deserialize,
 )]
 #[graphql(complex)]
+#[cfg_attr(feature = "field-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(feature = "field-case-snake", graphql(rename_fields = "snake_case"))]
 #[graphql_entity(
     backend = "sqlite",
     table = "composed_parents",
@@ -40,6 +42,7 @@ fn duration_order_parameters(
 )]
 #[graphql_orm(
     compose_complex_object,
+    order_expression(name = "LabelLength", expression = "length(id)"),
     order_expression(
         name = "Duration",
         expression = "COALESCE(finished_at, :as_of) - started_at",
@@ -257,4 +260,74 @@ async fn relation_count_ordering_executes_as_a_correlated_server_expression()
     assert_eq!(edges[1]["node"]["id"].as_str(), Some("one"));
     assert_eq!(edges[2]["node"]["id"].as_str(), Some("none"));
     Ok(())
+}
+
+#[tokio::test]
+async fn generated_order_expressions_compile_without_model_disclosure() {
+    use graphql_orm::graphql::orm::*;
+    use graphql_orm_ai_tool_profiles::*;
+    let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
+        .await
+        .unwrap();
+    let sdl = schema_builder(database)
+        .data(DurationAsOf(40))
+        .finish()
+        .sdl();
+    let semantic = graphql_orm_semantic_catalog();
+    let capabilities = AiGraphqlQueryCapabilityCatalog::compile(
+        "expression-contracts",
+        GraphqlExecutionTargetId::parse("expressions.test").unwrap(),
+        &sdl,
+        semantic,
+        AiGraphqlQueryCapabilityLimits::default(),
+    )
+    .expect("generated roots compile with contextual and ordinary order expressions");
+    assert_eq!(
+        capabilities
+            .capabilities()
+            .filter(|c| semantic
+                .operations
+                .iter()
+                .any(|op| op.field_name == c.field_name()
+                    && op.generated_entity_name.as_deref() == Some("ComposedParent")))
+            .count(),
+        2
+    );
+    let entity = semantic
+        .entities
+        .iter()
+        .find(|e| e.entity_name == "ComposedParent")
+        .unwrap();
+    for name in ["LabelLength", "Duration", "ChildCount"] {
+        let contract = entity
+            .generated_input_members
+            .iter()
+            .find(|m| m.input_type == "ComposedParentOrderByInput" && m.field_name == name)
+            .expect("every expression and count has an explicit host contract");
+        assert_eq!(contract.kind, GraphqlGeneratedInputKind::OrderBy);
+        assert_eq!(
+            contract.type_ref,
+            GraphqlSemanticTypeRef::named("OrderDirection", GraphqlSemanticTypeKind::Enum, true)
+        );
+        assert!(!contract.required);
+        assert!(sdl.contains(&format!("{name}: OrderDirection")));
+        for capability in capabilities.capabilities() {
+            assert!(
+                !capability
+                    .compact_argument_schema()
+                    .to_string()
+                    .contains(name)
+            );
+            assert!(!capability.argument_schema().to_string().contains(name));
+        }
+    }
+    // Context parameters are supplied by the host provider, outside GraphQL inputs.
+    assert!(!sdl.contains("as_of:"));
+    assert!(!sdl.contains("asOf:"));
+    assert!(semantic.operations.iter().all(|operation| {
+        operation
+            .arguments
+            .iter()
+            .all(|argument| argument.graphql_name != "as_of" && argument.graphql_name != "asOf")
+    }));
 }

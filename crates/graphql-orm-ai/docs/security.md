@@ -165,7 +165,11 @@ reconciliation.
 
 Logical remote GraphQL targets are deployment-registered. Models cannot choose
 URLs, audiences, resources, direct-service routes, or credentials. Recursive
-AI control-plane and introspection tools are rejected.
+AI control-plane and introspection tools are rejected. The control-plane root
+set is derived from the crate's own composable GraphQL roots, and it applies to
+static tools, generated capability sets and remote delegated requests alike.
+Static tool documents must parse to exactly one operation of the declared kind
+and contract name.
 
 Installed local harnesses are not shell tools. A model selects only a logical
 name already frozen in `AiLocalHarnessRegistry`; the registration fixes an

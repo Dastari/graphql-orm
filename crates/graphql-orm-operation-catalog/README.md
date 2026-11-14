@@ -3,12 +3,26 @@ title: "graphql-orm-operation-catalog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-31
+last_reviewed: 2026-11-13
 review_by: 2027-02-11
 supersedes: []
 ---
 
 # `graphql-orm-operation-catalog`
+
+Version `0.8.0` (**breaking Rust API**) adds the host-only `generated_input_members` contract to entity
+metadata. ORM/macros 0.149.0 supplies exact types for generated members that
+remain undisclosed. The sidecar is omitted from serde, Debug output, SDL and
+router extensions, so existing public catalogue bytes and fingerprints stay
+unchanged. Struct literals initialize the new field; serialized consumers
+reattach producer contracts before AI compilation. No data migration is needed.
+See the [migration guide](../../MIGRATION.md#01470-to-01490-host-only-generated-input-contracts).
+
+The entire semantic catalogue is a trusted host assertion, including public
+fields, deserialized metadata, relationship arguments and generated labels.
+Canonical identity and shape checks limit disclosure; a custom resolver reusing
+a generated input receives its generated disclosure, and the checks cannot
+prove how that resolver interprets the members.
 
 Version `0.7.3` adds:
 
@@ -64,6 +78,12 @@ and Changed envelopes retain that boundary. Entities with no reachable
 exportable field result, including entirely nonexportable fields and closed
 relationship cycles, remain in the canonical GraphQL catalogue with
 `NeverExport` result metadata. This does not remove or authorize a resolver.
+
+Entity/catalogue equality excludes the host-only input contracts, matching public
+serialization and fingerprints. JSON/extension round trips have an empty sidecar;
+hosts reattach producer contracts before compiling unreadable generated members.
+A non-null hidden member with a default is not representable by this contract;
+current producers emit none.
 
 ## Install
 

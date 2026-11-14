@@ -68,6 +68,8 @@ packages_by_id = {package["id"]: package for package in metadata["packages"]}
 nodes_by_id = {node["id"]: node for node in metadata["resolve"]["nodes"]}
 allowed_internal_edges = {
     ("graphql-orm-ai", "graphql-orm-ai-tool-profiles"),
+    # AI requires the producer contract version directly as well as via profiles.
+    ("graphql-orm-ai", "graphql-orm-operation-catalog"),
     ("graphql-orm-ai", "graphql-orm-storage"),
     ("graphql-orm-ai", "graphql-orm"),
     ("graphql-orm-ai-tool-profiles", "graphql-orm-operation-catalog"),

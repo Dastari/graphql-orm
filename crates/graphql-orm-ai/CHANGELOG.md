@@ -10,6 +10,19 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.142.0
+
+- **Breaking:** require ORM/macros 0.149.0 and catalogue 0.8.0 for generated input contracts. Re-exported query options are non-`Copy`, and their relationship-depth accessor takes `&self`. Hosts can inspect capability-specific omission diagnostics without disclosing producer-hidden members.
+
+- **Documentation:** backend-neutral API descriptions name optional database-backed services without unconditional links.
+
+- **Changed (security):** the AI control-plane root set is now derived from this crate's own composable GraphQL roots: sessions, messages, approvals, proposals, skills, rules, budgets, configuration, attachments, usage and subscriptions. It is exposed as `ai_control_plane_root_fields()` and matched ignoring case and underscores. A test fails if a new GraphQL object type is added without being classified as a control-plane root or a non-root output.
+- **Changed (security):** `register_query_capability_catalog`, `register_mutation_capability_catalog` and `register_subscription_capability_catalog` now refuse a whole capability set that contains a control-plane root.
+- **Changed (security):** static tool registration now parses the document. It refuses a document that does not parse, spreads an undefined fragment, or selects, at any depth, an AI control-plane field name, an introspection field other than `__typename`, or the federation fields `_service` and `_entities`. Registration now also requires exactly one operation, named as the contract names it, whose type equals the declared `operation_kind`. Remote delegated requests apply the same document check.
+- Adopt tool profiles 0.23.0: handwritten input objects disclose only host-declared fields, and aggregate plans use exact field names. See the tool-profiles migration guide.
+
+No GraphQL SDL, persistent schema or data migration change; `AI_SCHEMA_MODULE_VERSION` is unchanged. See the migration guide.
+
 ## Unreleased - 0.139.0
 
 - **Fix:** the crate's own persistence no longer depends on what the host `FieldPolicy` answers for repository field decisions. ORM 0.143.0 asks `can_write_repository_field` about every field a generated repository write touches (it already asked `can_read_repository_field` on reads), with no access context, so a host policy that refuses unknown entities or every call without an access context would have refused the crate's inserts, updates and compare-and-swap writes of its own records with `FORBIDDEN`. Every service now works on an internal handle whose field policy answers repository-surface decisions for the crate's own entities (the entities of `AiSchemaModule`, for fields without a policy key) and delegates every other entity, every declared key and both GraphQL surfaces to the host policy unchanged. A database without a field policy is used as it is.
