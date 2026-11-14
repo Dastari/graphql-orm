@@ -3084,8 +3084,8 @@ fn generate_graphql_operations_unfiltered(
                     // keeps the client-supplied rule. ORM-managed version
                     // columns are not the client's to write.
                     let existing_row_asks = upsert_update_candidate && !meta.managed_version;
-                    let supplied_is_constant = !(keyless && is_option_type(field_type));
-                    if graphql_create_asks && (supplied_is_constant || !existing_row_asks) {
+                    let supplied_condition_is_constant = !(keyless && is_option_type(field_type));
+                    if graphql_create_asks && (supplied_condition_is_constant || !existing_row_asks) {
                         upsert_policy_checks_graphql.push(quote! {
                             if #graphql_create_condition {
                                 #graphql_check
