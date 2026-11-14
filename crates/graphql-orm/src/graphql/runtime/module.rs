@@ -1246,21 +1246,13 @@ impl<B: RuntimeReadBackend> RuntimeGraphqlComposer<B> {
         if let Some(mut subscription) = self.subscription.take() {
             // Bind final composer limits and cursor protection, independent of
             // whether the host configured those before or after installing a module.
-            // One row-security gate per module, shared by its live roots.
-            let mut row_security: BTreeMap<String, Arc<super::execution::LiveRowSecurity>> =
-                BTreeMap::new();
             for (module, collection) in std::mem::take(&mut self.pending_live) {
-                let gate = row_security
-                    .entry(module.schema.fingerprint().to_string())
-                    .or_default()
-                    .clone();
                 subscription = subscription.field(super::live::subscription_field(
                     self.database.clone(),
                     module,
                     collection,
                     self.limits,
                     self.protection.clone(),
-                    gate,
                 ));
             }
             self = self.register(subscription.into())?;

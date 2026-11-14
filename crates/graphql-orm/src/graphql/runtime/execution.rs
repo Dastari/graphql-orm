@@ -285,6 +285,11 @@ fn assurance_denials(
 /// collection's table, its link tables and search documents, and, for writes,
 /// the tables of verified incoming dependencies. It reads `pg_class` live, so
 /// RLS enabled outside the ORM counts too. Other backends are unaffected.
+///
+/// A live subscription registered without context is checked again at the two
+/// points where RLS state matters: inside each read transaction of an event,
+/// after the read ([`Self::read_guard`]), and immediately before the payload
+/// is handed to the subscriber, after release authorization.
 pub(super) struct RowSecurity<'a, B: RuntimeReadBackend> {
     database: &'a Database<B>,
     exempt: bool,
@@ -315,43 +320,12 @@ impl<'a, B: RuntimeReadBackend> RowSecurity<'a, B> {
         if self.exempt {
             return Ok(());
         }
-        let mut tables = std::collections::BTreeSet::new();
-        for c in &module.schema.schema().collections {
-            tables.insert(c.physical_table.clone());
-            if c.search.is_some() {
-                tables.insert(search_table_name(&c.physical_table));
-            }
-            for relation in &c.relations {
-                if let Some(join) = &relation.join {
-                    tables.insert(join.physical_table.clone());
-                }
-            }
-            if let Some(environment) = environment {
-                for dependency in environment.incoming_dependencies(&c.physical_table) {
-                    tables.insert(dependency.source_table.clone());
-                }
-            }
-        }
+        let mut tables = module_tables(module, environment);
         tables.retain(|table| !self.admitted.contains(table));
         let tables = tables.into_iter().collect::<Vec<_>>();
         for chunk in tables.chunks(256) {
-            let candidates = (1..=chunk.len())
-                .map(|index| {
-                    format!(
-                        "to_regclass(quote_ident({}))",
-                        B::DIALECT.placeholder(index)
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            let sql = format!(
-                "SELECT 1 AS row_security FROM pg_catalog.pg_class WHERE relrowsecurity AND oid IN ({candidates}) LIMIT 1"
-            );
-            let binds = chunk
-                .iter()
-                .map(|table| SqlValue::String(table.clone()))
-                .collect::<Vec<_>>();
-            let rows = B::fetch_rows(self.database.pool(), &sql, &binds)
+            let guard = row_security_statement::<B>(chunk);
+            let rows = B::fetch_rows(self.database.pool(), &guard.sql, &guard.values)
                 .await
                 .map_err(|_| RuntimeGraphqlError::new("backend_execution"))?;
             if !rows.is_empty() {
@@ -361,41 +335,64 @@ impl<'a, B: RuntimeReadBackend> RowSecurity<'a, B> {
         self.admitted.extend(tables);
         Ok(())
     }
-}
-/// The row-security admission shared by every live subscription of one module.
-///
-/// A live subscription registered without request context is admitted again
-/// for each event it would deliver, before any event read: RLS may be enabled
-/// after registration. One catalog check serves every subscription of the
-/// module that dequeued its event before the check started, so a published
-/// event costs one check per module however many subscriptions it reaches. A
-/// result is never reused for an event dequeued after its check started.
-#[derive(Default)]
-pub(super) struct LiveRowSecurity {
-    last: tokio::sync::Mutex<Option<(std::time::Instant, Result<(), RuntimeGraphqlError>)>>,
-}
-impl LiveRowSecurity {
-    /// Admit an event dequeued at `dequeued`, or refuse it.
-    pub(super) async fn admit<B: RuntimeReadBackend>(
-        &self,
-        database: &Database<B>,
-        module: &RuntimeGraphqlModule,
-        dequeued: std::time::Instant,
-    ) -> Result<(), RuntimeGraphqlError> {
-        let mut last = self.last.lock().await;
-        if let Some((started, result)) = *last
-            && started >= dequeued
-        {
-            return result;
+    /// The catalog statement a live read runs last in its own transaction, or
+    /// `None` when this request is exempt from the check.
+    pub(super) fn read_guard(&self, module: &RuntimeGraphqlModule) -> Option<RuntimeReadGuard> {
+        if self.exempt {
+            return None;
         }
-        let started = std::time::Instant::now();
-        let result = RowSecurity::new(database, None, false)
-            .admit(module, None)
-            .await;
-        *last = Some((started, result));
-        result
+        let tables = module_tables(module, None).into_iter().collect::<Vec<_>>();
+        Some(row_security_statement::<B>(&tables))
     }
 }
+/// Every table a module's runtime operations can read or write: collection
+/// tables, link tables, search documents and, for writes, the tables of
+/// verified incoming dependencies.
+fn module_tables(
+    module: &RuntimeGraphqlModule,
+    environment: Option<&RuntimeMutationEnvironment>,
+) -> std::collections::BTreeSet<String> {
+    let mut tables = std::collections::BTreeSet::new();
+    for c in &module.schema.schema().collections {
+        tables.insert(c.physical_table.clone());
+        if c.search.is_some() {
+            tables.insert(search_table_name(&c.physical_table));
+        }
+        for relation in &c.relations {
+            if let Some(join) = &relation.join {
+                tables.insert(join.physical_table.clone());
+            }
+        }
+        if let Some(environment) = environment {
+            for dependency in environment.incoming_dependencies(&c.physical_table) {
+                tables.insert(dependency.source_table.clone());
+            }
+        }
+    }
+    tables
+}
+/// `SELECT` one row when any of `tables` has row-level security enabled.
+fn row_security_statement<B: RuntimeReadBackend>(tables: &[String]) -> RuntimeReadGuard {
+    let candidates = (1..=tables.len())
+        .map(|index| {
+            format!(
+                "to_regclass(quote_ident({}))",
+                B::DIALECT.placeholder(index)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    RuntimeReadGuard {
+        sql: format!(
+            "SELECT 1 AS row_security FROM pg_catalog.pg_class WHERE relrowsecurity AND oid IN ({candidates}) LIMIT 1"
+        ),
+        values: tables
+            .iter()
+            .map(|table| SqlValue::String(table.clone()))
+            .collect(),
+    }
+}
+
 pub(super) struct GuardFactory<B: RuntimeReadBackend> {
     pub database: Database<B>,
     pub modules: Vec<RuntimeGraphqlModule>,
@@ -1013,6 +1010,7 @@ impl<B: RuntimeReadBackend> Guard<B> {
         let mut executor = Executor {
             database: &self.database,
             request,
+            guard: None,
             protection: self.protection.as_ref(),
             limits,
             response_bytes: 0,
@@ -1064,6 +1062,7 @@ impl<B: RuntimeReadBackend> Guard<B> {
                 &key,
                 self.protection.as_ref(),
                 limits,
+                None,
             )
             .await?
             .unwrap_or(Value::Null);
@@ -1281,11 +1280,18 @@ fn page_cursor(page: &RuntimePageRequest) -> Option<&str> {
 struct Executor<'a, B: RuntimeReadBackend> {
     database: &'a Database<B>,
     request: &'a RuntimeGraphqlRequest<B>,
+    /// Row-security guard run last in each read transaction, for reads that
+    /// must refuse when RLS is enabled; see [`RowSecurity::read_guard`].
+    guard: Option<&'a RuntimeReadGuard>,
     protection: Option<&'a Protection>,
     limits: RuntimeGraphqlLimits,
     response_bytes: usize,
     crypto_calls: usize,
     projection_calls: usize,
+}
+/// A guarded read whose guard refused it, or whose transaction did not complete.
+fn row_security_refused() -> RuntimeGraphqlError {
+    RuntimeGraphqlError::new("authorization_misconfigured")
 }
 fn relation_error(e: RuntimeRelationError) -> RuntimeGraphqlError {
     RuntimeGraphqlError::new(e.code().as_str())
@@ -1583,9 +1589,10 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
     ) -> Result<Value, RuntimeGraphqlError> {
         let connection = self
             .database
-            .execute_runtime_anchored_read(&request, self.request.auth.as_ref())
+            .execute_runtime_anchored_read_guarded(&request, self.request.auth.as_ref(), self.guard)
             .await
-            .map_err(relation_error)?;
+            .map_err(relation_error)?
+            .ok_or_else(row_security_refused)?;
         let records = connection
             .edges
             .iter()
@@ -1669,9 +1676,14 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
                 .map_err(relation_error)?;
             let batch = self
                 .database
-                .execute_runtime_relation_batch(&request, self.request.auth.as_ref())
+                .execute_runtime_relation_batch_guarded(
+                    &request,
+                    self.request.auth.as_ref(),
+                    self.guard,
+                )
                 .await
-                .map_err(relation_error)?;
+                .map_err(relation_error)?
+                .ok_or_else(row_security_refused)?;
             let records = batch
                 .results
                 .iter()
@@ -1741,6 +1753,7 @@ pub(super) async fn payload_relations<B: RuntimeReadBackend>(
     let mut executor = Executor {
         database,
         request,
+        guard: None,
         protection,
         limits,
         response_bytes: 0,
@@ -1912,6 +1925,9 @@ mod alias_tests {
 }
 
 /// One authorized complete-key read through the existing anchored executor.
+///
+/// With `guard`, every read transaction of the point read also runs the guard
+/// and is refused with `authorization_misconfigured` when it returns a row.
 pub(super) async fn point<B: RuntimeReadBackend>(
     database: &Database<B>,
     request: &RuntimeGraphqlRequest<B>,
@@ -1919,6 +1935,7 @@ pub(super) async fn point<B: RuntimeReadBackend>(
     key: &RuntimeKey,
     protection: Option<&Protection>,
     limits: RuntimeGraphqlLimits,
+    guard: Option<&RuntimeReadGuard>,
 ) -> Result<Option<Value>, RuntimeGraphqlError> {
     let mut plan = plan.clone();
     let identity = plan
@@ -1951,6 +1968,7 @@ pub(super) async fn point<B: RuntimeReadBackend>(
     let mut executor = Executor {
         database,
         request,
+        guard,
         protection,
         limits,
         response_bytes: 0,

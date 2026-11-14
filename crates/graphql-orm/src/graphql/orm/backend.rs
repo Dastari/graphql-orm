@@ -42,6 +42,23 @@ pub trait OrmBackend: Copy + Clone + Send + Sync + 'static {
         })
     }
 
+    /// Fetch the rows of every statement, in order, in one transaction that
+    /// carries `auth`, like [`Self::fetch_rows_pair_with_auth`]. Backends without
+    /// transactional reads run the statements one after another.
+    fn fetch_rows_many_with_auth<'a>(
+        pool: &'a Self::Pool,
+        statements: &'a [(&'a str, &'a [SqlValue])],
+        _auth: Option<&'a DbAuthContext>,
+    ) -> BoxFuture<'a, crate::Result<Vec<Vec<Self::Row>>>> {
+        Box::pin(async move {
+            let mut results = Vec::with_capacity(statements.len());
+            for (sql, values) in statements {
+                results.push(Self::fetch_rows(pool, sql, values).await?);
+            }
+            Ok(results)
+        })
+    }
+
     fn try_get_i64(row: &Self::Row, column: &str) -> crate::Result<i64>;
     fn try_get_f64(row: &Self::Row, column: &str) -> crate::Result<f64>;
     fn try_get_string(row: &Self::Row, column: &str) -> crate::Result<String>;
@@ -690,6 +707,30 @@ impl OrmBackend for PostgresBackend {
 
             tx.commit().await?;
             Ok((first, second))
+        })
+    }
+
+    fn fetch_rows_many_with_auth<'a>(
+        pool: &'a Self::Pool,
+        statements: &'a [(&'a str, &'a [SqlValue])],
+        auth: Option<&'a DbAuthContext>,
+    ) -> BoxFuture<'a, crate::Result<Vec<Vec<Self::Row>>>> {
+        Box::pin(async move {
+            let mut tx = pool.begin().await?;
+            if let Some(auth) = auth {
+                apply_postgres_auth_context(&mut tx, auth).await?;
+            }
+            let mut results = Vec::with_capacity(statements.len());
+            for (sql, values) in statements {
+                let sql = Self::normalize_sql(sql, 1);
+                let mut query = sqlx::query(&sql);
+                for value in *values {
+                    query = bind_postgres_value(query, value);
+                }
+                results.push(query.fetch_all(&mut *tx).await?);
+            }
+            tx.commit().await?;
+            Ok(results)
         })
     }
 

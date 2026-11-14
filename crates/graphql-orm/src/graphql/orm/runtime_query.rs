@@ -2256,6 +2256,24 @@ where
         request: &RuntimeReadRequest,
         auth: Option<&DbAuthContext>,
     ) -> Result<RuntimeConnection, RuntimeQueryError> {
+        self.execute_runtime_read_guarded(request, auth, None)
+            .await?
+            .ok_or_else(|| {
+                RuntimeQueryError::new(RuntimeQueryErrorCode::BackendExecution)
+                    .collection(request.collection.id())
+            })
+    }
+
+    /// [`Self::execute_runtime_read`] with an optional guard statement run last
+    /// in the read's own transaction. `None` means the guard returned a row, or
+    /// the guarded transaction could not complete; the read's rows are then
+    /// discarded unread.
+    pub(crate) async fn execute_runtime_read_guarded(
+        &self,
+        request: &RuntimeReadRequest,
+        auth: Option<&DbAuthContext>,
+        guard: Option<&RuntimeReadGuard>,
+    ) -> Result<Option<RuntimeConnection>, RuntimeQueryError> {
         if !B::RUNTIME_ROW_DECODING_SUPPORTED {
             return Err(
                 RuntimeQueryError::new(RuntimeQueryErrorCode::UnsupportedBackend)
@@ -2263,7 +2281,24 @@ where
             );
         }
         let (sql, values, count, backward) = render_request(request, B::DIALECT)?;
-        let (rows, count_rows) = if let Some((count_sql, count_values)) = count {
+        let (rows, count_rows) = if let Some(guard) = guard {
+            let mut statements: Vec<(&str, &[SqlValue])> = vec![(&sql, &values)];
+            if let Some((count_sql, count_values)) = &count {
+                statements.push((count_sql, count_values));
+            }
+            statements.push((&guard.sql, &guard.values));
+            let Some((rows, count_rows)) = guarded_rows::<B>(self.pool(), &statements, auth)
+                .await
+                .map_err(|error| {
+                    RuntimeQueryError::new(RuntimeQueryErrorCode::BackendExecution)
+                        .collection(request.collection.id())
+                        .source(error)
+                })?
+            else {
+                return Ok(None);
+            };
+            (rows, count_rows)
+        } else if let Some((count_sql, count_values)) = count {
             let (rows, count_rows) = super::fetch_rows_pair_with_auth::<B>(
                 self.pool(),
                 &sql,
@@ -2291,7 +2326,10 @@ where
         };
         let requested = match request.page {
             RuntimePageRequest::First { size, .. } | RuntimePageRequest::Last { size, .. } => {
-                usize::try_from(size).expect("validated positive page size")
+                usize::try_from(size).map_err(|_| {
+                    RuntimeQueryError::new(RuntimeQueryErrorCode::InvalidRequest)
+                        .collection(request.collection.id())
+                })?
             }
         };
         let lookahead = rows.len() > requested;
@@ -2382,11 +2420,54 @@ where
                     .collection(request.collection.id()));
             }
         };
-        Ok(RuntimeConnection {
+        Ok(Some(RuntimeConnection {
             edges,
             page_info,
             total_count,
-        })
+        }))
+    }
+}
+
+/// A statement run last in a read's own transaction, after its read statements.
+///
+/// Those statements hold their table locks until the transaction ends, so the
+/// guard observes exactly the catalog state they ran under. A guard that
+/// returns any row refuses the read.
+#[derive(Clone, Debug)]
+pub(crate) struct RuntimeReadGuard {
+    pub(crate) sql: String,
+    pub(crate) values: Vec<SqlValue>,
+}
+
+/// Run `statements` (one or two reads, then the guard) in one transaction.
+///
+/// `Ok(Some(..))` holds the first statement's rows and, when present, the
+/// second's. `Ok(None)` means the guard returned a row, or could not run: the
+/// read is refused. When the transaction fails, the guard runs alone to tell a
+/// failed read (returned as the error, rows unread) from a guard that would
+/// refuse; nothing read is released on that path.
+pub(crate) async fn guarded_rows<B: OrmBackend>(
+    pool: &B::Pool,
+    statements: &[(&str, &[SqlValue])],
+    auth: Option<&DbAuthContext>,
+) -> crate::Result<Option<(Vec<B::Row>, Option<Vec<B::Row>>)>> {
+    let Some(&(guard_sql, guard_values)) = statements.last() else {
+        return Ok(None);
+    };
+    match super::fetch_rows_many_with_auth::<B>(pool, statements, auth).await {
+        Ok(mut results) => {
+            if results.len() != statements.len()
+                || results.pop().is_none_or(|guard| !guard.is_empty())
+            {
+                return Ok(None);
+            }
+            let mut results = results.into_iter();
+            Ok(results.next().map(|rows| (rows, results.next())))
+        }
+        Err(error) => match super::fetch_rows::<B>(pool, guard_sql, guard_values).await {
+            Ok(rows) if rows.is_empty() => Err(error),
+            _ => Ok(None),
+        },
     }
 }
 

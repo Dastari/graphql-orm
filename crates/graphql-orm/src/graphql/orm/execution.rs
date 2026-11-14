@@ -1358,6 +1358,18 @@ pub async fn fetch_rows_pair_with_auth<B: OrmBackend>(
     .await
 }
 
+/// Fetch the rows of several statements in one transaction carrying `auth`.
+pub(crate) async fn fetch_rows_many_with_auth<B: OrmBackend>(
+    pool: &B::Pool,
+    statements: &[(&str, &[SqlValue])],
+    auth: Option<&DbAuthContext>,
+) -> crate::Result<Vec<Vec<B::Row>>> {
+    for _ in statements {
+        record_executed_query();
+    }
+    B::fetch_rows_many_with_auth(pool, statements, auth).await
+}
+
 pub async fn execute_with_binds_on<'e, B, E>(
     executor: E,
     sql: &str,
