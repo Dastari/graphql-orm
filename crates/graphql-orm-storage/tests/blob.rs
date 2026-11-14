@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use graphql_orm_storage::{
     StorageByteStream, StorageError, collect_storage_stream, validate_blob_key,
-    validate_object_bucket,
+    validate_object_bucket, validate_portable_blob_key,
 };
 
 #[test]
@@ -81,4 +81,71 @@ async fn collect_does_not_preallocate_a_declared_size() {
     let stream = StorageByteStream::with_size_hint(Box::pin(body), u64::MAX);
     let collected = collect_storage_stream(stream).await.expect("collect");
     assert_eq!(collected.as_ref(), b"small");
+}
+
+/// Portable validation also refuses names that SMB servers and Windows file
+/// systems cannot store as written, or alias to another name (#482).
+#[test]
+fn validate_portable_blob_key_refuses_windows_unsafe_names() {
+    for key in [
+        "snapshots/a/manifest.json",
+        "objects/sha256/aa/bb/hash",
+        "media/report.final.pdf",
+        "media/.hidden",
+        "media/CONSOLE.txt",
+        "media/COM10",
+        "media/LPT",
+        "media/aux-file",
+        "media/con_",
+        "media/naïve name.txt",
+    ] {
+        assert!(validate_portable_blob_key(key).is_ok(), "{key}");
+    }
+    for key in [
+        // Everything the provider-neutral rules refuse.
+        "",
+        "../escape",
+        "a//b",
+        ".graphql-orm-storage/x",
+        // Stream separator and characters Windows refuses.
+        "a:b",
+        "dir/file:stream",
+        "a<b",
+        "a>b",
+        "a\"b",
+        "a|b",
+        "a?b",
+        "a*b",
+        "a\u{1}b",
+        "dir\u{1f}/b",
+        // Trailing dots and spaces, which Windows strips.
+        "report.",
+        "dir./file",
+        "report ",
+        "dir /file",
+        "...",
+        // Reserved device names, in any case and with any extension.
+        "CON",
+        "con",
+        "dir/Prn.txt",
+        "AUX.tar.gz",
+        "nul",
+        "COM1",
+        "com9.log",
+        "LPT0",
+        "lpt5.bin",
+        "COM\u{b9}",
+        "LPT\u{b2}.txt",
+        "CONIN$",
+        "conout$.x",
+        "dir/CON /x",
+    ] {
+        let error = validate_portable_blob_key(key).expect_err(key);
+        assert!(
+            matches!(error, StorageError::InvalidStorageKey { .. }),
+            "{key}: {error:?}"
+        );
+        // The public message never reveals the rejected key.
+        assert_eq!(error.to_string(), "invalid storage key");
+    }
 }

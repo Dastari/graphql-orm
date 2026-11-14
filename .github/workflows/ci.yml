@@ -507,6 +507,10 @@ jobs:
         run: cargo test -p graphql-orm-backup --locked --no-default-features --features local,orm-postgres --test orm_016_postgres_conformance -- --ignored --test-threads=1
       - run: cargo check -p graphql-orm-storage --no-default-features --features s3,azure --all-targets
       - run: cargo check -p graphql-orm-storage --no-default-features --features smb --all-targets
+      - name: Compile every storage target without a provider feature (#422)
+        run: cargo check -p graphql-orm-storage --locked --no-default-features --all-targets
+      - name: Lint every backup target in the native SMB configuration without local (#662)
+        run: cargo clippy -p graphql-orm-backup --locked --no-default-features --features smb --all-targets -- -D warnings
       - name: Run owner-local SMB vendor unit tests (GHSA-439h-2cx8-xwgx regression)
         run: scripts/test-smb-vendor.sh
       - name: Verify the SMB vendor tree against the registry archive and recorded patches

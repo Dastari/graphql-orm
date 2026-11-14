@@ -26,6 +26,9 @@ pub enum StorageProviderErrorKind {
     ConnectionLost,
     /// The provider returned an invalid or unsupported protocol response.
     Protocol,
+    /// The provider's enforcement of conditional creates, which exclusive
+    /// locks rely on, failed or could not complete its verification.
+    ConditionalCreateUnverified,
 }
 
 /// Errors returned by storage services and provider backends.
@@ -81,10 +84,16 @@ pub enum StorageError {
         retryable: bool,
     },
 
-    /// A storage key is empty, absolute, or contains unsafe path components.
-    #[error("invalid storage key: {key}")]
+    /// A storage key is empty, absolute, or contains unsafe path components,
+    /// or a provider's key policy refuses it.
+    ///
+    /// The message is fixed and never contains the key, because a key can
+    /// reveal a repository path or a configured root prefix. The `key` field,
+    /// and so this error's `Debug` output, holds it for host diagnostics only;
+    /// never return either to an untrusted client.
+    #[error("invalid storage key")]
     InvalidStorageKey {
-        /// Rejected storage key.
+        /// Rejected storage key. Host diagnostics only.
         key: String,
     },
 

@@ -29,7 +29,7 @@ use crate::{
     BlobBody, BlobListPage, BlobMetadata, BlobPutOptions, BlobStore, BlobWriteOutcome,
     StorageBackend, StorageByteStream, StorageError, StorageProviderErrorKind,
     key::{TEMP_SUFFIX, is_canonical_uuid, is_temp_file_name, temp_file_name},
-    validate_blob_key,
+    validate_blob_key, validate_portable_blob_key,
 };
 
 const DEFAULT_PORT: u16 = 445;
@@ -172,6 +172,20 @@ pub struct SmbStorageConfig {
     /// Most bytes of names and paths one listing may accumulate; 256 MiB by
     /// default. A larger listing fails instead of returning a partial result.
     pub max_listing_bytes: usize,
+    /// Write only keys that [`validate_portable_blob_key`] accepts; `false`
+    /// by default. Enable it for a share on a Windows server, or on any
+    /// server whose clients include Windows, where a trailing dot or space,
+    /// a reserved device name or a character such as `?` would be stripped,
+    /// open a device or be refused. It applies to new writes only: the
+    /// written path, root prefix included, must be portable, and a refused
+    /// write fails with `InvalidStorageKey` before any request. Reads,
+    /// deletes and listings of existing keys keep the ordinary validation,
+    /// so objects written before the mode was enabled stay listed, readable
+    /// and deletable. It does not resolve case-folding or Unicode
+    /// normalisation aliasing.
+    ///
+    /// [`validate_portable_blob_key`]: crate::validate_portable_blob_key
+    pub portable_keys: bool,
 }
 
 impl SmbStorageConfig {
@@ -202,6 +216,7 @@ impl SmbStorageConfig {
             max_listing_entries: DEFAULT_MAX_LISTING_ENTRIES,
             listing_timeout: DEFAULT_LISTING_TIMEOUT,
             max_listing_bytes: DEFAULT_MAX_LISTING_BYTES,
+            portable_keys: false,
         }
     }
 
@@ -297,6 +312,7 @@ impl fmt::Debug for SmbStorageConfig {
             .field("max_listing_entries", &self.max_listing_entries)
             .field("listing_timeout", &self.listing_timeout)
             .field("max_listing_bytes", &self.max_listing_bytes)
+            .field("portable_keys", &self.portable_keys)
             .finish()
     }
 }
@@ -751,6 +767,20 @@ impl SmbStorageBackend {
 
     fn mapped_key(&self, key: &str) -> Result<String, StorageError> {
         map_key(self.inner.config.root_prefix.as_deref(), key)
+    }
+
+    /// Applies [`SmbStorageConfig::portable_keys`] to the path a new write
+    /// creates for a caller's key, root prefix included. Reads, deletes and
+    /// listings never apply it, so existing objects stay addressable.
+    fn check_write_policy(&self, key: &str) -> Result<(), StorageError> {
+        if self.inner.config.portable_keys
+            && validate_portable_blob_key(&self.mapped_key(key)?).is_err()
+        {
+            return Err(StorageError::InvalidStorageKey {
+                key: key.to_string(),
+            });
+        }
+        Ok(())
     }
 
     fn remote_path(&self, key: &str) -> Result<UncPath, StorageError> {
@@ -2167,6 +2197,7 @@ impl BlobStore for SmbStorageBackend {
         _options: BlobPutOptions,
     ) -> Result<BlobWriteOutcome, StorageError> {
         // Checks the caller's key, not the longer temporary key.
+        self.check_write_policy(key)?;
         let temp = temp_key(key)?;
         let result = self.write_file(&temp, body).await;
         let outcome = match result {
@@ -2195,6 +2226,7 @@ impl BlobStore for SmbStorageBackend {
         // holds a partial object, then published as a hard link at the key
         // that the server refuses atomically when the key exists. Checks the
         // caller's key, not the longer temporary key.
+        self.check_write_policy(key)?;
         let temp = temp_key(key)?;
         let outcome = match self.write_file(&temp, body).await {
             Ok(outcome) => outcome,
@@ -4530,6 +4562,20 @@ mod tests {
         assert!(check_listing_prefix("").is_ok());
         assert!(check_listing_prefix("dir/").is_ok());
         assert!(check_key("dir/2026-11-12T10-00-00Z.json").is_ok());
+    }
+
+    /// `portable_keys` is opt-in and governs new writes only: it never makes
+    /// a configuration that addresses existing objects invalid (#482).
+    #[test]
+    fn portable_keys_are_opt_in_and_keep_existing_repositories_valid() {
+        let mut config = config();
+        assert!(!config.portable_keys, "off by default");
+        config.root_prefix = Some("backups/CON".to_string());
+        config.portable_keys = true;
+        config
+            .validate()
+            .expect("existing repositories stay addressable");
+        assert!(format!("{config:?}").contains("portable_keys: true"));
     }
 
     #[tokio::test]

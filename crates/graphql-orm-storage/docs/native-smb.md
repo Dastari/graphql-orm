@@ -133,6 +133,20 @@ paths, UNC paths, or SMB URLs.
 `.graphql-orm-storage` namespace and `:` are rejected. Windows servers, and
 Samba with `streams_xattr`, treat `:` as an alternate data stream separator,
 so `a:b` would open stream `b` of the file `a`; listings skip names with `:`.
+
+Set `portable_keys` to `true` for a share on a Windows server, or one that
+Windows clients also use. New writes must then create a path, `root_prefix`
+included, that passes `validate_portable_blob_key`, which also refuses the
+characters `< > " | ? *`, control characters, a component ending in `.` or a
+space, and reserved device names such as `CON`, `NUL.txt` or `COM1`, in any
+ASCII case. A refused write fails with `InvalidStorageKey` before any request.
+Reads, deletes and listings keep the ordinary validation, so objects written
+before the mode was enabled stay listed, readable and deletable. The mode does
+not resolve case-folding or Unicode-normalisation aliasing: keys that differ
+only in case, or only in normalisation, can name one file on such a server.
+Samba's default `mangled names = yes` lists a stored name that Windows cannot
+represent under an 8.3 alias, such as `CSHOFG~F.TXT` for `CON.txt`, with or
+without this mode.
 Passwords use `SecretString`, are redacted from `Debug`, and never enter errors
 or probe results. The backend moves the password straight into the SMB
 client's zeroizing secret, and no plain copy outlives the connection call.

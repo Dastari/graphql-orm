@@ -31,7 +31,10 @@ This crate is a reusable storage companion for applications that use `graphql-or
 
 ## Integration contracts
 
-- Package versions and workspace dependency identities belong to the generated
+- The package version belongs to [Cargo.toml](Cargo.toml); published versions
+  are retained in the release manifest (see the
+  [release tag checks](../../docs/operations/runbooks/release-tag-check.md)).
+  Workspace dependency identities belong to the generated
   [workspace inventory](../../docs/reference/workspace-packages.md).
 - Internal packages resolve through workspace path dependencies and the root
   `Cargo.lock`. Keep downstream companion packages on one reviewed monorepo

@@ -465,6 +465,78 @@ pub fn validate_blob_key(key: &str) -> Result<(), StorageError> {
     Ok(())
 }
 
+/// Validates a blob key for SMB servers and Windows file systems.
+///
+/// Applies [`validate_blob_key`], and also refuses a key with any component
+/// that such targets cannot store under the name as written, or that they
+/// treat as another name:
+///
+/// - `:`, the alternate data stream separator, and the characters
+///   `< > " | ? *`;
+/// - control characters U+0001 to U+001F;
+/// - a trailing `.` or space, which Windows strips, so `report.` and
+///   `report` would name the same file;
+/// - a reserved device name, in any ASCII case and with or without an
+///   extension: `CON`, `PRN`, `AUX`, `NUL`, `CONIN$`, `CONOUT$`, and `COM` or
+///   `LPT` followed by a digit `0`-`9` or a superscript `¹`, `²` or `³`. A
+///   name such as `CON.txt` or `CON .txt` opens the device, not a file.
+///
+/// It does not fold case: on a case-insensitive target, keys that differ only
+/// in case still name the same object. Keys that are valid here are valid
+/// everywhere `validate_blob_key` keys are.
+///
+/// # Errors
+///
+/// Returns [`StorageError::InvalidStorageKey`] when the key fails
+/// [`validate_blob_key`] or any of the rules above.
+pub fn validate_portable_blob_key(key: &str) -> Result<(), StorageError> {
+    validate_blob_key(key)?;
+    if key.split('/').all(is_portable_component) {
+        Ok(())
+    } else {
+        Err(StorageError::InvalidStorageKey {
+            key: key.to_string(),
+        })
+    }
+}
+
+/// Whether one complete key component is portable (see
+/// [`validate_portable_blob_key`]).
+fn is_portable_component(component: &str) -> bool {
+    has_portable_characters(component)
+        && !component.ends_with(['.', ' '])
+        && !is_reserved_device_name(component)
+}
+
+/// Whether `text` avoids every character Windows refuses in a name.
+fn has_portable_characters(text: &str) -> bool {
+    !text.chars().any(|character| {
+        matches!(character, ':' | '<' | '>' | '"' | '|' | '?' | '*')
+            || ('\u{1}'..='\u{1f}').contains(&character)
+    })
+}
+
+/// Whether `component` opens a Windows device: its part before the first
+/// `.`, without trailing spaces, is a reserved device name in any ASCII case.
+fn is_reserved_device_name(component: &str) -> bool {
+    let stem = component
+        .split('.')
+        .next()
+        .unwrap_or(component)
+        .trim_end_matches(' ');
+    if ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"]
+        .iter()
+        .any(|name| stem.eq_ignore_ascii_case(name))
+    {
+        return true;
+    }
+    let mut characters = stem.chars();
+    let device: String = characters.by_ref().take(3).collect();
+    let rest: Vec<char> = characters.collect();
+    (device.eq_ignore_ascii_case("COM") || device.eq_ignore_ascii_case("LPT"))
+        && matches!(rest.as_slice(), [digit] if digit.is_ascii_digit() || matches!(digit, '\u{b9}' | '\u{b2}' | '\u{b3}'))
+}
+
 /// Validates a listing prefix: empty, or a valid key optionally followed by
 /// one `/`.
 #[cfg(any(feature = "local", feature = "s3", feature = "smb"))]

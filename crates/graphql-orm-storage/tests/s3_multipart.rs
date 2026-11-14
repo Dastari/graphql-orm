@@ -157,10 +157,32 @@ async fn owned_s3_passes_the_multipart_conformance_suite() {
     misconfigured_storage_is_never_an_unknown_upload(&server.config).await;
     key_prefixes_sharing_a_bucket_stay_apart(&server.config).await;
     let store = S3StorageBackend::new(server.config.clone());
+    the_conditional_create_probe_passes_and_cleans_up(&store).await;
     a_failed_body_aborts_its_multipart_upload(&store).await;
     a_cancelled_put_aborts_its_multipart_upload(&store).await;
     listing_contract::prefixes_are_string_prefixes(&store, "listing").await;
     listing_contract::the_internal_namespace_is_reserved(&store).await;
+}
+
+/// The owned server enforces `If-None-Match: *` on both committing
+/// requests, so the probe passes and leaves neither an object nor an upload.
+async fn the_conditional_create_probe_passes_and_cleans_up(store: &S3StorageBackend) {
+    store
+        .probe_conditional_create()
+        .await
+        .expect("the owned S3 server enforces conditional creates");
+    let left: Vec<String> = store
+        .list_blobs("")
+        .await
+        .expect("list")
+        .into_iter()
+        .filter(|key| key.starts_with(".graphql-orm-probe-"))
+        .collect();
+    assert!(left.is_empty(), "probe objects left: {left:?}");
+    assert_eq!(
+        incomplete_uploads(store, ".graphql-orm-probe-").await,
+        Vec::<String>::new()
+    );
 }
 
 /// More than one automatic multipart part, so a part is uploaded first.

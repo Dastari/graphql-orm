@@ -104,8 +104,15 @@ fails with `RestoreObjectConflict`. Restore into an empty staging namespace.
 
 The object stream handed to a sink fails at its end when its bytes do not
 match the manifest digest, and `restore_objects` then returns
-`ChecksumMismatch`. A bundled `BlobStore` discards such a write; buffering
-sinks never receive the bytes. A custom streaming sink must likewise discard a
+`ChecksumMismatch`. A bundled `BlobStore` discards such a write, and none of
+them makes the refused object readable at its key: local storage and SMB
+write a hidden temporary file and publish it only after the whole body, and
+S3 sends its committing request only after the body ends. Before
+`graphql-orm-storage` 0.11.0, SMB created the object at its final key with
+delete-on-close set, so a concurrent reader of the live store could read it
+until the delete took effect
+([#475](https://github.com/Dastari/graphql-orm/issues/475)). Buffering sinks
+never receive the bytes. A custom streaming sink must likewise discard a
 body whose stream ends in an error. A sink that returns success without
 reading the whole stream also fails with `ChecksumMismatch`.
 
