@@ -890,6 +890,41 @@ where
     }
 }
 
+/// Typed values scoped to one transaction; see
+/// [`MutationContext::insert_extension`]. Allocates nothing until a value is
+/// attached.
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+#[derive(Default)]
+struct TransactionExtensions(
+    Option<std::collections::HashMap<std::any::TypeId, Box<dyn std::any::Any + Send + Sync>>>,
+);
+
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+impl TransactionExtensions {
+    fn insert<T: Send + Sync + 'static>(&mut self, value: T) -> Option<T> {
+        self.0
+            .get_or_insert_with(Default::default)
+            .insert(std::any::TypeId::of::<T>(), Box::new(value))
+            .and_then(|previous| previous.downcast::<T>().ok())
+            .map(|previous| *previous)
+    }
+
+    fn get<T: Send + Sync + 'static>(&self) -> Option<&T> {
+        self.0
+            .as_ref()?
+            .get(&std::any::TypeId::of::<T>())?
+            .downcast_ref::<T>()
+    }
+
+    fn remove<T: Send + Sync + 'static>(&mut self) -> Option<T> {
+        self.0
+            .as_mut()?
+            .remove(&std::any::TypeId::of::<T>())
+            .and_then(|value| value.downcast::<T>().ok())
+            .map(|value| *value)
+    }
+}
+
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub struct MutationContext<'tx, B: WriteBackend = DefaultWriteBackend> {
     db: &'tx crate::db::Database<B>,
@@ -901,6 +936,8 @@ pub struct MutationContext<'tx, B: WriteBackend = DefaultWriteBackend> {
     hook_depth: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// The handle policies see while a [`Self::with_system_access`] scope is open.
     scoped_db: Option<Box<crate::db::Database<B>>>,
+    /// Typed values attached by the code that began this transaction.
+    extensions: TransactionExtensions,
     /// Tables whose PostgreSQL change journal recorder this transaction has verified.
     #[cfg_attr(
         not(all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))),
@@ -1627,6 +1664,7 @@ where
             deferred_actions: Vec::new(),
             hook_depth: Default::default(),
             scoped_db: None,
+            extensions: TransactionExtensions::default(),
             change_journal_verified_tables: Vec::new(),
         }
     }
@@ -1732,6 +1770,64 @@ where
         abandoned.1 = false;
         self.scoped_db = previous;
         value
+    }
+
+    /// Attach a typed value to this transaction for its mutation hooks to
+    /// read with [`Self::extension`], returning the value it replaces.
+    ///
+    /// The value belongs to this transaction only: it is dropped before the
+    /// commit or rollback, and is never visible to deferred post-commit
+    /// actions, queued events, other transactions, other handles or generated
+    /// GraphQL resolvers. Only the code that began the transaction sets it,
+    /// typically the callback of
+    /// [`Database::transaction`](crate::db::Database::transaction).
+    ///
+    /// # Errors
+    ///
+    /// Refused with `CONFLICT` while a mutation hook is running: a hook reads
+    /// extensions and cannot grant itself one.
+    pub fn insert_extension<T>(
+        &mut self,
+        value: T,
+    ) -> Result<Option<T>, crate::graphql::errors::OrmPublicError>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.require_transaction_owner()?;
+        Ok(self.extensions.insert(value))
+    }
+
+    /// The value of type `T` attached to this transaction, if any.
+    pub fn extension<T>(&self) -> Option<&T>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.extensions.get::<T>()
+    }
+
+    /// Remove and return the value of type `T` attached to this transaction.
+    ///
+    /// # Errors
+    ///
+    /// Refused with `CONFLICT` while a mutation hook is running.
+    pub fn remove_extension<T>(
+        &mut self,
+    ) -> Result<Option<T>, crate::graphql::errors::OrmPublicError>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.require_transaction_owner()?;
+        Ok(self.extensions.remove::<T>())
+    }
+
+    fn require_transaction_owner(&self) -> Result<(), crate::graphql::errors::OrmPublicError> {
+        if self.hook_depth.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+            return Err(crate::graphql::errors::OrmPublicError::with_message(
+                crate::graphql::errors::OrmErrorCode::Conflict,
+                "transaction extensions are set by the code that began the transaction, not by a mutation hook",
+            ));
+        }
+        Ok(())
     }
 
     pub fn actor<T>(&self, ctx: Option<&async_graphql::Context<'_>>) -> Option<T>
@@ -1932,8 +2028,12 @@ where
             deferred_actions,
             hook_depth: _,
             scoped_db: _,
+            extensions,
             change_journal_verified_tables: _,
         } = self;
+        // Transaction extensions end before the commit: nothing that runs
+        // afterwards, including a deferred action, can observe one.
+        drop(extensions);
         B::commit_write_transaction(tx).await?;
         for event in deferred_events {
             event.emit(db);
@@ -1948,7 +2048,9 @@ where
 
     /// Roll back and consume this transaction without emitting side effects.
     #[doc(hidden)]
-    pub async fn rollback(self) -> crate::Result<()> {
+    pub async fn rollback(mut self) -> crate::Result<()> {
+        // Transaction extensions end with the transaction.
+        self.extensions = TransactionExtensions::default();
         B::rollback_write_transaction(self.tx).await
     }
 
