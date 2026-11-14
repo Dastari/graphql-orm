@@ -1130,7 +1130,7 @@ impl MssqlScalar for rust_decimal::Decimal {
 fn naive_utc_rfc3339(value: tiberius::time::chrono::NaiveDateTime) -> String {
     use chrono::Timelike;
     let nanos = value.nanosecond();
-    let value = if nanos % 100 == 0 {
+    let value = if nanos.is_multiple_of(100) {
         value
     } else {
         // At most 299/300 s, so rounding never reaches the next second.
