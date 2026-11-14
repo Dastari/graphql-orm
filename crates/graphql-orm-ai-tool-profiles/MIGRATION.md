@@ -3,12 +3,111 @@ title: "graphql-orm-ai-tool-profiles migration guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-10-31
+last_reviewed: 2026-11-13
 review_by: 2027-02-11
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.22.0 to 0.23.0: explicit handwritten input disclosure
+
+Generated aggregate roots accept their canonical `groupLimit` or `group_limit`
+spelling for the server-owned bound. Plans supply `maximumItems`; the host
+injects that value into the bound argument. The model cannot supply the bound.
+No SDL or data migration is needed.
+
+
+Generated input compilation requires producer metadata from ORM/macros 0.149.0
+and catalogue 0.8.0. Undisclosed generated members remain closed even when a
+host declares custom inputs. Query, mutation and subscription catalogues expose
+host-only `diagnostics()` for capabilities omitted because a generated member
+requires a host-supplied value. Other capabilities compile normally. Do not log
+or send diagnostics to models. Generated input shape mismatches return a host
+configuration error naming the input and member; rebuild matching producer
+metadata instead of declaring hidden members. The host-only member sidecar is
+not serialized; reattach producer metadata after public catalogue round trips.
+
+
+No data migration is needed. Rebuild capability catalogues and refresh any
+retained capability bindings whose provider argument schema changes.
+
+Handwritten input objects disclose nothing unless declared. Canonical generated
+entity inputs include key, create, update, where/filter, order, keyset order,
+runtime order, aggregate metric and link inputs. Service inputs include search
+and subscription filters. These inputs and their filter, operand and page
+helpers require generated reach and canonical identity and type contracts.
+Other inputs are handwritten everywhere, including custom roots, generated roots
+and relationship arguments, and their fields need declarations.
+
+An input with a generated kind's name (for example `Create{Entity}Input` or
+`{Entity}AggregateMetricInput`) counts as generated only when it has that kind's
+canonical member shape and a generated root of that entity, or a relationship
+argument targeting it, reaches it. For an aggregate metric input, `operator` must
+be the aggregate-operator enum and `field` the entity's `{Entity}AggregateField`
+enum; for the other kinds, every member the generated rules admit must have the
+generated type. Any other input with such a name, including a host-written one
+used by a custom root or by a root built with
+`GraphqlSemanticOperationDescriptor::generated`, is handwritten and needs
+declarations like any other. A canonical aggregate metric input applies the
+generated field and operator rules on every root that uses it.
+
+The ORM's fixed generated inputs need no declarations when a generated root
+reaches them with their exact generated shape: the search input (`SearchInput`
+and the runtime `RuntimeSearchInput`), the change-subscription filter (only
+`actions` is offered) and the runtime link inputs (`{Entity}LinksInput` offers
+only exportable relations; each `{Entity}{Relation}LinkChangeInput` offers
+`set`, `add` and `remove`). The same shape reached only by a custom root is
+handwritten.
+Order and keyset inputs use `OrderDirection` with exactly `ASC` and `DESC`.
+Search inputs use `SearchMode` or `RuntimeSearchMode`, respectively, with exactly
+`PLAIN`, `PHRASE`, `WEB` and `PREFIX`. `SubscriptionFilterInput` uses
+`[ChangeAction!]` with exactly `CREATED`, `UPDATED` and `DELETED`.
+Canonical names and complete helper member shapes are required. A generated
+label asserts a trusted host resolver choice; shape checks cannot establish
+how a host resolver interprets otherwise canonical arguments.
+Runtime projected outputs retain stored scalar input and ordering contracts;
+projected members omitted from semantic metadata remain undisclosed. Link
+helpers describe to-many join relations. Logical where controls follow one
+configured field case. Ordinary order inputs retain generated relation-count
+aliases for readable to-one and to-many relations; these aliases are not offered
+to the model.
+
+Declare each field the model may describe and send, or declare a custom
+operation to disclose every handwritten input its arguments reach:
+
+```rust
+let disclosure = AiCustomInputDisclosure::new()
+    .with_exportable_field("LookupInput", "name")?
+    .with_declared_operation(GraphqlOperationKind::Mutation, "ImportRecords")?;
+let options = AiGraphqlQueryCapabilityOptions::default()
+    .with_custom_input_disclosure(disclosure);
+let queries = AiGraphqlQueryCapabilityCatalog::compile_with_options(
+    subgraph, target.clone(), &sdl, &semantics, limits, options.clone(),
+)?;
+let mutations = AiGraphqlMutationCapabilityCatalog::compile_with_options(
+    subgraph, target, &sdl, &semantics, limits, options,
+)?;
+```
+
+- An input whose name starts with an entity name is no longer filtered by that
+  entity's field metadata. Declare its fields explicitly.
+- Compilation fails when a required handwritten field is undeclared, when a
+  declared coordinate is not a field of a handwritten input, when a declared
+  operation is not a custom operation in the catalogue, or when a declared
+  operation reaches no handwritten input.
+- A declaration is model-facing disclosure only. The resolver must still
+  authorize every value it receives.
+- `AiGraphqlQueryCapabilityOptions` is no longer `Copy`; clone it to reuse it,
+  and call `maximum_relationship_argument_depth` through a reference.
+- Serialized options gain an optional `customInputDisclosure` member that is
+  omitted when empty, so existing encodings still decode and re-encode
+  unchanged.
+
+Aggregate plans must name grouping and metric fields by their exact public
+field name, and aggregate field enums offer only values that equal an
+exportable field name. Plans that relied on a differently cased or punctuated
+spelling must use the exact name.
 
 ## 0.21.1 to 0.22.0: complete capability ranking
 

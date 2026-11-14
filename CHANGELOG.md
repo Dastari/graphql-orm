@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-13
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -15,6 +15,11 @@ This file is the authoritative user-facing release chronology. The former
 for historical context.
 
 ## Unreleased
+
+- ORM/macros 0.149.0 and catalogue 0.8.0: generated order expressions have optional, closed OrderBy contracts. Entity/catalogue equality compares public metadata and excludes in-memory input contracts, consistently with serialization and fingerprints.
+
+- ORM/macros 0.149.0 and catalogue 0.8.0: **breaking Rust API:** `GraphqlEntitySemanticMetadata` gains `generated_input_members`; struct literals must initialize it. The generated input metadata includes host-only contracts for undisclosed members. Public SDL/catalogue bytes and operation/semantic fingerprints are unchanged. Tool profiles 0.23.0 preserves readable inputs, keeps producer-hidden members closed, and omits capabilities requiring those members with host diagnostics. Generated shape errors identify the input/member. See the [migration guide](MIGRATION.md#01470-to-01490-host-only-generated-input-contracts).
+- AI 0.142.0, tool profiles 0.23.0, operation catalogue 0.8.0: **security:** AI tool registration and provider disclosure fail closed. The AI control-plane root set is now derived from the AI crate's own GraphQL roots and applies to static tools, generated capability sets and remote requests; static and remote documents are refused when they select a control-plane field at any depth, introspection, or `_service`/`_entities`. Static tool documents must parse to exactly one operation of the declared kind and contract name. Handwritten input objects, wherever they are reached, now disclose only fields the host declares with `AiCustomInputDisclosure`, never by entity-name prefix; an input counts as a generated entity input only when it has the canonical generated identity and member types and a generated operation or relationship reaches it, and a canonical aggregate metric input applies the generated field and operator rules on every root that uses it. Aggregate plans match exact field names and refuse repeated normalised keys. No data migration. See the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01400-to-01420-exact-tool-registration-and-derived-control-plane-roots) and the [tool-profiles migration guide](crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0220-to-0230-explicit-handwritten-input-disclosure).
 
 - ORM and macros 0.147.0 (placeholder): **breaking/security:** generated write paths, hooks and authority. See the [migration guide](MIGRATION.md#01440-to-01470-write-paths-hooks-and-authority).
   - **Breaking (security):** the generated repository `Entity::insert(provider, input)` takes one authorized path whatever the provider is. Called with a bare pool (or any `PoolProvider` that is not a `Database`) it ran a raw `INSERT`: no entity, row or field policy, no schema policy, no `WriteInputTransform`, no mutation hook, no written-row check and no transaction. It now behaves as the same call on `Database::new(pool)` does: an entity that declares a `write_policy`, or a field that declares one, is refused with `AUTHORIZATION_MISCONFIGURED`, a SQL Server pool keeps the access mode it was opened with (a read-only pool refuses, an external-writable pool writes), and an entity without policy keys inserts as before, inside a transaction. Pass the `Database` that carries the host's policies and hooks (#601).

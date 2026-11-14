@@ -6628,6 +6628,7 @@ mod tests {
             has_field_policy: false,
         };
         let entity = GraphqlEntitySemanticMetadata {
+            generated_input_members: Vec::new(),
             entity_name: "Record".to_owned(),
             description: "A reviewed application record.".to_owned(),
             default_classification: GraphqlSemanticClassification::Internal,
@@ -6660,13 +6661,18 @@ mod tests {
             [operation],
         )
         .expect("test mutation catalogue should validate");
-        let catalog = AiGraphqlMutationCapabilityCatalog::compile(
+        let catalog = AiGraphqlMutationCapabilityCatalog::compile_with_options(
             "generated",
             GraphqlExecutionTargetId::parse("generated-application")
                 .expect("generated target should validate"),
             GENERATED_MUTATION_SDL,
             &semantics,
             AiGraphqlQueryCapabilityLimits::default(),
+            crate::AiGraphqlQueryCapabilityOptions::default().with_custom_input_disclosure(
+                crate::AiCustomInputDisclosure::new()
+                    .with_exportable_field("RecordInput", "subject")
+                    .expect("handwritten input field should be declared"),
+            ),
         )
         .expect("automatic mutation capabilities should compile");
         (semantics, catalog)
@@ -6694,6 +6700,7 @@ mod tests {
             has_field_policy: false,
         };
         let entity = GraphqlEntitySemanticMetadata {
+            generated_input_members: Vec::new(),
             entity_name: "Record".to_owned(),
             description: "A reviewed application record.".to_owned(),
             default_classification: GraphqlSemanticClassification::Internal,
@@ -6758,6 +6765,7 @@ mod tests {
             has_field_policy: true,
         };
         let entity = GraphqlEntitySemanticMetadata {
+            generated_input_members: Vec::new(),
             entity_name: "Record".to_owned(),
             description: "A reviewed replayable record event.".to_owned(),
             default_classification: GraphqlSemanticClassification::Internal,

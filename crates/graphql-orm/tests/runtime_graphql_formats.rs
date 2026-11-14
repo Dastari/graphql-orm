@@ -940,3 +940,59 @@ async fn failing_hooks_roll_back_staged_claims_and_concurrent_claims_cannot_both
     assert_eq!(rows, 1);
     f.finish().await;
 }
+
+#[tokio::test]
+async fn projected_runtime_inputs_compile_public_scalar_capabilities() {
+    use graphql_orm_ai_tool_profiles::{
+        AiGraphqlQueryCapabilityCatalog, AiGraphqlQueryCapabilityLimits, GraphqlExecutionTargetId,
+    };
+    let f = Fixture::new().await;
+    let projector = FileProjector::new(false);
+    let module = RuntimeGraphqlModule::compile(f.schema.clone(), f.options(&projector)).unwrap();
+    let (api, catalog) = RuntimeGraphqlComposer::new(f.db.clone(), "Query", Default::default())
+        .unwrap()
+        .mutation_root("Mutation")
+        .unwrap()
+        .install(module)
+        .unwrap()
+        .finish_with_semantic_catalog()
+        .unwrap();
+    let result = AiGraphqlQueryCapabilityCatalog::compile(
+        "runtime-projections",
+        GraphqlExecutionTargetId::parse("runtime.projections").unwrap(),
+        &api.sdl(),
+        &catalog,
+        AiGraphqlQueryCapabilityLimits::default(),
+    )
+    .and_then(|capabilities| {
+        let capability = capabilities.capabilities().next().unwrap();
+        let described = capability.compact_argument_schema().to_string();
+        assert!(!described.contains("\"avatar\""), "{described}");
+        assert!(!described.contains("\"banner\""), "{described}");
+        capability.compile_compact(serde_json::json!({
+            "arguments": {"where": {"name": {"eq": "public"}},
+                "orderBy": [{"field": "name", "direction": "ASC"}]},
+            "maximumItems": 1, "selections": ["name"],
+            "relationshipArguments": {}, "relationshipMaximumItems": {}
+        }))
+    });
+    let invalid_sdl = api.sdl().replacen(
+        "enum ProfileOrderField {",
+        "enum ProfileOrderField {\n HOST_SELECTOR",
+        1,
+    );
+    assert_ne!(invalid_sdl, api.sdl());
+    let invalid = AiGraphqlQueryCapabilityCatalog::compile(
+        "runtime-projections-invalid",
+        GraphqlExecutionTargetId::parse("runtime.projections.invalid").unwrap(),
+        &invalid_sdl,
+        &catalog,
+        AiGraphqlQueryCapabilityLimits::default(),
+    );
+    f.finish().await;
+    result.expect("runtime-emitted projected inputs retain public scalar filtering and ordering");
+    assert!(
+        invalid.is_err(),
+        "runtime order fields require canonical scalar or opaque projected members"
+    );
+}
