@@ -267,3 +267,16 @@ required by the pinned Tiberius transport and optional SDK owners; changing it
 would overlap #516. These duplicates remain explicit follow-ups, not resolved
 by updating the lockfile.
 
+### Remaining repository/test hygiene (#545)
+
+PR base SHAs now enter shells through environment variables. All tracked fixture
+locks are scanned. The fixed qualified generator is still executed for the
+historical serialization comparison: it is repository-owned code loaded from a
+full immutable commit, not issue text or a moving ref. Only the current generator
+performs package-tag verification, preserving that gate while avoiding obsolete
+historical source-selection rules (#616).
+
+Sleep-based tests, missing-docs policy expansion, committed agent tooling and the
+synchronous public migration-file API require separate scoped decisions. No tests,
+lints or tool directories are removed here. The synchronous API documentation
+and timing-test refactors should be addressed with their owning runtime/API work.

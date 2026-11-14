@@ -21,6 +21,7 @@ env:
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
   CARGO_INCREMENTAL: "0"
+  BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
   # Disposable runners may pull the digest-pinned owned SQL Server image;
   # local and qualification runs default to never pulling.
   GRAPHQL_ORM_TEST_MSSQL_PULL: missing
@@ -64,7 +65,7 @@ jobs:
           components: rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Check documentation governance
-        run: python3 scripts/check-documentation.py --base "${{ github.event.pull_request.base.sha }}"
+        run: python3 scripts/check-documentation.py --base "${BASE_SHA}"
       - name: Check generated workspace inventory
         run: python3 scripts/generate-workspace-inventory.py --check
       - name: Check Git-only release metadata
@@ -467,7 +468,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - run: scripts/check-package-release-policy.sh "${{ github.event.pull_request.base.sha }}"
+      - run: scripts/check-package-release-policy.sh "${BASE_SHA}"
 
   alternate-features:
     runs-on: ubuntu-latest
@@ -523,13 +524,13 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       - name: Create baseline worktree
-        run: git worktree add ../graphql-orm-baseline "${{ github.event.pull_request.base.sha }}"
+        run: git worktree add ../graphql-orm-baseline "${BASE_SHA}"
       - name: Constrain the historical Hive telemetry dependency without changing its source or features
         run: python3 scripts/prepare-router-semver-baseline.py ../graphql-orm-baseline
       - id: companion-baseline
         name: Detect consolidated packages in the baseline
         run: |
-          if git cat-file -e "${{ github.event.pull_request.base.sha }}:crates/graphql-orm-ai/Cargo.toml"; then
+          if git cat-file -e "${BASE_SHA}:crates/graphql-orm-ai/Cargo.toml"; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
@@ -537,7 +538,7 @@ jobs:
       - id: router-baseline
         name: Detect router packages in the baseline
         run: |
-          if git cat-file -e "${{ github.event.pull_request.base.sha }}:crates/graphql-orm-router/Cargo.toml"; then
+          if git cat-file -e "${BASE_SHA}:crates/graphql-orm-router/Cargo.toml"; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
