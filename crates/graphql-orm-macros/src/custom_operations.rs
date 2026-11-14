@@ -846,19 +846,22 @@ fn watch_subscription_stream(
     Ok(inner)
 }
 
-/// Enforce a declared requirement inside a `#[graphql(entity)]` resolver.
+/// Enforce the declared authorization and the operation-assurance requirement
+/// inside a `#[graphql(entity)]` resolver.
 ///
-/// async-graphql applies no guard to an entity resolver, so the check is the
-/// first statement of its body. That needs the resolver's `Context` and a
-/// `Result` return type; a resolver without them is refused instead of being
-/// described as protected while running unchecked.
-fn enforce_entity_resolver_authorization(
+/// async-graphql applies no guard to an entity resolver, so the checks are
+/// the first statements of its body: authentication and scopes, then the
+/// assurance requirement registered for the resolver's own catalogued
+/// coordinate, then any registered for `Query._entities`, as generated entity
+/// resolvers check them. That needs the resolver's `Context` and a `Result`
+/// return type; a resolver without them is refused instead of being described
+/// and classified as protected while running unchecked.
+fn enforce_entity_resolver_checks(
     method: &mut syn::ImplItemFn,
     authorization: &DeclaredAuthorization,
+    kind_variant: &str,
+    field_name: &str,
 ) -> syn::Result<()> {
-    if !authorization.is_required() {
-        return Ok(());
-    }
     let context = method
         .sig
         .inputs
@@ -877,15 +880,37 @@ fn enforce_entity_resolver_authorization(
     let (Some(context), true) = (context, returns_result) else {
         return Err(syn::Error::new_spanned(
             &method.sig,
-            "this `#[graphql(entity)]` resolver declares authorization, which is enforced in \
-             its body: give it a named `&Context<'_>` argument and a `Result` return type, or \
-             declare it public with `#[graphql_orm(authorization = false)]`",
+            if authorization.is_required() {
+                "this `#[graphql(entity)]` resolver declares authorization, which is enforced in \
+                 its body: give it a named `&Context<'_>` argument and a `Result` return type, or \
+                 declare it public with `#[graphql_orm(authorization = false)]`"
+            } else {
+                "a described `#[graphql(entity)]` resolver enforces the operation-assurance \
+                 requirement registered for its coordinate in its body: give it a named \
+                 `&Context<'_>` argument and a `Result` return type"
+            },
         ));
     };
-    let enforcement = authorization.enforcement_tokens(&context);
+    let enforcement = if authorization.is_required() {
+        authorization.enforcement_tokens(&context)
+    } else {
+        quote! {}
+    };
+    let kind = quote::format_ident!("{}", kind_variant);
     let block = &method.block;
     method.block = syn::parse_quote! {{
         #enforcement
+        // The context field is `_entities`: enforce this resolver's own
+        // coordinate, and any classification registered for `_entities`.
+        ::graphql_orm::graphql::assurance::enforce_operation_assurance(
+            #context,
+            ::graphql_orm::graphql::orm::GraphqlOperationKind::#kind,
+            #field_name,
+        )?;
+        ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
+            #context,
+            ::graphql_orm::graphql::orm::GraphqlOperationKind::#kind,
+        )?;
         #block
     }};
     Ok(())
@@ -1381,8 +1406,15 @@ pub(crate) fn expand(args: TokenStream, input: TokenStream) -> TokenStream {
             .into_iter()
             .chain([assurance_guard.clone()])
             .collect::<Vec<_>>();
+        let method_name = method.sig.ident.unraw().to_string();
+        let field_name = match graphql_attribute_value(&method.attrs, "name") {
+            Ok(Some(name)) => name,
+            Ok(None) => crate::naming::async_graphql_rename(&method_name, None),
+            Err(error) => return error.to_compile_error().into(),
+        };
         let installed = if entity {
-            enforce_entity_resolver_authorization(method, &authorization).map(|()| String::new())
+            enforce_entity_resolver_checks(method, &authorization, kind_variant, &field_name)
+                .map(|()| String::new())
         } else {
             install_generated_guards(method, &generated_guards, root_guard.as_deref())
         };
@@ -1391,12 +1423,6 @@ pub(crate) fn expand(args: TokenStream, input: TokenStream) -> TokenStream {
             Err(error) => return error.to_compile_error().into(),
         };
         let explicit = semantic_options.description.clone();
-        let method_name = method.sig.ident.unraw().to_string();
-        let field_name = match graphql_attribute_value(&method.attrs, "name") {
-            Ok(Some(name)) => name,
-            Ok(None) => crate::naming::async_graphql_rename(&method_name, None),
-            Err(error) => return error.to_compile_error().into(),
-        };
         if !field_names.insert(field_name.clone()) {
             return syn::Error::new_spanned(
                 &method.sig.ident,

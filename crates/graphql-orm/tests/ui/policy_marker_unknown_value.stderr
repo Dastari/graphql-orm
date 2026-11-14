@@ -1,0 +1,5 @@
+error: policy accepts only "open": it records that the entity deliberately declares no read_policy or write_policy
+ --> tests/ui/policy_marker_unknown_value.rs:4:95
+  |
+4 | #[graphql_entity(backend = "sqlite", table = "closed_notes", plural = "ClosedNotes", policy = "closed")]
+  |                                                                                               ^^^^^^^^

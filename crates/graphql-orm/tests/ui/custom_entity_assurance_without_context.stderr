@@ -1,0 +1,5 @@
+error: a described `#[graphql(entity)]` resolver enforces the operation-assurance requirement registered for its coordinate in its body: give it a named `&Context<'_>` argument and a `Result` return type
+  --> tests/ui/custom_entity_assurance_without_context.rs:22:5
+   |
+22 |     async fn find_widget_by_id(&self, id: String) -> Widget {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

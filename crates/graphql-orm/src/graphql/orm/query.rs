@@ -133,6 +133,14 @@ pub trait Entity: DatabaseEntity + DatabaseSchema + EntityRelations + DatabaseSe
     fn entity_name() -> &'static str;
     fn metadata() -> &'static EntityMetadata;
 
+    /// Whether the entity's declaration records an explicit policy decision:
+    /// an entity `read_policy` or `write_policy`, an entity-level
+    /// `auth = "none"`, or the `policy = "open"` marker that states it is
+    /// deliberately open to every subject the schema's `auth` setting admits. `schema_roots!` checks it at compile
+    /// time under `require_policies: true`. It changes nothing at run time.
+    /// Handwritten implementations default to `false`.
+    const POLICY_DECISION_DECLARED: bool = false;
+
     /// Public field name of the entity's managed record version, if it has one.
     ///
     /// Generated entities with `#[graphql_orm(version = "managed")]` return the
@@ -368,6 +376,23 @@ pub trait DatabaseOrderBy {
     }
 }
 
+/// One orderable field of a generated entity, for ordering with explicit
+/// precedence.
+///
+/// The entity derives generate `<Entity>OrderField`, an enum with one variant
+/// per field of `<Entity>OrderByInput`, and implement this trait for it. A
+/// field and a direction make the single-field order input that
+/// `order_by` accepts, so `order_by_fields([(Field::A, Asc), (Field::B, Asc)])`
+/// equals `.order_by({a: Asc}).order_by({b: Asc})` and sorts by `a` first
+/// whatever the declaration order of the entity's fields.
+pub trait DatabaseOrderField: Copy {
+    /// The generated order input this field belongs to.
+    type OrderBy: DatabaseOrderBy;
+
+    /// The order input that sorts by this field only.
+    fn order(self, direction: OrderDirection) -> Self::OrderBy;
+}
+
 /// Internal bridge used by the generated complex-object composition macro.
 ///
 /// This is public only because macro expansion occurs in the consuming crate.
@@ -502,8 +527,36 @@ where
     }
 
     /// Add one generated deterministic ordering input.
+    ///
+    /// Calls compose in call order: the first call is the primary sort key.
+    /// One input value with several fields set sorts in the entity's field
+    /// **declaration** order, not in the order the fields are written, because
+    /// a struct literal carries no field order. Use one call per field, or
+    /// [`Self::order_by_fields`], when precedence matters.
     pub fn order_by(mut self, order: O) -> Self {
         self.query = self.query.order_by(&order);
+        self
+    }
+
+    /// Add ordering terms in the order given: the first pair is the primary
+    /// sort key. Each pair is one generated orderable field and a direction,
+    /// and is applied exactly as one [`Self::order_by`] call, so the same
+    /// orderable-field and read-policy checks apply and it composes with
+    /// other ordering calls in call order.
+    ///
+    /// Use this, or chained `order_by` calls, when precedence matters: one
+    /// generated `OrderByInput` value with several fields set always sorts in
+    /// the entity's field declaration order.
+    pub fn order_by_fields<K>(
+        mut self,
+        fields: impl IntoIterator<Item = (K, OrderDirection)>,
+    ) -> Self
+    where
+        K: DatabaseOrderField<OrderBy = O>,
+    {
+        for (field, direction) in fields {
+            self = self.order_by(field.order(direction));
+        }
         self
     }
 
@@ -1394,9 +1447,23 @@ pub struct PaginationConfig {
     /// scan that would need more candidates fails with `PAGE_LIMIT_EXCEEDED`
     /// rather than return a short page. It does not bound or refuse a read
     /// that needs no scan. Whether the budget runs out depends on
-    /// rows the caller cannot see, so set it in trusted code. `None` removes
-    /// the bound.
+    /// rows the caller cannot see, so set it in trusted code. The same budget
+    /// caps the candidates a generated GraphQL bulk write classifies when its
+    /// row policy or filter is evaluated in Rust. `None` removes the bound.
     pub max_scanned_rows: Option<i64>,
+    /// Maximum rows one generated GraphQL `updateMany` or `deleteMany` field
+    /// may write. A bulk write that matches more rows the caller is allowed
+    /// to write is refused with `PAGE_LIMIT_EXCEEDED` before any row changes;
+    /// it is never truncated. The bound counts rows after visibility: rows
+    /// the caller can neither read nor write are not counted, so for a fixed
+    /// set of rows the caller may write the outcome does not depend on other
+    /// matching rows. When row policy or a filter is evaluated in Rust, the
+    /// candidates are classified in bounded pages and the scan is capped by
+    /// [`Self::max_scanned_rows`], as for reads. The bound applies to each
+    /// bulk mutation field of a request separately. Repository `update_where`
+    /// and `delete_where` helpers are trusted code and are not bounded by it.
+    /// `None` removes the bound.
+    pub max_bulk_write_rows: Option<i64>,
 }
 
 impl Default for PaginationConfig {
@@ -1405,6 +1472,7 @@ impl Default for PaginationConfig {
             default_limit: Some(Self::DEFAULT_LIMIT),
             max_limit: Some(Self::DEFAULT_MAX_LIMIT),
             max_scanned_rows: Some(Self::DEFAULT_MAX_SCANNED_ROWS),
+            max_bulk_write_rows: Some(Self::DEFAULT_MAX_BULK_WRITE_ROWS),
         }
     }
 }
@@ -1434,6 +1502,9 @@ impl PaginationConfig {
     /// Default row scan budget of a Rust repository read whose row checks run
     /// in Rust; see [`Self::max_scanned_rows`].
     pub const DEFAULT_MAX_SCANNED_ROWS: i64 = 10_000;
+    /// Default row bound of a generated GraphQL bulk write; see
+    /// [`Self::max_bulk_write_rows`].
+    pub const DEFAULT_MAX_BULK_WRITE_ROWS: i64 = 10_000;
 
     /// Create a config that does not add a default limit and does not cap limits.
     ///
@@ -1443,6 +1514,7 @@ impl PaginationConfig {
             default_limit: None,
             max_limit: None,
             max_scanned_rows: None,
+            max_bulk_write_rows: None,
         }
     }
 
@@ -1452,6 +1524,7 @@ impl PaginationConfig {
             default_limit: Some(Self::LEGACY_DEFAULT_LIMIT),
             max_limit: Some(Self::LEGACY_MAX_LIMIT),
             max_scanned_rows: Some(Self::DEFAULT_MAX_SCANNED_ROWS),
+            max_bulk_write_rows: Some(Self::DEFAULT_MAX_BULK_WRITE_ROWS),
         }
     }
 
@@ -1461,6 +1534,7 @@ impl PaginationConfig {
             default_limit: Some(Self::SECURE_DEFAULT_LIMIT),
             max_limit: Some(Self::SECURE_MAX_LIMIT),
             max_scanned_rows: Some(Self::DEFAULT_MAX_SCANNED_ROWS),
+            max_bulk_write_rows: Some(Self::DEFAULT_MAX_BULK_WRITE_ROWS),
         }
     }
 
@@ -1470,6 +1544,7 @@ impl PaginationConfig {
             default_limit: None,
             max_limit: Some(max_limit),
             max_scanned_rows: Some(Self::DEFAULT_MAX_SCANNED_ROWS),
+            max_bulk_write_rows: Some(Self::DEFAULT_MAX_BULK_WRITE_ROWS),
         }
     }
 
@@ -1489,6 +1564,13 @@ impl PaginationConfig {
     /// [`Self::max_scanned_rows`].
     pub fn with_max_scanned_rows(mut self, max_scanned_rows: Option<i64>) -> Self {
         self.max_scanned_rows = max_scanned_rows;
+        self
+    }
+
+    /// Return a copy with a different generated bulk-write row bound; see
+    /// [`Self::max_bulk_write_rows`].
+    pub fn with_max_bulk_write_rows(mut self, max_bulk_write_rows: Option<i64>) -> Self {
+        self.max_bulk_write_rows = max_bulk_write_rows;
         self
     }
 
@@ -4336,6 +4418,28 @@ where
         self
     }
 
+    /// Add ordering terms in the order given: the first pair is the primary
+    /// sort key. Each pair is one generated orderable field and a direction,
+    /// and is applied exactly as one [`Self::order_by`] call, so the same
+    /// orderable-field and read-policy checks apply and it composes with
+    /// other ordering calls in call order.
+    ///
+    /// Use this, or chained `order_by` calls, when precedence matters: one
+    /// generated `OrderByInput` value with several fields set always sorts in
+    /// the entity's field declaration order.
+    pub fn order_by_fields<K>(
+        mut self,
+        fields: impl IntoIterator<Item = (K, OrderDirection)>,
+    ) -> Self
+    where
+        K: DatabaseOrderField<OrderBy = P::Order>,
+    {
+        for (field, direction) in fields {
+            self = self.order_by(field.order(direction));
+        }
+        self
+    }
+
     /// Read at most `limit` rows, exactly. A limit above the database's
     /// maximum page limit fails with `PAGE_LIMIT_EXCEEDED` instead of being
     /// reduced. Without a limit, `fetch_all` reads at most the maximum and
@@ -4469,6 +4573,28 @@ where
 
     pub fn order_by(mut self, order: P::Order) -> Self {
         self.state = self.state.order_by(order);
+        self
+    }
+
+    /// Add ordering terms in the order given: the first pair is the primary
+    /// sort key. Each pair is one generated orderable field and a direction,
+    /// and is applied exactly as one [`Self::order_by`] call, so the same
+    /// orderable-field and read-policy checks apply and it composes with
+    /// other ordering calls in call order.
+    ///
+    /// Use this, or chained `order_by` calls, when precedence matters: one
+    /// generated `OrderByInput` value with several fields set always sorts in
+    /// the entity's field declaration order.
+    pub fn order_by_fields<K>(
+        mut self,
+        fields: impl IntoIterator<Item = (K, OrderDirection)>,
+    ) -> Self
+    where
+        K: DatabaseOrderField<OrderBy = P::Order>,
+    {
+        for (field, direction) in fields {
+            self = self.order_by(field.order(direction));
+        }
         self
     }
 
@@ -4654,6 +4780,28 @@ where
         if let Some(sort) = order.to_sort_expression() {
             self.order_clauses.push(sort.clause);
             self.order_values.push(sort.values);
+        }
+        self
+    }
+
+    /// Add ordering terms in the order given: the first pair is the primary
+    /// sort key. Each pair is one generated orderable field and a direction,
+    /// and is applied exactly as one [`Self::order_by`] call, so the same
+    /// orderable-field and read-policy checks apply and it composes with
+    /// other ordering calls in call order.
+    ///
+    /// Use this, or chained `order_by` calls, when precedence matters: one
+    /// generated `OrderByInput` value with several fields set always sorts in
+    /// the entity's field declaration order.
+    pub fn order_by_fields<K>(
+        mut self,
+        fields: impl IntoIterator<Item = (K, OrderDirection)>,
+    ) -> Self
+    where
+        K: DatabaseOrderField,
+    {
+        for (field, direction) in fields {
+            self = self.order_by(&field.order(direction));
         }
         self
     }
@@ -5058,6 +5206,43 @@ where
             .await?
             .into_iter()
             .next())
+    }
+
+    /// Fetch one page of write-decision candidates for a generated bulk write:
+    /// at most `limit` rows from database offset `offset`, ordered by the
+    /// complete primary key, each with whether it satisfies the residual
+    /// in-memory predicates.
+    ///
+    /// The page is limited in SQL even when residual predicates remain, so a
+    /// caller never materializes more candidates than it asked for, and the
+    /// primary-key order makes the limit portable and the lock order
+    /// deterministic.
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    pub(crate) async fn fetch_write_candidates_in_transaction(
+        &self,
+        context: &mut MutationContext<'_, B>,
+        offset: i64,
+        limit: i64,
+    ) -> crate::Result<Vec<(T, bool)>>
+    where
+        B: WriteBackend,
+    {
+        let mut query = self.clone();
+        query.order_clauses = vec![
+            T::PRIMARY_KEYS
+                .iter()
+                .map(|column| B::DIALECT.quote_identifier_path(column))
+                .collect::<Vec<_>>()
+                .join(", "),
+        ];
+        query.order_values = Vec::new();
+        let rendered = render_write_decision_select_query(
+            B::DIALECT,
+            &query.candidate_select(offset, Some(limit.max(0)))?,
+        );
+        let rows = context.fetch_rows(&rendered.sql, &rendered.values).await?;
+        context.database().observe_read(&rendered.sql, rows.len());
+        query.decode_candidates(&rows)
     }
 
     #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
@@ -5811,6 +5996,29 @@ where
         O: DatabaseOrderBy,
     {
         self.query = self.query.order_by(&order);
+        self
+    }
+
+    /// Add ordering terms in the order given: the first pair is the primary
+    /// sort key. Each pair is one generated orderable field and a direction,
+    /// and is applied exactly as one [`Self::order_by`] call, so the same
+    /// orderable-field and read-policy checks apply and it composes with
+    /// other ordering calls in call order.
+    ///
+    /// Use this, or chained `order_by` calls, when precedence matters: one
+    /// generated `OrderByInput` value with several fields set always sorts in
+    /// the entity's field declaration order.
+    pub fn order_by_fields<K>(
+        mut self,
+        fields: impl IntoIterator<Item = (K, OrderDirection)>,
+    ) -> Self
+    where
+        O: DatabaseOrderBy,
+        K: DatabaseOrderField<OrderBy = O>,
+    {
+        for (field, direction) in fields {
+            self = self.order_by(field.order(direction));
+        }
         self
     }
 

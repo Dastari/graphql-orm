@@ -10,7 +10,7 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.145.0 corrects SQL Server behaviour, with two breaking changes
+Version 0.151.0 corrects SQL Server behaviour, with two breaking changes
 for hosts (the error variant and the date text): server errors keep their
 number and class (`MssqlServerError`), so constraint violations and deadlocks
 are classified and a failed rollback no longer hides the real error; dates
@@ -20,7 +20,18 @@ relation batches stay under the 2,100-parameter limit; `limit: 0`, bracket
 composite-unique DDL and a bare multi-column `default_sort` render correctly;
 and connections follow an Azure SQL redirect. Upgrade ORM/macros together;
 see the
-[root migration guide](../../MIGRATION.md#01430-to-01450-sql-server-correctness).
+[root migration guide](../../MIGRATION.md#01470-to-01510-sql-server-correctness).
+
+Version 0.147.0 (placeholder) puts every generated write on one authorized
+path and gives hooks and workers an explicit authority. `Entity::insert` with a
+bare pool no longer bypasses policies and hooks; generated GraphQL bulk writes
+are bounded by `PaginationConfig::max_bulk_write_rows` and refused with
+`PAGE_LIMIT_EXCEEDED` above it; custom `#[graphql(entity)]` resolvers enforce
+operation assurance; `RowPolicy::write_target_prefilter`,
+`Database::with_system_access`, `MutationContext::with_system_access`,
+transaction extensions, `order_by_fields` with the generated `<Entity>OrderField`
+enum and `schema_roots!` `require_policies` are new and opt-in. Upgrade ORM/macros together; see the
+[root migration guide](../../MIGRATION.md#01440-to-01470-write-paths-hooks-and-authority).
 
 Version 0.143.0 gives authorization one contract: every generated read path
 asks the field policy about a field with or without a policy key;

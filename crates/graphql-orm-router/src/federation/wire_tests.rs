@@ -64,6 +64,13 @@ const PRODUCTS_SDL_ENDPOINT_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_PRODUCTS_SDL_EN
 const REVIEWS_SDL_ENDPOINT_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_REVIEWS_SDL_ENDPOINT";
 const PRODUCTS_PROTOCOL_ENDPOINT_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_PRODUCTS_PROTOCOL_ENDPOINT";
 const REVIEWS_PROTOCOL_ENDPOINT_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_REVIEWS_PROTOCOL_ENDPOINT";
+const PROMETHEUS_LISTENER_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_PROMETHEUS_LISTENER";
+const OMIT_OPERATION_NAME_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_OMIT_OPERATION_NAME";
+/// A file whose content `stale` makes the `role-events` credential's role
+/// expansion unavailable, as a role-scope catalogue past its maximum staleness.
+const AUTHORITY_CONTROL_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_AUTHORITY_CONTROL";
+/// Each fresh `role-events` expansion stays valid this long.
+const ROLE_AUTHORITY_LIFETIME: Duration = Duration::from_millis(300);
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 const PRODUCTS_V1: &str = r#"
@@ -281,6 +288,18 @@ fn router_child_entrypoint() {
                 if env::var_os("PERSISTED_INTROSPECTION").is_some() {
                     config = config.with_introspection(true);
                 }
+                if let Ok(listener) = env::var(PROMETHEUS_LISTENER_ENV) {
+                    config = config.with_telemetry(
+                        crate::RouterTelemetryConfig::new()
+                            .with_prometheus_listener(
+                                listener.parse().expect("Prometheus listener address"),
+                                "/internal/metrics",
+                            )
+                            .omit_operation_name_from_metrics(
+                                env::var_os(OMIT_OPERATION_NAME_ENV).is_some(),
+                            ),
+                    );
+                }
                 let control = env::var("PERSISTED_CONTROL").ok();
                 if let Some(control) = &control {
                     config = config.with_schema_poll_interval(Duration::from_secs(3600)).validate().unwrap();
@@ -425,11 +444,72 @@ async fn run_wire_app() {
 #[derive(Debug)]
 struct TestAuthenticationProvider;
 
+/// The `role-events` catalogue as the parent test controls it. The file holds
+/// either `fresh`/`stale`, or `key=value` lines: `state`, `generation`,
+/// space-separated `scopes`, and `lifetime_ms`.
+struct TestAuthority {
+    stale: bool,
+    generation: u64,
+    scopes: Vec<String>,
+    lifetime: Duration,
+}
+
+impl TestAuthority {
+    fn read() -> Self {
+        let mut authority = Self {
+            stale: false,
+            generation: 1,
+            scopes: vec![
+                "products.p1.events".to_owned(),
+                "products.failure.events".to_owned(),
+            ],
+            lifetime: ROLE_AUTHORITY_LIFETIME,
+        };
+        let content = env::var_os(AUTHORITY_CONTROL_ENV)
+            .and_then(|path| fs::read_to_string(path).ok())
+            .unwrap_or_default();
+        for line in content.lines().map(str::trim) {
+            match line.split_once('=') {
+                Some(("state", state)) => authority.stale = state == "stale",
+                None if !line.is_empty() => authority.stale = line == "stale",
+                Some(("generation", value)) => authority.generation = value.parse().unwrap(),
+                Some(("scopes", value)) => {
+                    authority.scopes = value.split_whitespace().map(str::to_owned).collect();
+                }
+                Some(("lifetime_ms", value)) => {
+                    authority.lifetime = Duration::from_millis(value.parse().unwrap());
+                }
+                _ => {}
+            }
+        }
+        authority
+    }
+}
+
 impl AuthenticationProvider for TestAuthenticationProvider {
+    fn authority_generation(&self) -> Option<u64> {
+        Some(TestAuthority::read().generation)
+    }
+
     fn authenticate_bearer(
         &self,
         token: &str,
     ) -> Result<AuthenticatedPrincipal, AuthenticationError> {
+        if token == "role-events" {
+            let authority = TestAuthority::read();
+            if authority.stale {
+                return Err(AuthenticationError::unavailable(
+                    "role-scope catalogue snapshot exceeded its maximum staleness",
+                ));
+            }
+            return Ok(AuthenticatedPrincipal::new(
+                "role-subject",
+                authority.scopes,
+                SystemTime::now().checked_add(Duration::from_secs(3_600)),
+            )?
+            .with_authority_valid_until(Instant::now() + authority.lifetime)
+            .with_authority_generation(authority.generation));
+        }
         let (subject, scopes) = match token {
             "product-p1" => ("test-subject", vec!["products.p1.read"]),
             "product-admin" => ("test-subject", vec!["products.admin"]),
@@ -1487,6 +1567,146 @@ fn public_static_router_serves_only_after_complete_preparation() {
         "SUBGRAPH_FAILURE"
     );
 
+    // Pinned engine defaults: no mutations over GET and no request batching.
+    let get_mutation = raw_http(
+        router.address,
+        "GET",
+        "/api/graphql?query=mutation%20%7B%20renameProduct(id%3A%20%22p1%22%2C%20name%3A%20%22x%22)%20%7B%20id%20%7D%20%7D",
+        &[("accept", "application/json")],
+        None,
+    )
+    .unwrap();
+    let get_mutation_body = String::from_utf8_lossy(&get_mutation.body);
+    assert!(
+        get_mutation_body.contains("MUTATION_NOT_ALLOWED_OVER_HTTP_GET"),
+        "{} {get_mutation_body}",
+        get_mutation.status
+    );
+    let batch = serde_json::to_vec(&json!([
+        {"query": "query { product(id: \"p1\") { id } }"},
+        {"query": "query { product(id: \"p1\") { id } }"}
+    ]))
+    .unwrap();
+    let batched = raw_http(router.address, "POST", "/api/graphql", &[], Some(&batch)).unwrap();
+    let batched_body = String::from_utf8_lossy(&batched.body);
+    assert!(
+        batched.status >= 400 && !batched_body.contains("\"data\""),
+        "{} {batched_body}",
+        batched.status
+    );
+
+    // A request head that stalls is closed by the HTTP server's header read
+    // deadline instead of holding the connection open.
+    let mut slow = TcpStream::connect(router.address).unwrap();
+    slow.set_read_timeout(Some(TEST_TIMEOUT)).unwrap();
+    slow.write_all(b"GET /health HTTP/1.1\r\nHost: router\r\n")
+        .unwrap();
+    let started = Instant::now();
+    let mut stalled = Vec::new();
+    let _ = slow.read_to_end(&mut stalled);
+    assert!(
+        started.elapsed() < TEST_TIMEOUT,
+        "a stalled request head must be closed by the server"
+    );
+    assert!(
+        stalled.is_empty() || stalled.starts_with(b"HTTP/1.1 408"),
+        "{}",
+        String::from_utf8_lossy(&stalled)
+    );
+
+    router.stop();
+}
+
+#[test]
+fn prometheus_exporter_binds_only_its_separate_scrape_address() {
+    prometheus_exporter_case("127.0.0.2:0", false);
+}
+
+#[test]
+fn prometheus_exporter_binds_ipv6_and_can_omit_operation_names() {
+    prometheus_exporter_case("[::1]:0", true);
+}
+
+fn prometheus_exporter_case(bind: &str, omit_operation_name: bool) {
+    let products = LoopbackSubgraph::start(SubgraphKind::Products);
+    let reviews = LoopbackSubgraph::start(SubgraphKind::Reviews);
+    let products_sdl = LoopbackSdl::start(PRODUCTS_V1);
+    let reviews_sdl = LoopbackSdl::start(REVIEWS);
+    // The public listener binds 127.0.0.1. Reserve a port on another loopback
+    // address for the exporter; Hive binds it itself, so release it first.
+    let metrics = {
+        let reserved = TcpListener::bind(bind).expect("second loopback address");
+        reserved.local_addr().unwrap()
+    };
+    let mut command = Command::new(env::current_exe().expect("test executable path"));
+    if omit_operation_name {
+        command.env(OMIT_OPERATION_NAME_ENV, "true");
+    }
+    let child = command
+        .args([
+            "--exact",
+            "federation::wire_tests::router_child_entrypoint",
+            "--nocapture",
+        ])
+        .env(CHILD_ENV, "static")
+        .env(PRODUCTS_ENDPOINT_ENV, products.endpoint())
+        .env(REVIEWS_ENDPOINT_ENV, reviews.endpoint())
+        .env(PRODUCTS_SDL_ENDPOINT_ENV, products_sdl.endpoint())
+        .env(REVIEWS_SDL_ENDPOINT_ENV, reviews_sdl.endpoint())
+        .env(PROMETHEUS_LISTENER_ENV, metrics.to_string())
+        .env("RUST_TEST_THREADS", "1")
+        .env("RUST_LOG", "error")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("metrics router child should start");
+    let mut router = TestRouter::from_child(child, false).0;
+    router.wait_until_ready();
+    assert_eq!(
+        router.address.ip(),
+        "127.0.0.1".parse::<std::net::IpAddr>().unwrap()
+    );
+
+    let literal = "metrics-literal-7f3a";
+    let operation = "MetricsOperation5d2b";
+    let response = router.graphql_at(
+        "/api/graphql",
+        json!({"query": format!("query {operation} {{ product(id: \"{literal}\") {{ id }} }}")}),
+        &[("x-approved", "metrics-header-9c1e")],
+    );
+    assert!(response.get("data").is_some(), "{response}");
+
+    let mut scrape = None;
+    wait_until("Prometheus scrape", || {
+        scrape = raw_http(metrics, "GET", "/internal/metrics", &[], None)
+            .ok()
+            .filter(|response| response.status == 200);
+        scrape.is_some()
+    });
+    let scrape = scrape.unwrap();
+    let body = String::from_utf8_lossy(&scrape.body);
+    assert!(body.contains("# TYPE"), "{body}");
+    for secret in [literal, "metrics-header-9c1e", "schema-secret"] {
+        assert!(
+            !body.contains(secret),
+            "the exporter must not publish request or credential text: {secret}"
+        );
+    }
+    assert_eq!(
+        body.contains(operation),
+        !omit_operation_name,
+        "the operation-name attribute follows the opt-in filter: {body}"
+    );
+    assert!(body.contains("http_server_request_duration"), "{body}");
+
+    // The exporter is not on the public IP address, and the public listener
+    // does not serve the scrape path.
+    let public_ip_metrics = std::net::SocketAddr::new(router.address.ip(), metrics.port());
+    assert!(
+        raw_http(public_ip_metrics, "GET", "/internal/metrics", &[], None).is_err(),
+        "nothing listens on the public IP address at the exporter port"
+    );
+    assert_ne!(router.probe("/internal/metrics"), 200);
     router.stop();
 }
 
@@ -1716,6 +1936,7 @@ fn authenticated_admin_registration_binds_identity_destinations_and_restart_stat
     assert!(metrics["router_graphql_requests_total"].as_u64().unwrap() >= 2);
     assert!(metrics["router_subgraph_requests_total"].as_u64().unwrap() >= 2);
     assert_eq!(metrics["router_websocket_rejections_total"], 0);
+    assert_eq!(metrics["router_websocket_send_failures_total"], 0);
     // A router without byte routes reports none of their keys.
     assert!(
         metrics
@@ -2331,6 +2552,213 @@ fn authenticated_websocket_uses_provider_clock_and_rejects_clock_failure() {
         }
         router.stop();
     }
+}
+
+#[test]
+fn established_websocket_respects_the_role_authority_deadline() {
+    let products = LoopbackSubgraph::start(SubgraphKind::Products);
+    let reviews = LoopbackSubgraph::start(SubgraphKind::Reviews);
+    let products_sdl = LoopbackSdl::start(PRODUCTS_V1);
+    let reviews_sdl = LoopbackSdl::start(REVIEWS);
+    let products_protocol = LoopbackProtocol::start(protocol_descriptor(
+        "products",
+        products.endpoint(),
+        products_sdl.endpoint(),
+        authenticated_product_operations(false),
+    ));
+    let reviews_protocol = LoopbackProtocol::start(protocol_descriptor(
+        "reviews",
+        reviews.endpoint(),
+        reviews_sdl.endpoint(),
+        Vec::new(),
+    ));
+    let temp = TemporaryConfig::new();
+    let control = temp.directory.join("authority");
+    fs::write(&control, "fresh").unwrap();
+    let child = Command::new(env::current_exe().expect("test executable path"))
+        .args([
+            "--exact",
+            "federation::wire_tests::router_child_entrypoint",
+            "--nocapture",
+        ])
+        .env(CHILD_ENV, "auth-subscriptions")
+        .env(AUTHORITY_CONTROL_ENV, &control)
+        .env(PRODUCTS_ENDPOINT_ENV, products.endpoint())
+        .env(REVIEWS_ENDPOINT_ENV, reviews.endpoint())
+        .env(PRODUCTS_SDL_ENDPOINT_ENV, products_sdl.endpoint())
+        .env(REVIEWS_SDL_ENDPOINT_ENV, reviews_sdl.endpoint())
+        .env(PRODUCTS_PROTOCOL_ENDPOINT_ENV, products_protocol.endpoint())
+        .env(REVIEWS_PROTOCOL_ENDPOINT_ENV, reviews_protocol.endpoint())
+        .env("RUST_TEST_THREADS", "1")
+        .env("RUST_LOG", "error")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("authority router child should start");
+    let mut router = TestRouter::from_child(child, false).0;
+    router.wait_until_ready();
+    let subscription = r#"subscription { productChanged(id: "p1") { id } }"#;
+    let assert_unavailable = |message: &Value| {
+        assert_eq!(message["type"], "error", "{message}");
+        assert_eq!(
+            message["payload"][0]["extensions"]["code"], "UNAUTHENTICATED",
+            "{message}"
+        );
+    };
+
+    let mut role = TestWebSocket::connect_at(router.address, "/api/graphql");
+    role.connection_init_bearer("role-events");
+    role.subscribe("held", subscription);
+    assert_eq!(
+        role.wait_for_operation_message("held", "next")["payload"]["data"]["productChanged"]["id"],
+        "p1"
+    );
+    // Fresh expansions renew the deadline: the connection outlives several.
+    thread::sleep(ROLE_AUTHORITY_LIFETIME * 3);
+    let mut direct = TestWebSocket::connect_at(router.address, "/api/graphql");
+    direct.connection_init_bearer("product-events");
+    direct.subscribe("direct", subscription);
+    direct.wait_for_operation_message("direct", "next");
+
+    // The authority goes stale: the held subscription ends, and new operations
+    // are refused, while the connection itself stays open.
+    fs::write(&control, "stale").unwrap();
+    assert_unavailable(&role.wait_for_operation_message("held", "error"));
+    role.subscribe("after", subscription);
+    assert_unavailable(&role.wait_for_operation_message("after", "error"));
+    role.subscribe("query", r#"query { product(id: "p1") { id } }"#);
+    assert_unavailable(&role.wait_for_operation_message("query", "error"));
+
+    // Direct scopes do not depend on the authority.
+    direct.subscribe("direct-2", subscription);
+    direct.wait_for_operation_message("direct-2", "next");
+
+    // A refreshed authority restores the same role-bearing connection.
+    fs::write(&control, "fresh").unwrap();
+    role.subscribe("renewed", subscription);
+    assert_eq!(
+        role.wait_for_operation_message("renewed", "next")["payload"]["data"]["productChanged"]["id"],
+        "p1"
+    );
+    router.stop();
+}
+
+#[test]
+fn refreshed_role_catalogue_applies_to_established_websockets() {
+    let products = LoopbackSubgraph::start(SubgraphKind::Products);
+    let reviews = LoopbackSubgraph::start(SubgraphKind::Reviews);
+    let products_sdl = LoopbackSdl::start(PRODUCTS_V1);
+    let reviews_sdl = LoopbackSdl::start(REVIEWS);
+    let products_protocol = LoopbackProtocol::start(protocol_descriptor(
+        "products",
+        products.endpoint(),
+        products_sdl.endpoint(),
+        authenticated_product_operations(false),
+    ));
+    let reviews_protocol = LoopbackProtocol::start(protocol_descriptor(
+        "reviews",
+        reviews.endpoint(),
+        reviews_sdl.endpoint(),
+        Vec::new(),
+    ));
+    let temp = TemporaryConfig::new();
+    let control = temp.directory.join("authority");
+    // A long deadline: only the generation can trigger re-expansion here.
+    let catalogue = |generation: u64, scopes: &str| {
+        fs::write(
+            &control,
+            format!("state=fresh\ngeneration={generation}\nscopes={scopes}\nlifetime_ms=600000\n"),
+        )
+        .unwrap();
+    };
+    catalogue(1, "products.p1.events products.failure.events");
+    let child = Command::new(env::current_exe().expect("test executable path"))
+        .args([
+            "--exact",
+            "federation::wire_tests::router_child_entrypoint",
+            "--nocapture",
+        ])
+        .env(CHILD_ENV, "auth-subscriptions")
+        .env(AUTHORITY_CONTROL_ENV, &control)
+        .env(PRODUCTS_ENDPOINT_ENV, products.endpoint())
+        .env(REVIEWS_ENDPOINT_ENV, reviews.endpoint())
+        .env(PRODUCTS_SDL_ENDPOINT_ENV, products_sdl.endpoint())
+        .env(REVIEWS_SDL_ENDPOINT_ENV, reviews_sdl.endpoint())
+        .env(PRODUCTS_PROTOCOL_ENDPOINT_ENV, products_protocol.endpoint())
+        .env(REVIEWS_PROTOCOL_ENDPOINT_ENV, reviews_protocol.endpoint())
+        .env("RUST_TEST_THREADS", "1")
+        .env("RUST_LOG", "error")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("authority router child should start");
+    let mut router = TestRouter::from_child(child, false).0;
+    router.wait_until_ready();
+    let p1 = r#"subscription { productChanged(id: "p1") { id } }"#;
+
+    let mut role = TestWebSocket::connect_at(router.address, "/api/graphql");
+    role.connection_init_bearer("role-events");
+    role.subscribe("held", p1);
+    role.wait_for_operation_message("held", "next");
+    let mut direct = TestWebSocket::connect_at(router.address, "/api/graphql");
+    direct.connection_init_bearer("product-events");
+    direct.subscribe("direct", p1);
+    direct.wait_for_operation_message("direct", "next");
+
+    // An unrelated catalogue change leaves the effective scopes identical: the
+    // held subscription keeps running across several generation checks.
+    catalogue(2, "products.failure.events products.p1.events");
+    thread::sleep(Duration::from_millis(1_500));
+    role.subscribe("same", p1);
+    let message = role.next_message();
+    assert_eq!(
+        (message["id"].as_str(), message["type"].as_str()),
+        (Some("same"), Some("next")),
+        "identical effective scopes must not end the held subscription: {message}"
+    );
+
+    // The refreshed catalogue removes the authorizing scope while the role
+    // stays known. Without any client message, every subscription on the
+    // connection ends with the authorization-changed error.
+    catalogue(3, "products.failure.events");
+    let mut ended = std::collections::BTreeSet::new();
+    while ended.len() < 2 {
+        let message = role.next_message();
+        assert_eq!(
+            message["type"], "error",
+            "no further events may arrive: {message}"
+        );
+        assert_eq!(
+            message["payload"][0]["extensions"]["code"], "SUBSCRIPTION_AUTHORIZATION_CHANGED",
+            "{message}"
+        );
+        ended.insert(message["id"].as_str().unwrap().to_owned());
+    }
+    assert_eq!(ended, ["held", "same"].map(str::to_owned).into());
+
+    // Resubscribing is authorized against the new catalogue and refused.
+    role.subscribe("again", p1);
+    let refused = role.next_message();
+    assert_eq!(
+        (refused["id"].as_str(), refused["type"].as_str()),
+        (Some("again"), Some("next")),
+        "{refused}"
+    );
+    assert!(refused["payload"].get("data").is_none(), "{refused}");
+    assert_eq!(
+        refused["payload"]["errors"][0]["extensions"]["code"], "FORBIDDEN",
+        "{refused}"
+    );
+    role.wait_for_operation_message("again", "complete");
+    // Direct scopes are unaffected by catalogue generations.
+    direct.subscribe("direct-2", p1);
+    direct.wait_for_operation_message("direct-2", "next");
+
+    // Restoring the scope authorizes the next operation again.
+    catalogue(4, "products.p1.events products.failure.events");
+    role.subscribe("restored", p1);
+    role.wait_for_operation_message("restored", "next");
+    router.stop();
 }
 
 #[test]
@@ -4941,7 +5369,12 @@ fn handle_subgraph_websocket(
     });
     if !matches!(
         authorization,
-        Some("Bearer product-events" | "Bearer product-events-refreshed" | "Bearer short-lived")
+        Some(
+            "Bearer product-events"
+                | "Bearer product-events-refreshed"
+                | "Bearer short-lived"
+                | "Bearer role-events"
+        )
     ) {
         return write_server_websocket_close(&mut request.stream, 4401, "unauthorized");
     }

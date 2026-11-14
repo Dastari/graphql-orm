@@ -3,7 +3,7 @@ title: "Strict Authorization Guide"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-14
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -63,8 +63,12 @@ entity with no row isolation still needs a provider; one that allows
 its rows is enough.
 
 An entity that declares no policy has no such requirement: with `auth: "required"`, any authenticated
-subject can use its generated operations.
-[#287](https://github.com/Dastari/graphql-orm/issues/287) tracks requiring an explicit decision.
+subject can use its generated operations. To make that a recorded decision rather than an omission,
+set `require_policies: true` in `schema_roots!`: every listed entity must then declare a
+`read_policy`, a `write_policy`, an entity-level `auth = "none"` or the `policy = "open"` marker, or the build fails with an error
+naming the entity. The marker states that the entity is deliberately open; it changes nothing at
+run time and cannot be combined with a policy key. `Entity::POLICY_DECISION_DECLARED` exposes the
+same fact to host tooling. Without the setting, nothing is required.
 
 Generated single-row reads (get-by-key roots, `NodeId` lookups and Federation
 `_entities`) apply the same row authority as generated list reads. The SQL
@@ -202,7 +206,7 @@ Writes follow the same rule, with one difference between the two surfaces:
 | GraphQL upsert, new row | as create |
 | GraphQL upsert, existing row | every writable input field outside the primary key and upsert key, `skip_input` and host-managed timestamps included, keyed or key-less, supplied or omitted, with the current row and the value about to be written; ORM-managed timestamps and the managed version are not asked about, and a keyed field outside that set is not asked |
 | GraphQL `updateMany` | as update, per matched row |
-| Repository `insert`, `insert_many`, `insert_if_absent` and their transaction forms | every create field through the repository decision |
+| Repository `insert`, `insert_many`, `insert_if_absent` and their transaction forms | every create field through the repository decision; `insert` with a bare pool instead of a `Database` takes the same path on a default handle over that pool, so a declared key is `AUTHORIZATION_MISCONFIGURED` there |
 | Repository `update_by_id`, `update_by_key`, `update_where`, `update_if`, `compare_and_swap` and their transaction forms | every supplied field through the repository decision, with the current row |
 | Repository `upsert`, `upsert_many` | every create field for a new row; every field its update sets for an existing one (changed or not; primary-key and upsert-key fields are asked only on insert); through the repository decision |
 | Repository-only entities | every create and supplied update field (unchanged) |
@@ -235,10 +239,13 @@ and names the public field on both surfaces: the message is
 an omission.
 
 **What the repository callbacks receive.** Generated repository reads and
-writes always call `can_read_repository_field` and `can_write_repository_field`
-with `access: None`: the ORM cannot tell a hook, a worker or a custom resolver
-apart on this surface (see [repository / system access](#repository-system-access)).
-`None` is not system authority, and it is not a reason to refuse either. Decide
+writes call `can_read_repository_field` and `can_write_repository_field` with
+`access: None` unless the caller presents a named system access: a handle
+labelled with `Database::with_system_access`, or a hook write inside
+`MutationContext::with_system_access`, passes `Some(AccessContext::System(..))`
+(see [repository / system access](#repository-system-access)). Without a label
+the ORM cannot tell a hook, a worker or a custom resolver apart on this
+surface. `None` is not system authority, and it is not a reason to refuse either. Decide
 on the entity name, field name and policy key. A provider that refuses every
 call without an access context refuses every generated repository write,
 including the writes of companion crates on their own entities;
@@ -329,8 +336,31 @@ existing row they select:
 | neither read nor write it | `success: false`, `error: "Entity not found"`, as for a missing row | row is left out: not written, counted or held against the `notify_with` 1,000-row bound |
 
 So the response never depends on rows the caller can't read or write, and a
-filter can't probe their columns. For a dependent delete this holds for the
-root row only. A dependent child row the caller can neither read nor write is
+filter can't probe their columns. Without more help from the host, those rows
+are still selected and locked, and passed to the row callbacks, before they are
+treated as missing. `RowPolicy::write_target_prefilter` removes that
+difference: return a `ReadPredicate` that selects the rows the caller can read
+**or** write, and generated GraphQL `update`, `delete`, `updateMany` and
+`deleteMany` add it to their locking read, so a row outside it is never
+selected, locked or passed to a callback. The predicate only narrows. Every
+selected row is still classified by `can_write_row` and `can_read_row`, so it
+cannot grant a write; a row it leaves out is treated as missing even where the
+callbacks would have allowed it, so it must not exclude rows the caller can
+write. The default returns `None`. Repository writes do not ask.
+
+A generated GraphQL bulk write may write at most
+`PaginationConfig::max_bulk_write_rows` rows (default `10_000`) per mutation
+field and is refused with `errorCode = "PAGE_LIMIT_EXCEEDED"` when more rows
+the caller may write match; see
+[bulk write bound](runtime-and-writes.md#bulk-write-bound). The bound counts
+rows after the classification above, so hidden rows never decide whether it is
+reached. With a row policy installed the candidates are classified in pages
+under the read scan budget (`max_scanned_rows`); a scan that would need more
+candidates is refused as an authorized read is, which is the one way hidden
+rows can still affect the outcome, and a prefilter removes them from the scan.
+
+For a dependent delete, leaving hidden rows out holds for
+the root row only. A dependent child row the caller can neither read nor write is
 not left out. Like any other unauthorized dependent, it makes the whole delete
 refuse with `Dependent delete refused`, so the refusal can reveal that such a
 child exists. A write-only caller still writes rows it can't
@@ -360,20 +390,53 @@ refuses these calls as unauthenticated. A custom resolver applies its own checks
 `Some(ctx)`.
 
 Writes from a mutation hook reach policies the same way, without the originating request, so
-`ScopeEntityPolicy::new` refuses them too. A policy can't distinguish hooks, workers and custom
-resolvers on this surface, and `AccessContext` reaches only repository field policies.
-[#291](https://github.com/Dastari/graphql-orm/issues/291) tracks an explicit authority.
+`ScopeEntityPolicy::new` refuses them too. By default a policy can't distinguish hooks, workers
+and custom resolvers on this surface.
 
-Do not treat `None` as system authority. Use:
+Do not treat `None` as system authority. A trusted caller presents a named one instead, and the
+policy decides on it:
 
 ```rust
 use graphql_orm::prelude::*;
 
-let system = SystemAccess::new("backup-worker").with_capabilities(vec!["export".into()]);
-let access = AccessContext::System(&system);
-// or
-let access = AccessContext::Principal(&db_auth);
+// A worker: every repository call and transaction on this handle presents it.
+let worker = db.clone().with_system_access(
+    SystemAccess::new("backup-worker").with_capabilities(vec!["export".into()]),
+);
+
+// A mutation hook: the writes it makes inside the scope present it.
+hook_ctx
+    .with_system_access(SystemAccess::new("order-cleanup"), |tx| {
+        Box::pin(async move { tx.delete_where::<OrderLine>(lines).await })
+    })
+    .await?;
 ```
+
+| Caller | `ctx` | Surface | `db.system_access()` | Repository field callbacks' `access` |
+| --- | --- | --- | --- | --- |
+| Generated GraphQL operation | `Some` | a `Graphql*` surface | `None` | not asked |
+| Repository helper, transaction or hook write with no label | `None` | `Repository` | `None` | `None` |
+| The same through `Database::with_system_access` | `None` | `Repository` | the handle's `SystemAccess` | `Some(AccessContext::System(..))` |
+| A hook write inside `MutationContext::with_system_access` | `None` | `Repository` | the scope's `SystemAccess` | `Some(AccessContext::System(..))` |
+
+Entity and row policies receive the `Database` the call runs on and read the label with
+`Database::system_access()`; `FieldPolicy::can_read_repository_field` and
+`can_write_repository_field` receive it as `AccessContext::System`. The label grants nothing by
+itself: a policy that does not look at it decides as it did, and a call without one still presents
+no authority. A hook is given the originating request, so it decides from that request whether to
+open a scope; the policy then decides whether the named access may do the write. Every policy
+check of a write made inside the scope uses the scope's access: entity access, field decisions,
+the existing row and the row as written. A handle with broad access that enters a narrower scope
+is therefore held to the narrower one, and a row it writes that the scope may not write is refused
+and blocks the commit, like any other refused written row. A scope ends when
+its future completes and restores the previous access; if the future is dropped first, the
+transaction can no longer commit. Keep a labelled handle out of GraphQL schema data, and let a
+policy that honours a label also require `ctx` to be `None`.
+
+Hook writes still use the `Repository` surface, and nested writes do not receive the originating
+request's `Context`. [#291](https://github.com/Dastari/graphql-orm/issues/291) tracks whether to
+add a separate surface or to carry the request, both of which would change what existing policies
+observe.
 
 ## Subscriptions
 
