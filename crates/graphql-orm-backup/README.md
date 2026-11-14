@@ -10,6 +10,13 @@ supersedes: []
 
 # graphql-orm-backup
 
+Version 0.18.0 requires storage 0.12.0, whose S3 conditional creates, and so
+repository locks, run as one attempt; run
+`S3StorageBackend::probe_conditional_create` before using an S3 bucket as a
+repository. It adds restore tests for early-stopping sinks and swapped change
+payloads, and builds every target in the native SMB configuration without
+`local`. See [MIGRATION.md](MIGRATION.md).
+
 Version 0.17.0 exports object references from the same rows as the table backup
 and writes repository-bound seals. Upgrade custom indexes and configure legacy
 restore trust as described in [MIGRATION.md](MIGRATION.md).
@@ -69,7 +76,7 @@ restore before replacing a production pin.
 
 ```toml
 [dependencies]
-graphql-orm-backup = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.16.0" }
+graphql-orm-backup = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.18.0" }
 ```
 
 The default `local` feature provides `LocalBackupRepository`. To supply only a

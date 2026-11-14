@@ -10,6 +10,30 @@ supersedes: []
 
 # Changelog
 
+## 0.18.0 (unreleased)
+
+Requires `graphql-orm-storage` 0.12.0. See [MIGRATION.md](MIGRATION.md).
+
+- On S3, a repository lock or content object whose conditional create has an
+  unknown outcome now fails with a non-retryable error instead of being
+  retried inside the SDK, where a retry after a lost success reported the
+  writer's own lock as held (storage
+  [#657](https://github.com/Dastari/graphql-orm/issues/657)). The usage
+  guide tells hosts to run `S3StorageBackend::probe_conditional_create`
+  before using an S3 bucket as a repository (storage
+  [#478](https://github.com/Dastari/graphql-orm/issues/478)).
+- Restore tests cover a sink that returns success before reading an object
+  to its end, which fails as unverified, and a change payload swapped after
+  verification, which is never applied or compacted. The architecture and
+  restore-semantics guides no longer describe SMB as creating restored
+  objects at their final key with delete-on-close: since storage 0.11.0 a
+  refused object is never readable at its key.
+  ([#612](https://github.com/Dastari/graphql-orm/issues/612))
+- The `lifecycle_safety` integration test requires the `local` feature, so
+  every target builds in the native SMB configuration
+  (`--no-default-features --features smb`).
+  ([#662](https://github.com/Dastari/graphql-orm/issues/662))
+
 ## 0.17.0 (unreleased)
 
 - `AcceptSealedLegacy` authenticates format-2 content without repository binding;
