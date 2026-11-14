@@ -103,13 +103,15 @@ pub struct InputInventoryRecord {
     pub children: Vec<InputInventoryChild>,
 }
 
-#[graphql_complex_object]
+#[cfg_attr(
+    feature = "field-case-pascal",
+    graphql_complex_object(rename_fields = "PascalCase")
+)]
+#[cfg_attr(not(feature = "field-case-pascal"), graphql_complex_object)]
 impl InputInventoryRecord {
-    #[cfg_attr(feature = "field-case-pascal", graphql(name = "Document"))]
     async fn document(&self) -> Option<graphql_orm::async_graphql::Json<serde_json::Value>> {
         self.document.clone().map(graphql_orm::async_graphql::Json)
     }
-    #[cfg_attr(feature = "field-case-pascal", graphql(name = "Location"))]
     async fn location(&self) -> Option<graphql_orm::async_graphql::Json<serde_json::Value>> {
         self.location.clone().map(graphql_orm::async_graphql::Json)
     }
