@@ -74,12 +74,16 @@ let response = api.execute(request).await;
 
 Serve runtime queries and mutations with `Schema::execute`. The request guard
 prepares an operation in async-graphql's `execute` extension hook, which
-`execute_stream` does not run for queries and mutations. Over `execute_stream`
-(for example a graphql-ws transport) every runtime query and mutation root,
-including `RuntimeHostField` roots, refuses with the stable code
-`request_not_prepared`, before any host resolver, authority call or database
-work. Live `…Changed` subscriptions and host-owned subscription roots use
-`execute_stream` as before.
+`execute_stream` does not run for queries and mutations, so a query or mutation
+sent over `execute_stream` (for example a graphql-ws transport) is always
+refused before any host resolver, authority call or database work. When the
+schema has a subscription root (a live collection or a host
+`subscription_root`), every runtime query and mutation root, including
+`RuntimeHostField` roots, refuses with the stable code `request_not_prepared`.
+Without one, async-graphql refuses the request itself, with its own uncoded
+message, before any extension runs; the ORM adds no placeholder subscription
+root, which would change the SDL. Live `…Changed` subscriptions and host-owned
+subscription roots use `execute_stream` as before.
 
 Install protection before a protected module. The default profile requires it.
 Options are non-exhaustive so future D configuration can remain source-compatible;

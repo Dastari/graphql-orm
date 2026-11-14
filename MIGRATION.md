@@ -34,8 +34,10 @@ once RLS is enabled on its module's tables. SQLite and other backends are
 unaffected.
 
 **Serve runtime queries and mutations with `Schema::execute`.** Over
-`execute_stream` every runtime query and mutation root, including
-`RuntimeHostField` roots, now refuses with `request_not_prepared`. ORM roots
+`execute_stream` a query or mutation is always refused: when the schema has a
+subscription root, every runtime query and mutation root, including
+`RuntimeHostField` roots, refuses with `request_not_prepared`; without one,
+async-graphql refuses the request with its own uncoded message. ORM roots
 already failed there (with an error naming an internal type); host roots ran
 without the operation-assurance pre-pass and now refuse too. Route queries and
 mutations of a streaming transport through `Schema::execute`; live
