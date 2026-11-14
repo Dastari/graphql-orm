@@ -8,6 +8,9 @@ must pass, so every failure is caused by the single reverted rule.
 
 import importlib.util
 import shutil
+import json
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,6 +26,9 @@ COPIED = [
     "scripts/check-schema-export.sh",
     "crates/graphql-orm-storage/tests/samba/run.sh",
 ]
+COPIED += [str(p.relative_to(ROOT)) for p in supply_chain.test_source_files(ROOT)]
+COPIED += [str(p.relative_to(ROOT)) for p in (ROOT / "crates").rglob("*")
+           if p.is_file() and (p.name == "Dockerfile" or p.name.endswith(".Dockerfile") or p.name.startswith("Dockerfile."))]
 CHECKOUT = "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5"
 TOOLCHAIN = "dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1"
 CACHE = "Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2"
@@ -59,6 +65,150 @@ class SupplyChainTests(unittest.TestCase):
 
     def release_job(self, name):
         return supply_chain.jobs((self.root / ".github/workflows/release.yml").read_text())[name]
+
+    def test_checkout_credentials_are_not_persisted(self):
+        self.edit(".github/workflows/ci.yml", "persist-credentials: false", "persist-credentials: true")
+        self.assertReported("checkout must disable persisted credentials")
+
+    def test_publisher_tag_validation_is_required(self):
+        self.edit(".github/workflows/release.yml", "test \"${package_tags}\" = \"${expected_tags}\"", ": # removed tag binding")
+        self.assertReported("publisher must bind tags to workspace manifests")
+
+    def test_floating_rust_postgres_image_is_rejected(self):
+        path = self.root / "crates/example/tests/image.rs"
+        path.parent.mkdir(parents=True)
+        path.write_text('const IMAGE: &str = "postgres:17-alpine";')
+        self.assertReported("Rust test image is not pinned by digest")
+
+    def test_scoped_unexpected_manifest_tag_fails_before_tag_creation(self):
+        self.test_unexpected_manifest_tag_fails_before_tag_creation("release-scoped", "target/scoped-dist")
+
+    def test_unexpected_manifest_tag_fails_before_tag_creation(self, job_name="release", directory="release-dist"):
+        # Run the actual publisher shell with a recording git stub; never push or tag.
+        job = self.release_job(job_name)
+        script = next(code for code in supply_chain.run_scripts(job) if "tags_to_push=()" in code)
+        binary = self.root / "bin"
+        binary.mkdir()
+        git = binary / "git"
+        git.write_text('#!/bin/bash\ncase "$*" in\n*show-ref*) if [[ ${EXISTING_RELEASE:-} == 1 ]]; then exit 0; fi; exit 1;;\n*origin/main*) echo \"${MAIN_SHA:-a}\";;\n*rev-parse*) echo a;;\ntag*) echo tagged >> "$TAG_LOG";;\nesac\n')
+        git.chmod(0o755)
+        tags = []
+        for manifest in ROOT.glob("crates/*/Cargo.toml"):
+            target = self.root / manifest.relative_to(ROOT)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(manifest.read_text())
+            import tomllib
+            package = tomllib.loads(manifest.read_text())["package"]
+            tags.append({"tag": package["name"] + "-v" + package["version"]})
+        dist = self.root / directory
+        dist.mkdir(parents=True)
+        manifest = dist / "workspace-2000.01.01.1.json"
+        env = {**os.environ, "PATH": str(binary) + ":" + os.environ["PATH"],
+               "RELEASE_ID": "workspace-2000.01.01.1", "GITHUB_SHA": "a",
+               "GH_TOKEN": "test", "TAG_LOG": str(self.root / "tag.log")}
+        for extra in ["other-v1.0.0", "--force", "graphql-orm-v999.0.0"]:
+            manifest.write_text(json.dumps({"packages": tags + [{"tag": extra}]}))
+            result = subprocess.run(["bash", "-c", script], cwd=self.root, env=env, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse((self.root / "tag.log").exists())
+        manifest.write_text(json.dumps({"packages": tags}))
+        for invalid in ["workspace-2000.01.01.1\n", "..", "refs/workspace-2000.01.01.1", "-workspace-2000.01.01.1"]:
+            invalid_result = subprocess.run(["bash", "-c", script], cwd=self.root,
+                                            env={**env, "RELEASE_ID": invalid}, capture_output=True)
+            self.assertNotEqual(invalid_result.returncode, 0)
+            self.assertFalse((self.root / "tag.log").exists())
+        moved = subprocess.run(["bash", "-c", script], cwd=self.root,
+                               env={**env, "MAIN_SHA": "b"}, capture_output=True)
+        self.assertNotEqual(moved.returncode, 0)
+        self.assertFalse((self.root / "tag.log").exists())
+        existing = subprocess.run(["bash", "-c", script], cwd=self.root,
+                                  env={**env, "EXISTING_RELEASE": "1"}, capture_output=True)
+        self.assertNotEqual(existing.returncode, 0)
+        self.assertFalse((self.root / "tag.log").exists())
+        result = subprocess.run(["bash", "-c", script], cwd=self.root, env=env, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.root / "tag.log").exists())
+
+    def test_other_test_images_and_dockerfile_names(self):
+        for directory in ["crates/example/tests", "crates/example/src/test_support", "crates/example/test-support"]:
+            path = self.root / directory / "images.rs"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            for ref in ["docker.io/library/postgres:17-alpine", "redis:7", "mcr.microsoft.com/mssql/server:2022-latest", "registry.example:5000/team/image:v1"]:
+                path.write_text('const IMAGE: &str = "' + ref + '";')
+                self.assertReported("Rust test image is not pinned by digest")
+            path.unlink()
+        for extension in ['toml', 'yaml', 'json', 'js']:
+            path = self.root / "crates/example/tests" / ('images.' + extension)
+            path.write_text('"docker.io/library/redis:7"')
+            self.assertReported("Rust test image is not pinned by digest")
+            path.unlink()
+        for name in ["test.Dockerfile", "Dockerfile.test"]:
+            path = self.root / "crates/example/tests" / name
+            path.write_text("FROM redis:7\n")
+            self.assertReported("Dockerfile image is not pinned by digest")
+            path.unlink()
+
+    def test_manual_dispatch_is_separate_and_shares_the_postgres_action(self):
+        ci = (self.root / '.github/workflows/ci.yml').read_text()
+        self.assertNotIn('workflow_dispatch', ci)
+        self.assertIn("if: github.event_name == 'push' && github.ref == 'refs/heads/main'",
+                      supply_chain.jobs(ci)['owned-postgres-complete'])
+        manual = (self.root / '.github/workflows/owned-postgres-manual.yml').read_text()
+        self.assertIn('  workflow_dispatch:', manual)
+        self.assertNotIn('  push:', manual)
+        self.assertNotIn('  pull_request:', manual)
+        self.assertIn('group: owned-postgres-manual-', manual)
+        for file, name in [('ci.yml', 'owned-postgres-complete'),
+                           ('owned-postgres-manual.yml', 'qualify-postgres'),
+                           ('release.yml', 'owned-postgres-complete')]:
+            body = supply_chain.jobs((self.root / '.github/workflows' / file).read_text())[name]
+            self.assertIn('uses: ./.github/actions/owned-postgres-complete', body)
+            self.assertIn('timeout-minutes: 120', body)
+        self.edit('.github/workflows/owned-postgres-manual.yml',
+                  './.github/actions/owned-postgres-complete', './.github/actions/other')
+        self.assertReported('owned PostgreSQL caller must use the shared action')
+
+    def test_untagged_container_run_image_is_rejected(self):
+        path = self.root / 'crates/example/tests/container.rs'
+        path.parent.mkdir(parents=True)
+        for call in ['Command::new("docker").args(["run", "redis"]).status();',
+                     'Command::new("podman").arg("run").arg("redis").status();',
+                     'subprocess.run(["docker", "run", "redis"])',
+                     "subprocess.run(['docker', 'run', 'redis'])",
+                     'Command::new("docker").args(["run", "-d", "--name", "owned", "docker.io/library/redis"]).status();']:
+            path.write_text(call)
+            self.assertReported('container run image is not pinned by digest')
+        path.write_text('Command::new("docker").args(["run", "redis@sha256:' + 'a' * 64 + '"]).status();')
+        self.assertEqual(self.messages(), [])
+
+    def test_credentials_are_masked_and_never_passed_in_git_argv(self):
+        workflow = supply_chain.jobs((self.root / '.github/workflows/release.yml').read_text())
+        count = 0
+        for name, body in workflow.items():
+            if 'GIT_CONFIG_COUNT:' not in body:
+                continue
+            count += 1
+            self.assertEqual(body.count('- id: git-auth'), 1)
+            self.assertIn('set -euo pipefail\n          encoded=$(', body)
+            self.assertIn('echo "::add-mask::${encoded}"', body)
+            self.assertIn('echo "::add-mask::${header}"', body)
+            self.assertIn('GIT_CONFIG_KEY_0: http.https://github.com/.extraheader', body)
+            self.assertNotIn('git -c ', body)
+            self.assertNotIn('git config http.', body)
+            # Only Git steps receive the config, not the later bundle compiler.
+            for step in supply_chain.steps(body):
+                if any('name: ' + name in step for name in
+                       ['Restore release tag visibility', 'Create annotated release tags']):
+                    self.assertNotIn('GH_TOKEN:', step)
+                if 'GIT_CONFIG_COUNT:' in step:
+                    self.assertTrue('git fetch' in step or 'git push' in step)
+                    self.assertNotIn('cargo ', step)
+        self.assertEqual(count, 5)
+
+    def test_workspace_integrity_runs_both_contract_suites(self):
+        ci = supply_chain.jobs((self.root / '.github/workflows/ci.yml').read_text())
+        for script in ['test-release-workflow-contract.py', 'test-reviewed-cargo-tool.py']:
+            self.assertIn('python3 scripts/' + script, ci['workspace-integrity'])
 
     def test_current_tree_passes(self):
         self.assertEqual(self.messages(), [])

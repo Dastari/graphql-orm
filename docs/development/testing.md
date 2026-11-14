@@ -329,3 +329,39 @@ tag/revision/path sources), and one
 `graphql-orm`/macro universe. The router lane exercises only the one-way
 resource-server validator and matcher adapters; it must not instantiate
 issuer-side or storage services.
+
+## Newer compiler compatibility
+
+`scripts/check-async-trait-clippy.sh 1.99.0` builds a bounded temporary crate
+using async-trait 0.1.89 and runs warnings-denied Clippy. This reproduces the
+compatibility issue tracked in [#107](https://github.com/Dastari/graphql-orm/issues/107)
+without changing the reviewed compiler baseline or suppressing unused-future
+diagnostics. Run it through the shared build-slot wrapper on shared machines.
+A passing reproducer alone does not qualify a baseline upgrade: an owning macro
+compatibility fix and warnings-denied storage plus all affected AI
+provider/backend Clippy lanes are still required.
+
+## Test-image static checks
+
+`scripts/check-workflow-supply-chain.py` checks quoted image-shaped references
+in test/support Rust, shell, Python, TOML, YAML, JSON and JavaScript/TypeScript
+files, plus Dockerfile variants. It also checks literal Docker/Podman run
+arguments in Rust command calls and literal argument arrays; an untagged image
+pulls `latest` and must be pinned by digest too. Exact path/literal exceptions
+identify non-image fixture data and intentional negative tests.
+
+This is a static literal check, not a language parser or a complete inventory of
+container execution. It does not cover image names and tags assembled from
+separate values, other dynamic image arguments, or files outside the scanned
+`crates/**/tests`, `support`, `test_support` and `test-support` directories. Review
+those paths when adding or changing container launch code.
+
+## Manual PostgreSQL qualification
+
+The separate `owned-postgres-manual.yml` workflow is dispatch-only and uses its
+own concurrency group. It calls the same local PostgreSQL action as main-push
+CI and full release validation. Run it on a selected branch with
+`gh workflow run owned-postgres-manual.yml --ref <branch>`.
+It does not create skipped check runs for CI's other jobs or share CI's main
+concurrency group. The runner has a 120-minute timeout and reclaims disk before
+executing the two owned PostgreSQL test families. No release is triggered.

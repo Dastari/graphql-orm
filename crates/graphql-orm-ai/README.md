@@ -760,3 +760,5 @@ method-only tracing warnings and a bounded counter. Initialization bytes,
 budgets, effect replay and version readiness (Related to #333) are unchanged.
 No data migration. See the [migration guide](MIGRATION.md) and
 [protocol contract and threat review](docs/provider-sessions-and-hosted-activity.md#optional-read-marker-notification-policy).
+
+Test-owned PostgreSQL infrastructure uses digest-pinned images.

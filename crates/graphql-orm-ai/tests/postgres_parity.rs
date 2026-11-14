@@ -30,7 +30,8 @@ use secrecy::SecretString;
 use sha2::Sha256;
 
 const LOCAL_DOCKER_SOCKET: &str = "unix:///var/run/docker.sock";
-const POSTGRES_IMAGE: &str = "postgres:17-alpine";
+const POSTGRES_IMAGE: &str =
+    "postgres:17-alpine@sha256:d3244e8ce3f165ee3c93d9c4a4b1d0fe48b3a89e2287b717fdcbbde92d405065";
 
 #[derive(
     GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,

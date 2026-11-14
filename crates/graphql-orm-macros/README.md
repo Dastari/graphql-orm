@@ -19,7 +19,7 @@ operation assurance; `RowPolicy::write_target_prefilter`,
 `Database::with_system_access`, `MutationContext::with_system_access`,
 transaction extensions, `order_by_fields` with the generated `<Entity>OrderField`
 enum and `schema_roots!` `require_policies` are new and opt-in. Upgrade ORM/macros together; see the
-[root migration guide](../../MIGRATION.md#01430-to-01470-write-paths-hooks-and-authority).
+[root migration guide](../../MIGRATION.md#01440-to-01470-write-paths-hooks-and-authority).
 
 Version 0.143.0 gives authorization one contract: every generated read path
 asks the field policy about a field with or without a policy key;
@@ -767,3 +767,5 @@ SDL export builds. Runtime builds must leave it disabled; see
 [schema export](../../docs/reference/graphql-orm/schema-export.md).
 
 Version 0.93.0 shares generated scalar-filter SQL and semantic metadata builders to reduce consumer compile cost. SQL, binds, SDL and public contracts are unchanged; no data migration is needed.
+
+Test-owned PostgreSQL infrastructure uses digest-pinned images.
