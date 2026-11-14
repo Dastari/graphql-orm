@@ -202,6 +202,7 @@ fn label_ids_containing_commas_cannot_collide() {
 #[test]
 fn semantic_catalogue_validates_label_fields() {
     let entity = |labels: &[&str]| GraphqlEntitySemanticMetadata {
+        generated_input_members: Vec::new(),
         entity_name: "Book".into(),
         description: "Book".into(),
         default_classification: GraphqlSemanticClassification::Internal,
@@ -253,6 +254,7 @@ fn semantic_catalogue_validates_label_fields() {
         record_version: None,
     };
     let author = GraphqlEntitySemanticMetadata {
+        generated_input_members: Vec::new(),
         entity_name: "Author".into(),
         description: "Author".into(),
         default_classification: GraphqlSemanticClassification::Internal,

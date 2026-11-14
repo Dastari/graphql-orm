@@ -763,8 +763,62 @@ pub struct GraphqlSemanticFieldMetadata {
     pub has_field_policy: bool,
 }
 
+/// Generated input family described by host-only shape metadata.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum GraphqlGeneratedInputKind {
+    /// Generated create input, also used by upsert.
+    Create,
+    /// Generated update input.
+    Update,
+    /// Entity filter input.
+    Where,
+    /// Ordinary entity ordering input.
+    OrderBy,
+    /// Keyset ordering input.
+    KeysetOrderBy,
+    /// Composite or runtime key input.
+    Key,
+    /// Runtime relationship link input.
+    Links,
+    /// One runtime relationship's link change.
+    LinkChange,
+}
+
+/// One generated input member that remains closed to model-authored plans.
+///
+/// This is a trusted host assertion used only to check generated input shapes.
+/// Entity serialization and public catalogue fingerprints omit this sidecar.
+/// Recompose it from the producer when consuming a serialized catalogue.
+/// Debug formatting redacts its names and type; consumers return diagnostics
+/// to host code and do not log this contract or send it to a model.
+#[derive(Clone, Eq, PartialEq)]
+pub struct GraphqlGeneratedInputMember {
+    /// Generated family, including create inputs reused by upsert.
+    pub kind: GraphqlGeneratedInputKind,
+    /// Exact generated input-object identity.
+    pub input_type: String,
+    /// Exact member identity in that input object.
+    pub field_name: String,
+    /// Exact GraphQL input type, including list and nullability structure.
+    pub type_ref: GraphqlSemanticTypeRef,
+    /// Whether the generated member is non-null and has no default.
+    ///
+    /// This contract cannot represent a non-null member with a default:
+    /// validation requires `required` to be the inverse of outer nullability.
+    /// Current generators do not emit such undisclosed members.
+    pub required: bool,
+}
+
+impl std::fmt::Debug for GraphqlGeneratedInputMember {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GraphqlGeneratedInputMember")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Canonical semantic metadata for one public entity/type.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphqlEntitySemanticMetadata {
     /// Public GraphQL entity/type identity.
@@ -775,6 +829,14 @@ pub struct GraphqlEntitySemanticMetadata {
     pub default_classification: GraphqlSemanticClassification,
     /// Public fields only, in declaration order.
     pub fields: Box<[GraphqlSemanticFieldMetadata]>,
+    /// Host-only contracts for generated members that are never disclosed.
+    ///
+    /// Omitted from serde exports/imports, SDL, router extensions and public
+    /// catalogue fingerprints and equality. Producers supply this metadata in memory;
+    /// serialized catalogues must be recomposed with their producer contracts
+    /// before compiling capabilities that use these members.
+    #[serde(skip)]
+    pub generated_input_members: Vec<GraphqlGeneratedInputMember>,
     /// Ordered fields whose values form one human-readable label per record,
     /// for pickers, relation cells and model context. Each names a selectable,
     /// exportable, non-secret, non-list scalar or enum field of this entity. Empty when the
@@ -785,6 +847,33 @@ pub struct GraphqlEntitySemanticMetadata {
     /// wire and fingerprint when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record_version: Option<GraphqlRecordVersionMetadata>,
+}
+
+impl PartialEq for GraphqlEntitySemanticMetadata {
+    fn eq(&self, other: &Self) -> bool {
+        self.entity_name == other.entity_name
+            && self.description == other.description
+            && self.default_classification == other.default_classification
+            && self.fields == other.fields
+            && self.label_fields == other.label_fields
+            && self.record_version == other.record_version
+    }
+}
+
+impl Eq for GraphqlEntitySemanticMetadata {}
+
+impl std::fmt::Debug for GraphqlEntitySemanticMetadata {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GraphqlEntitySemanticMetadata")
+            .field("entity_name", &self.entity_name)
+            .field("description", &self.description)
+            .field("default_classification", &self.default_classification)
+            .field("fields", &self.fields)
+            .field("label_fields", &self.label_fields)
+            .field("record_version", &self.record_version)
+            .finish()
+    }
 }
 
 /// The field that carries an entity's optimistic-concurrency record version.
@@ -971,6 +1060,14 @@ pub trait GraphqlSemanticResultTypeMetadata {
 }
 
 /// Versioned canonical semantic graph for one composed GraphQL schema.
+///
+/// The entire graph is a trusted host assertion. Public fields and Deserialize
+/// allow hosts to supply descriptors without using their constructors. Generated
+/// reach follows operations, relationship arguments and entity metadata; a
+/// custom resolver reusing a generated input receives that entity's disclosure.
+/// Consumers cannot prove resolver interpretation from these assertions.
+/// Host-only generated input member contracts are not serialized; reattach
+/// producer metadata after a public JSON/extension round trip for AI compilation.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphqlSemanticCatalog {
@@ -980,7 +1077,8 @@ pub struct GraphqlSemanticCatalog {
     pub entities: Vec<GraphqlEntitySemanticMetadata>,
     /// Public operations ordered by root coordinate.
     pub operations: Vec<GraphqlSemanticOperationDescriptor>,
-    /// Stable fingerprint over the complete versioned semantic graph.
+    /// Stable fingerprint over the public versioned semantic graph.
+    /// Host-only generated input member contracts are excluded.
     pub fingerprint: String,
 }
 
@@ -1306,6 +1404,17 @@ impl GraphqlSemanticOperationDescriptor {
     /// Mutations start as [`AiMutationExecutionPolicy::Prohibited`]; use
     /// [`Self::with_ai_mutation_execution`] to classify them.
     ///
+    /// The generated label is an assertion by trusted host code that the
+    /// resolver is the ORM's generated resolver. Consumers check canonical
+    /// input identities and shapes to limit what this label can disclose.
+    /// Those checks cannot prove how a host resolver interprets canonical
+    /// arguments. Generated reach also follows relationship argument descriptors
+    /// and entity metadata. Catalogue structs have public fields and implement
+    /// Deserialize: the entire catalogue is a trusted host assertion, not proof
+    /// of resolver behavior. A custom root reusing a real generated input gets
+    /// that entity's generated disclosure even if its resolver interprets the
+    /// members differently. Other input types require handwritten disclosure.
+    ///
     /// # Errors
     ///
     /// Returns an error for invalid names, descriptions, arguments, or types.
@@ -1502,6 +1611,55 @@ fn validate_entity(entity: &GraphqlEntitySemanticMetadata) -> Result<(), Graphql
         return Err(GraphqlSemanticError::new(
             "semantic entity has too many fields",
         ));
+    }
+    let mut hidden_coordinates = BTreeSet::new();
+    for member in &entity.generated_input_members {
+        let entity_name = &entity.entity_name;
+        let canonical = match member.kind {
+            GraphqlGeneratedInputKind::Create => {
+                member.input_type == format!("Create{entity_name}Input")
+            }
+            GraphqlGeneratedInputKind::Update => {
+                member.input_type == format!("Update{entity_name}Input")
+            }
+            GraphqlGeneratedInputKind::Where => {
+                member.input_type == format!("{entity_name}WhereInput")
+            }
+            GraphqlGeneratedInputKind::OrderBy => {
+                member.input_type == format!("{entity_name}OrderByInput")
+            }
+            GraphqlGeneratedInputKind::KeysetOrderBy => {
+                member.input_type == format!("{entity_name}KeysetOrderByInput")
+            }
+            GraphqlGeneratedInputKind::Key => member.input_type == format!("{entity_name}KeyInput"),
+            GraphqlGeneratedInputKind::Links => {
+                member.input_type == format!("{entity_name}LinksInput")
+            }
+            GraphqlGeneratedInputKind::LinkChange => member
+                .input_type
+                .strip_prefix(entity_name)
+                .and_then(|name| name.strip_suffix("LinkChangeInput"))
+                .is_some_and(|relation| !relation.is_empty()),
+        };
+        if !canonical {
+            return Err(GraphqlSemanticError::new(
+                "generated undisclosed input identity is invalid",
+            ));
+        }
+        let nullable = match &member.type_ref {
+            GraphqlSemanticTypeRef::Named { nullable, .. }
+            | GraphqlSemanticTypeRef::List { nullable, .. } => *nullable,
+        };
+        if !valid_graphql_name(&member.input_type)
+            || !valid_graphql_name(&member.field_name)
+            || member.required == nullable
+            || !hidden_coordinates.insert((&member.input_type, &member.field_name))
+        {
+            return Err(GraphqlSemanticError::new(
+                "generated undisclosed input member contract is invalid",
+            ));
+        }
+        member.type_ref.validate(0)?;
     }
     let mut fields = BTreeSet::new();
     for field in &entity.fields {
@@ -2213,6 +2371,7 @@ mod filter_contract_tests {
             has_field_policy: false,
         };
         let entity = GraphqlEntitySemanticMetadata {
+            generated_input_members: Vec::new(),
             entity_name: "Record".into(),
             description: "Public record.".into(),
             default_classification: GraphqlSemanticClassification::Internal,
@@ -2242,6 +2401,39 @@ mod filter_contract_tests {
     }
 
     #[test]
+    fn public_catalogue_equality_excludes_generated_input_contracts() {
+        let entity = GraphqlEntitySemanticMetadata {
+            entity_name: "Record".into(),
+            description: "Public record.".into(),
+            default_classification: GraphqlSemanticClassification::Internal,
+            fields: Vec::new().into_boxed_slice(),
+            label_fields: Vec::new(),
+            record_version: None,
+            generated_input_members: vec![GraphqlGeneratedInputMember {
+                kind: GraphqlGeneratedInputKind::OrderBy,
+                input_type: "RecordOrderByInput".into(),
+                field_name: "LabelLength".into(),
+                type_ref: GraphqlSemanticTypeRef::named(
+                    "OrderDirection",
+                    GraphqlSemanticTypeKind::Enum,
+                    true,
+                ),
+                required: false,
+            }],
+        };
+        let catalog = GraphqlSemanticCatalog::compose_descriptors([entity], []).unwrap();
+        let decoded =
+            GraphqlSemanticCatalog::from_extension_payload(catalog.extension_payload().unwrap())
+                .unwrap();
+        assert!(decoded.entities[0].generated_input_members.is_empty());
+        assert_eq!(decoded.fingerprint, catalog.fingerprint);
+        assert_eq!(decoded, catalog);
+        let mut different = decoded.entities[0].clone();
+        different.description = "Another public description.".into();
+        assert_ne!(different, catalog.entities[0]);
+    }
+
+    #[test]
     fn record_version_is_omitted_when_absent_and_must_name_a_scalar_field() {
         let field = |name: &str, scalar: &str| GraphqlSemanticFieldMetadata {
             field_name: name.into(),
@@ -2260,6 +2452,7 @@ mod filter_contract_tests {
             has_field_policy: false,
         };
         let entity = |record_version| GraphqlEntitySemanticMetadata {
+            generated_input_members: Vec::new(),
             entity_name: "Record".into(),
             description: "Public record.".into(),
             default_classification: GraphqlSemanticClassification::Internal,

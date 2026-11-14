@@ -629,7 +629,9 @@ async fn searchable_module_semantic_catalog_matches_sdl() {
     )
     .expect("searchable composition must compile in the AI catalog");
     capabilities.capabilities().find(|capability| capability.field_name() == "records").unwrap().compile_compact(serde_json::json!({
-        "arguments":{"search":{(member("query")):"bridge",(member("mode")):"PLAIN"}},
+        "arguments":{"search":{(member("query")):"bridge",(member("mode")):"PLAIN"},
+            "where":{"title":{"eq":"Harbour Bridge"}},
+            "orderBy":[{"field":"title","direction":"ASC","nulls":"LAST"}]},
         "selections":["id","title"],"maximumItems":1,"relationshipArguments":{},"relationshipMaximumItems":{}
     })).expect("AI compiler accepts the searchable runtime input types");
 }

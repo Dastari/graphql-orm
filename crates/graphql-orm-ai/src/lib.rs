@@ -29,6 +29,7 @@ mod budget;
 mod capability_delivery;
 mod configuration;
 mod content_protection;
+mod control_plane;
 // Used by the ORM persistence services, which exist for these backends only.
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod custody_field_policy;
@@ -168,6 +169,7 @@ pub use budget::*;
 pub use capability_delivery::*;
 pub use configuration::*;
 pub use content_protection::*;
+pub use control_plane::ai_control_plane_root_fields;
 pub use domain::*;
 pub use egress::*;
 pub use execution::*;

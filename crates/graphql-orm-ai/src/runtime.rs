@@ -41,12 +41,12 @@ pub struct AiRuntimeReadinessReport {
 
 /// Crate-minted authority to open one runtime start gate.
 ///
-/// Only [`crate::OrmAiRuntimeRecoveryService`] creates this value, and only
+/// Only `OrmAiRuntimeRecoveryService` creates this value, and only
 /// after it has read or recorded a live recovery epoch for the exact compiled
 /// module fingerprint in one store. An epoch row restored from a portable
 /// backup is never live. A file-level or physical database restore carries
 /// the deployment-local marker with the rows, so the crate cannot detect it;
-/// run [`crate::OrmAiRuntimeRecoveryService::reconcile_restore`] after any
+/// run `OrmAiRuntimeRecoveryService::reconcile_restore` after any
 /// such restore.
 ///
 /// The proof is bound to its store through its epoch: leases record the
@@ -103,9 +103,9 @@ impl AiRuntimeStartGate {
     /// Opens the gate for a crate-minted proof of a live recovery epoch.
     ///
     /// Obtain the proof from
-    /// [`crate::OrmAiRuntimeRecoveryService::readiness_proof`] for the store
+    /// `OrmAiRuntimeRecoveryService::readiness_proof` for the store
     /// this runtime's workers use, or call
-    /// [`crate::OrmAiRuntimeRecoveryService::open_start_gate`]. A host-built
+    /// `OrmAiRuntimeRecoveryService::open_start_gate`. A host-built
     /// [`AiRuntimeReadinessReport`] is not accepted.
     ///
     /// # Errors

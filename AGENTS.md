@@ -39,6 +39,7 @@ under a crate add package-local invariants.
 - Preserve this acyclic dependency direction:
   `graphql-orm-ai -> graphql-orm-ai-tool-profiles -> graphql-orm-operation-catalog`,
   `graphql-orm-ai -> graphql-orm`,
+  `graphql-orm-ai -> graphql-orm-operation-catalog`,
   `graphql-orm-ai -> graphql-orm-storage`,
   `graphql-orm-backup -> graphql-orm-storage`, optional
   `graphql-orm-backup -> graphql-orm`, and

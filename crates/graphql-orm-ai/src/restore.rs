@@ -454,7 +454,7 @@ impl AiRestoreReconciler {
     /// includes one fatal `AI_RESTORE_AUDIT_EVIDENCE_MISSING` issue per
     /// required audit and can never report readiness. Use
     /// [`Self::plan_collected`] with database-collected facts, and
-    /// [`crate::OrmAiRuntimeRecoveryService::reconcile_restore`] to apply
+    /// `OrmAiRuntimeRecoveryService::reconcile_restore` to apply
     /// closure. This method never resumes provider work or invokes
     /// application tools.
     pub fn plan(&self, facts: &AiRestoreSnapshotFacts) -> AiRestorePlan {
@@ -623,7 +623,7 @@ impl AiRestoreReconciler {
     ///
     /// Every incomplete, truncated, or structurally invalid audit becomes a
     /// fatal issue. The returned digests bind the recovery epoch that
-    /// [`crate::OrmAiRuntimeRecoveryService::reconcile_restore`] records, but
+    /// `OrmAiRuntimeRecoveryService::reconcile_restore` records, but
     /// do not themselves prove application or validation.
     ///
     /// # Errors

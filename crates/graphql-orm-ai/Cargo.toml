@@ -63,6 +63,7 @@ base64 = { version = "0.22", optional = true }
 futures = "0.3"
 graphql-orm = { workspace = true }
 graphql-orm-ai-tool-profiles = { workspace = true }
+graphql-orm-operation-catalog = { workspace = true }
 graphql-orm-storage = { workspace = true }
 hex = "0.4"
 image = { version = "=0.25.10", default-features = false, features = ["jpeg", "png"] }

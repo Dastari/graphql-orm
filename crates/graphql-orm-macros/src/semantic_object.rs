@@ -399,6 +399,7 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStrea
                     ::graphql_orm::graphql::orm::GraphqlEntitySemanticMetadata
                 > = ::std::sync::OnceLock::new();
                 METADATA.get_or_init(|| ::graphql_orm::graphql::orm::GraphqlEntitySemanticMetadata {
+                    generated_input_members: ::std::vec::Vec::new(),
                     entity_name: #object_name.to_owned(),
                     description: #description.to_owned(),
                     default_classification: #classification_tokens,

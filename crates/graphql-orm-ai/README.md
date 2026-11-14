@@ -10,9 +10,15 @@ supersedes: []
 
 # graphql-orm-ai
 
-AI 0.143.0 uses ORM/macros 0.150.0 and AI schema module `0.80.0` (nullable cleanup metadata columns; no data backfill). The runtime and provider bug batch tightens approval execution, principal validation, reclamation and egress bounds. Unshared obsolete credentials are deleted after durable cleanup recording; shared references and failed deletes remain available through scoped host retry APIs. Provider-file cleanup has a bounded, explicitly unconfirmed terminal outcome; see [migration guidance](MIGRATION.md#01400-to-01430-runtime-and-provider-bug-batch).
+AI 0.143.0 uses ORM/macros 0.150.0 and AI schema module `0.80.0` (nullable cleanup metadata columns; no data backfill). The runtime and provider bug batch tightens approval execution, principal validation, reclamation and egress bounds. Unshared obsolete credentials are deleted after durable cleanup recording; shared references and failed deletes remain available through scoped host retry APIs. Provider-file cleanup has a bounded, explicitly unconfirmed terminal outcome; see [migration guidance](MIGRATION.md#01420-to-01430-runtime-and-provider-bug-batch).
 
 Native quota retry and pending-quota lifecycle tests run on explicitly sized 1 MiB threads in the AI test lanes. Production provider/approval phases use heap-pinned futures, and an unstarted replacement drops its completed pass before the next pass starts.
+
+Version `0.142.0` derives the AI control-plane root set from this crate's own GraphQL roots and applies it to static tools, generated capability sets and remote requests. Static tool documents must parse to exactly one operation of the declared kind and contract name, and handwritten operation inputs disclose only host-declared fields. No data migration is needed. See the [migration guide](MIGRATION.md#01400-to-01420-exact-tool-registration-and-derived-control-plane-roots).
+
+AI 0.142.0 requires ORM/macros 0.149.0 and operation catalogue 0.8.0 for
+host-only generated input contracts. Static GraphQL variable definitions and
+tool argument schemas are host-authored and are not cross-checked by registration.
 
 Version `0.139.0` adopts ORM 0.143.0 and keeps the crate's own records readable and writable whatever the host `FieldPolicy` answers for repository field decisions: internal handles answer those decisions for the crate's own entities and delegate everything else, and `database()` returns the host's handle. No data migration is needed. See the [migration guide](MIGRATION.md#01380-to-01390-custody-of-the-crates-own-records-under-a-host-field-policy).
 

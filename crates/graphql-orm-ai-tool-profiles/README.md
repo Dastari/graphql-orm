@@ -3,7 +3,7 @@ title: "graphql-orm-ai-tool-profiles"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-10-31
+last_reviewed: 2026-11-13
 review_by: 2027-02-11
 supersedes: []
 ---
@@ -19,6 +19,29 @@ be used without selecting the `graphql-orm-ai` persistence runtime.
 It does not enable resolvers, mint authority, perform introspection, execute
 GraphQL, grant provider egress, or make a generated resolver an AI tool. Those
 are separate runtime decisions and must remain default-deny.
+
+Version `0.23.0` requires operation catalogue 0.8.0 and ORM/macros 0.149.0
+producer metadata. It closes handwritten input objects by default. Every input object
+outside canonical generated entity and service inputs and their proved filter,
+operand and page helpers is handwritten, wherever it is reached. Generated
+recognition requires canonical identities and member types together with
+generated operation or relationship reach, including shared helpers. A generated
+label asserts the trusted host's resolver choice; it cannot prove that a host
+resolver interprets canonical arguments as the ORM does. A handwritten input has no
+canonical field coordinates, so its fields are described to the provider and
+accepted in a plan only when the host declares them with
+`AiCustomInputDisclosure`: an exact input-field coordinate, or a declared custom
+operation whose reachable handwritten inputs are all disclosed. Generated
+ownership follows canonical identities and contracts. An undeclared required field fails
+readiness, and a stale declaration fails compilation. Generated producer contracts
+keep undisclosed members closed while retaining readable members. A required
+undisclosed member omits only the affected capability and returns host-only
+`diagnostics()`; canonical shape drift is a host error naming its type and member.
+Mutation and subscription
+catalogues gain `compile_with_options` to carry the declaration. Aggregate
+grouping and metric fields, and aggregate field enum values, now match the exact
+public field name, and repeated normalised plan keys are refused. See the
+[migration guide](MIGRATION.md).
 
 Version `0.22.0` adds `AiCapabilityIndexSet::ranked_matches`, the complete capability ranking before any result ceiling, so policy can filter before truncation. It also adds regression coverage that query-plan disclosure follows each field's own coordinate, never a name prefix shared with a private relation. No data migration is needed.
 

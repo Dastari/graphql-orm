@@ -9764,6 +9764,7 @@ pub(crate) mod tests {
             input PageInput { limit: Int, offset: Int }
         "#;
         let child = GraphqlEntitySemanticMetadata {
+            generated_input_members: Vec::new(),
             entity_name: "Child".to_owned(),
             description: "A bounded child record.".to_owned(),
             default_classification: GraphqlSemanticClassification::Internal,
@@ -9776,6 +9777,7 @@ pub(crate) mod tests {
             record_version: None,
         };
         let parent = GraphqlEntitySemanticMetadata {
+            generated_input_members: Vec::new(),
             entity_name: "Parent".to_owned(),
             description: "A reviewed parent record.".to_owned(),
             default_classification: GraphqlSemanticClassification::Internal,
@@ -9931,6 +9933,7 @@ pub(crate) mod tests {
             input ParentMutationInput { name: String! }
         "#;
         let parent = GraphqlEntitySemanticMetadata {
+            generated_input_members: Vec::new(),
             entity_name: "Parent".to_owned(),
             description: "A reviewed parent record.".to_owned(),
             default_classification: GraphqlSemanticClassification::Internal,
@@ -9967,13 +9970,18 @@ pub(crate) mod tests {
             [mutation],
         )
         .expect("mutation semantic catalogue should validate");
-        let compiled = AiGraphqlMutationCapabilityCatalog::compile(
+        let compiled = AiGraphqlMutationCapabilityCatalog::compile_with_options(
             "inventory",
             GraphqlExecutionTargetId::parse("inventory.graphql")
                 .expect("mutation target should validate"),
             SDL,
             &semantics,
             AiGraphqlQueryCapabilityLimits::default(),
+            crate::AiGraphqlQueryCapabilityOptions::default().with_custom_input_disclosure(
+                crate::AiCustomInputDisclosure::new()
+                    .with_exportable_field("ParentMutationInput", "name")
+                    .expect("handwritten input field should be declared"),
+            ),
         )
         .expect("automatic mutation capabilities should compile");
         let mut catalog = AiToolCatalog::new();
@@ -10000,6 +10008,7 @@ pub(crate) mod tests {
             type Parent { id: String!, name: String! }
         "#;
         let parent = GraphqlEntitySemanticMetadata {
+            generated_input_members: Vec::new(),
             entity_name: "Parent".to_owned(),
             description: "A reviewed parent event.".to_owned(),
             default_classification: GraphqlSemanticClassification::Internal,

@@ -19,7 +19,7 @@ use graphql_orm_ai_tool_profiles::{
     GraphqlExecutionTargetId,
 };
 use graphql_orm_operation_catalog::{
-    GraphqlEntitySemanticMetadata, GraphqlOperationCatalog, GraphqlOperationKind,
+    GeneratedGraphqlOperationCategory, GraphqlEntitySemanticMetadata, GraphqlOperationKind,
     GraphqlSemanticArgumentDescriptor, GraphqlSemanticCatalog, GraphqlSemanticClassification,
     GraphqlSemanticExport, GraphqlSemanticFieldMetadata, GraphqlSemanticFilterInputMetadata,
     GraphqlSemanticFilterInputOperator, GraphqlSemanticFilterOperator,
@@ -44,15 +44,12 @@ const SDL: &str = r#"
     type Plan { code: String!, codeKey: String! }
     input SubscriptionWhereInput {
         id: StringFilterInput, ownerId: StringFilterInput, ownerEmail: StringFilterInput
-        owner: OwnerWhereInput, ownerSome: OwnerWhereInput, ownerIsNull: Boolean
-        plan: PlanWhereInput
-        ownerIdExtra: StringFilterInput, owner_id: StringFilterInput, OWNERID: StringFilterInput
         and: [SubscriptionWhereInput!], or: [SubscriptionWhereInput!], not: SubscriptionWhereInput
     }
     input OwnerWhereInput { id: StringFilterInput }
     input PlanWhereInput { code: StringFilterInput, codeKey: StringFilterInput }
     input SubscriptionOrderByInput {
-        ownerId: OrderDirection, ownerEmail: OrderDirection, ownerCount: OrderDirection
+        ownerId: OrderDirection, ownerEmail: OrderDirection
     }
     input StringFilterInput { eq: String, isNull: Boolean }
     input PageInput { limit: Int, offset: Int }
@@ -152,6 +149,7 @@ fn relation(
 
 fn entity(name: &str, fields: Vec<GraphqlSemanticFieldMetadata>) -> GraphqlEntitySemanticMetadata {
     GraphqlEntitySemanticMetadata {
+        generated_input_members: Vec::new(),
         entity_name: name.to_owned(),
         description: format!("Reviewed {name} record."),
         default_classification: GraphqlSemanticClassification::Internal,
@@ -168,8 +166,12 @@ fn capability_catalog() -> AiGraphqlQueryCapabilityCatalog {
         description: format!("Typed {name} argument."),
         type_ref,
     };
-    let operation = GraphqlSemanticOperationDescriptor::custom(
+    // A generated list root: generated-kind inputs follow entity metadata
+    // only when that entity's generated roots reach them.
+    let operation = GraphqlSemanticOperationDescriptor::generated(
         GraphqlOperationKind::Query,
+        GeneratedGraphqlOperationCategory::List,
+        "Subscription",
         "Subscriptions",
         "Read one bounded subscription page.",
         vec![
@@ -184,7 +186,7 @@ fn capability_catalog() -> AiGraphqlQueryCapabilityCatalog {
         true,
     )
     .expect("subscription list semantics");
-    let semantics = GraphqlSemanticCatalog::compose_with_custom(
+    let semantics = GraphqlSemanticCatalog::compose_descriptors(
         [
             entity(
                 "Subscription",
@@ -208,7 +210,6 @@ fn capability_catalog() -> AiGraphqlQueryCapabilityCatalog {
                 ],
             ),
         ],
-        &GraphqlOperationCatalog::compose(std::iter::empty()),
         [operation],
     )
     .expect("subscription semantics");

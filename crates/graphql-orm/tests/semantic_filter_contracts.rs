@@ -350,8 +350,12 @@ fn actual_derived_spatial_contract_compiles_exact_json_plans_for_all_predicates(
         })
         .unwrap()
         .clone();
-    let operation = GraphqlSemanticOperationDescriptor::custom(
+    // The stand-in root is the entity's generated read: a generated Where
+    // input keeps its generated contract only when a generated root reaches it.
+    let operation = GraphqlSemanticOperationDescriptor::generated(
         GraphqlOperationKind::Query,
+        GeneratedGraphqlOperationCategory::SingleRead,
+        entity.entity_name.clone(),
         "GetSpatial",
         "Plan a public spatial filter.",
         vec![GraphqlSemanticArgumentDescriptor {
@@ -371,12 +375,8 @@ fn actual_derived_spatial_contract_compiles_exact_json_plans_for_all_predicates(
         true,
     )
     .unwrap();
-    let semantic = GraphqlSemanticCatalog::compose_with_custom(
-        [entity.clone()],
-        &GraphqlOperationCatalog::compose(std::iter::empty()),
-        [operation],
-    )
-    .unwrap();
+    let semantic =
+        GraphqlSemanticCatalog::compose_descriptors([entity.clone()], [operation]).unwrap();
     let catalog = AiGraphqlQueryCapabilityCatalog::compile(
         "filter-contract",
         GraphqlExecutionTargetId::parse("filter-contract.graphql").unwrap(),

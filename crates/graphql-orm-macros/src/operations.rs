@@ -16,7 +16,7 @@ use crate::naming::{
 use std::collections::HashMap;
 use syn::spanned::Spanned;
 
-fn runtime_keyset_value(ty: &syn::Type) -> Option<proc_macro2::TokenStream> {
+pub(crate) fn runtime_keyset_value(ty: &syn::Type) -> Option<proc_macro2::TokenStream> {
     let (inner, optional) = option_inner_type(ty)
         .map(|inner| (inner, true))
         .unwrap_or((ty, false));
@@ -836,7 +836,11 @@ pub(crate) struct PrimaryKeyField {
     pub(crate) graphql_name: String,
 }
 
-fn create_input_visibility(meta: &FieldMetadata, rust_name: &str, auto_generated_pk: bool) -> bool {
+pub(crate) fn create_input_visibility(
+    meta: &FieldMetadata,
+    rust_name: &str,
+    auto_generated_pk: bool,
+) -> bool {
     let is_timestamp = meta.timestamp_behavior(rust_name).exclude_input;
     let include_in_create =
         (!meta.is_primary_key || !auto_generated_pk) && !is_timestamp && meta.write;
@@ -2853,15 +2857,8 @@ fn generate_graphql_operations_unfiltered(
             && meta.default.is_some();
         if include_in_create {
             let graphql_include_in_create = !meta.skip_input || meta.input_only;
-            let graphql_create_field_type = if is_json_like_field {
-                if let Some(inner_type) = option_inner_type(field_type) {
-                    quote! { Option<::graphql_orm::async_graphql::Json<#inner_type>> }
-                } else {
-                    quote! { ::graphql_orm::async_graphql::Json<#field_type> }
-                }
-            } else {
-                quote! { #field_type }
-            };
+            let graphql_create_field_type =
+                crate::entity::graphql_write_input_type(field_type, &meta);
             let create_policy_check = {
                 if is_option_type(field_type) {
                     quote! {
