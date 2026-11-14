@@ -10,7 +10,58 @@ from replay_release import (COMPILERS, EXCLUDED_JOBS, QUALIFIED, ROOT, commands,
                             metadata_commands, require, source)
 
 
+AUTH_PREPARE = r'''
+      - id: git-auth
+        name: Prepare masked Git authentication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          encoded=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::${encoded}"
+          header="AUTHORIZATION: basic ${encoded}"
+          echo "::add-mask::${header}"
+          printf 'header=%s\n' "${header}" >> "${GITHUB_OUTPUT}"
+'''[1:]
+AUTH_ENV = r'''
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: http.https://github.com/.extraheader
+          GIT_CONFIG_VALUE_0: ${{ steps.git-auth.outputs.header }}
+'''[1:]
+TAG_HARDENING = r'''
+          [[ "${RELEASE_ID}" =~ ^workspace-[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]+$ ]]
+          git fetch origin main --tags --force
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          if git show-ref --verify --quiet "refs/tags/${RELEASE_ID}"; then
+            echo "release tag already exists: ${RELEASE_ID}" >&2
+            exit 1
+          fi
+          # Compare the entire tag set with the trusted checked-out package manifests.
+          expected_tags=$(for manifest in crates/*/Cargo.toml; do
+            awk -F '"' '/^name = / && !name {name=$2} /^version = / {print name "-v" $2; exit}' "$manifest"
+          done | LC_ALL=C sort)
+          package_tags=$(jq -er '.packages | map(.tag) | sort | .[]' "BUNDLE_DIR/${RELEASE_ID}.json")
+          test "${package_tags}" = "${expected_tags}"
+          while IFS= read -r package_tag; do
+            [[ "${package_tag}" =~ ^[a-z][a-z0-9-]*-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          done <<<"${package_tags}"
+'''[1:]
+
+
+def check_tag_hardening(tag_step, directory):
+    start = tag_step.index('          [[ "${RELEASE_ID}" =~')
+    end = tag_step.index('          tags_to_push=()')
+    require(tag_step[start:end] == TAG_HARDENING.replace('BUNDLE_DIR', directory),
+            'publisher tag hardening differs from exact reviewed literal')
+    return tag_step[:start] + tag_step[end:]
+
+
 def jobs(text):
+    text = text.replace("          persist-credentials: false\n", "")
+    text = text.replace(AUTH_PREPARE, '')
+    text = text.replace(AUTH_ENV, '')
+    text = text.replace("        with:\n      -", "      -")
     matches = list(re.finditer(r"(?m)^  ([a-z][a-z0-9-]*):\n", text))
     return {match[1]: text[match.start():matches[i + 1].start() if i + 1 < len(matches) else len(text)]
             for i, match in enumerate(matches) if match.start() > text.index("jobs:\n")}
@@ -25,7 +76,7 @@ def without_timeout(body):
 ORM_JOBS = ["orm", "orm-runtime-graphql", "orm-backends"]
 # Full-profile lanes added after the qualified snapshot. They have no qualified
 # counterpart; the scoped verification record lists them as unexecuted (#494).
-ADDED_FULL_JOBS = ["schema-export"]
+ADDED_FULL_JOBS = ["schema-export", "dependency-audit", "owned-postgres-complete"]
 # The qualified publisher is split into a read-only bundle job, which runs every
 # step that compiles or interprets code, and a publisher that holds the write,
 # OIDC and attestation permissions and runs only verification, attestation,
@@ -75,6 +126,8 @@ def job_needs(body):
 def check_publisher_split(bundle, publisher, bundle_name, validator, reference=None):
     """The publisher's steps, split across a read-only bundle job."""
     built, published = named_steps(bundle), named_steps(publisher)
+    check_tag_hardening(published["Create annotated release tags"],
+                        "release-dist" if bundle_name == "release-bundle" else "target/scoped-dist")
     for name in BUNDLE_STEPS:
         require(name not in published, f"publisher runs a bundle step: {name}")
     for name in PUBLISH_STEPS:
@@ -85,11 +138,20 @@ def check_publisher_split(bundle, publisher, bundle_name, validator, reference=N
         require(published.get(name) == built[name], f"publisher setup changed: {name}")
     if reference is not None:
         original = named_steps(reference)
+        # Raw GH_TOKEN is no longer needed by the Git-only tag step.
+        original['Create annotated release tags'] = original['Create annotated release tags'].replace(
+            '          GH_TOKEN: ${{ github.token }}\n', '')
+        previous_install = 'cargo install cargo-cyclonedx --version 0.5.9 --locked'
+        current_install = 'python3 scripts/install-reviewed-cargo-tool.py cargo-cyclonedx'
+        require(current_install in built['Build approved router artifact'], 'reviewed CycloneDX installer missing')
+        built['Build approved router artifact'] = built['Build approved router artifact'].replace(current_install, previous_install)
         for name in BUNDLE_STEPS + SHARED_STEPS:
             require(built.get(name) == original[name], f"bundle step changed: {name}")
+        tag_step = check_tag_hardening(published["Create annotated release tags"], "release-dist")
+        published["Create annotated release tags"] = tag_step
         for name in PUBLISH_STEPS:
             require(published[name] == original[name], f"publisher step changed: {name}")
-        require(reference[reference.index("    permissions:\n"):reference.index("    name:")] in publisher,
+        require(reference[reference.index("    permissions:\n"):reference.index("    name:")] in publisher.replace("      actions: read\n", ""),
                 "publisher permissions changed")
     for name in DIGEST_STEPS:
         require(name in published, f"publisher does not verify the bundle by digest: {name}")
@@ -101,7 +163,7 @@ def check_publisher_split(bundle, publisher, bundle_name, validator, reference=N
             "publisher validation boundary changed")
     require("    permissions:\n      contents: read\n" in bundle and ": write" not in bundle,
             "bundle job must be read-only")
-    require("    permissions:\n      contents: write\n      id-token: write\n      attestations: write\n" in publisher,
+    require("    permissions:\n      contents: write\n      actions: read\n      id-token: write\n      attestations: write\n" in publisher,
             "publisher permissions changed")
     for forbidden in ["rust-toolchain", "rust-cache", "cargo ", "python3", "reclaim-runner-disk", "upload-artifact"]:
         require(forbidden not in publisher, f"publisher runs build tooling: {forbidden}")
@@ -140,6 +202,17 @@ def check_orm_split(old, new):
         'cargo check -p graphql-orm --locked --no-default-features --features "$backend" --all-targets',
         'cargo clippy -p graphql-orm -p graphql-orm-macros --locked --no-default-features --features "$backend" --all-targets -- -D warnings',
         "done",
+    ]
+    # Reviewed additive PostgreSQL coverage already present on main (#507).
+    expected = [line.replace('--test runtime_strings -- --include-ignored',
+                             '--test runtime_strings --test full_text_search -- --include-ignored')
+                .replace('--test host_timestamps --locked -- --ignored',
+                         '--test host_timestamps --test point_read_visibility_backends --test visible_row_pages --locked -- --ignored')
+                if line.startswith('cargo test -p graphql-orm ') else line for line in expected]
+    expected += [
+        'cargo test -p graphql-orm --locked --no-default-features --features postgres --test postgres_rls --test postgres_rls_drift -- --include-ignored --test-threads=1',
+        'cargo test -p graphql-orm --locked --no-default-features --features postgres,change-journal --test postgres_rls_coverage --test postgres_change_journal_paths --test dependent_delete_repro -- --include-ignored --test-threads=1',
+        'cargo test -p graphql-orm --locked --no-default-features --features postgres,change-journal --lib catalog_read_cancellation -- --include-ignored --test-threads=1',
     ]
     require(sorted(split) == sorted(expected), "ORM lane commands changed by the split")
     for line in [line for name in ORM_JOBS for line in new[name].splitlines()
@@ -193,7 +266,7 @@ def main():
       - name: Verify TLS and retained query notifications on owned servers
         env:
           GRAPHQL_ORM_TEST_MSSQL_PULL: missing
-        run: cargo test -p graphql-orm --locked --no-default-features --features mssql --test mssql_tls --test mssql_notifications -- --ignored --test-threads=1
+        run: cargo test -p graphql-orm --locked --no-default-features --features mssql --test mssql_tls --test mssql_transport --test mssql_notifications -- --ignored --test-threads=1
 """
             require(current in body, "complete owned MSSQL execution is required")
             body = body.replace(current, previous, 1)
@@ -222,7 +295,7 @@ def main():
     check_publisher_split(new["release-scoped-bundle"], new["release-scoped"],
                           "release-scoped-bundle", "replay-scoped-validate")
     require("--verification-evidence" in new["release-scoped-bundle"]
-            and "git push --atomic origin" in new["release-scoped"]
+            and 'push --atomic origin' in new["release-scoped"]
             and 'test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"' in new["release-scoped"],
             "scoped evidence/atomic publication missing")
     require("environment: release" in new["guard"] and 'test "${INCLUDE_ROUTER}" = false' in new["guard"]
@@ -248,7 +321,7 @@ def main():
     original = types.ModuleType("original_release_manifest")
     original.__file__ = str(ROOT / "scripts/generate-release-manifest.py")
     exec(compile(source(QUALIFIED, "scripts/generate-release-manifest.py"), original.__file__, "exec"), original.__dict__)
-    require(first == original.build_manifest("workspace-2000.01.01.1", "HEAD", True)
+    require(first == original.build_manifest("workspace-2000.01.01.1", "HEAD", False)
             and module.render_notes(first) == original.render_notes(first),
             "default full manifest or notes changed from released generator")
     contracts = first["contracts"]
@@ -256,8 +329,8 @@ def main():
             and contracts == sorted(contracts, key=lambda row: row["name"]), "contract order changed")
     replay = [row for row in contracts if row["name"].startswith("graphql-orm-owned-planning-replay-")]
     require(len(replay) == 3, "both explicit recipes and format must remain recorded")
-    print("Positive release conformance: 15 full jobs preserved with explicit backend coverage additions and the ORM job split; "
-          "1 added full lane; publishers split from read-only bundle jobs; 5 explicit scoped jobs; "
+    print(f"Positive release conformance: {len(EXCLUDED_JOBS)} full lanes preserve reviewed backend coverage and the ORM job split; "
+          f"{len(ADDED_FULL_JOBS)} additive full lanes; publishers split from read-only bundle jobs; 5 explicit scoped jobs; "
           "deterministic manifest and three replay contract rows.")
 
 

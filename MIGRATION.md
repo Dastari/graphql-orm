@@ -5971,3 +5971,11 @@ access path.
 - The current `auth-agql` feature targets `agql-auth` 0.16.0 at revision
   `3bc38cd94794f1e868a9cc3a5551047b95a32105`; earlier release sections above
   retain their historical pins.
+
+## graphql-orm 0.144.0
+
+Test infrastructure only: no API or data migration required. Owned PostgreSQL tests pull digest-pinned images.
+
+## graphql-orm-macros 0.144.0
+
+Test infrastructure only: no API or data migration required. Owned PostgreSQL tests pull digest-pinned images.

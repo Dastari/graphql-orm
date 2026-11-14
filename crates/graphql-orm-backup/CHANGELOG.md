@@ -10,6 +10,10 @@ supersedes: []
 
 # Changelog
 
+## 0.18.0 (unreleased)
+
+- Pin test-owned PostgreSQL images by digest. No runtime API or data migration.
+
 ## 0.17.0 (unreleased)
 
 - `AcceptSealedLegacy` authenticates format-2 content without repository binding;
