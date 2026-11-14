@@ -26,9 +26,6 @@ smb = [
     "dep:tracing",
 ]
 azure = []
-# Test infrastructure only: barriers and handles for the managed Samba sweep
-# tests. Never enable it in an application.
-smb-sweep-test-hooks = ["smb"]
 
 [dependencies]
 async-trait = "0.1"

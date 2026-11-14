@@ -29,12 +29,6 @@ from the host application if long-running processes may be interrupted. It
 removes only that exact form, never a stored object whose name ends in
 `.uploading`.
 
-`SmbStorageBackend::sweep_temp_files` does the same on an SMB share, by the
-server's clock, as a maintenance-window operation: the host states with
-`SmbRepositoryQuiesced` that nothing else modifies the repository tree while it
-runs; see
-[native SMB](native-smb.md#atomicity-and-streaming).
-
 ## Dependency
 
 Default local filesystem support:

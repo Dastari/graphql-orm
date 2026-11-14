@@ -226,18 +226,11 @@ SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP
   run_test samba_listing_follows_the_provider_prefix_contract "$SMB_TEST_CARGO" test --locked --features smb --test smb_integration \
   samba_listing_follows_the_provider_prefix_contract -- --ignored --exact --nocapture
 
-# Portable key mode refuses names a Windows target cannot store as written.
+# Portable key mode refuses new writes a Windows target cannot store as written.
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
   run_test samba_portable_keys_refuse_windows_unsafe_names "$SMB_TEST_CARGO" test --locked --features smb --test smb_integration \
   samba_portable_keys_refuse_windows_unsafe_names -- --ignored --exact --nocapture
-
-# The temporary-file sweep removes only stale backend temporary names.
-SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
-SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
-SMB_TEST_CONTAINER_NAME="$NORMAL_ID" SMB_TEST_FIXTURE_RUN="$RUN_ID" \
-  run_test samba_sweep_removes_only_stale_temporary_files "$SMB_TEST_CARGO" test --locked --features smb,smb-sweep-test-hooks --test smb_integration \
-  samba_sweep_removes_only_stale_temporary_files -- --ignored --exact --nocapture
 
 # The constrained server offers at most SMB 3.0, below the default minimum.
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$CONSTRAINED_PORT" SMB_TEST_SHARE=backups \

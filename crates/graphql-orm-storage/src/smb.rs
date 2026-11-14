@@ -7,7 +7,7 @@ use std::{
         Arc, Weak,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
@@ -17,10 +17,9 @@ use secrecy::{ExposeSecret, SecretString};
 use sha2::{Digest, Sha256};
 use smb::{
     Client, ClientConfig, ConnectionConfig, CreateOptions, Dialect, DirAccessMask, Directory, File,
-    FileAccessMask, FileAttributes, FileBasicInformation, FileCreateArgs,
-    FileDispositionInformation, FileFullDirectoryInformation, FileLinkInformation,
-    FileRenameInformation, FileStandardInformation, Resource, ShareAccessFlags, Status, UncPath,
-    connection::EncryptionMode,
+    FileAccessMask, FileAttributes, FileCreateArgs, FileDispositionInformation,
+    FileFullDirectoryInformation, FileLinkInformation, FileRenameInformation,
+    FileStandardInformation, Resource, Status, UncPath, connection::EncryptionMode,
 };
 use smb_dtyp::binrw_util::sized_wide_string::SizedWideString;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
@@ -57,10 +56,6 @@ const LISTED_PATH_OVERHEAD: usize = 64;
 /// Most pages one continuation chain of `list_blobs_page` may return. Each
 /// page re-lists the whole tree; `list_blobs` lists it once.
 const MAX_LISTING_PAGES: u64 = 1_024;
-/// Shortest age [`SmbStorageBackend::sweep_temp_files`] accepts, so that a
-/// small clock difference with the server cannot make an upload in progress
-/// look stale.
-const MIN_TEMP_SWEEP_AGE: Duration = Duration::from_secs(60 * 60);
 /// Prefix of this backend's continuation tokens.
 const CONTINUATION_PREFIX: &str = "smb1:";
 const READ_CHUNK_SIZE: usize = 256 * 1024;
@@ -320,58 +315,6 @@ impl fmt::Debug for SmbStorageConfig {
             .field("portable_keys", &self.portable_keys)
             .finish()
     }
-}
-
-/// The host's statement that nothing else modifies the repository tree while
-/// [`SmbStorageBackend::sweep_temp_files`] runs.
-///
-/// The sweep is a maintenance-window operation on a repository tree the host
-/// controls. Construct this only when, for the whole sweep, no other party
-/// modifies the tree below this backend's root prefix at all: no uploads, no
-/// renames or deletions, and no directory or reparse-point changes, from any
-/// host or process, through SMB or on the server itself. Never sweep a share
-/// where an untrusted party has write access to the repository tree. The
-/// sweep's own checks are defence in depth, not a replacement for this: age
-/// cannot protect an upload that pauses and resumes, and an SMB client with
-/// write access can empty a directory the sweep holds and turn it into a
-/// junction.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SmbRepositoryQuiesced(());
-
-impl SmbRepositoryQuiesced {
-    /// States that, for the whole sweep, no other party modifies the
-    /// repository tree: no uploads, renames, deletions, or directory or
-    /// reparse-point changes.
-    #[must_use]
-    pub const fn confirmed_by_host() -> Self {
-        Self(())
-    }
-}
-
-/// What one [`SmbStorageBackend::sweep_temp_files`] call removed and skipped.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-#[non_exhaustive]
-pub struct SmbTempSweepReport {
-    /// Stale temporary files removed.
-    pub removed: usize,
-    /// Entries and handles skipped because they are reparse points
-    /// (junctions, symbolic links and other links the server reports);
-    /// nothing behind them is entered or removed.
-    pub skipped_reparse_points: usize,
-    /// Stale temporary files skipped because another handle had them open.
-    pub skipped_in_use: usize,
-    /// Stale temporary files skipped because their size, last-write time or
-    /// type changed after enumeration.
-    pub skipped_changed: usize,
-    /// Directories skipped with everything below them because they could
-    /// not be held open as a plain directory without delete sharing: a link
-    /// the server refuses to follow, a reparse point, a directory another
-    /// client holds with delete access, or one that vanished.
-    pub skipped_directories: usize,
-    /// Handles or the sweep's connection that failed to close cleanly. The
-    /// sweep's dedicated connection is disconnected regardless, which makes
-    /// the server release them.
-    pub cleanup_failures: usize,
 }
 
 /// Options controlling whether a probe may create the configured root prefix.
@@ -750,547 +693,6 @@ impl SmbStorageBackend {
         })
     }
 
-    /// Removes this backend's stale temporary upload files below the root
-    /// prefix and reports what it removed and skipped.
-    ///
-    /// A write whose process or connection is lost between creating its
-    /// temporary file and publishing it leaves the file on the share, hidden
-    /// from listings but counting against the share's quota. The sweep walks
-    /// the root prefix depth-first within the configured listing limits and
-    /// deadline, and removes only files named exactly as this backend names
-    /// temporary files, `.<uuid>.uploading` or the `.<name>.<uuid>.uploading`
-    /// form of versions before 0.9.0, whose last-write time is at least
-    /// `older_than` before the server's current time. Every other name,
-    /// including a caller's key that merely ends in `.uploading`, is kept, as
-    /// is a file whose server reports no last-write time.
-    ///
-    /// `quiesced` is the host's statement that, for the whole sweep, no other
-    /// party modifies the repository tree; see [`SmbRepositoryQuiesced`].
-    /// Never run it on a share where an untrusted party has write access to
-    /// the repository tree. Age is measured against the server's clock, read
-    /// from a file the sweep creates and removes, never against this host's
-    /// clock. The sweep runs on its own SMB connection; if it is cancelled,
-    /// times out or fails, dropping it disconnects that connection, so the
-    /// server releases every handle it held.
-    ///
-    /// Defence in depth behind that precondition: every directory from the
-    /// share root down to the one being processed, root prefix included, is
-    /// held open while the sweep works below it, opened as itself with
-    /// `FILE_OPEN_REPARSE_POINT`, checked on the handle not to be a reparse
-    /// point, and opened without delete sharing. A directory that cannot be
-    /// held that way is skipped with everything below it and counted; it is
-    /// never opened by path alone. Entries reported as reparse points are
-    /// skipped and counted. Immediately before each candidate is opened, the
-    /// held parent's handle is asked again whether it has become a reparse
-    /// point, and its remaining candidates are skipped if so. Each candidate
-    /// is opened exclusively, without following a reparse point, and removed
-    /// through that handle, once, only if it is still a plain file with the
-    /// size and last-write time enumeration saw.
-    ///
-    /// What these checks stop: on a server that enforces share modes, other
-    /// SMB clients cannot rename, delete or replace a held directory, a file
-    /// another handle has open is not removed, and a reported reparse point
-    /// is never followed. What they do not stop: an SMB client with write
-    /// access can empty a held directory and set a reparse point on it,
-    /// after which a candidate path can resolve outside the root (the parent
-    /// re-check narrows that window but does not close it), and changes made
-    /// on the server's file system outside SMB bypass share modes. A server
-    /// that resolves links itself, as Samba does for symbolic links by
-    /// default, gives the client nothing to detect.
-    ///
-    /// Removing the temporary name of a conditional create whose link
-    /// outcome was unknown leaves any object linked at its key in place; no
-    /// published object is ever removed.
-    ///
-    /// # Errors
-    ///
-    /// Returns a non-retryable configuration error when `older_than` is less
-    /// than one hour, a listing-limit or deadline error when the walk reaches
-    /// a limit, and the first failed request's error. The sweep removes files
-    /// as it goes: files removed before an error remain removed. An error
-    /// after a removal request may have reached the server is a
-    /// non-retryable single-attempt error. The sweep is never retried
-    /// internally.
-    pub async fn sweep_temp_files(
-        &self,
-        quiesced: SmbRepositoryQuiesced,
-        older_than: Duration,
-    ) -> Result<SmbTempSweepReport, StorageError> {
-        self.sweep_with(quiesced, older_than, SweepHooks::none())
-            .await
-    }
-
-    /// Runs [`Self::sweep_temp_files`], awaiting `barrier` for each
-    /// candidate after its directory chain is held and before the candidate
-    /// is opened. Test infrastructure only: the barrier lets a test change
-    /// the share between enumeration and removal.
-    ///
-    /// # Errors
-    ///
-    /// As for [`Self::sweep_temp_files`].
-    #[cfg(feature = "smb-sweep-test-hooks")]
-    pub async fn sweep_temp_files_with_barrier(
-        &self,
-        quiesced: SmbRepositoryQuiesced,
-        older_than: Duration,
-        barrier: &SmbSweepBarrier,
-    ) -> Result<SmbTempSweepReport, StorageError> {
-        self.sweep_with(quiesced, older_than, SweepHooks { barrier })
-            .await
-    }
-
-    /// Opens the directory at the root-relative `key` with delete access and
-    /// holds it until [`SmbHeldDirectory::release`], as another client could.
-    /// Test infrastructure only.
-    ///
-    /// # Errors
-    ///
-    /// Returns the open's error.
-    #[cfg(feature = "smb-sweep-test-hooks")]
-    pub async fn hold_directory_open_for_delete(
-        &self,
-        key: &str,
-    ) -> Result<SmbHeldDirectory, StorageError> {
-        let path = self.share_path()?.with_path(&self.mapped_key(key)?);
-        let snapshot = self.client_snapshot().await;
-        let resource = self
-            .with_timeout(
-                "hold",
-                snapshot.client.create_file(
-                    &path,
-                    &FileCreateArgs::make_open_existing(
-                        DirAccessMask::new()
-                            .with_list_directory(true)
-                            .with_delete(true)
-                            .with_synchronize(true)
-                            .into(),
-                    ),
-                ),
-            )
-            .await?;
-        match resource {
-            Resource::Directory(directory) => Ok(SmbHeldDirectory {
-                directory,
-                timeout: self.inner.config.operation_timeout,
-            }),
-            other => {
-                let _ = close_resource(other).await;
-                Err(probe_mismatch())
-            }
-        }
-    }
-
-    async fn sweep_with(
-        &self,
-        quiesced: SmbRepositoryQuiesced,
-        older_than: Duration,
-        hooks: SweepHooks<'_>,
-    ) -> Result<SmbTempSweepReport, StorageError> {
-        let SmbRepositoryQuiesced(()) = quiesced;
-        if older_than < MIN_TEMP_SWEEP_AGE {
-            return Err(invalid_config(
-                "the temporary-file sweep age must be at least one hour",
-            ));
-        }
-        let limits = ListingLimits::from_config(&self.inner.config);
-        // A dedicated connection: if this future is dropped, times out or
-        // fails part-way, dropping the guard disconnects it, and the server
-        // releases every handle the sweep held, whatever state individual
-        // closes reached. The backend's shared connection never holds them.
-        let session = SweepSession::connect(self).await?;
-        let mut chain = Vec::new();
-        let walked = within_listing_deadline(
-            limits.timeout,
-            self.sweep_walk(session.client(), limits, older_than, &hooks, &mut chain),
-        )
-        .await;
-        // Release every held directory, innermost first, whatever happened,
-        // and count closes that failed; disconnecting releases them anyway.
-        let mut cleanup_failures = 0;
-        while let Some(held) = chain.pop() {
-            if self
-                .with_timeout("close", held.directory.close())
-                .await
-                .is_err()
-            {
-                cleanup_failures += 1;
-            }
-        }
-        if session.shutdown().await.is_err() {
-            cleanup_failures += 1;
-        }
-        walked.map(|mut report| {
-            report.cleanup_failures += cleanup_failures;
-            report
-        })
-    }
-
-    /// Walks the root prefix depth-first, holding in `chain` every directory
-    /// from the share root to the one being processed.
-    async fn sweep_walk(
-        &self,
-        client: &Client,
-        limits: ListingLimits,
-        older_than: Duration,
-        hooks: &SweepHooks<'_>,
-        chain: &mut Vec<HeldDirectory>,
-    ) -> Result<SmbTempSweepReport, StorageError> {
-        let mut report = SmbTempSweepReport::default();
-        let root = self.inner.config.root_prefix.clone().unwrap_or_default();
-        // Hold the share root and every root-prefix component.
-        let mut path = String::new();
-        let components = root.split('/').filter(|component| !component.is_empty());
-        for component in std::iter::once("").chain(components) {
-            if !component.is_empty() {
-                if !path.is_empty() {
-                    path.push('/');
-                }
-                path.push_str(component);
-            }
-            match self.hold_directory(client, &path).await? {
-                DirectoryHold::Held(directory) => chain.push(HeldDirectory {
-                    directory,
-                    relative: String::new(),
-                    entries: Vec::new().into_iter(),
-                    depth: 0,
-                }),
-                // Nothing to sweep below a missing root.
-                DirectoryHold::Missing => return Ok(report),
-                DirectoryHold::Refused => {
-                    report.skipped_directories += 1;
-                    return Ok(report);
-                }
-            }
-        }
-        let server_now = self.server_time(client).await?;
-        let skips = SweepSkips::default();
-        let source = SmbListingSource {
-            backend: self,
-            client,
-            base: self.share_path()?,
-            sweep: Some(&skips),
-        };
-        let mut budget = ListingBudget::new(limits);
-        let base_depth = chain.len();
-        {
-            let top = chain.last_mut().expect("the root is held");
-            top.entries = source
-                .enumerate(&top.directory, &mut budget)
-                .await?
-                .into_iter();
-        }
-        while chain.len() >= base_depth {
-            let top = chain.last_mut().expect("the chain is not empty");
-            let Some(entry) = top.entries.next() else {
-                if chain.len() == base_depth {
-                    break;
-                }
-                let done = chain.pop().expect("a held directory");
-                self.with_timeout("close", done.directory.close()).await?;
-                continue;
-            };
-            let name_len = entry.name.len();
-            let child = if top.relative.is_empty() {
-                entry.name
-            } else {
-                format!("{}/{}", top.relative, entry.name)
-            };
-            let depth = top.depth;
-            budget.charge(child.len() - name_len)?;
-            if validate_blob_key(&child).is_err() || child.contains(':') {
-                continue;
-            }
-            if child.len() > key_byte_limit(&child) {
-                return Err(listing_limit_exceeded(format!(
-                    "listing reached a path longer than {MAX_KEY_BYTES} bytes"
-                )));
-            }
-            if entry.directory {
-                if depth >= limits.max_depth {
-                    return Err(listing_limit_exceeded(format!(
-                        "listing exceeded the maximum directory depth of {} at {child:?}",
-                        limits.max_depth
-                    )));
-                }
-                let share_relative = match root.is_empty() {
-                    true => child.clone(),
-                    false => format!("{root}/{child}"),
-                };
-                match self.hold_directory(client, &share_relative).await? {
-                    DirectoryHold::Held(directory) => {
-                        let entries = match source.enumerate(&directory, &mut budget).await {
-                            Ok(entries) => entries,
-                            Err(error) => {
-                                let _ = self.with_timeout("close", directory.close()).await;
-                                return Err(error);
-                            }
-                        };
-                        chain.push(HeldDirectory {
-                            directory,
-                            relative: child,
-                            entries: entries.into_iter(),
-                            depth: depth + 1,
-                        });
-                    }
-                    DirectoryHold::Missing | DirectoryHold::Refused => {
-                        report.skipped_directories += 1;
-                    }
-                }
-                continue;
-            }
-            if !is_stale_temp(&child, entry.last_write, server_now, older_than) {
-                continue;
-            }
-            let file = ListedFile {
-                key: child,
-                last_write: entry.last_write,
-                size: entry.size,
-            };
-            hooks.before_candidate(&file.key, server_now).await;
-            // Ask the held directory itself, not its path, whether it has
-            // become a reparse point since it was opened. This narrows, but
-            // does not close, the window in which another client with write
-            // access could empty it and turn it into a junction.
-            let parent = chain.last_mut().expect("the chain is not empty");
-            let basic: FileBasicInformation = self
-                .with_timeout("sweep", parent.directory.query_info())
-                .await?;
-            if basic.file_attributes.reparse_point() {
-                parent.entries = Vec::new().into_iter();
-                report.skipped_directories += 1;
-                continue;
-            }
-            match self.remove_stale_temp_file(client, &file).await? {
-                StaleRemoval::Removed => report.removed += 1,
-                StaleRemoval::Gone => {}
-                StaleRemoval::InUse => report.skipped_in_use += 1,
-                StaleRemoval::Changed => report.skipped_changed += 1,
-                StaleRemoval::ReparsePoint => report.skipped_reparse_points += 1,
-            }
-        }
-        let walked = skips.report();
-        report.skipped_reparse_points += walked.skipped_reparse_points;
-        Ok(report)
-    }
-
-    /// Opens the share-relative directory `path` so that it stays the same
-    /// directory while held: as itself, never through a reparse point, and
-    /// without delete sharing, so a server enforcing share modes refuses to
-    /// rename, delete or replace it. The handle is checked not to be a
-    /// reparse point. Any directory it cannot hold that way is refused.
-    async fn hold_directory(
-        &self,
-        client: &Client,
-        path: &str,
-    ) -> Result<DirectoryHold, StorageError> {
-        let target = self.share_path()?.with_path(path);
-        let mut args = FileCreateArgs::make_open_existing(
-            DirAccessMask::new()
-                .with_list_directory(true)
-                .with_read_attributes(true)
-                .with_synchronize(true)
-                .into(),
-        );
-        args.options = CreateOptions::new()
-            .with_directory_file(true)
-            .with_open_reparse_point(true);
-        args.share_access = Some(ShareAccessFlags::new().with_read(true).with_write(true));
-        let opened = tokio::time::timeout(
-            self.inner.config.operation_timeout,
-            client.create_file(&target, &args),
-        )
-        .await
-        .map_err(|_| {
-            remote_error(
-                StorageProviderErrorKind::Timeout,
-                "sweep",
-                "operation timed out",
-                true,
-            )
-        })?;
-        let resource = match opened {
-            Ok(resource) => resource,
-            Err(error) => {
-                let mapped = map_smb_error("sweep", error);
-                return if is_not_found(&mapped) {
-                    Ok(DirectoryHold::Missing)
-                } else if mapped.is_retryable() {
-                    Err(mapped)
-                } else {
-                    // A sharing violation, access denial, a link the server
-                    // refuses or a name that is not a directory.
-                    Ok(DirectoryHold::Refused)
-                };
-            }
-        };
-        let Resource::Directory(directory) = resource else {
-            let _ = close_resource(resource).await;
-            return Ok(DirectoryHold::Refused);
-        };
-        let directory = Arc::new(directory);
-        let basic: Result<FileBasicInformation, _> =
-            self.with_timeout("sweep", directory.query_info()).await;
-        match basic {
-            Ok(basic)
-                if holdable_directory(
-                    basic.file_attributes.directory(),
-                    basic.file_attributes.reparse_point(),
-                ) =>
-            {
-                Ok(DirectoryHold::Held(directory))
-            }
-            Ok(_) => {
-                let _ = self.with_timeout("close", directory.close()).await;
-                Ok(DirectoryHold::Refused)
-            }
-            Err(error) => {
-                let _ = self.with_timeout("close", directory.close()).await;
-                Err(error)
-            }
-        }
-    }
-
-    /// The server's current time: the last-write time the server gives a
-    /// file the sweep creates under the root prefix, with a temporary name
-    /// listings hide, and removes through the same handle.
-    async fn server_time(&self, client: &Client) -> Result<SystemTime, StorageError> {
-        let key = temp_file_name();
-        let path = self.remote_path(&key)?;
-        let resource = self
-            .with_timeout(
-                "server_time",
-                client.create_file(
-                    &path,
-                    &FileCreateArgs::make_create_new(
-                        FileAttributes::new(),
-                        CreateOptions::new().with_non_directory_file(true),
-                    ),
-                ),
-            )
-            .await?;
-        let Resource::File(file) = resource else {
-            let _ = close_resource(resource).await;
-            return Err(probe_mismatch());
-        };
-        let basic: Result<FileBasicInformation, _> =
-            self.with_timeout("server_time", file.query_info()).await;
-        let disposed = self
-            .with_timeout(
-                "server_time",
-                file.set_info(FileDispositionInformation::default()),
-            )
-            .await;
-        let closed = self.with_timeout("close", file.close()).await;
-        let basic = basic?;
-        disposed?;
-        closed?;
-        file_time(basic.last_write_time.since_epoch()).ok_or_else(|| {
-            remote_error(
-                StorageProviderErrorKind::Protocol,
-                "server_time",
-                "the server reported no time for a new file",
-                false,
-            )
-        })
-    }
-
-    /// Removes one stale temporary file through a handle it validated: an
-    /// exclusive open of the name itself, never a reparse point's target,
-    /// that still shows the size and last-write time enumeration saw. The
-    /// removal is never replayed.
-    async fn remove_stale_temp_file(
-        &self,
-        client: &Client,
-        file: &ListedFile,
-    ) -> Result<StaleRemoval, StorageError> {
-        let path = self.remote_path(&file.key)?;
-        let mut args = FileCreateArgs::make_open_existing(
-            FileAccessMask::new()
-                .with_delete(true)
-                .with_file_read_attributes(true),
-        );
-        args.options = CreateOptions::new()
-            .with_open_reparse_point(true)
-            .with_non_directory_file(true);
-        args.share_access = Some(ShareAccessFlags::new());
-        let opened = tokio::time::timeout(
-            self.inner.config.operation_timeout,
-            client.create_file(&path, &args),
-        )
-        .await
-        .map_err(|_| {
-            remote_error(
-                StorageProviderErrorKind::Timeout,
-                "sweep",
-                "operation timed out",
-                true,
-            )
-        })?;
-        let resource = match opened {
-            Ok(resource) => resource,
-            Err(error) => {
-                return match smb_status(&error) {
-                    Some(status) if status == Status::SharingViolation as u32 => {
-                        Ok(StaleRemoval::InUse)
-                    }
-                    Some(status)
-                        if status == Status::ObjectNameNotFound as u32
-                            || status == Status::ObjectPathNotFound as u32
-                            || status == STATUS_DELETE_PENDING =>
-                    {
-                        Ok(StaleRemoval::Gone)
-                    }
-                    Some(STATUS_FILE_IS_A_DIRECTORY) => Ok(StaleRemoval::Changed),
-                    _ => Err(map_smb_error("sweep", error)),
-                };
-            }
-        };
-        let Resource::File(handle) = resource else {
-            let _ = close_resource(resource).await;
-            return Ok(StaleRemoval::Changed);
-        };
-        let checked = self.check_stale_handle(&handle, file).await;
-        let decision = match checked {
-            Ok(StaleRemoval::Removed) => self
-                .with_timeout(
-                    "sweep",
-                    handle.set_info(FileDispositionInformation::default()),
-                )
-                .await
-                .map(|()| StaleRemoval::Removed)
-                .map_err(StorageError::single_attempt),
-            other => other,
-        };
-        let closed = self.with_timeout("close", handle.close()).await;
-        match decision {
-            Ok(StaleRemoval::Removed) => closed
-                .map(|()| StaleRemoval::Removed)
-                .map_err(StorageError::single_attempt),
-            other => other,
-        }
-    }
-
-    /// Decides from an open handle whether the file is still the stale
-    /// temporary file enumeration saw.
-    async fn check_stale_handle(
-        &self,
-        handle: &File,
-        file: &ListedFile,
-    ) -> Result<StaleRemoval, StorageError> {
-        let basic: FileBasicInformation = self.with_timeout("sweep", handle.query_info()).await?;
-        let standard: FileStandardInformation =
-            self.with_timeout("sweep", handle.query_info()).await?;
-        Ok(stale_handle_decision(
-            file,
-            &HandleFacts {
-                reparse_point: basic.file_attributes.reparse_point(),
-                directory: bool::from(standard.directory) || basic.file_attributes.directory(),
-                size: standard.end_of_file,
-                last_write: file_time(basic.last_write_time.since_epoch()),
-            },
-        ))
-    }
-
     async fn client_snapshot(&self) -> ConnectedClient {
         let client = self.inner.client.read().await;
         ConnectedClient {
@@ -1484,7 +886,6 @@ impl SmbStorageBackend {
                 .with_list_directory(true)
                 .with_synchronize(true)
                 .into(),
-            share_access: None,
         };
         for attempt in 0..2 {
             let snapshot = self.client_snapshot().await;
@@ -1904,36 +1305,22 @@ impl SmbStorageBackend {
     /// Lists every key once. One `listing_timeout` deadline covers both
     /// attempts and the reconnect between them.
     async fn collect_keys(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
-        let mut keys: Vec<String> = self
-            .collect_files(prefix)
-            .await?
-            .into_iter()
-            .map(|file| file.key)
-            .filter(|key| !is_temp_key(key))
-            .collect();
-        keys.sort();
-        Ok(keys)
-    }
-
-    /// Lists every file once, temporary files included, within one
-    /// `listing_timeout` deadline.
-    async fn collect_files(&self, prefix: &str) -> Result<Vec<ListedFile>, StorageError> {
         let limits = ListingLimits::from_config(&self.inner.config);
         within_listing_deadline(
             limits.timeout,
-            retry_listing_once(|| self.collect_files_attempt(limits, prefix)),
+            retry_listing_once(|| self.collect_keys_attempt(limits, prefix)),
         )
         .await
     }
 
-    async fn collect_files_attempt(
+    async fn collect_keys_attempt(
         &self,
         limits: ListingLimits,
         prefix: &str,
-    ) -> Result<Vec<ListedFile>, StorageError> {
+    ) -> Result<Vec<String>, StorageError> {
         let snapshot = self.client_snapshot().await;
         match self
-            .collect_files_once(&snapshot.client, limits, prefix)
+            .collect_keys_once(&snapshot.client, limits, prefix)
             .await
         {
             Err(error) if error.is_retryable() => {
@@ -1944,20 +1331,22 @@ impl SmbStorageBackend {
         }
     }
 
-    async fn collect_files_once(
+    async fn collect_keys_once(
         &self,
         client: &Client,
         limits: ListingLimits,
         prefix: &str,
-    ) -> Result<Vec<ListedFile>, StorageError> {
+    ) -> Result<Vec<String>, StorageError> {
         let source = SmbListingSource {
             backend: self,
             client,
             base: self.share_path()?,
-            sweep: None,
         };
         let root = self.inner.config.root_prefix.clone().unwrap_or_default();
-        walk_listing_files(&source, root, prefix, limits).await
+        let mut keys = walk_listing(&source, root, prefix, limits).await?;
+        keys.retain(|key| !is_temp_key(key));
+        keys.sort();
+        Ok(keys)
     }
 }
 
@@ -2038,223 +1427,6 @@ impl ListingBudget {
 struct ListedEntry {
     name: String,
     directory: bool,
-    /// The server's last-write time, when it reported one.
-    last_write: Option<SystemTime>,
-    /// The file's size as enumerated.
-    size: u64,
-}
-
-/// One file a listing walk returned, with its root-relative key.
-#[derive(Clone, Debug)]
-struct ListedFile {
-    key: String,
-    last_write: Option<SystemTime>,
-    size: u64,
-}
-
-/// Entries one sweep walk skipped, counted while the walk runs.
-#[derive(Debug, Default)]
-struct SweepSkips {
-    reparse_points: AtomicU64,
-}
-
-impl SweepSkips {
-    fn report(&self) -> SmbTempSweepReport {
-        let count = |counter: &AtomicU64| {
-            usize::try_from(counter.load(Ordering::Relaxed)).unwrap_or(usize::MAX)
-        };
-        SmbTempSweepReport {
-            skipped_reparse_points: count(&self.reparse_points),
-            ..SmbTempSweepReport::default()
-        }
-    }
-}
-
-/// One directory the sweep holds while it works below it.
-struct HeldDirectory {
-    directory: Arc<Directory>,
-    /// Root-relative path; empty for the root and its ancestors.
-    relative: String,
-    /// Entries not yet processed.
-    entries: std::vec::IntoIter<ListedEntry>,
-    depth: usize,
-}
-
-/// The outcome of holding one directory for the sweep.
-enum DirectoryHold {
-    Held(Arc<Directory>),
-    Missing,
-    /// It could not be held as a plain directory without delete sharing.
-    Refused,
-}
-
-/// Whether a handle may be held as a sweep directory: a directory, and not a
-/// reparse point such as a junction or symbolic link.
-fn holdable_directory(directory: bool, reparse_point: bool) -> bool {
-    directory && !reparse_point
-}
-
-/// A sweep candidate, handed to the test-only barrier before it is opened.
-#[cfg(feature = "smb-sweep-test-hooks")]
-#[derive(Clone, Debug)]
-#[non_exhaustive]
-pub struct SmbSweepCandidate {
-    /// Root-relative key of the temporary file.
-    pub key: String,
-    /// The server's current time the sweep measures age against.
-    pub server_now: SystemTime,
-}
-
-/// A test-only barrier the sweep awaits for each candidate.
-#[cfg(feature = "smb-sweep-test-hooks")]
-pub type SmbSweepBarrier = dyn Fn(SmbSweepCandidate) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
-    + Send
-    + Sync;
-
-/// Observation points of one sweep: a barrier with the test-only feature,
-/// nothing otherwise.
-#[cfg(feature = "smb-sweep-test-hooks")]
-struct SweepHooks<'a> {
-    barrier: &'a SmbSweepBarrier,
-}
-
-#[cfg(not(feature = "smb-sweep-test-hooks"))]
-struct SweepHooks<'a> {
-    _none: std::marker::PhantomData<&'a ()>,
-}
-
-impl SweepHooks<'_> {
-    #[cfg(not(feature = "smb-sweep-test-hooks"))]
-    fn none() -> Self {
-        Self {
-            _none: std::marker::PhantomData,
-        }
-    }
-
-    #[cfg(feature = "smb-sweep-test-hooks")]
-    fn none() -> Self {
-        static NONE: fn(
-            SmbSweepCandidate,
-        )
-            -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
-            |_| Box::pin(async {});
-        Self { barrier: &NONE }
-    }
-
-    /// Runs before a candidate is opened.
-    #[cfg(feature = "smb-sweep-test-hooks")]
-    async fn before_candidate(&self, key: &str, server_now: SystemTime) {
-        (self.barrier)(SmbSweepCandidate {
-            key: key.to_string(),
-            server_now,
-        })
-        .await;
-    }
-
-    #[cfg(not(feature = "smb-sweep-test-hooks"))]
-    #[allow(clippy::unused_async)]
-    async fn before_candidate(&self, _key: &str, _server_now: SystemTime) {}
-}
-
-/// The sweep's own SMB connection. Dropping it without
-/// [`SweepSession::shutdown`], as when the sweep is cancelled, times out or
-/// fails, closes the connection in the background, so the server releases
-/// every handle opened through it.
-struct SweepSession {
-    client: Arc<Client>,
-    connection: Option<Arc<smb::Connection>>,
-}
-
-impl SweepSession {
-    async fn connect(backend: &SmbStorageBackend) -> Result<Self, StorageError> {
-        let config = &backend.inner.config;
-        let connected = connect_client(config, 0, Some(backend.inner.server_guid)).await?;
-        let connection = connected
-            .client
-            .get_connection(&config.server)
-            .await
-            .map_err(|error| map_smb_error("connect", error))?;
-        Ok(Self {
-            client: connected.client,
-            connection: Some(connection),
-        })
-    }
-
-    fn client(&self) -> &Client {
-        &self.client
-    }
-
-    /// Logs off and disconnects in order.
-    async fn shutdown(mut self) -> Result<(), StorageError> {
-        self.connection = None;
-        self.client
-            .close()
-            .await
-            .map_err(|error| map_smb_error("close", error))
-    }
-}
-
-impl Drop for SweepSession {
-    fn drop(&mut self) {
-        if let Some(connection) = self.connection.take()
-            && let Ok(runtime) = tokio::runtime::Handle::try_current()
-        {
-            runtime.spawn(async move {
-                let _ = connection.close().await;
-            });
-        }
-    }
-}
-
-/// A directory held open with delete access by test infrastructure.
-#[cfg(feature = "smb-sweep-test-hooks")]
-pub struct SmbHeldDirectory {
-    directory: Directory,
-    timeout: Duration,
-}
-
-#[cfg(feature = "smb-sweep-test-hooks")]
-impl SmbHeldDirectory {
-    /// Closes the handle.
-    pub async fn release(self) {
-        let _ = tokio::time::timeout(self.timeout, self.directory.close()).await;
-    }
-}
-
-/// What the sweep did with one candidate.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum StaleRemoval {
-    Removed,
-    /// Already gone when opened.
-    Gone,
-    InUse,
-    Changed,
-    ReparsePoint,
-}
-
-/// What an open handle reports about a sweep candidate.
-#[derive(Debug)]
-struct HandleFacts {
-    reparse_point: bool,
-    directory: bool,
-    size: u64,
-    last_write: Option<SystemTime>,
-}
-
-/// Removes a candidate only if its handle still shows the plain file, size
-/// and last-write time that enumeration saw.
-fn stale_handle_decision(file: &ListedFile, facts: &HandleFacts) -> StaleRemoval {
-    if facts.reparse_point {
-        StaleRemoval::ReparsePoint
-    } else if facts.directory
-        || facts.size != file.size
-        || facts.last_write.is_none()
-        || facts.last_write != file.last_write
-    {
-        StaleRemoval::Changed
-    } else {
-        StaleRemoval::Removed
-    }
 }
 
 /// Enumerates single directories for [`walk_listing`].
@@ -2305,27 +1477,12 @@ where
 /// Walks the tree under the share-relative `root` within `limits`, returning
 /// file keys relative to `root`. Only directories that can hold a key
 /// starting with `prefix` are entered, and only such files are returned.
-#[cfg(test)]
 async fn walk_listing<S: ListingSource>(
     source: &S,
     root: String,
     prefix: &str,
     limits: ListingLimits,
 ) -> Result<Vec<String>, StorageError> {
-    Ok(walk_listing_files(source, root, prefix, limits)
-        .await?
-        .into_iter()
-        .map(|file| file.key)
-        .collect())
-}
-
-/// Walks as [`walk_listing`] does, returning each file's last-write time too.
-async fn walk_listing_files<S: ListingSource>(
-    source: &S,
-    root: String,
-    prefix: &str,
-    limits: ListingLimits,
-) -> Result<Vec<ListedFile>, StorageError> {
     let mut budget = ListingBudget::new(limits);
     // Each entry is a root-relative directory path, whether enumeration
     // discovered it, and its depth below the root.
@@ -2380,11 +1537,7 @@ async fn walk_listing_files<S: ListingSource>(
                 }
                 stack.push((child, true, depth + 1));
             } else {
-                files.push(ListedFile {
-                    key: child,
-                    last_write: entry.last_write,
-                    size: entry.size,
-                });
+                files.push(child);
             }
         }
     }
@@ -2567,9 +1720,6 @@ struct SmbListingSource<'a> {
     backend: &'a SmbStorageBackend,
     client: &'a Client,
     base: UncPath,
-    /// Set for a temporary-file sweep: enumeration skips and counts entries
-    /// the server reports as reparse points.
-    sweep: Option<&'a SweepSkips>,
 }
 
 #[async_trait]
@@ -2661,19 +1811,7 @@ impl SmbListingSource<'_> {
                 continue;
             }
             budget.record_entry(&name)?;
-            if let Some(skips) = self.sweep
-                && entry.file_attributes.reparse_point()
-            {
-                // Never enter or remove anything through a reparse point.
-                skips.reparse_points.fetch_add(1, Ordering::Relaxed);
-                continue;
-            }
-            listed.push(ListedEntry {
-                name,
-                directory,
-                last_write: file_time(entry.last_write_time.since_epoch()),
-                size: entry.end_of_file,
-            });
+            listed.push(ListedEntry { name, directory });
         }
         Ok(listed)
     }
@@ -3723,64 +2861,6 @@ fn temp_key(key: &str) -> Result<String, StorageError> {
     Ok(temp)
 }
 
-/// Seconds from the FILETIME epoch, 1601-01-01, to the Unix epoch.
-const FILETIME_UNIX_OFFSET: Duration = Duration::from_secs(11_644_473_600);
-
-/// Converts a FILETIME, as a duration since 1601-01-01 UTC, to a system time.
-/// Zero means the server reported no time, and a time before 1970 is not
-/// plausible for a file this backend wrote; both are `None`.
-fn file_time(since_1601: Duration) -> Option<SystemTime> {
-    if since_1601.is_zero() {
-        return None;
-    }
-    since_1601
-        .checked_sub(FILETIME_UNIX_OFFSET)
-        .and_then(|since_unix| SystemTime::UNIX_EPOCH.checked_add(since_unix))
-}
-
-#[cfg(test)]
-/// This backend's temporary upload files whose last-write time is at least
-/// `older_than` before the server's current time `server_now`. A file
-/// without a last-write time, or one after `server_now`, is never stale.
-fn stale_temp_files(
-    files: Vec<ListedFile>,
-    server_now: SystemTime,
-    older_than: Duration,
-) -> Vec<ListedFile> {
-    let mut stale: Vec<ListedFile> = files
-        .into_iter()
-        .filter(|file| is_stale_temp(&file.key, file.last_write, server_now, older_than))
-        .collect();
-    stale.sort_by(|a, b| a.key.cmp(&b.key));
-    stale
-}
-
-/// Whether `key` names one of this backend's temporary files whose
-/// last-write time is at least `older_than` before `server_now`.
-fn is_stale_temp(
-    key: &str,
-    last_write: Option<SystemTime>,
-    server_now: SystemTime,
-    older_than: Duration,
-) -> bool {
-    is_temp_key(key)
-        && last_write
-            .and_then(|written| server_now.duration_since(written).ok())
-            .is_some_and(|age| age >= older_than)
-}
-
-/// The NT status of a server's error response, if it is one.
-fn smb_status(error: &smb::Error) -> Option<u32> {
-    match error {
-        smb::Error::UnexpectedMessageStatus(status)
-        | smb::Error::ReceivedErrorMessage(status, _) => Some(*status),
-        _ => None,
-    }
-}
-
-/// `STATUS_FILE_IS_A_DIRECTORY`: a non-directory open named a directory.
-const STATUS_FILE_IS_A_DIRECTORY: u32 = 0xC000_00BA;
-
 /// Whether `key` names a temporary upload file this backend writes: exactly
 /// `.<uuid>.uploading`, or `.<name>.<uuid>.uploading` as versions before 0.9.0
 /// wrote, with the UUID in its lowercase hyphenated form. Any other name,
@@ -4223,12 +3303,7 @@ mod tests {
             let mut listed = Vec::new();
             for (name, directory) in (self.entries)(path) {
                 budget.record_entry(&name)?;
-                listed.push(ListedEntry {
-                    name,
-                    directory,
-                    last_write: None,
-                    size: 0,
-                });
+                listed.push(ListedEntry { name, directory });
             }
             Ok(Some(listed))
         }
@@ -5487,124 +4562,6 @@ mod tests {
         assert!(check_listing_prefix("").is_ok());
         assert!(check_listing_prefix("dir/").is_ok());
         assert!(check_key("dir/2026-11-12T10-00-00Z.json").is_ok());
-    }
-
-    /// The sweep selects only exact temporary names whose last-write time is
-    /// old enough by the server's clock; a caller's key ending in
-    /// `.uploading`, a fresh or future temporary file and one without a time
-    /// are kept (#593).
-    #[test]
-    fn stale_temp_selection_keeps_every_other_name() {
-        let server_now = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000_000);
-        let day = Duration::from_secs(24 * 60 * 60);
-        let uuid = |n: u128| Uuid::from_u128(n).hyphenated().to_string();
-        let file = |key: String, last_write: Option<SystemTime>| ListedFile {
-            key,
-            last_write,
-            size: 7,
-        };
-        let aged = |age: Duration| Some(server_now - age);
-        let files = vec![
-            file(format!("a/.{}.uploading", uuid(1)), aged(2 * day)),
-            file(format!(".{}.uploading", uuid(2)), aged(day)),
-            file(format!("a/.blob.bin.{}.uploading", uuid(3)), aged(3 * day)),
-            // Too recent, no time, or after the server's current time.
-            file(
-                format!("a/.{}.uploading", uuid(4)),
-                aged(Duration::from_secs(60)),
-            ),
-            file(format!("a/.{}.uploading", uuid(5)), None),
-            file(format!("a/.{}.uploading", uuid(6)), Some(server_now + day)),
-            // Callers' keys, however old.
-            file("a/report.uploading".to_string(), aged(9 * day)),
-            file(format!("a/x.{}.uploading", uuid(7)), aged(9 * day)),
-            file(
-                format!("a/.{}.uploading", uuid(0xabcd).to_uppercase()),
-                aged(9 * day),
-            ),
-            file("a/kept.bin".to_string(), aged(9 * day)),
-        ];
-        let keys: Vec<String> = stale_temp_files(files.clone(), server_now, day)
-            .into_iter()
-            .map(|file| file.key)
-            .collect();
-        assert_eq!(
-            keys,
-            [
-                format!(".{}.uploading", uuid(2)),
-                format!("a/.{}.uploading", uuid(1)),
-                format!("a/.blob.bin.{}.uploading", uuid(3)),
-            ]
-        );
-        // A client clock that runs ahead cannot make a fresh file stale: only
-        // the server's time is compared.
-        assert!(
-            stale_temp_files(files, server_now - 2 * day, day)
-                .iter()
-                .all(|file| file.key != format!("a/.{}.uploading", uuid(4)))
-        );
-    }
-
-    /// Immediately before removal, the validated handle must still show the
-    /// plain file, size and last-write time enumeration saw (#593).
-    #[test]
-    fn a_candidate_that_changed_after_enumeration_is_kept() {
-        let written = SystemTime::UNIX_EPOCH + Duration::from_secs(1_600_000_000);
-        let file = ListedFile {
-            key: format!("a/.{}.uploading", Uuid::new_v4()),
-            last_write: Some(written),
-            size: 7,
-        };
-        let facts = |reparse_point, directory, size, last_write| HandleFacts {
-            reparse_point,
-            directory,
-            size,
-            last_write,
-        };
-        assert_eq!(
-            stale_handle_decision(&file, &facts(false, false, 7, Some(written))),
-            StaleRemoval::Removed
-        );
-        for (changed, expected) in [
-            (
-                facts(true, false, 7, Some(written)),
-                StaleRemoval::ReparsePoint,
-            ),
-            (facts(false, true, 7, Some(written)), StaleRemoval::Changed),
-            (facts(false, false, 8, Some(written)), StaleRemoval::Changed),
-            (
-                facts(false, false, 7, Some(written + Duration::from_secs(1))),
-                StaleRemoval::Changed,
-            ),
-            (facts(false, false, 7, None), StaleRemoval::Changed),
-        ] {
-            assert_eq!(
-                stale_handle_decision(&file, &changed),
-                expected,
-                "{changed:?}"
-            );
-        }
-    }
-
-    /// Every directory the sweep holds, ancestors included, must be a plain
-    /// directory: a junction, symbolic link or other reparse point is never
-    /// held or entered (#593).
-    #[test]
-    fn only_plain_directories_are_held_as_ancestors() {
-        assert!(holdable_directory(true, false));
-        assert!(!holdable_directory(true, true), "a junction");
-        assert!(!holdable_directory(false, true), "a file symbolic link");
-        assert!(!holdable_directory(false, false), "a file");
-    }
-
-    #[test]
-    fn file_times_convert_from_the_1601_epoch() {
-        assert_eq!(file_time(Duration::ZERO), None);
-        assert_eq!(file_time(Duration::from_secs(1)), None, "before 1970");
-        assert_eq!(
-            file_time(FILETIME_UNIX_OFFSET + Duration::from_secs(5)),
-            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(5))
-        );
     }
 
     /// `portable_keys` is opt-in and governs new writes only: it never makes

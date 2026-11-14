@@ -67,36 +67,6 @@ message, and `SmbStorageConfig` gains a field. See [MIGRATION.md](MIGRATION.md).
   storage key`. It used to print the key, which can reveal a repository path
   or configured root prefix. The `key` field, and so `Debug`, still holds
   it for host diagnostics; never return either to an untrusted client.
-- SMB: `SmbStorageBackend::sweep_temp_files(quiesced, older_than)` removes
-  temporary upload files that a lost process or connection left on the
-  share, as `LocalStorageBackend::sweep_temp_files` does for local roots,
-  and returns an `SmbTempSweepReport`. It is a maintenance-window operation:
-  it requires an `SmbRepositoryQuiesced`, the host's statement that, for the
-  whole sweep, no other party modifies the repository tree (no uploads,
-  renames, deletions, or directory or reparse-point changes), and must not
-  run on a share where an untrusted party has write access to that tree. It
-  runs on its own SMB connection, which is disconnected if the sweep is
-  cancelled, times out or fails, so the server releases every handle it
-  held. It considers only exact backend temporary names
-  (`.<uuid>.uploading`, and the pre-0.9.0 `.<name>.<uuid>.uploading`) whose
-  last-write time is at least `older_than` before the server's current time,
-  read from a file the sweep creates and removes; callers' keys ending in
-  `.uploading` are kept, and `older_than` below one hour is refused. As
-  defence in depth it holds every directory from the share root down to the
-  one it works in (opened with `FILE_OPEN_REPARSE_POINT`, checked not to be a
-  reparse point, without delete sharing), skips and counts directories it
-  cannot hold that way and reparse entries, re-checks the held parent handle
-  before each candidate, and removes each candidate through an exclusive
-  handle only if its size and last-write time are unchanged. These stop
-  other SMB clients from renaming, deleting or replacing held directories on
-  servers that enforce share modes; they do not stop a client with write
-  access from emptying a held directory and turning it into a junction, nor
-  changes outside SMB. Files removed before an error stay removed. A fifth
-  owner-local vendor patch, `share-access-override`, adds the share-access
-  option the exclusive and hold opens need. The test-only
-  `smb-sweep-test-hooks` feature adds a barrier between enumeration and
-  removal for the managed Samba suite; applications must not enable it.
-  ([#593](https://github.com/Dastari/graphql-orm/issues/593))
 
 ## 0.11.0 (unreleased)
 

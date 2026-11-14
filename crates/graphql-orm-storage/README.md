@@ -28,10 +28,8 @@ appearing taken, and makes S3 conditional creates, and so repository locks,
 fail closed until a per-instance probe shows that the provider enforces
 `If-None-Match`. It adds an opt-in portable key mode for new writes to SMB
 shares on Windows servers (`validate_portable_blob_key`,
-`SmbStorageConfig::portable_keys`), a fixed `InvalidStorageKey` message that
-never reveals the key, and `SmbStorageBackend::sweep_temp_files` for stale SMB
-temporary files during a quiesced maintenance window. See
-[MIGRATION.md](MIGRATION.md).
+`SmbStorageConfig::portable_keys`), and a fixed `InvalidStorageKey` message
+that never reveals the key. See [MIGRATION.md](MIGRATION.md).
 
 Version 0.11.0 makes SMB conditional creates publish only complete objects,
 holds SMB transfer permits only while a request is in flight, lists only the
