@@ -386,7 +386,8 @@ async fn external_writable_mssql_dml_and_transactions_are_native_and_atomic()
     assert_eq!(scalars.document["count"], 2);
     assert_eq!(scalars.business_date, "2026-08-13");
     assert!(scalars.business_time.starts_with("14:15:16.125"));
-    assert!(scalars.occurred_at.starts_with("2026-08-13 14:15:16.125"));
+    // A `datetime2` reads back as RFC 3339 in UTC.
+    assert_eq!(scalars.occurred_at, "2026-08-13T14:15:16.125Z");
     let first = WritableRecord::insert(&database, writable_input("first", 1)).await?;
     assert!(!first.id.is_empty());
     assert_eq!(first.version, 0);
