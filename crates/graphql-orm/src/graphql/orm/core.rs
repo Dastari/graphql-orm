@@ -899,6 +899,8 @@ pub struct MutationContext<'tx, B: WriteBackend = DefaultWriteBackend> {
     deferred_events: Vec<Box<dyn DeferredEventEmitter<B>>>,
     deferred_actions: Vec<Box<dyn PostCommitActionRunner<B>>>,
     hook_depth: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// The handle policies see while a [`Self::with_system_access`] scope is open.
+    scoped_db: Option<Box<crate::db::Database<B>>>,
     /// Tables whose PostgreSQL change journal recorder this transaction has verified.
     #[cfg_attr(
         not(all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))),
@@ -1624,6 +1626,7 @@ where
             deferred_events: Vec::new(),
             deferred_actions: Vec::new(),
             hook_depth: Default::default(),
+            scoped_db: None,
             change_journal_verified_tables: Vec::new(),
         }
     }
@@ -1676,8 +1679,59 @@ where
         ))
     }
 
+    /// The database handle this transaction runs on. Inside a
+    /// [`Self::with_system_access`] scope it is that handle labelled with the
+    /// scope's [`SystemAccess`](crate::graphql::auth::SystemAccess).
     pub fn database(&self) -> &crate::db::Database<B> {
-        self.db
+        match &self.scoped_db {
+            Some(scoped) => scoped,
+            None => self.db,
+        }
+    }
+
+    /// Run `scope` with this transaction's writes and reads presenting a named
+    /// [`SystemAccess`](crate::graphql::auth::SystemAccess) to policies.
+    ///
+    /// A mutation hook's nested writes reach entity, row and field policies
+    /// without the originating request (`ctx = None`, the `Repository`
+    /// surface), so a policy cannot tell them from any other in-process
+    /// caller. Inside the scope, the handle those policies receive carries
+    /// `access`: they read it with
+    /// [`Database::system_access`](crate::db::Database::system_access), and
+    /// repository field decisions receive it as
+    /// `AccessContext::System`. The hook decides from the request it was given
+    /// whether to open the scope, and the policy decides whether the named
+    /// access may do the write. Nothing is granted by the label itself.
+    ///
+    /// The previous access is restored when `scope` completes. If the returned
+    /// future is dropped before that, the transaction can no longer commit.
+    pub async fn with_system_access<T, F>(
+        &mut self,
+        access: crate::graphql::auth::SystemAccess,
+        scope: F,
+    ) -> T
+    where
+        F: for<'a> FnOnce(&'a mut Self) -> futures::future::BoxFuture<'a, T>,
+    {
+        /// Poisons the transaction unless the scope ran to completion.
+        struct Abandoned(
+            std::sync::Arc<super::runtime_transaction::RuntimeTransactionState>,
+            bool,
+        );
+        impl Drop for Abandoned {
+            fn drop(&mut self) {
+                if self.1 {
+                    self.0.poison();
+                }
+            }
+        }
+        let scoped = Box::new(self.db.clone().with_system_access(access));
+        let previous = self.scoped_db.replace(scoped);
+        let mut abandoned = Abandoned(self.runtime_state.clone(), true);
+        let value = scope(self).await;
+        abandoned.1 = false;
+        self.scoped_db = previous;
+        value
     }
 
     pub fn actor<T>(&self, ctx: Option<&async_graphql::Context<'_>>) -> Option<T>
@@ -1877,6 +1931,7 @@ where
             deferred_events,
             deferred_actions,
             hook_depth: _,
+            scoped_db: _,
             change_journal_verified_tables: _,
         } = self;
         B::commit_write_transaction(tx).await?;
@@ -1936,7 +1991,7 @@ where {
     where
         T: MutationContextInsert<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
         T::insert_in_mutation_context(self, input).await
     }
 
@@ -1948,7 +2003,7 @@ where {
         T: MutationContextUpsert<B> + Entity,
     {
         self.require_state_machine("upsert")?;
-        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
         T::upsert_in_mutation_context(self, input).await
     }
 
@@ -1960,7 +2015,7 @@ where {
     where
         T: MutationContextUpdateById<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
         T::update_by_id_in_mutation_context(self, id, input).await
     }
 
@@ -1972,7 +2027,7 @@ where {
     where
         T: MutationContextUpdateWhere<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
         T::update_where_in_mutation_context(self, where_input, input).await
     }
 
@@ -1988,7 +2043,7 @@ where {
     where
         T: MutationContextCompareAndSwap<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
         T::compare_and_swap_in_mutation_context(self, id, expected_version, expected, input).await
     }
 
@@ -1999,7 +2054,7 @@ where {
     where
         T: MutationContextDeleteById<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
         T::delete_by_id_in_mutation_context(self, id).await
     }
 
@@ -2010,7 +2065,7 @@ where {
     where
         T: MutationContextDeleteWhere<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
         T::delete_where_in_mutation_context(self, where_input).await
     }
 
@@ -2038,7 +2093,7 @@ where {
         T: MutationContextFindById<B> + Entity,
     {
         let metadata = T::metadata();
-        self.db
+        self.database()
             .ensure_entity_access(
                 None,
                 metadata.entity_name,
@@ -2052,7 +2107,7 @@ where {
         let Some(row) = row else {
             return Ok(None);
         };
-        if authorize_repository_row::<T, B>(self.db, &row).await? {
+        if authorize_repository_row::<T, B>(self.database(), &row).await? {
             Ok(Some(row))
         } else {
             Ok(None)
@@ -2068,7 +2123,7 @@ where {
         T: MutationContextFindByKey<B> + Entity,
     {
         let metadata = T::metadata();
-        self.db
+        self.database()
             .ensure_entity_access(
                 None,
                 metadata.entity_name,
@@ -2082,7 +2137,7 @@ where {
         let Some(row) = row else {
             return Ok(None);
         };
-        if authorize_repository_row::<T, B>(self.db, &row).await? {
+        if authorize_repository_row::<T, B>(self.database(), &row).await? {
             Ok(Some(row))
         } else {
             Ok(None)
@@ -2098,7 +2153,7 @@ where {
     where
         T: MutationContextUpdateByKey<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
         T::update_by_key_in_mutation_context(self, key, input).await
     }
 
@@ -2110,7 +2165,7 @@ where {
     where
         T: MutationContextDeleteByKey<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
         T::delete_by_key_in_mutation_context(self, key).await
     }
 
@@ -2122,7 +2177,7 @@ where {
     where
         T: MutationContextInsertIfAbsent<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
         T::insert_if_absent_in_mutation_context(self, input).await
     }
 
@@ -2136,7 +2191,7 @@ where {
     where
         T: MutationContextBoundedUpdateWhere<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
         T::update_where_bounded_in_mutation_context(self, where_input, input, limit).await
     }
 
@@ -2149,7 +2204,7 @@ where {
     where
         T: MutationContextBoundedDeleteWhere<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
         T::delete_where_bounded_in_mutation_context(self, where_input, limit).await
     }
 
@@ -2163,7 +2218,7 @@ where {
     where
         T: MutationContextPredicateUpdate<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
         T::update_if_in_mutation_context(self, key, expected, input).await
     }
 
@@ -2176,7 +2231,7 @@ where {
         T: MutationContextKeysetPage<B> + Entity,
     {
         let metadata = T::metadata();
-        self.db
+        self.database()
             .ensure_entity_access(
                 None,
                 metadata.entity_name,
@@ -2190,7 +2245,7 @@ where {
                     crate::graphql::errors::sqlx_error_from_graphql(error),
                 )
             })?;
-        if page.include_total_count && self.db.row_policy().is_some() {
+        if page.include_total_count && self.database().row_policy().is_some() {
             return Err(crate::graphql::errors::OrmPublicError::new(
                 crate::graphql::errors::OrmErrorCode::AuthorizationMisconfigured,
             )
@@ -2200,7 +2255,7 @@ where {
         }
         let connection = T::keyset_page_in_mutation_context(self, filter, page).await?;
         for edge in &connection.edges {
-            if !authorize_repository_row::<T, B>(self.db, &edge.node)
+            if !authorize_repository_row::<T, B>(self.database(), &edge.node)
                 .await
                 .map_err(crate::graphql::errors::OrmPublicError::from)?
             {
@@ -2221,7 +2276,7 @@ where {
         T: MutationContextKeysetConnectionPage<B> + Entity,
     {
         let metadata = T::metadata();
-        self.db
+        self.database()
             .ensure_entity_access(
                 None,
                 metadata.entity_name,
@@ -2235,7 +2290,7 @@ where {
                     crate::graphql::errors::sqlx_error_from_graphql(error),
                 )
             })?;
-        if page.include_total_count && self.db.row_policy().is_some() {
+        if page.include_total_count && self.database().row_policy().is_some() {
             return Err(crate::graphql::errors::OrmPublicError::new(
                 crate::graphql::errors::OrmErrorCode::AuthorizationMisconfigured,
             )
@@ -2245,7 +2300,7 @@ where {
         }
         let connection = T::keyset_connection_page_in_mutation_context(self, filter, page).await?;
         for edge in &connection.edges {
-            if !authorize_repository_row::<T, B>(self.db, &edge.node)
+            if !authorize_repository_row::<T, B>(self.database(), &edge.node)
                 .await
                 .map_err(crate::graphql::errors::OrmPublicError::from)?
             {
