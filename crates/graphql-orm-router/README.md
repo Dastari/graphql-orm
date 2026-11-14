@@ -3,7 +3,7 @@ title: graphql-orm-router
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-14
 review_by: 2027-02-07
 supersedes: []
 ---
@@ -15,6 +15,14 @@ The current workspace selects published Auth `v0.26.0`, peeled to
 that same tag and refresh their locks to one source; matching the commit alone
 does not unify revision and tag selectors. See the
 [Auth 0.26.0 migration](../../MIGRATION.md#agql-auth-0260).
+
+Version 0.15.0 lets the Prometheus exporter bind its own `host` (opt-in; the
+default is unchanged) and bounds stale role-scope catalogue use: after
+`maximumStalenessSeconds` (default 15 minutes) of failed refreshes,
+role-bearing requests are refused as unavailable instead of being served from
+the stale snapshot. A refreshed descriptor must keep its subgraph ID, and
+subscription counts are capped at 2^20. See
+[MIGRATION.md](MIGRATION.md#0140-to-0150-router-hardening).
 
 Version 0.13.0 accepts outbound `http` URLs only for loopback hosts unless
 `allowPlaintextHttp` is set, and its schema and JWKS clients ignore proxy
