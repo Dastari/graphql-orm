@@ -62,6 +62,45 @@ env:
   GRAPHQL_ORM_TEST_MSSQL_PULL: missing
 
 jobs:
+  owned-postgres-complete:
+    if: inputs.validation_profile == 'full'
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.target_ref }}
+      - uses: ./.github/actions/owned-postgres-complete
+
+  dependency-audit:
+    if: inputs.validation_profile == 'full'
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.target_ref }}
+      - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
+      - name: Install the reviewed advisory scanner
+        run: python3 scripts/install-reviewed-cargo-tool.py cargo-audit
+      - run: python3 scripts/test-dependency-audit.py
+      - name: Audit all tracked root and fixture lockfiles
+        run: python3 scripts/check-dependency-audit.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: dependency-audit
+          path: target/dependency-audit/
+          if-no-files-found: error
+
   guard:
     name: Prove the selected source is current main
     runs-on: ubuntu-latest
@@ -71,13 +110,31 @@ jobs:
     # approval still gates the whole run before any release lane compiles
     # anything, exactly as the single `validate` job required.
     environment: release
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          persist-credentials: false
           ref: ${{ inputs.target_ref }}
           fetch-depth: 0
+      - id: git-auth
+        name: Prepare masked Git authentication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          encoded=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::${encoded}"
+          header="AUTHORIZATION: basic ${encoded}"
+          echo "::add-mask::${header}"
+          printf 'header=%s\n' "${header}" >> "${GITHUB_OUTPUT}"
       - name: Prove the selected source is current main
         env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: http.https://github.com/.extraheader
+          GIT_CONFIG_VALUE_0: ${{ steps.git-auth.outputs.header }}
           VALIDATION_PROFILE: ${{ inputs.validation_profile }}
           RELEASE_APPROVAL: ${{ inputs.release_approval_reference }}
           TARGET_REF: ${{ inputs.target_ref }}
@@ -91,6 +148,7 @@ jobs:
           protection=$(gh api "repos/$GITHUB_REPOSITORY/environments/release" \
             --jq '.protection_rules | any(.type == "required_reviewers" and any(.reviewers[]; .type == "User" and .reviewer.login == "Dastari"))')
           test "$protection" = true
+          [[ "${RELEASE_ID}" =~ ^workspace-[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]+$ ]]
           test "${GITHUB_REF}" = refs/heads/main
           test "${GITHUB_SHA}" = "${TARGET_REF}"
           git fetch origin main --tags --force
@@ -124,6 +182,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          persist-credentials: false
           ref: ${{ inputs.target_ref }}
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
@@ -153,6 +212,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          persist-credentials: false
           ref: ${{ inputs.target_ref }}
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
         with:
@@ -181,6 +241,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          persist-credentials: false
           ref: ${{ inputs.target_ref }}
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
         with:
@@ -207,6 +268,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          persist-credentials: false
           ref: ${{ inputs.target_ref }}
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
         with:
@@ -229,6 +291,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          persist-credentials: false
           ref: ${{ inputs.target_ref }}
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
         with:
@@ -251,6 +314,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          persist-credentials: false
           ref: ${{ inputs.target_ref }}
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
         with:
@@ -297,6 +361,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          persist-credentials: false
           ref: ${{ inputs.target_ref }}
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -325,6 +390,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          persist-credentials: false
           ref: ${{ inputs.target_ref }}
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
         with:
@@ -346,6 +412,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          persist-credentials: false
           ref: ${{ inputs.target_ref }}
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -369,6 +436,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          persist-credentials: false
           ref: ${{ inputs.target_ref }}
       - id: providers
         name: Read the provider lane list from the lane runner
@@ -398,6 +466,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          persist-credentials: false
           ref: ${{ inputs.target_ref }}
       - name: Reclaim runner disk
         # graphql-orm-ai relinks every test binary for the test, Clippy, and
@@ -428,6 +497,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          persist-credentials: false
           ref: ${{ inputs.target_ref }}
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -442,6 +512,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          persist-credentials: false
           ref: ${{ inputs.target_ref }}
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -457,6 +528,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          persist-credentials: false
           ref: ${{ inputs.target_ref }}
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -478,6 +550,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          persist-credentials: false
           ref: ${{ inputs.target_ref }}
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
         with:
@@ -502,6 +575,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          persist-credentials: false
           ref: ${{ inputs.target_ref }}
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
@@ -521,6 +595,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          persist-credentials: false
           ref: ${{ inputs.target_ref }}
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
         with:
@@ -535,6 +610,8 @@ jobs:
     if: inputs.validation_profile == 'full'
     name: Release validation complete
     needs:
+      - owned-postgres-complete
+      - dependency-audit
       - guard
       - workspace-integrity
       - neutral-packages
@@ -585,6 +662,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          persist-credentials: false
           ref: ${{ inputs.target_ref }}
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # pinned installer
@@ -612,6 +690,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          persist-credentials: false
           ref: ${{ inputs.target_ref }}
           fetch-depth: 0
       - uses: ./.github/actions/reclaim-runner-disk
@@ -642,6 +721,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          persist-credentials: false
           ref: ${{ inputs.target_ref }}
           fetch-depth: 0
       - name: Require all selected scoped jobs to have succeeded
@@ -690,10 +770,25 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          persist-credentials: false
           ref: ${{ inputs.target_ref }}
           fetch-depth: 0
+      - id: git-auth
+        name: Prepare masked Git authentication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          encoded=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::${encoded}"
+          header="AUTHORIZATION: basic ${encoded}"
+          echo "::add-mask::${header}"
+          printf 'header=%s\n' "${header}" >> "${GITHUB_OUTPUT}"
       - name: Restore release tag visibility
         env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: http.https://github.com/.extraheader
+          GIT_CONFIG_VALUE_0: ${{ steps.git-auth.outputs.header }}
           TARGET_REF: ${{ inputs.target_ref }}
         run: |
           set -euo pipefail
@@ -732,7 +827,7 @@ jobs:
           test "$(rustc -vV | sed -n 's/^host: //p')" = "x86_64-unknown-linux-gnu"
           SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
           export SOURCE_DATE_EPOCH
-          cargo install cargo-cyclonedx --version 0.5.9 --locked
+          python3 scripts/install-reviewed-cargo-tool.py cargo-cyclonedx
           cargo build -p graphql-orm-router --release --features auth-agql --locked
           cargo cyclonedx \
             --manifest-path crates/graphql-orm-router/Cargo.toml \
@@ -786,6 +881,7 @@ jobs:
     # read-only bundle by digest, attests it, tags and publishes.
     permissions:
       contents: write
+      actions: read
       id-token: write
       attestations: write
     name: Publish immutable workspace release
@@ -798,10 +894,25 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          persist-credentials: false
           ref: ${{ inputs.target_ref }}
           fetch-depth: 0
+      - id: git-auth
+        name: Prepare masked Git authentication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          encoded=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::${encoded}"
+          header="AUTHORIZATION: basic ${encoded}"
+          echo "::add-mask::${header}"
+          printf 'header=%s\n' "${header}" >> "${GITHUB_OUTPUT}"
       - name: Restore release tag visibility
         env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: http.https://github.com/.extraheader
+          GIT_CONFIG_VALUE_0: ${{ steps.git-auth.outputs.header }}
           TARGET_REF: ${{ inputs.target_ref }}
         run: |
           set -euo pipefail
@@ -860,12 +971,31 @@ jobs:
           subject-path: release-dist/*
       - name: Create annotated release tags
         env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: http.https://github.com/.extraheader
+          GIT_CONFIG_VALUE_0: ${{ steps.git-auth.outputs.header }}
           RELEASE_ID: ${{ inputs.release_id }}
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          [[ "${RELEASE_ID}" =~ ^workspace-[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]+$ ]]
+          git fetch origin main --tags --force
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          if git show-ref --verify --quiet "refs/tags/${RELEASE_ID}"; then
+            echo "release tag already exists: ${RELEASE_ID}" >&2
+            exit 1
+          fi
+          # Compare the entire tag set with the trusted checked-out package manifests.
+          expected_tags=$(for manifest in crates/*/Cargo.toml; do
+            awk -F '"' '/^name = / && !name {name=$2} /^version = / {print name "-v" $2; exit}' "$manifest"
+          done | LC_ALL=C sort)
+          package_tags=$(jq -er '.packages | map(.tag) | sort | .[]' "release-dist/${RELEASE_ID}.json")
+          test "${package_tags}" = "${expected_tags}"
+          while IFS= read -r package_tag; do
+            [[ "${package_tag}" =~ ^[a-z][a-z0-9-]*-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          done <<<"${package_tags}"
           tags_to_push=()
           while IFS= read -r package_tag; do
             if git show-ref --verify --quiet "refs/tags/${package_tag}"; then
@@ -914,10 +1044,25 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          persist-credentials: false
           ref: ${{ inputs.target_ref }}
           fetch-depth: 0
+      - id: git-auth
+        name: Prepare masked Git authentication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          encoded=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::${encoded}"
+          header="AUTHORIZATION: basic ${encoded}"
+          echo "::add-mask::${header}"
+          printf 'header=%s\n' "${header}" >> "${GITHUB_OUTPUT}"
       - name: Restore release tag visibility
         env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: http.https://github.com/.extraheader
+          GIT_CONFIG_VALUE_0: ${{ steps.git-auth.outputs.header }}
           TARGET_REF: ${{ inputs.target_ref }}
         run: |
           set -euo pipefail
@@ -976,6 +1121,7 @@ jobs:
     if: inputs.validation_profile == 'replay-scoped-positive-v1'
     permissions:
       contents: write
+      actions: read
       id-token: write
       attestations: write
     name: Publish immutable scoped source release
@@ -988,10 +1134,25 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          persist-credentials: false
           ref: ${{ inputs.target_ref }}
           fetch-depth: 0
+      - id: git-auth
+        name: Prepare masked Git authentication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          encoded=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::${encoded}"
+          header="AUTHORIZATION: basic ${encoded}"
+          echo "::add-mask::${header}"
+          printf 'header=%s\n' "${header}" >> "${GITHUB_OUTPUT}"
       - name: Restore release tag visibility
         env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: http.https://github.com/.extraheader
+          GIT_CONFIG_VALUE_0: ${{ steps.git-auth.outputs.header }}
           TARGET_REF: ${{ inputs.target_ref }}
         run: |
           set -euo pipefail
@@ -1050,15 +1211,31 @@ jobs:
           subject-path: target/scoped-dist/*
       - name: Create annotated release tags
         env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: http.https://github.com/.extraheader
+          GIT_CONFIG_VALUE_0: ${{ steps.git-auth.outputs.header }}
           RELEASE_ID: ${{ inputs.release_id }}
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git fetch origin main
+          [[ "${RELEASE_ID}" =~ ^workspace-[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]+$ ]]
+          git fetch origin main --tags --force
           test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
           test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          if git show-ref --verify --quiet "refs/tags/${RELEASE_ID}"; then
+            echo "release tag already exists: ${RELEASE_ID}" >&2
+            exit 1
+          fi
+          # Compare the entire tag set with the trusted checked-out package manifests.
+          expected_tags=$(for manifest in crates/*/Cargo.toml; do
+            awk -F '"' '/^name = / && !name {name=$2} /^version = / {print name "-v" $2; exit}' "$manifest"
+          done | LC_ALL=C sort)
+          package_tags=$(jq -er '.packages | map(.tag) | sort | .[]' "target/scoped-dist/${RELEASE_ID}.json")
+          test "${package_tags}" = "${expected_tags}"
+          while IFS= read -r package_tag; do
+            [[ "${package_tag}" =~ ^[a-z][a-z0-9-]*-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          done <<<"${package_tags}"
           tags_to_push=()
           while IFS= read -r package_tag; do
             if git show-ref --verify --quiet "refs/tags/${package_tag}"; then

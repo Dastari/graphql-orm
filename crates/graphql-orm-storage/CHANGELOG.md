@@ -85,7 +85,7 @@ message, and `SmbStorageConfig` gains a field. See [MIGRATION.md](MIGRATION.md).
   it still has the size and last-write time enumeration saw; a file another
   handle has open, or one that changed, is skipped. Servers that resolve
   links themselves, as Samba does for symbolic links by default, present
-  them as ordinary directories, which no client can detect. A fourth
+  them as ordinary directories, which no client can detect. A fifth
   owner-local vendor patch, `share-access-override`, adds the share-access
   option the exclusive open needs.
   ([#593](https://github.com/Dastari/graphql-orm/issues/593))

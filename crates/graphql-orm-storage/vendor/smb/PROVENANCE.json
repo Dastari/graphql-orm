@@ -68,10 +68,18 @@
       "upstream": "Upstream 0.12.0 is reported to no longer slice a short session key; the other three sites are not known to be fixed upstream. Replace with a reviewed upstream fix when one is adopted."
     },
     {
+      "id": "test-image-digest",
+      "patch_file": "PATCHES/test-image-digest.patch",
+      "patch_sha256": "992de03f0d9acc89497c3bbbc0dd912f22811b4cd4046ab5a808007a09c2042a",
+      "applies_after": "PATCHES/server-response-errors.patch",
+      "runtime_changed_files": [],
+      "scope": "Test-only: pin the archived Samba Dockerfile base image by OCI index digest; no SMB runtime changes."
+    },
+    {
       "id": "share-access-override",
       "patch_file": "PATCHES/share-access-override.patch",
       "patch_sha256": "469867c4f7bb98502b73f9530fdb2a3b01e585cb07a374c3ee58ab47a4c4a392",
-      "applies_after": "PATCHES/server-response-errors.patch",
+      "applies_after": "PATCHES/test-image-digest.patch",
       "runtime_changed_files": [
         "src/resource.rs",
         "src/tree.rs"
@@ -612,7 +620,7 @@
     "src/tree/dfs_tree.rs": "e51e2bb70cde3e854166e7758705fa4e90706be805d05920520882b36808a937",
     "src/tree/ipc_tree.rs": "4bd97825246e9a9c3de638a00a614cd52adad0fd7af45cf250ca8ec8f04515bf",
     "src/tree.rs": "55b33152f676112cbcf5571fcadb1f44c76f9a01a48cee6c6bac96d0b9381e43",
-    "tests/Dockerfile": "10e06e8fb000d985643663ae33748a481b7303453e357a2c914d687f7c6fdf39",
+    "tests/Dockerfile": "826fb18767c69942263f53a1ba4afaa8a93d85ec8dfe9b55f1a0a37096e54153",
     "tests/README.md": "f73d0052681dfc4084795d7fa765d2ed7b98338033db076bfb2ed7b82f583ca9",
     "tests/basic.rs": "9589dbc8aa904745c0197809f74154c6a2016cf500a0469af110ba595d7a947c",
     "tests/closes.rs": "0da550c496ea4f2533f73d60d2a52a69e1255d1bfc3be97761dc9f32cb576b19",

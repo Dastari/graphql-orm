@@ -19,6 +19,8 @@ LOCAL_PATCHES = (
      'd400954a1d448b4bc5aa8bb28cc3c67bf1ee85e8ac4ceff2133b6a265a0114d6'),
     ('server-response-errors', 'PATCHES/server-response-errors.patch',
      '491df9ced427f2a64f0a36cee43a0ad84bf173782f6912db6431754a41324adb'),
+    ('test-image-digest', 'PATCHES/test-image-digest.patch',
+     '992de03f0d9acc89497c3bbbc0dd912f22811b4cd4046ab5a808007a09c2042a'),
     ('share-access-override', 'PATCHES/share-access-override.patch',
      '469867c4f7bb98502b73f9530fdb2a3b01e585cb07a374c3ee58ab47a4c4a392'),
 )

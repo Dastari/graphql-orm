@@ -1,0 +1,52 @@
+[
+  {
+    "finding": "RUSTSEC-2023-0071:rsa:0.9.10",
+    "review_by": "2026-12-04",
+    "reason": "JWT verification/signing and optional SMB NTLM paths do not expose a private RSA decryption oracle; no fixed compatible release. Review crypto API/key reuse changes."
+  },
+  {
+    "finding": "RUSTSEC-2023-0089:atomic-polyfill:1.0.3",
+    "review_by": "2026-12-04",
+    "reason": "Optional heapless/rstar spatial compatibility bridge; obsolete upstream owner. Retained in fixture/root resolution, not a claim of selected runtime reachability."
+  },
+  {
+    "finding": "RUSTSEC-2024-0449:unsafe-libyaml:0.2.11",
+    "review_by": "2026-12-04",
+    "reason": "Hive telemetry/VRL serde_yaml owner is unmaintained; replacement crosses owning dependency/API boundaries. No universal unreachable claim."
+  },
+  {
+    "finding": "RUSTSEC-2026-0194:quick-xml:0.39.4",
+    "review_by": "2026-12-04",
+    "reason": "Hive object_store 0.13 reader requires quick-xml 0.39; fixed owner 0.14 crosses its range. Typed router config excludes storage/credential XML initialization; host extensions invalidate this condition."
+  },
+  {
+    "finding": "RUSTSEC-2026-0195:quick-xml:0.39.4",
+    "review_by": "2026-12-04",
+    "reason": "Hive object_store 0.13 reader requires quick-xml 0.39; fixed owner 0.14 crosses its range. Typed router config excludes storage/credential XML initialization; host extensions invalidate this condition."
+  },
+  {
+    "finding": "RUSTSEC-2026-0253:lru:0.16.3",
+    "review_by": "2026-12-04",
+    "reason": "async-graphql/libdd retain incompatible old ranges; fixed lru starts at 0.18.2. Generated DataLoaders use NoCache; router does not initialize Datadog. Generic host caches remain exposed to panicking-key destructors."
+  },
+  {
+    "finding": "RUSTSEC-2026-0253:lru:0.16.4",
+    "review_by": "2026-12-04",
+    "reason": "async-graphql/libdd retain incompatible old ranges; fixed lru starts at 0.18.2. Generated DataLoaders use NoCache; router does not initialize Datadog. Generic host caches remain exposed to panicking-key destructors."
+  },
+  {
+    "finding": "RUSTSEC-2026-0387:crypto-bigint:0.5.5",
+    "review_by": "2026-12-04",
+    "reason": "Pinned agql-auth/jsonwebtoken RustCrypto elliptic-curve path; no compatible fixed release. Existing owner acceptance excludes private EC operations; auth pin move requires maintainer approval."
+  },
+  {
+    "finding": "RUSTSEC-2026-0441:pin-utils:0.1.0",
+    "review_by": "2026-12-04",
+    "reason": "aws-smithy-runtime (S3), sspi -> async-dnssd (optional SMB), and Hive reqwest-retry -> wasmtimer retain the unmaintained utility. Requires owning upstream migrations; maintenance status is not treated as a vulnerability exclusion."
+  },
+  {
+    "finding": "RUSTSEC-2026-0459:libsqlite3-sys:0.30.1",
+    "review_by": "2026-12-04",
+    "reason": "sqlx 0.8.6 -> sqlx-sqlite -> libsqlite3-sys 0.30.1. Fixed 0.39 requires an incompatible SQLx owner migration and backend/API review. SQLite accepts application SQL/data; no unreachability exemption claimed."
+  }
+]

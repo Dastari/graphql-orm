@@ -165,3 +165,5 @@ layout.
 - [Storage `BlobStore` integration](../graphql-orm-storage/docs/backup-integration.md)
 - [SMB integration](docs/smb.md)
 - [Migration guide](MIGRATION.md) and [changelog](CHANGELOG.md)
+
+Test-owned PostgreSQL infrastructure uses digest-pinned images.

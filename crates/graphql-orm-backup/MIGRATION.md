@@ -722,3 +722,7 @@ and reviewed revision as this crate; otherwise Rust treats the duplicated
 No `agql-auth` migration is required. Hosts continue to authorize
 configuration, validation, backup, restore, delete, and prune operations and to
 provide an internal trusted path for scheduled backups.
+
+## graphql-orm-backup 0.18.0
+
+Test infrastructure only: no API or data migration required. Owned PostgreSQL tests pull digest-pinned images.

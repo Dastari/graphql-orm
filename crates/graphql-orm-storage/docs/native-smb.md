@@ -47,8 +47,8 @@ dropping the handle closes it), and a session key shorter than 16 bytes
 (`InvalidState`). MS-SMB2 would right-pad a short session key with zeros; the
 client fails closed instead of deriving signing and encryption keys from it.
 
-Storage 0.12.0 adds a fourth owner-local patch,
-`PATCHES/share-access-override.patch`. `FileCreateArgs` gains an optional
+Storage 0.12.0 adds `PATCHES/share-access-override.patch`, applied after the
+test-only `PATCHES/test-image-digest.patch`. `FileCreateArgs` gains an optional
 share-access override; without one, a create keeps the share type's default.
 The temporary-file sweep uses it to open a candidate exclusively, so a file
 another handle still has open is skipped rather than deleted.
