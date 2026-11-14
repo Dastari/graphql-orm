@@ -25,6 +25,17 @@ or use `RouterTelemetryConfig::with_prometheus_listener(address, path)`. The
 port must still differ from the public and administrative ports. A router whose
 exporter binds `0.0.0.0` or `::` now logs a startup warning.
 
+### Subgraph identity and subscription bounds (validation)
+
+- A refresh refuses a router descriptor whose `subgraph.id` changed since the
+  source was admitted, and the source keeps its last-known-good input. If a
+  subgraph's identity is meant to change, restart the router after deploying
+  it.
+- `SubscriptionConfig` counts above 1048576 now fail validation with
+  `InvalidConfiguration`. Lower any such value.
+- Outbound fetches send `User-Agent: graphql-orm-router/<version>`. Update any
+  upstream allow-list that matched `graphql-orm-router/0.1`.
+
 ### Role-scope catalogue maximum staleness (can refuse requests)
 
 This applies to `auth-agql` builds with `roleScopeCatalogue`. Earlier routers

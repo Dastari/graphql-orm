@@ -24,6 +24,9 @@ const DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_PUBLIC_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_SUBGRAPH_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_WEBSOCKET_MESSAGE_BYTES: usize = 64 * 1024;
+/// Safety ceiling for every subscription count. Values above it are refused
+/// rather than reaching allocation or channel construction.
+const MAX_SUBSCRIPTION_LIMIT: usize = 1 << 20;
 const RESERVED_PUBLIC_HEADERS: &[&str] = &[
     "authorization",
     "cookie",
@@ -836,6 +839,15 @@ impl SubscriptionConfig {
             return Err(RouterError::new(
                 RouterErrorKind::InvalidConfiguration,
                 format!("{name} must be greater than zero"),
+            ));
+        }
+        if let Some((name, _)) = bounded
+            .iter()
+            .find(|(_, value)| *value > MAX_SUBSCRIPTION_LIMIT)
+        {
+            return Err(RouterError::new(
+                RouterErrorKind::InvalidConfiguration,
+                format!("{name} must not exceed {MAX_SUBSCRIPTION_LIMIT}"),
             ));
         }
         if self.max_client_message_bytes == 0
@@ -1919,6 +1931,50 @@ mod tests {
         let debug = format!("{subgraph:?}");
         assert!(debug.contains("authorization"));
         assert!(!debug.contains("very-secret"));
+    }
+
+    #[test]
+    fn subscription_counts_have_upper_safety_bounds() {
+        type Setter = fn(SubscriptionConfig, usize) -> SubscriptionConfig;
+        let limit = MAX_SUBSCRIPTION_LIMIT;
+        let setters: [(&str, Setter); 6] = [
+            (
+                "maximum WebSocket connections",
+                SubscriptionConfig::with_max_connections,
+            ),
+            (
+                "maximum pending WebSocket connections",
+                SubscriptionConfig::with_max_pending_connections,
+            ),
+            (
+                "maximum WebSocket connection attempts per second",
+                SubscriptionConfig::with_max_connection_attempts_per_second,
+            ),
+            (
+                "maximum operations per WebSocket connection",
+                SubscriptionConfig::with_max_operations_per_connection,
+            ),
+            (
+                "subscription broadcast capacity",
+                SubscriptionConfig::with_broadcast_capacity,
+            ),
+            (
+                "subscription subgraph buffer capacity",
+                SubscriptionConfig::with_subgraph_buffer_capacity,
+            ),
+        ];
+        for (name, set) in setters {
+            set(SubscriptionConfig::new(), limit)
+                .validate()
+                .unwrap_or_else(|error| panic!("{name} at the bound: {error}"));
+            for value in [limit + 1, usize::MAX] {
+                let error = set(SubscriptionConfig::new(), value)
+                    .validate()
+                    .unwrap_err();
+                assert_eq!(error.kind(), RouterErrorKind::InvalidConfiguration);
+                assert!(error.to_string().starts_with(name), "{error}");
+            }
+        }
     }
 
     #[test]

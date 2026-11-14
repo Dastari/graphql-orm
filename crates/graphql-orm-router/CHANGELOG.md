@@ -31,6 +31,21 @@ supersedes: []
   provider counters `role_scope_stale_refusal_total` and
   `role_scope_refresh_failure_total` (which also counts scheduled refreshes)
   go with rate-limited warning logs.
+- Router code-quality follow-ups from the 2026-11-09 audit (part of #539):
+  - **Behaviour change:** a schema refresh refuses a router descriptor whose
+    subgraph ID differs from the one its source was admitted with. The source
+    keeps its last-known-good input, and a restart accepts the new identity.
+  - **Behaviour change:** every `SubscriptionConfig` count is capped at
+    1048576. Larger values used to reach channel construction unchecked.
+  - Schema, registration, JWKS and role-catalogue fetches share one bounded body
+    reader. The outbound `User-Agent` is `graphql-orm-router/<version>`
+    instead of the fixed `graphql-orm-router/0.1`, and JWKS and catalogue
+    requests now send it too.
+  - Internal WebSocket frames are JSON-parsed once instead of twice, and the
+    authorization-variable projection is trimmed without re-serialising the
+    whole message for every removed entry.
+  - The engine's slow-request, keep-alive, GET-mutation, batching and
+    subgraph-response defaults are documented and pinned by tests.
 
 ## 0.14.0 (unreleased)
 

@@ -710,25 +710,40 @@ fn selected_subscription(message: &Value) -> Option<bool> {
     Some(operation.operation_type() == cynic_parser::common::OperationType::Subscription)
 }
 
+/// One frame from the private Hive endpoint. A text frame is JSON-parsed once,
+/// on arrival, and the parsed message travels through the bridge queue.
+enum BridgeFrame {
+    Message(Value),
+    Control(ws::Frame),
+}
+
+impl BridgeFrame {
+    /// Unparseable text is dropped here, exactly as the public translation
+    /// would drop it later.
+    fn parse(frame: ws::Frame) -> Option<Self> {
+        match frame {
+            ws::Frame::Text(bytes) => serde_json::from_slice(&bytes).ok().map(Self::Message),
+            frame => Some(Self::Control(frame)),
+        }
+    }
+}
+
 fn enqueue_subscription_frame(
-    tx: &hive_router::tokio::sync::mpsc::Sender<
-        Result<ws::Frame, hive_router::ntex::ws::error::WsError<()>>,
-    >,
+    tx: &hive_router::tokio::sync::mpsc::Sender<BridgeFrame>,
     frame: ws::Frame,
     state: &SharedConnectionState,
-) -> Option<ws::Frame> {
+) -> Option<BridgeFrame> {
+    let frame = BridgeFrame::parse(frame)?;
     let id = match &frame {
-        ws::Frame::Text(bytes) => serde_json::from_slice::<Value>(bytes)
-            .ok()
-            .and_then(|message| message.get("id").and_then(Value::as_str).map(str::to_owned)),
-        _ => None,
+        BridgeFrame::Message(message) => message.get("id").and_then(Value::as_str),
+        BridgeFrame::Control(_) => None,
     };
     let mut state = state.borrow_mut();
-    let Some(operation) = id.as_ref().and_then(|id| {
+    let Some(operation) = id.and_then(|id| {
         state
             .operations
             .values_mut()
-            .find(|operation| operation.internal_id == *id && operation.subscription)
+            .find(|operation| operation.internal_id == id && operation.subscription)
     }) else {
         return Some(frame);
     };
@@ -736,7 +751,7 @@ fn enqueue_subscription_frame(
         return None;
     }
     if matches!(
-        tx.try_send(Ok(frame)),
+        tx.try_send(frame),
         Err(hive_router::tokio::sync::mpsc::error::TrySendError::Full(_))
     ) {
         operation.lost = true;
@@ -787,21 +802,23 @@ async fn connect_internal(
                     // One-shot results and connection controls never enter the
                     // lossy subscription queue, even when it is saturated.
                     match queued {
-                        Some(ws::Frame::Text(bytes)) => {
-                            if let Some(text) = public_server_message(&bytes, &state)
+                        Some(BridgeFrame::Message(message)) => {
+                            if let Some(text) = public_server_message(message, &state)
                                 && sink.send(ws::Message::Text(text.into())).await.is_err()
                             {
                                 state.borrow_mut().terminate_and_close_internal();
                             }
                         }
-                        Some(ws::Frame::Ping(bytes)) => {
+                        Some(BridgeFrame::Control(ws::Frame::Ping(bytes))) => {
                             return Ok::<_, ()>(Some(ws::Message::Pong(bytes)));
                         }
-                        Some(ws::Frame::Close(reason)) => {
+                        Some(BridgeFrame::Control(ws::Frame::Close(reason))) => {
                             state.borrow_mut().terminate_and_close_internal();
                             let _ = sink.send(ws::Message::Close(reason)).await;
                         }
-                        Some(ws::Frame::Binary(_) | ws::Frame::Continuation(_)) => {
+                        Some(BridgeFrame::Control(
+                            ws::Frame::Binary(_) | ws::Frame::Continuation(_),
+                        )) => {
                             state.borrow_mut().terminate_and_close_internal();
                             let _ = sink
                                 .send(close_message(1011, "Subscription transport unavailable"))
@@ -836,9 +853,7 @@ async fn connect_internal(
 }
 
 async fn forward_internal_messages(
-    mut receiver: hive_router::tokio::sync::mpsc::Receiver<
-        Result<ws::Frame, hive_router::ntex::ws::error::WsError<()>>,
-    >,
+    mut receiver: hive_router::tokio::sync::mpsc::Receiver<BridgeFrame>,
     internal_sink: ws::WsSink,
     external_sink: ws::WsSink,
     state: SharedConnectionState,
@@ -850,16 +865,15 @@ async fn forward_internal_messages(
     }
 
     let mut end = ForwardEnd::InternalFailure;
+    // Only subscription messages enter this queue; connection controls are
+    // answered inline by the bridge service. The control arms stay exhaustive.
     while let Some(frame) = receiver.recv().await {
-        let Ok(frame) = frame else {
-            break;
-        };
         match frame {
-            ws::Frame::Text(bytes) => {
+            BridgeFrame::Message(message) => {
                 if external_sink.io().is_wr_backpressure() {
                     state.borrow_mut().lose_connection_subscriptions();
                 }
-                let Some(text) = public_server_message(&bytes, &state) else {
+                let Some(text) = public_server_message(message, &state) else {
                     continue;
                 };
                 if external_sink
@@ -871,17 +885,17 @@ async fn forward_internal_messages(
                     break;
                 }
             }
-            ws::Frame::Ping(bytes) => {
+            BridgeFrame::Control(ws::Frame::Ping(bytes)) => {
                 if internal_sink.send(ws::Message::Pong(bytes)).await.is_err() {
                     break;
                 }
             }
-            ws::Frame::Pong(_) => {}
-            ws::Frame::Close(reason) => {
+            BridgeFrame::Control(ws::Frame::Pong(_) | ws::Frame::Text(_)) => {}
+            BridgeFrame::Control(ws::Frame::Close(reason)) => {
                 end = ForwardEnd::InternalClose(reason);
                 break;
             }
-            ws::Frame::Binary(_) | ws::Frame::Continuation(_) => break,
+            BridgeFrame::Control(ws::Frame::Binary(_) | ws::Frame::Continuation(_)) => break,
         }
     }
     let termination = state.borrow_mut().terminate();
@@ -909,8 +923,7 @@ async fn forward_internal_messages(
 
 // Hive can emit complete after an error. Translate each bridge generation back to
 // its public ID only while active: error is terminal, even if that ID is reused.
-fn public_server_message(bytes: &[u8], state: &SharedConnectionState) -> Option<String> {
-    let mut message = serde_json::from_slice::<Value>(bytes).ok()?;
+fn public_server_message(mut message: Value, state: &SharedConnectionState) -> Option<String> {
     let mut state = state.borrow_mut();
     match message.get("type").and_then(Value::as_str) {
         Some("connection_ack") => {
@@ -1130,6 +1143,38 @@ fn inject_operation_variables_inner(
         return;
     }
 
+    // Trim with exact compact-JSON size arithmetic rather than re-serialising
+    // the whole message per removed entry. An object entry costs its encoded
+    // key, a colon and its encoded value, plus one comma unless it is alone.
+    let mut encoded_len = message.to_string().len();
+    while encoded_len > internal_max_bytes {
+        let Some(projected) = message
+            .get_mut("payload")
+            .and_then(Value::as_object_mut)
+            .and_then(|payload| payload.get_mut("extensions"))
+            .and_then(Value::as_object_mut)
+            .and_then(|extensions| extensions.get_mut(INTERNAL_SUBSCRIPTION_VARIABLES_EXTENSION))
+            .and_then(Value::as_object_mut)
+        else {
+            break;
+        };
+        let Some(name) = projected.keys().next_back().cloned() else {
+            break;
+        };
+        let Some(value) = projected.remove(&name) else {
+            break;
+        };
+        let entry = serde_json::to_string(&name)
+            .expect("JSON variable name")
+            .len()
+            + 1
+            + value.to_string().len();
+        let separator = usize::from(!projected.is_empty());
+        encoded_len = encoded_len.saturating_sub(entry + separator);
+    }
+
+    // Confirm with one real serialization; this also removes an emptied
+    // projection when the message is still too large.
     while message.to_string().len() > internal_max_bytes {
         let Some(projected) = message
             .get_mut("payload")
@@ -1281,6 +1326,11 @@ fn spawn_continuity_watch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pre-parse test entry point: frames arrive as text.
+    fn public_server_message(bytes: &[u8], state: &SharedConnectionState) -> Option<String> {
+        super::public_server_message(serde_json::from_slice(bytes).ok()?, state)
+    }
 
     #[derive(Debug)]
     struct UnusedAuthentication;
@@ -1680,6 +1730,59 @@ mod tests {
         assert!(!endpoint.authorizes(&endpoint.path, Some(std::str::from_utf8(&flipped).unwrap())));
         assert!(!endpoint.authorizes(&endpoint.path, Some(segment)));
         assert!(endpoint.authorizes(&endpoint.path, Some(&endpoint.secret)));
+    }
+
+    #[test]
+    fn projection_trim_matches_the_reserialising_reference() {
+        let message = || {
+            let mut variables = serde_json::Map::new();
+            for index in 0..40 {
+                variables.insert(format!("v{index:02}"), json!(format!("value-{index}")));
+            }
+            variables.insert("quo\"te".to_owned(), json!("needs \"escaping\""));
+            variables.insert("unicode\u{e9}".to_owned(), json!(12.5));
+            variables.insert("flag".to_owned(), json!(true));
+            variables.insert("nothing".to_owned(), Value::Null);
+            json!({
+                "id": "operation",
+                "type": "subscribe",
+                "payload": {
+                    "query": "subscription { event }",
+                    "variables": variables,
+                    "extensions": {"client": true}
+                }
+            })
+        };
+        // The old algorithm: re-serialise after every removed entry.
+        let reference = |limit: usize| {
+            let mut value = message();
+            inject_operation_variables(&mut value, usize::MAX);
+            while value.to_string().len() > limit {
+                let extensions = value["payload"]["extensions"].as_object_mut().unwrap();
+                let Some(projected) = extensions
+                    .get_mut(INTERNAL_SUBSCRIPTION_VARIABLES_EXTENSION)
+                    .and_then(Value::as_object_mut)
+                else {
+                    break;
+                };
+                let Some(name) = projected.keys().next_back().cloned() else {
+                    extensions.remove(INTERNAL_SUBSCRIPTION_VARIABLES_EXTENSION);
+                    break;
+                };
+                projected.remove(&name);
+            }
+            value
+        };
+        let full = {
+            let mut value = message();
+            inject_operation_variables(&mut value, usize::MAX);
+            value.to_string().len()
+        };
+        for limit in (0..=full + 2).step_by(7).chain([full, full - 1, 1]) {
+            let mut trimmed = message();
+            inject_operation_variables(&mut trimmed, limit);
+            assert_eq!(trimmed, reference(limit), "limit {limit}");
+        }
     }
 
     #[test]

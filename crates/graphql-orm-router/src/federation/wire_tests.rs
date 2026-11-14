@@ -1496,6 +1496,53 @@ fn public_static_router_serves_only_after_complete_preparation() {
         "SUBGRAPH_FAILURE"
     );
 
+    // Pinned engine defaults: no mutations over GET and no request batching.
+    let get_mutation = raw_http(
+        router.address,
+        "GET",
+        "/api/graphql?query=mutation%20%7B%20renameProduct(id%3A%20%22p1%22%2C%20name%3A%20%22x%22)%20%7B%20id%20%7D%20%7D",
+        &[("accept", "application/json")],
+        None,
+    )
+    .unwrap();
+    let get_mutation_body = String::from_utf8_lossy(&get_mutation.body);
+    assert!(
+        get_mutation_body.contains("MUTATION_NOT_ALLOWED_OVER_HTTP_GET"),
+        "{} {get_mutation_body}",
+        get_mutation.status
+    );
+    let batch = serde_json::to_vec(&json!([
+        {"query": "query { product(id: \"p1\") { id } }"},
+        {"query": "query { product(id: \"p1\") { id } }"}
+    ]))
+    .unwrap();
+    let batched = raw_http(router.address, "POST", "/api/graphql", &[], Some(&batch)).unwrap();
+    let batched_body = String::from_utf8_lossy(&batched.body);
+    assert!(
+        batched.status >= 400 && !batched_body.contains("\"data\""),
+        "{} {batched_body}",
+        batched.status
+    );
+
+    // A request head that stalls is closed by the HTTP server's header read
+    // deadline instead of holding the connection open.
+    let mut slow = TcpStream::connect(router.address).unwrap();
+    slow.set_read_timeout(Some(TEST_TIMEOUT)).unwrap();
+    slow.write_all(b"GET /health HTTP/1.1\r\nHost: router\r\n")
+        .unwrap();
+    let started = Instant::now();
+    let mut stalled = Vec::new();
+    let _ = slow.read_to_end(&mut stalled);
+    assert!(
+        started.elapsed() < TEST_TIMEOUT,
+        "a stalled request head must be closed by the server"
+    );
+    assert!(
+        stalled.is_empty() || stalled.starts_with(b"HTTP/1.1 408"),
+        "{}",
+        String::from_utf8_lossy(&stalled)
+    );
+
     router.stop();
 }
 

@@ -18,7 +18,7 @@ use agql_auth::{
     RoleScopeExpansionProvider, SignedRoleScopeCatalogue, StaticRoleScopeExpansion,
     effective_scopes,
 };
-use futures::{StreamExt, future::BoxFuture};
+use futures::future::BoxFuture;
 use jsonwebtoken::{
     Algorithm, DecodingKey, Validation, decode, decode_header,
     jwk::{AlgorithmParameters, Jwk, KeyAlgorithm, KeyOperations, PublicKeyUse},
@@ -35,6 +35,7 @@ use url::Url;
 use crate::{
     AuthenticatedPrincipal, AuthenticationError, AuthenticationProvider, RouterError,
     RouterErrorKind,
+    http_body::{BoundedBodyError, USER_AGENT, read_bounded_body},
 };
 
 const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
@@ -516,6 +517,7 @@ impl JwksAuthenticationProvider {
     pub fn new(config: JwksAuthenticationConfig) -> Result<Self, RouterError> {
         config.validate()?;
         let mut client = Client::builder()
+            .user_agent(USER_AGENT)
             .redirect(Policy::none())
             .timeout(config.request_timeout);
         if !config.use_environment_proxy {
@@ -591,28 +593,16 @@ impl JwksAuthenticationProvider {
                 "{resource} endpoint returned an unsuccessful status"
             )));
         }
-        if response
-            .content_length()
-            .is_some_and(|length| length > maximum_bytes as u64)
-        {
-            return Err(AuthenticationError::unavailable(format!(
-                "{resource} response exceeded its configured body limit"
-            )));
-        }
-        let mut body = Vec::new();
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|_| {
-                AuthenticationError::unavailable(format!("{resource} response read failed"))
-            })?;
-            if body.len().saturating_add(chunk.len()) > maximum_bytes {
-                return Err(AuthenticationError::unavailable(format!(
+        read_bounded_body(response, maximum_bytes)
+            .await
+            .map_err(|error| match error {
+                BoundedBodyError::TooLarge => AuthenticationError::unavailable(format!(
                     "{resource} response exceeded its configured body limit"
-                )));
-            }
-            body.extend_from_slice(&chunk);
-        }
-        Ok(body)
+                )),
+                BoundedBodyError::Read => {
+                    AuthenticationError::unavailable(format!("{resource} response read failed"))
+                }
+            })
     }
 
     #[cfg(feature = "auth-agql")]

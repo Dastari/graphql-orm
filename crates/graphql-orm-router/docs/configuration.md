@@ -305,6 +305,11 @@ value. Changing the rate or the deadline resizes the default. An explicit
 `maxPendingConnections` below that product lets fewer idle upgrades than the
 rate admits fill the budget. A shorter deadline frees idle slots sooner.
 
+Every subscription count (`maxConnections`, `maxPendingConnections`,
+`maxConnectionAttemptsPerSecond`, `maxOperationsPerConnection`,
+`broadcastCapacity`, and `subgraphBufferCapacity`) must be between 1 and
+1048576 (2^20). Validation refuses larger values before any channel is built.
+
 The administrative metrics report `router_websocket_connections` for
 authenticated connections and `router_pending_websocket_connections` for
 sockets still waiting for `connection_init`. A socket is counted in exactly one

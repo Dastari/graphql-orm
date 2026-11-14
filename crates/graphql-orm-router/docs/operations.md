@@ -84,7 +84,32 @@ not refreshing, and refusals mean role-bearing requests are failing because a
 stale snapshot passed `maximumStalenessSeconds`. Both emit rate-limited warning
 logs; refresh failures log a redacted reason without URLs or header values.
 
+### Public HTTP server defaults
+
+These limits come from the pinned engine (Hive 0.2.19 on ntex 3.12) and are not
+configurable through the router. Wire tests pin the stalled-head,
+GET-mutation, and batching behaviour.
+
+- A request head must start arriving within 1 second and keep arriving at
+  256 bytes per second or more, for at most 16 seconds. A stalled head is
+  closed.
+- Idle keep-alive connections close after 5 seconds.
+- The request-head parse buffer is 64 KiB, so a `maxRequestHeaderBytes` above
+  64 KiB is effectively capped there.
+- The body read has no separate rate limit. It is bounded by
+  `maxRequestBodyBytes` and by `publicRequestTimeoutMs`, which covers the whole
+  handler, including the body read.
+- `GET` serves queries only. A mutation over `GET` fails with
+  `MUTATION_NOT_ALLOWED_OVER_HTTP_GET`. A JSON array body (request batching) is
+  refused.
+- Subgraph responses have no byte limit of their own; `subgraphRequestTimeoutMs`
+  bounds them. Subgraph URLs are deployment-owned or trusted registrations.
+
 ## Reload and recovery
+
+A refreshed router descriptor must keep the subgraph ID its source was
+admitted with. A changed ID fails that source's refresh and keeps its
+last-known-good input; restart the router to accept a new identity.
 
 Polling uses conditional ETags. A changed source is composed with every other
 active last-known-good source and published only after the complete runtime and

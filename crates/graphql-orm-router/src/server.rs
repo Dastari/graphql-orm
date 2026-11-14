@@ -56,6 +56,12 @@ use crate::{
 
 const STATIC_GRAPH_PLUGIN: &str = "graphql-orm-router-static-graph";
 static NEXT_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
+/// One-shot handoff of each prepared runtime into its Hive plugin.
+///
+/// Hive builds plugins from serialisable configuration only, so the plugin
+/// config carries a process-unique `runtime_id` and `on_plugin_init` removes
+/// the matching entry. Every failure before that point removes it too, so an
+/// entry never outlives one router start and is never shared between routers.
 static PLUGIN_RUNTIMES: OnceLock<Mutex<BTreeMap<u64, PluginRuntime>>> = OnceLock::new();
 
 /// Prepares and runs a router on its owned Ntex runtime.
