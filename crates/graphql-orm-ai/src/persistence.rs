@@ -88,6 +88,7 @@ pub(crate) struct AiProviderProfileRecord {
     pub base_url: Option<String>,
     /// Non-secret reference only; credential plaintext never enters this row.
     #[backup(redact)]
+    #[filterable(type = "string")]
     pub credential_reference: Option<String>,
     pub enabled: bool,
     #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
@@ -2406,7 +2407,8 @@ pub(crate) struct AiAuditEventRecord {
 #[backend_selected_graphql_entity(
     table = "graphql_orm_ai_secret_cleanup",
     plural = "GraphqlOrmAiSecretCleanup",
-    default_sort = "created_at ASC"
+    default_sort = "created_at ASC",
+    keyset = "created_at asc, id asc"
 )]
 #[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
 #[cfg_attr(
@@ -2419,9 +2421,13 @@ pub(crate) struct AiSecretCleanupRecord {
     #[graphql_orm(auto_generated = false)]
     #[filterable(type = "uuid")]
     pub id: graphql_orm::uuid::Uuid,
-    /// Opaque reference only. It is redacted from backups and never exposed.
+    /// Opaque reference only; redacted from backups and disclosed only to an
+    /// authorized host cleanup caller, never to models or clients.
     #[backup(redact)]
     pub secret_reference: String,
+    /// Exact configuration scope; legacy unscoped commands require operator review.
+    #[filterable(type = "string")]
+    pub scope_key: Option<String>,
     pub reason_code: String,
     #[filterable(type = "string")]
     pub state: String,

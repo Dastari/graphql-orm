@@ -371,3 +371,79 @@ impl AiSubscriptionService for OrmAiSubscriptionService {
         }))
     }
 }
+
+#[cfg(all(test, feature = "sqlite"))]
+mod tests {
+    use super::*;
+    use crate::{
+        AiAccessDecision, AiAccessPolicy, AiContentProtectionPolicy,
+        AiContentProtectionPolicyResolver, AiScope, AiSessionAction,
+    };
+    use agql_auth::{AuthPrincipal, PrincipalReference, ResolvedPrincipal};
+
+    struct UnusedPolicy;
+    #[async_trait]
+    impl AiAccessPolicy for UnusedPolicy {
+        async fn can_access_scope(
+            &self,
+            _: &AuthPrincipal,
+            _: &AiScope,
+            _: AiSessionAction,
+        ) -> AiAccessDecision {
+            unreachable!()
+        }
+        async fn can_access_session(
+            &self,
+            _: &AuthPrincipal,
+            _: AiSessionId,
+            _: AiSessionAction,
+        ) -> AiAccessDecision {
+            unreachable!()
+        }
+    }
+    #[async_trait]
+    impl AiContentProtectionPolicyResolver for UnusedPolicy {
+        async fn resolve(
+            &self,
+            _: &AuthPrincipal,
+            _: &AiScope,
+        ) -> Result<AiContentProtectionPolicy, AiError> {
+            unreachable!()
+        }
+    }
+    #[async_trait]
+    impl CurrentPrincipalResolver for UnusedPolicy {
+        async fn resolve(
+            &self,
+            _: &PrincipalReference,
+        ) -> agql_auth::AuthResult<ResolvedPrincipal> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn host_reauthorization_grace_is_capped_and_zero_still_disables_it() {
+        let database =
+            graphql_orm::db::Database::<graphql_orm::graphql::orm::SqliteBackend>::connect_sqlite(
+                "sqlite::memory:",
+            )
+            .await
+            .unwrap();
+        let sessions = Arc::new(OrmAiSessionService::new(
+            database,
+            Arc::new(UnusedPolicy),
+            Arc::new(UnusedPolicy),
+            Arc::new(crate::DatabaseManagedContentProtector),
+        ));
+        for (requested, expected) in [
+            (Duration::ZERO, Duration::ZERO),
+            (Duration::from_secs(119), Duration::from_secs(119)),
+            (Duration::from_secs(121), Duration::from_secs(120)),
+            (Duration::MAX, Duration::from_secs(120)),
+        ] {
+            let service = OrmAiSubscriptionService::new(sessions.clone(), Arc::new(UnusedPolicy))
+                .with_reauthorization_grace(requested);
+            assert_eq!(service.reauthorization_grace, expected);
+        }
+    }
+}

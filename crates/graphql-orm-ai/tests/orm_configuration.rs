@@ -69,7 +69,7 @@ impl AiSecretStore for MemorySecretStore {
             "configuration uses fresh secret references"
         );
         let value = self.next.fetch_add(1, Ordering::SeqCst);
-        let reference = SecretRef::parse(format!("memory:{value}"))?;
+        let reference = SecretRef::parse(format!("memory/{value}"))?;
         self.references
             .lock()
             .expect("secret lock")
@@ -294,10 +294,9 @@ async fn profile_and_credential_mutations_require_recent_mfa_and_cas() {
             1,
         )
         .await
-        .expect("rotation retains the old reference for host-owned cleanup");
+        .expect("rotation cleans up the unshared old reference");
     assert_eq!(rotated.row_version, 2);
-    // Old references can have other users, including outside this crate.
-    assert_eq!(secrets.count(), 2);
+    assert_eq!(secrets.count(), 1);
     let removed = service
         .remove_provider_credential(
             &principal,
@@ -310,7 +309,7 @@ async fn profile_and_credential_mutations_require_recent_mfa_and_cas() {
         .expect("credential removal records cleanup");
     assert!(!removed.credential_configured);
     assert_eq!(removed.row_version, 3);
-    assert_eq!(secrets.count(), 2);
+    assert_eq!(secrets.count(), 0);
 
     let profiles = service
         .provider_profiles(&principal, scope())

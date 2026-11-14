@@ -66,6 +66,8 @@ impl AiProviderEndpointPolicy for AllowEndpoints {
 #[derive(Default)]
 struct CountingSecretStore {
     next: Mutex<u32>,
+    fail_delete: std::sync::atomic::AtomicBool,
+    deleted: Mutex<Vec<String>>,
 }
 
 #[async_trait]
@@ -88,7 +90,14 @@ impl AiSecretStore for CountingSecretStore {
             .map_err(|_| crate::SecretError::Unavailable)
     }
 
-    async fn delete(&self, _reference: &SecretRef) -> Result<(), crate::SecretError> {
+    async fn delete(&self, reference: &SecretRef) -> Result<(), crate::SecretError> {
+        if self.fail_delete.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(crate::SecretError::Unavailable);
+        }
+        self.deleted
+            .lock()
+            .unwrap()
+            .push(reference.as_str().to_owned());
         Ok(())
     }
 }
@@ -625,4 +634,260 @@ async fn local_harness_conversion_of_a_credentialed_profile_is_refused() {
         "{with_credentials:?}"
     );
     assert_eq!(stored(&database, profile.id).await, before);
+}
+
+#[tokio::test]
+async fn secret_cleanup_is_scoped_retryable_and_preserves_shared_references() {
+    for shared in [false, true] {
+        let database = database().await;
+        let mut host = database.clone();
+        host.set_field_policy(crate::custody_field_policy::tests::DenyEverything);
+        let policy = GrantedActions::new(&[
+            AiConfigurationAction::ManageProviderProfiles,
+            AiConfigurationAction::ManageProviderCredentials,
+        ]);
+        let secrets = Arc::new(CountingSecretStore::default());
+        let mut admin = service(&host, policy);
+        admin.secret_store = secrets.clone();
+        let created = admin
+            .upsert_provider_profile(
+                &principal(),
+                input(None, None, AiProviderKindInput::OpenAi, None),
+            )
+            .await
+            .unwrap();
+        let first = admin
+            .set_provider_credential(
+                &principal(),
+                created.id,
+                SecretString::from("one".to_owned()),
+                created.row_version,
+            )
+            .await
+            .unwrap();
+        let old = stored(&database, first.id)
+            .await
+            .credential_reference
+            .unwrap();
+        let mut other = None;
+        if shared {
+            let profile = admin
+                .upsert_provider_profile(
+                    &principal(),
+                    input(None, None, AiProviderKindInput::OpenAi, None),
+                )
+                .await
+                .unwrap();
+            // Legacy sharing is seeded through the unrestricted test handle.
+            AiProviderProfileRecord::update_by_id(
+                &database,
+                &profile.id,
+                UpdateAiProviderProfileRecordInput {
+                    credential_reference: Some(Some(old.clone())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            other = Some(profile.id);
+        }
+        // A failed store deletion must not roll back the new credential or lose its command.
+        secrets
+            .fail_delete
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let rotated = admin
+            .set_provider_credential(
+                &principal(),
+                first.id,
+                SecretString::from("two".to_owned()),
+                first.row_version,
+            )
+            .await
+            .unwrap();
+        let scope: AiScope = scope_input().into();
+        let pending = admin
+            .pending_secret_cleanups(&principal(), &scope, None)
+            .await
+            .unwrap();
+        assert_eq!(pending.entries.len(), 1);
+        let command = &pending.entries[0];
+        assert_eq!(command.reference.as_str(), old);
+        assert!(secrets.deleted.lock().unwrap().is_empty());
+        let denied = service(&database, GrantedActions::new(&[]));
+        assert!(matches!(
+            denied
+                .pending_secret_cleanups(&principal(), &scope, None)
+                .await,
+            Err(AiError::Forbidden)
+        ));
+        assert!(matches!(
+            denied
+                .complete_secret_cleanup(&principal(), &scope, command.id, command.row_version)
+                .await,
+            Err(AiError::NotFound)
+        ));
+        assert!(matches!(
+            admin
+                .complete_secret_cleanup(
+                    &principal(),
+                    &AiScope::new("tenant", "other"),
+                    command.id,
+                    command.row_version
+                )
+                .await,
+            Err(AiError::NotFound)
+        ));
+        assert!(matches!(
+            admin
+                .complete_secret_cleanup(&principal(), &scope, command.id, command.row_version + 1)
+                .await,
+            Err(AiError::Conflict)
+        ));
+        let failed = admin
+            .complete_secret_cleanup(&principal(), &scope, command.id, command.row_version)
+            .await;
+        assert!(matches!(failed, Err(AiError::Conflict)) == shared);
+        assert!(matches!(failed, Err(AiError::PersistenceFailed)) == !shared);
+        assert_eq!(
+            admin
+                .pending_secret_cleanups(&principal(), &scope, None)
+                .await
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
+        let mut filtered = database.clone();
+        filtered.set_row_policy(PossiblyFilteredProfiles);
+        let mut filtered_admin = service(
+            &filtered,
+            GrantedActions::new(&[AiConfigurationAction::ManageProviderCredentials]),
+        );
+        filtered_admin.secret_store = secrets.clone();
+        assert!(
+            matches!(
+                filtered_admin
+                    .complete_secret_cleanup(&principal(), &scope, command.id, command.row_version)
+                    .await,
+                Err(AiError::Conflict)
+            ),
+            "filtered absence is never deletion authority"
+        );
+        secrets
+            .fail_delete
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        if let Some(id) = other {
+            // A shared command remains pending until its final profile releases it.
+            assert!(matches!(
+                admin
+                    .complete_secret_cleanup(&principal(), &scope, command.id, command.row_version)
+                    .await,
+                Err(AiError::Conflict)
+            ));
+            AiProviderProfileRecord::update_by_id(
+                &database,
+                &id,
+                UpdateAiProviderProfileRecordInput {
+                    credential_reference: Some(None),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }
+        admin
+            .complete_secret_cleanup(&principal(), &scope, command.id, command.row_version)
+            .await
+            .unwrap();
+        assert_eq!(secrets.deleted.lock().unwrap().as_slice(), &[old]);
+        assert!(
+            admin
+                .pending_secret_cleanups(&principal(), &scope, None)
+                .await
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+        admin
+            .remove_provider_credential(
+                &principal(),
+                RemoveAiProviderCredentialInput {
+                    profile_id: rotated.id,
+                    expected_version: rotated.row_version,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            secrets.deleted.lock().unwrap().len(),
+            2,
+            "unshared removals finish immediately"
+        );
+        assert!(
+            admin
+                .pending_secret_cleanups(&principal(), &scope, None)
+                .await
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+    }
+}
+
+#[tokio::test]
+async fn inaccessible_profile_ids_are_masked_like_missing_ids() {
+    let database = database().await;
+    let profile = credentialed_profile(&database, AiProviderKindInput::OpenAi, None).await;
+    let denied = service(&database, GrantedActions::new(&[]));
+    for id in [profile.id, Uuid::new_v4()] {
+        assert!(matches!(
+            denied
+                .set_provider_credential(
+                    &principal(),
+                    id,
+                    SecretString::from("never-stored".to_owned()),
+                    profile.row_version
+                )
+                .await,
+            Err(AiError::NotFound)
+        ));
+        assert!(matches!(
+            denied
+                .remove_provider_credential(
+                    &principal(),
+                    RemoveAiProviderCredentialInput {
+                        profile_id: id,
+                        expected_version: profile.row_version
+                    }
+                )
+                .await,
+            Err(AiError::NotFound)
+        ));
+    }
+}
+
+struct PossiblyFilteredProfiles;
+impl graphql_orm::graphql::orm::RowPolicy<DefaultWriteBackend> for PossiblyFilteredProfiles {
+    fn can_read_row<'a>(
+        &'a self,
+        _: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database<DefaultWriteBackend>,
+        entity: &'static str,
+        _: Option<&'static str>,
+        _: graphql_orm::graphql::orm::EntityAccessSurface,
+        _: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async move { Ok(entity != "AiProviderProfileRecord") })
+    }
+    fn can_write_row<'a>(
+        &'a self,
+        _: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database<DefaultWriteBackend>,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: graphql_orm::graphql::orm::EntityAccessSurface,
+        _: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(true) })
+    }
 }

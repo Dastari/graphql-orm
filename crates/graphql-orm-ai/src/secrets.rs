@@ -35,7 +35,11 @@ impl SecretRef {
         let value = value.into();
         let valid = !value.is_empty()
             && value.len() <= 200
-            && !value.split('/').any(|part| matches!(part, "." | ".."))
+            && !value
+                .split('/')
+                .next()
+                .is_some_and(|part| part.contains(':'))
+            && !value.split('/').any(|part| matches!(part, "" | "." | ".."))
             && value.bytes().all(|byte| {
                 byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':' | b'/')
             });
@@ -173,7 +177,18 @@ mod reference_tests {
     use super::*;
     #[test]
     fn secret_references_reject_relative_path_segments() {
-        for value in ["..", ".", "keys/../key", "keys/./key"] {
+        for value in [
+            "..",
+            ".",
+            "keys/../key",
+            "keys/./key",
+            "/keys/key",
+            "C:/keys/key",
+            "vault:key",
+            "keys//key",
+            "keys/",
+            "//key",
+        ] {
             assert!(SecretRef::parse(value).is_err(), "{value}");
             assert!(serde_json::from_value::<SecretRef>(serde_json::json!(value)).is_err());
         }
