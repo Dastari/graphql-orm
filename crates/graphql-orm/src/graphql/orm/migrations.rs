@@ -754,7 +754,7 @@ fn render_create_table_statement_for_name(
             source_columns,
             backend.render_identifier_path(&foreign_key.target_table),
             target_columns,
-            foreign_key.on_delete.as_sql(),
+            foreign_key.on_delete.as_sql_for(backend),
         )
     }));
     parts.extend(table.check_constraints.iter().map(|constraint| {
@@ -2035,7 +2035,11 @@ fn render_composite_unique_changes(
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
-                format!(
+                // The batch declares a variable, and a rendered plan may be
+                // executed as one batch, where a second declaration of the
+                // same name is an error. `sp_executesql` gives each statement
+                // its own scope.
+                let batch = format!(
                     "DECLARE @sql nvarchar(max) = N''; \
                      SELECT @sql = @sql + N'ALTER TABLE ' + QUOTENAME(OBJECT_SCHEMA_NAME(k.parent_object_id)) + N'.' + \
                      QUOTENAME(OBJECT_NAME(k.parent_object_id)) + N' DROP CONSTRAINT ' + QUOTENAME(k.name) + N';' \
@@ -2048,7 +2052,8 @@ fn render_composite_unique_changes(
                      EXEC sp_executesql @sql",
                     sql_string_literal(&table),
                     columns.len()
-                )
+                );
+                format!("EXEC sys.sp_executesql N{}", sql_string_literal(&batch))
             }
             // MySQL is not an executable backend in this workspace.
             DatabaseBackend::Mysql => {
@@ -2901,9 +2906,15 @@ pub(super) fn render_migration_step_view(
                 column.name, table_name
             )]
         }
+        // T-SQL adds a column with `ADD`, without the `COLUMN` keyword.
         StepRef::AddColumn { table_name, column } => vec![format!(
-            "ALTER TABLE {} ADD COLUMN {}",
+            "ALTER TABLE {} ADD {}{}",
             backend.render_identifier_path(table_name),
+            if backend == DatabaseBackend::Mssql {
+                ""
+            } else {
+                "COLUMN "
+            },
             render_column_definition(backend, column, true)
         )],
         StepRef::DropColumn {
@@ -2985,11 +2996,21 @@ pub(super) fn render_migration_step_view(
                 "-- sqlite requires table rebuild to alter column {} on {}",
                 after.name, table_name
             )],
-            DatabaseBackend::Mysql | DatabaseBackend::Mssql => vec![format!(
+            DatabaseBackend::Mysql => vec![format!(
                 "ALTER TABLE {} ALTER COLUMN {} {}",
                 backend.render_identifier_path(table_name),
                 backend.render_identifier(&after.name),
                 after.sql_type
+            )],
+            // Without an explicit `NULL` or `NOT NULL`, SQL Server takes the
+            // nullability from session settings instead of keeping the
+            // column's own.
+            DatabaseBackend::Mssql => vec![format!(
+                "ALTER TABLE {} ALTER COLUMN {} {} {}",
+                backend.render_identifier_path(table_name),
+                backend.render_identifier(&after.name),
+                after.sql_type,
+                if after.nullable { "NULL" } else { "NOT NULL" }
             )],
         },
         StepRef::CreateIndex { table_name, index } => {
@@ -3058,7 +3079,7 @@ pub(super) fn render_migration_step_view(
                     source_columns,
                     target_table,
                     target_columns,
-                    foreign_key.on_delete.as_sql()
+                    foreign_key.on_delete.as_sql_for(backend)
                 )],
                 DatabaseBackend::Sqlite => vec![format!(
                     "-- sqlite requires table rebuild to add foreign key {} on {}",
@@ -3071,7 +3092,7 @@ pub(super) fn render_migration_step_view(
                     source_columns,
                     target_table,
                     target_columns,
-                    foreign_key.on_delete.as_sql()
+                    foreign_key.on_delete.as_sql_for(backend)
                 )],
             }
         }
@@ -5251,7 +5272,13 @@ pub async fn introspect_mssql_schema(
     for row in table_rows {
         let schema_name = super::MssqlBackend::try_get_string(&row, "table_schema")?;
         let raw_table_name = super::MssqlBackend::try_get_string(&row, "table_name")?;
-        let table_path = format!("{schema_name}.{raw_table_name}");
+        // Quote each part on its own: a `.` inside a table name is not a
+        // schema separator.
+        let table_path = format!(
+            "{}.{}",
+            DatabaseBackend::Mssql.quote_identifier(&schema_name),
+            DatabaseBackend::Mssql.quote_identifier(&raw_table_name)
+        );
         if is_internal_graphql_orm_table(&raw_table_name) {
             continue;
         }
@@ -5259,9 +5286,12 @@ pub async fn introspect_mssql_schema(
         let column_rows = super::MssqlBackend::fetch_rows(
             pool,
             "SELECT COLUMN_NAME AS column_name,
-                    CASE WHEN DATA_TYPE = 'nvarchar' THEN
+                    CASE WHEN DATA_TYPE IN ('nvarchar', 'varchar', 'nchar', 'char', 'varbinary', 'binary') THEN
                         DATA_TYPE + '(' + CASE WHEN CHARACTER_MAXIMUM_LENGTH = -1
                             THEN 'max' ELSE CONVERT(varchar(10), CHARACTER_MAXIMUM_LENGTH) END + ')'
+                        WHEN DATA_TYPE IN ('decimal', 'numeric') THEN
+                        DATA_TYPE + '(' + CONVERT(varchar(10), NUMERIC_PRECISION) + ','
+                            + CONVERT(varchar(10), NUMERIC_SCALE) + ')'
                         ELSE DATA_TYPE END AS data_type,
                     IS_NULLABLE AS is_nullable,
                     COLUMN_DEFAULT AS column_default
@@ -5359,7 +5389,7 @@ pub async fn introspect_mssql_schema(
 
         tables.push(TableModel {
             entity_name: raw_table_name.clone(),
-            table_name: DatabaseBackend::Mssql.quote_identifier_path(&table_path),
+            table_name: table_path,
             primary_key: primary_key.clone(),
             primary_keys,
             default_sort: format!("{primary_key} ASC"),
