@@ -4717,7 +4717,10 @@ mod tests {
             file(format!(".{}.uploading", uuid(2)), Some(day)),
             file(format!("a/.blob.bin.{}.uploading", uuid(3)), Some(3 * day)),
             // Too recent, no time, or in the future.
-            file(format!("a/.{}.uploading", uuid(4)), Some(Duration::from_secs(60))),
+            file(
+                format!("a/.{}.uploading", uuid(4)),
+                Some(Duration::from_secs(60)),
+            ),
             file(format!("a/.{}.uploading", uuid(5)), None),
             ListedFile {
                 key: format!("a/.{}.uploading", uuid(6)),
@@ -4726,7 +4729,10 @@ mod tests {
             // Callers' keys, however old.
             file("a/report.uploading".to_string(), Some(9 * day)),
             file(format!("a/x.{}.uploading", uuid(7)), Some(9 * day)),
-            file(format!("a/.{}.uploading", uuid(0xabcd).to_uppercase()), Some(9 * day)),
+            file(
+                format!("a/.{}.uploading", uuid(0xabcd).to_uppercase()),
+                Some(9 * day),
+            ),
             file("a/kept.bin".to_string(), Some(9 * day)),
         ];
         assert_eq!(
@@ -4755,9 +4761,14 @@ mod tests {
     #[test]
     fn portable_keys_are_opt_in_and_cover_the_root_and_listing_prefixes() {
         let mut config = config();
-        assert!(!config.portable_keys, "the default keeps existing keys valid");
+        assert!(
+            !config.portable_keys,
+            "the default keeps existing keys valid"
+        );
         config.root_prefix = Some("backups/CON".to_string());
-        config.validate().expect("POSIX validation accepts a device name");
+        config
+            .validate()
+            .expect("POSIX validation accepts a device name");
         config.portable_keys = true;
         assert!(matches!(
             config.validate(),

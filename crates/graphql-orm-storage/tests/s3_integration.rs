@@ -717,7 +717,11 @@ async fn conditional_multipart_completion_is_one_attempt_after_a_lost_response()
                 ),
                 "PUT" if query.contains("partNumber=") => {
                     assert!(!request.body.is_empty());
-                    ScriptedReply::Respond("200 OK", "ETag: \"part\"\r\n".to_string(), String::new())
+                    ScriptedReply::Respond(
+                        "200 OK",
+                        "ETag: \"part\"\r\n".to_string(),
+                        String::new(),
+                    )
                 }
                 "POST" if query.contains("uploadId=upload-1") => {
                     assert!(request.headers.contains("if-none-match: *"));
@@ -828,6 +832,9 @@ async fn answered_conditional_put_failures_keep_their_classification() {
     server.join().expect("fixture thread");
 }
 
+/// Objects an in-memory fixture holds, by request path.
+type FixtureObjects = std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>>;
+
 /// An in-memory S3 for the conditional-create probe. `honours_put` and
 /// `honours_complete` select whether `If-None-Match: *` is enforced on
 /// `PutObject` and on `CompleteMultipartUpload`.
@@ -835,16 +842,12 @@ fn probe_fixture(
     honours_put: bool,
     honours_complete: bool,
     done: std::sync::Arc<std::sync::atomic::AtomicBool>,
-) -> (
-    String,
-    std::thread::JoinHandle<()>,
-    std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>>,
-) {
+) -> (String, std::thread::JoinHandle<()>, FixtureObjects) {
     use std::{
         collections::BTreeMap,
         sync::{Arc, Mutex},
     };
-    let objects: Arc<Mutex<BTreeMap<String, Vec<u8>>>> = Arc::default();
+    let objects: FixtureObjects = Arc::default();
     let uploads: Arc<Mutex<BTreeMap<String, Vec<u8>>>> = Arc::default();
     let server_objects = Arc::clone(&objects);
     let (endpoint, server) = serve_scripted_s3(

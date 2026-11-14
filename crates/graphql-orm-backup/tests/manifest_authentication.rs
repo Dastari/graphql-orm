@@ -1128,7 +1128,10 @@ async fn change_payload_swapped_after_verification_is_never_applied_or_compacted
         BackupError::ChecksumMismatch { ref key, .. } if *key == change_key
     ));
     assert_eq!(target.restored()[0].rows[0].values["name"], "Ada");
-    assert!(target.restored_changes().is_empty(), "forged change never applied");
+    assert!(
+        target.restored_changes().is_empty(),
+        "forged change never applied"
+    );
     assert!(swapping.reads() >= 2, "verification and use both read");
 
     let swapping = SwappingRepository::new(inner.clone(), &change_key, forged);
