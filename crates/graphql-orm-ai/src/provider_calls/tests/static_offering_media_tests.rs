@@ -519,18 +519,37 @@ pub(super) async fn owning_coordinator_reset(
     assert_eq!(custody.effects.load(Ordering::SeqCst), 1);
 }
 
-#[tokio::test]
-async fn approved_native_quota_retry_is_once_and_preserves_effect_task_and_external_freeze() {
-    for mode in [8, 9, 10, 11] {
-        Box::pin(approved_media_lifecycle(false, false, 0, Some(mode))).await;
-    }
+// Keep the production approval/retained-provider path comfortably below the
+// ordinary 2 MiB test-thread stack. This guard runs in every existing AI lane;
+// RUST_MIN_STACK cannot silently enlarge this explicitly sized thread.
+fn approved_native_on_small_stack(modes: &'static [usize]) {
+    std::thread::Builder::new()
+        .name("native-approval-1m".to_owned())
+        .stack_size(1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async move {
+                    for &mode in modes {
+                        Box::pin(approved_media_lifecycle(false, false, 0, Some(mode))).await;
+                    }
+                });
+        })
+        .unwrap()
+        .join()
+        .expect("native approval lifecycle must fit a 1 MiB stack");
 }
 
-#[tokio::test]
-async fn approved_native_pending_quota_replan_is_bounded_and_owner_cancellable() {
-    for mode in [12, 13] {
-        Box::pin(approved_media_lifecycle(false, false, 0, Some(mode))).await;
-    }
+#[test]
+fn approved_native_quota_retry_is_once_and_preserves_effect_task_and_external_freeze() {
+    approved_native_on_small_stack(&[8, 9, 10, 11]);
+}
+
+#[test]
+fn approved_native_pending_quota_replan_is_bounded_and_owner_cancellable() {
+    approved_native_on_small_stack(&[12, 13]);
 }
 
 #[tokio::test]

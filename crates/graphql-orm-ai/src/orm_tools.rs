@@ -2784,6 +2784,28 @@ pub struct OrmAiConsequentialToolCallService {
     provider_session_service: Option<Arc<dyn crate::AiProviderSessionService>>,
 }
 
+// Private phase data, not execution authority: consumption and fresh resolver
+// authorization still occur in the execution phase under the current fence.
+struct PreparedApprovedExecution {
+    route: AiToolResultEgressRoute,
+    call: Box<AiToolCallRecord>,
+    scope: AiScope,
+    provider_kind: String,
+    provider_model: String,
+    correlation_id: String,
+    context: AiApplicationToolCallContext,
+    policy: crate::AiContentProtectionPolicy,
+    descriptor: AiToolDescriptor,
+    request: ToolGraphqlRequest,
+    binding: AiApprovalBinding,
+    preview: AiCanonicalActionPreview,
+    provenance: Option<crate::AiToolExecutionProvenance>,
+    prepared: Option<crate::AiPreparedGraphqlMutation>,
+    disclosure_schema_fingerprint: String,
+    expected_owner_principal_kind: String,
+    expected_owner_subject: String,
+}
+
 struct PreparedConsequentialRequest {
     call: PreparedToolCallStart,
     binding: AiApprovalBinding,
@@ -3565,344 +3587,324 @@ impl OrmAiConsequentialToolCallService {
         tool_call_id: AiToolCallId,
         route: AiToolResultEgressRoute,
     ) -> Result<AiConsequentialToolCallOutcome, AiError> {
-        route.validate()?;
-        let call = AiToolCallRecord::find_by_id(
-            self.application_tools.run_service.custody_database(),
-            &tool_call_id.0,
-        )
-        .await
-        .map_err(|error| map_orm(OrmPublicError::from(error)))?
-        .ok_or(AiError::NotFound)?;
-        if call.run_id != lease.run_id().0
-            || call.lease_generation != lease.lease_generation()
-            || call.state != "waiting_approval"
-            || call.approval_id != Some(approval_id.0)
-            || call.completed_at.is_some()
-            || call.protected_result.is_some()
-        {
-            return Err(AiError::Conflict);
-        }
-        let session = AiSessionRecord::find_by_id(
-            self.application_tools.run_service.custody_database(),
-            &lease.session_id().0,
-        )
-        .await
-        .map_err(|error| map_orm(OrmPublicError::from(error)))?
-        .ok_or(AiError::NotFound)?;
-        let scope = AiScope {
-            kind: session.scope_kind.clone(),
-            id: session.scope_id.clone(),
-            tenant_id: session.tenant_id.clone(),
-        };
-        validate_session_binding(&session, lease, &scope)?;
-        let tool_id = AiToolId::parse(call.tool_id.clone())?;
-        let provider_kind = call
-            .provider_kind
-            .clone()
-            .ok_or(AiError::PersistenceFailed)?;
-        let provider_model = call
-            .provider_model
-            .clone()
-            .ok_or(AiError::PersistenceFailed)?;
-        let budget_reservation_id = call
-            .budget_reservation_id
-            .ok_or(AiError::PersistenceFailed)?;
-        let correlation_id = call
-            .correlation_id
-            .clone()
-            .ok_or(AiError::PersistenceFailed)?;
-        let causation_id = call
-            .causation_id
-            .clone()
-            .ok_or(AiError::PersistenceFailed)?;
-        let reservation = AiBudgetReservationRecord::find_by_id(
-            self.application_tools.run_service.custody_database(),
-            &budget_reservation_id,
-        )
-        .await
-        .map_err(|error| map_orm(OrmPublicError::from(error)))?
-        .ok_or(AiError::PersistenceFailed)?;
-        if reservation.attempt_id != lease.attempt_id()
-            || reservation.lease_generation != lease.lease_generation()
-        {
-            self.application_tools
-                .run_service
-                .validate_native_approved_budget(
-                    lease,
-                    approval_id,
-                    tool_call_id,
-                    budget_reservation_id,
-                )
-                .await?;
-        }
-        if reservation.session_id != lease.session_id().0
-            || reservation.run_id != lease.run_id().0
-            || reservation.provider_kind != provider_kind
-            || reservation.provider_model != provider_model
-            || reservation.state != "committed"
-            || reservation.actual_runs != Some(1)
-            || reservation.reconciled_at.is_none()
-        {
-            return Err(AiError::PersistenceFailed);
-        }
-        let current = self.application_tools.current_access(lease, &scope).await?;
-        let policy = self
-            .application_tools
-            .runtime
-            .content_protection_policy_resolver()
-            .resolve(current.principal(), &scope)
+        let prepared = self
+            .prepare_approved_execution(lease, approval_id, tool_call_id, route)
             .await?;
-        if !policy.ready || policy.scope != scope {
-            return Err(AiError::RuntimeNotReady);
-        }
-        let arguments = self
-            .application_tools
-            .open(
-                &policy,
-                protection_context(
-                    "graphql_orm_ai_tool_calls",
-                    tool_call_id.0,
-                    "protected_arguments",
-                    &scope,
-                ),
-                call.protected_arguments
-                    .as_ref()
-                    .ok_or(AiError::PersistenceFailed)?,
+        self.execute_prepared_approval(lease, approval_id, tool_call_id, prepared)
+            .await
+    }
+
+    // Construct each phase inside a factory returning a boxed future. Its
+    // construction temporaries disappear before the phase is polled, rather
+    // than inflating every caller's async polling frame.
+    fn prepare_approved_execution<'a>(
+        &'a self,
+        lease: &'a AiRunLease,
+        approval_id: AiApprovalId,
+        tool_call_id: AiToolCallId,
+        route: AiToolResultEgressRoute,
+    ) -> std::pin::Pin<
+        Box<impl std::future::Future<Output = Result<PreparedApprovedExecution, AiError>> + 'a>,
+    > {
+        Box::pin(async move {
+            route.validate()?;
+            let call = AiToolCallRecord::find_by_id(
+                self.application_tools.run_service.custody_database(),
+                &tool_call_id.0,
             )
-            .await?;
-        if canonical_json_hash(&arguments)? != call.argument_hash {
-            return Err(AiError::PersistenceFailed);
-        }
-        let context = AiApplicationToolCallContext {
-            provider_turn_index: u32::try_from(call.provider_turn_index)
-                .map_err(|_| AiError::PersistenceFailed)?,
-            tool_call_index: usize::try_from(call.tool_call_index)
-                .map_err(|_| AiError::PersistenceFailed)?,
-            scope: scope.clone(),
-            correlation_id: correlation_id.clone(),
-            causation_id: causation_id.clone(),
-            delegation_reference: call.delegation_reference.clone(),
-        };
-        let invocation = GraphqlInvocationContext {
-            run_id: lease.run_id(),
-            tool_call_id,
-            scope: scope.clone(),
-            correlation_id: correlation_id.clone(),
-            causation_id: causation_id.clone(),
-            delegation_reference: call.delegation_reference.clone(),
-            idempotency_key: call.idempotency_key.clone(),
-        };
-        let (descriptor, request, preauthorization, binding_fingerprint, prepared) =
-            if let Some(descriptor) = self
+            .await
+            .map_err(|error| map_orm(OrmPublicError::from(error)))?
+            .ok_or(AiError::NotFound)?;
+            if call.run_id != lease.run_id().0
+                || call.lease_generation != lease.lease_generation()
+                || call.state != "waiting_approval"
+                || call.approval_id != Some(approval_id.0)
+                || call.completed_at.is_some()
+                || call.protected_result.is_some()
+            {
+                return Err(AiError::Conflict);
+            }
+            let session = AiSessionRecord::find_by_id(
+                self.application_tools.run_service.custody_database(),
+                &lease.session_id().0,
+            )
+            .await
+            .map_err(|error| map_orm(OrmPublicError::from(error)))?
+            .ok_or(AiError::NotFound)?;
+            let scope = AiScope {
+                kind: session.scope_kind.clone(),
+                id: session.scope_id.clone(),
+                tenant_id: session.tenant_id.clone(),
+            };
+            validate_session_binding(&session, lease, &scope)?;
+            let tool_id = AiToolId::parse(call.tool_id.clone())?;
+            let provider_kind = call
+                .provider_kind
+                .clone()
+                .ok_or(AiError::PersistenceFailed)?;
+            let provider_model = call
+                .provider_model
+                .clone()
+                .ok_or(AiError::PersistenceFailed)?;
+            let budget_reservation_id = call
+                .budget_reservation_id
+                .ok_or(AiError::PersistenceFailed)?;
+            let correlation_id = call
+                .correlation_id
+                .clone()
+                .ok_or(AiError::PersistenceFailed)?;
+            let causation_id = call
+                .causation_id
+                .clone()
+                .ok_or(AiError::PersistenceFailed)?;
+            let reservation = AiBudgetReservationRecord::find_by_id(
+                self.application_tools.run_service.custody_database(),
+                &budget_reservation_id,
+            )
+            .await
+            .map_err(|error| map_orm(OrmPublicError::from(error)))?
+            .ok_or(AiError::PersistenceFailed)?;
+            if reservation.attempt_id != lease.attempt_id()
+                || reservation.lease_generation != lease.lease_generation()
+            {
+                self.application_tools
+                    .run_service
+                    .validate_native_approved_budget(
+                        lease,
+                        approval_id,
+                        tool_call_id,
+                        budget_reservation_id,
+                    )
+                    .await?;
+            }
+            if reservation.session_id != lease.session_id().0
+                || reservation.run_id != lease.run_id().0
+                || reservation.provider_kind != provider_kind
+                || reservation.provider_model != provider_model
+                || reservation.state != "committed"
+                || reservation.actual_runs != Some(1)
+                || reservation.reconciled_at.is_none()
+            {
+                return Err(AiError::PersistenceFailed);
+            }
+            let current = self.application_tools.current_access(lease, &scope).await?;
+            let policy = self
                 .application_tools
                 .runtime
-                .tool_catalog()
-                .descriptor(&tool_id)
-                .cloned()
-            {
-                validate_approval_descriptor(&descriptor, &call.tool_fingerprint)?;
-                let request = build_tool_request(
-                    lease,
-                    tool_call_id,
-                    &descriptor,
-                    arguments,
-                    &context,
-                    call.idempotency_key.clone(),
-                )?;
-                let preauthorization = self
-                    .application_tools
-                    .runtime
-                    .preauthorize_tool(lease.principal_reference(), &descriptor.id, &request)
-                    .await?;
-                let fingerprint = descriptor.fingerprint.clone();
-                (descriptor, request, preauthorization, fingerprint, None)
-            } else {
-                let prepared = self.application_tools.runtime.prepare_mutation_capability(
-                    &tool_id,
-                    &call.tool_fingerprint,
-                    arguments,
-                    invocation,
-                )?;
-                if prepared.execution_policy()
-                    != graphql_orm::graphql::orm::AiMutationExecutionPolicy::ApprovalRequired
-                {
-                    return Err(AiError::Forbidden);
-                }
-                let preauthorization = self
-                    .application_tools
-                    .runtime
-                    .preauthorize_prepared_mutation(lease.principal_reference(), &prepared)
-                    .await?;
-                let descriptor = prepared.descriptor().clone();
-                let request = prepared.request().clone();
-                (
-                    descriptor,
-                    request,
-                    preauthorization,
-                    call.tool_fingerprint.clone(),
-                    Some(prepared),
+                .content_protection_policy_resolver()
+                .resolve(current.principal(), &scope)
+                .await?;
+            if !policy.ready || policy.scope != scope {
+                return Err(AiError::RuntimeNotReady);
+            }
+            let arguments = self
+                .application_tools
+                .open(
+                    &policy,
+                    protection_context(
+                        "graphql_orm_ai_tool_calls",
+                        tool_call_id.0,
+                        "protected_arguments",
+                        &scope,
+                    ),
+                    call.protected_arguments
+                        .as_ref()
+                        .ok_or(AiError::PersistenceFailed)?,
                 )
+                .await?;
+            if canonical_json_hash(&arguments)? != call.argument_hash {
+                return Err(AiError::PersistenceFailed);
+            }
+            let context = AiApplicationToolCallContext {
+                provider_turn_index: u32::try_from(call.provider_turn_index)
+                    .map_err(|_| AiError::PersistenceFailed)?,
+                tool_call_index: usize::try_from(call.tool_call_index)
+                    .map_err(|_| AiError::PersistenceFailed)?,
+                scope: scope.clone(),
+                correlation_id: correlation_id.clone(),
+                causation_id: causation_id.clone(),
+                delegation_reference: call.delegation_reference.clone(),
             };
-        let disclosure_schema_fingerprint = descriptor
-            .graphql_contract
-            .as_ref()
-            .ok_or(AiError::Forbidden)?
-            .disclosure_schema_fingerprint
-            .clone();
-        if preauthorization.approval_requirement() != AiApprovalRule::OneShot {
-            return Err(AiError::Forbidden);
-        }
-        let preview = self
-            .preview_builder
-            .build_preview(preauthorization.principal(), &descriptor, &request)
-            .await?;
-        let binding = build_approval_binding(
-            lease,
-            tool_call_id,
-            &descriptor,
-            &binding_fingerprint,
-            &call.argument_hash,
-            &scope,
-            call.delegation_reference.clone(),
-            &preauthorization,
-            &preview,
-        )?;
-        let provenance: Option<crate::AiToolExecutionProvenance> = call
-            .execution_provenance
-            .as_ref()
-            .map(|value| {
-                serde_json::from_value(value.clone()).map_err(|_| AiError::PersistenceFailed)
-            })
-            .transpose()?;
-        if provenance.as_ref().is_some_and(|origin| {
-            origin.session_id() != lease.session_id()
-                || origin.run_id() != lease.run_id()
-                || origin.tool_call_id() != tool_call_id
-                || origin.provider_call_id() != call.provider_call_id
-                || origin.provider_kind().as_str() != provider_kind
-                || origin.provider_model() != provider_model
-                || origin.budget_reservation_id().0 != budget_reservation_id
-                || origin.tool_fingerprint() != descriptor.fingerprint
-                || origin.argument_hash() != call.argument_hash
-                || origin.approval_id().is_some()
-        }) {
-            return Err(AiError::Conflict);
-        }
-        if let Some(origin) = &provenance {
-            self.application_tools
-                .runtime
-                .preflight_tool_result_media(&descriptor, origin.provider_kind())?;
-        }
-        if descriptor.result_media.is_some() && provenance.is_none() {
-            return Err(AiError::Forbidden);
-        }
-        let consumed = self
-            .approval_service
-            .consume_approval(lease, approval_id, &binding, &preview)
-            .await?;
-        let (approval, running_lease) = consumed.into_parts();
-        // Cancellation can win between consumption and dispatch. Re-check it
-        // so a cancelled run never starts the resolver it was approved for.
-        if !matches!(
-            self.application_tools
-                .run_service
-                .cancellation(&running_lease)
-                .await,
-            Ok(None)
-        ) {
-            return self
-                .mark_consequential_recovery(
-                    &running_lease,
-                    tool_call_id,
-                    call.provider_response_id,
-                )
-                .await;
-        }
-        let provenance = provenance
-            .map(|origin| origin.with_effect_execution(&running_lease))
-            .transpose()?;
-        let retained_origin = provenance
-            .clone()
-            .map(|origin| {
-                origin
-                    .with_consumed_approval(&approval, &binding)
-                    .map_err(|_| AiError::Conflict)
-            })
-            .transpose()?;
-        let approved_execution = async {
-            if let Some(prepared) = prepared {
-                tokio::time::timeout(
-                    self.application_tools
-                        .limits
-                        .maximum_execution_time
-                        .unsigned_abs(),
-                    self.application_tools
+            let invocation = GraphqlInvocationContext {
+                run_id: lease.run_id(),
+                tool_call_id,
+                scope: scope.clone(),
+                correlation_id: correlation_id.clone(),
+                causation_id: causation_id.clone(),
+                delegation_reference: call.delegation_reference.clone(),
+                idempotency_key: call.idempotency_key.clone(),
+            };
+            let (descriptor, request, preauthorization, binding_fingerprint, prepared) =
+                if let Some(descriptor) = self
+                    .application_tools
+                    .runtime
+                    .tool_catalog()
+                    .descriptor(&tool_id)
+                    .cloned()
+                {
+                    validate_approval_descriptor(&descriptor, &call.tool_fingerprint)?;
+                    let request = build_tool_request(
+                        lease,
+                        tool_call_id,
+                        &descriptor,
+                        arguments,
+                        &context,
+                        call.idempotency_key.clone(),
+                    )?;
+                    let preauthorization = self
+                        .application_tools
                         .runtime
-                        .execute_approved_prepared_mutation(
-                            running_lease.principal_reference(),
-                            prepared,
-                            &approval,
-                            &binding,
-                        ),
-                )
-                .await
-            } else {
-                tokio::time::timeout(
-                    self.application_tools
-                        .limits
-                        .maximum_execution_time
-                        .unsigned_abs(),
-                    self.application_tools
+                        .preauthorize_tool(lease.principal_reference(), &descriptor.id, &request)
+                        .await?;
+                    let fingerprint = descriptor.fingerprint.clone();
+                    (descriptor, request, preauthorization, fingerprint, None)
+                } else {
+                    let prepared = self.application_tools.runtime.prepare_mutation_capability(
+                        &tool_id,
+                        &call.tool_fingerprint,
+                        arguments,
+                        invocation,
+                    )?;
+                    if prepared.execution_policy()
+                        != graphql_orm::graphql::orm::AiMutationExecutionPolicy::ApprovalRequired
+                    {
+                        return Err(AiError::Forbidden);
+                    }
+                    let preauthorization = self
+                        .application_tools
                         .runtime
-                        .execute_approved_tool_with_provenance(
-                            running_lease.principal_reference(),
-                            &descriptor.id,
-                            request,
-                            &approval,
-                            &binding,
-                            provenance.clone(),
-                        ),
-                )
-                .await
+                        .preauthorize_prepared_mutation(lease.principal_reference(), &prepared)
+                        .await?;
+                    let descriptor = prepared.descriptor().clone();
+                    let request = prepared.request().clone();
+                    (
+                        descriptor,
+                        request,
+                        preauthorization,
+                        call.tool_fingerprint.clone(),
+                        Some(prepared),
+                    )
+                };
+            let disclosure_schema_fingerprint = descriptor
+                .graphql_contract
+                .as_ref()
+                .ok_or(AiError::Forbidden)?
+                .disclosure_schema_fingerprint
+                .clone();
+            if preauthorization.approval_requirement() != AiApprovalRule::OneShot {
+                return Err(AiError::Forbidden);
             }
-        };
-        let (execution, running_lease) = Box::pin(
-            self.application_tools
-                .run_service
-                .run_with_lease_heartbeat(&running_lease, Box::pin(approved_execution)),
-        )
-        .await;
-        let (
-            model_output,
-            classification,
-            source_trust,
-            failure_code,
-            policy_version,
-            authorization_digest,
-            audit_ref,
-        ) = match execution {
-            Ok(Ok(result)) => (
-                result.model_output(),
-                result.disclosure().maximum_classification,
-                AiSourceTrust::ResolverResult,
-                None,
-                Some(result.policy_version().to_owned()),
-                Some(result.authorization_state_digest().to_owned()),
-                result.response().application_audit_ref.clone(),
-            ),
-            Ok(Err(AiError::ToolRejectedBeforeExecution(proof))) => {
-                let code = crate::AiApplicationToolFailureCode::NotStarted(proof.reason());
-                (
-                    crate::AiApplicationToolFailureEnvelope::new(code).to_json(),
-                    DataClassification::Public,
-                    AiSourceTrust::TrustedRuntime,
-                    Some(code),
-                    Some(binding.policy_version.clone()),
-                    Some(binding.authorization_state_digest.clone()),
-                    None,
-                )
+            let preview = self
+                .preview_builder
+                .build_preview(preauthorization.principal(), &descriptor, &request)
+                .await?;
+            let binding = build_approval_binding(
+                lease,
+                tool_call_id,
+                &descriptor,
+                &binding_fingerprint,
+                &call.argument_hash,
+                &scope,
+                call.delegation_reference.clone(),
+                &preauthorization,
+                &preview,
+            )?;
+            let provenance: Option<crate::AiToolExecutionProvenance> = call
+                .execution_provenance
+                .as_ref()
+                .map(|value| {
+                    serde_json::from_value(value.clone()).map_err(|_| AiError::PersistenceFailed)
+                })
+                .transpose()?;
+            if provenance.as_ref().is_some_and(|origin| {
+                origin.session_id() != lease.session_id()
+                    || origin.run_id() != lease.run_id()
+                    || origin.tool_call_id() != tool_call_id
+                    || origin.provider_call_id() != call.provider_call_id
+                    || origin.provider_kind().as_str() != provider_kind
+                    || origin.provider_model() != provider_model
+                    || origin.budget_reservation_id().0 != budget_reservation_id
+                    || origin.tool_fingerprint() != descriptor.fingerprint
+                    || origin.argument_hash() != call.argument_hash
+                    || origin.approval_id().is_some()
+            }) {
+                return Err(AiError::Conflict);
             }
-            Ok(Err(_)) | Err(_) => {
+            if let Some(origin) = &provenance {
+                self.application_tools
+                    .runtime
+                    .preflight_tool_result_media(&descriptor, origin.provider_kind())?;
+            }
+            if descriptor.result_media.is_some() && provenance.is_none() {
+                return Err(AiError::Forbidden);
+            }
+            Ok(PreparedApprovedExecution {
+                route,
+                call: Box::new(call),
+                scope,
+                provider_kind,
+                provider_model,
+                correlation_id,
+                context,
+                policy,
+                descriptor,
+                request,
+                binding,
+                preview,
+                provenance,
+                prepared,
+                disclosure_schema_fingerprint,
+                expected_owner_principal_kind: session.owner_principal_kind,
+                expected_owner_subject: session.owner_subject,
+            })
+        })
+    }
+
+    fn execute_prepared_approval<'a>(
+        &'a self,
+        lease: &'a AiRunLease,
+        approval_id: AiApprovalId,
+        tool_call_id: AiToolCallId,
+        execution: PreparedApprovedExecution,
+    ) -> std::pin::Pin<
+        Box<
+            impl std::future::Future<Output = Result<AiConsequentialToolCallOutcome, AiError>> + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            let PreparedApprovedExecution {
+                route,
+                call,
+                scope,
+                provider_kind,
+                provider_model,
+                correlation_id,
+                context,
+                policy,
+                descriptor,
+                request,
+                binding,
+                preview,
+                provenance,
+                prepared,
+                disclosure_schema_fingerprint,
+                expected_owner_principal_kind,
+                expected_owner_subject,
+            } = execution;
+            let consumed = self
+                .approval_service
+                .consume_approval(lease, approval_id, &binding, &preview)
+                .await?;
+            let (approval, running_lease) = consumed.into_parts();
+            // Cancellation can win between consumption and dispatch. Re-check it
+            // so a cancelled run never starts the resolver it was approved for.
+            if !matches!(
+                self.application_tools
+                    .run_service
+                    .cancellation(&running_lease)
+                    .await,
+                Ok(None)
+            ) {
                 return self
                     .mark_consequential_recovery(
                         &running_lease,
@@ -3911,48 +3913,211 @@ impl OrmAiConsequentialToolCallService {
                     )
                     .await;
             }
-        };
-        let provider_response_id = call.provider_response_id.clone();
-        let output_bytes = match serde_json::to_vec(&model_output) {
-            Ok(output) => output,
-            Err(_) => {
+            let provenance = provenance
+                .map(|origin| origin.with_effect_execution(&running_lease))
+                .transpose()?;
+            let retained_origin = provenance
+                .clone()
+                .map(|origin| {
+                    origin
+                        .with_consumed_approval(&approval, &binding)
+                        .map_err(|_| AiError::Conflict)
+                })
+                .transpose()?;
+            let approved_execution = async {
+                if let Some(prepared) = prepared {
+                    tokio::time::timeout(
+                        self.application_tools
+                            .limits
+                            .maximum_execution_time
+                            .unsigned_abs(),
+                        self.application_tools
+                            .runtime
+                            .execute_approved_prepared_mutation(
+                                running_lease.principal_reference(),
+                                prepared,
+                                &approval,
+                                &binding,
+                            ),
+                    )
+                    .await
+                } else {
+                    tokio::time::timeout(
+                        self.application_tools
+                            .limits
+                            .maximum_execution_time
+                            .unsigned_abs(),
+                        self.application_tools
+                            .runtime
+                            .execute_approved_tool_with_provenance(
+                                running_lease.principal_reference(),
+                                &descriptor.id,
+                                request,
+                                &approval,
+                                &binding,
+                                provenance.clone(),
+                            ),
+                    )
+                    .await
+                }
+            };
+            let (execution, running_lease) = Box::pin(
+                self.application_tools
+                    .run_service
+                    .run_with_lease_heartbeat(&running_lease, Box::pin(approved_execution)),
+            )
+            .await;
+            let (
+                model_output,
+                classification,
+                source_trust,
+                failure_code,
+                policy_version,
+                authorization_digest,
+                audit_ref,
+            ) = match execution {
+                Ok(Ok(result)) => (
+                    result.model_output(),
+                    result.disclosure().maximum_classification,
+                    AiSourceTrust::ResolverResult,
+                    None,
+                    Some(result.policy_version().to_owned()),
+                    Some(result.authorization_state_digest().to_owned()),
+                    result.response().application_audit_ref.clone(),
+                ),
+                Ok(Err(AiError::ToolRejectedBeforeExecution(proof))) => {
+                    let code = crate::AiApplicationToolFailureCode::NotStarted(proof.reason());
+                    (
+                        crate::AiApplicationToolFailureEnvelope::new(code).to_json(),
+                        DataClassification::Public,
+                        AiSourceTrust::TrustedRuntime,
+                        Some(code),
+                        Some(binding.policy_version.clone()),
+                        Some(binding.authorization_state_digest.clone()),
+                        None,
+                    )
+                }
+                Ok(Err(_)) | Err(_) => {
+                    return self
+                        .mark_consequential_recovery(
+                            &running_lease,
+                            tool_call_id,
+                            call.provider_response_id,
+                        )
+                        .await;
+                }
+            };
+            let provider_response_id = call.provider_response_id.clone();
+            let output_bytes = match serde_json::to_vec(&model_output) {
+                Ok(output) => output,
+                Err(_) => {
+                    return self
+                        .mark_consequential_recovery(
+                            &running_lease,
+                            tool_call_id,
+                            provider_response_id,
+                        )
+                        .await;
+                }
+            };
+            if output_bytes.len() > self.application_tools.limits.maximum_model_output_bytes {
                 return self
-                    .mark_consequential_recovery(&running_lease, tool_call_id, provider_response_id)
+                    .mark_consequential_recovery(
+                        &running_lease,
+                        tool_call_id,
+                        provider_response_id.clone(),
+                    )
                     .await;
             }
-        };
-        if output_bytes.len() > self.application_tools.limits.maximum_model_output_bytes {
-            return self
-                .mark_consequential_recovery(
+            let retained = if failure_code.is_none()
+                && (descriptor.result_media.is_some()
+                    || classification >= DataClassification::Restricted)
+            {
+                let Some(origin) = retained_origin.as_ref() else {
+                    return self
+                        .mark_consequential_recovery(
+                            &running_lease,
+                            tool_call_id,
+                            provider_response_id,
+                        )
+                        .await;
+                };
+                let retained = Box::pin(self.application_tools.retain_disclosure_source(
                     &running_lease,
-                    tool_call_id,
-                    provider_response_id.clone(),
-                )
+                    &descriptor,
+                    origin,
+                    &context,
+                    &policy,
+                    &model_output,
+                    &disclosure_schema_fingerprint,
+                    classification,
+                    source_trust,
+                ))
                 .await;
-        }
-        let retained = if failure_code.is_none()
-            && (descriptor.result_media.is_some()
-                || classification >= DataClassification::Restricted)
-        {
-            let Some(origin) = retained_origin.as_ref() else {
+                match retained {
+                    Ok(retained) => Some(retained),
+                    Err(_) => {
+                        return self
+                            .mark_consequential_recovery(
+                                &running_lease,
+                                tool_call_id,
+                                provider_response_id,
+                            )
+                            .await;
+                    }
+                }
+            } else {
+                None
+            };
+            if self
+                .application_tools
+                .current_access(&running_lease, &scope)
+                .await
+                .is_err()
+            {
+                return self
+                    .mark_consequential_recovery(
+                        &running_lease,
+                        tool_call_id,
+                        provider_response_id.clone(),
+                    )
+                    .await;
+            }
+            let retained_context = if retained.is_some() {
+                let reopened = self
+                    .application_tools
+                    .reopen_tool_result_source(
+                        &running_lease,
+                        tool_call_id,
+                        crate::AiToolResultDisclosurePurpose::ToolResult,
+                    )
+                    .await;
+                match reopened {
+                    Ok(context) => Some(context),
+                    Err(_) => {
+                        return self
+                            .mark_consequential_recovery(
+                                &running_lease,
+                                tool_call_id,
+                                provider_response_id,
+                            )
+                            .await;
+                    }
+                }
+            } else {
+                None
+            };
+            let Some(outbound_bytes) = output_bytes
+                .len()
+                .checked_add(call.provider_call_id.len())
+                .and_then(|bytes| bytes.checked_add(descriptor.id.as_str().len()))
+            else {
                 return self
                     .mark_consequential_recovery(&running_lease, tool_call_id, provider_response_id)
                     .await;
             };
-            let retained = Box::pin(self.application_tools.retain_disclosure_source(
-                &running_lease,
-                &descriptor,
-                origin,
-                &context,
-                &policy,
-                &model_output,
-                &disclosure_schema_fingerprint,
-                classification,
-                source_trust,
-            ))
-            .await;
-            match retained {
-                Ok(retained) => Some(retained),
+            let estimated_bytes = match u64::try_from(outbound_bytes) {
+                Ok(bytes) => bytes,
                 Err(_) => {
                     return self
                         .mark_consequential_recovery(
@@ -3962,176 +4127,156 @@ impl OrmAiConsequentialToolCallService {
                         )
                         .await;
                 }
-            }
-        } else {
-            None
-        };
-        if self
-            .application_tools
-            .current_access(&running_lease, &scope)
-            .await
-            .is_err()
-        {
-            return self
-                .mark_consequential_recovery(
-                    &running_lease,
-                    tool_call_id,
-                    provider_response_id.clone(),
-                )
-                .await;
-        }
-        let retained_context = if retained.is_some() {
-            let reopened = self
+            };
+            let manifest = AiEgressManifest {
+                provider_profile_id: route.provider_profile_id,
+                provider_kind,
+                model: provider_model,
+                destination: route.destination,
+                destination_trust: route.destination_trust,
+                capability: AiEgressCapability::ToolResult,
+                scope: scope.clone(),
+                session_id: Some(running_lease.session_id()),
+                run_id: Some(running_lease.run_id()),
+                sources: vec![
+                    retained_context
+                        .as_ref()
+                        .map(|source| source.data_source())
+                        .unwrap_or_else(|| AiDataSourceRef {
+                            kind: "application_tool_result".to_owned(),
+                            reference: tool_call_id.0.to_string(),
+                            classification,
+                            trust: source_trust,
+                        }),
+                ],
+                estimated_bytes,
+                estimated_tokens: 0,
+                attachment_count: 0,
+                purpose: route.purpose,
+                retention: route.retention,
+                residency: route.residency,
+                policy_version: route.policy_version,
+                consent_reference: route.consent_reference,
+            };
+            let decision_result = if let Some(source) = &retained_context {
+                self.application_tools
+                    .runtime
+                    .authorize_tool_source_egress(
+                        running_lease.principal_reference(),
+                        &manifest,
+                        std::slice::from_ref(source),
+                    )
+                    .await
+            } else {
+                self.application_tools
+                    .runtime
+                    .authorize_egress(running_lease.principal_reference(), &manifest)
+                    .await
+            };
+            let decision = match decision_result {
+                Ok(decision) => decision,
+                Err(_) => {
+                    return self
+                        .mark_consequential_recovery(
+                            &running_lease,
+                            tool_call_id,
+                            provider_response_id,
+                        )
+                        .await;
+                }
+            };
+            let audit_result = self
                 .application_tools
-                .reopen_tool_result_source(
-                    &running_lease,
-                    tool_call_id,
-                    crate::AiToolResultDisclosurePurpose::ToolResult,
-                )
+                .egress_audit
+                .record(&manifest, &decision)
                 .await;
-            match reopened {
-                Ok(context) => Some(context),
-                Err(_) => {
-                    return self
-                        .mark_consequential_recovery(
-                            &running_lease,
-                            tool_call_id,
-                            provider_response_id,
-                        )
-                        .await;
-                }
-            }
-        } else {
-            None
-        };
-        let Some(outbound_bytes) = output_bytes
-            .len()
-            .checked_add(call.provider_call_id.len())
-            .and_then(|bytes| bytes.checked_add(descriptor.id.as_str().len()))
-        else {
-            return self
-                .mark_consequential_recovery(&running_lease, tool_call_id, provider_response_id)
-                .await;
-        };
-        let estimated_bytes = match u64::try_from(outbound_bytes) {
-            Ok(bytes) => bytes,
-            Err(_) => {
-                return self
-                    .mark_consequential_recovery(&running_lease, tool_call_id, provider_response_id)
-                    .await;
-            }
-        };
-        let manifest = AiEgressManifest {
-            provider_profile_id: route.provider_profile_id,
-            provider_kind,
-            model: provider_model,
-            destination: route.destination,
-            destination_trust: route.destination_trust,
-            capability: AiEgressCapability::ToolResult,
-            scope: scope.clone(),
-            session_id: Some(running_lease.session_id()),
-            run_id: Some(running_lease.run_id()),
-            sources: vec![
-                retained_context
-                    .as_ref()
-                    .map(|source| source.data_source())
-                    .unwrap_or_else(|| AiDataSourceRef {
-                        kind: "application_tool_result".to_owned(),
-                        reference: tool_call_id.0.to_string(),
-                        classification,
-                        trust: source_trust,
-                    }),
-            ],
-            estimated_bytes,
-            estimated_tokens: 0,
-            attachment_count: 0,
-            purpose: route.purpose,
-            retention: route.retention,
-            residency: route.residency,
-            policy_version: route.policy_version,
-            consent_reference: route.consent_reference,
-        };
-        let decision_result = if let Some(source) = &retained_context {
-            self.application_tools
-                .runtime
-                .authorize_tool_source_egress(
-                    running_lease.principal_reference(),
-                    &manifest,
-                    std::slice::from_ref(source),
-                )
-                .await
-        } else {
-            self.application_tools
-                .runtime
-                .authorize_egress(running_lease.principal_reference(), &manifest)
-                .await
-        };
-        let decision = match decision_result {
-            Ok(decision) => decision,
-            Err(_) => {
-                return self
-                    .mark_consequential_recovery(&running_lease, tool_call_id, provider_response_id)
-                    .await;
-            }
-        };
-        let audit_result = self
-            .application_tools
-            .egress_audit
-            .record(&manifest, &decision)
-            .await;
-        let (state, model_input, decision_id, manifest_hash, authorization_code) = if audit_result
-            .is_err()
-        {
-            (
-                AiApplicationToolCallState::EgressAuditFailed,
-                None,
-                None,
-                None,
-                "egress_audit_failed".to_owned(),
-            )
-        } else if decision.authorize(&manifest).is_err() {
-            (
-                AiApplicationToolCallState::EgressDenied,
-                None,
-                Some(decision.id.0),
-                Some(decision.manifest_hash.clone()),
-                "egress_denied".to_owned(),
-            )
-        } else {
-            (
-                if failure_code.is_some() {
-                    AiApplicationToolCallState::ExecutionFailed
+            let (state, model_input, decision_id, manifest_hash, authorization_code) =
+                if audit_result.is_err() {
+                    (
+                        AiApplicationToolCallState::EgressAuditFailed,
+                        None,
+                        None,
+                        None,
+                        "egress_audit_failed".to_owned(),
+                    )
+                } else if decision.authorize(&manifest).is_err() {
+                    (
+                        AiApplicationToolCallState::EgressDenied,
+                        None,
+                        Some(decision.id.0),
+                        Some(decision.manifest_hash.clone()),
+                        "egress_denied".to_owned(),
+                    )
                 } else {
-                    AiApplicationToolCallState::Completed
-                },
-                Some(ModelInputBlock::ToolResult {
-                    call_id: call.provider_call_id.clone(),
-                    tool_id: descriptor.id.as_str().to_owned(),
-                    output: model_output.clone(),
-                }),
-                Some(decision.id.0),
-                Some(decision.manifest_hash.clone()),
-                failure_code.map_or_else(|| "allowed".to_owned(), |code| code.as_str().to_owned()),
-            )
-        };
-        let protected_result = if let Some(source) = &retained {
-            source.protected_result.clone()
-        } else {
-            match self
+                    (
+                        if failure_code.is_some() {
+                            AiApplicationToolCallState::ExecutionFailed
+                        } else {
+                            AiApplicationToolCallState::Completed
+                        },
+                        Some(ModelInputBlock::ToolResult {
+                            call_id: call.provider_call_id.clone(),
+                            tool_id: descriptor.id.as_str().to_owned(),
+                            output: model_output.clone(),
+                        }),
+                        Some(decision.id.0),
+                        Some(decision.manifest_hash.clone()),
+                        failure_code
+                            .map_or_else(|| "allowed".to_owned(), |code| code.as_str().to_owned()),
+                    )
+                };
+            let protected_result = if let Some(source) = &retained {
+                source.protected_result.clone()
+            } else {
+                match self
+                    .application_tools
+                    .protect(
+                        &policy,
+                        protection_context(
+                            "graphql_orm_ai_tool_calls",
+                            tool_call_id.0,
+                            "protected_result",
+                            &scope,
+                        ),
+                        model_output,
+                    )
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        return self
+                            .mark_consequential_recovery(
+                                &running_lease,
+                                tool_call_id,
+                                provider_response_id.clone(),
+                            )
+                            .await;
+                    }
+                }
+            };
+            let event_id = Uuid::new_v4();
+            let inbox_event_id = Uuid::new_v4();
+            let protected_event = match self
                 .application_tools
                 .protect(
                     &policy,
                     protection_context(
-                        "graphql_orm_ai_tool_calls",
-                        tool_call_id.0,
-                        "protected_result",
+                        "graphql_orm_ai_session_events",
+                        event_id,
+                        "protected_payload",
                         &scope,
                     ),
-                    model_output,
+                    json!({
+                        "toolCallId": tool_call_id.0,
+                        "runId": running_lease.run_id().0,
+                        "toolId": descriptor.id.as_str(),
+                        "state": state.as_str(),
+                        "approvalId": approval_id.0,
+                    }),
                 )
                 .await
             {
-                Ok(result) => result,
+                Ok(event) => event,
                 Err(_) => {
                     return self
                         .mark_consequential_recovery(
@@ -4141,132 +4286,103 @@ impl OrmAiConsequentialToolCallService {
                         )
                         .await;
                 }
-            }
-        };
-        let event_id = Uuid::new_v4();
-        let inbox_event_id = Uuid::new_v4();
-        let protected_event = match self
-            .application_tools
-            .protect(
-                &policy,
-                protection_context(
-                    "graphql_orm_ai_session_events",
-                    event_id,
-                    "protected_payload",
-                    &scope,
-                ),
-                json!({
-                    "toolCallId": tool_call_id.0,
-                    "runId": running_lease.run_id().0,
-                    "toolId": descriptor.id.as_str(),
-                    "state": state.as_str(),
-                    "approvalId": approval_id.0,
-                }),
-            )
-            .await
-        {
-            Ok(event) => event,
-            Err(_) => {
-                return self
-                    .mark_consequential_recovery(
-                        &running_lease,
-                        tool_call_id,
-                        provider_response_id.clone(),
-                    )
-                    .await;
-            }
-        };
-        let protected_inbox_event = match self
-            .application_tools
-            .protect(
-                &policy,
-                protection_context(
-                    "graphql_orm_ai_inbox_events",
-                    inbox_event_id,
-                    "protected_payload",
-                    &scope,
-                ),
-                json!({
-                    "toolCallId": tool_call_id.0,
-                    "runId": running_lease.run_id().0,
-                    "toolId": descriptor.id.as_str(),
-                    "state": state.as_str(),
-                    "approvalId": approval_id.0,
-                }),
-            )
-            .await
-        {
-            Ok(event) => event,
-            Err(_) => {
-                return self
-                    .mark_consequential_recovery(
-                        &running_lease,
-                        tool_call_id,
-                        provider_response_id.clone(),
-                    )
-                    .await;
-            }
-        };
-        let renewed = match self
-            .application_tools
-            .run_service
-            .finish_tool_call_with_source(
-                &running_lease,
-                PreparedToolCallFinish {
-                    id: tool_call_id.0,
-                    state: state.as_str().to_owned(),
-                    protected_result,
-                    authorization_code,
-                    authorization_policy_version: policy_version,
-                    authorization_state_digest: authorization_digest,
-                    disclosure_schema_fingerprint: if failure_code.is_some() {
-                        safe_failure_disclosure_fingerprint()
-                    } else {
-                        disclosure_schema_fingerprint
+            };
+            let protected_inbox_event = match self
+                .application_tools
+                .protect(
+                    &policy,
+                    protection_context(
+                        "graphql_orm_ai_inbox_events",
+                        inbox_event_id,
+                        "protected_payload",
+                        &scope,
+                    ),
+                    json!({
+                        "toolCallId": tool_call_id.0,
+                        "runId": running_lease.run_id().0,
+                        "toolId": descriptor.id.as_str(),
+                        "state": state.as_str(),
+                        "approvalId": approval_id.0,
+                    }),
+                )
+                .await
+            {
+                Ok(event) => event,
+                Err(_) => {
+                    return self
+                        .mark_consequential_recovery(
+                            &running_lease,
+                            tool_call_id,
+                            provider_response_id.clone(),
+                        )
+                        .await;
+                }
+            };
+            let renewed = match self
+                .application_tools
+                .run_service
+                .finish_tool_call_with_source(
+                    &running_lease,
+                    PreparedToolCallFinish {
+                        id: tool_call_id.0,
+                        state: state.as_str().to_owned(),
+                        protected_result,
+                        authorization_code,
+                        authorization_policy_version: policy_version,
+                        authorization_state_digest: authorization_digest,
+                        disclosure_schema_fingerprint: if failure_code.is_some() {
+                            safe_failure_disclosure_fingerprint()
+                        } else {
+                            disclosure_schema_fingerprint
+                        },
+                        result_classification: classification_value(classification).to_owned(),
+                        result_egress_decision_id: decision_id,
+                        result_egress_manifest_hash: manifest_hash,
+                        application_audit_ref: audit_ref,
+                        event_id,
+                        inbox_event_id,
+                        protected_event,
+                        protected_inbox_event,
+                        correlation_id,
+                        expected_provider_call_key: call.provider_call_key,
+                        expected_tool_fingerprint: call.tool_fingerprint,
+                        expected_owner_principal_kind,
+                        expected_owner_subject,
+                        expected_scope_kind: scope.kind,
+                        expected_scope_id: scope.id,
+                        expected_tenant_id: scope.tenant_id,
                     },
-                    result_classification: classification_value(classification).to_owned(),
-                    result_egress_decision_id: decision_id,
-                    result_egress_manifest_hash: manifest_hash,
-                    application_audit_ref: audit_ref,
-                    event_id,
-                    inbox_event_id,
-                    protected_event,
-                    protected_inbox_event,
-                    correlation_id,
-                    expected_provider_call_key: call.provider_call_key,
-                    expected_tool_fingerprint: call.tool_fingerprint,
-                    expected_owner_principal_kind: session.owner_principal_kind,
-                    expected_owner_subject: session.owner_subject,
-                    expected_scope_kind: scope.kind,
-                    expected_scope_id: scope.id,
-                    expected_tenant_id: scope.tenant_id,
+                    retained.map(|source| source.protected_source),
+                )
+                .await
+            {
+                Ok(lease) => lease,
+                Err(error) => {
+                    return match self
+                        .mark_consequential_recovery(
+                            &running_lease,
+                            tool_call_id,
+                            provider_response_id,
+                        )
+                        .await
+                    {
+                        Ok(outcome) => Ok(outcome),
+                        Err(_) => Err(error),
+                    };
+                }
+            };
+            Ok(AiConsequentialToolCallOutcome::Persisted(Box::new(
+                AiPersistedApplicationToolCall {
+                    id: tool_call_id,
+                    provider_call_id: call.provider_call_id,
+                    state,
+                    model_input,
+                    egress_manifest: decision_id.map(|_| manifest),
+                    failure_code,
+                    lease: renewed,
                 },
-                retained.map(|source| source.protected_source),
-            )
-            .await
-        {
-            Ok(lease) => lease,
-            Err(error) => {
-                return match self
-                    .mark_consequential_recovery(&running_lease, tool_call_id, provider_response_id)
-                    .await
-                {
-                    Ok(outcome) => Ok(outcome),
-                    Err(_) => Err(error),
-                };
-            }
-        };
-        Ok(AiConsequentialToolCallOutcome::Persisted(Box::new(
-            AiPersistedApplicationToolCall {
-                id: tool_call_id,
-                provider_call_id: call.provider_call_id,
-                state,
-                model_input,
-                egress_manifest: decision_id.map(|_| manifest),
-                failure_code,
-                lease: renewed,
-            },
-        )))
+            )))
+        })
     }
 
     async fn mark_consequential_recovery(

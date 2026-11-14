@@ -3585,6 +3585,34 @@ fn test_model_inference_manifest(lease: &AiRunLease, model: &str) -> AiEgressMan
     }
 }
 
+// Preparation and active transport are separate polling phases. Keeping the
+// completed preparation future off the active turn's stack also bounds nested
+// native approval/coordinator polling in unoptimized host builds.
+struct PreparedRetainedTurn {
+    lease_state: Arc<Mutex<AiRunLease>>,
+    plan: AiProviderCallPlan,
+    session_plan: crate::AiProviderSessionTurnPlan,
+    session_service: Arc<dyn crate::AiProviderSessionService>,
+    dynamic_execution: Option<Arc<dyn AiProviderDynamicToolExecution>>,
+    claim: crate::AiProviderSessionClaim,
+    opened: crate::AiOpenedProviderSession,
+    historical_image_units: u64,
+}
+
+struct CompletedRetainedTurn {
+    outcome: Result<AiProviderCallResult, AiError>,
+    lease_state: Arc<Mutex<AiRunLease>>,
+    withheld_plan: AiProviderCallPlan,
+    session_plan: crate::AiProviderSessionTurnPlan,
+    session_service: Arc<dyn crate::AiProviderSessionService>,
+    current_claim: crate::AiProviderSessionClaim,
+}
+
+enum RetainedTurnPreparation {
+    Ready(Box<PreparedRetainedTurn>),
+    Finished(Box<AiProviderCallResult>),
+}
+
 /// Security-ordered executor for one provider turn.
 ///
 /// The executor requires a running fenced lease, freshly reauthorizes session
@@ -3928,25 +3956,32 @@ impl AiProviderCallExecutor {
         // The complete retained lifecycle owns several mutually exclusive ORM/transport
         // paths. Keep that state on the heap rather than embedding it in each coordinator
         // continuation frame; native execution must work on the ordinary thread stack.
-        Box::pin(self.execute_with_provider_session_inner(
+        let prepared = Box::pin(self.prepare_retained_provider_turn(
             lease_state,
             plan,
             session_plan,
             session_service,
             dynamic_execution,
         ))
-        .await
+        .await?;
+        match prepared {
+            RetainedTurnPreparation::Finished(result) => Ok(*result),
+            RetainedTurnPreparation::Ready(prepared) => {
+                let completed = Box::pin(self.execute_prepared_retained_turn(prepared)).await?;
+                Box::pin(self.finish_retained_turn(completed)).await
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn execute_with_provider_session_inner(
+    async fn prepare_retained_provider_turn(
         &self,
         lease_state: Arc<Mutex<AiRunLease>>,
         mut plan: AiProviderCallPlan,
         mut session_plan: crate::AiProviderSessionTurnPlan,
         session_service: Arc<dyn crate::AiProviderSessionService>,
         dynamic_execution: Option<Arc<dyn AiProviderDynamicToolExecution>>,
-    ) -> Result<AiProviderCallResult, AiError> {
+    ) -> Result<RetainedTurnPreparation, AiError> {
         if let Some(offering) = &plan.capability_offering {
             offering
                 .validate()
@@ -4213,7 +4248,8 @@ impl AiProviderCallExecutor {
                         &session_service,
                         &claim,
                     ))
-                    .await;
+                    .await
+                    .map(|result| RetainedTurnPreparation::Finished(Box::new(result)));
                 }
                 session_service
                     .require_cleanup(&claim, "retained_tool_source_withheld")
@@ -4226,7 +4262,8 @@ impl AiProviderCallExecutor {
                     None,
                     0,
                 ))
-                .await;
+                .await
+                .map(|result| RetainedTurnPreparation::Finished(Box::new(result)));
             }
             Err(error) => return Err(error),
         };
@@ -4273,17 +4310,46 @@ impl AiProviderCallExecutor {
         } else {
             opened
         };
+        Ok(RetainedTurnPreparation::Ready(Box::new(
+            PreparedRetainedTurn {
+                lease_state,
+                plan,
+                session_plan,
+                session_service,
+                dynamic_execution,
+                claim,
+                opened,
+                historical_image_units,
+            },
+        )))
+    }
+
+    async fn execute_prepared_retained_turn(
+        &self,
+        prepared: Box<PreparedRetainedTurn>,
+    ) -> Result<CompletedRetainedTurn, AiError> {
+        let PreparedRetainedTurn {
+            lease_state,
+            plan,
+            session_plan,
+            session_service,
+            dynamic_execution,
+            claim,
+            opened,
+            historical_image_units,
+        } = *prepared;
         let shared_claim = Arc::new(Mutex::new(claim.clone()));
         let withheld_plan = plan.clone();
-        let turn = self.execute_inner(
+        // The retained turn stays live across claim renewals. Heap-pin its
+        // state instead of embedding every ORM/transport branch in this frame.
+        let mut turn = Box::pin(self.execute_inner(
             lease_state.clone(),
             plan,
             dynamic_execution,
             Some(opened),
             Some(shared_claim.clone()),
             historical_image_units,
-        );
-        tokio::pin!(turn);
+        ));
         let mut current_claim = claim;
         let outcome = loop {
             let remaining = current_claim.claim_expires_at() - self.clock.now();
@@ -4320,6 +4386,30 @@ impl AiProviderCallExecutor {
                 }
             }
         };
+        // The turn is complete. Drop its polling/construction frame before
+        // any withheld-context cleanup or replacement session is attempted.
+        Ok(CompletedRetainedTurn {
+            outcome,
+            lease_state,
+            withheld_plan,
+            session_plan,
+            session_service,
+            current_claim,
+        })
+    }
+
+    async fn finish_retained_turn(
+        &self,
+        completed: CompletedRetainedTurn,
+    ) -> Result<AiProviderCallResult, AiError> {
+        let CompletedRetainedTurn {
+            outcome,
+            lease_state,
+            withheld_plan,
+            session_plan,
+            session_service,
+            current_claim,
+        } = completed;
         match outcome {
             Ok(mut result) => {
                 result.provider_session_claim = Some(current_claim);
