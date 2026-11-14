@@ -10,7 +10,8 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.145.0 corrects SQL Server behaviour: server errors keep their
+Version 0.145.0 corrects SQL Server behaviour, with two breaking changes
+for hosts (the error variant and the date text): server errors keep their
 number and class (`MssqlServerError`), so constraint violations and deadlocks
 are classified and a failed rollback no longer hides the real error; dates
 read as RFC 3339; out-of-range `DECIMAL` values are decode errors; wide

@@ -647,10 +647,13 @@ The MSSQL backend supports these common scalar shapes for generated reads and wr
   strings when mapped to `String`. Date-time values are RFC 3339, the text the SQLite and
   PostgreSQL backends hold: a type without an offset is read as UTC
   (`2026-11-09T12:34:56Z`, with the fraction when it is not zero) and a `datetimeoffset`
-  keeps its offset (`2026-11-09T12:34:56+02:00`). `date` stays `2026-11-09`. Values are still
+  keeps its offset (`2026-11-09T12:34:56+02:00`). `date` stays `2026-11-09`. What is read does
+  not depend on the session language or `DATEFORMAT`. Values are still
   bound as text, so write ISO 8601 with a `T` to columns of the legacy `datetime` type.
 - a `DECIMAL` value beyond `rust_decimal`'s range (more than 28 decimal places or a 96-bit
-  mantissa) is a column decode error
+  mantissa) is a column decode error. A non-NULL value in a column declared with scale 38
+  (`DECIMAL(38,38)`) panics inside the driver while the row is read; cast such a column in a
+  view or avoid mapping it
 - `uniqueidentifier` mapped to `uuid::Uuid`
 - floating point values
 - fixed decimals declared with `#[graphql_orm(decimal(precision = P, scale = S))]` and mapped to
@@ -749,6 +752,14 @@ schemas, queues, services, triggers, or Broker configuration. Queue consumption
 and conversation completion change Broker state and require explicit authority.
 Database permissions remain authoritative; SELECT-prefix validation is not a SQL
 security sandbox. Deny this principal business DML and DDL.
+
+Delivery is at-least-once, and consumers must be idempotent. `receive` reads
+the message and ends its conversation inside a transaction that commits only
+after the message has reached the process. If ending the conversation fails,
+the connection is lost or the future is dropped before that commit, the
+message returns to the queue and a later `receive` delivers it again. Messages
+are invalidation hints, so handling one twice repeats a refresh. SQL Server
+disables a queue after five consecutive rolled-back receives.
 
 The external owner must enable Broker and provision a dedicated queue and service
 accepting `http://schemas.microsoft.com/SQL/Notifications/PostQueryNotification`.
