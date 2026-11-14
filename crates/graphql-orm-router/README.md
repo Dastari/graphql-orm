@@ -220,7 +220,7 @@ composition warnings before serving.
 | Subgraphs | At least one static source; file configuration requires strict JSON. |
 | Dynamic registration | Disabled unless authenticated administration and exact network policy are configured. |
 | Subscriptions | Disabled by default; require authentication and a declared owner. |
-| Prometheus | Disabled by default; deployment network policy protects its listener. |
+| Prometheus | Disabled by default; binds the public listener's IP address unless an explicit scrape `host` is set; deployment network policy protects its listener. |
 | Byte routes | Disabled by default; each streams `GET`/`HEAD` from one static prefix to one upstream, authenticated unless explicitly public. |
 
 The [configuration reference](docs/configuration.md) is the complete field,

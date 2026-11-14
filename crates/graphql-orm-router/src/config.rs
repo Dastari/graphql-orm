@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     sync::Arc,
     time::Duration,
 };
@@ -1021,6 +1021,7 @@ pub struct RouterTelemetryConfig {
     pub(crate) log_level: RouterLogLevel,
     pub(crate) json_logs: bool,
     pub(crate) prometheus_port: Option<u16>,
+    pub(crate) prometheus_host: Option<IpAddr>,
     pub(crate) prometheus_path: String,
 }
 
@@ -1046,12 +1047,46 @@ impl RouterTelemetryConfig {
     }
 
     /// Enables Hive execution and subscription metrics on a separate port.
+    ///
+    /// The scrape listener binds the public listener's IP address on `port`.
     /// Network access control for this scrape listener is deployment-owned.
+    /// Use [`with_prometheus_listener`](Self::with_prometheus_listener) to
+    /// bind it to a different address, such as loopback or a private
+    /// interface.
     #[must_use]
     pub fn with_prometheus(mut self, port: u16, path: impl Into<String>) -> Self {
         self.prometheus_port = Some(port);
+        self.prometheus_host = None;
         self.prometheus_path = path.into();
         self
+    }
+
+    /// Enables Hive execution and subscription metrics on an explicit socket
+    /// address, independent of the public listener's IP address.
+    ///
+    /// The port follows the same rules as
+    /// [`with_prometheus`](Self::with_prometheus): nonzero and distinct from
+    /// the public and administrative listener ports, whatever their IP
+    /// addresses. The scrape listener has no application authentication. An
+    /// unspecified address (`0.0.0.0` or `::`) binds every interface and logs a
+    /// warning at startup.
+    #[must_use]
+    pub fn with_prometheus_listener(
+        mut self,
+        address: SocketAddr,
+        path: impl Into<String>,
+    ) -> Self {
+        self.prometheus_port = Some(address.port());
+        self.prometheus_host = Some(address.ip());
+        self.prometheus_path = path.into();
+        self
+    }
+
+    /// Returns the address the optional scrape listener binds for a router
+    /// whose public listener is `public_listener`.
+    pub(crate) fn prometheus_listener(&self, public_listener: SocketAddr) -> Option<SocketAddr> {
+        self.prometheus_port
+            .map(|port| SocketAddr::new(self.prometheus_host.unwrap_or(public_listener.ip()), port))
     }
 
     fn validate(
@@ -1089,6 +1124,7 @@ impl Default for RouterTelemetryConfig {
             log_level: RouterLogLevel::Info,
             json_logs: true,
             prometheus_port: None,
+            prometheus_host: None,
             prometheus_path: "/metrics".to_owned(),
         }
     }

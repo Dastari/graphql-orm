@@ -10,6 +10,17 @@ supersedes: []
 
 # Changelog
 
+## 0.15.0 (unreleased)
+
+- The Prometheus exporter can bind its own address (#487). Set
+  `telemetry.prometheus.host` to an IP literal, or call
+  `RouterTelemetryConfig::with_prometheus_listener`, to put the unauthenticated
+  scrape listener on loopback or a private interface. Without it the exporter
+  keeps binding the public listener's IP address, so existing deployments are
+  unchanged. The port rules are unchanged: nonzero and distinct from the public
+  and administrative ports whatever their addresses. The router logs a startup
+  warning when the exporter binds every interface.
+
 ## 0.14.0 (unreleased)
 
 - Add opt-in local persisted documents with exact SHA-256 manifest validation and

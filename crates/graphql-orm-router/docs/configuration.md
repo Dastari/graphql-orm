@@ -554,6 +554,22 @@ scrape listener has no application authentication; bind and protect it with
 deployment network policy. The authenticated administrative metrics route is
 `GET /_router/metrics`.
 
+By default the exporter binds the public listener's IP address on its own port.
+The optional `host` IP literal (`RouterTelemetryConfig::with_prometheus_listener`)
+binds it elsewhere instead, for example loopback or a private interface:
+
+```json
+"telemetry": {"prometheus": {"host": "127.0.0.1", "port": 9090, "path": "/metrics"}}
+```
+
+Host names are refused so the bind needs no DNS. The port must still be nonzero
+and distinct from the public and administrative ports whatever their
+addresses. An unspecified exporter address (`0.0.0.0` or `::`), whether set
+explicitly or inherited from the public listener, logs a startup warning. The
+exporter publishes Hive's metric families, which carry route, status, subgraph
+and GraphQL operation-name labels; it never carries bearer tokens, header
+values, subjects, scopes, or document text.
+
 ## Persisted documents
 
 The default is off. Enable a local JSON manifest using

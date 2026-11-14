@@ -64,6 +64,7 @@ const PRODUCTS_SDL_ENDPOINT_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_PRODUCTS_SDL_EN
 const REVIEWS_SDL_ENDPOINT_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_REVIEWS_SDL_ENDPOINT";
 const PRODUCTS_PROTOCOL_ENDPOINT_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_PRODUCTS_PROTOCOL_ENDPOINT";
 const REVIEWS_PROTOCOL_ENDPOINT_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_REVIEWS_PROTOCOL_ENDPOINT";
+const PROMETHEUS_LISTENER_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_PROMETHEUS_LISTENER";
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 const PRODUCTS_V1: &str = r#"
@@ -280,6 +281,14 @@ fn router_child_entrypoint() {
                 }
                 if env::var_os("PERSISTED_INTROSPECTION").is_some() {
                     config = config.with_introspection(true);
+                }
+                if let Ok(listener) = env::var(PROMETHEUS_LISTENER_ENV) {
+                    config = config.with_telemetry(
+                        crate::RouterTelemetryConfig::new().with_prometheus_listener(
+                            listener.parse().expect("Prometheus listener address"),
+                            "/internal/metrics",
+                        ),
+                    );
                 }
                 let control = env::var("PERSISTED_CONTROL").ok();
                 if let Some(control) = &control {
@@ -1487,6 +1496,79 @@ fn public_static_router_serves_only_after_complete_preparation() {
         "SUBGRAPH_FAILURE"
     );
 
+    router.stop();
+}
+
+#[test]
+fn prometheus_exporter_binds_only_its_separate_scrape_address() {
+    let products = LoopbackSubgraph::start(SubgraphKind::Products);
+    let reviews = LoopbackSubgraph::start(SubgraphKind::Reviews);
+    let products_sdl = LoopbackSdl::start(PRODUCTS_V1);
+    let reviews_sdl = LoopbackSdl::start(REVIEWS);
+    // The public listener binds 127.0.0.1. Reserve a port on another loopback
+    // address for the exporter; Hive binds it itself, so release it first.
+    let metrics = {
+        let reserved = TcpListener::bind("127.0.0.2:0").expect("second loopback address");
+        reserved.local_addr().unwrap()
+    };
+    let child = Command::new(env::current_exe().expect("test executable path"))
+        .args([
+            "--exact",
+            "federation::wire_tests::router_child_entrypoint",
+            "--nocapture",
+        ])
+        .env(CHILD_ENV, "static")
+        .env(PRODUCTS_ENDPOINT_ENV, products.endpoint())
+        .env(REVIEWS_ENDPOINT_ENV, reviews.endpoint())
+        .env(PRODUCTS_SDL_ENDPOINT_ENV, products_sdl.endpoint())
+        .env(REVIEWS_SDL_ENDPOINT_ENV, reviews_sdl.endpoint())
+        .env(PROMETHEUS_LISTENER_ENV, metrics.to_string())
+        .env("RUST_TEST_THREADS", "1")
+        .env("RUST_LOG", "error")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("metrics router child should start");
+    let mut router = TestRouter::from_child(child, false).0;
+    router.wait_until_ready();
+    assert_eq!(
+        router.address.ip(),
+        "127.0.0.1".parse::<std::net::IpAddr>().unwrap()
+    );
+
+    let literal = "metrics-literal-7f3a";
+    let response = router.graphql_at(
+        "/api/graphql",
+        json!({"query": format!("query {{ product(id: \"{literal}\") {{ id }} }}")}),
+        &[("x-approved", "metrics-header-9c1e")],
+    );
+    assert!(response.get("data").is_some(), "{response}");
+
+    let mut scrape = None;
+    wait_until("Prometheus scrape", || {
+        scrape = raw_http(metrics, "GET", "/internal/metrics", &[], None)
+            .ok()
+            .filter(|response| response.status == 200);
+        scrape.is_some()
+    });
+    let scrape = scrape.unwrap();
+    let body = String::from_utf8_lossy(&scrape.body);
+    assert!(body.contains("# TYPE"), "{body}");
+    for secret in [literal, "metrics-header-9c1e", "schema-secret"] {
+        assert!(
+            !body.contains(secret),
+            "the exporter must not publish request or credential text: {secret}"
+        );
+    }
+
+    // The exporter is not on the public IP address, and the public listener
+    // does not serve the scrape path.
+    let public_ip_metrics = std::net::SocketAddr::new(router.address.ip(), metrics.port());
+    assert!(
+        raw_http(public_ip_metrics, "GET", "/internal/metrics", &[], None).is_err(),
+        "nothing listens on the public IP address at the exporter port"
+    );
+    assert_ne!(router.probe("/internal/metrics"), 200);
     router.stop();
 }
 

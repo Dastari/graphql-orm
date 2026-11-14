@@ -81,7 +81,9 @@ and RLS remain authoritative after router preflight.
 ## Residual deployment responsibilities
 
 - Terminate public and administrative TLS with a trusted proxy or service mesh;
-  restrict the admin and optional Prometheus listeners by network policy.
+  restrict the admin and optional Prometheus listeners by network policy. The
+  Prometheus exporter can bind a private or loopback `host` separately from
+  the public listener.
 - Apply per-client WebSocket connection limits at that proxy. The router's
   attempt rate and pending-connection budget are process-wide and charged
   before any credential is known.

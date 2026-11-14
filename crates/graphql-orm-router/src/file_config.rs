@@ -790,7 +790,13 @@ impl FileTelemetry {
             value = value.with_log_level(level.into());
         }
         if let Some(prometheus) = self.prometheus {
-            value = value.with_prometheus(prometheus.port, prometheus.path);
+            value = match prometheus.host {
+                Some(host) => value.with_prometheus_listener(
+                    std::net::SocketAddr::new(host, prometheus.port),
+                    prometheus.path,
+                ),
+                None => value.with_prometheus(prometheus.port, prometheus.path),
+            };
         }
         value
     }
@@ -819,6 +825,9 @@ impl From<FileLogLevel> for RouterLogLevel {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct FilePrometheus {
+    /// Optional IP address literal for the scrape listener. Omitted, the
+    /// exporter binds the public listener's IP address.
+    host: Option<std::net::IpAddr>,
     port: u16,
     #[serde(default = "default_metrics_path")]
     path: String,
@@ -1007,6 +1016,48 @@ mod tests {
         assert!(
             error.to_string().contains("public token audience"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn prometheus_scrape_address_is_opt_in_and_otherwise_follows_the_public_listener() {
+        let telemetry =
+            |prometheus: &str| {
+                let file = FILE.replace(r#""prometheus": {"port": 4900}"#, prometheus);
+                RouterFileConfig::from_json(&file)
+                    .unwrap()
+                    .into_router_config_with(|name| {
+                        Ok((name == "PRODUCTS_SCHEMA_TOKEN")
+                            .then(|| "Bearer schema-secret".to_owned()))
+                    })
+                    .unwrap()
+                    .validate()
+                    .map(|config| config.telemetry.prometheus_listener(config.listener))
+            };
+        assert_eq!(
+            telemetry(r#""prometheus": {"port": 4900}"#).unwrap(),
+            Some("127.0.0.1:4900".parse().unwrap()),
+            "without a host the exporter keeps the public listener's IP address"
+        );
+        assert_eq!(
+            telemetry(r#""prometheus": {"host": "127.0.0.2", "port": 4900, "path": "/internal"}"#)
+                .unwrap(),
+            Some("127.0.0.2:4900".parse().unwrap())
+        );
+        assert_eq!(
+            telemetry(r#""prometheus": {"host": "::1", "port": 4900}"#).unwrap(),
+            Some("[::1]:4900".parse().unwrap())
+        );
+        // The port must still differ from the public port on another address.
+        let error = telemetry(r#""prometheus": {"host": "127.0.0.2", "port": 4000}"#).unwrap_err();
+        assert!(error.to_string().contains("distinct"), "{error}");
+        // Host names would need DNS at startup; only IP literals are accepted.
+        assert!(
+            RouterFileConfig::from_json(&FILE.replace(
+                r#""prometheus": {"port": 4900}"#,
+                r#""prometheus": {"host": "metrics.internal", "port": 4900}"#
+            ))
+            .is_err()
         );
     }
 

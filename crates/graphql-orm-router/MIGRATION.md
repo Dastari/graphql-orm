@@ -10,6 +10,21 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.14.0 to 0.15.0: router hardening
+
+### Prometheus scrape address (new, opt-in)
+
+Nothing changes unless you opt in. To move the unauthenticated Prometheus
+exporter off the public interface, add an IP literal:
+
+```json
+"telemetry": {"prometheus": {"host": "127.0.0.1", "port": 9090}}
+```
+
+or use `RouterTelemetryConfig::with_prometheus_listener(address, path)`. The
+port must still differ from the public and administrative ports. A router whose
+exporter binds `0.0.0.0` or `::` now logs a startup warning.
+
 ## 0.13.0 to 0.14.0: persisted documents
 
 Persisted documents remain disabled by default. Enable `persistedDocuments` or

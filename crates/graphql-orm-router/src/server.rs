@@ -403,6 +403,16 @@ impl PreparedRouter {
         if let Some(internal) = &internal_subscription {
             internal.continuity.install(&mut telemetry.context);
         }
+        if self
+            .config
+            .telemetry
+            .prometheus_listener(self.config.listener)
+            .is_some_and(|listener| listener.ip().is_unspecified())
+        {
+            tracing::warn!(
+                "the unauthenticated Prometheus exporter binds every interface; restrict it with network policy"
+            );
+        }
         if let Some(warning) = crate::byte_route::public_route_warning(&self.config.byte_routes) {
             tracing::warn!("{warning}");
         }
@@ -1396,8 +1406,16 @@ fn build_hive_config(
         "persisted_documents": config.persisted_documents.as_ref().map_or_else(
             || json!({"enabled": false}), |documents| documents.hive_config()),
         "supergraph": {"source": "plugin"},
+        // The router binds its public listener itself. Hive 0.2.19 reads
+        // `http.host` only to bind the detached Prometheus exporter, so this
+        // is the exporter's IP address: the public listener's IP unless the
+        // host configured a separate scrape address.
         "http": {
-            "host": config.listener.ip().to_string(),
+            "host": config
+                .telemetry
+                .prometheus_listener(config.listener)
+                .map_or(config.listener.ip(), |listener| listener.ip())
+                .to_string(),
             "port": config.listener.port(),
             "graphql_endpoint": config.graphql_path,
         },
@@ -1635,6 +1653,59 @@ mod tests {
             serialized["telemetry"]["metrics"]["exporters"][0]["port"],
             4900
         );
+        // Hive binds its detached exporter on `http.host`; by default that is
+        // the public listener's IP address, exactly as before.
+        assert_eq!(serialized["http"]["host"], "127.0.0.1");
+        assert_eq!(serialized["http"]["port"], 4000);
+    }
+
+    #[test]
+    fn private_hive_telemetry_translation_binds_an_explicit_scrape_address() {
+        let config = |telemetry: crate::RouterTelemetryConfig| {
+            RouterConfig::new("0.0.0.0:4000".parse().unwrap())
+                .allow_plaintext_http(true)
+                .allow_anonymous_development(true)
+                .with_subgraph(StaticSubgraph::new(
+                    "status",
+                    "http://status.test/graphql",
+                    "http://status.test/sdl",
+                ))
+                .with_telemetry(telemetry)
+                .validate()
+        };
+        let separate = config(
+            crate::RouterTelemetryConfig::new()
+                .with_prometheus_listener("127.0.0.1:4900".parse().unwrap(), "/metrics"),
+        )
+        .unwrap();
+        let serialized =
+            serde_json::to_value(build_hive_config(&separate, 9, None).unwrap()).unwrap();
+        assert_eq!(serialized["http"]["host"], "127.0.0.1");
+        assert_eq!(serialized["http"]["port"], 4000);
+        assert_eq!(
+            serialized["telemetry"]["metrics"]["exporters"][0]["port"],
+            4900
+        );
+
+        // Without metrics, the translation is unchanged.
+        let disabled = config(crate::RouterTelemetryConfig::new()).unwrap();
+        let serialized =
+            serde_json::to_value(build_hive_config(&disabled, 9, None).unwrap()).unwrap();
+        assert_eq!(serialized["http"]["host"], "0.0.0.0");
+        assert_eq!(serialized["telemetry"]["metrics"]["exporters"], json!([]));
+
+        // A separate address never relaxes the port rule: Hive attaches an
+        // exporter that shares the public port to the public router instead.
+        for port in [0, 4000] {
+            let error = config(
+                crate::RouterTelemetryConfig::new().with_prometheus_listener(
+                    std::net::SocketAddr::new("127.0.0.2".parse().unwrap(), port),
+                    "/metrics",
+                ),
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), RouterErrorKind::InvalidConfiguration);
+        }
     }
 
     #[test]
