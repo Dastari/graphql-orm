@@ -3352,19 +3352,27 @@ pub(crate) fn default_relation_source_field(parsed_fields: &[ParsedField]) -> St
 
 /// `ORDER BY` text for an explicit SQL Server `default_sort` written without
 /// whitespace, such as `a,b`: each comma-separated column is quoted on its
-/// own. A comma inside `[...]`, `"..."` or parentheses belongs to its term.
+/// own. A comma inside `[...]`, `"..."` or parentheses belongs to its term,
+/// and a doubled closing delimiter (`]]`, `""`) is an escaped character of the
+/// quoted name, as in the identifier-path parser.
 fn mssql_bare_default_sort(raw: &str) -> String {
     let mut terms = Vec::new();
     let mut term = String::new();
     let mut depth = 0usize;
     let mut closing = None;
-    for ch in raw.chars() {
+    let mut chars = raw.chars().peekable();
+    while let Some(ch) = chars.next() {
         match (closing, ch) {
-            (Some(end), _) => {
-                if ch == end {
+            (Some(end), _) if ch == end => {
+                if chars.peek() == Some(&end) {
+                    // Escaped delimiter: keep both characters in the name.
+                    term.push(ch);
+                    chars.next();
+                } else {
                     closing = None;
                 }
             }
+            (Some(_), _) => {}
             (None, '[') => closing = Some(']'),
             (None, '"') => closing = Some('"'),
             (None, '(') => depth += 1,
@@ -9014,6 +9022,11 @@ mod default_sort_tests {
         );
         assert_eq!(mssql_bare_default_sort("[a,b],[c]"), "[a,b], [c]");
         assert_eq!(mssql_bare_default_sort("a,,b,"), "[a], [b]");
+        // A doubled `]` is part of the name, not its end: columns `a],b` and `id`.
+        assert_eq!(mssql_bare_default_sort("[a]],b],id"), "[a]],b], [id]");
+        assert_eq!(mssql_bare_default_sort("[a]],b]"), "[a]],b]");
+        assert_eq!(mssql_bare_default_sort("[x]]],[y]"), "[x]]], [y]");
+        assert_eq!(mssql_bare_default_sort("\"a\"\",b\",c"), "\"a\"\",b\", [c]");
     }
 
     #[cfg(feature = "mssql")]
@@ -9035,6 +9048,11 @@ mod default_sort_tests {
         assert!(
             bare.contains("const DEFAULT_SORT : & 'static str = \"[a], [b]\""),
             "{bare}"
+        );
+        let escaped = entity("[a]],b],b");
+        assert!(
+            escaped.contains("const DEFAULT_SORT : & 'static str = \"[a]],b], [b]\""),
+            "{escaped}"
         );
         // A declaration with whitespace is still used exactly as written.
         let spaced = entity("a ASC, b DESC");
