@@ -717,6 +717,9 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                         protection.as_ref(),
                         limits,
                         row_security.read_guard(&eligibility).as_ref(),
+                        // Admission output is never released.
+                        super::execution::Shapes::default(),
+                        &mut 0,
                     )
                     .await;
                     fence(&mut receiver, &mut pending, module.schema.fingerprint())
@@ -899,6 +902,8 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                                     protection.as_ref(),
                                     limits,
                                     read_guard.as_ref(),
+                                    super::execution::Shapes::of(&shape).select(&entity_field),
+                                    &mut 0,
                                 )
                                 .await;
                                 if let Err(code) =

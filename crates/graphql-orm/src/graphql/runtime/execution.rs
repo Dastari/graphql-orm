@@ -1103,7 +1103,12 @@ impl<B: RuntimeReadBackend> Guard<B> {
                 .map_err(query_error)?;
             prepared.push(read);
         }
+        // One running response total for every root of the operation.
         for (plan, key, typename) in nodes {
+            let shapes = output_shapes
+                .get(&plan.response_key)
+                .map(Shapes::of)
+                .unwrap_or_default();
             let mut value = point(
                 &self.database,
                 request,
@@ -1112,6 +1117,8 @@ impl<B: RuntimeReadBackend> Guard<B> {
                 self.protection.as_ref(),
                 limits,
                 None,
+                shapes,
+                &mut executor.response_bytes,
             )
             .await?
             .unwrap_or(Value::Null);
@@ -1121,7 +1128,8 @@ impl<B: RuntimeReadBackend> Guard<B> {
             values.insert(plan.response_key, value);
         }
         for (plan, read) in plans.into_iter().zip(prepared) {
-            let value = executor.root(&plan, read).await?;
+            let shapes = Shapes::of(output_shapes.get(&plan.response_key).ok_or_else(invalid)?);
+            let value = executor.root(&plan, read, shapes).await?;
             values.insert(plan.response_key, value);
         }
         let mut response_bytes = 0usize;
@@ -1439,8 +1447,12 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
         parent: Option<&RuntimeParentAnchor>,
         connection: RuntimeConnection,
         nodes: Vec<Value>,
+        shapes: &Shapes<'_>,
     ) -> Result<Value, RuntimeGraphqlError> {
         let context = self.context(plan, parent)?;
+        let edge_shapes = shapes.select("edges");
+        // Each edge's `node` key; its object was charged when it was built.
+        let node_slot = edge_shapes.slot_bytes("node", false)?;
         let mut cursors = Vec::new();
         let mut edges = Vec::new();
         for (edge, node) in connection.edges.into_iter().zip(nodes) {
@@ -1457,7 +1469,6 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
             } else {
                 edge.cursor
             };
-            self.reserve(token.len())?;
             cursors.push(token.clone());
             let mut edge_value = object([("cursor", Value::String(token)), ("node", node)]);
             // A searchable collection's edges carry their score: null without
@@ -1479,9 +1490,20 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
                     },
                 );
             }
-            edges.push(edge_value);
+            // The edge without its node: the cursor, score and structure.
+            let Value::Object(mut map) = edge_value else {
+                return Err(invalid());
+            };
+            let node = map.swap_remove("node").ok_or_else(invalid)?;
+            let bytes = edge_shapes
+                .present_bytes(&Value::Object(map.clone()), self.limits.max_response_bytes)?
+                .checked_add(node_slot)
+                .ok_or_else(invalid)?;
+            self.reserve(bytes)?;
+            map.insert(Name::new("node"), node);
+            edges.push(Value::Object(map));
         }
-        Ok(object([
+        let page = object([
             ("edges", Value::List(edges)),
             (
                 "pageInfo",
@@ -1519,7 +1541,19 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
                     .map(|v| Value::String(v.to_string()))
                     .unwrap_or(Value::Null),
             ),
-        ]))
+        ]);
+        // The connection without its edges, plus the edges key and list.
+        let Value::Object(mut map) = page else {
+            return Err(invalid());
+        };
+        let edges = map.swap_remove("edges").ok_or_else(invalid)?;
+        let bytes = shapes
+            .present_bytes(&Value::Object(map.clone()), self.limits.max_response_bytes)?
+            .checked_add(shapes.slot_bytes("edges", true)?)
+            .ok_or_else(invalid)?;
+        self.reserve(bytes)?;
+        map.insert(Name::new("edges"), edges);
+        Ok(Value::Object(map))
     }
     fn reserve(&mut self, bytes: usize) -> Result<(), RuntimeGraphqlError> {
         self.response_bytes = self.response_bytes.checked_add(bytes).ok_or_else(invalid)?;
@@ -1528,10 +1562,12 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
         }
         Ok(())
     }
+    /// Build a layer's node objects and charge each where `shapes` place it.
     fn records(
         &mut self,
         plan: &Plan,
         records: &[RuntimeRecord],
+        shapes: &Shapes<'_>,
     ) -> Result<Vec<Value>, RuntimeGraphqlError> {
         let metadata = plan
             .module
@@ -1560,11 +1596,6 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
                         return Err(RuntimeGraphqlError::new("projection_mismatch"));
                     }
                 };
-                let size = match &value {
-                    Value::String(v) => v.len(),
-                    _ => 16,
-                };
-                self.reserve(size)?;
                 let name = &metadata
                     .fields
                     .iter()
@@ -1582,7 +1613,11 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
                 plan.record_version,
                 &mut values,
             )?;
-            nodes.push(Value::Object(values));
+            // The object, its scalars and identity; projected objects and
+            // relations are charged as they are built.
+            let node = Value::Object(values);
+            self.reserve(shapes.present_bytes(&node, self.limits.max_response_bytes)?)?;
+            nodes.push(node);
         }
         Ok(nodes)
     }
@@ -1592,7 +1627,9 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
         plan: &Plan,
         records: &[RuntimeRecord],
         nodes: &mut [Value],
+        shapes: &Shapes<'_>,
     ) -> Result<(), RuntimeGraphqlError> {
+        let maximum = self.limits.max_response_bytes;
         for projected in &plan.projected {
             let stored = records
                 .iter()
@@ -1602,10 +1639,16 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
                     _ => Err(RuntimeGraphqlError::new("projection_mismatch")),
                 })
                 .collect::<Result<Vec<_>, _>>()?;
+            let charge = |value: &Value| shapes.field_bytes(&projected.api_name, value, maximum);
             if stored
                 .iter()
                 .all(|value| matches!(value, RuntimeValue::Null))
             {
+                self.reserve(
+                    charge(&Value::Null)?
+                        .checked_mul(stored.len())
+                        .ok_or_else(invalid)?,
+                )?;
                 attach(nodes, &projected.api_name, vec![Value::Null; stored.len()])?;
                 continue;
             }
@@ -1621,9 +1664,8 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
                     self.request.auth.as_ref(),
                     self.request.projection_context.as_deref(),
                     self.limits,
-                    self.limits
-                        .max_response_bytes
-                        .saturating_sub(self.response_bytes),
+                    maximum.saturating_sub(self.response_bytes),
+                    &charge,
                 )
                 .await?;
             self.reserve(bytes)?;
@@ -1631,11 +1673,20 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
         }
         Ok(())
     }
+    /// Read one root layer. `shapes` are where it appears in the response: its
+    /// connection objects, or for a point read its node objects.
     async fn root(
         &mut self,
         plan: &Plan,
         request: RuntimeAnchoredReadRequest,
+        shapes: Shapes<'_>,
     ) -> Result<Value, RuntimeGraphqlError> {
+        let (connections, node_shapes) = if plan.point_read {
+            (Shapes::default(), shapes)
+        } else {
+            let nodes = shapes.select("edges").select("node");
+            (shapes, nodes)
+        };
         let connection = self
             .database
             .execute_runtime_anchored_read_guarded(&request, self.request.auth.as_ref(), self.guard)
@@ -1647,14 +1698,15 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
             .iter()
             .map(|e| e.node.clone())
             .collect::<Vec<_>>();
-        let mut nodes = self.records(plan, &records)?;
-        self.project(plan, &records, &mut nodes).await?;
+        let mut nodes = self.records(plan, &records, &node_shapes)?;
+        self.project(plan, &records, &mut nodes, &node_shapes)
+            .await?;
         for child in &plan.children {
             let relation = child.relation.as_ref().ok_or_else(invalid)?;
             let parents = connection
                 .relation_parents(relation)
                 .map_err(relation_error)?;
-            let values = self.layer(child, parents).await?;
+            let values = self.layer(child, parents, node_shapes.clone()).await?;
             attach(
                 &mut nodes,
                 &super::schema::relation_output_key(&child.field_name, &child.response_key),
@@ -1685,15 +1737,26 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
             page_info: connection.page_info,
             total_count: connection.total_count,
         };
-        self.connection(plan, None, connection, nodes).await
+        self.connection(plan, None, connection, nodes, &connections)
+            .await
     }
+    /// Read one relation layer for `parents`, whose node objects appear at
+    /// `parent_nodes` in the response.
     fn layer<'a>(
         &'a mut self,
         plan: &'a Plan,
         parents: Vec<RuntimeParentAnchor>,
+        parent_nodes: Shapes<'a>,
     ) -> BoxFuture<'a, Result<Vec<Value>, RuntimeGraphqlError>> {
         Box::pin(async move {
             let relation = plan.relation.as_ref().ok_or_else(invalid)?;
+            let here = parent_nodes.relation(&plan.field_name, &plan.response_key);
+            let (connections, node_shapes) = if relation.cardinality() == RelationCardinality::One {
+                (Shapes::default(), here)
+            } else {
+                let nodes = here.select("edges").select("node");
+                (here, nodes)
+            };
             if parents.is_empty() {
                 return Ok(Vec::new());
             }
@@ -1743,13 +1806,14 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
                     }
                 })
                 .collect::<Vec<_>>();
-            let mut nodes = self.records(plan, &records)?;
-            self.project(plan, &records, &mut nodes).await?;
+            let mut nodes = self.records(plan, &records, &node_shapes)?;
+            self.project(plan, &records, &mut nodes, &node_shapes)
+                .await?;
             for child in &plan.children {
                 let parents = batch
                     .relation_parents(child.relation.as_ref().ok_or_else(invalid)?)
                     .map_err(relation_error)?;
-                let values = self.layer(child, parents).await?;
+                let values = self.layer(child, parents, node_shapes.clone()).await?;
                 attach(
                     &mut nodes,
                     &super::schema::relation_output_key(&child.field_name, &child.response_key),
@@ -1769,7 +1833,7 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
                     }
                     RuntimeRelationValue::ToMany(connection) => {
                         let values = nodes.by_ref().take(connection.edges.len()).collect();
-                        self.connection(plan, Some(parent), connection, values)
+                        self.connection(plan, Some(parent), connection, values, &connections)
                             .await?
                     }
                 });
@@ -1796,6 +1860,8 @@ pub(super) async fn payload_relations<B: RuntimeReadBackend>(
     schema: &ValidatedRuntimeSchema,
     record: &RuntimeRecord,
     children: &[Plan],
+    shapes: Shapes<'_>,
+    spent: usize,
 ) -> Result<Vec<(String, Value)>, RuntimeGraphqlError> {
     use std::sync::atomic::Ordering;
     // Mutation fields of one request run serially; carry their counts forward.
@@ -1805,11 +1871,11 @@ pub(super) async fn payload_relations<B: RuntimeReadBackend>(
         guard: None,
         protection,
         limits,
-        response_bytes: 0,
+        response_bytes: spent,
         crypto_calls: budget.crypto_calls.load(Ordering::SeqCst),
         projection_calls: budget.projection_calls.load(Ordering::SeqCst),
     };
-    let result = payload_layers(&mut executor, schema, record, children).await;
+    let result = payload_layers(&mut executor, schema, record, children, shapes).await;
     budget
         .crypto_calls
         .store(executor.crypto_calls, Ordering::SeqCst);
@@ -1823,6 +1889,7 @@ async fn payload_layers<B: RuntimeReadBackend>(
     schema: &ValidatedRuntimeSchema,
     record: &RuntimeRecord,
     children: &[Plan],
+    shapes: Shapes<'_>,
 ) -> Result<Vec<(String, Value)>, RuntimeGraphqlError> {
     let mut output = Vec::with_capacity(children.len());
     for child in children {
@@ -1830,7 +1897,7 @@ async fn payload_layers<B: RuntimeReadBackend>(
         let parents = schema
             .runtime_relation_parents(relation, std::slice::from_ref(record))
             .map_err(relation_error)?;
-        let mut values = executor.layer(child, parents).await?;
+        let mut values = executor.layer(child, parents, shapes.clone()).await?;
         let value = values.pop().ok_or_else(invalid)?;
         output.push((
             super::schema::relation_output_key(&child.field_name, &child.response_key),
@@ -1891,11 +1958,35 @@ impl OutputShape {
         }
         Ok(Self { fields })
     }
+    /// Add the bytes `value` takes in the response under this shape to `bytes`,
+    /// refusing with `cost_exceeded` above `maximum`: every response key with
+    /// a worst-case escaping factor of six, two bytes of structure per value and
+    /// 32 for each non-string scalar. This is the one response accounting:
+    /// [`Shapes`] charges partial output with the same rule.
     pub(super) fn measure(
         &self,
         value: &Value,
         bytes: &mut usize,
         maximum: usize,
+    ) -> Result<(), RuntimeGraphqlError> {
+        self.measure_with(value, bytes, maximum, true)
+    }
+    /// [`Self::measure`] for output still being built: a field the object
+    /// does not have yet is not charged.
+    pub(super) fn measure_present(
+        &self,
+        value: &Value,
+        bytes: &mut usize,
+        maximum: usize,
+    ) -> Result<(), RuntimeGraphqlError> {
+        self.measure_with(value, bytes, maximum, false)
+    }
+    fn measure_with(
+        &self,
+        value: &Value,
+        bytes: &mut usize,
+        maximum: usize,
+        complete: bool,
     ) -> Result<(), RuntimeGraphqlError> {
         let add = |bytes: &mut usize, size: usize| -> Result<(), RuntimeGraphqlError> {
             *bytes = bytes.checked_add(size).ok_or_else(invalid)?;
@@ -1908,33 +1999,131 @@ impl OutputShape {
         match value {
             Value::List(values) => {
                 for value in values {
-                    self.measure(value, bytes, maximum)?;
+                    self.measure_with(value, bytes, maximum, complete)?;
                 }
             }
             Value::Object(values) => {
                 for (key, name, child) in &self.fields {
-                    add(
-                        bytes,
-                        key.len()
-                            .checked_mul(6)
-                            .and_then(|n| n.checked_add(4))
-                            .ok_or_else(invalid)?,
-                    )?;
+                    let value = values
+                        .get(super::schema::relation_output_key(name, key).as_str())
+                        .or_else(|| values.get(name.as_str()));
+                    if value.is_none() && !complete && name != "__typename" {
+                        continue;
+                    }
+                    add(bytes, key_bytes(key)?)?;
                     if name == "__typename" {
                         add(bytes, 128)?;
                         continue;
                     }
-                    let value = values
-                        .get(super::schema::relation_output_key(name, key).as_str())
-                        .or_else(|| values.get(name.as_str()))
-                        .ok_or_else(invalid)?;
-                    child.measure(value, bytes, maximum)?;
+                    child.measure_with(value.ok_or_else(invalid)?, bytes, maximum, complete)?;
                 }
             }
             Value::String(value) => add(bytes, value.len().checked_mul(6).ok_or_else(invalid)?)?,
             _ => add(bytes, 32)?,
         }
         Ok(())
+    }
+}
+#[cfg(test)]
+impl OutputShape {
+    /// A shape from `(response key, schema name, child)` entries.
+    pub(super) fn of_fields(fields: Vec<(&str, &str, OutputShape)>) -> Self {
+        Self {
+            fields: fields
+                .into_iter()
+                .map(|(key, name, child)| (key.to_owned(), name.to_owned(), child))
+                .collect(),
+        }
+    }
+}
+/// Bytes one response key takes, by the rule of [`OutputShape::measure`].
+fn key_bytes(key: &str) -> Result<usize, RuntimeGraphqlError> {
+    key.len()
+        .checked_mul(6)
+        .and_then(|n| n.checked_add(4))
+        .ok_or_else(invalid)
+}
+
+/// Every place one layer's values appear in the response: the shapes of the
+/// objects that hold them, one per alias path. Charging through it uses the
+/// rule of [`OutputShape::measure`], so a running total and the final measure
+/// count the same bytes.
+#[derive(Clone, Default)]
+pub(super) struct Shapes<'s>(Vec<&'s OutputShape>);
+impl<'s> Shapes<'s> {
+    pub(super) fn of(shape: &'s OutputShape) -> Self {
+        Self(vec![shape])
+    }
+    /// The shapes of field `name` (under any response key) of these objects.
+    pub(super) fn select(&self, name: &str) -> Self {
+        Self(
+            self.0
+                .iter()
+                .flat_map(|shape| shape.fields.iter())
+                .filter(|(_, field, _)| field == name)
+                .map(|(_, _, child)| child)
+                .collect(),
+        )
+    }
+    /// The shapes of one relation selection (schema name and response key).
+    pub(super) fn relation(&self, name: &str, key: &str) -> Self {
+        Self(
+            self.0
+                .iter()
+                .flat_map(|shape| shape.fields.iter())
+                .filter(|(response, field, _)| field == name && response == key)
+                .map(|(_, _, child)| child)
+                .collect(),
+        )
+    }
+    /// Bytes one copy of `value` adds as field `name` of each of these objects.
+    pub(super) fn field_bytes(
+        &self,
+        name: &str,
+        value: &Value,
+        maximum: usize,
+    ) -> Result<usize, RuntimeGraphqlError> {
+        let mut bytes = 0usize;
+        for (key, _, child) in self
+            .0
+            .iter()
+            .flat_map(|shape| shape.fields.iter())
+            .filter(|(_, field, _)| field == name)
+        {
+            bytes = bytes.checked_add(key_bytes(key)?).ok_or_else(invalid)?;
+            child.measure(value, &mut bytes, maximum)?;
+        }
+        Ok(bytes)
+    }
+    /// Bytes an object adds at each of these places, counting only the fields
+    /// it already has.
+    pub(super) fn present_bytes(
+        &self,
+        value: &Value,
+        maximum: usize,
+    ) -> Result<usize, RuntimeGraphqlError> {
+        let mut bytes = 0usize;
+        for shape in &self.0 {
+            shape.measure_present(value, &mut bytes, maximum)?;
+        }
+        Ok(bytes)
+    }
+    /// Bytes field `name` adds to each of these objects before its value:
+    /// its response keys, and two for a list value.
+    pub(super) fn slot_bytes(&self, name: &str, list: bool) -> Result<usize, RuntimeGraphqlError> {
+        let mut bytes = 0usize;
+        for (key, _, _) in self
+            .0
+            .iter()
+            .flat_map(|shape| shape.fields.iter())
+            .filter(|(_, field, _)| field == name)
+        {
+            bytes = bytes
+                .checked_add(key_bytes(key)?)
+                .and_then(|n| n.checked_add(if list { 2 } else { 0 }))
+                .ok_or_else(invalid)?;
+        }
+        Ok(bytes)
     }
 }
 
@@ -1977,6 +2166,9 @@ mod alias_tests {
 ///
 /// With `guard`, every read transaction of the point read also runs the guard
 /// and is refused with `authorization_misconfigured` when it returns a row.
+/// `shapes` are where the node object appears in the response; `spent` is the
+/// response budget already used, and is advanced by this read.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn point<B: RuntimeReadBackend>(
     database: &Database<B>,
     request: &RuntimeGraphqlRequest<B>,
@@ -1985,6 +2177,8 @@ pub(super) async fn point<B: RuntimeReadBackend>(
     protection: Option<&Protection>,
     limits: RuntimeGraphqlLimits,
     guard: Option<&RuntimeReadGuard>,
+    shapes: Shapes<'_>,
+    spent: &mut usize,
 ) -> Result<Option<Value>, RuntimeGraphqlError> {
     let mut plan = plan.clone();
     let identity = plan
@@ -2020,11 +2214,13 @@ pub(super) async fn point<B: RuntimeReadBackend>(
         guard,
         protection,
         limits,
-        response_bytes: 0,
+        response_bytes: *spent,
         crypto_calls: 0,
         projection_calls: 0,
     };
-    let Value::Object(connection) = executor.root(&plan, read).await? else {
+    let read = executor.root(&plan, read, shapes).await;
+    *spent = executor.response_bytes;
+    let Value::Object(connection) = read? else {
         return Err(invalid());
     };
     let Some(Value::List(edges)) = connection.get("edges") else {

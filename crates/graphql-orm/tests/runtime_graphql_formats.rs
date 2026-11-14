@@ -1021,8 +1021,16 @@ async fn mutation_roots_share_the_response_budget_with_their_projections() {
             low = middle + 1;
         }
     }
+    // Count the projected objects copied into responses from here on.
+    let copies = Arc::new(AtomicUsize::new(0));
+    let _copies = tracing::subscriber::set_default(Copies(copies.clone()));
     let exact = run(low).await;
     assert!(exact.errors.is_empty(), "{:?}", exact.errors);
+    assert_eq!(
+        copies.swap(0, Ordering::SeqCst),
+        2,
+        "both banners are copied"
+    );
     sqlx::query("UPDATE format_profiles SET name = 'reset' WHERE id IN (1, 2)")
         .execute(f.db.pool())
         .await
@@ -1033,6 +1041,13 @@ async fn mutation_roots_share_the_response_budget_with_their_projections() {
         ["mutation_payload_failed"],
         "{:?}",
         short.errors
+    );
+    // Root `b`'s banner, the one over the remainder, is refused before it is
+    // copied: only root `a`'s is.
+    assert_eq!(
+        copies.load(Ordering::SeqCst),
+        1,
+        "the refused banner was copied"
     );
     // The first root was served; the second, the one over the remainder, is refused.
     // Root `b` is on line 3 of the operation.
@@ -1053,4 +1068,25 @@ async fn mutation_roots_share_the_response_budget_with_their_projections() {
             .unwrap();
     assert_eq!(names, ["a", "b"], "both mutations committed");
     f.finish().await;
+}
+
+/// Counts `graphql_orm::runtime_projection` events: one per projection call
+/// that copied objects into a response.
+struct Copies(Arc<AtomicUsize>);
+impl tracing::Subscriber for Copies {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        metadata.target() == "graphql_orm::runtime_projection"
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        if event.metadata().target() == "graphql_orm::runtime_projection" {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
 }

@@ -1274,9 +1274,20 @@ async fn execute_once<B: RuntimeMutationBackend>(
         &mut values,
     )
     .map_err(|_| committed_error("mutation_payload_failed"))?;
+    // One accounting with the final reservation: what earlier roots used, this
+    // root's key and the payload built so far, measured as `reserve_payload`
+    // will measure the whole payload.
+    let maximum = prepared.limits.max_response_bytes;
+    let record_shapes = super::execution::Shapes::of(&prepared.shape).select("record");
+    let mut payload = Value::Object(
+        [(async_graphql::Name::new("record"), Value::Object(values))]
+            .into_iter()
+            .collect(),
+    );
+    let spent = payload_spent(prepared, key, &payload)
+        .map_err(|_| committed_error("mutation_payload_failed"))?;
     // Host objects resolve only after commit and the independent release check,
-    // within what the response budget leaves after earlier roots, this key and
-    // the ordinary fields.
+    // each charged before the next and refused before it is copied.
     let mut items = Vec::with_capacity(prepared.projected.len());
     for projected in &prepared.projected {
         let stored = match record
@@ -1289,33 +1300,24 @@ async fn execute_once<B: RuntimeMutationBackend>(
         };
         items.push((projected, stored));
     }
-    if !items.is_empty() {
-        let used = prepared
-            .response_bytes
-            .load(std::sync::atomic::Ordering::SeqCst)
-            .saturating_add(key.len().saturating_mul(6).saturating_add(8))
-            .saturating_add(values.values().map(value_bytes).sum());
-        let remaining = prepared.limits.max_response_bytes.saturating_sub(used);
-        for (name, value) in project_committed(
-            &items,
-            &prepared.module.schema,
-            super::RuntimeProjectionPurpose::MutationResult {
-                action: effect.action(),
-                kind,
-            },
-            context.auth.as_ref(),
-            context.projection_context.as_deref(),
-            prepared.limits,
-            remaining,
-        )
-        .await
-        .map_err(|_| committed_error("mutation_payload_failed"))?
-        {
-            values.insert(async_graphql::Name::new(name), value);
-        }
-    }
-    // Related records are read now, through each child's authorized layer.
-    for (key, value) in super::execution::payload_relations(
+    let (projected, charged) = project_committed(
+        &items,
+        &prepared.module.schema,
+        super::RuntimeProjectionPurpose::MutationResult {
+            action: effect.action(),
+            kind,
+        },
+        context.auth.as_ref(),
+        context.projection_context.as_deref(),
+        prepared.limits,
+        &record_shapes,
+        maximum.saturating_sub(spent),
+    )
+    .await
+    .map_err(|_| committed_error("mutation_payload_failed"))?;
+    // Related records are read now, through each child's authorized layer,
+    // continuing the same running total.
+    let related = super::execution::payload_relations(
         &database,
         context,
         prepared.protection.as_ref(),
@@ -1324,17 +1326,20 @@ async fn execute_once<B: RuntimeMutationBackend>(
         &prepared.module.schema,
         record,
         &prepared.children,
+        record_shapes,
+        spent.saturating_add(charged),
     )
     .await
-    .map_err(|_| committed_error("mutation_payload_failed"))?
-    {
-        values.insert(async_graphql::Name::new(key), value);
+    .map_err(|_| committed_error("mutation_payload_failed"))?;
+    let Value::Object(fields) = &mut payload else {
+        return Err(committed_error("mutation_payload_failed"));
+    };
+    let Some(Value::Object(values)) = fields.get_mut("record") else {
+        return Err(committed_error("mutation_payload_failed"));
+    };
+    for (name, value) in projected.into_iter().chain(related) {
+        values.insert(async_graphql::Name::new(name), value);
     }
-    let payload = Value::Object(
-        [(async_graphql::Name::new("record"), Value::Object(values))]
-            .into_iter()
-            .collect(),
-    );
     reserve_payload(prepared, &payload, key)?;
     Ok(payload)
 }
@@ -1365,18 +1370,52 @@ fn committed_error(code: &'static str) -> async_graphql::Error {
     })
 }
 
-/// Bytes an encoded scalar adds to the response, as read layers count them.
-fn value_bytes(value: &Value) -> usize {
-    match value {
-        Value::String(text) => text.len(),
-        _ => 16,
+/// Bytes a mutation root adds before its payload: its response key, by the
+/// rule of the response measure.
+fn root_bytes(key: &str) -> usize {
+    key.len().saturating_mul(6).saturating_add(8)
+}
+
+/// The response budget used once `payload` (built so far) is added: earlier
+/// mutation roots, this root's key and the payload's present fields, measured
+/// as [`reserve_payload`] measures. Refuses with `cost_exceeded` when that
+/// already exceeds the budget.
+fn payload_spent(
+    prepared: &Prepared,
+    key: &str,
+    payload: &Value,
+) -> Result<usize, RuntimeGraphqlError> {
+    spent_after(
+        prepared
+            .response_bytes
+            .load(std::sync::atomic::Ordering::SeqCst),
+        key,
+        &prepared.shape,
+        payload,
+        prepared.limits.max_response_bytes,
+    )
+}
+fn spent_after(
+    earlier: usize,
+    key: &str,
+    shape: &super::execution::OutputShape,
+    payload: &Value,
+    maximum: usize,
+) -> Result<usize, RuntimeGraphqlError> {
+    let mut bytes = earlier.saturating_add(root_bytes(key));
+    if bytes > maximum {
+        return Err(RuntimeGraphqlError::new("cost_exceeded"));
     }
+    shape.measure_present(payload, &mut bytes, maximum)?;
+    Ok(bytes)
 }
 
 /// Resolve each projected field of one committed record within `remaining`
-/// response bytes. Each projection is charged its byte count before the next
-/// resolves, and the one that exceeds the remainder is refused with
-/// `cost_exceeded` before its object is copied into the payload.
+/// response bytes, charged where `shapes` place it in the response by the rule
+/// of the final measure. Each projection is charged before the next resolves,
+/// and the one that exceeds the remainder is refused with `cost_exceeded`
+/// before its object is copied into the payload. Returns the outputs and the
+/// bytes charged.
 #[allow(clippy::too_many_arguments)]
 async fn project_committed(
     items: &[(&super::projection::ProjectedPlan, RuntimeValue)],
@@ -1385,10 +1424,14 @@ async fn project_committed(
     auth: Option<&DbAuthContext>,
     context: Option<&(dyn std::any::Any + Send + Sync)>,
     limits: RuntimeGraphqlLimits,
+    shapes: &super::execution::Shapes<'_>,
     mut remaining: usize,
-) -> Result<Vec<(String, Value)>, RuntimeGraphqlError> {
+) -> Result<(Vec<(String, Value)>, usize), RuntimeGraphqlError> {
     let mut output = Vec::with_capacity(items.len());
+    let mut charged = 0usize;
     for (projected, stored) in items {
+        let maximum = limits.max_response_bytes;
+        let charge = |value: &Value| shapes.field_bytes(&projected.api_name, value, maximum);
         let (mut values, bytes) = projected
             .resolve(
                 schema,
@@ -1398,23 +1441,25 @@ async fn project_committed(
                 context,
                 limits,
                 remaining,
+                &charge,
             )
             .await?;
         remaining = remaining
             .checked_sub(bytes)
             .ok_or_else(|| RuntimeGraphqlError::new("cost_exceeded"))?;
+        charged = charged.saturating_add(bytes);
         let value = values
             .pop()
             .ok_or_else(|| RuntimeGraphqlError::new("projection_failed"))?;
         output.push((projected.api_name.clone(), value));
     }
-    Ok(output)
+    Ok((output, charged))
 }
 
 fn reserve_payload(prepared: &Prepared, payload: &Value, key: &str) -> async_graphql::Result<()> {
     use std::sync::atomic::Ordering;
     let maximum = prepared.limits.max_response_bytes;
-    let mut bytes = key.len().saturating_mul(6).saturating_add(8);
+    let mut bytes = root_bytes(key);
     prepared
         .shape
         .measure(payload, &mut bytes, maximum)
@@ -1430,7 +1475,10 @@ fn reserve_payload(prepared: &Prepared, payload: &Value, key: &str) -> async_gra
 
 #[cfg(test)]
 mod tests {
-    use super::super::projection::tests::{fixture, materialized, reset_materialized};
+    use super::super::execution::{OutputShape, Shapes};
+    use super::super::projection::tests::{
+        OBJECT_BYTES, fixture, materialized, record_shape, reset_materialized,
+    };
     use super::*;
 
     fn purpose() -> super::super::RuntimeProjectionPurpose {
@@ -1440,9 +1488,28 @@ mod tests {
         }
     }
 
+    /// `updateFile { record { label avatar { name } banner { name } } }`.
+    fn payload_shape() -> OutputShape {
+        let leaf = || OutputShape::of_fields(vec![]);
+        let object = || OutputShape::of_fields(vec![("name", "name", leaf())]);
+        OutputShape::of_fields(vec![(
+            "record",
+            "record",
+            OutputShape::of_fields(vec![
+                ("label", "label", leaf()),
+                ("avatar", "avatar", object()),
+                ("banner", "banner", object()),
+            ]),
+        )])
+    }
+
+    fn payload(label: &str) -> Value {
+        async_graphql::value!({ "record": { "label": label } })
+    }
+
     /// Projections of one committed record share the remaining budget: each is
-    /// charged before the next resolves, and the one that exceeds the
-    /// remainder is refused before its object is copied (#528).
+    /// charged, as the final measure charges it, before the next resolves, and
+    /// the one that exceeds the remainder is refused before it is copied (#528).
     #[tokio::test]
     async fn committed_projections_share_the_remaining_budget() {
         let (schema, plans) = fixture();
@@ -1451,6 +1518,8 @@ mod tests {
             .iter()
             .map(|plan| (plan, file.clone()))
             .collect::<Vec<_>>();
+        let shape = record_shape();
+        let shapes = Shapes::of(&shape);
         let run = |remaining: usize| {
             project_committed(
                 &items,
@@ -1459,31 +1528,74 @@ mod tests {
                 None,
                 None,
                 Default::default(),
+                &shapes,
                 remaining,
             )
         };
-        // Both objects (100 bytes each) fit in 200 bytes.
         reset_materialized();
-        let both = run(200).await.unwrap();
-        assert_eq!(both.len(), 2);
+        let (both, charged) = run(2 * OBJECT_BYTES).await.unwrap();
+        assert_eq!((both.len(), charged), (2, 2 * OBJECT_BYTES));
         assert_eq!(materialized(), 2);
-        // With 150 bytes the first resolves and the second, which would need
-        // 100 of the 50 left, is refused without being copied.
+        // The first resolves; the second needs more than what is left.
         reset_materialized();
-        let refused = run(150).await;
+        let refused = run(OBJECT_BYTES + OBJECT_BYTES / 2).await;
         assert_eq!(
             refused.err().map(RuntimeGraphqlError::code),
             Some("cost_exceeded")
         );
         assert_eq!(materialized(), 1);
-        // Earlier mutation roots already used the budget: 90 bytes remain, so
-        // the first projection is refused and nothing is copied.
-        reset_materialized();
-        let refused = run(90).await;
+    }
+
+    /// Ordinary fields and earlier roots are charged with the final measure's
+    /// rule before any projection resolves: 1,000 control characters take six
+    /// bytes each once escaped, so a 6,500-byte budget leaves no room for a
+    /// projected object, and nothing is copied. Counting raw string length
+    /// would have left about 5,400 bytes (#528).
+    #[tokio::test]
+    async fn ordinary_fields_and_earlier_roots_use_the_final_measure() {
+        let (schema, plans) = fixture();
+        let shape = payload_shape();
+        let record = Shapes::of(&shape).select("record");
+        let file = RuntimeValue::Uuid(uuid::Uuid::from_bytes([1; 16]));
+        let items = vec![(&plans[0], file)];
+        let control = "\u{1}".repeat(1_000);
+        let maximum = 6_500;
+        for (earlier, label) in [(0, control.as_str()), (maximum - 300, "short")] {
+            let spent =
+                spent_after(earlier, "updateFile", &shape, &payload(label), maximum).unwrap();
+            let mut exact = 0;
+            shape
+                .measure_present(&payload(label), &mut exact, usize::MAX)
+                .unwrap();
+            assert_eq!(spent, earlier + root_bytes("updateFile") + exact);
+            reset_materialized();
+            let refused = project_committed(
+                &items,
+                &schema,
+                purpose(),
+                None,
+                None,
+                RuntimeGraphqlLimits {
+                    max_response_bytes: maximum,
+                    ..Default::default()
+                },
+                &record,
+                maximum - spent,
+            )
+            .await;
+            assert_eq!(
+                refused.err().map(RuntimeGraphqlError::code),
+                Some("cost_exceeded"),
+                "{earlier} earlier bytes"
+            );
+            assert_eq!(materialized(), 0, "{earlier} earlier bytes");
+        }
+        // Earlier roots that already exceed the budget refuse before measuring.
         assert_eq!(
-            refused.err().map(RuntimeGraphqlError::code),
+            spent_after(maximum, "updateFile", &shape, &payload("x"), maximum)
+                .err()
+                .map(RuntimeGraphqlError::code),
             Some("cost_exceeded")
         );
-        assert_eq!(materialized(), 0);
     }
 }

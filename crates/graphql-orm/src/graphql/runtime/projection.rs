@@ -296,11 +296,13 @@ impl ProjectedPlan {
     }
 
     /// Call the projector once and return one output value per input record value,
-    /// plus the encoded bytes to reserve against the response budget.
+    /// plus the bytes charged against the response budget.
     ///
-    /// `budget` is the response budget still available. Each distinct object is
-    /// built once and charged for every record that carries it; a total above
-    /// `budget` is refused with `cost_exceeded` before any per-record copy.
+    /// `budget` is the response budget still available and `charge` the bytes
+    /// one copy of an output value takes in the response, by the rule of the
+    /// final response measure. Each distinct output is built once and charged
+    /// for every record that carries it; a total above `budget` is refused with
+    /// `cost_exceeded` before any output is copied to a record.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn resolve(
         &self,
@@ -311,8 +313,22 @@ impl ProjectedPlan {
         context: Option<&(dyn Any + Send + Sync)>,
         limits: super::RuntimeGraphqlLimits,
         budget: usize,
+        charge: &(dyn Fn(&async_graphql::Value) -> Result<usize, RuntimeGraphqlError> + Sync),
     ) -> Result<(Vec<async_graphql::Value>, usize), RuntimeGraphqlError> {
-        let mut bytes = 0usize;
+        let over = || RuntimeGraphqlError::new("cost_exceeded");
+        // Records without a stored value output null; charge those first.
+        let nulls = stored
+            .iter()
+            .filter(|value| matches!(value, RuntimeValue::Null))
+            .count();
+        let mut bytes = if nulls == 0 {
+            0
+        } else {
+            charge(&async_graphql::Value::Null)?
+                .checked_mul(nulls)
+                .filter(|total| *total <= budget)
+                .ok_or_else(over)?
+        };
         let failed = || RuntimeGraphqlError::new("projection_failed");
         let mut distinct: Vec<RuntimeValue> = Vec::new();
         // How many records carry each distinct value: each gets its own copy
@@ -385,7 +401,6 @@ impl ProjectedPlan {
                             return Err(failed());
                         }
                         let mut object = async_graphql::indexmap::IndexMap::new();
-                        let mut object_bytes = 0usize;
                         for name in &self.selected {
                             let declared = contract.object.field(name).ok_or_else(failed)?;
                             let encoded = match fields.get(name) {
@@ -397,22 +412,18 @@ impl ProjectedPlan {
                                 }
                                 _ => return Err(failed()),
                             };
-                            object_bytes = object_bytes
-                                .checked_add(match &encoded {
-                                    async_graphql::Value::String(text) => text.len(),
-                                    _ => 16,
-                                })
-                                .ok_or_else(failed)?;
                             object.insert(async_graphql::Name::new(name), encoded);
                         }
-                        bytes = object_bytes
-                            .checked_mul(uses[index])
-                            .and_then(|total| bytes.checked_add(total))
-                            .filter(|total| *total <= budget)
-                            .ok_or_else(|| RuntimeGraphqlError::new("cost_exceeded"))?;
                         async_graphql::Value::Object(object)
                     }
                 });
+                // Every record carrying this value gets its own copy.
+                let output = outputs[index].as_ref().ok_or_else(failed)?;
+                bytes = charge(output)?
+                    .checked_mul(uses[index])
+                    .and_then(|total| bytes.checked_add(total))
+                    .filter(|total| *total <= budget)
+                    .ok_or_else(over)?;
             }
         }
         // Only now, within budget, copy each object to the records that carry it.
@@ -428,6 +439,14 @@ impl ProjectedPlan {
                 outputs[keys[&key]].clone().ok_or_else(failed)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let copies = stored.len() - nulls;
+        if copies > 0 {
+            tracing::trace!(
+                target: "graphql_orm::runtime_projection",
+                copies,
+                "projected objects copied into the response"
+            );
+        }
         Ok((values, bytes))
     }
 }
@@ -673,6 +692,21 @@ pub(crate) mod tests {
         (schema, plans)
     }
 
+    /// The shape of a record selecting `avatar { name }` and `banner { name }`.
+    pub(crate) fn record_shape() -> super::super::execution::OutputShape {
+        use super::super::execution::OutputShape;
+        let object =
+            || OutputShape::of_fields(vec![("name", "name", OutputShape::of_fields(vec![]))]);
+        OutputShape::of_fields(vec![
+            ("avatar", "avatar", object()),
+            ("banner", "banner", object()),
+        ])
+    }
+    /// Bytes one projected object adds as `avatar` or `banner` (both six
+    /// letters): the key, the object and its 100-byte name, by the response
+    /// measure's rule.
+    pub(crate) const OBJECT_BYTES: usize = (6 * 6 + 4) + 2 + (4 * 6 + 4) + 2 + 100 * 6;
+
     pub(crate) fn materialized() -> usize {
         MATERIALIZED.with(std::cell::Cell::get)
     }
@@ -690,6 +724,9 @@ pub(crate) mod tests {
         let other = RuntimeValue::Uuid(uuid::Uuid::from_bytes([2; 16]));
         let mut stored = vec![shared; 49];
         stored.push(other);
+        let shape = record_shape();
+        let shapes = super::super::execution::Shapes::of(&shape);
+        let charge = |value: &async_graphql::Value| shapes.field_bytes("avatar", value, usize::MAX);
         let run = |budget: usize| {
             plan.resolve(
                 &schema,
@@ -699,18 +736,20 @@ pub(crate) mod tests {
                 None,
                 Default::default(),
                 budget,
+                &charge,
             )
         };
-        // 50 records of 100 bytes each, from two distinct values.
+        // 50 records, from two distinct values, each charged in full.
+        let page = 50 * OBJECT_BYTES;
         reset_materialized();
-        let refused = run(4_999).await;
+        let refused = run(page - 1).await;
         assert_eq!(
             refused.err().map(RuntimeGraphqlError::code),
             Some("cost_exceeded")
         );
         assert_eq!(materialized(), 0);
-        let (values, bytes) = run(5_000).await.unwrap();
-        assert_eq!((values.len(), bytes), (50, 5_000));
+        let (values, bytes) = run(page).await.unwrap();
+        assert_eq!((values.len(), bytes), (50, page));
         assert_eq!(materialized(), 50);
     }
 }
