@@ -1162,11 +1162,10 @@ pub(crate) struct AiRunRecord {
     pub cancellation_request_id: Option<graphql_orm::uuid::Uuid>,
     /// Server timestamp at which cancellation became terminal.
     pub cancellation_requested_at: Option<i64>,
-    /// When lease recovery last examined this expired run and left it
-    /// unchanged after an operational failure (a host policy refusal, a
-    /// refused read, a database error). Recovery scans in this order, so such
-    /// a run rotates behind the rest across passes and restarts without its
-    /// own state changing. Zero for a run never left behind.
+    /// Durable maintenance progress for recovery, queued claims and approval
+    /// waits. Examined or operationally skipped rows rotate behind unexamined
+    /// rows across passes and restarts without gaining execution authority.
+    /// Zero for a run maintenance has never left behind.
     #[sortable]
     #[graphql_orm(default = "0")]
     pub recovery_examined_at: i64,
@@ -2215,7 +2214,7 @@ pub(crate) struct AiUsageEntryRecord {
     pub tool_units: i64,
     pub image_units: i64,
     pub cost_microunits: Option<i64>,
-    #[filterable(type = "number")]
+    #[filterable(type = "int64")]
     #[sortable]
     pub created_at: i64,
 }
@@ -2559,7 +2558,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.78.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.79.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 

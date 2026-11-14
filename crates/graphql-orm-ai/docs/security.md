@@ -3,7 +3,7 @@ title: "Security Model"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-11
+last_reviewed: 2026-11-14
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -75,6 +75,29 @@ every application resolver, around checkpoint protection, and at adoption.
 Changed rules fail before an external effect where possible; after transport,
 stale rule or actual-usage evidence requires recovery and cannot be replayed.
 Legacy/unbound checkpoints are not adoption authority.
+
+## Content protection scope
+
+Content protection is a seam, not an encryption feature. The crate ships no
+encryption and holds no keys.
+
+- `DatabaseManagedContentProtector` is the only protector the crate provides
+  ([`content_protection.rs`](../src/content_protection.rs) lines 130-167). It
+  stores the canonical JSON value unchanged in a `DatabaseManaged` envelope
+  and refuses a policy whose mode is `ApplicationEncrypted` with
+  `Unsupported`. Confidentiality in this mode is whatever the deployment's
+  database or storage layer provides at rest.
+- The `ApplicationEncrypted` envelope and the `AiContentProtector` trait are
+  extension points. Encryption, key management, and key rotation are
+  host-owned and must be implemented and reviewed by the host; the crate
+  provides no cipher.
+- Attachment bytes are never passed through the protector. They are streamed
+  to the host's `BlobStore` (`put_blob_if_not_exists` in
+  [`orm_attachments.rs`](../src/orm_attachments.rs)), so any encryption of
+  attachment bytes is the blob store's or the deployment's responsibility.
+  The protector covers only the attachment session event payload
+  (`protected_payload` of `graphql_orm_ai_session_events`). Filename and MIME
+  metadata can also be sensitive; see [attachments](attachments.md).
 
 ## Disclosure
 

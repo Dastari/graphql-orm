@@ -342,9 +342,6 @@ impl AiProviderFileDeletionService for OpenAiFileDeletionService {
         }
         let endpoint = format!("{}/{}", self.files_endpoint, request.provider_reference());
         let deletion = self.send(reqwest::Method::DELETE, &endpoint).await?;
-        if deletion.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(());
-        }
         if !deletion.status().is_success() {
             return Err(AiError::ProviderFailed);
         }
@@ -3724,7 +3721,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn absent_file_is_idempotent() {
+    async fn first_file_404_does_not_prove_absence() {
         let (endpoint, server) = file_mock_server(vec![(
             "404 Not Found".to_owned(),
             r#"{"error":{"code":"not_found"}}"#.to_owned(),
@@ -3747,10 +3744,7 @@ mod tests {
             "profile-openai".to_owned(),
             "file-already_absent".to_owned(),
         );
-        service
-            .delete_and_confirm_absent(&request)
-            .await
-            .expect("not found should prove idempotent absence");
+        assert!(service.delete_and_confirm_absent(&request).await.is_err());
         assert_eq!(
             server.await.expect("file server should finish"),
             vec!["DELETE /v1/files/file-already_absent HTTP/1.1"]

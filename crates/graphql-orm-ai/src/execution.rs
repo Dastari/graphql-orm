@@ -799,7 +799,7 @@ pub trait AuthenticatedGraphqlExecutor: Send + Sync {
 /// executing a tool request.
 #[derive(Clone)]
 pub struct AuthenticatedToolBridge {
-    principal_resolver: Arc<dyn CurrentPrincipalResolver>,
+    principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver,
     authorization_policy: Arc<dyn AiToolAuthorizationPolicy>,
     context_factory: Arc<dyn GraphqlRequestContextFactory>,
     executor: Arc<dyn AuthenticatedGraphqlExecutor>,
@@ -816,7 +816,7 @@ impl AuthenticatedToolBridge {
         targets: GraphqlExecutionTargetRegistry,
     ) -> Self {
         Self {
-            principal_resolver,
+            principal_resolver: principal_resolver.into(),
             authorization_policy,
             context_factory,
             executor,

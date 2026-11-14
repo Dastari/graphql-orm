@@ -10,6 +10,19 @@ supersedes: []
 
 # Migration Guide
 
+## 0.144.0 to 0.150.0: batched row-security probe
+
+Upgrade ORM and macros together. No data migration is needed. The new optional
+backend method `RlsIntrospectionBackend::probe_row_security` preserves path order
+and duplicates. Its default returns unknown entries, so existing backend
+implementations remain conservative. Only a complete list of `Some(false)`
+values excludes backend row security; errors, missing entries and `None` never do.
+An inactive result does not prove a relation exists or that an ORM row policy
+permits reads. SQLite reports inactive security without catalog lookups.
+See the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01400-to-01430-runtime-and-provider-bug-batch)
+when upgrading AI to 0.143.0.
+
+
 ## 0.141.0 to 0.143.0: one authorization contract
 
 Upgrade runtime and macros together. No schema or data migration is needed.

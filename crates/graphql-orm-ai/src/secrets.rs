@@ -12,9 +12,16 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Opaque, non-secret reference to provider credentials or key material.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
 pub struct SecretRef(String);
+
+impl<'de> Deserialize<'de> for SecretRef {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(serde::de::Error::custom)
+    }
+}
 
 impl SecretRef {
     /// Parses a bounded reference suitable for persistence and audit metadata.
@@ -28,6 +35,7 @@ impl SecretRef {
         let value = value.into();
         let valid = !value.is_empty()
             && value.len() <= 200
+            && !value.split('/').any(|part| matches!(part, "." | ".."))
             && value.bytes().all(|byte| {
                 byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':' | b'/')
             });
@@ -157,5 +165,18 @@ impl AiSecretStore for EnvironmentSecretStore {
 
     async fn delete(&self, _reference: &SecretRef) -> Result<(), SecretError> {
         Err(SecretError::ReadOnly)
+    }
+}
+
+#[cfg(test)]
+mod reference_tests {
+    use super::*;
+    #[test]
+    fn secret_references_reject_relative_path_segments() {
+        for value in ["..", ".", "keys/../key", "keys/./key"] {
+            assert!(SecretRef::parse(value).is_err(), "{value}");
+            assert!(serde_json::from_value::<SecretRef>(serde_json::json!(value)).is_err());
+        }
+        assert!(SecretRef::parse("keys/service.v2").is_ok());
     }
 }

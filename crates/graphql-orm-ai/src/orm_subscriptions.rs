@@ -61,7 +61,7 @@ fn jittered_backoff(base: Duration, attempt: u32, session_id: Uuid) -> Duration 
 /// through the resolver, which would yield the full user behind it.
 pub struct OrmAiSubscriptionService {
     sessions: Arc<OrmAiSessionService>,
-    principal_resolver: Arc<dyn CurrentPrincipalResolver>,
+    principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver,
     reauthorization_interval: Duration,
     reauthorization_grace: Duration,
     replay_check_interval: Duration,
@@ -78,7 +78,7 @@ impl OrmAiSubscriptionService {
     ) -> Self {
         Self {
             sessions,
-            principal_resolver,
+            principal_resolver: principal_resolver.into(),
             reauthorization_interval: Duration::from_secs(30),
             reauthorization_grace: Duration::from_secs(120),
             replay_check_interval: Duration::from_secs(10),
@@ -98,10 +98,11 @@ impl OrmAiSubscriptionService {
     /// tolerated before the stream closes.
     ///
     /// An authoritative denial is never subject to this window. Zero disables
-    /// the grace period and restores fail-on-first-failure behavior.
+    /// the grace period and restores fail-on-first-failure behavior. Values
+    /// above 120 seconds are clamped to that ceiling.
     #[must_use]
     pub fn with_reauthorization_grace(mut self, grace: Duration) -> Self {
-        self.reauthorization_grace = grace;
+        self.reauthorization_grace = grace.min(Duration::from_secs(120));
         self
     }
 

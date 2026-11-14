@@ -10,6 +10,10 @@ supersedes: []
 
 # graphql-orm-ai
 
+AI 0.143.0 uses ORM/macros 0.150.0 and AI schema module `0.79.0` (no column or data migration). The runtime and provider bug batch tightens approval execution, principal validation, reclamation and egress bounds. Hosts now own retirement of previous shared secret references; see [migration guidance](MIGRATION.md#01400-to-01430-runtime-and-provider-bug-batch).
+
+Native quota retry and pending-quota lifecycle tests run on explicitly sized 1 MiB threads in the AI test lanes. Production provider/approval phases use heap-pinned futures, and an unstarted replacement drops its completed pass before the next pass starts.
+
 Version `0.139.0` adopts ORM 0.143.0 and keeps the crate's own records readable and writable whatever the host `FieldPolicy` answers for repository field decisions: internal handles answer those decisions for the crate's own entities and delegate everything else, and `database()` returns the host's handle. No data migration is needed. See the [migration guide](MIGRATION.md#01380-to-01390-custody-of-the-crates-own-records-under-a-host-field-policy).
 
 Version `0.138.0` keeps run recovery, claims and session retention going when one row is malformed, refuses to retry a cancelled run whose mutation may have run, settles budget reservations of closed attempts, and retries serialization conflicts in run transitions. Apply AI schema module `0.78.0`; it adds two defaulted columns and needs no data migration. See the [migration guide](MIGRATION.md#01370-to-01380).

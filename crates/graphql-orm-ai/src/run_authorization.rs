@@ -87,13 +87,7 @@ impl AiRunAuthorization {
             || original
                 .expires_at
                 .is_none_or(|expiry| expiry <= started_at)
-            || matches!(
-                original.grant_kind,
-                Some(
-                    agql_auth::AccessTokenGrantKind::Sessionless
-                        | agql_auth::AccessTokenGrantKind::SessionBoundDelegation
-                )
-            )
+            || crate::principal_projection::is_delegated_reference(&original)
         {
             return Err(AiError::ReauthorizationFailed);
         }
@@ -162,6 +156,44 @@ mod tests {
             )
             .await
     }
+    #[tokio::test]
+    async fn missing_grant_kind_with_an_operation_never_reaches_the_issuer() {
+        struct NeverIssue;
+        #[async_trait]
+        impl AiRunAuthorizationIssuer for NeverIssue {
+            async fn issue(
+                &self,
+                _: &AuthPrincipal,
+                _: Uuid,
+                _: Uuid,
+            ) -> Result<PrincipalReference, AiError> {
+                panic!("a narrowed credential must never issue run authority")
+            }
+        }
+        let now = OffsetDateTime::now_utc();
+        let mut principal = principal(now);
+        if let AuthPrincipal::User(user) = &mut principal {
+            user.token_claims.grant_kind = None;
+            user.token_claims.operation = Some(agql_auth::ExactOperationBinding::new(
+                "RecordsCount",
+                "sha256:reviewed-document",
+            ));
+        }
+        let authorization =
+            AiRunAuthorization::new(Arc::new(NeverIssue), Arc::new(FixedClock::new(now)));
+        assert!(matches!(
+            authorization
+                .issue(
+                    &principal,
+                    &principal.reference(),
+                    Uuid::new_v4(),
+                    Uuid::new_v4()
+                )
+                .await,
+            Err(AiError::ReauthorizationFailed)
+        ));
+    }
+
     #[tokio::test]
     async fn admits_an_hour_of_work_without_changing_the_submitting_credential() {
         let now = OffsetDateTime::now_utc();

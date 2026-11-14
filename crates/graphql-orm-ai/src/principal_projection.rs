@@ -188,14 +188,56 @@ pub(crate) fn is_delegated_reference(reference: &PrincipalReference) -> bool {
 /// non-transient error an expired or revoked reference produces. Callers map
 /// the error exactly as they map any other resolution failure, so these rows
 /// fail through the expired-reference path.
+#[derive(Clone)]
+pub(crate) struct AiCurrentPrincipalResolver {
+    resolver: Arc<dyn agql_auth::CurrentPrincipalResolver>,
+    clock: Arc<dyn agql_auth::Clock>,
+}
+
+impl From<Arc<dyn agql_auth::CurrentPrincipalResolver>> for AiCurrentPrincipalResolver {
+    fn from(resolver: Arc<dyn agql_auth::CurrentPrincipalResolver>) -> Self {
+        Self {
+            resolver,
+            clock: Arc::new(agql_auth::SystemClock),
+        }
+    }
+}
+
+impl AsRef<AiCurrentPrincipalResolver> for AiCurrentPrincipalResolver {
+    fn as_ref(&self) -> &AiCurrentPrincipalResolver {
+        self
+    }
+}
+
+impl AiCurrentPrincipalResolver {
+    pub(crate) fn with_clock(mut self, clock: Arc<dyn agql_auth::Clock>) -> Self {
+        self.clock = clock;
+        self
+    }
+    async fn resolve_current_reference(
+        &self,
+        reference: &PrincipalReference,
+    ) -> agql_auth::AuthResult<agql_auth::ResolvedPrincipal> {
+        if is_delegated_reference(reference) {
+            return Err(agql_auth::AuthError::Forbidden);
+        }
+        let resolved = self.resolver.resolve(reference).await?;
+        if resolved.reference() != reference
+            || reference.expires_at.is_some_and(|expiry| {
+                expiry <= resolved.resolved_at() || expiry <= self.clock.now()
+            })
+        {
+            return Err(agql_auth::AuthError::Forbidden);
+        }
+        Ok(resolved)
+    }
+}
+
 pub(crate) async fn resolve_current_reference(
-    resolver: &dyn agql_auth::CurrentPrincipalResolver,
+    resolver: &AiCurrentPrincipalResolver,
     reference: &PrincipalReference,
 ) -> agql_auth::AuthResult<agql_auth::ResolvedPrincipal> {
-    if is_delegated_reference(reference) {
-        return Err(agql_auth::AuthError::Forbidden);
-    }
-    resolver.resolve(reference).await
+    resolver.resolve_current_reference(reference).await
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -255,7 +297,7 @@ pub(crate) fn admission_reference(
 /// principal and periodically re-resolves the projected reference.
 pub(crate) async fn admit_stream(
     projection: Option<&AiPrincipalProjection>,
-    resolver: &dyn CurrentPrincipalResolver,
+    resolver: &AiCurrentPrincipalResolver,
     principal: AuthPrincipal,
 ) -> Result<(PrincipalReference, AuthPrincipal), AiError> {
     refuse_delegated_request(&principal)?;
@@ -300,14 +342,17 @@ pub(crate) fn resolved_identity_matches(
 /// Opt-in strict resolution of a new submission's reference before any write.
 #[derive(Clone)]
 pub(crate) struct AiSubmissionAdmission {
-    resolver: Arc<dyn CurrentPrincipalResolver>,
+    resolver: crate::principal_projection::AiCurrentPrincipalResolver,
     clock: Arc<dyn Clock>,
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 impl AiSubmissionAdmission {
     pub(crate) fn new(resolver: Arc<dyn CurrentPrincipalResolver>, clock: Arc<dyn Clock>) -> Self {
-        Self { resolver, clock }
+        Self {
+            resolver: AiCurrentPrincipalResolver::from(resolver).with_clock(clock.clone()),
+            clock,
+        }
     }
 
     /// Requires the host resolver to return exactly this live reference.
@@ -341,10 +386,17 @@ pub(crate) fn test_delegated_references(
     let mut actor_only = base.clone();
     actor_only.grant_kind = None;
     actor_only.actor_subject = Some("delegated-agent".to_owned());
+    let mut operation_only = base.clone();
+    operation_only.grant_kind = None;
+    operation_only.operation = Some(agql_auth::ExactOperationBinding::new(
+        "RecordsCount",
+        "sha256:reviewed-document",
+    ));
     vec![
         ("session_bound_delegation", delegation),
         ("sessionless", sessionless),
         ("no_grant_kind_with_actor", actor_only),
+        ("no_grant_kind_with_operation", operation_only),
     ]
 }
 
@@ -570,6 +622,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolution_refuses_wrong_reference_and_expiry() {
+        struct Fixed(agql_auth::ResolvedPrincipal);
+        #[async_trait::async_trait]
+        impl agql_auth::CurrentPrincipalResolver for Fixed {
+            async fn resolve(
+                &self,
+                _: &PrincipalReference,
+            ) -> agql_auth::AuthResult<agql_auth::ResolvedPrincipal> {
+                Ok(self.0.clone())
+            }
+        }
+        let principal = user("tenant");
+        let reference = principal.reference();
+        let expired = agql_auth::ResolvedPrincipal::new(
+            reference.clone(),
+            principal.clone(),
+            reference.expires_at.unwrap(),
+        )
+        .unwrap();
+        assert!(
+            resolve_current_reference(
+                &(Arc::new(Fixed(expired)) as Arc<dyn agql_auth::CurrentPrincipalResolver>).into(),
+                &reference
+            )
+            .await
+            .is_err()
+        );
+        let current = agql_auth::ResolvedPrincipal::new(
+            reference.clone(),
+            principal.clone(),
+            OffsetDateTime::UNIX_EPOCH,
+        )
+        .unwrap();
+        let cached = agql_auth::ResolvedPrincipal::new(
+            reference.clone(),
+            principal,
+            OffsetDateTime::UNIX_EPOCH,
+        )
+        .unwrap();
+        let cached: AiCurrentPrincipalResolver =
+            (Arc::new(Fixed(cached)) as Arc<dyn agql_auth::CurrentPrincipalResolver>).into();
+        assert!(
+            resolve_current_reference(&cached, &reference)
+                .await
+                .is_err(),
+            "expired now even when the resolver timestamp predates expiry"
+        );
+        let mut wrong = reference.clone();
+        wrong.subject = "other".into();
+        assert!(
+            resolve_current_reference(
+                &(Arc::new(Fixed(current)) as Arc<dyn agql_auth::CurrentPrincipalResolver>).into(),
+                &wrong
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn stored_reference_resolution_refuses_before_the_host_resolver() {
         struct Counting(std::sync::atomic::AtomicUsize);
         #[async_trait::async_trait]
@@ -582,16 +694,18 @@ mod tests {
                 Err(agql_auth::AuthError::AuthServiceUnavailable)
             }
         }
-        let resolver = Counting(std::sync::atomic::AtomicUsize::new(0));
+        let resolver = Arc::new(Counting(std::sync::atomic::AtomicUsize::new(0)));
+        let guarded: AiCurrentPrincipalResolver =
+            (resolver.clone() as Arc<dyn agql_auth::CurrentPrincipalResolver>).into();
         let base = user("tenant").reference();
         for (_, reference) in test_delegated_references(&base) {
             assert!(matches!(
-                resolve_current_reference(&resolver, &reference).await,
+                resolve_current_reference(&guarded, &reference).await,
                 Err(agql_auth::AuthError::Forbidden)
             ));
         }
         assert_eq!(resolver.0.load(std::sync::atomic::Ordering::SeqCst), 0);
-        assert!(resolve_current_reference(&resolver, &base).await.is_err());
+        assert!(resolve_current_reference(&guarded, &base).await.is_err());
         assert_eq!(resolver.0.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

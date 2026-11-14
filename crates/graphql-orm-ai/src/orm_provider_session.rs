@@ -198,7 +198,7 @@ mod service {
         access_policy: Arc<dyn AiAccessPolicy>,
         protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
         content_protector: Arc<dyn AiContentProtector>,
-        principal_resolver: Arc<dyn CurrentPrincipalResolver>,
+        principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver,
         clock: Arc<dyn Clock>,
         limits: AiProviderSessionLimits,
         maximum_principal_age: Duration,
@@ -241,7 +241,10 @@ mod service {
                 access_policy,
                 protection_policy,
                 content_protector,
-                principal_resolver,
+                principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver::from(
+                    principal_resolver,
+                )
+                .with_clock(clock.clone()),
                 clock,
                 limits,
                 maximum_principal_age,

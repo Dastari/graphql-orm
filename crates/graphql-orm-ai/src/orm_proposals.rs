@@ -111,7 +111,7 @@ pub struct OrmAiProposalService {
     /// The handle the host supplied, returned by `database()`.
     host_database: Database<DefaultWriteBackend>,
     run_service: OrmAiRunService,
-    principal_resolver: Arc<dyn CurrentPrincipalResolver>,
+    principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver,
     access_policy: Arc<dyn AiProposalAccessPolicy>,
     protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
     content_protector: Arc<dyn AiContentProtector>,
@@ -140,7 +140,10 @@ impl OrmAiProposalService {
             host_database,
             database,
             run_service,
-            principal_resolver,
+            principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver::from(
+                principal_resolver,
+            )
+            .with_clock(clock.clone()),
             access_policy,
             protection_policy,
             content_protector,

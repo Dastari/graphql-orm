@@ -655,6 +655,20 @@ pub struct AiSupervisedAgentCoordinator {
     native_services: Option<Arc<native::NativeServices>>,
 }
 
+// A definitely unstarted replacement is a new polling pass, not a nested
+// invocation retaining the first pass's entire frame and local proofs.
+struct UnstartedTurnRetry {
+    lease: AiRunLease,
+    guard: AiAgentLoopGuard,
+    plan: AiSupervisedAgentTurnPlan,
+    rule_usage: AiRuleRunUsage,
+}
+
+enum SupervisedTurnStep {
+    Finished(AiSupervisedAgentRunOutcome),
+    Retry(Box<UnstartedTurnRetry>),
+}
+
 impl AiSupervisedAgentCoordinator {
     /// Creates the supervised coordinator from proof-preserving boundaries.
     #[allow(clippy::too_many_arguments)]
@@ -1034,17 +1048,67 @@ impl AiSupervisedAgentCoordinator {
     #[allow(clippy::too_many_arguments)]
     async fn execute_turn(
         &self,
+        mut lease: AiRunLease,
+        mut guard: AiAgentLoopGuard,
+        mut plan: AiSupervisedAgentTurnPlan,
+        mut rule_usage: AiRuleRunUsage,
+        mut adopted: Option<&AiAdoptedSupervisedToolBatch>,
+        mut adopted_automatic: Option<&AiAdoptedAutomaticMutationBatch>,
+        mut adopted_subscription: Option<&crate::AiAdoptedReadOnlyToolBatch>,
+    ) -> Result<AiSupervisedAgentRunOutcome, AiError> {
+        let mut retried = false;
+        loop {
+            let step = self
+                .boxed_turn_step(
+                    lease,
+                    guard,
+                    plan,
+                    rule_usage,
+                    adopted.take(),
+                    adopted_automatic.take(),
+                    adopted_subscription.take(),
+                    !retried,
+                )
+                .await?;
+            match step {
+                SupervisedTurnStep::Finished(outcome) => return Ok(outcome),
+                SupervisedTurnStep::Retry(next) => {
+                    if retried {
+                        return Err(AiError::Conflict);
+                    }
+                    let UnstartedTurnRetry {
+                        lease: next_lease,
+                        guard: next_guard,
+                        plan: next_plan,
+                        rule_usage: next_usage,
+                    } = *next;
+                    lease = next_lease;
+                    guard = next_guard;
+                    plan = next_plan;
+                    rule_usage = next_usage;
+                    retried = true;
+                }
+            }
+        }
+    }
+
+    // Construct a pass here, then release construction temporaries before
+    // polling it. The driver drops a complete pass before one replacement.
+    #[allow(clippy::too_many_arguments)]
+    fn boxed_turn_step<'a>(
+        &'a self,
         lease: AiRunLease,
         guard: AiAgentLoopGuard,
         plan: AiSupervisedAgentTurnPlan,
         rule_usage: AiRuleRunUsage,
-        adopted: Option<&AiAdoptedSupervisedToolBatch>,
-        adopted_automatic: Option<&AiAdoptedAutomaticMutationBatch>,
-        adopted_subscription: Option<&crate::AiAdoptedReadOnlyToolBatch>,
-    ) -> Result<AiSupervisedAgentRunOutcome, AiError> {
-        // The private retry state retains several exact plans and proofs. Keep that
-        // future off every native continuation caller's inline polling frame.
-        Box::pin(self.execute_turn_with_retry(
+        adopted: Option<&'a AiAdoptedSupervisedToolBatch>,
+        adopted_automatic: Option<&'a AiAdoptedAutomaticMutationBatch>,
+        adopted_subscription: Option<&'a crate::AiAdoptedReadOnlyToolBatch>,
+        allow_unstarted_retry: bool,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<SupervisedTurnStep, AiError>> + Send + 'a>,
+    > {
+        Box::pin(self.execute_turn_step(
             lease,
             guard,
             plan,
@@ -1052,13 +1116,12 @@ impl AiSupervisedAgentCoordinator {
             adopted,
             adopted_automatic,
             adopted_subscription,
-            true,
+            allow_unstarted_retry,
         ))
-        .await
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn execute_turn_with_retry(
+    async fn execute_turn_step(
         &self,
         mut lease: AiRunLease,
         mut guard: AiAgentLoopGuard,
@@ -1068,11 +1131,12 @@ impl AiSupervisedAgentCoordinator {
         adopted_automatic: Option<&AiAdoptedAutomaticMutationBatch>,
         adopted_subscription: Option<&crate::AiAdoptedReadOnlyToolBatch>,
         allow_unstarted_retry: bool,
-    ) -> Result<AiSupervisedAgentRunOutcome, AiError> {
+    ) -> Result<SupervisedTurnStep, AiError> {
         if !guard.can_begin_provider_turn() {
-            return self
+            return (self
                 .finish_failed(&lease, &guard, "supervised_provider_turn_limit_reached")
-                .await;
+                .await)
+                .map(SupervisedTurnStep::Finished);
         }
         let native_mode = plan.native;
         let (
@@ -1090,17 +1154,19 @@ impl AiSupervisedAgentCoordinator {
                 resolution
             }
             _ => {
-                return self
+                return (self
                     .finish_failed(&lease, &guard, "supervised_rule_plan_stale")
-                    .await;
+                    .await)
+                    .map(SupervisedTurnStep::Finished);
             }
         };
         let started_usage = match rule_usage.validate(&resolution) {
             Ok(usage) => usage,
             Err(_) => {
-                return self
+                return (self
                     .finish_failed(&lease, &guard, "supervised_rule_duration_exceeded")
-                    .await;
+                    .await)
+                    .map(SupervisedTurnStep::Finished);
             }
         };
         if (if native_mode {
@@ -1110,16 +1176,17 @@ impl AiSupervisedAgentCoordinator {
         })
         .is_err()
         {
-            return self
+            return (self
                 .finish_failed(&lease, &guard, "supervised_rule_plan_denied")
-                .await;
+                .await)
+                .map(SupervisedTurnStep::Finished);
         }
         rule_usage = started_usage;
         if let Some(adopted) = adopted {
             lease = match self.checkpoint_control.consume(&lease, adopted).await {
                 Ok(renewed) => renewed,
                 Err(_) => {
-                    return self
+                    return (self
                         .finish_recovery(
                             &lease,
                             &guard,
@@ -1127,7 +1194,8 @@ impl AiSupervisedAgentCoordinator {
                             "supervised_checkpoint_consumption_failed",
                             None,
                         )
-                        .await;
+                        .await)
+                        .map(SupervisedTurnStep::Finished);
                 }
             };
             let final_rules = match self.rule_resolver.resolve_rules(&lease, &scope).await {
@@ -1138,9 +1206,10 @@ impl AiSupervisedAgentCoordinator {
                     current
                 }
                 _ => {
-                    return self
+                    return (self
                         .finish_failed(&lease, &guard, "supervised_rule_changed_after_consume")
-                        .await;
+                        .await)
+                        .map(SupervisedTurnStep::Finished);
                 }
             };
             if (if native_mode {
@@ -1150,9 +1219,10 @@ impl AiSupervisedAgentCoordinator {
             })
             .is_err()
             {
-                return self
+                return (self
                     .finish_failed(&lease, &guard, "supervised_rule_denied_after_consume")
-                    .await;
+                    .await)
+                    .map(SupervisedTurnStep::Finished);
             }
         } else if let Some(adopted) = adopted_automatic {
             lease = match self
@@ -1162,7 +1232,7 @@ impl AiSupervisedAgentCoordinator {
             {
                 Ok(renewed) => renewed,
                 Err(_) => {
-                    return self
+                    return (self
                         .finish_recovery(
                             &lease,
                             &guard,
@@ -1170,7 +1240,8 @@ impl AiSupervisedAgentCoordinator {
                             "automatic_checkpoint_consumption_failed",
                             None,
                         )
-                        .await;
+                        .await)
+                        .map(SupervisedTurnStep::Finished);
                 }
             };
             let final_rules = match self.rule_resolver.resolve_rules(&lease, &scope).await {
@@ -1181,9 +1252,10 @@ impl AiSupervisedAgentCoordinator {
                     current
                 }
                 _ => {
-                    return self
+                    return (self
                         .finish_failed(&lease, &guard, "automatic_rule_changed_after_consume")
-                        .await;
+                        .await)
+                        .map(SupervisedTurnStep::Finished);
                 }
             };
             if (if native_mode {
@@ -1193,9 +1265,10 @@ impl AiSupervisedAgentCoordinator {
             })
             .is_err()
             {
-                return self
+                return (self
                     .finish_failed(&lease, &guard, "automatic_rule_denied_after_consume")
-                    .await;
+                    .await)
+                    .map(SupervisedTurnStep::Finished);
             }
         } else if let Some(adopted) = adopted_subscription {
             lease = match self
@@ -1205,7 +1278,7 @@ impl AiSupervisedAgentCoordinator {
             {
                 Ok(renewed) => renewed,
                 Err(_) => {
-                    return self
+                    return (self
                         .finish_recovery(
                             &lease,
                             &guard,
@@ -1213,7 +1286,8 @@ impl AiSupervisedAgentCoordinator {
                             "subscription_checkpoint_consumption_failed",
                             None,
                         )
-                        .await;
+                        .await)
+                        .map(SupervisedTurnStep::Finished);
                 }
             };
             let final_rules = match self.rule_resolver.resolve_rules(&lease, &scope).await {
@@ -1224,9 +1298,10 @@ impl AiSupervisedAgentCoordinator {
                     current
                 }
                 _ => {
-                    return self
+                    return (self
                         .finish_failed(&lease, &guard, "subscription_rule_changed_after_consume")
-                        .await;
+                        .await)
+                        .map(SupervisedTurnStep::Finished);
                 }
             };
             if (if native_mode {
@@ -1236,9 +1311,10 @@ impl AiSupervisedAgentCoordinator {
             })
             .is_err()
             {
-                return self
+                return (self
                     .finish_failed(&lease, &guard, "subscription_rule_denied_after_consume")
-                    .await;
+                    .await)
+                    .map(SupervisedTurnStep::Finished);
             }
         }
         let unstarted_replan = if native_mode && allow_unstarted_retry {
@@ -1260,7 +1336,7 @@ impl AiSupervisedAgentCoordinator {
             adopted.is_some() || adopted_automatic.is_some() || adopted_subscription.is_some();
         let reclaimed = if resumed_checkpoint && provider_session.is_some() {
             let Some(service) = &self.provider_session_service else {
-                return self
+                return (self
                     .finish_recovery(
                         &lease,
                         &guard,
@@ -1268,12 +1344,13 @@ impl AiSupervisedAgentCoordinator {
                         "provider_session_reclaim_service_unavailable",
                         None,
                     )
-                    .await;
+                    .await)
+                    .map(SupervisedTurnStep::Finished);
             };
             match service.reclaim_after_wait(&lease).await {
                 Ok(claim) => Some((service.clone(), claim)),
                 Err(_) => {
-                    return self
+                    return (self
                         .finish_recovery(
                             &lease,
                             &guard,
@@ -1281,7 +1358,8 @@ impl AiSupervisedAgentCoordinator {
                             "provider_session_wait_reclaim_failed",
                             None,
                         )
-                        .await;
+                        .await)
+                        .map(SupervisedTurnStep::Finished);
                 }
             }
         } else {
@@ -1319,7 +1397,7 @@ impl AiSupervisedAgentCoordinator {
         };
         let provider_result = if let Some(session_plan) = provider_session {
             let Some(service) = &self.provider_session_service else {
-                return self
+                return (self
                     .finish_recovery(
                         &lease,
                         &guard,
@@ -1327,7 +1405,8 @@ impl AiSupervisedAgentCoordinator {
                         "provider_session_service_unavailable",
                         None,
                     )
-                    .await;
+                    .await)
+                    .map(SupervisedTurnStep::Finished);
             };
             self.execute_retained_provider_with_heartbeats(
                 &mut lease,
@@ -1352,12 +1431,14 @@ impl AiSupervisedAgentCoordinator {
                         .await;
                 }
                 if self.run_control.cancellation(&lease).await?.is_some() {
-                    return Ok(AiSupervisedAgentRunOutcome::Cancelled {
-                        provider_turns: guard.provider_turns(),
-                        total_tool_calls: guard.total_tool_calls(),
-                    });
+                    return Ok(SupervisedTurnStep::Finished(
+                        AiSupervisedAgentRunOutcome::Cancelled {
+                            provider_turns: guard.provider_turns(),
+                            total_tool_calls: guard.total_tool_calls(),
+                        },
+                    ));
                 }
-                return self
+                return (self
                     .finish_recovery(
                         &lease,
                         &guard,
@@ -1365,7 +1446,8 @@ impl AiSupervisedAgentCoordinator {
                         "supervised_provider_turn_uncertain",
                         None,
                     )
-                    .await;
+                    .await)
+                    .map(SupervisedTurnStep::Finished);
             }
             Err(SupervisedProviderTurnFailure::BudgetDenied) => {
                 if let Some(context) = unstarted_replan {
@@ -1374,7 +1456,7 @@ impl AiSupervisedAgentCoordinator {
                     drop(classified_bindings);
                     drop(native_execution);
                     if context.ready_for_callback().is_err() {
-                        return self
+                        return (self
                             .finish_recovery(
                                 &lease,
                                 &guard,
@@ -1382,13 +1464,16 @@ impl AiSupervisedAgentCoordinator {
                                 "unstarted_static_offering_plan_still_frozen",
                                 None,
                             )
-                            .await;
+                            .await)
+                            .map(SupervisedTurnStep::Finished);
                     }
                     if self.run_control.cancellation(&lease).await?.is_some() {
-                        return Ok(AiSupervisedAgentRunOutcome::Cancelled {
-                            provider_turns: guard.provider_turns(),
-                            total_tool_calls: guard.total_tool_calls(),
-                        });
+                        return Ok(SupervisedTurnStep::Finished(
+                            AiSupervisedAgentRunOutcome::Cancelled {
+                                provider_turns: guard.provider_turns(),
+                                total_tool_calls: guard.total_tool_calls(),
+                            },
+                        ));
                     }
                     let cleanup_is_current = if let Some(service) = &self.provider_session_service {
                         context
@@ -1399,7 +1484,7 @@ impl AiSupervisedAgentCoordinator {
                         false
                     };
                     if !cleanup_is_current {
-                        return self
+                        return (self
                             .finish_recovery(
                                 &lease,
                                 &guard,
@@ -1407,7 +1492,8 @@ impl AiSupervisedAgentCoordinator {
                                 "unstarted_static_offering_cleanup_not_proved",
                                 None,
                             )
-                            .await;
+                            .await)
+                            .map(SupervisedTurnStep::Finished);
                     }
                     let replacement = Box::pin(self.replan_unstarted_static_offering_bounded(
                         &lease,
@@ -1416,21 +1502,24 @@ impl AiSupervisedAgentCoordinator {
                     ))
                     .await;
                     if self.run_control.cancellation(&lease).await?.is_some() {
-                        return Ok(AiSupervisedAgentRunOutcome::Cancelled {
-                            provider_turns: guard.provider_turns(),
-                            total_tool_calls: guard.total_tool_calls(),
-                        });
+                        return Ok(SupervisedTurnStep::Finished(
+                            AiSupervisedAgentRunOutcome::Cancelled {
+                                provider_turns: guard.provider_turns(),
+                                total_tool_calls: guard.total_tool_calls(),
+                            },
+                        ));
                     }
                     let replacement = match replacement {
                         Ok(replacement) => replacement,
                         Err(_) => {
-                            return self
+                            return (self
                                 .finish_failed(
                                     &lease,
                                     &guard,
                                     "unstarted_static_offering_replan_refused",
                                 )
-                                .await;
+                                .await)
+                                .map(SupervisedTurnStep::Finished);
                         }
                     };
                     if let Some(next) = replacement {
@@ -1452,20 +1541,23 @@ impl AiSupervisedAgentCoordinator {
                                         .is_err()
                                 })
                         {
-                            return self
+                            return (self
                                 .finish_failed(
                                     &lease,
                                     &guard,
                                     "unstarted_static_offering_replan_invalid",
                                 )
-                                .await;
+                                .await)
+                                .map(SupervisedTurnStep::Finished);
                         }
-                        // The original checkpoint was already consumed; recursive entry only
+                        // The original checkpoint was already consumed; the replacement pass only
                         // prices/discloses the same continuation and never consumes or invokes it again.
-                        return Box::pin(self.execute_turn_with_retry(
-                            lease, guard, next, rule_usage, None, None, None, false,
-                        ))
-                        .await;
+                        return Ok(SupervisedTurnStep::Retry(Box::new(UnstartedTurnRetry {
+                            lease,
+                            guard,
+                            plan: next,
+                            rule_usage,
+                        })));
                     }
                 }
                 if let Some((service, claim)) = &reclaimed {
@@ -1475,9 +1567,10 @@ impl AiSupervisedAgentCoordinator {
                 }
                 // A pre-transport reservation denial is certain and local: it
                 // consumed no provider turn and left no reservation held.
-                return self
+                return (self
                     .finish_failed(&lease, &guard, "provider_budget_denied")
-                    .await;
+                    .await)
+                    .map(SupervisedTurnStep::Finished);
             }
             Err(SupervisedProviderTurnFailure::PreTransportProvider) => {
                 if let Some((service, claim)) = &reclaimed {
@@ -1489,9 +1582,10 @@ impl AiSupervisedAgentCoordinator {
                 // provider boundary. The reservation has already been
                 // released and retained-session cleanup, when applicable,
                 // has been durably fenced by the call executor.
-                return self
+                return (self
                     .finish_failed(&lease, &guard, "provider_pre_transport_failed")
-                    .await;
+                    .await)
+                    .map(SupervisedTurnStep::Finished);
             }
             Err(SupervisedProviderTurnFailure::StatelessNativeItemRejected) => {
                 if let Some((service, claim)) = &reclaimed {
@@ -1499,9 +1593,10 @@ impl AiSupervisedAgentCoordinator {
                         .require_cleanup(claim, "provider_session_reclaimed_handoff_failed")
                         .await;
                 }
-                return self
+                return (self
                     .finish_failed(&lease, &guard, "provider_native_item_rejected")
-                    .await;
+                    .await)
+                    .map(SupervisedTurnStep::Finished);
             }
             Err(SupervisedProviderTurnFailure::LeaseLost(error)) => return Err(error),
         };
@@ -1511,10 +1606,12 @@ impl AiSupervisedAgentCoordinator {
                 "provider_session_cancelled_after_turn",
             )
             .await;
-            return Ok(AiSupervisedAgentRunOutcome::Cancelled {
-                provider_turns: guard.provider_turns(),
-                total_tool_calls: guard.total_tool_calls(),
-            });
+            return Ok(SupervisedTurnStep::Finished(
+                AiSupervisedAgentRunOutcome::Cancelled {
+                    provider_turns: guard.provider_turns(),
+                    total_tool_calls: guard.total_tool_calls(),
+                },
+            ));
         }
         let observed = match guard.observe_provider_turn(&result) {
             Ok(observed) => observed,
@@ -1524,7 +1621,7 @@ impl AiSupervisedAgentCoordinator {
                     "provider_session_turn_binding_failed",
                 )
                 .await;
-                return self
+                return (self
                     .finish_recovery(
                         &lease,
                         &guard,
@@ -1532,7 +1629,8 @@ impl AiSupervisedAgentCoordinator {
                         "supervised_provider_turn_binding_failed",
                         result.provider_response_id(),
                     )
-                    .await;
+                    .await)
+                    .map(SupervisedTurnStep::Finished);
             }
         };
         let current_rules = match self.rule_resolver.resolve_rules(&lease, &scope).await {
@@ -1543,7 +1641,7 @@ impl AiSupervisedAgentCoordinator {
                     "provider_session_rule_changed_after_provider",
                 )
                 .await;
-                return self
+                return (self
                     .finish_recovery(
                         &lease,
                         &guard,
@@ -1551,7 +1649,8 @@ impl AiSupervisedAgentCoordinator {
                         "supervised_rule_changed_after_provider",
                         result.provider_response_id(),
                     )
-                    .await;
+                    .await)
+                    .map(SupervisedTurnStep::Finished);
             }
         };
         if let Some(execution) = &native_execution {
@@ -1569,7 +1668,7 @@ impl AiSupervisedAgentCoordinator {
                     "provider_session_rule_budget_exceeded",
                 )
                 .await;
-                return self
+                return (self
                     .finish_recovery(
                         &lease,
                         &guard,
@@ -1577,13 +1676,15 @@ impl AiSupervisedAgentCoordinator {
                         "supervised_rule_budget_exceeded",
                         result.provider_response_id(),
                     )
-                    .await;
+                    .await)
+                    .map(SupervisedTurnStep::Finished);
             }
         };
         if let Some(execution) = &native_execution {
             let pending = execution.state.lock().await.pending.clone();
             if let Some(pending) = pending {
-                let prepared = async {
+                // Keep generated-write finalization out of every turn frame.
+                let prepared = Box::pin(async {
                     let renewed = execution
                         .services
                         .checkpoints
@@ -1617,9 +1718,9 @@ impl AiSupervisedAgentCoordinator {
                             self.limits.recent_mfa_required,
                         )
                         .await
-                }
+                })
                 .await;
-                return match prepared {
+                return (match prepared {
                     Ok(wait) if wait.lease().state() == AiRunState::WaitingApproval => {
                         Ok(AiSupervisedAgentRunOutcome::WaitingApproval {
                             approval_id: wait.approval_id(),
@@ -1643,7 +1744,8 @@ impl AiSupervisedAgentCoordinator {
                         )
                         .await
                     }
-                };
+                })
+                .map(SupervisedTurnStep::Finished);
             }
         }
         lease = match self
@@ -1668,7 +1770,7 @@ impl AiSupervisedAgentCoordinator {
                     "provider_session_checkpoint_uncertain",
                 )
                 .await;
-                return self
+                return (self
                     .finish_recovery(
                         &lease,
                         &guard,
@@ -1676,10 +1778,11 @@ impl AiSupervisedAgentCoordinator {
                         "supervised_provider_checkpoint_uncertain",
                         result.provider_response_id(),
                     )
-                    .await;
+                    .await)
+                    .map(SupervisedTurnStep::Finished);
             }
         };
-        match observed {
+        let outcome = match observed {
             AiAgentLoopTurn::Completed => {
                 let persisted = match self.output_writer.persist_output(&lease, &result).await {
                     Ok(persisted) => persisted,
@@ -1692,7 +1795,7 @@ impl AiSupervisedAgentCoordinator {
                                 .require_cleanup(claim, "provider_session_output_uncertain")
                                 .await;
                         }
-                        return self
+                        return (self
                             .finish_recovery(
                                 &lease,
                                 &guard,
@@ -1700,7 +1803,8 @@ impl AiSupervisedAgentCoordinator {
                                 "supervised_output_uncertain",
                                 result.provider_response_id(),
                             )
-                            .await;
+                            .await)
+                            .map(SupervisedTurnStep::Finished);
                     }
                 };
                 let message_id = persisted.message_id();
@@ -1711,10 +1815,12 @@ impl AiSupervisedAgentCoordinator {
                         "provider_session_cancelled_after_output",
                     )
                     .await;
-                    return Ok(AiSupervisedAgentRunOutcome::Cancelled {
-                        provider_turns: guard.provider_turns(),
-                        total_tool_calls: guard.total_tool_calls(),
-                    });
+                    return Ok(SupervisedTurnStep::Finished(
+                        AiSupervisedAgentRunOutcome::Cancelled {
+                            provider_turns: guard.provider_turns(),
+                            total_tool_calls: guard.total_tool_calls(),
+                        },
+                    ));
                 }
                 let provider_session_commit = match result.provider_session_commit(message_id) {
                     Ok(Some(commit)) => {
@@ -1724,7 +1830,7 @@ impl AiSupervisedAgentCoordinator {
                                 "provider_session_commit_service_unavailable",
                             )
                             .await;
-                            return self
+                            return (self
                                 .finish_recovery(
                                     &lease,
                                     &guard,
@@ -1732,7 +1838,8 @@ impl AiSupervisedAgentCoordinator {
                                     "provider_session_commit_service_unavailable",
                                     result.provider_response_id(),
                                 )
-                                .await;
+                                .await)
+                                .map(SupervisedTurnStep::Finished);
                         };
                         let claim = result.provider_session_claim().ok_or(AiError::Conflict)?;
                         Some((service.clone(), claim.clone(), commit))
@@ -1747,7 +1854,7 @@ impl AiSupervisedAgentCoordinator {
                                 .require_cleanup(claim, "provider_session_commit_proof_invalid")
                                 .await;
                         }
-                        return self
+                        return (self
                             .finish_recovery(
                                 &lease,
                                 &guard,
@@ -1755,7 +1862,8 @@ impl AiSupervisedAgentCoordinator {
                                 "provider_session_commit_proof_invalid",
                                 result.provider_response_id(),
                             )
-                            .await;
+                            .await)
+                            .map(SupervisedTurnStep::Finished);
                     }
                 };
                 let completion = AiRunCompletion::new(
@@ -1801,9 +1909,10 @@ impl AiSupervisedAgentCoordinator {
                         "provider_session_tool_batch_unsupported",
                     )
                     .await;
-                    return self
+                    return (self
                         .finish_failed(&lease, &guard, "supervised_tool_batch_unsupported")
-                        .await;
+                        .await)
+                        .map(SupervisedTurnStep::Finished);
                 }
                 if !guard.has_provider_turn_capacity() {
                     self.invalidate_result_provider_session(
@@ -1811,9 +1920,10 @@ impl AiSupervisedAgentCoordinator {
                         "provider_session_continuation_limit_reached",
                     )
                     .await;
-                    return self
+                    return (self
                         .finish_failed(&lease, &guard, "supervised_continuation_limit_reached")
-                        .await;
+                        .await)
+                        .map(SupervisedTurnStep::Finished);
                 }
                 let binding = match plan_binding(&classified_bindings, &result) {
                     Some(binding) => binding,
@@ -1823,9 +1933,10 @@ impl AiSupervisedAgentCoordinator {
                             "provider_session_classified_binding_missing",
                         )
                         .await;
-                        return self
+                        return (self
                             .finish_failed(&lease, &guard, "classified_mutation_binding_missing")
-                            .await;
+                            .await)
+                            .map(SupervisedTurnStep::Finished);
                     }
                 };
                 let rules = match self.rule_resolver.resolve_rules(&lease, &scope).await {
@@ -1845,9 +1956,10 @@ impl AiSupervisedAgentCoordinator {
                             "provider_session_tool_rule_denied",
                         )
                         .await;
-                        return self
+                        return (self
                             .finish_failed(&lease, &guard, "supervised_tool_rule_denied")
-                            .await;
+                            .await)
+                            .map(SupervisedTurnStep::Finished);
                     }
                 };
                 let completed_rule_usage = match rule_usage.accept_tool_calls(1, &rules) {
@@ -1858,9 +1970,10 @@ impl AiSupervisedAgentCoordinator {
                             "provider_session_rule_steps_exceeded",
                         )
                         .await;
-                        return self
+                        return (self
                             .finish_failed(&lease, &guard, "supervised_rule_steps_exceeded")
-                            .await;
+                            .await)
+                            .map(SupervisedTurnStep::Finished);
                     }
                 };
                 let context = AiApplicationToolCallContext::new(
@@ -1888,7 +2001,7 @@ impl AiSupervisedAgentCoordinator {
                                 "provider_session_automatic_mutation_uncertain",
                             )
                             .await;
-                            return self
+                            return (self
                                 .finish_recovery(
                                     &lease,
                                     &guard,
@@ -1896,7 +2009,8 @@ impl AiSupervisedAgentCoordinator {
                                     "automatic_mutation_uncertain",
                                     result.provider_response_id(),
                                 )
-                                .await;
+                                .await)
+                                .map(SupervisedTurnStep::Finished);
                         }
                     };
                     let Some(persisted) = outcome.persisted() else {
@@ -1905,11 +2019,13 @@ impl AiSupervisedAgentCoordinator {
                             "provider_session_automatic_mutation_recovery",
                         )
                         .await;
-                        return Ok(AiSupervisedAgentRunOutcome::RecoveryRequired {
-                            phase: AiAgentRecoveryPhase::ApplicationTool,
-                            provider_turns: guard.provider_turns(),
-                            total_tool_calls: guard.total_tool_calls(),
-                        });
+                        return Ok(SupervisedTurnStep::Finished(
+                            AiSupervisedAgentRunOutcome::RecoveryRequired {
+                                phase: AiAgentRecoveryPhase::ApplicationTool,
+                                provider_turns: guard.provider_turns(),
+                                total_tool_calls: guard.total_tool_calls(),
+                            },
+                        ));
                     };
                     if guard.observe_tool_result(persisted).is_err() {
                         self.invalidate_result_provider_session(
@@ -1917,7 +2033,7 @@ impl AiSupervisedAgentCoordinator {
                             "provider_session_automatic_result_invalid",
                         )
                         .await;
-                        return self
+                        return (self
                             .finish_recovery(
                                 persisted.lease(),
                                 &guard,
@@ -1925,7 +2041,8 @@ impl AiSupervisedAgentCoordinator {
                                 "automatic_mutation_result_invalid",
                                 result.provider_response_id(),
                             )
-                            .await;
+                            .await)
+                            .map(SupervisedTurnStep::Finished);
                     }
                     if self
                         .run_control
@@ -1938,7 +2055,7 @@ impl AiSupervisedAgentCoordinator {
                             "provider_session_automatic_cancelled_after_effect",
                         )
                         .await;
-                        return self
+                        return (self
                             .finish_recovery(
                                 persisted.lease(),
                                 &guard,
@@ -1946,7 +2063,8 @@ impl AiSupervisedAgentCoordinator {
                                 "automatic_mutation_cancelled_after_effect",
                                 result.provider_response_id(),
                             )
-                            .await;
+                            .await)
+                            .map(SupervisedTurnStep::Finished);
                     }
                     let continuation = match guard.continuation() {
                         Ok(continuation) => continuation,
@@ -1956,7 +2074,7 @@ impl AiSupervisedAgentCoordinator {
                                 "provider_session_automatic_continuation_invalid",
                             )
                             .await;
-                            return self
+                            return (self
                                 .finish_recovery(
                                     persisted.lease(),
                                     &guard,
@@ -1964,7 +2082,8 @@ impl AiSupervisedAgentCoordinator {
                                     "automatic_mutation_continuation_invalid",
                                     result.provider_response_id(),
                                 )
-                                .await;
+                                .await)
+                                .map(SupervisedTurnStep::Finished);
                         }
                     };
                     lease = match self
@@ -1991,7 +2110,7 @@ impl AiSupervisedAgentCoordinator {
                                 "provider_session_automatic_checkpoint_uncertain",
                             )
                             .await;
-                            return self
+                            return (self
                                 .finish_recovery(
                                     persisted.lease(),
                                     &guard,
@@ -1999,7 +2118,8 @@ impl AiSupervisedAgentCoordinator {
                                     "automatic_mutation_checkpoint_uncertain",
                                     result.provider_response_id(),
                                 )
-                                .await;
+                                .await)
+                                .map(SupervisedTurnStep::Finished);
                         }
                     };
                     let adopted = match self.checkpoint_control.adopt_automatic(&lease).await {
@@ -2010,7 +2130,7 @@ impl AiSupervisedAgentCoordinator {
                                 "provider_session_automatic_adoption_failed",
                             )
                             .await;
-                            return self
+                            return (self
                                 .finish_recovery(
                                     &lease,
                                     &guard,
@@ -2018,10 +2138,12 @@ impl AiSupervisedAgentCoordinator {
                                     "automatic_mutation_checkpoint_adoption_failed",
                                     result.provider_response_id(),
                                 )
-                                .await;
+                                .await)
+                                .map(SupervisedTurnStep::Finished);
                         }
                     };
-                    return Box::pin(self.continue_from_automatic(lease, adopted)).await;
+                    return (Box::pin(self.continue_from_automatic(lease, adopted)).await)
+                        .map(SupervisedTurnStep::Finished);
                 }
                 let expires_at = self
                     .clock
@@ -2041,7 +2163,7 @@ impl AiSupervisedAgentCoordinator {
                 {
                     Ok(wait) => wait,
                     Err(_) => {
-                        return self
+                        return (self
                             .finish_recovery(
                                 &lease,
                                 &guard,
@@ -2049,7 +2171,8 @@ impl AiSupervisedAgentCoordinator {
                                 "supervised_approval_staging_uncertain",
                                 result.provider_response_id(),
                             )
-                            .await;
+                            .await)
+                            .map(SupervisedTurnStep::Finished);
                     }
                 };
                 if wait.lease().state() != AiRunState::WaitingApproval {
@@ -2062,7 +2185,8 @@ impl AiSupervisedAgentCoordinator {
                     total_tool_calls: guard.total_tool_calls(),
                 })
             }
-        }
+        };
+        outcome.map(SupervisedTurnStep::Finished)
     }
 
     async fn replan_unstarted_static_offering_bounded(

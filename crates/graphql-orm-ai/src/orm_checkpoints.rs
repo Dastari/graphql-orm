@@ -440,7 +440,7 @@ impl AiCoordinatorCheckpointLimits {
 /// proof under current authority first.
 pub struct OrmAiCoordinatorCheckpointService {
     run_service: OrmAiRunService,
-    principal_resolver: Arc<dyn CurrentPrincipalResolver>,
+    principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver,
     access_policy: Arc<dyn AiAccessPolicy>,
     protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
     content_protector: Arc<dyn AiContentProtector>,
@@ -464,7 +464,10 @@ impl OrmAiCoordinatorCheckpointService {
     ) -> Self {
         Self {
             run_service,
-            principal_resolver,
+            principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver::from(
+                principal_resolver,
+            )
+            .with_clock(clock.clone()),
             access_policy,
             protection_policy,
             content_protector,

@@ -3845,7 +3845,14 @@ impl IntrospectionBackend for super::SqliteBackend {
 }
 
 #[cfg(feature = "sqlite")]
-impl RlsIntrospectionBackend for super::SqliteBackend {}
+impl RlsIntrospectionBackend for super::SqliteBackend {
+    async fn probe_row_security(
+        _pool: &Self::Pool,
+        paths: &[String],
+    ) -> crate::Result<Vec<Option<bool>>> {
+        Ok(vec![Some(false); paths.len()])
+    }
+}
 
 #[cfg(any(feature = "postgres", feature = "mssql"))]
 fn classify_postgres_unique_constraints(
@@ -4399,6 +4406,19 @@ impl IntrospectionBackend for super::PostgresBackend {
 
 #[cfg(feature = "postgres")]
 impl RlsIntrospectionBackend for super::PostgresBackend {
+    async fn probe_row_security(
+        pool: &Self::Pool,
+        paths: &[String],
+    ) -> crate::Result<Vec<Option<bool>>> {
+        let rows = sqlx::query_scalar::<_, Option<bool>>(
+            "SELECT CASE WHEN c.relkind IN ('r', 'p') THEN pg_catalog.row_security_active(c.oid) ELSE NULL END
+             FROM pg_catalog.unnest($1::pg_catalog.text[]) WITH ORDINALITY AS input(path, position)
+             LEFT JOIN pg_catalog.pg_class c ON c.oid = pg_catalog.to_regclass(input.path)
+             ORDER BY input.position",
+        ).bind(paths).fetch_all(pool).await?;
+        Ok(rows)
+    }
+
     async fn introspect_rls(pool: &Self::Pool) -> crate::Result<Vec<LiveRlsTable>> {
         // Read-only; the transaction only scopes the pinned search_path.
         // The pool hands this call a connection of its own, so no caller

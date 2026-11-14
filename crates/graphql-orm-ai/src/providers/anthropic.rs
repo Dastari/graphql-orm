@@ -843,7 +843,10 @@ impl AnthropicEventNormalizer {
             .pointer("/delta/stop_reason")
             .and_then(Value::as_str)
             .ok_or(ProviderError::Rejected)?;
-        if !matches!(stop_reason, "end_turn" | "tool_use" | "refusal") {
+        if !matches!(
+            stop_reason,
+            "end_turn" | "tool_use" | "refusal" | "max_tokens" | "stop_sequence"
+        ) {
             return Err(ProviderError::Rejected);
         }
         if stop_reason == "tool_use" {
@@ -1520,6 +1523,21 @@ mod tests {
             }),
             Err(ProviderError::Rejected)
         ));
+    }
+
+    #[test]
+    fn bounded_text_stops_preserve_usage_and_complete() {
+        for reason in ["max_tokens", "stop_sequence"] {
+            let mut normalizer =
+                AnthropicEventNormalizer::new("test-model".into(), BTreeMap::new(), 128);
+            normalizer.message_start(&json!({"message": {"role": "assistant", "model": "test-model", "content": [], "usage": {"input_tokens": 1}}})).unwrap();
+            normalizer
+                .message_delta(
+                    &json!({"delta": {"stop_reason": reason}, "usage": {"output_tokens": 2}}),
+                )
+                .unwrap();
+            assert!(normalizer.message_stop().is_ok());
+        }
     }
 
     #[test]

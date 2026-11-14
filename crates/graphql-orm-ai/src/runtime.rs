@@ -151,7 +151,7 @@ impl AiRuntimeStartGate {
 
 /// Built project-agnostic runtime.
 pub struct AiRuntime {
-    principal_resolver: Arc<dyn CurrentPrincipalResolver>,
+    principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver,
     access_policy: Arc<dyn AiAccessPolicy>,
     tool_bridge: AuthenticatedToolBridge,
     egress_policy: Arc<dyn AiEgressPolicy>,
@@ -899,6 +899,7 @@ impl AiRuntime {
         if !approved_prepared_mutation_matches(&prepared, approval, binding) {
             return Err(AiError::Forbidden);
         }
+        approval.claim_execution()?;
         let registered = AiRegisteredToolExecutionBinding::generated_mutation(
             &prepared.descriptor.id,
             &prepared.capability_fingerprint,
@@ -1054,6 +1055,7 @@ impl AiRuntime {
                 .with_provenance(provenance, &request)
                 .map_err(Self::map_tool_execution_error)?;
         }
+        approval.claim_execution()?;
         let (response, authorization) = self
             .tool_bridge
             .execute_registered_bound_requiring(
@@ -2122,7 +2124,7 @@ impl AiRuntimeBuilder {
         }
 
         Ok(AiRuntime {
-            principal_resolver,
+            principal_resolver: principal_resolver.into(),
             access_policy,
             tool_bridge,
             egress_policy,

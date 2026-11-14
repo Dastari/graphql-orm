@@ -10,6 +10,62 @@ supersedes: []
 
 # Migration Guide
 
+## 0.140.0 to 0.143.0: runtime and provider bug batch
+
+The [security model](docs/security.md#content-protection-scope) now makes the
+existing protection boundary explicit: the crate ships no cipher and does not
+protect attachment bytes. Hosts supply application encryption/key management
+and blob-store confidentiality. This documentation correction changes no stored
+data or runtime behavior (part of #469).
+
+Native approval and retained-provider execution now split and heap-pin large
+future phases. A definitely unstarted quota replacement runs as a second pass
+after the first pass drops, retaining the existing single-retry limit and all
+authorization/fencing checks. The quota lifecycle tests enforce 1 MiB thread
+stacks. This future-layout change needs no configuration or data migration.
+
+Upgrade with ORM/macros 0.150.0. No data migration is needed. Usage timestamp
+filters now accept 64-bit Unix seconds; no stored column changes. Apply AI schema
+module `0.79.0` to record the updated filter contract.
+
+A consumed approval proof may dispatch at most once across all its clones.
+A failed dispatch spends the execution claim too; obtain a fresh approval rather
+than retrying the proof. The proof still does not replace resolver authorization.
+All guarded resolver handles check exact reference identity and current expiry,
+using the service's existing clock (system time for services without one).
+Privileged reclamation is refused while the recovery epoch is closed.
+
+Approval-wait reports add `skipped`: unresolved principals, unavailable protection
+and malformed candidate state do not abort other candidates. Examined waits use
+the existing durable progress stamp so skipped or still-valid waits rotate behind
+unexamined ones. A failed progress-stamp write still fails the pass after its
+other work. Skipping is operational and never grants authority or quarantines a
+row merely because a host read failed. Queued claims likewise isolate each
+candidate in its own transaction and rotate operational failures; a healthy
+claim can still succeed behind a failed legacy closure. If no lease is returned,
+any candidate failure is returned to the host, with safe tracing codes for
+skipped candidates and refused progress stamps. Missing-grant credentials carrying an actor
+or exact operation binding cannot issue run authority. Legacy claim refusal may
+create and close an internal attempt atomically; no lease reaches a worker.
+
+Secret references with relative `.` or `..` path segments must be replaced.
+Credential rotation/removal no longer deletes the previous secret automatically:
+its cleanup record remains pending. Hosts must establish that no profile or
+external secret-store user still needs that reference before revoking it. Fresh
+uncommitted values still use compensating deletion. Identifier-based skill and
+credential mutations mask inaccessible rows as `NotFound`. Subscription grace
+values above 120 seconds are clamped; zero still disables grace.
+
+Ollama egress manifests must name the normalized origin, including its trailing
+slash, for every transfer. Streams are limited to 16 MiB total and 16,384 HTTP
+chunks. File maintenance must receive a successful exact OpenAI deletion
+acknowledgement before a subsequent 404 confirms absence; an initial 404 leaves
+cleanup unresolved. Stored-response deletion remains a host responsibility.
+Anthropic accepts `max_tokens` and `stop_sequence` only with complete, bounded
+text state; model aliases and `pause_turn` remain unsupported. Lease-recovery
+clock-skew grace keeps its existing zero default and must be configured by hosts.
+
+
 ## 0.138.0 to 0.139.0: custody of the crate's own records under a host field policy
 
 Upgrade with ORM/macros 0.143.0. No GraphQL SDL, AI schema or data migration
