@@ -154,6 +154,12 @@ is not supported; requests without the supported subprotocol close with 4406.
   trailing `complete` is provided. The connection remains usable.
 - `SUBSCRIPTION_SCHEMA_RELOAD`: the selected graph retired; the `error` frame is
   terminal. Open a fresh connection and resubscribe without waiting for `complete`.
+- `SUBSCRIPTION_AUTHORIZATION_CHANGED`: a refreshed role-scope catalogue changed
+  the connection's effective scopes. The `error` is terminal; resubscribe on the
+  same connection, which is authorized against the new scopes.
+- `UNAUTHENTICATED` on a role-bearing connection: the role-scope catalogue is
+  past its maximum staleness. Subscriptions end; retry operations after backoff
+  on the same connection once the catalogue recovers.
 - `SERVICE_UNAVAILABLE` or `1011`: back off, query authoritative state, and
   reconnect. Missed events are not replayed.
 

@@ -204,19 +204,29 @@ router converts its signed expiry and soft age into a remaining lifetime once,
 using wall time, and from then on counts elapsed time only. Moving the wall
 clock back after a refusal does not reopen the snapshot, and moving it forward
 does not extend it. A wall clock earlier than the snapshot's load time still
-fails closed.
+fails closed. Whether the monotonic clock advances during system suspend is
+platform dependent. Where it pauses, a suspended process keeps its remaining
+catalogue lifetime after resume. Where that matters, restart the router or
+force a refresh after resume.
 
-A role-expanded principal carries its snapshot's refusal deadline
-(`AuthenticatedPrincipal::authority_valid_until`). An HTTP request
-authenticates per request. A WebSocket connection keeps its principal, so once
-the deadline passes the router re-authenticates the connection's retained
-bearer before its next operation, both in the public gateway and in the
-private endpoint. A refreshed snapshot renews the deadline and applies role
-changes. A stale one refuses the operation with `UNAUTHENTICATED`, and a timer
-at the deadline ends the connection's subscriptions with the same error. The
-socket stays open, and a later operation succeeds once the catalogue
-refreshes. Only role-bearing connections retain their bearer in memory, and it
-is never logged.
+A role-expanded principal carries its snapshot's refusal deadline and
+generation (`AuthenticatedPrincipal::authority_valid_until` and
+`authority_generation`). Each accepted snapshot is a new generation. An HTTP
+request authenticates per request. A WebSocket connection keeps its principal,
+so the router re-authenticates the connection's retained bearer against the
+current snapshot, in both the public gateway and the private endpoint, before
+its next operation once the deadline passes or the generation changes. The
+result replaces the old scopes and is never merged with them, so a refreshed
+catalogue's removals apply to the next query, mutation or subscription. The
+same check runs without client activity at the deadline and every 500 ms
+(one atomic read). When the effective scopes change, the connection's
+subscriptions end with `SUBSCRIPTION_AUTHORIZATION_CHANGED`, and a
+resubscription is authorized against the new scopes. Subscriptions keep
+running when the scopes are unchanged. A stale snapshot refuses the operation
+with `UNAUTHENTICATED` and ends the subscriptions with the same error. The
+socket stays open in both cases. Only role-bearing connections retain their
+bearer in memory, and it is never logged. Direct-scope connections are
+unaffected.
 
 The router validates RS256 public keys only. Configuration has no private-key,
 token-signing, session, refresh-token, or RSA-decryption field.

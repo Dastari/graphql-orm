@@ -21,14 +21,20 @@ supersedes: []
   (`RoleScopeCatalogueConfig::with_maximum_staleness`): 15 minutes by default,
   at most 24 hours. After that, role-bearing credentials are refused as
   unavailable until a refresh succeeds; they used to be served from the stale
-  snapshot indefinitely. This also applies to established WebSocket
-  connections. A principal expanded from a snapshot carries that snapshot's
-  deadline (`AuthenticatedPrincipal::authority_valid_until`). Once the deadline
-  passes, the next operation on the connection re-authenticates its bearer.
-  A refreshed snapshot renews the deadline and applies role changes; a stale
-  one refuses the operation (`UNAUTHENTICATED`, "authentication service
-  unavailable") and ends the connection's subscriptions with the same error,
-  while the connection stays open. Staleness follows a monotonic clock fixed
+  snapshot indefinitely. Established WebSocket connections follow the
+  catalogue too. A principal expanded from a snapshot carries that snapshot's
+  deadline and generation (`AuthenticatedPrincipal::authority_valid_until`,
+  `authority_generation`, `AuthenticationProvider::authority_generation`).
+  Once the deadline passes or a new snapshot is accepted, the connection's
+  bearer is re-expanded against the current snapshot before its next
+  operation, and also without client activity. The result replaces the old
+  scopes, so a refreshed catalogue's removals apply to the next query,
+  mutation or subscription. Subscriptions end with
+  `SUBSCRIPTION_AUTHORIZATION_CHANGED` when the effective scopes change, and
+  keep running when they do not. A stale snapshot refuses the operation
+  (`UNAUTHENTICATED`, "authentication service unavailable") and ends the
+  connection's subscriptions with the same error. The connection stays open
+  in both cases. Staleness follows a monotonic clock fixed
   when the snapshot is accepted, so moving the wall clock never reopens or
   extends a snapshot; wall time only validates signed timestamps.
   Direct-scope-only credentials and connections are unaffected. New provider

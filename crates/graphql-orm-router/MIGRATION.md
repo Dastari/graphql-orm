@@ -24,13 +24,24 @@ signed expiry, whichever is first) serves roles for at most
 `authorization_roles` that the old router served are refused as unavailable**
 until the catalogue refreshes. Direct-scope-only requests are unaffected.
 
-Established WebSocket connections follow the same deadline. Once it passes,
-the next operation on a role-bearing connection is re-authenticated: with a
-refreshed catalogue it proceeds with the current role expansion, and otherwise
-it fails with `UNAUTHENTICATED`. The connection's open subscriptions end with
-that error. The socket stays open, so clients can resubscribe after the
-catalogue recovers. Staleness is measured on a monotonic clock, so wall-clock
-steps neither reopen nor extend a snapshot.
+Established WebSocket connections follow the catalogue too. When a new snapshot
+is accepted, or the old one passes its deadline, a role-bearing connection is
+re-expanded against the current snapshot at its next operation, or within
+about 500 ms without client activity. The new expansion replaces the old one:
+
+- **Changed effective scopes:** the connection's subscriptions end with
+  `SUBSCRIPTION_AUTHORIZATION_CHANGED`, and the next query, mutation or
+  subscription is authorized against the new scopes. A removed role or scope
+  is refused from then on.
+- **Unchanged effective scopes:** subscriptions keep running.
+- **Stale catalogue:** operations fail with `UNAUTHENTICATED`, and
+  subscriptions end with that error.
+
+The socket stays open in every case. Clients should resubscribe when they see
+either error code. Direct-scope connections are unaffected. Staleness is
+measured on a monotonic clock, so wall-clock steps neither reopen nor extend a
+snapshot. Whether that clock advances during system suspend depends on the
+platform; restart or force a refresh after resume where that matters.
 
 Before upgrading, make sure the catalogue endpoint is reliably reachable, and
 alert on `role_scope_stale_serve_total`, `role_scope_stale_refusal_total` and
@@ -71,7 +82,9 @@ subgraph's identity is meant to change, restart the router after deploying it.
   time should override `AuthenticationClock::monotonic_now`, as role-scope
   staleness now follows it. A custom provider that marks principals with
   `AuthenticatedPrincipal::with_authority_valid_until` must return deadlines on
-  its own `monotonic_now` clock.
+  its own `monotonic_now` clock, and may report
+  `AuthenticationProvider::authority_generation` so transports re-expand
+  after an authority change.
 - Outbound fetches send `User-Agent: graphql-orm-router/<version>`. Update any
   upstream allow-list that matched `graphql-orm-router/0.1`.
 - `GET /_router/metrics` adds `router_websocket_send_failures_total`. Strict
