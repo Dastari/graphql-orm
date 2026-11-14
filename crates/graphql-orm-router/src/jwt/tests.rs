@@ -6,7 +6,7 @@ use std::{
         atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicUsize, Ordering},
     },
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use jsonwebtoken::{
@@ -52,22 +52,52 @@ UvrKS8WkuWRDuKrz1W/EQKApFjDGpdqToZqriUFQzwy7mR3ayIiogzNtHcvbDHx8
 oFnGY0OFksX/ye0/XGpy2SFxYRwGU98HPYeBvAQQrVjdkzfy7BmXQQ==
 -----END RSA PRIVATE KEY-----"#;
 
+/// Deterministic wall and monotonic clocks. `set` models elapsed time: the
+/// monotonic side advances by any forward wall step. `set_wall` moves only
+/// the wall clock, as an operator or NTP step would.
 #[derive(Debug)]
-struct TestClock(Mutex<SystemTime>);
+struct TestClock {
+    wall: Mutex<SystemTime>,
+    base: Instant,
+    elapsed: Mutex<Duration>,
+}
 
 impl TestClock {
     fn at(seconds: u64) -> Self {
-        Self(Mutex::new(UNIX_EPOCH + Duration::from_secs(seconds)))
+        Self {
+            wall: Mutex::new(UNIX_EPOCH + Duration::from_secs(seconds)),
+            base: Instant::now(),
+            elapsed: Mutex::new(Duration::ZERO),
+        }
     }
 
     fn set(&self, seconds: u64) {
-        *self.0.lock().unwrap() = UNIX_EPOCH + Duration::from_secs(seconds);
+        let target = UNIX_EPOCH + Duration::from_secs(seconds);
+        let mut wall = self.wall.lock().unwrap();
+        if let Ok(step) = target.duration_since(*wall) {
+            *self.elapsed.lock().unwrap() += step;
+        }
+        *wall = target;
+    }
+
+    #[cfg(feature = "auth-agql")]
+    fn set_wall(&self, seconds: u64) {
+        *self.wall.lock().unwrap() = UNIX_EPOCH + Duration::from_secs(seconds);
+    }
+
+    #[cfg(feature = "auth-agql")]
+    fn advance_monotonic(&self, by: Duration) {
+        *self.elapsed.lock().unwrap() += by;
     }
 }
 
 impl AuthenticationClock for TestClock {
     fn now(&self) -> SystemTime {
-        *self.0.lock().unwrap()
+        *self.wall.lock().unwrap()
+    }
+
+    fn monotonic_now(&self) -> Instant {
+        self.base + *self.elapsed.lock().unwrap()
     }
 }
 
@@ -268,10 +298,22 @@ fn provider_with_catalogue(
     catalogue: &JwksFixture,
     clock: Arc<TestClock>,
 ) -> JwksAuthenticationProvider {
-    let role_scope = RoleScopeCatalogueConfig::new(catalogue.url(), "role-catalogue-clients")
-        .unwrap()
-        .with_cache_ttl(Duration::from_secs(10))
-        .allow_insecure_loopback_http_for_development(true);
+    provider_with_catalogue_config(keys, catalogue, clock, |config| config).unwrap()
+}
+
+#[cfg(feature = "auth-agql")]
+fn provider_with_catalogue_config(
+    keys: &JwksFixture,
+    catalogue: &JwksFixture,
+    clock: Arc<TestClock>,
+    configure: impl FnOnce(RoleScopeCatalogueConfig) -> RoleScopeCatalogueConfig,
+) -> Result<JwksAuthenticationProvider, RouterError> {
+    let role_scope = configure(
+        RoleScopeCatalogueConfig::new(catalogue.url(), "role-catalogue-clients")
+            .unwrap()
+            .with_cache_ttl(Duration::from_secs(10))
+            .allow_insecure_loopback_http_for_development(true),
+    );
     let config =
         JwksAuthenticationConfig::new(keys.url(), "https://issuer.test", ["graphql-router"])
             .unwrap()
@@ -280,7 +322,7 @@ fn provider_with_catalogue(
             .with_clock(clock)
             .allow_insecure_loopback_http_for_development(true)
             .with_role_scope_catalogue(role_scope);
-    JwksAuthenticationProvider::new(config).unwrap()
+    JwksAuthenticationProvider::new(config)
 }
 
 fn initialize(provider: &JwksAuthenticationProvider) -> Result<(), AuthenticationError> {
@@ -632,6 +674,324 @@ fn role_catalogue_is_mandatory_current_and_verified_for_role_bearers() {
         provider.authenticate_bearer(&malformed).unwrap_err().kind(),
         AuthenticationErrorKind::InvalidCredential
     );
+}
+
+#[cfg(feature = "auth-agql")]
+#[test]
+fn stale_role_catalogue_is_refused_after_its_maximum_staleness() {
+    let keys = JwksFixture::start(jwks("key-a"));
+    // Signed expiry 1_010 equals the soft age (loaded 1_000, TTL 10), so the
+    // snapshot is stale from 1_010 and may serve roles until 1_030.
+    let catalogue = JwksFixture::start(signed_catalogue("key-a", 1_000, 1_010));
+    let clock = Arc::new(TestClock::at(1_000));
+    let provider = provider_with_catalogue_config(&keys, &catalogue, clock.clone(), |config| {
+        config.with_maximum_staleness(Duration::from_secs(20))
+    })
+    .unwrap();
+    initialize(&provider).unwrap();
+    refresh_catalogue(&provider).unwrap();
+    let role_credential = token(
+        "key-a",
+        json!({
+            "sub": "user-7", "iss": "https://issuer.test", "aud": "graphql-router",
+            "exp": 2_000, "authorization_roles": ["inventory-operator"]
+        }),
+    );
+    let direct_only = token(
+        "key-a",
+        json!({
+            "sub": "user-7", "iss": "https://issuer.test", "aud": "graphql-router",
+            "exp": 2_000, "scope": "profile.read"
+        }),
+    );
+
+    catalogue.set_status(503);
+    assert_eq!(provider.role_scope_refresh_failure_total(), 0);
+    assert!(refresh(&provider).is_err());
+    assert_eq!(provider.role_scope_refresh_failure_total(), 1);
+
+    clock.set(1_029);
+    assert_eq!(
+        provider
+            .authenticate_bearer(&role_credential)
+            .unwrap()
+            .scopes(),
+        &["inventory.read", "inventory.write"],
+        "within the maximum staleness the last verified snapshot still serves"
+    );
+    assert_eq!(provider.role_scope_stale_serve_total(), 1);
+    assert_eq!(provider.role_scope_stale_refusal_total(), 0);
+
+    clock.set(1_030);
+    let refused = provider.authenticate_bearer(&role_credential).unwrap_err();
+    assert_eq!(refused.kind(), AuthenticationErrorKind::Unavailable);
+    assert_eq!(
+        refused.detail(),
+        "role-scope catalogue snapshot exceeded its maximum staleness"
+    );
+    assert_eq!(provider.role_scope_stale_refusal_total(), 1);
+    assert_eq!(
+        provider.role_scope_stale_serve_total(),
+        1,
+        "a refusal is not counted as a stale serve"
+    );
+    assert_eq!(
+        provider.authenticate_bearer(&direct_only).unwrap().scopes(),
+        &["profile.read"],
+        "direct-scope-only credentials do not depend on the catalogue"
+    );
+
+    // A later successful refresh restores role expansion.
+    catalogue.replace(signed_catalogue("key-a", 1_030, 1_100));
+    catalogue.set_status(200);
+    refresh_catalogue(&provider).unwrap();
+    assert_eq!(
+        provider
+            .authenticate_bearer(&role_credential)
+            .unwrap()
+            .scopes(),
+        &["inventory.read", "inventory.write"]
+    );
+    assert_eq!(provider.role_scope_stale_refusal_total(), 1);
+}
+
+#[cfg(feature = "auth-agql")]
+#[test]
+fn catalogue_staleness_follows_a_monotonic_deadline_not_the_wall_clock() {
+    let keys = JwksFixture::start(jwks("key-a"));
+    let catalogue = JwksFixture::start(signed_catalogue("key-a", 1_000, 1_010));
+    let role_credential = token(
+        "key-a",
+        json!({
+            "sub": "user-7", "iss": "https://issuer.test", "aud": "graphql-router",
+            "exp": 9_000, "authorization_roles": ["inventory-operator"]
+        }),
+    );
+    let staleness_refused = |provider: &JwksAuthenticationProvider| {
+        provider
+            .authenticate_bearer(&role_credential)
+            .is_err_and(|error| {
+                error.detail() == "role-scope catalogue snapshot exceeded its maximum staleness"
+            })
+    };
+    // Loaded at 1_000, stale at 1_010, refused from 1_030 on the monotonic clock.
+    let fresh = || {
+        let clock = Arc::new(TestClock::at(1_000));
+        let provider = provider_with_catalogue_config(&keys, &catalogue, clock.clone(), |config| {
+            config.with_maximum_staleness(Duration::from_secs(20))
+        })
+        .unwrap();
+        initialize(&provider).unwrap();
+        refresh_catalogue(&provider).unwrap();
+        (clock, provider)
+    };
+    catalogue.set_status(200);
+
+    // A refusal is not reopened by moving the wall clock back, as long as it
+    // stays after the load time.
+    let (clock, provider) = fresh();
+    catalogue.set_status(503);
+    clock.set(1_030);
+    assert!(staleness_refused(&provider));
+    clock.set_wall(1_005);
+    assert!(
+        staleness_refused(&provider),
+        "a wall-clock rollback must not reopen the snapshot"
+    );
+    // Behind the load time it still fails closed, just as before.
+    clock.set_wall(999);
+    assert!(provider.authenticate_bearer(&role_credential).is_err());
+
+    // Rolling the wall clock back before the cutoff does not extend it.
+    catalogue.set_status(200);
+    let (clock, provider) = fresh();
+    catalogue.set_status(503);
+    clock.set(1_020);
+    clock.set_wall(1_001);
+    provider.authenticate_bearer(&role_credential).unwrap();
+    clock.advance_monotonic(Duration::from_secs(10));
+    assert!(
+        staleness_refused(&provider),
+        "the cutoff stays 30 seconds of elapsed time after acceptance"
+    );
+
+    // A wall-clock jump forward neither ends nor extends the snapshot.
+    catalogue.set_status(200);
+    let (clock, provider) = fresh();
+    catalogue.set_status(503);
+    clock.set_wall(8_000);
+    // Reload the keys at the new wall time so only the catalogue is in play.
+    keys.set_status(200);
+    initialize(&provider).unwrap();
+    let principal = provider.authenticate_bearer(&role_credential).unwrap();
+    assert_eq!(provider.role_scope_stale_serve_total(), 0, "not stale yet");
+    assert_eq!(
+        principal.authority_valid_until(),
+        Some(clock.monotonic_now() + Duration::from_secs(30))
+    );
+    clock.advance_monotonic(Duration::from_secs(29));
+    provider.authenticate_bearer(&role_credential).unwrap();
+    clock.advance_monotonic(Duration::from_secs(1));
+    assert!(staleness_refused(&provider));
+}
+
+#[cfg(feature = "auth-agql")]
+#[test]
+fn role_expansion_carries_its_snapshot_deadline_and_direct_scopes_do_not() {
+    let keys = JwksFixture::start(jwks("key-a"));
+    let catalogue = JwksFixture::start(signed_catalogue("key-a", 1_000, 1_100));
+    let clock = Arc::new(TestClock::at(1_000));
+    let provider = provider_with_catalogue_config(&keys, &catalogue, clock.clone(), |config| {
+        config.with_maximum_staleness(Duration::from_secs(20))
+    })
+    .unwrap();
+    initialize(&provider).unwrap();
+    refresh_catalogue(&provider).unwrap();
+    let role = provider
+        .authenticate_bearer(&token(
+            "key-a",
+            json!({
+                "sub": "user-7", "iss": "https://issuer.test", "aud": "graphql-router",
+                "exp": 9_000, "authorization_roles": ["inventory-operator"]
+            }),
+        ))
+        .unwrap();
+    // Soft TTL 10 s is earlier than the signed expiry, plus 20 s staleness.
+    assert_eq!(
+        role.authority_valid_until(),
+        Some(clock.monotonic_now() + Duration::from_secs(30))
+    );
+    let direct = provider
+        .authenticate_bearer(&token(
+            "key-a",
+            json!({
+                "sub": "user-7", "iss": "https://issuer.test", "aud": "graphql-router",
+                "exp": 9_000, "scope": "profile.read"
+            }),
+        ))
+        .unwrap();
+    assert_eq!(direct.authority_valid_until(), None);
+    assert_eq!(provider.monotonic_now(), clock.monotonic_now());
+}
+
+#[cfg(feature = "auth-agql")]
+#[test]
+fn each_accepted_catalogue_advances_the_authority_generation() {
+    let keys = JwksFixture::start(jwks("key-a"));
+    let catalogue = JwksFixture::start(signed_catalogue("key-a", 1_000, 1_100));
+    let provider = provider_with_catalogue(&keys, &catalogue, Arc::new(TestClock::at(1_000)));
+    initialize(&provider).unwrap();
+    assert_eq!(
+        provider.authority_generation(),
+        Some(0),
+        "nothing accepted yet"
+    );
+    refresh_catalogue(&provider).unwrap();
+    let credential = token(
+        "key-a",
+        json!({
+            "sub": "user-7", "iss": "https://issuer.test", "aud": "graphql-router",
+            "exp": 9_000, "authorization_roles": ["inventory-operator"]
+        }),
+    );
+    let first = provider.authenticate_bearer(&credential).unwrap();
+    assert_eq!(first.authority_generation(), Some(1));
+    assert_eq!(provider.authority_generation(), Some(1));
+
+    // An identical snapshot is a new generation with the same expansion.
+    refresh_catalogue(&provider).unwrap();
+    let same = provider.authenticate_bearer(&credential).unwrap();
+    assert_eq!(same.authority_generation(), Some(2));
+    assert_eq!(same.scopes(), first.scopes());
+
+    // A refreshed catalogue without the role refuses its expansion, so a
+    // transport that re-authenticates on the new generation sees the removal.
+    catalogue.replace(signed_catalogue_with_role(
+        "key-a",
+        1_000,
+        1_100,
+        "other-role",
+    ));
+    refresh_catalogue(&provider).unwrap();
+    assert_eq!(provider.authority_generation(), Some(3));
+    assert_eq!(
+        provider
+            .authenticate_bearer(&credential)
+            .unwrap_err()
+            .kind(),
+        AuthenticationErrorKind::Unavailable
+    );
+    // Direct-scope principals carry no generation.
+    let direct = provider
+        .authenticate_bearer(&token(
+            "key-a",
+            json!({
+                "sub": "user-7", "iss": "https://issuer.test", "aud": "graphql-router",
+                "exp": 9_000, "scope": "profile.read"
+            }),
+        ))
+        .unwrap();
+    assert_eq!(direct.authority_generation(), None);
+}
+
+#[cfg(feature = "auth-agql")]
+#[test]
+fn role_catalogue_maximum_staleness_has_a_bounded_default() {
+    let keys = JwksFixture::start(jwks("key-a"));
+    let catalogue = JwksFixture::start(signed_catalogue("key-a", 1_000, 1_010));
+    let default = RoleScopeCatalogueConfig::new(catalogue.url(), "role-catalogue-clients").unwrap();
+    assert!(format!("{default:?}").contains("maximum_staleness: 900s"));
+    let error = provider_with_catalogue_config(
+        &keys,
+        &catalogue,
+        Arc::new(TestClock::at(1_000)),
+        |config| config.with_maximum_staleness(Duration::from_secs(86_401)),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("maximum staleness"), "{error}");
+
+    // The default serves a stale snapshot for 15 minutes past staleness only.
+    let clock = Arc::new(TestClock::at(1_000));
+    let provider = provider_with_catalogue(&keys, &catalogue, clock.clone());
+    initialize(&provider).unwrap();
+    refresh_catalogue(&provider).unwrap();
+    catalogue.set_status(503);
+    let role_credential = token(
+        "key-a",
+        json!({
+            "sub": "user-7", "iss": "https://issuer.test", "aud": "graphql-router",
+            "exp": 5_000, "authorization_roles": ["inventory-operator"]
+        }),
+    );
+    // Reload the keys so only the catalogue is stale.
+    clock.set(1_010 + 899);
+    initialize(&provider).unwrap();
+    provider.authenticate_bearer(&role_credential).unwrap();
+    clock.set(1_010 + 900);
+    initialize(&provider).unwrap();
+    assert_eq!(
+        provider
+            .authenticate_bearer(&role_credential)
+            .unwrap_err()
+            .detail(),
+        "role-scope catalogue snapshot exceeded its maximum staleness"
+    );
+
+    // Zero refuses role expansion as soon as the snapshot is stale.
+    let clock = Arc::new(TestClock::at(1_000));
+    let strict = provider_with_catalogue_config(&keys, &catalogue, clock.clone(), |config| {
+        config.with_maximum_staleness(Duration::ZERO)
+    })
+    .unwrap();
+    catalogue.set_status(200);
+    initialize(&strict).unwrap();
+    refresh_catalogue(&strict).unwrap();
+    clock.set(1_009);
+    strict.authenticate_bearer(&role_credential).unwrap();
+    clock.set(1_010);
+    assert!(strict.authenticate_bearer(&role_credential).is_err());
+    assert_eq!(strict.role_scope_stale_serve_total(), 0);
+    assert_eq!(strict.role_scope_stale_refusal_total(), 1);
 }
 
 #[cfg(feature = "auth-agql")]

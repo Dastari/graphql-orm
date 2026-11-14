@@ -3,7 +3,7 @@ title: "Public ORM Error-Code Contract"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-14
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -25,7 +25,7 @@ constraint names, filesystem paths, and configuration strings stay server-side.
 | `CONFLICT` | State conflict |
 | `CONSTRAINT_VIOLATION` | Database constraint failed without schema leak |
 | `CURSOR_INVALID` | Pagination cursor invalid/tampered/version mismatch |
-| `PAGE_LIMIT_EXCEEDED` | Requested page size exceeds configured max |
+| `PAGE_LIMIT_EXCEEDED` | Requested page size exceeds configured max, a visible-row scan ran out of budget, or a generated GraphQL bulk write selects more rows than `PaginationConfig::max_bulk_write_rows` |
 | `SERVICE_UNAVAILABLE` | Temporary dependency failure |
 | `INTERNAL_ERROR` | Unexpected failure |
 | `AUTHORIZATION_MISCONFIGURED` | A declared policy key has no provider. Under `DeclaredPoliciesRequired` this covers every key; in every mode it covers an entity `write_policy` without a row provider on generated writes |

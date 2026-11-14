@@ -218,6 +218,15 @@ async fn every_generated_input_member_has_an_owner_contract() {
         .await
         .unwrap();
     let sdl = schema_builder(db).finish().sdl();
+    // Ordered Rust builders do not introduce a GraphQL enum or input members.
+    assert!(!sdl.contains("enum InputInventoryRecordOrderField"));
+    let ordered = InputInventoryRecordKeysetOrderByInput::ordered([(
+        InputInventoryRecordOrderField::HiddenSort,
+        OrderDirection::Asc,
+    )])
+    .unwrap();
+    assert_eq!(ordered.len(), 1);
+    assert_eq!(ordered[0].hidden_sort, Some(OrderDirection::Asc));
     let semantic = graphql_orm_semantic_catalog();
     let mut inputs = all_inputs(&sdl);
     let mut audited = BTreeSet::new();

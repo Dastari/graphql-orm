@@ -23,7 +23,7 @@ no longer `Copy`; clone it when reusing options. Its
 
 AI 0.142.0 requires ORM/macros 0.149.0 and catalogue 0.8.0, which supply the
 host-only generated input contracts. It does not support ORM/macros 0.133.0.
-See the [contract migration](../../MIGRATION.md#01440-to-01490-host-only-generated-input-contracts).
+See the [contract migration](../../MIGRATION.md#01470-to-01490-host-only-generated-input-contracts).
 
 Static GraphQL variable definitions and the tool argument JSON Schema are both
 host-authored contracts. Registration checks the document's operation and

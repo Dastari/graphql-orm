@@ -3,7 +3,7 @@ title: graphql-orm-router configuration reference
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-14
 review_by: 2027-02-07
 supersedes: []
 ---
@@ -165,9 +165,9 @@ at a time, so a slow older fetch never replaces a newer key set.
 `roleScopeCatalogue` is optional and requires `auth-agql`. Select exactly one
 of literal `url` or `urlFromEnv`. Request headers are loaded only through
 `requestHeadersFromEnv`; values never appear in JSON or diagnostics. Optional
-bounds are `cacheTtlSeconds`, `maximumSignedLifetimeSeconds`,
-`clockSkewLeewaySeconds`, `retryBackoffSeconds`,
-`maximumRetryBackoffSeconds`, and `maxBodyBytes`. The default response bound is
+bounds are `cacheTtlSeconds`, `maximumStalenessSeconds`,
+`maximumSignedLifetimeSeconds`, `clockSkewLeewaySeconds`,
+`retryBackoffSeconds`, `maximumRetryBackoffSeconds`, and `maxBodyBytes`. The default response bound is
 2 MiB for the complete signed JSON envelope, including the catalogue repeated
 inside its JWS. An explicit lower limit still applies. This is separate from
 the JWKS and public GraphQL request-body limits. Its URL is HTTPS-only except for
@@ -186,12 +186,47 @@ soft refresh age; it does not cap issuer lifetime.
 When configured, the distinct typed `authorization_roles` claim expands
 through the last signature-verified catalogue and is unioned with direct token
 scopes. Application `roles` are not expanded. Unknown authorization roles fail
-explicitly and request an immediate refresh. A failed refresh preserves and
-continues serving the last verified snapshot past its soft age or signed
-expiry, increments `role_scope_stale_serve_total`, and emits rate-limited warning
-logs. A role-bearing credential fails closed only when no verified snapshot is
-available or its role remains unknown; direct-scope-only credentials do not
-depend on the optional authority source.
+explicitly and request an immediate refresh. A snapshot is stale from its soft
+age or its signed expiry, whichever comes first. A failed refresh keeps serving
+the last verified snapshot after that point for at most
+`maximumStalenessSeconds` (default 900, at most 86400, `0` refuses as soon as the
+snapshot is stale), incrementing `role_scope_stale_serve_total` and emitting
+rate-limited warning logs. Past that bound, role-bearing credentials fail
+closed as unavailable (HTTP 503 / WebSocket refusal) and increment
+`role_scope_stale_refusal_total` until a refresh succeeds. A role-bearing
+credential also fails closed when no verified snapshot is available or its
+role remains unknown. Direct-scope-only credentials do not depend on the
+optional authority source. Every failed catalogue refresh, lazy or scheduled,
+increments `role_scope_refresh_failure_total` and logs its redacted reason.
+
+Staleness is measured on a monotonic clock. When a snapshot is accepted, the
+router converts its signed expiry and soft age into a remaining lifetime once,
+using wall time, and from then on counts elapsed time only. Moving the wall
+clock back after a refusal does not reopen the snapshot, and moving it forward
+does not extend it. A wall clock earlier than the snapshot's load time still
+fails closed. Whether the monotonic clock advances during system suspend is
+platform dependent. Where it pauses, a suspended process keeps its remaining
+catalogue lifetime after resume. Where that matters, restart the router or
+force a refresh after resume.
+
+A role-expanded principal carries its snapshot's refusal deadline and
+generation (`AuthenticatedPrincipal::authority_valid_until` and
+`authority_generation`). Each accepted snapshot is a new generation. An HTTP
+request authenticates per request. A WebSocket connection keeps its principal,
+so the router re-authenticates the connection's retained bearer against the
+current snapshot, in both the public gateway and the private endpoint, before
+its next operation once the deadline passes or the generation changes. The
+result replaces the old scopes and is never merged with them, so a refreshed
+catalogue's removals apply to the next query, mutation or subscription. The
+same check runs without client activity at the deadline and every 500 ms
+(one atomic read). When the effective scopes change, the connection's
+subscriptions end with `SUBSCRIPTION_AUTHORIZATION_CHANGED`, and a
+resubscription is authorized against the new scopes. Subscriptions keep
+running when the scopes are unchanged. A stale snapshot refuses the operation
+with `UNAUTHENTICATED` and ends the subscriptions with the same error. The
+socket stays open in both cases. Only role-bearing connections retain their
+bearer in memory, and it is never logged. Direct-scope connections are
+unaffected.
 
 The router validates RS256 public keys only. Configuration has no private-key,
 token-signing, session, refresh-token, or RSA-decryption field.
@@ -298,6 +333,11 @@ the pending budget. The exception is when `maxConnections` is the smaller
 value. Changing the rate or the deadline resizes the default. An explicit
 `maxPendingConnections` below that product lets fewer idle upgrades than the
 rate admits fill the budget. A shorter deadline frees idle slots sooner.
+
+Every subscription count (`maxConnections`, `maxPendingConnections`,
+`maxConnectionAttemptsPerSecond`, `maxOperationsPerConnection`,
+`broadcastCapacity`, and `subgraphBufferCapacity`) must be between 1 and
+1048576 (2^20). Validation refuses larger values before any channel is built.
 
 The administrative metrics report `router_websocket_connections` for
 authenticated connections and `router_pending_websocket_connections` for
@@ -553,6 +593,35 @@ Prometheus is opt-in with a distinct `port` and absolute non-root `path`. That
 scrape listener has no application authentication; bind and protect it with
 deployment network policy. The authenticated administrative metrics route is
 `GET /_router/metrics`.
+
+By default the exporter binds the public listener's IP address on its own port.
+The optional `host` IP literal (`RouterTelemetryConfig::with_prometheus_listener`)
+binds it elsewhere instead, for example loopback or a private interface:
+
+```json
+"telemetry": {"prometheus": {"host": "127.0.0.1", "port": 9090, "path": "/metrics"}}
+```
+
+Host names and IPv6 zone IDs are refused so the bind needs no DNS or
+interface lookup. The port must still be nonzero
+and distinct from the public and administrative ports whatever their
+addresses. An unspecified exporter address (`0.0.0.0` or `::`), whether set
+explicitly or inherited from the public listener, logs a startup warning. The
+exporter publishes Hive's metric families, which carry route, status, subgraph
+and GraphQL operation-name labels; it never carries bearer tokens, header
+values, subjects, scopes, or document text.
+
+`"omitOperationName": true` under `prometheus`
+(`RouterTelemetryConfig::omit_operation_name_from_metrics`) removes the
+`graphql.operation.name` attribute from every HTTP server and cost metric
+that carries it, through the engine's per-instrument attribute filters. It is
+a metrics-cardinality and privacy option and defaults to off, so existing
+dashboards keep their per-operation series. Operation names are chosen by
+clients: every distinct name can open new series (the metrics SDK caps each
+metric at 2,000 attribute sets and folds the rest into an overflow series), and
+the names stay in scrape output. Enable it where anonymous or untrusted
+clients can send operations; per-operation breakdowns then disappear from these
+metrics.
 
 ## Persisted documents
 

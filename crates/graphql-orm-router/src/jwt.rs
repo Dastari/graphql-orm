@@ -6,7 +6,7 @@ use std::{
         Arc, RwLock,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(feature = "auth-agql")]
@@ -18,7 +18,7 @@ use agql_auth::{
     RoleScopeExpansionProvider, SignedRoleScopeCatalogue, StaticRoleScopeExpansion,
     effective_scopes,
 };
-use futures::{StreamExt, future::BoxFuture};
+use futures::future::BoxFuture;
 use jsonwebtoken::{
     Algorithm, DecodingKey, Validation, decode, decode_header,
     jwk::{AlgorithmParameters, Jwk, KeyAlgorithm, KeyOperations, PublicKeyUse},
@@ -35,6 +35,7 @@ use url::Url;
 use crate::{
     AuthenticatedPrincipal, AuthenticationError, AuthenticationProvider, RouterError,
     RouterErrorKind,
+    http_body::{BoundedBodyError, USER_AGENT, read_bounded_body},
 };
 
 const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
@@ -47,6 +48,9 @@ const DEFAULT_ROLE_SCOPE_SIGNED_LIFETIME: Duration = Duration::from_secs(24 * 60
 const DEFAULT_ROLE_SCOPE_CLOCK_LEEWAY: Duration = Duration::from_secs(30);
 const DEFAULT_ROLE_SCOPE_RETRY_BACKOFF: Duration = Duration::from_secs(1);
 const DEFAULT_ROLE_SCOPE_MAXIMUM_RETRY_BACKOFF: Duration = Duration::from_secs(60);
+const DEFAULT_ROLE_SCOPE_MAXIMUM_STALENESS: Duration = Duration::from_secs(15 * 60);
+#[cfg(feature = "auth-agql")]
+const MAX_ROLE_SCOPE_MAXIMUM_STALENESS: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_JWKS_KEYS: usize = 128;
 const MAX_LEEWAY: Duration = Duration::from_secs(5 * 60);
 const MAX_UNKNOWN_KEY_REFRESH_COOLDOWN: Duration = Duration::from_secs(24 * 60 * 60);
@@ -65,6 +69,7 @@ pub struct RoleScopeCatalogueConfig {
     clock_skew_leeway: Duration,
     retry_backoff: Duration,
     maximum_retry_backoff: Duration,
+    maximum_staleness: Duration,
     max_body_bytes: usize,
     allow_insecure_loopback_http: bool,
     request_headers: HeaderMap,
@@ -84,6 +89,7 @@ impl RoleScopeCatalogueConfig {
             clock_skew_leeway: DEFAULT_ROLE_SCOPE_CLOCK_LEEWAY,
             retry_backoff: DEFAULT_ROLE_SCOPE_RETRY_BACKOFF,
             maximum_retry_backoff: DEFAULT_ROLE_SCOPE_MAXIMUM_RETRY_BACKOFF,
+            maximum_staleness: DEFAULT_ROLE_SCOPE_MAXIMUM_STALENESS,
             max_body_bytes: DEFAULT_MAX_ROLE_SCOPE_CATALOGUE_BYTES,
             allow_insecure_loopback_http: false,
             request_headers: HeaderMap::new(),
@@ -94,6 +100,22 @@ impl RoleScopeCatalogueConfig {
     /// a refresh is requested. It does not constrain issuer-signed lifetime.
     pub fn with_cache_ttl(mut self, cache_ttl: Duration) -> Self {
         self.cache_ttl = cache_ttl;
+        self
+    }
+
+    /// Sets how long a stale snapshot may still expand authorization roles.
+    ///
+    /// A snapshot becomes stale at its soft age ([`with_cache_ttl`]) or its
+    /// issuer-signed expiry, whichever comes first. While refreshes fail, it
+    /// keeps expanding roles for at most this long after that point. After it,
+    /// role-bearing credentials are refused as unavailable until a refresh
+    /// succeeds; direct-scope-only credentials are unaffected. Defaults to 15
+    /// minutes, the default JWKS cache lifetime. Zero refuses role expansion as
+    /// soon as the snapshot is stale. The maximum is 24 hours.
+    ///
+    /// [`with_cache_ttl`]: Self::with_cache_ttl
+    pub fn with_maximum_staleness(mut self, maximum_staleness: Duration) -> Self {
+        self.maximum_staleness = maximum_staleness;
         self
     }
 
@@ -177,6 +199,11 @@ impl RoleScopeCatalogueConfig {
                 "role-scope catalogue retry backoff must be greater than zero and not exceed its maximum",
             ));
         }
+        if self.maximum_staleness > MAX_ROLE_SCOPE_MAXIMUM_STALENESS {
+            return Err(invalid_configuration(
+                "role-scope catalogue maximum staleness must not exceed 86400 seconds",
+            ));
+        }
         validate_public_resource_url(
             &self.url,
             self.allow_insecure_loopback_http,
@@ -196,6 +223,7 @@ impl fmt::Debug for RoleScopeCatalogueConfig {
             .field("clock_skew_leeway", &self.clock_skew_leeway)
             .field("retry_backoff", &self.retry_backoff)
             .field("maximum_retry_backoff", &self.maximum_retry_backoff)
+            .field("maximum_staleness", &self.maximum_staleness)
             .field("max_body_bytes", &self.max_body_bytes)
             .field(
                 "request_header_names",
@@ -224,6 +252,17 @@ pub enum LegacyScopeClaims {
 pub trait AuthenticationClock: Send + Sync + fmt::Debug + 'static {
     /// Returns the resource server's current wall-clock time.
     fn now(&self) -> SystemTime;
+
+    /// Returns a monotonic instant for deadlines that must not move with the
+    /// wall clock, such as role-scope catalogue staleness.
+    ///
+    /// Wall time validates signed timestamps once, when a snapshot is
+    /// accepted; from then on its staleness deadline follows this clock, so
+    /// moving the wall clock never reopens or extends a snapshot. The default
+    /// is [`Instant::now`].
+    fn monotonic_now(&self) -> Instant {
+        Instant::now()
+    }
 }
 
 /// System wall clock used by default.
@@ -477,6 +516,13 @@ pub struct JwksAuthenticationProvider {
     role_scope_retry_after: Arc<RwLock<Option<SystemTime>>>,
     #[cfg(feature = "auth-agql")]
     role_scope_stale_serves: Arc<AtomicU64>,
+    #[cfg(feature = "auth-agql")]
+    role_scope_stale_refusals: Arc<AtomicU64>,
+    #[cfg(feature = "auth-agql")]
+    role_scope_refresh_failure_total: Arc<AtomicU64>,
+    /// Incremented under the cache lock each time a snapshot is accepted.
+    #[cfg(feature = "auth-agql")]
+    role_scope_generation: Arc<AtomicU64>,
 }
 
 impl JwksAuthenticationProvider {
@@ -485,6 +531,7 @@ impl JwksAuthenticationProvider {
     pub fn new(config: JwksAuthenticationConfig) -> Result<Self, RouterError> {
         config.validate()?;
         let mut client = Client::builder()
+            .user_agent(USER_AGENT)
             .redirect(Policy::none())
             .timeout(config.request_timeout);
         if !config.use_environment_proxy {
@@ -510,6 +557,12 @@ impl JwksAuthenticationProvider {
             role_scope_retry_after: Arc::new(RwLock::new(None)),
             #[cfg(feature = "auth-agql")]
             role_scope_stale_serves: Arc::new(AtomicU64::new(0)),
+            #[cfg(feature = "auth-agql")]
+            role_scope_stale_refusals: Arc::new(AtomicU64::new(0)),
+            #[cfg(feature = "auth-agql")]
+            role_scope_refresh_failure_total: Arc::new(AtomicU64::new(0)),
+            #[cfg(feature = "auth-agql")]
+            role_scope_generation: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -556,28 +609,16 @@ impl JwksAuthenticationProvider {
                 "{resource} endpoint returned an unsuccessful status"
             )));
         }
-        if response
-            .content_length()
-            .is_some_and(|length| length > maximum_bytes as u64)
-        {
-            return Err(AuthenticationError::unavailable(format!(
-                "{resource} response exceeded its configured body limit"
-            )));
-        }
-        let mut body = Vec::new();
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|_| {
-                AuthenticationError::unavailable(format!("{resource} response read failed"))
-            })?;
-            if body.len().saturating_add(chunk.len()) > maximum_bytes {
-                return Err(AuthenticationError::unavailable(format!(
+        read_bounded_body(response, maximum_bytes)
+            .await
+            .map_err(|error| match error {
+                BoundedBodyError::TooLarge => AuthenticationError::unavailable(format!(
                     "{resource} response exceeded its configured body limit"
-                )));
-            }
-            body.extend_from_slice(&chunk);
-        }
-        Ok(body)
+                )),
+                BoundedBodyError::Read => {
+                    AuthenticationError::unavailable(format!("{resource} response read failed"))
+                }
+            })
     }
 
     #[cfg(feature = "auth-agql")]
@@ -662,9 +703,28 @@ impl JwksAuthenticationProvider {
         let mut cache = self.role_scope_cache.write().map_err(|_| {
             AuthenticationError::unavailable("role-scope catalogue cache is unavailable")
         })?;
+        // Wall time is read once here, to turn the signed expiry into a
+        // remaining lifetime; the deadlines then follow the monotonic clock.
+        let loaded_at = self.config.clock.now();
+        let accepted = self.config.clock.monotonic_now();
+        let signed_remaining = expires_at
+            .duration_since(loaded_at)
+            .unwrap_or(Duration::ZERO);
+        let stale_at = accepted
+            .checked_add(config.cache_ttl.min(signed_remaining))
+            .unwrap_or(accepted);
+        let refuse_at = stale_at
+            .checked_add(config.maximum_staleness)
+            .unwrap_or(stale_at);
+        let generation = self
+            .role_scope_generation
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1);
         *cache = Some(Arc::new(RoleScopeCache {
-            loaded_at: self.config.clock.now(),
-            expires_at,
+            loaded_at,
+            stale_at,
+            refuse_at,
+            generation,
             provider,
         }));
         self.role_scope_refresh_failures.store(0, Ordering::Release);
@@ -703,6 +763,9 @@ impl JwksAuthenticationProvider {
         handle.spawn(async move {
             let _in_flight = in_flight;
             if let Err(error) = provider.refresh_role_scope_catalogue().await {
+                provider
+                    .role_scope_refresh_failure_total
+                    .fetch_add(1, Ordering::Relaxed);
                 let failure_count = provider
                     .role_scope_refresh_failures
                     .fetch_add(1, Ordering::AcqRel)
@@ -737,7 +800,11 @@ impl JwksAuthenticationProvider {
     async fn refresh_verification_state(&self) -> Result<(), AuthenticationError> {
         self.refresh_keys().await?;
         #[cfg(feature = "auth-agql")]
-        self.refresh_role_scope_catalogue().await?;
+        if let Err(error) = self.refresh_role_scope_catalogue().await {
+            self.role_scope_refresh_failure_total
+                .fetch_add(1, Ordering::Relaxed);
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -815,13 +882,15 @@ impl JwksAuthenticationProvider {
     }
 
     #[cfg(feature = "auth-agql")]
+    /// Expands authorization roles. With roles, also returns the snapshot's
+    /// monotonic refusal deadline and generation.
     fn expand_roles(
         &self,
         roles: &[String],
         direct_scopes: Vec<String>,
-    ) -> Result<Vec<String>, AuthenticationError> {
+    ) -> Result<(Vec<String>, Option<ExpansionAuthority>), AuthenticationError> {
         if roles.is_empty() {
-            return Ok(direct_scopes);
+            return Ok((direct_scopes, None));
         }
         let Some(config) = &self.config.role_scope_catalogue else {
             return Err(AuthenticationError::unavailable(
@@ -842,12 +911,33 @@ impl JwksAuthenticationProvider {
                 "role-scope catalogue cache is not initialized",
             ));
         };
-        let age = now.duration_since(cache.loaded_at).map_err(|_| {
+        // A wall clock behind the load time still fails closed.
+        now.duration_since(cache.loaded_at).map_err(|_| {
             AuthenticationError::unavailable(
                 "authentication clock moved before role-scope catalogue load time",
             )
         })?;
-        if age >= config.cache_ttl || now >= cache.expires_at {
+        let monotonic_now = self.config.clock.monotonic_now();
+        if monotonic_now >= cache.stale_at {
+            let staleness = monotonic_now.saturating_duration_since(cache.stale_at);
+            if monotonic_now >= cache.refuse_at {
+                let count = self
+                    .role_scope_stale_refusals
+                    .fetch_add(1, Ordering::Relaxed)
+                    .saturating_add(1);
+                if count == 1 || count.is_power_of_two() {
+                    tracing::warn!(
+                        stale_refusal_total = count,
+                        stale_seconds = staleness.as_secs(),
+                        maximum_staleness_seconds = config.maximum_staleness.as_secs(),
+                        "refusing role expansion from a role-scope catalogue past its maximum staleness"
+                    );
+                }
+                self.request_role_scope_refresh(false);
+                return Err(AuthenticationError::unavailable(
+                    "role-scope catalogue snapshot exceeded its maximum staleness",
+                ));
+            }
             let count = self
                 .role_scope_stale_serves
                 .fetch_add(1, Ordering::Relaxed)
@@ -855,7 +945,7 @@ impl JwksAuthenticationProvider {
             if count == 1 || count.is_power_of_two() {
                 tracing::warn!(
                     stale_serve_total = count,
-                    stale_seconds = age.as_secs(),
+                    stale_seconds = staleness.as_secs(),
                     "serving a stale signature-verified role-scope catalogue while refreshing"
                 );
             }
@@ -867,7 +957,10 @@ impl JwksAuthenticationProvider {
             }
             AuthenticationError::unavailable("role-scope catalogue expansion failed")
         })?;
-        Ok(effective_scopes(direct_scopes, &expansion))
+        Ok((
+            effective_scopes(direct_scopes, &expansion),
+            Some((cache.refuse_at, cache.generation)),
+        ))
     }
 
     /// Returns the process-local count of requests served from a stale but
@@ -875,6 +968,21 @@ impl JwksAuthenticationProvider {
     #[cfg(feature = "auth-agql")]
     pub fn role_scope_stale_serve_total(&self) -> u64 {
         self.role_scope_stale_serves.load(Ordering::Relaxed)
+    }
+
+    /// Returns the process-local count of role-bearing requests refused because
+    /// the last verified role-scope snapshot was past its maximum staleness.
+    #[cfg(feature = "auth-agql")]
+    pub fn role_scope_stale_refusal_total(&self) -> u64 {
+        self.role_scope_stale_refusals.load(Ordering::Relaxed)
+    }
+
+    /// Returns the process-local count of failed role-scope catalogue
+    /// refreshes, lazy or scheduled. Unlike the retry backoff, it never resets.
+    #[cfg(feature = "auth-agql")]
+    pub fn role_scope_refresh_failure_total(&self) -> u64 {
+        self.role_scope_refresh_failure_total
+            .load(Ordering::Relaxed)
     }
 }
 
@@ -924,14 +1032,35 @@ impl AuthenticationProvider for JwksAuthenticationProvider {
         validate_time_claims(&claims, self.config.clock.as_ref(), self.config.leeway)?;
         let scopes = parse_scope_claims(&claims.additional, self.config.legacy_scope_claims)?;
         #[cfg(feature = "auth-agql")]
-        let scopes = self.expand_roles(&claims.authorization_roles, scopes)?;
+        let (scopes, authority_valid_until) =
+            self.expand_roles(&claims.authorization_roles, scopes)?;
         let expires_at = UNIX_EPOCH.checked_add(Duration::from_secs(claims.exp));
         let expires_at = expires_at.ok_or_else(invalid_token)?;
-        AuthenticatedPrincipal::new(claims.sub, scopes, Some(expires_at))
+        let principal = AuthenticatedPrincipal::new(claims.sub, scopes, Some(expires_at))?;
+        #[cfg(feature = "auth-agql")]
+        let principal = match authority_valid_until {
+            Some((deadline, generation)) => principal
+                .with_authority_valid_until(deadline)
+                .with_authority_generation(generation),
+            None => principal,
+        };
+        Ok(principal)
     }
 
     fn current_time(&self) -> Result<SystemTime, AuthenticationError> {
         Ok(self.config.clock.now())
+    }
+
+    fn monotonic_now(&self) -> Instant {
+        self.config.clock.monotonic_now()
+    }
+
+    #[cfg(feature = "auth-agql")]
+    fn authority_generation(&self) -> Option<u64> {
+        self.config
+            .role_scope_catalogue
+            .is_some()
+            .then(|| self.role_scope_generation.load(Ordering::Acquire))
     }
 
     fn refresh_interval(&self) -> Option<Duration> {
@@ -977,10 +1106,20 @@ struct JwksCache {
     keys: BTreeMap<String, DecodingKey>,
 }
 
+/// The refusal deadline and generation of the snapshot a role expansion used.
+#[cfg(feature = "auth-agql")]
+type ExpansionAuthority = (Instant, u64);
+
 #[cfg(feature = "auth-agql")]
 struct RoleScopeCache {
     loaded_at: SystemTime,
-    expires_at: SystemTime,
+    /// Monotonic point where the snapshot turns stale: its soft age or its
+    /// signed expiry, whichever is first, measured from acceptance.
+    stale_at: Instant,
+    /// Monotonic point after which it no longer expands roles.
+    refuse_at: Instant,
+    /// Acceptance order of this snapshot.
+    generation: u64,
     provider: StaticRoleScopeExpansion,
 }
 

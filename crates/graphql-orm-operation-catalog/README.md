@@ -16,7 +16,7 @@ remain undisclosed. The sidecar is omitted from serde, Debug output, SDL and
 router extensions, so existing public catalogue bytes and fingerprints stay
 unchanged. Struct literals initialize the new field; serialized consumers
 reattach producer contracts before AI compilation. No data migration is needed.
-See the [migration guide](../../MIGRATION.md#01440-to-01490-host-only-generated-input-contracts).
+See the [migration guide](../../MIGRATION.md#01470-to-01490-host-only-generated-input-contracts).
 
 The entire semantic catalogue is a trusted host assertion, including public
 fields, deserialized metadata, relationship arguments and generated labels.
