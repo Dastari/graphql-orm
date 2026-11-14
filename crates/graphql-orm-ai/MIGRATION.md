@@ -6939,3 +6939,7 @@ attached prepared context. The SDK verifies the exact confirmed unstarted
 cleanup again before this callback; an error category alone is insufficient.
 A host may offer ordinary semantic tools at zero image quota; no retained
 screenshot or completed native effect is replayed to manufacture capacity.
+
+## graphql-orm-ai 0.140.0
+
+Test infrastructure only: no API or data migration required. Owned PostgreSQL tests pull digest-pinned images.
