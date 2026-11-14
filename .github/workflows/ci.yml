@@ -509,6 +509,8 @@ jobs:
       - run: cargo check -p graphql-orm-storage --no-default-features --features smb --all-targets
       - name: Compile every storage target without a provider feature (#422)
         run: cargo check -p graphql-orm-storage --locked --no-default-features --all-targets
+      - name: Lint storage with the test-only SMB sweep hooks
+        run: cargo clippy -p graphql-orm-storage --locked --features smb,smb-sweep-test-hooks --all-targets -- -D warnings
       - name: Lint every backup target in the native SMB configuration without local (#662)
         run: cargo clippy -p graphql-orm-backup --locked --no-default-features --features smb --all-targets -- -D warnings
       - name: Run owner-local SMB vendor unit tests (GHSA-439h-2cx8-xwgx regression)

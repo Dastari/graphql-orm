@@ -1094,30 +1094,40 @@ async fn samba_portable_keys_refuse_windows_unsafe_names() {
 }
 
 /// The sweep removes only this backend's stale temporary upload names, by
-/// the server's clock, through a validated exclusive handle (#593):
+/// the server's clock, through validated handles, while it holds every
+/// directory above each candidate (#593):
 ///
-/// - fresh, future-dated and callers' look-alike names are kept;
-/// - a stale temporary file another handle still has open is skipped, and
-///   an upload in progress keeps its temporary file and still publishes;
-/// - a stale temporary file behind a symbolic link survives, and nothing
-///   outside the root prefix is touched.
+/// - fresh, future-dated and callers' look-alike names are kept, and a file
+///   30 minutes old by the server's clock is kept by a one-hour sweep;
+/// - a stale temporary file another handle still has open is skipped, and an
+///   upload in progress keeps its temporary file and still publishes;
+/// - between enumeration and removal (the barrier), a second SMB session
+///   (`smbclient` in the server container) cannot rename the candidate's
+///   directory, so it cannot be replaced by a link to the identically named
+///   file outside the root, which survives; once the sweep ends the rename
+///   succeeds;
+/// - a candidate whose size and last-write time change after enumeration is
+///   kept;
+/// - a directory another client holds open with delete access cannot be
+///   held, so it is skipped with its subtree and counted, and a link out of
+///   the share is skipped and counted, its target untouched.
 ///
-/// Samba 4.12, the managed server, resolves symbolic links itself and never
-/// reports them to SMB2 clients as reparse points. It refuses links that
-/// leave the share (`wide links = no`), which this test uses; a link that
-/// stays inside the share is presented as an ordinary directory and cannot
-/// be detected by any client, so it is not modelled here. Reparse-point
-/// entries and handles, as Windows servers report junctions and symbolic
-/// links, are covered by the handle and entry checks, not by this server.
-/// A file that changes between enumeration and removal is covered by a unit
-/// test of the handle re-check, because the server offers no hook between
-/// the two steps.
+/// What this server cannot model: Samba 4.12 resolves symbolic links itself
+/// and reports no reparse points to SMB2 clients, so Windows junctions and
+/// reparse handles are covered by the decision-level unit tests, and a link
+/// that stays inside the share looks like an ordinary directory. The test
+/// process and the container share one real-time clock, so a skewed client
+/// clock cannot be staged; the barrier checks that the sweep's reference
+/// time is the server's, and the unit test covers a skewed client time.
+#[cfg(feature = "smb-sweep-test-hooks")]
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires the managed Samba container harness"]
 async fn samba_sweep_removes_only_stale_temporary_files() {
-    use graphql_orm_storage::SmbUploadsQuiesced;
+    use graphql_orm_storage::{SmbSweepBarrier, SmbSweepCandidate, SmbUploadsQuiesced};
+    use std::sync::Mutex;
 
     let fixture = owned_fixture();
+    let container = fixture.container.clone();
     let root = format!("graphql-orm-storage-sweep/{}", Uuid::new_v4());
     let store = SmbStorageBackend::connect(test_config(root.clone()))
         .await
@@ -1129,6 +1139,9 @@ async fn samba_sweep_removes_only_stale_temporary_files() {
         "sweep/kept.bin".to_string(),
         "sweep/report.uploading".to_string(),
         caller_lookalike.clone(),
+        "sweep/pinned/kept.bin".to_string(),
+        "sweep/changing/kept.bin".to_string(),
+        "sweep/held-dir/kept.bin".to_string(),
     ];
     for key in &callers {
         store
@@ -1145,9 +1158,14 @@ async fn samba_sweep_removes_only_stale_temporary_files() {
         format!(".{}.uploading", Uuid::new_v4()),
         format!("sweep/.blob.bin.{}.uploading", Uuid::new_v4()),
     ];
+    let pinned_name = format!(".{}.uploading", Uuid::new_v4());
+    let pinned = format!("sweep/pinned/{pinned_name}");
+    let changing = format!("sweep/changing/.{}.uploading", Uuid::new_v4());
+    let held_dir_temp = format!("sweep/held-dir/.{}.uploading", Uuid::new_v4());
     let fresh = format!("sweep/.{}.uploading", Uuid::new_v4());
-    let open_elsewhere = format!("sweep/.{}.uploading", Uuid::new_v4());
+    let half_hour = format!("sweep/.{}.uploading", Uuid::new_v4());
     let future = format!("sweep/.{}.uploading", Uuid::new_v4());
+    let open_elsewhere = format!("sweep/.{}.uploading", Uuid::new_v4());
     let outside_temp = format!(".{}.uploading", Uuid::new_v4());
     let outside = format!("/outside-{}", Uuid::new_v4());
     let share = format!("/share/{root}");
@@ -1165,28 +1183,48 @@ async fn samba_sweep_removes_only_stale_temporary_files() {
         })
     };
     // Interrupted uploads, owned like the share's files. The stale ones and
-    // the callers' keys were last written in 2020, one in 2100. A link to a
-    // directory outside the share holds another stale temporary file. The
-    // fixture has BusyBox.
-    let mut script = format!("set -e\nowner=$(stat -c %u:%g '{share}/sweep')\n");
-    for name in stale.iter().chain([&fresh, &future, &open_elsewhere]) {
+    // the callers' keys were last written in 2020, one in 2100, one half an
+    // hour ago by the server's clock. Outside the share, a directory holds
+    // a file with the pinned candidate's name, size and time, and a link
+    // from the root leads to another stale temporary file. BusyBox.
+    let mut script = format!("set -e\nowner=$(stat -c %u:%g '{share}/sweep')\nnow=$(date +%s)\n");
+    let seeded = stale.iter().chain([
+        &pinned,
+        &changing,
+        &held_dir_temp,
+        &fresh,
+        &half_hour,
+        &future,
+        &open_elsewhere,
+    ]);
+    for name in seeded {
         script.push_str(&format!(
             "printf partial > '{share}/{name}'\nchown \"$owner\" '{share}/{name}'\n"
         ));
     }
-    for name in stale.iter().chain(&callers).chain([&open_elsewhere]) {
+    let dated =
+        stale
+            .iter()
+            .chain(&callers)
+            .chain([&pinned, &changing, &held_dir_temp, &open_elsewhere]);
+    for name in dated {
         script.push_str(&format!("touch -t 202001010000 '{share}/{name}'\n"));
     }
-    script.push_str(&format!("touch -t 210001010000 '{share}/{future}'\n"));
     script.push_str(&format!(
-        "mkdir -p '{outside}'\nprintf partial > '{outside}/{outside_temp}'\n\
-         chown -R \"$owner\" '{outside}'\ntouch -t 202001010000 '{outside}/{outside_temp}'\n\
+        "touch -t 210001010000 '{share}/{future}'\n\
+         touch -d @$((now - 1800)) '{share}/{half_hour}'\n\
+         mkdir -p '{outside}/pinned'\n\
+         printf partial > '{outside}/pinned/{pinned_name}'\n\
+         printf partial > '{outside}/{outside_temp}'\n\
+         chown -R \"$owner\" '{outside}'\n\
+         touch -t 202001010000 '{outside}/pinned/{pinned_name}' '{outside}/{outside_temp}'\n\
          ln -s '{outside}' '{share}/sweep/linked'\n"
     ));
     shell(script).expect("seed temporary files");
 
     // Another connection holds a stale temporary file open, as an upload
-    // between writes would; the read stream is never consumed.
+    // between writes would; the read stream is never consumed. It also
+    // holds a directory open with delete access.
     let other = SmbStorageBackend::connect(test_config(root.clone()))
         .await
         .expect("connect");
@@ -1194,6 +1232,10 @@ async fn samba_sweep_removes_only_stale_temporary_files() {
         .get_blob(&open_elsewhere)
         .await
         .expect("open the stale temporary file elsewhere");
+    let held_dir = other
+        .hold_directory_open_for_delete("sweep/held-dir")
+        .await
+        .expect("hold a directory with delete access");
 
     // An upload in progress: its temporary file is open, then dated 2020.
     // Samba reports an open file's write time from its own state, so this
@@ -1247,28 +1289,173 @@ async fn samba_sweep_removes_only_stale_temporary_files() {
         .expect_err("an age below one hour is refused");
     assert_refused(&too_short, StorageProviderErrorKind::Protocol);
 
-    let report = store.sweep_temp_files(quiesced, hour).await.expect("sweep");
-    assert_eq!(report.removed, stale.len(), "{report:?}");
+    // A second SMB session renames a directory; its output and exit status.
+    let smb_rename = {
+        let container = container.clone();
+        move |from: String, to: String| {
+            let output = std::process::Command::new("docker")
+                .args(["exec", &container, "smbclient", "//127.0.0.1/backups"])
+                .args([
+                    "-U",
+                    "backup%BackupTest-42!",
+                    "-W",
+                    "WORKGROUP",
+                    "-m",
+                    "SMB3",
+                ])
+                .args(["-c", &format!("rename \"{from}\" \"{to}\"")])
+                .output()
+                .expect("run smbclient in the owned fixture");
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            (
+                output.status.success() && !text.contains("NT_STATUS_"),
+                text,
+            )
+        }
+    };
+    let seen: Arc<Mutex<Vec<SmbSweepCandidate>>> = Arc::default();
+    let attempts: Arc<Mutex<Vec<(bool, String)>>> = Arc::default();
+    let barrier: Box<SmbSweepBarrier> = {
+        let seen = Arc::clone(&seen);
+        let attempts = Arc::clone(&attempts);
+        let container = container.clone();
+        let (pinned, changing, root, share) = (
+            pinned.clone(),
+            changing.clone(),
+            root.clone(),
+            share.clone(),
+        );
+        let smb_rename = smb_rename.clone();
+        Box::new(move |candidate: SmbSweepCandidate| {
+            seen.lock().expect("seen").push(candidate.clone());
+            let attempts = Arc::clone(&attempts);
+            let container = container.clone();
+            let (pinned, changing, root, share) = (
+                pinned.clone(),
+                changing.clone(),
+                root.clone(),
+                share.clone(),
+            );
+            let smb_rename = smb_rename.clone();
+            Box::pin(async move {
+                if candidate.key == pinned {
+                    // Try to move the held directory aside, so a link to the
+                    // outside directory could take its name.
+                    let outcome = tokio::task::spawn_blocking(move || {
+                        smb_rename(
+                            format!("{root}/sweep/pinned"),
+                            format!("{root}/sweep/pinned-moved"),
+                        )
+                    })
+                    .await
+                    .expect("rename attempt");
+                    attempts.lock().expect("attempts").push(outcome);
+                } else if candidate.key == changing {
+                    // The file grows after enumeration.
+                    let status = tokio::task::spawn_blocking(move || {
+                        std::process::Command::new("docker")
+                            .args(["exec", &container, "sh", "-c"])
+                            .arg(format!("printf more >> '{share}/{changing}'"))
+                            .status()
+                            .expect("modify the candidate")
+                    })
+                    .await
+                    .expect("modify task");
+                    assert!(status.success());
+                }
+            })
+        })
+    };
+
+    let report = store
+        .sweep_temp_files_with_barrier(quiesced, hour, &barrier)
+        .await
+        .expect("sweep");
+    assert_eq!(report.removed, stale.len() + 1, "{report:?}");
     assert_eq!(report.skipped_in_use, 1, "{report:?}");
-    // The link out of the share is refused by the server and skipped.
-    assert_eq!(report.skipped_directories, 1, "{report:?}");
+    assert_eq!(report.skipped_changed, 1, "{report:?}");
+    // The directory held with delete access and the link out of the share.
+    assert_eq!(report.skipped_directories, 2, "{report:?}");
+
+    // The held directory could not be renamed while the sweep held it.
+    let attempts = attempts.lock().expect("attempts").clone();
+    assert_eq!(attempts.len(), 1, "{attempts:?}");
+    assert!(
+        !attempts[0].0,
+        "the rename must be refused: {}",
+        attempts[0].1
+    );
+    assert!(
+        attempts[0].1.contains("NT_STATUS_SHARING_VIOLATION"),
+        "{}",
+        attempts[0].1
+    );
+    // The reference time is the server's.
+    let server_seconds: u64 = {
+        let output = std::process::Command::new("docker")
+            .args(["exec", &container, "date", "+%s"])
+            .output()
+            .expect("server date");
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .expect("seconds")
+    };
+    for candidate in seen.lock().expect("seen").iter() {
+        let reference = candidate
+            .server_now
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after 1970")
+            .as_secs();
+        assert!(
+            server_seconds.abs_diff(reference) < 300,
+            "{reference} vs {server_seconds}"
+        );
+    }
+
+    let mut check = String::from("set -e\n");
+    for name in stale.iter().chain([&pinned]) {
+        check.push_str(&format!("test ! -e '{share}/{name}'\n"));
+    }
+    for name in [
+        &fresh,
+        &half_hour,
+        &future,
+        &open_elsewhere,
+        &changing,
+        &held_dir_temp,
+    ] {
+        check.push_str(&format!("test -f '{share}/{name}'\n"));
+    }
+    check.push_str(&format!("test -f '{share}/held/{held_temp}'\n"));
+    check.push_str(&format!("test -f '{outside}/{outside_temp}'\n"));
+    check.push_str(&format!("test -f '{outside}/pinned/{pinned_name}'\n"));
+    shell(check).expect("only stale temporary files inside the root were removed");
+
+    // Without the sweep's hold, the same rename succeeds; move it back.
+    let (renamed, text) = smb_rename(
+        format!("{root}/sweep/pinned"),
+        format!("{root}/sweep/pinned-moved"),
+    );
+    assert!(renamed, "{text}");
+    let (restored, text) = smb_rename(
+        format!("{root}/sweep/pinned-moved"),
+        format!("{root}/sweep/pinned"),
+    );
+    assert!(restored, "{text}");
+
     // An ordinary listing fails closed on the refused link, so remove it.
     shell(format!("rm '{share}/sweep/linked'")).expect("remove the link");
     let mut expected = callers.to_vec();
     expected.sort();
     assert_eq!(store.list_blobs("sweep/").await.expect("list"), expected);
-    let mut check = String::from("set -e\n");
-    for name in &stale {
-        check.push_str(&format!("test ! -e '{share}/{name}'\n"));
-    }
-    for name in [&fresh, &future, &open_elsewhere] {
-        check.push_str(&format!("test -f '{share}/{name}'\n"));
-    }
-    check.push_str(&format!("test -f '{share}/held/{held_temp}'\n"));
-    check.push_str(&format!("test -f '{outside}/{outside_temp}'\n"));
-    shell(check).expect("only the stale temporary files inside the root were removed");
 
     drop(holder);
+    held_dir.release().await;
     // The upload that was in progress still publishes.
     release.send(()).expect("release the upload");
     upload
@@ -1281,18 +1468,22 @@ async fn samba_sweep_removes_only_stale_temporary_files() {
         Bytes::from_static(b"head-tail")
     );
 
-    // Nothing stale is left to remove.
+    // Once released, the file held open and the held directory's file go.
     let again = store
         .sweep_temp_files(quiesced, hour)
         .await
         .expect("second sweep");
-    // Once released, the stale file is removed by the next sweep.
-    assert_eq!(again.removed, 1, "{again:?}");
+    assert_eq!(again.removed, 2, "{again:?}");
     assert_eq!(again.skipped_in_use, 0, "{again:?}");
-    shell(format!("test ! -e '{share}/{open_elsewhere}'")).expect("removed once released");
+    assert_eq!(again.skipped_directories, 0, "{again:?}");
+    shell(format!(
+        "test ! -e '{share}/{open_elsewhere}'\ntest ! -e '{share}/{held_dir_temp}'"
+    ))
+    .expect("removed once released");
 
     shell(format!(
-        "rm -f '{share}/{fresh}' '{share}/{future}' '{share}/sweep/linked'\nrm -rf '{outside}'"
+        "rm -f '{share}/{fresh}' '{share}/{half_hour}' '{share}/{future}' '{share}/{changing}'\n\
+         rm -rf '{outside}'"
     ))
     .expect("remove the seeded files");
     for key in store.list_blobs("").await.expect("list") {

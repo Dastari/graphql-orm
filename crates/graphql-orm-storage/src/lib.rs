@@ -82,6 +82,8 @@ pub use smb::{
     SmbBackendDiagnostics, SmbDialect, SmbProbeOptions, SmbProbeResult, SmbStorageBackend,
     SmbStorageConfig, SmbTempSweepReport, SmbUploadsQuiesced,
 };
+#[cfg(feature = "smb-sweep-test-hooks")]
+pub use smb::{SmbHeldDirectory, SmbSweepBarrier, SmbSweepCandidate};
 pub use streaming_object::{
     BoxedMultipartWriter, MultipartWriter, ObjectContentRange, ObjectInfo, ObjectMetadata,
     ObjectRangeBody, StreamingObjectStore, validate_object_bucket,

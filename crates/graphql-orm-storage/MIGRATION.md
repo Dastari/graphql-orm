@@ -47,6 +47,16 @@ Update the storage requirement to 0.12.0 and refresh the consumer lockfile.
    assigns fields is unaffected. Set it to `true` for a share on a Windows
    server, or one Windows clients use; it refuses new writes of keys that
    are not portable, and existing objects stay addressable.
+5. **SMB temporary-file sweep precondition.** The new
+   `SmbStorageBackend::sweep_temp_files(quiesced, older_than)` requires an
+   `SmbUploadsQuiesced` witness, built with
+   `SmbUploadsQuiesced::confirmed_by_host()`. Construct it only after every
+   writer of the share below the backend's root prefix, on every host, is
+   stopped or paused, and keep them quiescent until the sweep returns: an
+   upload can pause past any age and resume, and the sweep's exclusive-open
+   and unchanged-size checks cannot protect a writer that closed its handle
+   between writes. Run it only on shares whose tree untrusted parties cannot
+   change outside SMB; see [native SMB](docs/native-smb.md#atomicity-and-streaming).
 
 ## 0.10.0 to 0.11.0: SMB signing, conditional-create outcomes, S3 messages
 

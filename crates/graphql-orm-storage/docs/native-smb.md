@@ -481,16 +481,51 @@ candidate that passes is removed through that same handle, once; an error
 after the removal request may have reached the server is a non-retryable
 single-attempt error.
 
-The sweep never follows a reparse point the server reports. Entries with the
-reparse attribute are skipped and counted, and every directory is opened with
-`FILE_OPEN_REPARSE_POINT` and its handle checked again before it is entered,
-so a junction or symbolic link that a Windows server reports cannot lead the
-sweep outside the root prefix. A directory it cannot open as a plain directory
-is skipped, not entered. A server that resolves links itself and presents
-them as ordinary directories, as Samba does for symbolic links by default,
-gives the client nothing to detect: keep links out of repository trees on
-such servers, or disable link following on the share. Samba refuses links
-that leave the share (`wide links = no`), and the sweep skips those.
+The sweep walks depth-first and holds the directory chain it works in. Every
+directory from the share root down to the one being processed, root prefix
+included, stays open from its enumeration through the removal of its
+candidates and the descent into its children, and is closed when the walk
+leaves it; at most `max_listing_depth` directories below the root are held,
+and a deeper tree fails the sweep. Each held handle is opened with
+`FILE_OPEN_REPARSE_POINT`, so it is the named directory itself and never a
+reparse point's target, is checked on the handle to be a plain directory and
+not a reparse point, and is opened without `FILE_SHARE_DELETE`. While it is
+held, a server that enforces share modes refuses every other open that asks
+for delete access to it, so no client can rename, delete or replace that
+directory, for example with a junction to a directory outside the root that
+contains an identically named file. A candidate is opened by path only while
+its whole ancestor chain is held, so the path resolves through those
+directories. A directory that cannot be held that way (a sharing violation
+because another client has it open with delete access, an access denial, a
+link the server refuses, a reparse point, or a name that is no longer a
+directory) is skipped with everything below it and counted in
+`skipped_directories`; the sweep never falls back to opening it by path
+alone. Entries the server reports with the reparse attribute are skipped and
+counted.
+
+What this guarantees: against other SMB clients of a server that enforces
+share modes for every client of the share, no directory above a candidate can
+be renamed, replaced or redirected between enumeration and removal, and the
+removed file is the plain file enumeration saw, at that path, below the root
+prefix. What it does not guarantee: a change made directly on the server's
+file system, outside SMB, bypasses share modes, and no client can prevent it,
+so a local process on the server could still redirect a path. Never run the
+sweep on a share whose tree untrusted parties can change outside SMB. A
+server that resolves links itself and presents them as ordinary directories,
+as Samba does for symbolic links by default, gives the client nothing to
+detect: keep links out of repository trees on such servers, or disable link
+following on the share. Samba refuses links that leave the share
+(`wide links = no`), and the sweep skips those.
+
+The managed Samba suite holds a candidate's directory at a barrier between
+enumeration and removal and checks that a second SMB session cannot rename
+it, that a file whose size changes at the barrier is kept, that a directory
+another client holds with delete access is skipped, and that the sweep's
+reference time is the server's. Samba 4.12 reports no reparse points to SMB2
+clients, so junctions and reparse handles are covered by decision-level unit
+tests, and the shared host clock means a skewed client clock is covered by a
+unit test only. The barrier is available only with the test-only
+`smb-sweep-test-hooks` feature, which applications must not enable.
 
 Removing a stalled upload's temporary file makes that upload fail; it never
 removes a published object, because publishing is a rename or a hard link,

@@ -236,7 +236,7 @@ SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
 SMB_TEST_CONTAINER_NAME="$NORMAL_ID" SMB_TEST_FIXTURE_RUN="$RUN_ID" \
-  run_test samba_sweep_removes_only_stale_temporary_files "$SMB_TEST_CARGO" test --locked --features smb --test smb_integration \
+  run_test samba_sweep_removes_only_stale_temporary_files "$SMB_TEST_CARGO" test --locked --features smb,smb-sweep-test-hooks --test smb_integration \
   samba_sweep_removes_only_stale_temporary_files -- --ignored --exact --nocapture
 
 # The constrained server offers at most SMB 3.0, below the default minimum.
