@@ -146,14 +146,14 @@ pub(crate) fn custody_database(
 }
 
 #[cfg(all(test, feature = "sqlite"))]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::persistence::{AiBudgetReservationRecord, AiRunRecord, AiSessionRecord};
     use graphql_orm::graphql::errors::OrmErrorCode;
     use graphql_orm::graphql::orm::Entity;
 
     /// A host policy that refuses every field decision on every surface.
-    struct DenyEverything;
+    pub(crate) struct DenyEverything;
     impl FieldPolicy<DefaultWriteBackend> for DenyEverything {
         fn can_read_field<'a>(
             &'a self,

@@ -1422,6 +1422,7 @@ impl AiConfigurationService for OrmAiConfigurationService {
                     {
                         return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                     }
+                    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
                     let previous_state = record.state.clone();
                     let updated =
                         crate::orm_budget::commit_stranded_reservation(tx, &record, now).await?;
@@ -2627,6 +2628,72 @@ mod tests {
         .await
         .expect("other-tenant reservation should seed");
         inserted.id
+    }
+
+    #[tokio::test]
+    async fn reclaim_uses_custody_under_a_deny_everything_host_policy() {
+        let (mut database, now, reservation_id) = stranded_reservation_fixture().await;
+        terminate_run(&database).await;
+        expire_reservation(
+            &database,
+            reservation_id,
+            (now - Duration::days(2)).unix_timestamp(),
+        )
+        .await;
+        database.set_field_policy(crate::custody_field_policy::tests::DenyEverything);
+        let service = configuration_service(database, Arc::new(AllowConfiguration), now, true);
+        let before = service
+            .budget_scope_capacity(&admin_principal(now), scope())
+            .await
+            .unwrap();
+        let reclaimed = service
+            .reclaim_budget_reservation(
+                &admin_principal(now),
+                ReclaimAiBudgetReservationInput {
+                    scope: scope_input(),
+                    reservation_id,
+                    expected_version: before.reservations[0].row_version,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(reclaimed.state, "committed");
+    }
+
+    #[tokio::test]
+    async fn reclaim_refuses_a_closed_recovery_epoch() {
+        let (database, now, reservation_id) = stranded_reservation_fixture().await;
+        terminate_run(&database).await;
+        expire_reservation(
+            &database,
+            reservation_id,
+            (now - Duration::days(2)).unix_timestamp(),
+        )
+        .await;
+        let service =
+            configuration_service(database.clone(), Arc::new(AllowConfiguration), now, true);
+        let before = service
+            .budget_scope_capacity(&admin_principal(now), scope())
+            .await
+            .unwrap();
+        crate::orm_runtime_recovery::close_test_epoch(&database).await;
+        let result = service
+            .reclaim_budget_reservation(
+                &admin_principal(now),
+                ReclaimAiBudgetReservationInput {
+                    scope: scope_input(),
+                    reservation_id,
+                    expected_version: before.reservations[0].row_version,
+                },
+            )
+            .await;
+        assert!(matches!(result, Err(AiError::RuntimeNotReady)));
+        let after = service
+            .budget_scope_capacity(&admin_principal(now), scope())
+            .await
+            .unwrap();
+        assert_eq!(after.reservations[0].state, before.reservations[0].state);
+        assert_eq!(after.policies[0].committed_input_tokens, 0);
     }
 
     #[tokio::test]
