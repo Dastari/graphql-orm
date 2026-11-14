@@ -4100,6 +4100,7 @@ mod tests {
             has_field_policy: true,
         };
         let entity = GraphqlEntitySemanticMetadata {
+            generated_input_members: Vec::new(),
             entity_name: "Parent".to_owned(),
             description: "One reviewed parent event.".to_owned(),
             default_classification: GraphqlSemanticClassification::Internal,

@@ -2565,3 +2565,94 @@ async fn dependent_set_null_advances_record_version_and_refuses_stale_expected_c
         );
     }
 }
+
+#[tokio::test]
+async fn live_composite_key_inputs_compile_public_query_capabilities() {
+    use graphql_orm_ai_tool_profiles::*;
+    for value_kind in [RuntimeValueKind::Integer, RuntimeValueKind::Uuid] {
+        for live in [false, true] {
+            let mut definition = definition();
+            definition.collections[0].fields[0].value_kind = value_kind;
+            definition.collections[0].primary_key.push(fid("tenant"));
+            if !live {
+                definition.collections[0].live_subscriptions = None;
+            }
+            let fixture = Fixture::with_definition(definition).await;
+            #[cfg(feature = "sqlite")]
+            let match_profile = RuntimeMatchProfile::SqliteBinaryCanonical;
+            #[cfg(feature = "postgres")]
+            let match_profile = RuntimeMatchProfile::PostgresCUtf8;
+            let module = RuntimeGraphqlModule::compile(
+                fixture.schema.clone(),
+                RuntimeGraphqlOptions::default()
+                    .with_mutations(RuntimeGraphqlMutationOptions::default())
+                    .with_cursor_profile(RuntimeCursorProfile::Unprotected)
+                    .with_live_source(
+                        fixture.source.clone(),
+                        RuntimeLiveProfile::ApplicationPolicy { match_profile },
+                    ),
+            )
+            .unwrap();
+            let entities = module.semantic_entities();
+            let (api, _) =
+                RuntimeGraphqlComposer::new(fixture.db.clone(), "Query", Default::default())
+                    .unwrap()
+                    .mutation_root("Mutation")
+                    .unwrap()
+                    .install(module)
+                    .unwrap()
+                    .finish_with_semantic_catalog()
+                    .unwrap();
+            let mut sdl = api.sdl();
+            let start = sdl.find("type Query {").unwrap();
+            let end = start + sdl[start..].find("\n}").unwrap() + 2;
+            sdl.replace_range(
+                start..end,
+                "type Query {\n inspectKey(key: RecordKeyInput): Record\n}",
+            );
+            let operation = GraphqlSemanticOperationDescriptor::generated(
+                GraphqlOperationKind::Query,
+                GeneratedGraphqlOperationCategory::SingleRead,
+                "Record",
+                "inspectKey",
+                "Inspect a public record key.",
+                vec![GraphqlSemanticArgumentDescriptor {
+                    graphql_name: "key".into(),
+                    description: "Generated key.".into(),
+                    type_ref: GraphqlSemanticTypeRef::named(
+                        "RecordKeyInput",
+                        GraphqlSemanticTypeKind::Object,
+                        true,
+                    ),
+                }],
+                GraphqlSemanticTypeRef::named("Record", GraphqlSemanticTypeKind::Object, true),
+                true,
+            )
+            .unwrap();
+            let catalog =
+                GraphqlSemanticCatalog::compose_descriptors(entities, [operation]).unwrap();
+            let capabilities = AiGraphqlQueryCapabilityCatalog::compile(
+                "live-keys",
+                GraphqlExecutionTargetId::parse("live.keys").unwrap(),
+                &sdl,
+                &catalog,
+                AiGraphqlQueryCapabilityLimits::default(),
+            )
+            .unwrap();
+            assert_eq!(capabilities.capabilities().count(), 1);
+            if live && value_kind == RuntimeValueKind::Uuid {
+                let imitating = sdl.replacen("scalar UUID", "enum UUID { LABEL OTHER_COLUMN }", 1);
+                assert_ne!(imitating, sdl);
+                let error = AiGraphqlQueryCapabilityCatalog::compile(
+                    "live-keys",
+                    GraphqlExecutionTargetId::parse("live.keys").unwrap(),
+                    &imitating,
+                    &catalog,
+                    AiGraphqlQueryCapabilityLimits::default(),
+                )
+                .expect_err("live key UUID is a scalar contract");
+                assert!(error.to_string().contains("RecordKeyInput.id"));
+            }
+        }
+    }
+}

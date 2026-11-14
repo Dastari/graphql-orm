@@ -3151,7 +3151,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-ai"
-version = "0.140.0"
+version = "0.142.0"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -3162,6 +3162,7 @@ dependencies = [
  "futures",
  "graphql-orm",
  "graphql-orm-ai-tool-profiles",
+ "graphql-orm-operation-catalog",
  "graphql-orm-storage",
  "hex",
  "hmac 0.12.1",
@@ -3188,7 +3189,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-ai-tool-profiles"
-version = "0.22.0"
+version = "0.23.0"
 dependencies = [
  "async-graphql",
  "async-graphql-parser",
@@ -3239,7 +3240,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-operation-catalog"
-version = "0.7.4"
+version = "0.8.0"
 dependencies = [
  "graphql-orm-router-protocol",
  "serde",

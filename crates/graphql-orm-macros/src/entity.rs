@@ -2991,6 +2991,181 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
     Ok(meta)
 }
 
+/// Host-only contracts use the same input eligibility and Rust input types as
+/// the generated resolvers. They do not create GraphQL fields or descriptions.
+fn generated_hidden_input_members(
+    struct_name: &syn::Ident,
+    fields: &syn::punctuated::Punctuated<Field, syn::token::Comma>,
+    entity_meta: &EntityMetadata,
+    entity_classification: &str,
+    graphql_rename_fields: Option<&str>,
+    serde_rename_all: Option<&str>,
+) -> syn::Result<Vec<proc_macro2::TokenStream>> {
+    let keys = crate::operations::collect_primary_key_fields(
+        struct_name,
+        fields,
+        graphql_rename_fields,
+        serde_rename_all,
+    )
+    .unwrap_or_default();
+    let auto_generated_pk = !(keys.len() > 1 && entity_meta.append_only)
+        && keys
+            .first()
+            .is_some_and(|key| key.meta.auto_generated.unwrap_or(key.rust_name == "id"));
+    let mut members = Vec::new();
+    for expression in &entity_meta.order_expressions {
+        let input = format!("{struct_name}OrderByInput");
+        let name = &expression.name;
+        members.push(quote! {
+            ::graphql_orm::graphql::orm::GraphqlGeneratedInputMember {
+                kind: ::graphql_orm::graphql::orm::GraphqlGeneratedInputKind::OrderBy,
+                input_type: ::std::string::String::from(#input),
+                field_name: ::std::string::String::from(#name),
+                type_ref: ::graphql_orm::graphql::orm::GraphqlSemanticTypeRef::named(
+                    "OrderDirection", ::graphql_orm::graphql::orm::GraphqlSemanticTypeKind::Enum, true,
+                ),
+                required: false,
+            }
+        });
+    }
+    for field in fields {
+        let meta = parse_field_metadata(field)?;
+        if meta.is_relation {
+            if meta.graphql_readable()
+                && let Some(order) = &meta.relation_order_aggregate
+            {
+                let input = format!("{struct_name}OrderByInput");
+                let name = &order.name;
+                members.push(quote! {
+                    ::graphql_orm::graphql::orm::GraphqlGeneratedInputMember {
+                        kind: ::graphql_orm::graphql::orm::GraphqlGeneratedInputKind::OrderBy,
+                        input_type: ::std::string::String::from(#input),
+                        field_name: ::std::string::String::from(#name),
+                        type_ref: ::graphql_orm::graphql::orm::GraphqlSemanticTypeRef::named(
+                            "OrderDirection", ::graphql_orm::graphql::orm::GraphqlSemanticTypeKind::Enum, true,
+                        ),
+                        required: false,
+                    }
+                });
+            }
+            continue;
+        }
+        if meta.skip_db {
+            continue;
+        }
+        let hidden = !meta.graphql_readable()
+            || meta.non_exportable
+            || meta
+                .classification
+                .as_deref()
+                .unwrap_or(entity_classification)
+                == "secret";
+        if !hidden {
+            continue;
+        }
+        let rust_name = field.ident.as_ref().expect("named fields").to_string();
+        let name = graphql_field_name(&meta, &rust_name, graphql_rename_fields, serde_rename_all);
+        let mut append = |kind: &str, input: String, ty: proc_macro2::TokenStream| {
+            let kind = syn::Ident::new(kind, field.span());
+            members.push(quote! {
+                ::graphql_orm::graphql::orm::GraphqlGeneratedInputMember {
+                    kind: ::graphql_orm::graphql::orm::GraphqlGeneratedInputKind::#kind,
+                    input_type: ::std::string::String::from(#input),
+                    field_name: ::std::string::String::from(#name),
+                    type_ref: ::graphql_orm::graphql::orm::parse_graphql_type(
+                        &<#ty as ::graphql_orm::async_graphql::InputType>::qualified_type_name(),
+                    ).expect("generated input member has a valid GraphQL type"),
+                    required: <#ty as ::graphql_orm::async_graphql::InputType>::qualified_type_name().ends_with('!'),
+                }
+            });
+        };
+        let write_type = graphql_write_input_type(&field.ty, &meta);
+        if crate::operations::create_input_visibility(&meta, &rust_name, auto_generated_pk) {
+            append(
+                "Create",
+                format!("Create{struct_name}Input"),
+                quote! { #write_type },
+            );
+        }
+        if !meta.is_primary_key
+            && !meta.timestamp_behavior(&rust_name).exclude_input
+            && meta.write
+            && (!meta.skip_input || meta.input_only)
+        {
+            append(
+                "Update",
+                format!("Update{struct_name}Input"),
+                quote! { Option<#write_type> },
+            );
+        }
+        if meta.filter
+            && let Some(kind) = meta.filterable.as_deref()
+        {
+            let helper = match kind {
+                "string" => "StringFilter",
+                "uuid" => "UuidFilter",
+                "number" => "IntFilter",
+                "int64" => "Int64Filter",
+                "decimal" => "DecimalFilter",
+                "boolean" | "bool" => "BoolFilter",
+                "bytes" => "BytesFilter",
+                "date" => "DateFilter",
+                "spatial" => "SpatialFilter",
+                _ => {
+                    return Err(syn::Error::new_spanned(
+                        field,
+                        "unsupported canonical filter type",
+                    ));
+                }
+            };
+            let helper = syn::Ident::new(helper, field.span());
+            append(
+                "Where",
+                format!("{struct_name}WhereInput"),
+                quote! { Option<::graphql_orm::graphql::filters::#helper> },
+            );
+        }
+        if meta.sortable && meta.order {
+            append(
+                "OrderBy",
+                format!("{struct_name}OrderByInput"),
+                quote! { Option<::graphql_orm::graphql::orm::OrderDirection> },
+            );
+        }
+        let is_key = keys.iter().any(|key| key.rust_name == rust_name);
+        if keys.len() > 1 && is_key {
+            let ty = &field.ty;
+            append("Key", format!("{struct_name}KeyInput"), quote! { #ty });
+        }
+        if entity_meta.keyset.is_some()
+            && meta.graphql_readable()
+            && !meta.graphql_skip
+            && meta.transform_read.is_none()
+            && (is_key || (meta.sortable && meta.order))
+            && crate::operations::runtime_keyset_value(&field.ty).is_some()
+        {
+            append(
+                "KeysetOrderBy",
+                format!("{struct_name}KeysetOrderByInput"),
+                quote! { Option<::graphql_orm::graphql::orm::OrderDirection> },
+            );
+        }
+    }
+    Ok(members)
+}
+
+pub(crate) fn graphql_write_input_type(field_type: &syn::Type, meta: &FieldMetadata) -> syn::Type {
+    if meta.is_json_field || meta.spatial.is_some() {
+        if let Some(inner) = option_inner_type(field_type) {
+            syn::parse_quote! { Option<::graphql_orm::async_graphql::Json<#inner>> }
+        } else {
+            syn::parse_quote! { ::graphql_orm::async_graphql::Json<#field_type> }
+        }
+    } else {
+        field_type.clone()
+    }
+}
+
 /// Keep legacy Rust-name input exclusion distinct from physical-column updates.
 /// Host management disables both; it never changes column/default metadata.
 #[derive(Clone, Copy)]
@@ -4011,6 +4186,14 @@ fn generate_entity_tokens(
     let mut search_relation_traversal_checks = Vec::new();
     let mut subscription_field_policy_arms = Vec::new();
     let mut semantic_field_defs = Vec::new();
+    let hidden_input_member_defs = generated_hidden_input_members(
+        struct_name,
+        fields,
+        &entity_meta,
+        entity_classification,
+        graphql_rename_fields,
+        serde_rename_all,
+    )?;
     let mut semantic_record_version = quote! { None };
     let mut aggregate_field_variants = Vec::new();
     let mut aggregate_field_match_arms = Vec::new();
@@ -6178,6 +6361,7 @@ fn generate_entity_tokens(
                     > = ::std::sync::OnceLock::new();
                     Some(METADATA.get_or_init(|| {
                         ::graphql_orm::graphql::orm::GraphqlEntitySemanticMetadata {
+                            generated_input_members: vec![#(#hidden_input_member_defs),*],
                             entity_name: ::std::string::ToString::to_string(#struct_name_str),
                             description: ::std::string::ToString::to_string(#entity_description),
                             default_classification: #entity_classification_tokens,
@@ -6876,6 +7060,7 @@ fn generate_entity_tokens(
                 > = ::std::sync::OnceLock::new();
                 Some(METADATA.get_or_init(|| {
                     ::graphql_orm::graphql::orm::GraphqlEntitySemanticMetadata {
+                        generated_input_members: vec![#(#hidden_input_member_defs),*],
                         entity_name: ::std::string::ToString::to_string(#struct_name_str),
                         description: ::std::string::ToString::to_string(#entity_description),
                         default_classification: #entity_classification_tokens,
