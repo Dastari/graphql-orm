@@ -65,6 +65,12 @@ const REVIEWS_SDL_ENDPOINT_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_REVIEWS_SDL_ENDP
 const PRODUCTS_PROTOCOL_ENDPOINT_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_PRODUCTS_PROTOCOL_ENDPOINT";
 const REVIEWS_PROTOCOL_ENDPOINT_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_REVIEWS_PROTOCOL_ENDPOINT";
 const PROMETHEUS_LISTENER_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_PROMETHEUS_LISTENER";
+const OMIT_OPERATION_NAME_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_OMIT_OPERATION_NAME";
+/// A file whose content `stale` makes the `role-events` credential's role
+/// expansion unavailable, as a role-scope catalogue past its maximum staleness.
+const AUTHORITY_CONTROL_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_AUTHORITY_CONTROL";
+/// Each fresh `role-events` expansion stays valid this long.
+const ROLE_AUTHORITY_LIFETIME: Duration = Duration::from_millis(300);
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 const PRODUCTS_V1: &str = r#"
@@ -284,10 +290,14 @@ fn router_child_entrypoint() {
                 }
                 if let Ok(listener) = env::var(PROMETHEUS_LISTENER_ENV) {
                     config = config.with_telemetry(
-                        crate::RouterTelemetryConfig::new().with_prometheus_listener(
-                            listener.parse().expect("Prometheus listener address"),
-                            "/internal/metrics",
-                        ),
+                        crate::RouterTelemetryConfig::new()
+                            .with_prometheus_listener(
+                                listener.parse().expect("Prometheus listener address"),
+                                "/internal/metrics",
+                            )
+                            .omit_operation_name_from_metrics(
+                                env::var_os(OMIT_OPERATION_NAME_ENV).is_some(),
+                            ),
                     );
                 }
                 let control = env::var("PERSISTED_CONTROL").ok();
@@ -439,6 +449,22 @@ impl AuthenticationProvider for TestAuthenticationProvider {
         &self,
         token: &str,
     ) -> Result<AuthenticatedPrincipal, AuthenticationError> {
+        if token == "role-events" {
+            let stale = env::var_os(AUTHORITY_CONTROL_ENV)
+                .and_then(|path| fs::read_to_string(path).ok())
+                .is_some_and(|state| state.trim() == "stale");
+            if stale {
+                return Err(AuthenticationError::unavailable(
+                    "role-scope catalogue snapshot exceeded its maximum staleness",
+                ));
+            }
+            return Ok(AuthenticatedPrincipal::new(
+                "role-subject",
+                ["products.p1.events", "products.failure.events"],
+                SystemTime::now().checked_add(Duration::from_secs(3_600)),
+            )?
+            .with_authority_valid_until(Instant::now() + ROLE_AUTHORITY_LIFETIME));
+        }
         let (subject, scopes) = match token {
             "product-p1" => ("test-subject", vec!["products.p1.read"]),
             "product-admin" => ("test-subject", vec!["products.admin"]),
@@ -1548,6 +1574,15 @@ fn public_static_router_serves_only_after_complete_preparation() {
 
 #[test]
 fn prometheus_exporter_binds_only_its_separate_scrape_address() {
+    prometheus_exporter_case("127.0.0.2:0", false);
+}
+
+#[test]
+fn prometheus_exporter_binds_ipv6_and_can_omit_operation_names() {
+    prometheus_exporter_case("[::1]:0", true);
+}
+
+fn prometheus_exporter_case(bind: &str, omit_operation_name: bool) {
     let products = LoopbackSubgraph::start(SubgraphKind::Products);
     let reviews = LoopbackSubgraph::start(SubgraphKind::Reviews);
     let products_sdl = LoopbackSdl::start(PRODUCTS_V1);
@@ -1555,10 +1590,14 @@ fn prometheus_exporter_binds_only_its_separate_scrape_address() {
     // The public listener binds 127.0.0.1. Reserve a port on another loopback
     // address for the exporter; Hive binds it itself, so release it first.
     let metrics = {
-        let reserved = TcpListener::bind("127.0.0.2:0").expect("second loopback address");
+        let reserved = TcpListener::bind(bind).expect("second loopback address");
         reserved.local_addr().unwrap()
     };
-    let child = Command::new(env::current_exe().expect("test executable path"))
+    let mut command = Command::new(env::current_exe().expect("test executable path"));
+    if omit_operation_name {
+        command.env(OMIT_OPERATION_NAME_ENV, "true");
+    }
+    let child = command
         .args([
             "--exact",
             "federation::wire_tests::router_child_entrypoint",
@@ -1584,9 +1623,10 @@ fn prometheus_exporter_binds_only_its_separate_scrape_address() {
     );
 
     let literal = "metrics-literal-7f3a";
+    let operation = "MetricsOperation5d2b";
     let response = router.graphql_at(
         "/api/graphql",
-        json!({"query": format!("query {{ product(id: \"{literal}\") {{ id }} }}")}),
+        json!({"query": format!("query {operation} {{ product(id: \"{literal}\") {{ id }} }}")}),
         &[("x-approved", "metrics-header-9c1e")],
     );
     assert!(response.get("data").is_some(), "{response}");
@@ -1607,6 +1647,12 @@ fn prometheus_exporter_binds_only_its_separate_scrape_address() {
             "the exporter must not publish request or credential text: {secret}"
         );
     }
+    assert_eq!(
+        body.contains(operation),
+        !omit_operation_name,
+        "the operation-name attribute follows the opt-in filter: {body}"
+    );
+    assert!(body.contains("http_server_request_duration"), "{body}");
 
     // The exporter is not on the public IP address, and the public listener
     // does not serve the scrape path.
@@ -2461,6 +2507,95 @@ fn authenticated_websocket_uses_provider_clock_and_rejects_clock_failure() {
         }
         router.stop();
     }
+}
+
+#[test]
+fn established_websocket_respects_the_role_authority_deadline() {
+    let products = LoopbackSubgraph::start(SubgraphKind::Products);
+    let reviews = LoopbackSubgraph::start(SubgraphKind::Reviews);
+    let products_sdl = LoopbackSdl::start(PRODUCTS_V1);
+    let reviews_sdl = LoopbackSdl::start(REVIEWS);
+    let products_protocol = LoopbackProtocol::start(protocol_descriptor(
+        "products",
+        products.endpoint(),
+        products_sdl.endpoint(),
+        authenticated_product_operations(false),
+    ));
+    let reviews_protocol = LoopbackProtocol::start(protocol_descriptor(
+        "reviews",
+        reviews.endpoint(),
+        reviews_sdl.endpoint(),
+        Vec::new(),
+    ));
+    let temp = TemporaryConfig::new();
+    let control = temp.directory.join("authority");
+    fs::write(&control, "fresh").unwrap();
+    let child = Command::new(env::current_exe().expect("test executable path"))
+        .args([
+            "--exact",
+            "federation::wire_tests::router_child_entrypoint",
+            "--nocapture",
+        ])
+        .env(CHILD_ENV, "auth-subscriptions")
+        .env(AUTHORITY_CONTROL_ENV, &control)
+        .env(PRODUCTS_ENDPOINT_ENV, products.endpoint())
+        .env(REVIEWS_ENDPOINT_ENV, reviews.endpoint())
+        .env(PRODUCTS_SDL_ENDPOINT_ENV, products_sdl.endpoint())
+        .env(REVIEWS_SDL_ENDPOINT_ENV, reviews_sdl.endpoint())
+        .env(PRODUCTS_PROTOCOL_ENDPOINT_ENV, products_protocol.endpoint())
+        .env(REVIEWS_PROTOCOL_ENDPOINT_ENV, reviews_protocol.endpoint())
+        .env("RUST_TEST_THREADS", "1")
+        .env("RUST_LOG", "error")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("authority router child should start");
+    let mut router = TestRouter::from_child(child, false).0;
+    router.wait_until_ready();
+    let subscription = r#"subscription { productChanged(id: "p1") { id } }"#;
+    let assert_unavailable = |message: &Value| {
+        assert_eq!(message["type"], "error", "{message}");
+        assert_eq!(
+            message["payload"][0]["extensions"]["code"], "UNAUTHENTICATED",
+            "{message}"
+        );
+    };
+
+    let mut role = TestWebSocket::connect_at(router.address, "/api/graphql");
+    role.connection_init_bearer("role-events");
+    role.subscribe("held", subscription);
+    assert_eq!(
+        role.wait_for_operation_message("held", "next")["payload"]["data"]["productChanged"]["id"],
+        "p1"
+    );
+    // Fresh expansions renew the deadline: the connection outlives several.
+    thread::sleep(ROLE_AUTHORITY_LIFETIME * 3);
+    let mut direct = TestWebSocket::connect_at(router.address, "/api/graphql");
+    direct.connection_init_bearer("product-events");
+    direct.subscribe("direct", subscription);
+    direct.wait_for_operation_message("direct", "next");
+
+    // The authority goes stale: the held subscription ends, and new operations
+    // are refused, while the connection itself stays open.
+    fs::write(&control, "stale").unwrap();
+    assert_unavailable(&role.wait_for_operation_message("held", "error"));
+    role.subscribe("after", subscription);
+    assert_unavailable(&role.wait_for_operation_message("after", "error"));
+    role.subscribe("query", r#"query { product(id: "p1") { id } }"#);
+    assert_unavailable(&role.wait_for_operation_message("query", "error"));
+
+    // Direct scopes do not depend on the authority.
+    direct.subscribe("direct-2", subscription);
+    direct.wait_for_operation_message("direct-2", "next");
+
+    // A refreshed authority restores the same role-bearing connection.
+    fs::write(&control, "fresh").unwrap();
+    role.subscribe("renewed", subscription);
+    assert_eq!(
+        role.wait_for_operation_message("renewed", "next")["payload"]["data"]["productChanged"]["id"],
+        "p1"
+    );
+    router.stop();
 }
 
 #[test]
@@ -5071,7 +5206,12 @@ fn handle_subgraph_websocket(
     });
     if !matches!(
         authorization,
-        Some("Bearer product-events" | "Bearer product-events-refreshed" | "Bearer short-lived")
+        Some(
+            "Bearer product-events"
+                | "Bearer product-events-refreshed"
+                | "Bearer short-lived"
+                | "Bearer role-events"
+        )
     ) {
         return write_server_websocket_close(&mut request.stream, 4401, "unauthorized");
     }

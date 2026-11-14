@@ -295,7 +295,20 @@ struct ConnectionState {
     next_operation: u64,
     local_loss: hive_router::tokio::sync::watch::Sender<u64>,
     permit: Option<ConnectionPermit>,
+    /// Present only while the connection's scopes came from an external
+    /// authority with a deadline, such as role-scope catalogue expansion.
+    authority: Option<ConnectionAuthority>,
 }
+
+/// The retained bearer of a connection whose expanded scopes expire with the
+/// authority snapshot they came from. It is never logged or formatted.
+struct ConnectionAuthority {
+    bearer: String,
+    valid_until: std::time::Instant,
+}
+
+/// How often a connection whose authority has lapsed checks it again.
+const AUTHORITY_RETRY: std::time::Duration = std::time::Duration::from_millis(500);
 
 struct Operation {
     internal_id: String,
@@ -325,6 +338,43 @@ impl ConnectionState {
         }
         self.local_loss
             .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+    }
+
+    /// Confirms the connection's externally expanded scopes before another
+    /// operation. Past their deadline the retained bearer is authenticated
+    /// again: a fresher snapshot renews the deadline (and applies role
+    /// changes in the private endpoint), and a stale one fails.
+    fn confirm_authority(&mut self) -> Result<(), ()> {
+        let provider = self.gateway.authentication.clone();
+        let Some(authority) = &mut self.authority else {
+            return Ok(());
+        };
+        if provider.monotonic_now() < authority.valid_until {
+            return Ok(());
+        }
+        let principal = provider
+            .authenticate_bearer(&authority.bearer)
+            .map_err(|_| ())?;
+        match principal.authority_valid_until() {
+            Some(deadline) => authority.valid_until = deadline,
+            None => self.authority = None,
+        }
+        Ok(())
+    }
+
+    /// Ends every subscription after the connection's authority lapsed and
+    /// returns their public and internal IDs. One-shot operations finish.
+    fn end_subscriptions_for_lapsed_authority(&mut self) -> Vec<(String, String)> {
+        let ended = self
+            .operations
+            .iter()
+            .filter(|(_, operation)| operation.subscription)
+            .map(|(id, operation)| (id.clone(), operation.internal_id.clone()))
+            .collect::<Vec<_>>();
+        for (id, _) in &ended {
+            self.remove_operation(id);
+        }
+        ended
     }
 
     fn remove_operation(&mut self, id: &str) {
@@ -443,6 +493,7 @@ async fn create_connection_service(
         next_operation: 0,
         local_loss: hive_router::tokio::sync::watch::channel(0).0,
         permit: Some(permit),
+        authority: None,
     }));
 
     spawn_continuity_watch(
@@ -679,10 +730,21 @@ async fn initialize_connection(
             .borrow_mut()
             .terminate_with_public_close(1013, "Too many connections");
     };
+    let watch_authority = principal.authority_valid_until().is_some();
     {
         let mut state = state.borrow_mut();
         state.permit = Some(permit);
         state.phase = ConnectionPhase::Connecting;
+        state.authority =
+            principal
+                .authority_valid_until()
+                .map(|valid_until| ConnectionAuthority {
+                    bearer: token.to_owned(),
+                    valid_until,
+                });
+    }
+    if watch_authority {
+        spawn_authority_watch(Rc::downgrade(&state), external_sink.clone());
     }
     spawn_expiry(
         Rc::downgrade(&state),
@@ -1033,6 +1095,11 @@ async fn forward_subscribe(
         if state.operations.contains_key(&id) {
             return state.terminate_with_public_close(4409, "Subscriber already exists");
         }
+        if state.confirm_authority().is_err() {
+            return Some(ws::Message::Text(
+                authority_unavailable_error(&id).to_string().into(),
+            ));
+        }
         if let Some(documents) = &state.gateway.persisted_documents
             && let Err(code) = documents.prepare_websocket_payload(&mut message)
         {
@@ -1307,10 +1374,101 @@ fn close_message(code: u16, description: &str) -> ws::Message {
 /// Sends a best-effort close or completion to a peer that may already have
 /// gone. A failure only means the peer closed first, so it is counted rather
 /// than propagated. Neither the message nor the peer is recorded.
-async fn send_best_effort(sink: &ws::WsSink, message: ws::Message, metrics: &RouterMetrics) {
-    if sink.send(message).await.is_err() {
+async fn send_best_effort(sink: &impl ControlSink, message: ws::Message, metrics: &RouterMetrics) {
+    if !sink.send_control(message).await {
         metrics.websocket_send_failed();
     }
+}
+
+/// A WebSocket peer that accepts one best-effort control message.
+trait ControlSink {
+    /// Attempts the send; `false` means the peer was already gone.
+    fn send_control(&self, message: ws::Message) -> impl std::future::Future<Output = bool>;
+}
+
+impl ControlSink for ws::WsSink {
+    fn send_control(&self, message: ws::Message) -> impl std::future::Future<Output = bool> {
+        let sent = self.send(message);
+        async move { sent.await.is_ok() }
+    }
+}
+
+/// The operation-scoped refusal when a connection's expanded scopes can no
+/// longer be confirmed, matching the HTTP refusal.
+fn authority_unavailable_error(id: &str) -> Value {
+    json!({"id": id, "type": "error", "payload": [{
+        "message": "authentication service unavailable",
+        "extensions": {"code": "UNAUTHENTICATED"}
+    }]})
+}
+
+/// Watches the authority deadline of a connection with expanded scopes. Once
+/// it passes and cannot be renewed, the connection's subscriptions end with
+/// [`authority_unavailable_error`]; the connection stays open, and a later
+/// operation succeeds again once the authority refreshes.
+fn spawn_authority_watch(state: Weak<RefCell<ConnectionState>>, sink: ws::WsSink) {
+    rt::spawn(async move {
+        loop {
+            let delay = {
+                let Some(state) = state.upgrade() else {
+                    return;
+                };
+                let state = state.borrow();
+                if state.phase == ConnectionPhase::Closed {
+                    return;
+                }
+                let Some(authority) = &state.authority else {
+                    return;
+                };
+                authority
+                    .valid_until
+                    .saturating_duration_since(state.gateway.authentication.monotonic_now())
+            };
+            hive_router::tokio::select! {
+                _ = hive_router::tokio::time::sleep(delay.max(std::time::Duration::from_millis(10))) => {}
+                _ = sink.on_disconnect() => return,
+            }
+            let Some(shared) = state.upgrade() else {
+                return;
+            };
+            let (ended, internal, metrics) = {
+                let mut state = shared.borrow_mut();
+                if state.phase == ConnectionPhase::Closed {
+                    return;
+                }
+                if state.confirm_authority().is_ok() {
+                    continue;
+                }
+                (
+                    state.end_subscriptions_for_lapsed_authority(),
+                    state.internal_sink.clone(),
+                    state.gateway.metrics.clone(),
+                )
+            };
+            drop(shared);
+            for (id, internal_id) in ended {
+                send_best_effort(
+                    &sink,
+                    ws::Message::Text(authority_unavailable_error(&id).to_string().into()),
+                    &metrics,
+                )
+                .await;
+                if let Some(internal) = &internal {
+                    let complete = json!({"id": internal_id, "type": "complete"});
+                    send_best_effort(
+                        internal,
+                        ws::Message::Text(complete.to_string().into()),
+                        &metrics,
+                    )
+                    .await;
+                }
+            }
+            hive_router::tokio::select! {
+                _ = hive_router::tokio::time::sleep(AUTHORITY_RETRY) => {}
+                _ = sink.on_disconnect() => return,
+            }
+        }
+    });
 }
 
 fn continuity_error(id: &str) -> Value {
@@ -1430,6 +1588,7 @@ mod tests {
             operations,
             next_operation: 0,
             permit: None,
+            authority: None,
             local_loss: hive_router::tokio::sync::watch::channel(0).0,
         }))
     }
@@ -1648,6 +1807,7 @@ mod tests {
             next_operation: 1,
             local_loss: hive_router::tokio::sync::watch::channel(0).0,
             permit: None,
+            authority: None,
         }));
         gateway.add_operation();
         if continuity_lost {
@@ -1791,6 +1951,25 @@ mod tests {
         assert!(endpoint.authorizes(&endpoint.path, Some(&endpoint.secret)));
     }
 
+    struct FixedSink(bool);
+
+    impl ControlSink for FixedSink {
+        fn send_control(&self, _: ws::Message) -> impl std::future::Future<Output = bool> {
+            std::future::ready(self.0)
+        }
+    }
+
+    #[ntex::test]
+    async fn failed_best_effort_sends_are_counted() {
+        let metrics = RouterMetrics::default();
+        send_best_effort(&FixedSink(true), close_message(1000, "done"), &metrics).await;
+        assert_eq!(metrics.snapshot().websocket_send_failures_total(), 0);
+        for _ in 0..2 {
+            send_best_effort(&FixedSink(false), close_message(1000, "gone"), &metrics).await;
+        }
+        assert_eq!(metrics.snapshot().websocket_send_failures_total(), 2);
+    }
+
     #[test]
     fn projection_trim_matches_the_reserialising_reference() {
         let message = || {
@@ -1799,6 +1978,11 @@ mod tests {
                 variables.insert(format!("v{index:02}"), json!(format!("value-{index}")));
             }
             variables.insert("quo\"te".to_owned(), json!("needs \"escaping\""));
+            variables.insert(
+                "multibyte".to_owned(),
+                json!("\u{fc}mlaut \u{20ac} \u{1f600}"),
+            );
+            variables.insert("control".to_owned(), json!("line\nbreak\u{1}"));
             variables.insert("unicode\u{e9}".to_owned(), json!(12.5));
             variables.insert("flag".to_owned(), json!(true));
             variables.insert("nothing".to_owned(), Value::Null);
@@ -1840,7 +2024,14 @@ mod tests {
         for limit in (0..=full + 2).step_by(7).chain([full, full - 1, 1]) {
             let mut trimmed = message();
             inject_operation_variables(&mut trimmed, limit);
-            assert_eq!(trimmed, reference(limit), "limit {limit}");
+            let expected = reference(limit);
+            assert_eq!(trimmed, expected, "limit {limit}");
+            // Compare the exact serialized bytes sent to the private endpoint.
+            assert_eq!(
+                trimmed.to_string().into_bytes(),
+                expected.to_string().into_bytes(),
+                "limit {limit}"
+            );
         }
     }
 

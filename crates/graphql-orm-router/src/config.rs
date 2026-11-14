@@ -1035,6 +1035,7 @@ pub struct RouterTelemetryConfig {
     pub(crate) prometheus_port: Option<u16>,
     pub(crate) prometheus_host: Option<IpAddr>,
     pub(crate) prometheus_path: String,
+    pub(crate) omit_operation_name_from_metrics: bool,
 }
 
 impl RouterTelemetryConfig {
@@ -1094,6 +1095,21 @@ impl RouterTelemetryConfig {
         self
     }
 
+    /// Removes the client-chosen `graphql.operation.name` attribute from every
+    /// exported metric that would carry it (the HTTP server request, body-size,
+    /// overhead and external-wait instruments, and the cost instruments).
+    ///
+    /// Off by default, so existing dashboards keep their series. Operation
+    /// names are chosen by clients, so each distinct name can start new metric
+    /// series and is retained as scrape text. Enable this where anonymous or
+    /// untrusted clients can send operations, accepting that per-operation
+    /// breakdowns disappear from these metrics.
+    #[must_use]
+    pub fn omit_operation_name_from_metrics(mut self, omit: bool) -> Self {
+        self.omit_operation_name_from_metrics = omit;
+        self
+    }
+
     /// Returns the address the optional scrape listener binds for a router
     /// whose public listener is `public_listener`.
     pub(crate) fn prometheus_listener(&self, public_listener: SocketAddr) -> Option<SocketAddr> {
@@ -1138,6 +1154,7 @@ impl Default for RouterTelemetryConfig {
             prometheus_port: None,
             prometheus_host: None,
             prometheus_path: "/metrics".to_owned(),
+            omit_operation_name_from_metrics: false,
         }
     }
 }

@@ -6,7 +6,7 @@ use std::{
         Arc, RwLock,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(feature = "auth-agql")]
@@ -252,6 +252,17 @@ pub enum LegacyScopeClaims {
 pub trait AuthenticationClock: Send + Sync + fmt::Debug + 'static {
     /// Returns the resource server's current wall-clock time.
     fn now(&self) -> SystemTime;
+
+    /// Returns a monotonic instant for deadlines that must not move with the
+    /// wall clock, such as role-scope catalogue staleness.
+    ///
+    /// Wall time validates signed timestamps once, when a snapshot is
+    /// accepted; from then on its staleness deadline follows this clock, so
+    /// moving the wall clock never reopens or extends a snapshot. The default
+    /// is [`Instant::now`].
+    fn monotonic_now(&self) -> Instant {
+        Instant::now()
+    }
 }
 
 /// System wall clock used by default.
@@ -687,9 +698,23 @@ impl JwksAuthenticationProvider {
         let mut cache = self.role_scope_cache.write().map_err(|_| {
             AuthenticationError::unavailable("role-scope catalogue cache is unavailable")
         })?;
+        // Wall time is read once here, to turn the signed expiry into a
+        // remaining lifetime; the deadlines then follow the monotonic clock.
+        let loaded_at = self.config.clock.now();
+        let accepted = self.config.clock.monotonic_now();
+        let signed_remaining = expires_at
+            .duration_since(loaded_at)
+            .unwrap_or(Duration::ZERO);
+        let stale_at = accepted
+            .checked_add(config.cache_ttl.min(signed_remaining))
+            .unwrap_or(accepted);
+        let refuse_at = stale_at
+            .checked_add(config.maximum_staleness)
+            .unwrap_or(stale_at);
         *cache = Some(Arc::new(RoleScopeCache {
-            loaded_at: self.config.clock.now(),
-            expires_at,
+            loaded_at,
+            stale_at,
+            refuse_at,
             provider,
         }));
         self.role_scope_refresh_failures.store(0, Ordering::Release);
@@ -847,13 +872,15 @@ impl JwksAuthenticationProvider {
     }
 
     #[cfg(feature = "auth-agql")]
+    /// Expands authorization roles. With roles, also returns the monotonic
+    /// deadline after which the snapshot used no longer expands them.
     fn expand_roles(
         &self,
         roles: &[String],
         direct_scopes: Vec<String>,
-    ) -> Result<Vec<String>, AuthenticationError> {
+    ) -> Result<(Vec<String>, Option<Instant>), AuthenticationError> {
         if roles.is_empty() {
-            return Ok(direct_scopes);
+            return Ok((direct_scopes, None));
         }
         let Some(config) = &self.config.role_scope_catalogue else {
             return Err(AuthenticationError::unavailable(
@@ -874,19 +901,16 @@ impl JwksAuthenticationProvider {
                 "role-scope catalogue cache is not initialized",
             ));
         };
-        let age = now.duration_since(cache.loaded_at).map_err(|_| {
+        // A wall clock behind the load time still fails closed.
+        now.duration_since(cache.loaded_at).map_err(|_| {
             AuthenticationError::unavailable(
                 "authentication clock moved before role-scope catalogue load time",
             )
         })?;
-        // Stale from the soft age or the signed expiry, whichever is first.
-        let stale_since = cache
-            .loaded_at
-            .checked_add(config.cache_ttl)
-            .map_or(cache.expires_at, |soft| soft.min(cache.expires_at));
-        if now >= stale_since {
-            let staleness = now.duration_since(stale_since).unwrap_or_default();
-            if staleness >= config.maximum_staleness {
+        let monotonic_now = self.config.clock.monotonic_now();
+        if monotonic_now >= cache.stale_at {
+            let staleness = monotonic_now.saturating_duration_since(cache.stale_at);
+            if monotonic_now >= cache.refuse_at {
                 let count = self
                     .role_scope_stale_refusals
                     .fetch_add(1, Ordering::Relaxed)
@@ -911,7 +935,7 @@ impl JwksAuthenticationProvider {
             if count == 1 || count.is_power_of_two() {
                 tracing::warn!(
                     stale_serve_total = count,
-                    stale_seconds = age.as_secs(),
+                    stale_seconds = staleness.as_secs(),
                     "serving a stale signature-verified role-scope catalogue while refreshing"
                 );
             }
@@ -923,7 +947,10 @@ impl JwksAuthenticationProvider {
             }
             AuthenticationError::unavailable("role-scope catalogue expansion failed")
         })?;
-        Ok(effective_scopes(direct_scopes, &expansion))
+        Ok((
+            effective_scopes(direct_scopes, &expansion),
+            Some(cache.refuse_at),
+        ))
     }
 
     /// Returns the process-local count of requests served from a stale but
@@ -995,14 +1022,25 @@ impl AuthenticationProvider for JwksAuthenticationProvider {
         validate_time_claims(&claims, self.config.clock.as_ref(), self.config.leeway)?;
         let scopes = parse_scope_claims(&claims.additional, self.config.legacy_scope_claims)?;
         #[cfg(feature = "auth-agql")]
-        let scopes = self.expand_roles(&claims.authorization_roles, scopes)?;
+        let (scopes, authority_valid_until) =
+            self.expand_roles(&claims.authorization_roles, scopes)?;
         let expires_at = UNIX_EPOCH.checked_add(Duration::from_secs(claims.exp));
         let expires_at = expires_at.ok_or_else(invalid_token)?;
-        AuthenticatedPrincipal::new(claims.sub, scopes, Some(expires_at))
+        let principal = AuthenticatedPrincipal::new(claims.sub, scopes, Some(expires_at))?;
+        #[cfg(feature = "auth-agql")]
+        let principal = match authority_valid_until {
+            Some(deadline) => principal.with_authority_valid_until(deadline),
+            None => principal,
+        };
+        Ok(principal)
     }
 
     fn current_time(&self) -> Result<SystemTime, AuthenticationError> {
         Ok(self.config.clock.now())
+    }
+
+    fn monotonic_now(&self) -> Instant {
+        self.config.clock.monotonic_now()
     }
 
     fn refresh_interval(&self) -> Option<Duration> {
@@ -1051,7 +1089,11 @@ struct JwksCache {
 #[cfg(feature = "auth-agql")]
 struct RoleScopeCache {
     loaded_at: SystemTime,
-    expires_at: SystemTime,
+    /// Monotonic point where the snapshot turns stale: its soft age or its
+    /// signed expiry, whichever is first, measured from acceptance.
+    stale_at: Instant,
+    /// Monotonic point after which it no longer expands roles.
+    refuse_at: Instant,
     provider: StaticRoleScopeExpansion,
 }
 

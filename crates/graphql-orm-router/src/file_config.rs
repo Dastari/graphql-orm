@@ -794,6 +794,7 @@ impl FileTelemetry {
             value = value.with_log_level(level.into());
         }
         if let Some(prometheus) = self.prometheus {
+            value = value.omit_operation_name_from_metrics(prometheus.omit_operation_name);
             value = match prometheus.host {
                 Some(host) => value.with_prometheus_listener(
                     std::net::SocketAddr::new(host, prometheus.port),
@@ -833,6 +834,9 @@ struct FilePrometheus {
     /// exporter binds the public listener's IP address.
     host: Option<std::net::IpAddr>,
     port: u16,
+    /// Removes the client-chosen operation-name attribute from metrics.
+    #[serde(default)]
+    omit_operation_name: bool,
     #[serde(default = "default_metrics_path")]
     path: String,
 }
@@ -1055,14 +1059,34 @@ mod tests {
         // The port must still differ from the public port on another address.
         let error = telemetry(r#""prometheus": {"host": "127.0.0.2", "port": 4000}"#).unwrap_err();
         assert!(error.to_string().contains("distinct"), "{error}");
-        // Host names would need DNS at startup; only IP literals are accepted.
-        assert!(
-            RouterFileConfig::from_json(&FILE.replace(
-                r#""prometheus": {"port": 4900}"#,
-                r#""prometheus": {"host": "metrics.internal", "port": 4900}"#
-            ))
-            .is_err()
-        );
+        // Host names would need DNS at startup, and an IPv6 zone ID names a
+        // host-local interface; only plain IP literals are accepted.
+        for host in ["metrics.internal", "fe80::1%2", "fe80::1%eth0", "[::1]"] {
+            assert!(
+                RouterFileConfig::from_json(&FILE.replace(
+                    r#""prometheus": {"port": 4900}"#,
+                    &format!(r#""prometheus": {{"host": "{host}", "port": 4900}}"#)
+                ))
+                .is_err(),
+                "{host}"
+            );
+        }
+        let omit = |prometheus: &str| {
+            RouterFileConfig::from_json(
+                &FILE.replace(r#""prometheus": {"port": 4900}"#, prometheus),
+            )
+            .unwrap()
+            .into_router_config_with(|name| {
+                Ok((name == "PRODUCTS_SCHEMA_TOKEN").then(|| "Bearer schema-secret".to_owned()))
+            })
+            .unwrap()
+            .telemetry
+            .omit_operation_name_from_metrics
+        };
+        assert!(!omit(r#""prometheus": {"port": 4900}"#), "off by default");
+        assert!(omit(
+            r#""prometheus": {"port": 4900, "omitOperationName": true}"#
+        ));
     }
 
     #[test]
