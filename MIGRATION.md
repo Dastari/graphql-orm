@@ -10,6 +10,102 @@ supersedes: []
 
 # Migration Guide
 
+## 0.149.0 to 0.151.0: SQL Server correctness
+
+Upgrade runtime and macros together. No schema or data migration is needed.
+Generated SDL, operation catalogues and fingerprints are unchanged. Every
+change applies to the `mssql` backend only, except where it says "all
+backends". The first two entries are breaking for hosts.
+
+- **Errors (breaking).** An error SQL Server reports is now `sqlx::Error::Database`
+  holding `graphql_orm::db::mssql::MssqlServerError`; it was
+  `sqlx::Error::Protocol` with the driver's text. Code that matched on
+  `Protocol` or searched the message for an error number should use
+  `as_database_error()` with `code()`, `kind()`, or a downcast to
+  `MssqlServerError::number()`. The message no longer names the server, the
+  procedure or the line. I/O and TLS failures are `sqlx::Error::Io` and
+  `sqlx::Error::Tls`. Unique (2627, 2601), foreign-key and check (547)
+  violations now reach GraphQL clients as `CONSTRAINT_VIOLATION` instead of
+  `INTERNAL_ERROR`.
+- **Retries.** A transaction is reported as retryable for errors 1205, 1222,
+  3960, 41301, 41302, 41305, 41325, 41839, 40501, 40197 and 40613, matched by
+  number. It was any error whose text contained `1205`, `3960` or `40501`.
+- **Transactions.** When a statement fails inside `Database::transaction` or
+  `transaction_with_auth` (any backend), the callback's error is returned even
+  if the rollback fails; the rollback failure is logged through `tracing`.
+  On SQL Server the callback's error used to be replaced by `INTERNAL_ERROR`
+  ("transaction is no longer active"). After a statement the server refused,
+  the transaction keeps its connection, refuses further statements and the
+  commit, and rolls back normally.
+- **Dates (breaking).** A `datetime2`, `datetime` or `smalldatetime` column mapped to
+  `String` reads as RFC 3339 in UTC, `2026-11-09T12:34:56Z`; it was
+  `2026-11-09 12:34:56`. A `datetimeoffset` column, which used to fail to
+  decode, reads with its offset. Clients and host code that parsed the old
+  text must accept RFC 3339. A fraction of the legacy `datetime` type reads
+  as the millisecond SQL Server shows (`.997`). `date` and `time` values are
+  unchanged, and values are still bound as text.
+- **Decimals.** A `DECIMAL` value with more than 28 decimal places or a
+  mantissa above 96 bits is a column decode error; it used to panic. One
+  panic remains: a non-NULL value in a column declared with scale 38
+  (`DECIMAL(38,38)`) panics inside the driver while the row is read.
+- **Pagination.** `limit: 0` returns an empty page; SQL Server used to reject
+  the statement. Offsets are not capped.
+- **Aggregates and relation keys.** Group keys and text `MIN`/`MAX` render
+  without loss: floats with 17 significant digits, date and time types as
+  ISO 8601, text without the 4,000-character cut. A grouped `datetime` key
+  that read `Nov  9 2026 12:34PM` now reads `2026-11-09T12:34:56`. Float
+  relation keys match their parents on every backend, and string relation
+  keys longer than 4,000 characters are no longer cut.
+- **Batches (all backends).** A relation, Federation key or single-column
+  batch whose bound values would exceed the backend's limit (2,000 on SQL
+  Server, 32,000 elsewhere) runs as several statements. Results are
+  unchanged; `query_count` is higher for such a batch. A request whose own
+  filter and sort values leave no room for a single key fails with
+  `INVALID_INPUT`; on SQL Server it used to fail at the server.
+- **Upsert.** The rendered SQL Server upsert (`render_upsert_sql`,
+  `build_upsert_sql`) opens and commits its own transaction when none is open
+  and stops at a failed update. It must stay a batch of its own.
+- **DDL text.** Rendered SQL Server plans spell `DeletePolicy::Restrict` as
+  `ON DELETE NO ACTION`, wrap each composite-unique drop in
+  `EXEC sys.sp_executesql` so a plan can run as one batch, add columns with
+  `ALTER TABLE ... ADD`, and state `NULL` or `NOT NULL` in `ALTER COLUMN`.
+  Introspection reports `decimal`, `numeric`, `varchar`, `char`, `nchar`,
+  `binary` and `varbinary` types with their length or precision, reads
+  foreign keys with their delete action, and keeps a `.` inside a table
+  name. A plan diffed against an introspected SQL Server schema no longer
+  reports those columns as changed, and now reports foreign keys the model
+  does not declare as drops. Ordinary indexes are still not read.
+- **`default_sort`.** An explicit SQL Server `default_sort` without
+  whitespace, such as `"a,b"`, orders by `[a], [b]`. It used to render the
+  single identifier `[a,b]` and fail at run time.
+- **`LIKE` patterns (all backends).** `escape_like_pattern` and the
+  `contains`, `startsWith` and `endsWith` filters also escape `[`. On SQL
+  Server `contains: "[draft]"` used to match any one of those letters. SQLite
+  and PostgreSQL results are unchanged.
+- **Connections.** The pool and the notification connection follow one
+  routing redirect (Azure SQL's Redirect connection policy).
+- **Notifications.** `MssqlQueryNotificationConnection::receive` is
+  at-least-once and hosts must be idempotent. It returns a message while the
+  transaction that received it is still open; the receive is committed at the
+  start of the next `receive` or `register`, by the new `acknowledge()`, or
+  by the new `close()`. It used to commit before returning, so a failure
+  between the two batches lost the message. What a host must change:
+  - Call `close()` (or `acknowledge()`) before dropping a connection after a
+    handled message, including the reconnect of a re-arm loop. A message
+    that is never acknowledged is delivered again.
+  - Until it is acknowledged, a message's conversation group stays locked
+    for other receivers. Call `acknowledge()` after handling a message when
+    the next `receive` does not follow promptly.
+  - Keep the connection value after an error or a cancelled call; it opens a
+    new session by itself. `uncertain_acknowledgements()` counts
+    acknowledgements whose outcome is unknown.
+  - SQL Server disables a queue after five consecutive rolled-back receives
+    (poison-message handling). Unacknowledged drops, crashes, failed
+    acknowledgements and cancelled receives of a waiting message each count,
+    so a receive-and-reconnect loop that never acknowledges disables a
+    healthy queue. Re-enable it with `ALTER QUEUE ... WITH STATUS = ON`, or
+    create the queue with `POISON_MESSAGE_HANDLING (STATUS = OFF)` if endless
+    redelivery is acceptable.
 ## 0.147.0 to 0.149.0: host-only generated input contracts
 
 Upgrade ORM/macros together to 0.149.0 and operation catalogue to 0.8.0.

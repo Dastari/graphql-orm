@@ -311,7 +311,14 @@
 
 // In-crate tests that share the integration-test support files name the
 // crate as `graphql_orm`.
-#[cfg(all(test, any(feature = "owned-planning-replay", feature = "postgres")))]
+#[cfg(all(
+    test,
+    any(
+        feature = "owned-planning-replay",
+        feature = "postgres",
+        feature = "mssql"
+    )
+))]
 extern crate self as graphql_orm;
 
 pub use async_graphql;
