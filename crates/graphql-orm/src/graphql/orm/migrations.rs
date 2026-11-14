@@ -5370,6 +5370,64 @@ pub async fn introspect_mssql_schema(
         let (unique_columns, composite_unique_indexes) =
             classify_postgres_unique_constraints(unique_members);
 
+        let foreign_key_rows = super::MssqlBackend::fetch_rows(
+            pool,
+            "SELECT fk.name AS constraint_name,
+                    SCHEMA_NAME(target.schema_id) AS target_schema,
+                    target.name AS target_table,
+                    CAST(fk.delete_referential_action AS bigint) AS delete_action,
+                    source_column.name AS source_column,
+                    target_column.name AS target_column
+             FROM sys.foreign_keys fk
+             JOIN sys.foreign_key_columns member ON member.constraint_object_id = fk.object_id
+             JOIN sys.tables target ON target.object_id = fk.referenced_object_id
+             JOIN sys.columns source_column
+               ON source_column.object_id = member.parent_object_id
+              AND source_column.column_id = member.parent_column_id
+             JOIN sys.columns target_column
+               ON target_column.object_id = member.referenced_object_id
+              AND target_column.column_id = member.referenced_column_id
+             WHERE fk.parent_object_id = OBJECT_ID(@P1)
+             ORDER BY fk.name, member.constraint_column_id",
+            &[SqlValue::String(table_path.clone())],
+        )
+        .await?;
+        let mut foreign_keys: Vec<super::core::ForeignKeyModel> = Vec::new();
+        for row in foreign_key_rows {
+            let constraint_name = super::MssqlBackend::try_get_string(&row, "constraint_name")?;
+            let pair = super::core::ForeignKeyColumnPairModel {
+                source_column: DatabaseBackend::Mssql
+                    .quote_identifier(&super::MssqlBackend::try_get_string(&row, "source_column")?),
+                target_column: DatabaseBackend::Mssql
+                    .quote_identifier(&super::MssqlBackend::try_get_string(&row, "target_column")?),
+            };
+            match foreign_keys.last_mut() {
+                Some(last) if last.constraint_name.as_deref() == Some(&constraint_name) => {
+                    last.column_pairs.push(pair);
+                }
+                _ => foreign_keys.push(super::core::ForeignKeyModel {
+                    constraint_name: Some(constraint_name),
+                    column_pairs: vec![pair],
+                    target_table: format!(
+                        "{}.{}",
+                        DatabaseBackend::Mssql.quote_identifier(
+                            &super::MssqlBackend::try_get_string(&row, "target_schema")?
+                        ),
+                        DatabaseBackend::Mssql.quote_identifier(
+                            &super::MssqlBackend::try_get_string(&row, "target_table")?
+                        )
+                    ),
+                    is_multiple: false,
+                    // 0 is NO ACTION, SQL Server's spelling of a refused delete.
+                    on_delete: match row.try_get::<i64, _>("delete_action")? {
+                        1 => super::core::DeletePolicy::Cascade,
+                        2 => super::core::DeletePolicy::SetNull,
+                        _ => super::core::DeletePolicy::Restrict,
+                    },
+                }),
+            }
+        }
+
         let columns = column_rows
             .into_iter()
             .map(|row| {
@@ -5396,7 +5454,7 @@ pub async fn introspect_mssql_schema(
             columns,
             indexes: Vec::new(),
             composite_unique_indexes,
-            foreign_keys: Vec::new(),
+            foreign_keys,
             search_indexes: Vec::new(),
             append_only: false,
             retention_purge: false,
