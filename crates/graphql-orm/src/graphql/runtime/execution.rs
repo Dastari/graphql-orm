@@ -1566,6 +1566,9 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
                     self.request.auth.as_ref(),
                     self.request.projection_context.as_deref(),
                     self.limits,
+                    self.limits
+                        .max_response_bytes
+                        .saturating_sub(self.response_bytes),
                 )
                 .await?;
             self.reserve(bytes)?;

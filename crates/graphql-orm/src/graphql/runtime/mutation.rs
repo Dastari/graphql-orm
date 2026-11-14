@@ -1295,6 +1295,7 @@ async fn execute_once<B: RuntimeMutationBackend>(
                 context.auth.as_ref(),
                 context.projection_context.as_deref(),
                 prepared.limits,
+                prepared.limits.max_response_bytes,
             )
             .await
             .map_err(|_| committed_error("mutation_payload_failed"))?;

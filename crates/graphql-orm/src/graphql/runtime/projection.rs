@@ -297,6 +297,10 @@ impl ProjectedPlan {
 
     /// Call the projector once and return one output value per input record value,
     /// plus the encoded bytes to reserve against the response budget.
+    ///
+    /// `budget` is the response budget still available. Each distinct object is
+    /// built once and charged for every record that carries it; a total above
+    /// `budget` is refused with `cost_exceeded` before any per-record copy.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn resolve(
         &self,
@@ -306,6 +310,7 @@ impl ProjectedPlan {
         auth: Option<&DbAuthContext>,
         context: Option<&(dyn Any + Send + Sync)>,
         limits: super::RuntimeGraphqlLimits,
+        budget: usize,
     ) -> Result<(Vec<async_graphql::Value>, usize), RuntimeGraphqlError> {
         let mut bytes = 0usize;
         let failed = || RuntimeGraphqlError::new("projection_failed");
@@ -403,12 +408,14 @@ impl ProjectedPlan {
                         bytes = object_bytes
                             .checked_mul(uses[index])
                             .and_then(|total| bytes.checked_add(total))
+                            .filter(|total| *total <= budget)
                             .ok_or_else(|| RuntimeGraphqlError::new("cost_exceeded"))?;
                         async_graphql::Value::Object(object)
                     }
                 });
             }
         }
+        // Only now, within budget, copy each object to the records that carry it.
         let values = stored
             .iter()
             .map(|value| {
@@ -416,6 +423,8 @@ impl ProjectedPlan {
                     return Ok(async_graphql::Value::Null);
                 }
                 let key = serde_json::to_string(value).map_err(|_| failed())?;
+                #[cfg(test)]
+                tests::MATERIALIZED.with(|count| count.set(count.get() + 1));
                 outputs[keys[&key]].clone().ok_or_else(failed)
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -521,4 +530,171 @@ pub(super) fn merge_projected(
         })
         .map(str::to_owned)
         .collect();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graphql::orm::{
+        CollectionId, RuntimeCollection, RuntimeField, RuntimeFormatPayload, RuntimeSchema,
+    };
+
+    thread_local! {
+        /// Per-record copies of projected objects made on this thread.
+        pub(super) static MATERIALIZED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    const NAME: &str = "example.file_ref";
+
+    struct Large(RuntimeProjectionContract);
+    impl RuntimeFieldProjector for Large {
+        fn contract(&self) -> &RuntimeProjectionContract {
+            &self.0
+        }
+        fn resolve<'a>(
+            &'a self,
+            batch: RuntimeProjectionBatch<'a>,
+        ) -> BoxFuture<'a, Result<RuntimeProjectionResults, RuntimeProjectionError>> {
+            Box::pin(async move {
+                let mut results = RuntimeProjectionResults::new();
+                for value in batch.values {
+                    results.insert(
+                        value.clone(),
+                        RuntimeProjected::Object(BTreeMap::from([(
+                            "name".to_owned(),
+                            RuntimeValue::String("x".repeat(100)),
+                        )])),
+                    );
+                }
+                Ok(results)
+            })
+        }
+    }
+
+    fn field(id: &str, kind: RuntimeValueKind, format: Option<RuntimeFieldFormat>) -> RuntimeField {
+        RuntimeField {
+            description: None,
+            classification: None,
+            export: None,
+            id: FieldId::new(id).unwrap(),
+            api_name: id.into(),
+            physical_column: id.into(),
+            value_kind: kind,
+            nullable: true,
+            unique: false,
+            filterable: false,
+            sortable: false,
+            generated: false,
+            default: None,
+            format,
+            auto_timestamp: None,
+            auto_actor: None,
+        }
+    }
+
+    /// A page repeating one stored value is charged for every copy of its
+    /// projected object, and refused before any copy is made (#528).
+    #[tokio::test]
+    async fn repeated_values_are_refused_before_per_record_copies() {
+        let namespace = RuntimeFormatNamespace::new(NAME).unwrap();
+        let mut id = field("id", RuntimeValueKind::Integer, None);
+        id.nullable = false;
+        let schema = RuntimeSchema {
+            repository_only: false,
+            format_version: 1,
+            collections: vec![RuntimeCollection {
+                node_identity: None,
+                live_subscriptions: None,
+                description: None,
+                classification: None,
+                id: CollectionId::new("files").unwrap(),
+                api_type_name: "File".into(),
+                api_plural_name: "Files".into(),
+                physical_table: "projection_files".into(),
+                primary_key: vec![FieldId::new("id").unwrap()],
+                append_only: false,
+                retention_purge: false,
+                fields: vec![
+                    id,
+                    field(
+                        "avatar",
+                        RuntimeValueKind::Uuid,
+                        Some(
+                            RuntimeFieldFormat::new(
+                                namespace.clone(),
+                                1,
+                                RuntimeFormatPayload::empty(),
+                            )
+                            .unwrap(),
+                        ),
+                    ),
+                ],
+                relations: vec![],
+                indexes: vec![],
+                composite_unique: vec![],
+                default_order: vec![],
+                label_fields: vec![],
+                search: None,
+            }],
+        }
+        .validate()
+        .unwrap();
+        let projector = Arc::new(Large(RuntimeProjectionContract {
+            namespace,
+            versions: 1..=1,
+            value_kinds: BTreeSet::from([RuntimeValueKind::Uuid]),
+            object: RuntimeProjectedObject::new(
+                "LargeFile",
+                vec![RuntimeProjectedField::new(
+                    "name",
+                    RuntimeValueKind::String,
+                    false,
+                )],
+            )
+            .unwrap(),
+            may_be_absent: false,
+        }));
+        let avatar = FieldId::new("avatar").unwrap();
+        let bindings = compile(
+            &schema,
+            &BTreeMap::from([(avatar.clone(), ProjectorRef(projector))]),
+            &[],
+        )
+        .unwrap();
+        let collection = schema
+            .resolve_collection(&CollectionId::new("files").unwrap())
+            .unwrap();
+        let plan = ProjectedPlan {
+            field: schema.resolve_field(&collection, &avatar).unwrap(),
+            api_name: "avatar".into(),
+            binding: bindings[&avatar].clone(),
+            selected: vec!["name".into()],
+        };
+        let shared = RuntimeValue::Uuid(uuid::Uuid::from_bytes([1; 16]));
+        let other = RuntimeValue::Uuid(uuid::Uuid::from_bytes([2; 16]));
+        let mut stored = vec![shared; 49];
+        stored.push(other);
+        let run = |budget: usize| {
+            plan.resolve(
+                &schema,
+                &stored,
+                RuntimeProjectionPurpose::Read,
+                None,
+                None,
+                Default::default(),
+                budget,
+            )
+        };
+        // 50 records of 100 bytes each, from two distinct values.
+        MATERIALIZED.with(|count| count.set(0));
+        let refused = run(4_999).await;
+        assert_eq!(
+            refused.err().map(RuntimeGraphqlError::code),
+            Some("cost_exceeded")
+        );
+        assert_eq!(MATERIALIZED.with(std::cell::Cell::get), 0);
+        let (values, bytes) = run(5_000).await.unwrap();
+        assert_eq!((values.len(), bytes), (50, 5_000));
+        assert_eq!(MATERIALIZED.with(std::cell::Cell::get), 50);
+    }
 }
