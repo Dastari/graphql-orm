@@ -24,9 +24,20 @@ after the first pass drops, retaining the existing single-retry limit and all
 authorization/fencing checks. The quota lifecycle tests enforce 1 MiB thread
 stacks. This future-layout change needs no configuration or data migration.
 
-Upgrade with ORM/macros 0.150.0. No data migration is needed. Usage timestamp
-filters now accept 64-bit Unix seconds; no stored column changes. Apply AI schema
-module `0.79.0` to record the updated filter contract.
+Upgrade with ORM/macros 0.150.0 and apply AI schema module `0.80.0` before
+starting workers. It adds nullable `scope_key` to secret cleanup commands and
+nullable `provider_delete_requested_at` / `provider_delete_attempts` to attachment
+artifacts. Existing rows need no data backfill; legacy unscoped secret commands
+require operator review and cannot be completed through the scoped host API.
+Usage timestamp filters now accept 64-bit Unix seconds.
+
+### Breaking changes
+
+The following tightening changes affect existing hosts: exact normalized-origin
+Ollama manifests; stricter `SecretRef` parsing/deserialization; inaccessible-ID
+`Forbidden` errors masked as `NotFound`; a failed dispatch spending its one-shot
+approval proof; and scoped cleanup of obsolete credential references. Details
+follow.
 
 A consumed approval proof may dispatch at most once across all its clones.
 A failed dispatch spends the execution claim too; obtain a fresh approval rather
@@ -36,10 +47,13 @@ using the service's existing clock (system time for services without one).
 Privileged reclamation is refused while the recovery epoch is closed.
 
 Approval-wait reports add `skipped`: unresolved principals, unavailable protection
-and malformed candidate state do not abort other candidates. Examined waits use
-the existing durable progress stamp so skipped or still-valid waits rotate behind
-unexamined ones. A failed progress-stamp write still fails the pass after its
-other work. Skipping is operational and never grants authority or quarantines a
+and malformed candidate state do not abort other candidates. A read-only keyset
+cursor rotates each service's bounded candidate scan; reuse the service (or its
+clones) across passes. Valid waits and active
+leases are never written, so existing consumption and heartbeat fences remain
+valid. Only skipped candidates without an active lease receive durable progress
+stamps; a failed stamp still fails the pass after its other work. Claim scan
+history is reset on state changes, including requeue and successful claim. Skipping is operational and never grants authority or quarantines a
 row merely because a host read failed. Queued claims likewise isolate each
 candidate in its own transaction and rotate operational failures; a healthy
 claim can still succeed behind a failed legacy closure. If no lease is returned,
@@ -48,23 +62,46 @@ skipped candidates and refused progress stamps. Missing-grant credentials carryi
 or exact operation binding cannot issue run authority. Legacy claim refusal may
 create and close an internal attempt atomically; no lease reaches a worker.
 
-Secret references with relative `.` or `..` path segments must be replaced.
-Credential rotation/removal no longer deletes the previous secret automatically:
-its cleanup record remains pending. Hosts must establish that no profile or
-external secret-store user still needs that reference before revoking it. Fresh
-uncommitted values still use compensating deletion. Identifier-based skill and
-credential mutations mask inaccessible rows as `NotFound`. Subscription grace
-values above 120 seconds are clamped; zero still disables grace.
+Secret references containing relative `.`/`..` segments, a leading slash,
+empty path segments (including `//` or a trailing slash), or a colon before the
+first slash must be replaced. This includes formerly accepted `vault:key` or
+`memory:key` forms; use a valid opaque relative reference supplied by the store.
+Credential rotation/removal first records a scoped cleanup command and then
+deletes the old secret if no provider profile in any scope still references it.
+Store-delete failures and shared references remain pending. Hosts with recent MFA
+and `ManageProviderCredentials` authority can page `pending_secret_cleanups` and
+retry `complete_secret_cleanup`; these APIs expose IDs/references, never secret
+material, and refuse shared references or scans whose lack of row filtering cannot be
+proved (including a registered host row policy or unknown/active backend RLS).
+Stores must still return fresh references
+from `put(None)`; newly uncommitted values retain compensating deletion.
+Identifier-based skill and credential mutations mask inaccessible rows as
+`NotFound`. Subscription grace above 120 seconds is clamped; zero disables it.
 
-Ollama egress manifests must name the normalized origin, including its trailing
-slash, for every transfer. Streams are limited to 16 MiB total and 16,384 HTTP
-chunks. File maintenance must receive a successful exact OpenAI deletion
-acknowledgement before a subsequent 404 confirms absence; an initial 404 leaves
-cleanup unresolved. Stored-response deletion remains a host responsibility.
+Ollama egress manifests must name the exact normalized origin, including its
+trailing slash. Streams allow four transport chunks per configured maximum output
+token plus 1,024 framing chunks, under `OllamaProviderConfig.maximum_stream_chunks`
+(default 1,048,576; valid range 1..=4,194,304). Requests without a token maximum use
+the ceiling. The 16 MiB total, 2 MiB line and request-duration limits still apply.
+
+OpenAI artifact cleanup persists exact-reference deletion intent before issuing
+DELETE. A first 404 before recorded expiry remains unconfirmed; a 404 on a later
+attempt after recorded intent, or at/after `provider_expires_at`, proves absence.
+Other ambiguous outcomes back off exponentially (120 seconds initially, capped
+at one hour). `AiAttachmentCleanupLimits::with_maximum_provider_delete_attempts`
+sets an intent bound in 1..=1024 (default 24); interrupted calls count. On exhaustion,
+`cleanup_unconfirmed` releases protected derivatives and sensitive references,
+retains minimal audit evidence with `provider_cleanup_attempts_exhausted`, and
+increments `AiAttachmentCleanupReport.artifacts_unconfirmed`, never
+`artifacts_cleaned`. Metadata retention may remove the terminal artifact row;
+the immutable audit remains. Local blob deletion must be confirmed before this
+terminal transition, so an unavailable blob store cannot orphan local bytes.
+Stored-response deletion remains a host responsibility.
 Anthropic accepts `max_tokens` and `stop_sequence` only with complete, bounded
-text state; model aliases and `pause_turn` remain unsupported. Lease-recovery
+text state; model aliases and `pause_turn` remain unsupported. `ResponseCompleted`
+has no finish-reason field, so distinguishing token truncation needs a separately
+reviewed public response API. Lease-recovery
 clock-skew grace keeps its existing zero default and must be configured by hosts.
-
 
 ## 0.138.0 to 0.139.0: custody of the crate's own records under a host field policy
 
@@ -1152,7 +1189,6 @@ Select one published Auth 0.22.1 source together with the coordinated workspace
 release and refresh host locks to one source. The runtime schema module remains `0.72.0`;
 no database, stored-data, GraphQL SDL or provider-policy migration is needed.
 
-
 ## 0.107.2 to 0.107.3: maintained workspace package identity
 
 Select the reviewed coordinated workspace revision for all companion packages,
@@ -1357,7 +1393,6 @@ Module/backup fingerprints change; older readers cannot adopt the new refusal
 codes, so restore/rollback retains its existing fingerprint boundary and should
 use forward repair after new evidence is written. Approval consumption remains
 one-shot, and denial does not grant new execution authority.
-
 
 ## 0.102.2 to 0.103.0
 
@@ -6977,7 +7012,6 @@ content protection and immutable deployment boundaries, and keep the runtime
 start gate closed until readiness succeeds. PostgreSQL/MSSQL rehearsal must use
 a disposable Docker-owned database; never point migration commands at a live
 machine database.
-
 
 ### Retained native static offering changes
 

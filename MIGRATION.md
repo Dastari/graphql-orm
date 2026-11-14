@@ -18,10 +18,11 @@ and duplicates. Its default returns unknown entries, so existing backend
 implementations remain conservative. Only a complete list of `Some(false)`
 values excludes backend row security; errors, missing entries and `None` never do.
 An inactive result does not prove a relation exists or that an ORM row policy
-permits reads. SQLite reports inactive security without catalog lookups.
+permits reads. PostgreSQL uses catalog-qualified functions and operators even
+when an untrusted schema precedes `pg_catalog` on the search path. SQLite reports
+inactive security without catalog lookups.
 See the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01400-to-01430-runtime-and-provider-bug-batch)
 when upgrading AI to 0.143.0.
-
 
 ## 0.141.0 to 0.143.0: one authorization contract
 
@@ -1982,7 +1983,6 @@ their exact semantics; do not clear the flags to admit conversion.
 Ordinary unconditional readable relations remain supported. There is no
 runtime wire-field change or database migration. AI is unchanged.
 
-
 ## 0.105.0 to 0.106.0: SQLite rebuild cleanup data safety
 
 Upgrade ORM/macros together; no data migration is required. Preparation no longer
@@ -2129,7 +2129,6 @@ infrastructure codes for host failures. Private details are removed. Polling,
 scheduling, host latency and backpressure can delay checks/delivery; this is
 not a constant-time or hard wall-clock guarantee. The bounded process-local
 channel and authorized lag/refetch timing are unchanged.
-
 
 ## 0.97.0 to 0.98.0: unreadable fields, relations and safe errors
 
@@ -3622,7 +3621,6 @@ Auth signature-envelope correction too; transport capacity does not bypass
 structural, cryptographic, issuer/audience or exact-content checks. No generated
 schema, data migration or host policy change is added.
 
-
 ## 0.53.0 to 0.54.0: service-owned cache synchronization
 
 Upgrade ORM/macros together. Existing generated schemas and stored data are
@@ -3641,7 +3639,6 @@ Existing generated streams remain
 best-effort: clients must reconcile the initial subscription/query race and
 refetch unconditionally after reconnect or gaps. See the
 [cache coordination reference](docs/reference/graphql-orm/cache-sync.md).
-
 
 ## 0.52.0 to 0.53.0: post-await and owned release checks
 
@@ -3672,7 +3669,6 @@ session or replace the accepted carrier. Current grants only narrow the original
 ceilings, and a longer current lifetime cannot extend the accepted credential.
 The legacy `ResolvedPrincipal::new` sensitive path remains strict. Host binding,
 owner/current-row checks and transaction/revision fences remain mandatory.
-
 
 ## 0.51.0 to 0.52.0: explicit native Rust 1.98.1 replay recipe
 
@@ -3997,7 +3993,6 @@ write racing revocation, use a host transaction/session-version boundary. Read t
 [bridge guide](docs/reference/graphql-orm/agql-auth-bridge.md) for transport evidence,
 parent expiry, asynchronous expiry checks and unsupported resource restrictions.
 No physical database schema or GraphQL SDL migration is required.
-
 
 ## 0.45.0 to 0.46.0: bounded protected offset and search reads
 
@@ -4475,7 +4470,6 @@ The patch records the merged external migration compatibility fixture under a
 new immutable package source identity. No application call-site, generated-code,
 GraphQL SDL, configuration or stored-data changes are required.
 
-
 ## 0.33.0 to 0.33.1: Federation fixture release identity
 
 Adopt runtime and macros 0.33.1 together from the same published workspace tag.
@@ -4507,7 +4501,6 @@ keyset-enabled entities. Those fields inherit `keyset_list` scopes and
 assurance, and fail closed until enabled. No database migration is required.
 See the [canonical pagination guide](docs/reference/graphql-orm/pagination-migration.md)
 for examples, supported relation predicates, backend limits, and consistency.
-
 
 ## 0.31.1 to 0.32.0: Federation entity keys and a shareable `PageInfo`
 

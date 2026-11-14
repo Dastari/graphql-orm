@@ -82,10 +82,11 @@ Content protection is a seam, not an encryption feature. The crate ships no
 encryption and holds no keys.
 
 - `DatabaseManagedContentProtector` is the only protector the crate provides
-  ([`content_protection.rs`](../src/content_protection.rs) lines 130-167). It
+  (see [`DatabaseManagedContentProtector`](../src/content_protection.rs)). It
   stores the canonical JSON value unchanged in a `DatabaseManaged` envelope
-  and refuses a policy whose mode is `ApplicationEncrypted` with
-  `Unsupported`. Confidentiality in this mode is whatever the deployment's
+  and its `protect` method refuses an `ApplicationEncrypted` policy with
+  `Unsupported`; `open` refuses an application-encrypted envelope with
+  `ValidationFailed`. Confidentiality in this mode is whatever the deployment's
   database or storage layer provides at rest.
 - The `ApplicationEncrypted` envelope and the `AiContentProtector` trait are
   extension points. Encryption, key management, and key rotation are
