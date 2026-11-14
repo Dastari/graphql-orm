@@ -507,6 +507,10 @@ impl AiRuntime {
     /// maturity are stale, current tool policy denies, resolver execution
     /// fails, output limits are exceeded, or static disclosure validation
     /// fails.
+    ///
+    /// A mutation without approval must be explicitly classified as an automatic
+    /// application write. Approval `None` alone never permits a mutation whose
+    /// maturity or risk contradicts that classification.
     pub async fn execute_tool(
         &self,
         principal_reference: &PrincipalReference,
@@ -532,7 +536,10 @@ impl AiRuntime {
             &request,
             self.maximum_tool_maturity,
         )?;
-        if descriptor.approval != AiApprovalRule::None {
+        if descriptor.approval != AiApprovalRule::None
+            || (descriptor.operation_kind == AiToolOperationKind::Mutation
+                && !is_automatic_application_mutation(descriptor))
+        {
             return Err(AiError::Forbidden);
         }
         let mut registered =

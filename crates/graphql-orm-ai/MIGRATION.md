@@ -33,6 +33,14 @@ Usage timestamp filters now accept 64-bit Unix seconds.
 
 ### Breaking changes
 
+Direct static mutations with approval `None` must have `AutonomousWrite`
+maturity and `LowRiskWrite` or `NonIdempotentWrite` risk. An unclassified,
+read-only, proposal-only, supervised or high-impact mutation is refused with
+`Forbidden` before dispatch; use the existing one-shot supervised path for
+consequential writes. Classified automatic mutations still require fresh host
+and resolver authorization. Static registration's document-kind checks alone
+are not an execution classification (#466).
+
 The following tightening changes affect existing hosts: exact normalized-origin
 Ollama manifests; stricter `SecretRef` parsing/deserialization; inaccessible-ID
 `Forbidden` errors masked as `NotFound`; a failed dispatch spending its one-shot
