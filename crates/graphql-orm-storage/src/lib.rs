@@ -80,7 +80,7 @@ pub use service::{ObjectStorage, StorageService};
 #[cfg(feature = "smb")]
 pub use smb::{
     SmbBackendDiagnostics, SmbDialect, SmbProbeOptions, SmbProbeResult, SmbStorageBackend,
-    SmbStorageConfig,
+    SmbStorageConfig, SmbTempSweepReport, SmbUploadsQuiesced,
 };
 pub use streaming_object::{
     BoxedMultipartWriter, MultipartWriter, ObjectContentRange, ObjectInfo, ObjectMetadata,

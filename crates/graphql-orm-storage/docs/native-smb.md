@@ -46,6 +46,12 @@ typed errors: a transform nested inside a decrypted or decompressed payload
 dropping the handle closes it), and a session key shorter than 16 bytes
 (`InvalidState`). MS-SMB2 would right-pad a short session key with zeros; the
 client fails closed instead of deriving signing and encryption keys from it.
+
+Storage 0.12.0 adds a fourth owner-local patch,
+`PATCHES/share-access-override.patch`. `FileCreateArgs` gains an optional
+share-access override; without one, a create keeps the share type's default.
+The temporary-file sweep uses it to open a candidate exclusively, so a file
+another handle still has open is skipped rather than deleted.
 The protocol/authentication companions, cryptographic versions and feature
 selection remain pinned to the existing 0.10.2 family; this is not an adoption
 of the newer SDK's crypto graph.
@@ -135,15 +141,18 @@ Samba with `streams_xattr`, treat `:` as an alternate data stream separator,
 so `a:b` would open stream `b` of the file `a`; listings skip names with `:`.
 
 Set `portable_keys` to `true` for a share on a Windows server, or one that
-Windows clients also use. Keys, listing prefixes and `root_prefix` must then
-pass `validate_portable_blob_key`, which also refuses the characters
-`< > " | ? *`, control characters, a component ending in `.` or a space, and
-reserved device names such as `CON`, `NUL.txt` or `COM1`, in any ASCII case.
-A refused key fails with `InvalidStorageKey` before any request, and listings
-skip stored names that are not portable. It is off by default so that keys
-written earlier stay addressable; enable it before writing to a new share.
-It does not fold case: keys that differ only in case name the same file on a
-case-insensitive server.
+Windows clients also use. New writes must then create a path, `root_prefix`
+included, that passes `validate_portable_blob_key`, which also refuses the
+characters `< > " | ? *`, control characters, a component ending in `.` or a
+space, and reserved device names such as `CON`, `NUL.txt` or `COM1`, in any
+ASCII case. A refused write fails with `InvalidStorageKey` before any request.
+Reads, deletes and listings keep the ordinary validation, so objects written
+before the mode was enabled stay listed, readable and deletable. The mode does
+not resolve case-folding or Unicode-normalisation aliasing: keys that differ
+only in case, or only in normalisation, can name one file on such a server.
+Samba's default `mangled names = yes` lists a stored name that Windows cannot
+represent under an 8.3 alias, such as `CSHOFG~F.TXT` for `CON.txt`, with or
+without this mode.
 Passwords use `SecretString`, are redacted from `Debug`, and never enter errors
 or probe results. The backend moves the password straight into the SMB
 client's zeroizing secret, and no plain copy outlives the connection call.
@@ -447,20 +456,46 @@ non-retryable `Protocol` error, never as a conditional-create conflict.
 If the response to a conditional write's link is lost, the key may hold
 this writer's complete object or none, and its temporary file remains.
 
-`SmbStorageBackend::sweep_temp_files(older_than)` removes temporary files
-that a lost process or connection left behind. It walks the root prefix
-within the listing limits and deadline, and removes, each with one
-single-attempt deletion, only files named exactly `.<uuid>.uploading`, or
-`.<name>.<uuid>.uploading` as versions before 0.9.0 wrote, whose server
-last-write time is at least `older_than` old. A caller's key that merely ends
-in `.uploading`, and a file without a last-write time, is kept. `older_than`
-must be at least one hour. Choose it longer than any upload, from any host,
-may go without writing, and longer than the clock difference with the server,
-because the sweep compares the server's last-write times with the local
-clock. Removing a stalled upload's temporary file makes that upload fail; it
-never removes a published object, because publishing is a rename or a hard
-link, and removing the temporary name of a conditional create whose outcome
-was unknown leaves an object linked at its key in place. A listing failure
+`SmbStorageBackend::sweep_temp_files(quiesced, older_than)` removes
+temporary files that a lost process or connection left behind, and returns an
+`SmbTempSweepReport` of what it removed and skipped. Run it only while no
+upload to the repository is in progress on any host, for example in a
+maintenance window: `quiesced` is an `SmbUploadsQuiesced` the host constructs
+with `SmbUploadsQuiesced::confirmed_by_host()` to state exactly that. Age
+alone cannot protect an upload in progress, because an upload can pause past
+any age and then resume.
+
+The sweep walks the root prefix within the listing limits and deadline, and
+considers only files named exactly `.<uuid>.uploading`, or
+`.<name>.<uuid>.uploading` as versions before 0.9.0 wrote, whose last-write
+time is at least `older_than` before the server's current time. It reads that
+time from a file it creates under the root prefix, with a temporary name
+listings hide, and removes through the same handle, so this host's clock is
+never compared with the server's. A caller's key that merely ends in
+`.uploading`, and a file without a last-write time, is kept. `older_than`
+must be at least one hour. As defence in depth, each candidate is opened with
+no share access and without following a reparse point; a file another handle
+has open fails with a sharing violation and is skipped, and a file whose type,
+size or last-write time differs from what enumeration saw is skipped. A
+candidate that passes is removed through that same handle, once; an error
+after the removal request may have reached the server is a non-retryable
+single-attempt error.
+
+The sweep never follows a reparse point the server reports. Entries with the
+reparse attribute are skipped and counted, and every directory is opened with
+`FILE_OPEN_REPARSE_POINT` and its handle checked again before it is entered,
+so a junction or symbolic link that a Windows server reports cannot lead the
+sweep outside the root prefix. A directory it cannot open as a plain directory
+is skipped, not entered. A server that resolves links itself and presents
+them as ordinary directories, as Samba does for symbolic links by default,
+gives the client nothing to detect: keep links out of repository trees on
+such servers, or disable link following on the share. Samba refuses links
+that leave the share (`wide links = no`), and the sweep skips those.
+
+Removing a stalled upload's temporary file makes that upload fail; it never
+removes a published object, because publishing is a rename or a hard link,
+and removing the temporary name of a conditional create whose outcome was
+unknown leaves an object linked at its key in place. A listing failure
 removes nothing. Cleanup of temporary files is best
 effort, so completed snapshots must still be verified. Backup manifests are written last and do not advertise incomplete
 payload sets.

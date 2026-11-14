@@ -537,27 +537,6 @@ fn is_reserved_device_name(component: &str) -> bool {
         && matches!(rest.as_slice(), [digit] if digit.is_ascii_digit() || matches!(digit, '\u{b9}' | '\u{b2}' | '\u{b3}'))
 }
 
-/// Validates a listing prefix for a target that requires portable keys:
-/// [`validate_blob_prefix`], with every complete component portable and the
-/// final, possibly partial, component free of characters Windows refuses.
-#[cfg(feature = "smb")]
-pub(crate) fn validate_portable_blob_prefix(prefix: &str) -> Result<(), StorageError> {
-    validate_blob_prefix(prefix)?;
-    let (complete, partial) = match prefix.rsplit_once('/') {
-        Some((complete, partial)) => (Some(complete), partial),
-        None => (None, prefix),
-    };
-    if complete.is_none_or(|complete| complete.split('/').all(is_portable_component))
-        && has_portable_characters(partial)
-    {
-        Ok(())
-    } else {
-        Err(StorageError::InvalidStorageKey {
-            key: prefix.to_string(),
-        })
-    }
-}
-
 /// Validates a listing prefix: empty, or a valid key optionally followed by
 /// one `/`.
 #[cfg(any(feature = "local", feature = "s3", feature = "smb"))]

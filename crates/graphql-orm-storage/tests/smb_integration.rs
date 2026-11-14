@@ -995,13 +995,13 @@ async fn samba_listing_follows_the_provider_prefix_contract() {
     }
 }
 
-/// With `portable_keys`, keys a Windows target cannot store as written are
-/// refused before any request, portable keys round-trip, and listings return
-/// only names the backend accepts as keys (#482).
+/// With `portable_keys`, a new write of a key a Windows target cannot store
+/// as written is refused before any request, while objects stored earlier
+/// under such names stay listed, readable and deletable (#482).
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires the managed Samba container harness"]
 async fn samba_portable_keys_refuse_windows_unsafe_names() {
-    use graphql_orm_storage::{StorageError, validate_portable_blob_key};
+    use graphql_orm_storage::StorageError;
 
     let root = format!("graphql-orm-storage-portable/{}", Uuid::new_v4());
     let posix = SmbStorageBackend::connect(test_config(root.clone()))
@@ -1012,20 +1012,54 @@ async fn samba_portable_keys_refuse_windows_unsafe_names() {
     let portable = SmbStorageBackend::connect(config).await.expect("connect");
     let body = || StorageByteStream::from_bytes(Bytes::from_static(b"portable"));
 
-    // Names a POSIX share stores, written without the portable mode.
-    for key in ["names/kept.bin", "names/CON.txt", "names/trailing."] {
+    // Names a POSIX share stores, written before the mode was enabled.
+    let existing = ["names/CON.txt", "names/kept.bin", "names/report."];
+    for key in existing {
         posix
             .put_blob(key, body(), BlobPutOptions::default())
             .await
             .unwrap_or_else(|error| panic!("{key}: {error}"));
     }
 
-    for key in ["names/CON.txt", "names/trailing.", "names/a?b", "LPT1/x"] {
-        let refused = |result: Result<(), StorageError>| {
-            assert!(
-                matches!(result, Err(StorageError::InvalidStorageKey { .. })),
-                "{key}: {result:?}"
-            );
+    // Existing objects stay listed: the portable listing is the ordinary
+    // one. Samba's default `mangled names = yes` presents names Windows
+    // cannot store under 8.3 aliases, such as `CSHOFG~F.TXT` for `CON.txt`,
+    // in every listing; the mode does not change what the server presents.
+    let listed = portable.list_blobs("names/").await.expect("portable list");
+    assert_eq!(listed, posix.list_blobs("names/").await.expect("list"));
+    assert_eq!(listed.len(), existing.len(), "{listed:?}");
+    assert!(listed.contains(&"names/kept.bin".to_string()), "{listed:?}");
+    for key in ["names/report.", "names/CON.txt"] {
+        let read = portable
+            .get_blob(key)
+            .await
+            .expect("an existing object reads");
+        assert_eq!(
+            collect_storage_stream(read.body).await.expect("body"),
+            Bytes::from_static(b"portable")
+        );
+        assert!(portable.blob_exists(key).await.expect("exists"));
+    }
+
+    // New writes of non-portable keys are refused, and the refusal does not
+    // reveal the key or the root prefix.
+    for key in [
+        "names/report.",
+        "names/CON.txt",
+        "names/a?b",
+        "LPT1/x",
+        "new.",
+    ] {
+        let refused = |result: Result<(), StorageError>| match result {
+            Err(error @ StorageError::InvalidStorageKey { .. }) => {
+                let message = error.to_string();
+                assert!(!message.contains(key), "{message}");
+                assert!(
+                    !message.contains("graphql-orm-storage-portable"),
+                    "{message}"
+                );
+            }
+            other => panic!("{key}: {other:?}"),
         };
         refused(
             portable
@@ -1039,61 +1073,57 @@ async fn samba_portable_keys_refuse_windows_unsafe_names() {
                 .await
                 .map(drop),
         );
-        refused(portable.get_blob(key).await.map(drop));
-        refused(portable.blob_exists(key).await.map(drop));
-        refused(portable.delete_blob(key).await);
+        refused(portable.copy_blob("names/kept.bin", key).await);
     }
-    assert!(matches!(
-        portable.list_blobs("CON/").await,
-        Err(StorageError::InvalidStorageKey { .. })
-    ));
 
     portable
         .put_blob("names/portable.bin", body(), BlobPutOptions::default())
         .await
         .expect("a portable key is written");
-    assert_eq!(
-        collect_storage_stream(
-            portable
-                .get_blob("names/portable.bin")
-                .await
-                .expect("read")
-                .body
-        )
+
+    // Existing non-portable objects can still be deleted.
+    portable
+        .delete_blob("names/report.")
         .await
-        .expect("body"),
-        Bytes::from_static(b"portable")
-    );
-
-    // The portable listing is the POSIX listing without names that are not
-    // portable keys, however the server presents them.
-    let all = posix.list_blobs("names/").await.expect("list");
-    let expected: Vec<String> = all
-        .iter()
-        .filter(|key| validate_portable_blob_key(key).is_ok())
-        .cloned()
-        .collect();
-    let listed = portable.list_blobs("names/").await.expect("portable list");
-    assert_eq!(listed, expected);
-    assert!(listed.contains(&"names/kept.bin".to_string()), "{listed:?}");
-    assert!(!listed.contains(&"names/CON.txt".to_string()), "{listed:?}");
-
-    for key in all {
-        posix.delete_blob(&key).await.expect("delete");
+        .expect("an existing object deletes");
+    assert!(!posix.blob_exists("names/report.").await.expect("exists"));
+    for key in ["names/CON.txt", "names/kept.bin", "names/portable.bin"] {
+        portable.delete_blob(key).await.expect("delete");
     }
+    assert!(posix.list_blobs("").await.expect("list").is_empty());
 }
 
-/// The sweep removes only this backend's temporary upload names older than
-/// the given age, keeps fresh temporary files and callers' keys that merely
-/// end in `.uploading`, and refuses an age below one hour (#593).
+/// The sweep removes only this backend's stale temporary upload names, by
+/// the server's clock, through a validated exclusive handle (#593):
+///
+/// - fresh, future-dated and callers' look-alike names are kept;
+/// - a stale temporary file another handle still has open is skipped, and
+///   an upload in progress keeps its temporary file and still publishes;
+/// - a stale temporary file behind a symbolic link survives, and nothing
+///   outside the root prefix is touched.
+///
+/// Samba 4.12, the managed server, resolves symbolic links itself and never
+/// reports them to SMB2 clients as reparse points. It refuses links that
+/// leave the share (`wide links = no`), which this test uses; a link that
+/// stays inside the share is presented as an ordinary directory and cannot
+/// be detected by any client, so it is not modelled here. Reparse-point
+/// entries and handles, as Windows servers report junctions and symbolic
+/// links, are covered by the handle and entry checks, not by this server.
+/// A file that changes between enumeration and removal is covered by a unit
+/// test of the handle re-check, because the server offers no hook between
+/// the two steps.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires the managed Samba container harness"]
 async fn samba_sweep_removes_only_stale_temporary_files() {
+    use graphql_orm_storage::SmbUploadsQuiesced;
+
     let fixture = owned_fixture();
     let root = format!("graphql-orm-storage-sweep/{}", Uuid::new_v4());
     let store = SmbStorageBackend::connect(test_config(root.clone()))
         .await
         .expect("connect");
+    let quiesced = SmbUploadsQuiesced::confirmed_by_host();
+    let hour = Duration::from_secs(60 * 60);
     let caller_lookalike = format!("sweep/x.{}.uploading", Uuid::new_v4());
     let callers = [
         "sweep/kept.bin".to_string(),
@@ -1116,6 +1146,10 @@ async fn samba_sweep_removes_only_stale_temporary_files() {
         format!("sweep/.blob.bin.{}.uploading", Uuid::new_v4()),
     ];
     let fresh = format!("sweep/.{}.uploading", Uuid::new_v4());
+    let open_elsewhere = format!("sweep/.{}.uploading", Uuid::new_v4());
+    let future = format!("sweep/.{}.uploading", Uuid::new_v4());
+    let outside_temp = format!(".{}.uploading", Uuid::new_v4());
+    let outside = format!("/outside-{}", Uuid::new_v4());
     let share = format!("/share/{root}");
     let shell = |script: String| {
         fixture.run_with(|container| {
@@ -1130,51 +1164,139 @@ async fn samba_sweep_removes_only_stale_temporary_files() {
             }
         })
     };
-    // Interrupted uploads, owned like the share's files; the stale ones and
-    // the callers' keys were last written in 2020. The fixture has BusyBox.
+    // Interrupted uploads, owned like the share's files. The stale ones and
+    // the callers' keys were last written in 2020, one in 2100. A link to a
+    // directory outside the share holds another stale temporary file. The
+    // fixture has BusyBox.
     let mut script = format!("set -e\nowner=$(stat -c %u:%g '{share}/sweep')\n");
-    for name in stale.iter().chain([&fresh]) {
+    for name in stale.iter().chain([&fresh, &future, &open_elsewhere]) {
         script.push_str(&format!(
             "printf partial > '{share}/{name}'\nchown \"$owner\" '{share}/{name}'\n"
         ));
     }
-    for name in stale.iter().chain(&callers) {
+    for name in stale.iter().chain(&callers).chain([&open_elsewhere]) {
         script.push_str(&format!("touch -t 202001010000 '{share}/{name}'\n"));
     }
+    script.push_str(&format!("touch -t 210001010000 '{share}/{future}'\n"));
+    script.push_str(&format!(
+        "mkdir -p '{outside}'\nprintf partial > '{outside}/{outside_temp}'\n\
+         chown -R \"$owner\" '{outside}'\ntouch -t 202001010000 '{outside}/{outside_temp}'\n\
+         ln -s '{outside}' '{share}/sweep/linked'\n"
+    ));
     shell(script).expect("seed temporary files");
 
+    // Another connection holds a stale temporary file open, as an upload
+    // between writes would; the read stream is never consumed.
+    let other = SmbStorageBackend::connect(test_config(root.clone()))
+        .await
+        .expect("connect");
+    let holder = other
+        .get_blob(&open_elsewhere)
+        .await
+        .expect("open the stale temporary file elsewhere");
+
+    // An upload in progress: its temporary file is open, then dated 2020.
+    // Samba reports an open file's write time from its own state, so this
+    // file need not look stale; it must survive either way.
+    let (release, released) = tokio::sync::oneshot::channel();
+    let writer = store.clone();
+    let upload = tokio::spawn(async move {
+        writer
+            .put_blob(
+                "held/in-progress.bin",
+                held_body(
+                    Bytes::from_static(b"head-"),
+                    Bytes::from_static(b"tail"),
+                    released,
+                ),
+                BlobPutOptions::default(),
+            )
+            .await
+    });
+    let mut held_temp = None;
+    for _ in 0..200 {
+        let mut found = String::new();
+        fixture
+            .run_with(|container| {
+                let output = std::process::Command::new("docker")
+                    .args(["exec", container, "sh", "-c"])
+                    .arg(format!(
+                        "ls -a '{share}/held' 2>/dev/null | grep uploading || true"
+                    ))
+                    .output()
+                    .map_err(|_| "cannot run in owned fixture".to_string())?;
+                found = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                Ok(())
+            })
+            .expect("inspect the upload");
+        if !found.is_empty() {
+            held_temp = Some(found);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let held_temp = held_temp.expect("the upload created its temporary file");
+    // Let any delayed write-time update land before dating the file.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    shell(format!("touch -t 202001010000 '{share}/held/{held_temp}'"))
+        .expect("date the held upload");
+
     let too_short = store
-        .sweep_temp_files(Duration::from_secs(30 * 60))
+        .sweep_temp_files(quiesced, Duration::from_secs(30 * 60))
         .await
         .expect_err("an age below one hour is refused");
     assert_refused(&too_short, StorageProviderErrorKind::Protocol);
 
-    let removed = store
-        .sweep_temp_files(Duration::from_secs(60 * 60))
-        .await
-        .expect("sweep");
-    assert_eq!(removed, stale.len());
+    let report = store.sweep_temp_files(quiesced, hour).await.expect("sweep");
+    assert_eq!(report.removed, stale.len(), "{report:?}");
+    assert_eq!(report.skipped_in_use, 1, "{report:?}");
+    // The link out of the share is refused by the server and skipped.
+    assert_eq!(report.skipped_directories, 1, "{report:?}");
+    // An ordinary listing fails closed on the refused link, so remove it.
+    shell(format!("rm '{share}/sweep/linked'")).expect("remove the link");
     let mut expected = callers.to_vec();
     expected.sort();
-    assert_eq!(store.list_blobs("").await.expect("list"), expected);
+    assert_eq!(store.list_blobs("sweep/").await.expect("list"), expected);
     let mut check = String::from("set -e\n");
     for name in &stale {
         check.push_str(&format!("test ! -e '{share}/{name}'\n"));
     }
-    check.push_str(&format!("test -f '{share}/{fresh}'\n"));
-    shell(check).expect("stale temporary files removed and the fresh one kept");
-    // Nothing is left to remove.
+    for name in [&fresh, &future, &open_elsewhere] {
+        check.push_str(&format!("test -f '{share}/{name}'\n"));
+    }
+    check.push_str(&format!("test -f '{share}/held/{held_temp}'\n"));
+    check.push_str(&format!("test -f '{outside}/{outside_temp}'\n"));
+    shell(check).expect("only the stale temporary files inside the root were removed");
+
+    drop(holder);
+    // The upload that was in progress still publishes.
+    release.send(()).expect("release the upload");
+    upload
+        .await
+        .expect("upload task")
+        .expect("the held upload publishes");
+    let published = store.get_blob("held/in-progress.bin").await.expect("read");
     assert_eq!(
-        store
-            .sweep_temp_files(Duration::from_secs(60 * 60))
-            .await
-            .expect("second sweep"),
-        0
+        collect_storage_stream(published.body).await.expect("body"),
+        Bytes::from_static(b"head-tail")
     );
 
-    shell(format!("rm -f '{share}/{fresh}'")).expect("remove the fresh temporary file");
-    for key in &callers {
-        store.delete_blob(key).await.expect("delete");
+    // Nothing stale is left to remove.
+    let again = store
+        .sweep_temp_files(quiesced, hour)
+        .await
+        .expect("second sweep");
+    // Once released, the stale file is removed by the next sweep.
+    assert_eq!(again.removed, 1, "{again:?}");
+    assert_eq!(again.skipped_in_use, 0, "{again:?}");
+    shell(format!("test ! -e '{share}/{open_elsewhere}'")).expect("removed once released");
+
+    shell(format!(
+        "rm -f '{share}/{fresh}' '{share}/{future}' '{share}/sweep/linked'\nrm -rf '{outside}'"
+    ))
+    .expect("remove the seeded files");
+    for key in store.list_blobs("").await.expect("list") {
+        store.delete_blob(&key).await.expect("delete");
     }
 }
 
