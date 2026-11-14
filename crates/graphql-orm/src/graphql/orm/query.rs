@@ -1402,18 +1402,22 @@ pub struct PaginationConfig {
     /// scan that would need more candidates fails with `PAGE_LIMIT_EXCEEDED`
     /// rather than return a short page. It does not bound or refuse a read
     /// that needs no scan. Whether the budget runs out depends on
-    /// rows the caller cannot see, so set it in trusted code. `None` removes
-    /// the bound.
+    /// rows the caller cannot see, so set it in trusted code. The same budget
+    /// caps the candidates a generated GraphQL bulk write classifies when its
+    /// row policy or filter is evaluated in Rust. `None` removes the bound.
     pub max_scanned_rows: Option<i64>,
-    /// Maximum rows one generated GraphQL `updateMany` or `deleteMany` loads
-    /// and locks, plus one look-ahead row. A bulk write whose filter selects
-    /// more rows is refused with `PAGE_LIMIT_EXCEEDED` before any row changes;
-    /// it is never truncated. The bound counts the rows the locking read
-    /// selects, before row policy, so whether it is reached can depend on rows
-    /// the caller cannot see unless `RowPolicy::write_target_prefilter`
-    /// removes them in SQL. Repository `update_where` and `delete_where`
-    /// helpers are trusted code and are not bounded by it. `None` removes the
-    /// bound.
+    /// Maximum rows one generated GraphQL `updateMany` or `deleteMany` field
+    /// may write. A bulk write that matches more rows the caller is allowed
+    /// to write is refused with `PAGE_LIMIT_EXCEEDED` before any row changes;
+    /// it is never truncated. The bound counts rows after visibility: rows
+    /// the caller can neither read nor write are not counted, so for a fixed
+    /// set of rows the caller may write the outcome does not depend on other
+    /// matching rows. When row policy or a filter is evaluated in Rust, the
+    /// candidates are classified in bounded pages and the scan is capped by
+    /// [`Self::max_scanned_rows`], as for reads. The bound applies to each
+    /// bulk mutation field of a request separately. Repository `update_where`
+    /// and `delete_where` helpers are trusted code and are not bounded by it.
+    /// `None` removes the bound.
     pub max_bulk_write_rows: Option<i64>,
 }
 
@@ -5023,25 +5027,25 @@ where
             .next())
     }
 
-    /// Fetch the write-decision rows of a generated bulk write, taking at most
-    /// `max_rows` rows plus one look-ahead row from the database.
+    /// Fetch one page of write-decision candidates for a generated bulk write:
+    /// at most `limit` rows from database offset `offset`, ordered by the
+    /// complete primary key, each with whether it satisfies the residual
+    /// in-memory predicates.
     ///
-    /// Returns the rows and whether the database had more than `max_rows`.
-    /// The rows are ordered by the complete primary key, which makes the
-    /// limit portable and the lock order deterministic. A filter the ORM
-    /// evaluates in Rust is not limited in SQL: the bound then counts the
-    /// matching rows.
+    /// The page is limited in SQL even when residual predicates remain, so a
+    /// caller never materializes more candidates than it asked for, and the
+    /// primary-key order makes the limit portable and the lock order
+    /// deterministic.
     #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
-    #[doc(hidden)]
-    pub async fn fetch_for_write_with_look_ahead_in_transaction(
+    pub(crate) async fn fetch_write_candidates_in_transaction(
         &self,
         context: &mut MutationContext<'_, B>,
-        max_rows: i64,
-    ) -> crate::Result<(Vec<T>, bool)>
+        offset: i64,
+        limit: i64,
+    ) -> crate::Result<Vec<(T, bool)>>
     where
         B: WriteBackend,
     {
-        let max_rows = max_rows.max(0);
         let mut query = self.clone();
         query.order_clauses = vec![
             T::PRIMARY_KEYS
@@ -5051,21 +5055,13 @@ where
                 .join(", "),
         ];
         query.order_values = Vec::new();
-        query.page = Some(PageInput {
-            limit: Some(max_rows.saturating_add(1)),
-            offset: Some(0),
-        });
-        let pagination = PaginationConfig::unbounded();
         let rendered = render_write_decision_select_query(
             B::DIALECT,
-            &query.build_select_query_with_config(pagination, false)?,
+            &query.candidate_select(offset, Some(limit.max(0)))?,
         );
         let rows = context.fetch_rows(&rendered.sql, &rendered.values).await?;
-        // A filter evaluated in Rust is not limited in SQL; its look-ahead is
-        // applied to the matching rows instead.
-        let rows = query.apply_in_memory_filtering(rows, pagination, false)?;
-        let exceeded = i64::try_from(rows.len()).unwrap_or(i64::MAX) > max_rows;
-        Ok((rows, exceeded))
+        context.database().observe_read(&rendered.sql, rows.len());
+        query.decode_candidates(&rows)
     }
 
     #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]

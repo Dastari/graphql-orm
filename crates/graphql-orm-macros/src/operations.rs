@@ -10593,9 +10593,10 @@ fn generate_graphql_operations_unfiltered(
                     auth_context,
                 )
                 .await?;
-                // A GraphQL bulk write narrows its locking read with the host's
-                // write-target prefilter and takes at most the configured bulk
-                // write bound; a repository write keeps the unbounded read.
+                // The runtime selects, locks and classifies the targets. A row a
+                // GraphQL caller can neither read nor write is left out before any
+                // count or refusal can depend on it, and the bulk write bound counts
+                // targets only; a repository write keeps the unbounded read.
                 let matched_entities = ::std::boxed::Box::pin(::graphql_orm::graphql::orm::bulk_write_targets::<Self, #backend_marker>(
                     db,
                     graphql_ctx,
@@ -10604,22 +10605,6 @@ fn generate_graphql_operations_unfiltered(
                         .filter_with_entity_matching(&where_input),
                 ))
                 .await?;
-                // GraphQL candidates exclude rows the caller can neither read nor write,
-                // before any count or refusal can depend on them.
-                let mut candidates = Vec::with_capacity(matched_entities.len());
-                for entity in matched_entities {
-                    if db.authorize_write_target(
-                        graphql_ctx,
-                        #entity_name_lit,
-                        <Self as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
-                        <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
-                        access_surface,
-                        &entity as &(dyn ::std::any::Any + Send + Sync),
-                    ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)? {
-                        candidates.push(entity);
-                    }
-                }
-                let matched_entities = candidates;
 
                 if #has_notify_handler && graphql_ctx.is_some() && matched_entities.len() > 1000 {
                     return Err(::graphql_orm::graphql::errors::sqlx_error_from_public(
@@ -11056,9 +11041,10 @@ fn generate_graphql_operations_unfiltered(
                     auth_context,
                 )
                 .await?;
-                // A GraphQL bulk write narrows its locking read with the host's
-                // write-target prefilter and takes at most the configured bulk
-                // write bound; a repository write keeps the unbounded read.
+                // The runtime selects, locks and classifies the targets. A row a
+                // GraphQL caller can neither read nor write is left out before any
+                // count or refusal can depend on it, and the bulk write bound counts
+                // targets only; a repository write keeps the unbounded read.
                 let matched_entities = ::std::boxed::Box::pin(::graphql_orm::graphql::orm::bulk_write_targets::<Self, #backend_marker>(
                     db,
                     graphql_ctx,
@@ -11067,22 +11053,6 @@ fn generate_graphql_operations_unfiltered(
                         .filter_with_entity_matching(&where_input),
                 ))
                 .await?;
-                // GraphQL candidates exclude rows the caller can neither read nor write,
-                // before any count or refusal can depend on them.
-                let mut candidates = Vec::with_capacity(matched_entities.len());
-                for entity in matched_entities {
-                    if db.authorize_write_target(
-                        graphql_ctx,
-                        #entity_name_lit,
-                        <Self as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
-                        <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
-                        access_surface,
-                        &entity as &(dyn ::std::any::Any + Send + Sync),
-                    ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)? {
-                        candidates.push(entity);
-                    }
-                }
-                let matched_entities = candidates;
 
                 if #has_notify_handler && graphql_ctx.is_some() && matched_entities.len() > 1000 {
                     return Err(::graphql_orm::graphql::errors::sqlx_error_from_public(

@@ -389,19 +389,95 @@ async fn write_target_prefilter_keeps_hidden_rows_from_row_callbacks() {
             assert_eq!(result["error"], "Entity not found");
             assert_eq!(hidden_asked(&asked), !prefilter, "{mutation}");
         }
+        owner.cleanup().unwrap();
+    }
+}
 
-        // Hidden rows do not count against the bulk bound once SQL removes them.
-        let tight = bounded(&db, Some(2));
-        let result = mutate(&tight, DELETE_ALL).await;
-        if prefilter {
-            assert_eq!(result["success"], true, "{result}");
-            assert_eq!(result["deletedCount"], 2);
-            assert_eq!(stored(&db).await.len(), 2);
-        } else {
-            assert_eq!(result["errorCode"], "PAGE_LIMIT_EXCEEDED", "{result}");
-            assert_eq!(stored(&db).await.len(), 4);
+/// The bulk bound counts the rows the caller may write. For a fixed set of
+/// such rows the payload is the same whether or not other, hidden rows match
+/// the filter, with a callback-only row policy and with a SQL prefilter.
+#[tokio::test]
+async fn hidden_matching_rows_never_change_a_bulk_write_outcome() {
+    for prefilter in [false, true] {
+        for (bound, mutation) in [
+            (1, UPDATE_ALL),
+            (2, UPDATE_ALL),
+            (1, DELETE_ALL),
+            (2, DELETE_ALL),
+        ] {
+            let mut payloads = Vec::new();
+            for hidden_rows_match in [true, false] {
+                let (mut db, mut owner) = setup().await;
+                if !hidden_rows_match {
+                    execute(&db, "DELETE FROM target_records WHERE owner = 'theirs'")
+                        .await
+                        .unwrap();
+                }
+                db.set_row_policy(OwnerRows {
+                    prefilter,
+                    asked: Default::default(),
+                });
+                let payload = mutate(&bounded(&db, Some(bound)), mutation).await;
+                let mine: Vec<_> = stored(&db)
+                    .await
+                    .into_iter()
+                    .filter(|(key, _)| key == "key1" || key == "key2")
+                    .collect();
+                payloads.push((payload, mine));
+                owner.cleanup().unwrap();
+            }
+            assert_eq!(
+                payloads[0], payloads[1],
+                "prefilter={prefilter} bound={bound} {mutation}"
+            );
+            // Two rows are the caller's: a bound of one refuses, two admits.
+            let (payload, _) = &payloads[0];
+            if bound == 1 {
+                assert_eq!(payload["success"], false, "{payload}");
+                assert_eq!(payload["errorCode"], "PAGE_LIMIT_EXCEEDED");
+            } else {
+                assert_eq!(payload["success"], true, "{payload}");
+            }
         }
-        assert!(!hidden_asked(&asked), "bounded deleteMany");
+    }
+}
+
+/// A row policy decided in Rust classifies candidates in pages under the scan
+/// budget authorized reads use. A scan that would need more candidates is the
+/// same host-configured refusal a read gets; a SQL prefilter avoids the scan.
+#[tokio::test]
+async fn a_bulk_write_candidate_scan_is_capped_by_the_read_scan_budget() {
+    for prefilter in [false, true] {
+        let (mut db, mut owner) = setup().await;
+        db.set_row_policy(OwnerRows {
+            prefilter,
+            asked: Default::default(),
+        });
+        // Four candidates match; the budget allows three.
+        let tight = db
+            .clone()
+            .with_pagination_config(PaginationConfig::default().with_max_scanned_rows(Some(3)));
+        let payload = mutate(&tight, UPDATE_ALL).await;
+        if prefilter {
+            // SQL removes the hidden rows: two candidates, within the budget.
+            assert_eq!(payload["success"], true, "{payload}");
+            assert_eq!(payload["affectedCount"], 2);
+        } else {
+            assert_eq!(payload["success"], false, "{payload}");
+            assert_eq!(payload["errorCode"], "PAGE_LIMIT_EXCEEDED");
+            assert!(
+                payload["error"].as_str().unwrap().contains("scan budget"),
+                "{payload}"
+            );
+            assert!(all_before(&stored(&db).await), "nothing was written");
+        }
+        // A budget that covers the candidates admits the write either way.
+        let roomy = db
+            .clone()
+            .with_pagination_config(PaginationConfig::default().with_max_scanned_rows(Some(4)));
+        let payload = mutate(&roomy, DELETE_ALL).await;
+        assert_eq!(payload["success"], true, "{payload}");
+        assert_eq!(payload["deletedCount"], 2);
         owner.cleanup().unwrap();
     }
 }
