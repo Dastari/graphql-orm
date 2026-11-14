@@ -434,6 +434,9 @@ pub struct AiAttachmentCleanupReport {
     /// Artifact rows retained because exact local or provider absence could
     /// not be proven.
     pub artifacts_failed: u32,
+    /// Terminal provider cleanups whose absence could not be confirmed within
+    /// the configured attempt bound. These are never counted as deleted.
+    pub artifacts_unconfirmed: u32,
 }
 
 /// Exact provider-persistent file selected by durable artifact retention.
@@ -452,6 +455,8 @@ pub struct AiProviderFileDeletionRequest {
     provider_kind: ProviderKind,
     provider_profile_id: String,
     provider_reference: String,
+    delete_previously_requested: bool,
+    provider_expired: bool,
 }
 
 impl AiProviderFileDeletionRequest {
@@ -471,7 +476,31 @@ impl AiProviderFileDeletionRequest {
             provider_kind,
             provider_profile_id,
             provider_reference,
+            delete_previously_requested: false,
+            provider_expired: false,
         }
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn with_cleanup_evidence(
+        mut self,
+        previous: bool,
+        expires_at: Option<i64>,
+        now: i64,
+    ) -> Self {
+        self.delete_previously_requested = previous;
+        self.provider_expired = expires_at.is_some_and(|expiry| expiry <= now);
+        self
+    }
+
+    /// Whether a durable exact-reference deletion intent predates this attempt.
+    pub const fn delete_previously_requested(&self) -> bool {
+        self.delete_previously_requested
+    }
+
+    /// Whether the provider's recorded expiry had passed when cleanup was claimed.
+    pub const fn provider_expired(&self) -> bool {
+        self.provider_expired
     }
 
     /// AI-owned artifact identifier.
@@ -525,7 +554,7 @@ impl fmt::Debug for AiProviderFileDeletionRequest {
 /// referenced provider object is absent after the call, including a provider
 /// "not found" response. A successful delete request without an authoritative
 /// absence guarantee is not sufficient. Implementations must never list or
-/// delete by prefix, infer absence from expiry, or expose the reference beyond
+/// delete by prefix, infer absence from an unrecorded expiry, or expose the reference beyond
 /// the configured provider adapter.
 #[async_trait]
 pub trait AiProviderFileDeletionService: Send + Sync {
@@ -559,8 +588,11 @@ pub trait AiAttachmentCleanupService: Send + Sync {
     ///
     /// Parent storage ambiguity is reported in
     /// [`AiAttachmentCleanupReport::failed`]; artifact local/provider ambiguity
-    /// is reported in [`AiAttachmentCleanupReport::artifacts_failed`]. Both are
-    /// retained for a later retry. A database or query failure aborts the pass
+    /// is reported in [`AiAttachmentCleanupReport::artifacts_failed`]. Those
+    /// remain retryable. Exhausted provider cleanup is reported separately in
+    /// [`AiAttachmentCleanupReport::artifacts_unconfirmed`] for host status and
+    /// metrics, with durable unconfirmed audit evidence and no deletion claim.
+    /// A database or query failure aborts the pass
     /// with a safe error.
     ///
     /// # Errors

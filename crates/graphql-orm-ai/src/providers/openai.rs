@@ -342,6 +342,11 @@ impl AiProviderFileDeletionService for OpenAiFileDeletionService {
         }
         let endpoint = format!("{}/{}", self.files_endpoint, request.provider_reference());
         let deletion = self.send(reqwest::Method::DELETE, &endpoint).await?;
+        if deletion.status() == reqwest::StatusCode::NOT_FOUND
+            && (request.delete_previously_requested() || request.provider_expired())
+        {
+            return Ok(());
+        }
         if !deletion.status().is_success() {
             return Err(AiError::ProviderFailed);
         }
@@ -3718,6 +3723,49 @@ mod tests {
         assert!(!debug.contains("profile-openai"));
         assert!(!debug.contains("file-maintenance-test"));
         assert!(!debug.contains("not-a-real-key"));
+    }
+
+    #[tokio::test]
+    async fn file_404_requires_a_prior_delete_intent_or_recorded_expiry() {
+        for (previous, expires, accepted) in [
+            (true, Some(101), true),
+            (false, Some(100), true),
+            (false, Some(99), true),
+            (false, Some(101), false),
+            (false, None, false),
+        ] {
+            let (endpoint, server) = file_mock_server(vec![(
+                "404 Not Found".to_owned(),
+                r#"{"error":{"code":"not_found"}}"#.to_owned(),
+            )])
+            .await;
+            let reference = SecretRef::parse("openai/file-proof-test").unwrap();
+            let service = OpenAiFileDeletionService::for_loopback_test(
+                "profile-openai",
+                OpenAiProviderConfig::new(reference.clone()),
+                Arc::new(TestSecrets(reference, "not-a-real-key".to_owned())),
+                endpoint,
+            )
+            .unwrap();
+            let request = AiProviderFileDeletionRequest::new(
+                uuid::Uuid::new_v4(),
+                uuid::Uuid::new_v4(),
+                "provider_file".to_owned(),
+                ProviderKind::OpenAi,
+                "profile-openai".to_owned(),
+                "file-proof".to_owned(),
+            )
+            .with_cleanup_evidence(previous, expires, 100);
+            assert_eq!(
+                service.delete_and_confirm_absent(&request).await.is_ok(),
+                accepted,
+                "previous={previous}, expiry={expires:?}"
+            );
+            assert_eq!(
+                server.await.unwrap(),
+                vec!["DELETE /v1/files/file-proof HTTP/1.1"]
+            );
+        }
     }
 
     #[tokio::test]

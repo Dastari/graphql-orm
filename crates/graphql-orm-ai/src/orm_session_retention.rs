@@ -4673,11 +4673,22 @@ pub(crate) fn validate_attachment_artifact(
         || artifact
             .cleanup_retry_count
             .is_some_and(|retry_count| retry_count < 0)
+        || artifact
+            .provider_delete_attempts
+            .is_some_and(|count| count <= 0)
+        || artifact.provider_delete_requested_at.is_some()
+            != artifact.provider_delete_attempts.is_some()
+        || (artifact.cleanup_state.as_deref() == Some("cleanup_unconfirmed")
+            && artifact.provider_delete_attempts.is_none())
         || (artifact.provider_expires_at.is_some() && artifact.provider_reference.is_none())
         || artifact.cleanup_state.as_deref().is_some_and(|state| {
             !matches!(
                 state,
-                "cleanup_required" | "cleanup_in_progress" | "cleanup_backoff" | "complete"
+                "cleanup_required"
+                    | "cleanup_in_progress"
+                    | "cleanup_backoff"
+                    | "complete"
+                    | "cleanup_unconfirmed"
             )
         })
         || (artifact.cleanup_state.as_deref() == Some("cleanup_required")
@@ -4697,17 +4708,19 @@ pub(crate) fn validate_attachment_artifact(
                     .cleanup_retry_count
                     .is_none_or(|retry_count| retry_count <= 0)
                 || artifact.cleanup_next_attempt_at.is_none()))
-        || (artifact.cleanup_state.as_deref() == Some("complete")
-            && (artifact.blob_reference.is_some()
-                || artifact.protected_content.is_some()
-                || artifact.provider_kind.is_some()
-                || artifact.provider_profile_id.is_some()
-                || artifact.provider_reference.is_some()
-                || artifact.provider_expires_at.is_some()
-                || artifact.deleted_at.is_none()
-                || artifact.cleanup_generation.is_none()
-                || artifact.cleanup_lease_expires_at.is_some()
-                || artifact.cleanup_next_attempt_at.is_some()))
+        || (matches!(
+            artifact.cleanup_state.as_deref(),
+            Some("complete" | "cleanup_unconfirmed")
+        ) && (artifact.blob_reference.is_some()
+            || artifact.protected_content.is_some()
+            || artifact.provider_kind.is_some()
+            || artifact.provider_profile_id.is_some()
+            || artifact.provider_reference.is_some()
+            || artifact.provider_expires_at.is_some()
+            || artifact.deleted_at.is_none()
+            || artifact.cleanup_generation.is_none()
+            || artifact.cleanup_lease_expires_at.is_some()
+            || artifact.cleanup_next_attempt_at.is_some()))
     {
         return Err(OrmPublicError::new(OrmErrorCode::InternalError));
     }
@@ -4715,10 +4728,12 @@ pub(crate) fn validate_attachment_artifact(
 }
 
 fn attachment_artifact_ready_for_metadata_delete(artifact: &AiAttachmentArtifactRecord) -> bool {
-    artifact.cleanup_state.as_deref() == Some("complete")
-        && artifact
-            .cleanup_generation
-            .is_some_and(|generation| generation > 0)
+    matches!(
+        artifact.cleanup_state.as_deref(),
+        Some("complete" | "cleanup_unconfirmed")
+    ) && artifact
+        .cleanup_generation
+        .is_some_and(|generation| generation > 0)
         && artifact.blob_reference.is_none()
         && artifact.protected_content.is_none()
         && artifact.provider_kind.is_none()
@@ -5018,6 +5033,8 @@ mod tests {
     struct ProviderFileDeletion {
         fail: AtomicBool,
         deleted: Mutex<Vec<String>>,
+        database: Mutex<Option<Database<DefaultWriteBackend>>>,
+        evidence: Mutex<Vec<bool>>,
     }
 
     impl ProviderFileDeletion {
@@ -5032,6 +5049,31 @@ mod tests {
             &self,
             request: &AiProviderFileDeletionRequest,
         ) -> Result<(), AiError> {
+            let database = self.database.lock().unwrap().clone();
+            if let Some(database) = database {
+                let artifact =
+                    AiAttachmentArtifactRecord::find_by_id(&database, &request.artifact_id())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                assert!(
+                    artifact.provider_delete_requested_at.is_some(),
+                    "intent precedes the external call"
+                );
+                assert!(
+                    artifact
+                        .provider_delete_attempts
+                        .is_some_and(|count| count > 0)
+                );
+                assert_eq!(
+                    request.delete_previously_requested(),
+                    artifact.provider_delete_attempts.unwrap() > 1
+                );
+            }
+            self.evidence
+                .lock()
+                .unwrap()
+                .push(request.delete_previously_requested());
             let debug = format!("{request:?}");
             assert!(!debug.contains(request.provider_reference()));
             assert!(!request.artifact_id().is_nil());
@@ -7942,6 +7984,8 @@ mod tests {
                 provider_profile_id: Some("profile-openai".to_owned()),
                 provider_reference: Some("provider-file-safe-reference".to_owned()),
                 provider_expires_at: None,
+                provider_delete_requested_at: None,
+                provider_delete_attempts: None,
                 cleanup_state: None,
                 cleanup_generation: None,
                 cleanup_lease_expires_at: None,
@@ -8020,6 +8064,8 @@ mod tests {
                                 provider_profile_id: Some(None),
                                 provider_reference: Some(None),
                                 provider_expires_at: Some(None),
+                                provider_delete_requested_at: None,
+                                provider_delete_attempts: None,
                                 cleanup_state: Some(Some("complete".to_owned())),
                                 cleanup_generation: Some(Some(1)),
                                 cleanup_lease_expires_at: Some(None),
@@ -8068,6 +8114,14 @@ mod tests {
 
     #[tokio::test]
     async fn artifact_worker_retries_ambiguous_provider_delete_and_fences_races() {
+        for mode in 0..3 {
+            Box::pin(artifact_worker_cleanup_scenario(mode)).await;
+        }
+    }
+
+    async fn artifact_worker_cleanup_scenario(mode: u8) {
+        let terminal = mode != 0;
+        let interrupted = mode == 2;
         let database = database().await;
         let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
         seed_policy(&database, &scope).await;
@@ -8113,6 +8167,8 @@ mod tests {
                 provider_profile_id: Some("profile-openai".to_owned()),
                 provider_reference: Some(provider_reference.to_owned()),
                 provider_expires_at: Some(now().unix_timestamp() - 1),
+                provider_delete_requested_at: None,
+                provider_delete_attempts: None,
                 cleanup_state: None,
                 cleanup_generation: None,
                 cleanup_lease_expires_at: None,
@@ -8142,8 +8198,11 @@ mod tests {
         let blobs = Arc::new(ArtifactBlobStore::default());
         blobs.insert(local_reference);
         let provider = Arc::new(ProviderFileDeletion::default());
+        *provider.database.lock().unwrap() = Some(database.clone());
+        let mut host = database.clone();
+        host.set_field_policy(crate::custody_field_policy::tests::DenyEverything);
         let cleanup = OrmAiAttachmentService::new(
-            database.clone(),
+            host,
             Arc::new(AllowAll),
             Arc::new(ProtectionPolicy),
             Arc::new(DatabaseManagedContentProtector),
@@ -8152,7 +8211,12 @@ mod tests {
             Arc::new(DenyAttachmentAcceptance),
             clock.clone(),
         )
-        .with_provider_file_deletion_service(provider.clone());
+        .with_provider_file_deletion_service(provider.clone())
+        .with_cleanup_limits(
+            crate::AiAttachmentCleanupLimits::default()
+                .with_maximum_provider_delete_attempts(2)
+                .unwrap(),
+        );
 
         set_provider_file_delete_required(&database, &scope, false).await;
         let policy_blocked = cleanup
@@ -8198,32 +8262,107 @@ mod tests {
         );
         assert!(retained.protected_content.is_some());
 
-        provider.set_fail(false);
+        assert_eq!(retained.provider_delete_attempts, Some(1));
+        assert!(retained.provider_delete_requested_at.is_some());
+        assert_eq!(retained.cleanup_retry_count, Some(1));
+        assert!(retained.cleanup_next_attempt_at.unwrap() > now().unix_timestamp());
+        assert_eq!(
+            crate::AiAttachmentCleanupLimits::default().maximum_provider_delete_attempts(),
+            24
+        );
+        if interrupted {
+            // The final intent committed, then its worker died before dispatch/finish.
+            AiAttachmentArtifactRecord::update_by_id(
+                &database,
+                &artifact_id,
+                UpdateAiAttachmentArtifactRecordInput {
+                    provider_delete_attempts: Some(Some(2)),
+                    cleanup_state: Some(Some("cleanup_in_progress".to_owned())),
+                    cleanup_next_attempt_at: Some(None),
+                    cleanup_lease_expires_at: Some(Some(now().unix_timestamp() + 120)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }
+        provider.set_fail(terminal);
         clock.advance_seconds(121);
         let (left, right) = tokio::join!(cleanup.cleanup_once(), cleanup.cleanup_once());
         let left = left.expect("left artifact worker should converge");
         let right = right.expect("right artifact worker should converge");
-        assert_eq!(left.artifacts_cleaned + right.artifacts_cleaned, 1);
+        assert_eq!(
+            left.artifacts_cleaned + right.artifacts_cleaned,
+            u32::from(!terminal)
+        );
+        assert_eq!(
+            left.artifacts_unconfirmed + right.artifacts_unconfirmed,
+            u32::from(terminal)
+        );
         assert_eq!(left.artifacts_failed + right.artifacts_failed, 0);
         assert!(left.artifacts_deferred + right.artifacts_deferred <= 1);
-        assert_eq!(
-            provider
-                .deleted
-                .lock()
-                .expect("provider deletion lock")
-                .as_slice(),
-            &[provider_reference.to_owned()]
-        );
+        let expected_deletions = if terminal {
+            vec![]
+        } else {
+            vec![provider_reference.to_owned()]
+        };
+        assert_eq!(*provider.deleted.lock().unwrap(), expected_deletions);
         let cleaned = AiAttachmentArtifactRecord::find_by_id(&database, &artifact_id)
             .await
             .expect("artifact lookup should succeed")
             .expect("artifact tombstone should remain until retention");
-        assert_eq!(cleaned.cleanup_state.as_deref(), Some("complete"));
+        assert_eq!(
+            cleaned.cleanup_state.as_deref(),
+            Some(if terminal {
+                "cleanup_unconfirmed"
+            } else {
+                "complete"
+            })
+        );
+        assert_eq!(cleaned.provider_delete_attempts, Some(2));
+        assert_eq!(
+            *provider.evidence.lock().unwrap(),
+            if interrupted {
+                vec![false]
+            } else {
+                vec![false, true]
+            }
+        );
         assert!(cleaned.blob_reference.is_none());
         assert!(cleaned.provider_reference.is_none());
         assert!(cleaned.provider_expires_at.is_none());
         assert!(cleaned.protected_content.is_none());
         assert!(cleaned.deleted_at.is_some());
+
+        if terminal {
+            assert!(cleaned.sha256.is_none());
+            assert!(cleaned.detected_mime.is_none());
+            assert_eq!(cleaned.byte_count, 0);
+        }
+        if terminal {
+            let audits = database
+                .transaction(TransactionMode::Default, move |tx| {
+                    Box::pin(async move {
+                        tx.query::<AiAuditEventRecord>()
+                            .filter(AiAuditEventRecordWhereInput {
+                                action: Some(StringFilter {
+                                    eq: Some("cleanup_attachment_artifact_objects".to_owned()),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .limit(10)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)
+                    })
+                })
+                .await
+                .unwrap();
+            assert!(audits.iter().any(|audit| audit.outcome == "unconfirmed"
+                && audit.reason_code == "provider_cleanup_attempts_exhausted"));
+            assert!(!audits.iter().any(|audit| audit.outcome == "succeeded"));
+        }
 
         let finalized = retention
             .prune_session_content(None)
@@ -8285,6 +8424,8 @@ mod tests {
                     provider_profile_id: None,
                     provider_reference: None,
                     provider_expires_at: None,
+                    provider_delete_requested_at: None,
+                    provider_delete_attempts: None,
                     cleanup_state: None,
                     cleanup_generation: None,
                     cleanup_lease_expires_at: None,

@@ -1086,6 +1086,10 @@ pub(crate) struct AiAttachmentArtifactRecord {
     #[backup(redact)]
     pub provider_reference: Option<String>,
     pub provider_expires_at: Option<i64>,
+    /// Persisted intent written before an exact provider deletion request.
+    pub provider_delete_requested_at: Option<i64>,
+    /// Number of durable provider deletion intents, including interrupted calls.
+    pub provider_delete_attempts: Option<i64>,
     /// Private retention state; absent means the artifact remains active.
     #[filterable(type = "string")]
     pub cleanup_state: Option<String>,

@@ -143,6 +143,7 @@ impl Default for AiAttachmentServiceLimits {
 pub struct AiAttachmentCleanupLimits {
     maximum_batch_size: u32,
     cleanup_lease_ttl: Duration,
+    maximum_provider_delete_attempts: u32,
 }
 
 impl AiAttachmentCleanupLimits {
@@ -164,7 +165,27 @@ impl AiAttachmentCleanupLimits {
         Ok(Self {
             maximum_batch_size,
             cleanup_lease_ttl,
+            maximum_provider_delete_attempts: 24,
         })
+    }
+
+    /// Sets the number of provider deletion intents before cleanup becomes
+    /// terminal and unconfirmed. The default is 24; interrupted calls count.
+    /// # Errors
+    /// Returns invalid configuration unless the bound is in `1..=1024`.
+    pub fn with_maximum_provider_delete_attempts(mut self, maximum: u32) -> Result<Self, AiError> {
+        if !(1..=1024).contains(&maximum) {
+            return Err(AiError::InvalidConfiguration(
+                "invalid provider cleanup attempt bound".to_owned(),
+            ));
+        }
+        self.maximum_provider_delete_attempts = maximum;
+        Ok(self)
+    }
+
+    /// Maximum provider deletion intents before terminal unconfirmed cleanup.
+    pub const fn maximum_provider_delete_attempts(self) -> u32 {
+        self.maximum_provider_delete_attempts
     }
 
     /// Maximum candidate rows considered in one pass.
@@ -183,8 +204,16 @@ impl Default for AiAttachmentCleanupLimits {
         Self {
             maximum_batch_size: 50,
             cleanup_lease_ttl: Duration::minutes(5),
+            maximum_provider_delete_attempts: 24,
         }
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ArtifactCleanupOutcome {
+    Absent,
+    LocalUnconfirmed,
+    ProviderUnconfirmed,
 }
 
 /// ORM-backed attachment service using a provider-neutral blob store.
@@ -729,9 +758,13 @@ impl OrmAiAttachmentService {
     async fn finish_artifact_cleanup(
         &self,
         claimed: &AiAttachmentArtifactRecord,
-        external_objects_absent: bool,
+        external: ArtifactCleanupOutcome,
         now: i64,
     ) -> Result<bool, AiError> {
+        let external_objects_absent = external == ArtifactCleanupOutcome::Absent;
+        let terminal_unconfirmed = external == ArtifactCleanupOutcome::ProviderUnconfirmed
+            && claimed.provider_delete_attempts.unwrap_or(0)
+                >= i64::from(self.cleanup_limits.maximum_provider_delete_attempts);
         let id = claimed.id;
         let expected_version = claimed.row_version;
         let generation = claimed
@@ -763,6 +796,28 @@ impl OrmAiAttachmentService {
                             },
                             "succeeded",
                             "artifact_objects_deleted",
+                        )
+                    } else if terminal_unconfirmed {
+                        (
+                            UpdateAiAttachmentArtifactRecordInput {
+                                blob_reference: Some(None),
+                                detected_mime: Some(None),
+                                sha256: Some(None),
+                                byte_count: Some(0),
+                                protected_content: Some(None),
+                                provider_reference: Some(None),
+                                provider_kind: Some(None),
+                                provider_profile_id: Some(None),
+                                provider_expires_at: Some(None),
+                                cleanup_state: Some(Some("cleanup_unconfirmed".to_owned())),
+                                cleanup_lease_expires_at: Some(None),
+                                cleanup_next_attempt_at: Some(None),
+                                deleted_at: Some(Some(now)),
+                                // A terminal audit record is retained without claiming provider deletion.
+                                ..Default::default()
+                            },
+                            "unconfirmed",
+                            "provider_cleanup_attempts_exhausted",
                         )
                     } else {
                         let (next_retry_count, next_attempt_at) =
@@ -814,45 +869,94 @@ impl OrmAiAttachmentService {
 
     async fn cleanup_artifact_external_objects(
         &self,
-        claimed: &AiAttachmentArtifactRecord,
-    ) -> bool {
-        let local_absent = match claimed.blob_reference.as_deref() {
-            Some(reference) => self.delete_blob_if_present(reference).await,
-            None => true,
+        claimed: &mut AiAttachmentArtifactRecord,
+        now: i64,
+    ) -> Result<ArtifactCleanupOutcome, AiError> {
+        if let Some(reference) = claimed.blob_reference.as_deref()
+            && !self.delete_blob_if_present(reference).await
+        {
+            return Ok(ArtifactCleanupOutcome::LocalUnconfirmed);
+        }
+        let Some(reference) = claimed.provider_reference.clone() else {
+            return Ok(ArtifactCleanupOutcome::Absent);
         };
-        if !local_absent {
-            return false;
+        if claimed.provider_delete_attempts.unwrap_or(0)
+            >= i64::from(self.cleanup_limits.maximum_provider_delete_attempts)
+        {
+            return Ok(ArtifactCleanupOutcome::ProviderUnconfirmed);
         }
-        match claimed.provider_reference.as_deref() {
-            Some(reference) => {
-                let Some(service) = &self.provider_file_deletion else {
-                    return false;
-                };
-                let Some(provider_kind) = claimed
-                    .provider_kind
-                    .as_deref()
-                    .and_then(parse_provider_kind)
-                else {
-                    return false;
-                };
-                let Some(provider_profile_id) = claimed.provider_profile_id.clone() else {
-                    return false;
-                };
-                if !valid_safe_reference(&provider_profile_id, 200) {
-                    return false;
-                }
-                let request = AiProviderFileDeletionRequest::new(
-                    claimed.id,
-                    claimed.attachment_id,
-                    claimed.artifact_kind.clone(),
-                    provider_kind,
-                    provider_profile_id,
-                    reference.to_owned(),
-                );
-                service.delete_and_confirm_absent(&request).await.is_ok()
-            }
-            None => true,
-        }
+        let Some(service) = &self.provider_file_deletion else {
+            return Ok(ArtifactCleanupOutcome::ProviderUnconfirmed);
+        };
+        let Some(provider_kind) = claimed
+            .provider_kind
+            .as_deref()
+            .and_then(parse_provider_kind)
+        else {
+            return Ok(ArtifactCleanupOutcome::ProviderUnconfirmed);
+        };
+        let Some(profile) = claimed
+            .provider_profile_id
+            .clone()
+            .filter(|id| valid_safe_reference(id, 200))
+        else {
+            return Ok(ArtifactCleanupOutcome::ProviderUnconfirmed);
+        };
+        let previous = claimed.provider_delete_requested_at.is_some();
+        let attempts = claimed
+            .provider_delete_attempts
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or(AiError::PersistenceFailed)?;
+        let id = claimed.id;
+        let version = claimed.row_version;
+        // Commit intent before the network call. Never send from a stale cleanup fence.
+        let updated = self
+            .database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    tx.compare_and_swap::<AiAttachmentArtifactRecord>(
+                        &id,
+                        version,
+                        AiAttachmentArtifactRecordWhereInput {
+                            cleanup_state: Some(StringFilter {
+                                eq: Some("cleanup_in_progress".to_owned()),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        },
+                        UpdateAiAttachmentArtifactRecordInput {
+                            provider_delete_requested_at: Some(Some(now)),
+                            provider_delete_attempts: Some(Some(attempts)),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .map_err(map_transaction)?;
+        *claimed = match updated {
+            ConditionalUpdateOutcome::Updated(row) => row,
+            _ => return Err(AiError::Conflict),
+        };
+        let request = AiProviderFileDeletionRequest::new(
+            claimed.id,
+            claimed.attachment_id,
+            claimed.artifact_kind.clone(),
+            provider_kind,
+            profile,
+            reference,
+        )
+        .with_cleanup_evidence(previous, claimed.provider_expires_at, now);
+        Ok(
+            if service.delete_and_confirm_absent(&request).await.is_ok() {
+                ArtifactCleanupOutcome::Absent
+            } else {
+                ArtifactCleanupOutcome::ProviderUnconfirmed
+            },
+        )
     }
 
     async fn cleanup_candidates(
@@ -1718,18 +1822,38 @@ impl AiAttachmentCleanupService for OrmAiAttachmentService {
             ..Default::default()
         };
         for candidate in artifact_candidates {
-            let Some(claimed) = self.claim_artifact_cleanup(&candidate, now).await? else {
+            let Some(mut claimed) = self.claim_artifact_cleanup(&candidate, now).await? else {
                 report.artifacts_deferred = report.artifacts_deferred.saturating_add(1);
                 continue;
             };
-            let external_objects_absent = self.cleanup_artifact_external_objects(&claimed).await;
+            let external = match self
+                .cleanup_artifact_external_objects(&mut claimed, now)
+                .await
+            {
+                Ok(outcome) => outcome,
+                Err(AiError::Conflict) => {
+                    report.artifacts_deferred = report.artifacts_deferred.saturating_add(1);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let terminal = external == ArtifactCleanupOutcome::ProviderUnconfirmed
+                && claimed.provider_delete_attempts.unwrap_or(0)
+                    >= i64::from(self.cleanup_limits.maximum_provider_delete_attempts);
             if !self
-                .finish_artifact_cleanup(&claimed, external_objects_absent, now)
+                .finish_artifact_cleanup(&claimed, external, now)
                 .await?
             {
                 report.artifacts_deferred = report.artifacts_deferred.saturating_add(1);
-            } else if external_objects_absent {
+            } else if external == ArtifactCleanupOutcome::Absent {
                 report.artifacts_cleaned = report.artifacts_cleaned.saturating_add(1);
+            } else if terminal {
+                tracing::warn!(
+                    code = "provider_cleanup_attempts_exhausted",
+                    outcome = "cleanup_unconfirmed",
+                    "provider artifact absence remains unconfirmed"
+                );
+                report.artifacts_unconfirmed = report.artifacts_unconfirmed.saturating_add(1);
             } else {
                 report.artifacts_failed = report.artifacts_failed.saturating_add(1);
             }
