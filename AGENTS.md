@@ -45,8 +45,10 @@ under a crate add package-local invariants.
   `graphql-orm-backup -> graphql-orm`, and
   `graphql-orm -> graphql-orm-macros`,
   `graphql-orm -> graphql-orm-operation-catalog`, plus
-  `graphql-orm-router -> graphql-orm-router-protocol` and optional
-  `graphql-orm -> graphql-orm-router-protocol`.
+  `graphql-orm-router -> graphql-orm-router-protocol`, optional
+  `graphql-orm-operation-catalog -> graphql-orm-router-protocol` (its
+  `router-protocol` feature, which the ORM's `router-protocol` feature
+  enables), and optional `graphql-orm -> graphql-orm-router-protocol`.
 - Keep Federation runtime and server dependencies inside
   `graphql-orm-router`. The protocol crate contains project-neutral data only,
   and neither router package depends on the ORM or companion packages.
