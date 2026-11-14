@@ -10,6 +10,204 @@ supersedes: []
 
 # Migration Guide
 
+## 0.143.0 to 0.147.0: write paths, hooks and authority
+
+Upgrade runtime and macros together. No schema or data migration is needed.
+Generated SDL, operation catalogues and fingerprints are unchanged.
+
+**Breaking: `Entity::insert` with a bare pool takes the authorized path.** The
+generated repository helper `Entity::insert(provider, input)` accepts any
+`PoolProvider`. Called with a `Database` it always ran entity, row and field
+policy, the write transform, mutation hooks and the written-row check. Called
+with a bare pool (`Entity::insert(&pool, input)` or
+`Entity::insert(db.pool(), input)`) it ran a raw `INSERT` with none of them,
+outside a transaction. It now behaves exactly as the same call on
+`Database::new(pool)`, a handle with nothing installed:
+
+| Entity | Before | Now |
+| --- | --- | --- |
+| no `write_policy`, no field `write_policy` | raw `INSERT` | inserted through the generated path, in a transaction; result unchanged |
+| declares a `write_policy`, or a field with one | raw `INSERT` | `AUTHORIZATION_MISCONFIGURED` under the default mode: a bare pool has no provider |
+| any entity, SQL Server pool | raw `INSERT` | `FORBIDDEN`: a default SQL Server handle is read-only (`SchemaPolicy::ExternalReadOnly`) |
+
+Hooks, transforms and `Changed` events installed on your `Database` still do
+not run for a bare pool, because the pool does not carry them. Pass the
+`Database` instead: `Entity::insert(&db, input)`. Test fixtures that seed rows
+of policy-protected entities through a pool should seed through a `Database`
+with the policies they need, or with SQL.
+
+**Breaking: generated GraphQL bulk writes are bounded.** `updateMany` and
+`deleteMany` loaded and locked every row their filter matched. They now take
+at most `PaginationConfig::max_bulk_write_rows` rows, default `10_000`, plus
+one look-ahead row, ordered by primary key. When more rows match, the write is
+refused before any row changes and the payload reports `success: false` with
+`errorCode = "PAGE_LIMIT_EXCEEDED"`; nothing is truncated and the message
+names no count. A bulk write under the bound returns what it returned before.
+
+- Raise, lower or remove the bound per handle:
+  `Database::builder(pool).max_bulk_write_rows(Some(50_000))`, or
+  `db.with_pagination_config(PaginationConfig::default().with_max_bulk_write_rows(None))`.
+  `PaginationConfig::unbounded()` and `DatabaseBuilder::unbounded_pagination()`
+  already mean "no bounds" and remove it too.
+- Clients should treat `PAGE_LIMIT_EXCEEDED` on a bulk mutation as "narrow the
+  filter and retry in parts".
+- `PaginationConfig` has a new public field, `max_bulk_write_rows`. A struct
+  literal that lists every field needs it, or `..Default::default()`.
+- The bound counts the rows the locking read selects, before row policy, so it
+  can be reached because of rows the caller cannot see. Return a
+  `write_target_prefilter` (below) to keep those rows out of it.
+- A filter the ORM evaluates in Rust rather than in SQL is not limited in SQL;
+  the bound then applies to the rows that match.
+- Repository `update_where`, `delete_where` and their transaction forms are
+  trusted code and are **not** bounded. Use `update_where_bounded` and
+  `delete_where_bounded` where a worker needs a ceiling.
+- The existing 1,000-row bound for `notify_with` bulk writes is unchanged and
+  still counts only the rows the caller may write.
+
+**New: SQL prefilter for write targets.** A generated GraphQL update or delete
+locks the rows its key or filter selects and then asks `can_write_row` and
+`can_read_row` about each; a row the caller can neither write nor read is
+treated as missing. Those hidden rows were still selected `FOR UPDATE` and
+passed to the callbacks first. A row policy that can express "rows this caller
+can read or write" in SQL now returns it from the new, optional
+`RowPolicy::write_target_prefilter`:
+
+```rust,ignore
+fn write_target_prefilter<'a>(
+    &'a self,
+    ctx: Option<&'a async_graphql::Context<'_>>,
+    _db: &'a Database,
+    _entity_name: &'static str,
+    _write_policy: Option<&'static str>,
+    _surface: EntityAccessSurface,
+) -> BoxFuture<'a, async_graphql::Result<Option<ReadPredicate>>> {
+    Box::pin(async move {
+        let tenant = tenant_of(ctx)?;
+        Ok(Some(ReadPredicate::column::<DefaultBackend, Invoice>(
+            "tenant_id",
+            ReadPredicateOp::Eq,
+            SqlValue::String(tenant),
+        )?))
+    })
+}
+```
+
+Rows outside the predicate are never selected, locked or passed to a callback
+on `update`, `delete`, `updateMany` and `deleteMany`. The predicate only
+narrows: every selected row is still classified by the callbacks, so it cannot
+grant a write, and a row it leaves out is treated as missing even if the
+callbacks would have allowed it. The default returns `None`, which keeps the
+previous behaviour. Repository writes do not ask. A `RowPolicy` wrapper that
+delegates to another policy should forward this method.
+
+**Breaking: custom entity resolvers enforce operation assurance.** A
+`#[graphql(entity)]` method in a `#[graphql_orm_custom_operations]` root is
+served below `Query._entities`, where async-graphql applies no guard. It was
+catalogued, so a host could classify its coordinate with an assurance
+requirement, and nothing enforced it. The attribute now makes the resolver's
+body start with its declared authorization (as since 0.143.0), then the
+requirement registered for the resolver's own coordinate, then any registered
+for `Query._entities`: the same order generated entity resolvers use. Two
+things follow:
+
+- A public (`authorization = false`) entity resolver now also needs a named
+  `&Context<'_>` argument and a `Result` return type; without them it does not
+  compile. Protected ones already did.
+- A requirement you registered for such a coordinate, or for `_entities`,
+  starts being enforced on Federation entity resolution. A host with no
+  `AssuranceEnforcement` installed sees no change.
+
+**New: named authority for workers and hooks (part of
+[#291](https://github.com/Dastari/graphql-orm/issues/291)).** Repository
+writes, transactions and the writes a mutation hook makes still reach entity,
+row and field policies with `ctx = None` on `EntityAccessSurface::Repository`.
+What is new is a typed label the caller can present and the policy can read:
+
+```rust,ignore
+// A trusted worker: every repository call and transaction on this handle.
+let worker = db.clone().with_system_access(
+    SystemAccess::new("retention-worker").with_capabilities(vec!["lines.purge".into()]),
+);
+
+// A mutation hook, for the writes it makes inside the scope.
+hook_ctx
+    .with_system_access(SystemAccess::new("order-cleanup"), |tx| {
+        Box::pin(async move { tx.delete_where::<OrderLine>(lines).await })
+    })
+    .await?;
+
+// A policy decides on it.
+fn can_access_entity<'a>(&'a self, ctx: Option<&'a Context<'_>>, db: &'a Database, /* ... */)
+    -> BoxFuture<'a, async_graphql::Result<bool>> {
+    Box::pin(async move {
+        Ok(match (ctx, db.system_access()) {
+            (Some(ctx), _) => request_may(ctx),
+            (None, Some(access)) => access.name == "order-cleanup",
+            (None, None) => false, // no authority, as before
+        })
+    })
+}
+```
+
+`FieldPolicy::can_read_repository_field` and `can_write_repository_field`
+receive `Some(AccessContext::System(..))` from a labelled handle or scope,
+where they received `None`. Nothing else changes for existing hosts: the label
+grants nothing unless a policy looks at it, an unlabelled call is exactly what
+it was, and no surface or callback signature changed. The scope ends when its
+future completes; if that future is dropped first, the transaction can no
+longer commit. Keep a labelled handle out of GraphQL schema data. A separate
+`EntityAccessSurface` for hook writes and carrying the originating request's
+`Context` into nested writes are not part of this release; both would change
+what existing policies observe.
+
+**New: `require_policies` in `schema_roots!`.** An entity with no
+`read_policy` or `write_policy` is open to every subject the schema's `auth`
+setting admits, and nothing told "deliberately open" from "nobody decided".
+Opt in per schema:
+
+```rust,ignore
+#[graphql_entity(table = "tags", plural = "Tags", policy = "open")]
+struct Tag { /* ... */ }
+
+schema_roots! {
+    require_policies: true,
+    entities: [Invoice, Tag],
+}
+```
+
+With the setting on, every listed entity must declare `read_policy`,
+`write_policy`, an entity-level `auth = "none"` or the new `policy = "open"` marker, or the build fails with an
+error naming the entity. The marker is a review signal only: it changes no
+behaviour and cannot be combined with a policy key. Without the setting,
+nothing changes.
+
+**New: transaction-scoped extensions.** The code that begins a transaction can
+attach typed values that the mutation hook reads for that transaction's
+writes:
+
+```rust,ignore
+db.transaction(TransactionMode::StateMachine, |tx| {
+    Box::pin(async move {
+        tx.insert_extension(ReviewedStep { ticket })?;
+        tx.update_by_id::<Ledger>(&id, input).await?;
+        Ok(())
+    })
+})
+.await?;
+
+// In MutationHook::on_mutation:
+if hook_ctx.extension::<ReviewedStep>().is_none() {
+    return Err(/* fenced */);
+}
+```
+
+An extension lives in its `MutationContext`: single, bulk and nested writes of
+that transaction see it, and it is dropped before the commit or the rollback.
+Deferred post-commit actions, queued events, other transactions, other
+`Database` handles and generated GraphQL mutations never see one. A mutation
+hook reads extensions but cannot insert or remove them (`CONFLICT`). Hosts
+that do not use the API are unaffected.
+
 ## 0.141.0 to 0.143.0: one authorization contract
 
 Upgrade runtime and macros together. No schema or data migration is needed.

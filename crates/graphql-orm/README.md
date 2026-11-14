@@ -10,6 +10,17 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.147.0 (placeholder) puts every generated write on one authorized
+path and gives hooks and workers an explicit authority. `Entity::insert` with a
+bare pool no longer bypasses policies and hooks; generated GraphQL bulk writes
+are bounded by `PaginationConfig::max_bulk_write_rows` and refused with
+`PAGE_LIMIT_EXCEEDED` above it; custom `#[graphql(entity)]` resolvers enforce
+operation assurance; `RowPolicy::write_target_prefilter`,
+`Database::with_system_access`, `MutationContext::with_system_access`,
+transaction extensions and `schema_roots!` `require_policies` are new and
+opt-in. Upgrade ORM/macros together; see the
+[root migration guide](../../MIGRATION.md#01430-to-01470-write-paths-hooks-and-authority).
+
 Version 0.143.0 gives authorization one contract: every generated read path
 asks the field policy about a field with or without a policy key;
 `#[graphql_orm_custom_operations]` enforces the authorization it declares;
