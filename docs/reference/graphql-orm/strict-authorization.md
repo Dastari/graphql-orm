@@ -200,11 +200,11 @@ Writes follow the same rule, with one difference between the two surfaces:
 | GraphQL create | a keyed field always (optional ones also when absent, as before); a key-less field when it is part of the GraphQL input type and the client supplied it (a required input always is) |
 | GraphQL update | a keyed field the input supplies; a key-less field the client supplied; with the current row |
 | GraphQL upsert, new row | as create |
-| GraphQL upsert, existing row | every field the conflict update sets (each column outside the primary key and the upsert key, except a managed version), keyed or key-less, supplied or omitted, with the current row and the value about to be written; a keyed field outside that set is not asked |
+| GraphQL upsert, existing row | every writable input field outside the primary key and upsert key, `skip_input` and host-managed timestamps included, keyed or key-less, supplied or omitted, with the current row and the value about to be written; ORM-managed timestamps and the managed version are not asked about, and a keyed field outside that set is not asked |
 | GraphQL `updateMany` | as update, per matched row |
 | Repository `insert`, `insert_many`, `insert_if_absent` and their transaction forms | every create field through the repository decision |
 | Repository `update_by_id`, `update_by_key`, `update_where`, `update_if`, `compare_and_swap` and their transaction forms | every supplied field through the repository decision, with the current row |
-| Repository `upsert`, `upsert_many` | every create field for a new row, every changed field for an existing one, through the repository decision |
+| Repository `upsert`, `upsert_many` | every create field for a new row; every field its update sets for an existing one (changed or not; primary-key and upsert-key fields are asked only on insert); through the repository decision |
 | Repository-only entities | every create and supplied update field (unchanged) |
 
 The existing-row upsert asks more because its statement writes more: the

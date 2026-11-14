@@ -96,16 +96,22 @@ host-managed timestamps, managed versions) or about a value only an input
 transform or hook set, and they never also ask the repository decision.
 
 The exception is an upsert that resolves to an existing row. Its update sets
-every column that is neither the primary key nor part of the upsert key, so an
-optional field the client left out is written as `NULL` and a `skip_input`
-field as its default. The statement is unchanged; the decision is now asked
+every writable input field outside the primary key and the upsert key,
+`skip_input` fields and host-managed timestamps included, so an optional field
+the client left out is written as `NULL` and a `skip_input` field as its
+default. ORM-managed timestamps and the managed version are not asked about. The statement is unchanged; the decision is now asked
 for each of those fields, with the current row and the value about to be
 written (`None` for an omitted optional field), whether or not the value
 differs from the stored one. A key-less field the client omitted was not asked
-before. An upsert that inserts keeps the client-supplied rule, and a managed
-version column is never asked about. A provider that denies a key-less field
-by name now refuses an upsert onto an existing row unless it allows that field
-for the caller; send the field's current value if the client means to keep it.
+before. An upsert that inserts keeps the client-supplied rule. A provider that
+denies a key-less field by name now refuses an upsert onto an existing row
+unless it allows that field for the caller. The remedy is in the policy: it
+receives the current row and the value about to be written, so it can allow
+the write when the two are equal or the caller is entitled to change the
+field. Sending the field's current value does not avoid the question (a sent
+value is asked about too, and a client cannot send a `skip_input` field or a
+host-managed timestamp at all); it only keeps the update from writing `NULL`
+over an optional field the client means to keep.
 
 `ignore_denied_field_write` and the optional-field rules for fields with a
 declared key are unchanged: such optional create and upsert fields are asked
