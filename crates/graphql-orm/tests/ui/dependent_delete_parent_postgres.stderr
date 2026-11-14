@@ -1,0 +1,51 @@
+error[E0277]: dependent_deletes requires `OptOutParent` to also opt in with #[graphql_entity(dependent_deletes)]
+  --> tests/ui/dependent_delete_parent_postgres.rs:12:25
+   |
+12 | #[derive(GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug)]
+   |                         ^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `graphql_orm::prelude::StaticDeleteEntity<PostgresBackend>` is not implemented for `OptOutParent`
+  --> tests/ui/dependent_delete_parent_postgres.rs:5:1
+   |
+ 5 | struct OptOutParent {
+   | ^^^^^^^^^^^^^^^^^^^
+help: the following other types implement trait `graphql_orm::prelude::StaticDeleteEntity<B>`
+  --> tests/ui/dependent_delete_parent_postgres.rs:12:25
+   |
+12 | #[derive(GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug)]
+   |                         ^^^^^^^^^^^^^^^^^ `CascadeChild`
+...
+23 | #[derive(GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug)]
+   |                         ^^^^^^^^^^^^^^^^^ `NullChild`
+note: required by a bound in `_::__gom_declared_cascade_or_set_null_parent_must_opt_in`
+  --> tests/ui/dependent_delete_parent_postgres.rs:20:5
+   |
+20 |     #[relation(target = "OptOutParent", from = "parent_id", to = "id", on_delete = "cascade")]
+   |     ^ required by this bound in `__gom_declared_cascade_or_set_null_parent_must_opt_in`
+   = note: this error originates in the derive macro `GraphQLOperations` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: dependent_deletes requires `OptOutParent` to also opt in with #[graphql_entity(dependent_deletes)]
+  --> tests/ui/dependent_delete_parent_postgres.rs:23:25
+   |
+23 | #[derive(GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug)]
+   |                         ^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `graphql_orm::prelude::StaticDeleteEntity<PostgresBackend>` is not implemented for `OptOutParent`
+  --> tests/ui/dependent_delete_parent_postgres.rs:5:1
+   |
+ 5 | struct OptOutParent {
+   | ^^^^^^^^^^^^^^^^^^^
+help: the following other types implement trait `graphql_orm::prelude::StaticDeleteEntity<B>`
+  --> tests/ui/dependent_delete_parent_postgres.rs:12:25
+   |
+12 | #[derive(GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug)]
+   |                         ^^^^^^^^^^^^^^^^^ `CascadeChild`
+...
+23 | #[derive(GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug)]
+   |                         ^^^^^^^^^^^^^^^^^ `NullChild`
+note: required by a bound in `_::__gom_declared_cascade_or_set_null_parent_must_opt_in`
+  --> tests/ui/dependent_delete_parent_postgres.rs:31:5
+   |
+31 |     #[relation(target = "OptOutParent", from = "parent_id", to = "id", on_delete = "set_null")]
+   |     ^ required by this bound in `__gom_declared_cascade_or_set_null_parent_must_opt_in`
+   = note: this error originates in the derive macro `GraphQLOperations` (in Nightly builds, run with -Z macro-backtrace for more info)
