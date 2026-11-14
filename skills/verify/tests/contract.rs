@@ -1664,6 +1664,7 @@ async fn a_hidden_to_one_target_is_null_without_losing_the_parent() {
     assert!(data["order"]["customer"].is_null());
 }
 
+#[test]
 fn collection_filter_opt_in_is_typed_and_read_only() {
     let filter = CustomerWhereInput {
         orders: Some(vec![]),
@@ -1680,6 +1681,7 @@ fn collection_filter_opt_in_is_typed_and_read_only() {
     assert!(filter.__gom_require_scalar_write_filter().is_err());
 }
 
+#[test]
 fn private_read_predicate_is_validated_and_negatable() {
     let predicate = ReadPredicate::column::<SqliteBackend, Profile>(
         "hidden_note",
