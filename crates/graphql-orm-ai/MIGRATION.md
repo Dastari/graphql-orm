@@ -19,9 +19,22 @@ module `0.79.0` to record the updated filter contract.
 A consumed approval proof may dispatch at most once across all its clones.
 A failed dispatch spends the execution claim too; obtain a fresh approval rather
 than retrying the proof. The proof still does not replace resolver authorization.
-Automatic static tools must have coherent query/read-only or explicitly
-autonomous application-mutation metadata. Dispatch refuses expired references.
+All guarded resolver handles check exact reference identity and current expiry,
+using the service's existing clock (system time for services without one).
 Privileged reclamation is refused while the recovery epoch is closed.
+
+Approval-wait reports add `skipped`: unresolved principals, unavailable protection
+and malformed candidate state do not abort other candidates. Examined waits use
+the existing durable progress stamp so skipped or still-valid waits rotate behind
+unexamined ones. A failed progress-stamp write still fails the pass after its
+other work. Skipping is operational and never grants authority or quarantines a
+row merely because a host read failed. Queued claims likewise isolate each
+candidate in its own transaction and rotate operational failures; a healthy
+claim can still succeed behind a failed legacy closure. If no lease is returned,
+any candidate failure is returned to the host, with safe tracing codes for
+skipped candidates and refused progress stamps. Missing-grant credentials carrying an actor
+or exact operation binding cannot issue run authority. Legacy claim refusal may
+create and close an internal attempt atomically; no lease reaches a worker.
 
 Secret references with relative `.` or `..` path segments must be replaced.
 Credential rotation/removal no longer deletes the previous secret automatically:

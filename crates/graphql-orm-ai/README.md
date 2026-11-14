@@ -10,7 +10,7 @@ supersedes: []
 
 # graphql-orm-ai
 
-AI 0.141.0 uses ORM/macros 0.146.0. The runtime and provider bug batch tightens approval execution, principal validation, reclamation and egress bounds. Hosts now own retirement of previous shared secret references; see [migration guidance](MIGRATION.md#01390-to-01410-runtime-and-provider-bug-batch).
+AI 0.141.0 uses ORM/macros 0.146.0 and AI schema module `0.79.0` (no column or data migration). The runtime and provider bug batch tightens approval execution, principal validation, reclamation and egress bounds. Hosts now own retirement of previous shared secret references; see [migration guidance](MIGRATION.md#01390-to-01410-runtime-and-provider-bug-batch).
 
 Version `0.139.0` adopts ORM 0.143.0 and keeps the crate's own records readable and writable whatever the host `FieldPolicy` answers for repository field decisions: internal handles answer those decisions for the crate's own entities and delegate everything else, and `database()` returns the host's handle. No data migration is needed. See the [migration guide](MIGRATION.md#01380-to-01390-custody-of-the-crates-own-records-under-a-host-field-policy).
 
