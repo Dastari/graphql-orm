@@ -39,6 +39,8 @@ pub(crate) struct EntityMetadata {
     pub(crate) backup_restore_order: Option<i32>,
     pub(crate) read_policy: Option<String>,
     pub(crate) write_policy: Option<String>,
+    /// `policy = "open"`: the entity is deliberately open; a review marker only.
+    pub(crate) policy_open: bool,
     /// Optional async hook path invoked after create/update/delete mutations.
     pub(crate) notify_handler: Option<String>,
     pub(crate) notify_report_errors: bool,
@@ -376,6 +378,18 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;
                     metadata.write_policy = Some(lit.value());
+                } else if meta.path.is_ident("policy") {
+                    if metadata.policy_open {
+                        return Err(meta.error("policy may only be declared once per entity"));
+                    }
+                    let lit: syn::LitStr = meta.value()?.parse()?;
+                    if lit.value() != "open" {
+                        return Err(syn::Error::new(
+                            lit.span(),
+                            "policy accepts only \"open\": it records that the entity deliberately declares no read_policy or write_policy",
+                        ));
+                    }
+                    metadata.policy_open = true;
                 } else if meta.path.is_ident("notify") || meta.path.is_ident("notify_with") {
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;
@@ -823,6 +837,12 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
         return Err(syn::Error::new(
             proc_macro2::Span::call_site(),
             "retention_purge is valid only for append_only entities",
+        ));
+    }
+    if metadata.policy_open && (metadata.read_policy.is_some() || metadata.write_policy.is_some()) {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "policy = \"open\" states that the entity declares no policy; remove it or remove read_policy and write_policy",
         ));
     }
     if metadata.append_only
@@ -3671,6 +3691,11 @@ fn generate_entity_tokens(
             quote! { Some(#lit) }
         })
         .unwrap_or_else(|| quote! { None });
+    // An entity-level `auth = "none"` is an explicit decision to be public.
+    let policy_decision_declared = entity_meta.policy_open
+        || entity_meta.read_policy.is_some()
+        || entity_meta.write_policy.is_some()
+        || entity_meta.auth.as_deref() == Some("none");
     let legacy_graphql_complex = has_graphql_complex(&input.attrs)?;
     // Rustc removes derive lists before invoking derives. Valid externally owned
     // objects opt into complex or schema_only, so check those ownership modes.
@@ -6020,6 +6045,8 @@ fn generate_entity_tokens(
             }
 
             impl ::graphql_orm::graphql::orm::Entity for #struct_name {
+                const POLICY_DECISION_DECLARED: bool = #policy_decision_declared;
+
                 fn entity_name() -> &'static str {
                     #struct_name_str
                 }
@@ -6705,6 +6732,8 @@ fn generate_entity_tokens(
         }
 
         impl ::graphql_orm::graphql::orm::Entity for #struct_name {
+            const POLICY_DECISION_DECLARED: bool = #policy_decision_declared;
+
             fn entity_name() -> &'static str {
                 #struct_name_str
             }

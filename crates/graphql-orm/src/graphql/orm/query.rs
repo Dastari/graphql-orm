@@ -133,6 +133,14 @@ pub trait Entity: DatabaseEntity + DatabaseSchema + EntityRelations + DatabaseSe
     fn entity_name() -> &'static str;
     fn metadata() -> &'static EntityMetadata;
 
+    /// Whether the entity's declaration records an explicit policy decision:
+    /// an entity `read_policy` or `write_policy`, an entity-level
+    /// `auth = "none"`, or the `policy = "open"` marker that states it is
+    /// deliberately open to every subject the schema's `auth` setting admits. `schema_roots!` checks it at compile
+    /// time under `require_policies: true`. It changes nothing at run time.
+    /// Handwritten implementations default to `false`.
+    const POLICY_DECISION_DECLARED: bool = false;
+
     /// Public field name of the entity's managed record version, if it has one.
     ///
     /// Generated entities with `#[graphql_orm(version = "managed")]` return the

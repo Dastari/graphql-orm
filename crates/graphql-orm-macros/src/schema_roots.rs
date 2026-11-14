@@ -35,6 +35,24 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         }
         .into();
     }
+    // Opt-in review gate: every listed entity must record a policy decision
+    // in its declaration. A const assertion names the entity that has none.
+    let policy_decision_checks = if args.require_policies {
+        let checks = entities.iter().map(|entity| {
+            let message = format!(
+                "schema_roots! `require_policies: true`: entity `{entity}` declares no policy decision; add `read_policy` or `write_policy` to its entity attribute, or mark it deliberately open with `policy = \"open\"` (or public with `auth = \"none\"`)"
+            );
+            quote! {
+                const _: () = ::std::assert!(
+                    <#entity as ::graphql_orm::graphql::orm::Entity>::POLICY_DECISION_DECLARED,
+                    #message
+                );
+            }
+        });
+        quote! { #(#checks)* }
+    } else {
+        quote! {}
+    };
     let schema_policy_const = schema_policy_tokens(args.schema_policy.as_deref());
     let schema_auth_data = match args.auth.as_deref() {
         Some(auth) => match resolver_auth_mode_value_tokens(auth, span) {
@@ -446,6 +464,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             )
         };
         return quote! {
+            #policy_decision_checks
             #query_root
             #operation_catalog_helper
             #root_field_collision_check
@@ -656,6 +675,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         .collect();
 
     quote! {
+        #policy_decision_checks
         #query_root
         #mutation_root
         #subscription_root
@@ -859,6 +879,8 @@ struct SchemaRootsArgs {
     federation: bool,
     schema_policy: Option<String>,
     auth: Option<String>,
+    /// Require an explicit policy decision on every listed entity.
+    require_policies: bool,
     generated_mutations: GeneratedMutationExposure,
     query_custom_ops: Vec<Ident>,
     entities: Vec<Ident>,
@@ -919,6 +941,7 @@ impl Parse for SchemaRootsArgs {
         let mut federation = None;
         let mut schema_policy = None;
         let mut auth = None;
+        let mut require_policies = None;
         let mut generated_mutations = None;
         let mut query_custom_ops = None;
         let mut entities = None;
@@ -958,6 +981,10 @@ impl Parse for SchemaRootsArgs {
                 let value = lit.value();
                 validate_resolver_auth_mode(&value, lit.span())?;
                 auth = Some(value);
+            } else if label == "require_policies" {
+                reject_duplicate(&require_policies, &label)?;
+                let lit: syn::LitBool = input.parse()?;
+                require_policies = Some(lit.value);
             } else if label == "generated_mutations" {
                 reject_duplicate(&generated_mutations, &label)?;
                 let lit: syn::LitStr = input.parse()?;
@@ -1027,7 +1054,7 @@ impl Parse for SchemaRootsArgs {
             } else {
                 return Err(syn::Error::new(
                     label.span(),
-                    "expected one of `backend`, `schema_policy`, `auth`, `generated_mutations`, `query_custom_ops`, `entities`, `extra_query_types`, `extra_mutation_types`, `extra_subscription_types`, `described_query_types`, `described_mutation_types`, `described_subscription_types`, `semantic_custom_operations`, `semantic_types`, `generated_mutation_allowlist`, or `generated_mutation_denylist`",
+                    "expected one of `backend`, `schema_policy`, `auth`, `require_policies`, `generated_mutations`, `query_custom_ops`, `entities`, `extra_query_types`, `extra_mutation_types`, `extra_subscription_types`, `described_query_types`, `described_mutation_types`, `described_subscription_types`, `semantic_custom_operations`, `semantic_types`, `generated_mutation_allowlist`, or `generated_mutation_denylist`",
                 ));
             }
 
@@ -1174,6 +1201,7 @@ impl Parse for SchemaRootsArgs {
             federation: federation.unwrap_or(false),
             schema_policy,
             auth,
+            require_policies: require_policies.unwrap_or(false),
             generated_mutations,
             query_custom_ops,
             entities,
