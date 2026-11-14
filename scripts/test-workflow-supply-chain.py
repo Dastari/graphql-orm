@@ -8,6 +8,9 @@ must pass, so every failure is caused by the single reverted rule.
 
 import importlib.util
 import shutil
+import json
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,6 +26,9 @@ COPIED = [
     "scripts/check-schema-export.sh",
     "crates/graphql-orm-storage/tests/samba/run.sh",
 ]
+COPIED += [str(p.relative_to(ROOT)) for p in (ROOT / "crates").rglob("*.rs")
+           if '"postgres:' in p.read_text()]
+COPIED += [str(p.relative_to(ROOT)) for p in (ROOT / "crates").rglob("Dockerfile")]
 CHECKOUT = "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5"
 TOOLCHAIN = "dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1"
 CACHE = "Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2"
@@ -59,6 +65,60 @@ class SupplyChainTests(unittest.TestCase):
 
     def release_job(self, name):
         return supply_chain.jobs((self.root / ".github/workflows/release.yml").read_text())[name]
+
+    def test_checkout_credentials_are_not_persisted(self):
+        self.edit(".github/workflows/ci.yml", "persist-credentials: false", "persist-credentials: true")
+        self.assertReported("checkout must disable persisted credentials")
+
+    def test_publisher_tag_validation_is_required(self):
+        self.edit(".github/workflows/release.yml", "test \"${package_tags}\" = \"${expected_tags}\"", ": # removed tag binding")
+        self.assertReported("publisher must bind tags to workspace manifests")
+
+    def test_floating_rust_postgres_image_is_rejected(self):
+        path = self.root / "crates/example/tests/image.rs"
+        path.parent.mkdir(parents=True)
+        path.write_text('const IMAGE: &str = "postgres:17-alpine";')
+        self.assertReported("Rust test image is not pinned by digest")
+
+    def test_scoped_unexpected_manifest_tag_fails_before_tag_creation(self):
+        self.test_unexpected_manifest_tag_fails_before_tag_creation("release-scoped", "target/scoped-dist")
+
+    def test_unexpected_manifest_tag_fails_before_tag_creation(self, job_name="release", directory="release-dist"):
+        # Run the actual publisher shell with a recording git stub; never push or tag.
+        job = self.release_job(job_name)
+        script = next(code for code in supply_chain.run_scripts(job) if "tags_to_push=()" in code)
+        binary = self.root / "bin"
+        binary.mkdir()
+        git = binary / "git"
+        git.write_text('#!/bin/bash\ncase "$*" in\n*show-ref*) if [[ ${EXISTING_RELEASE:-} == 1 ]]; then exit 0; fi; exit 1;;\n*rev-parse*) echo a;;\ntag*) echo tagged >> "$TAG_LOG";;\nesac\n')
+        git.chmod(0o755)
+        tags = []
+        for manifest in ROOT.glob("crates/*/Cargo.toml"):
+            target = self.root / manifest.relative_to(ROOT)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(manifest.read_text())
+            import tomllib
+            package = tomllib.loads(manifest.read_text())["package"]
+            tags.append({"tag": package["name"] + "-v" + package["version"]})
+        dist = self.root / directory
+        dist.mkdir(parents=True)
+        manifest = dist / "workspace-2000.01.01.1.json"
+        env = {**os.environ, "PATH": str(binary) + ":" + os.environ["PATH"],
+               "RELEASE_ID": "workspace-2000.01.01.1", "GITHUB_SHA": "a",
+               "GH_TOKEN": "test", "TAG_LOG": str(self.root / "tag.log")}
+        for extra in ["other-v1.0.0", "--force", "graphql-orm-v999.0.0"]:
+            manifest.write_text(json.dumps({"packages": tags + [{"tag": extra}]}))
+            result = subprocess.run(["bash", "-c", script], cwd=self.root, env=env, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse((self.root / "tag.log").exists())
+        manifest.write_text(json.dumps({"packages": tags}))
+        existing = subprocess.run(["bash", "-c", script], cwd=self.root,
+                                  env={**env, "EXISTING_RELEASE": "1"}, capture_output=True)
+        self.assertNotEqual(existing.returncode, 0)
+        self.assertFalse((self.root / "tag.log").exists())
+        result = subprocess.run(["bash", "-c", script], cwd=self.root, env=env, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.root / "tag.log").exists())
 
     def test_current_tree_passes(self):
         self.assertEqual(self.messages(), [])

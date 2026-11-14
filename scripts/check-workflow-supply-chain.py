@@ -242,11 +242,18 @@ def check_publishers(path, text, fail):
     top = workflow_permissions(text)
     if top is None or writes(top):
         fail(path, "workflow-level permissions must be explicit and read-only")
+    for step in steps(text):
+        if "uses: actions/checkout@" in step and "persist-credentials: false" not in step:
+            fail(path, "checkout must disable persisted credentials")
     all_jobs = jobs(text)
     for name, job_text in all_jobs.items():
+        if not re.search(r"(?m)^    timeout-minutes: [1-9][0-9]*$", job_text):
+            fail(path, f"{name}: job must have a positive timeout")
         if not writes(permissions(job_text)):
             continue
         code = strip_comments(job_text)
+        if 'test "${package_tags}" = "${expected_tags}"' not in code:
+            fail(path, "publisher must bind tags to workspace manifests")
         for target, _ in uses_lines(code):
             action = target.split("@", 1)[0]
             if action not in PUBLISHER_ACTIONS:
@@ -340,7 +347,15 @@ def check(root):
             for image in re.findall(r"(?m)^\s+(?:image|container):[ \t]*(\S+)$", strip_comments(text)):
                 if not IMAGE_DIGEST.search(image.strip("'\"")):
                     fail(path, f"job container image is not pinned by digest: {image}")
+    for file in (root / "crates").rglob("*.rs"):
+        for image in re.findall(r'"(postgres:(?!//)[^"\s]+)"', file.read_text()):
+            if not IMAGE_DIGEST.search(image):
+                fail(file.relative_to(root), f"Rust test image is not pinned by digest: {image}")
     check_release_validation(root, fail)
+    for dockerfile in (root / "crates").rglob("Dockerfile"):
+        for image in re.findall(r"(?m)^FROM ([^\s]+)", dockerfile.read_text()):
+            if image != "scratch" and not IMAGE_DIGEST.search(image):
+                fail(dockerfile.relative_to(root), f"Dockerfile image is not pinned by digest: {image}")
     check_compose(root, fail)
     check_image_defaults(root, fail)
     return fail.messages, len(files)
