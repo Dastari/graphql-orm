@@ -460,3 +460,15 @@ Cargo builds compile them from the pinned Git source.
   assets to a release for that exact tag. Do not regenerate from another SHA.
 - Consumers roll forward to a newly reviewed workspace tag and its recorded
   commit; published Git history is never rewritten.
+
+## Broader PostgreSQL and compiler follow-up lanes
+
+Main pushes and full release validation each run one additional owned-PostgreSQL
+job: `scripts/run-owned-database-lanes.sh postgres` followed by `postgres-legacy`.
+It adds no PR-push runner, preserves all existing PR gates, and reuses one cache
+and runner across both commands. The hard budget is 120 Linux runner minutes per
+main push/full release (actual minutes must be measured from Actions; this is a
+ceiling, not a measured price). Existing disposable-container safety checks still
+refuse ambient database URLs. Known runtime defects remain owned by their issues;
+this job does not hide failures with continue-on-error.
+

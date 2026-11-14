@@ -30,6 +30,25 @@ permissions:
   contents: read
 
 jobs:
+  owned-postgres-complete:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: scripts/run-owned-database-lanes.sh postgres
+      - run: scripts/run-owned-database-lanes.sh postgres-legacy
+
   dependency-audit:
     runs-on: ubuntu-latest
     timeout-minutes: 20
