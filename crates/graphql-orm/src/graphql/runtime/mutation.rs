@@ -1274,7 +1274,10 @@ async fn execute_once<B: RuntimeMutationBackend>(
         &mut values,
     )
     .map_err(|_| committed_error("mutation_payload_failed"))?;
-    // Host objects resolve only after commit and the independent release check.
+    // Host objects resolve only after commit and the independent release check,
+    // within what the response budget leaves after earlier roots, this key and
+    // the ordinary fields.
+    let mut items = Vec::with_capacity(prepared.projected.len());
     for projected in &prepared.projected {
         let stored = match record
             .state(&projected.field)
@@ -1284,27 +1287,32 @@ async fn execute_once<B: RuntimeMutationBackend>(
             RuntimeFieldState::Null => RuntimeValue::Null,
             RuntimeFieldState::Unloaded => return Err(committed_error("mutation_payload_failed")),
         };
-        let (mut value, _) = projected
-            .resolve(
-                &prepared.module.schema,
-                std::slice::from_ref(&stored),
-                super::RuntimeProjectionPurpose::MutationResult {
-                    action: effect.action(),
-                    kind,
-                },
-                context.auth.as_ref(),
-                context.projection_context.as_deref(),
-                prepared.limits,
-                prepared.limits.max_response_bytes,
-            )
-            .await
-            .map_err(|_| committed_error("mutation_payload_failed"))?;
-        values.insert(
-            async_graphql::Name::new(&projected.api_name),
-            value
-                .pop()
-                .ok_or_else(|| committed_error("mutation_payload_failed"))?,
-        );
+        items.push((projected, stored));
+    }
+    if !items.is_empty() {
+        let used = prepared
+            .response_bytes
+            .load(std::sync::atomic::Ordering::SeqCst)
+            .saturating_add(key.len().saturating_mul(6).saturating_add(8))
+            .saturating_add(values.values().map(value_bytes).sum());
+        let remaining = prepared.limits.max_response_bytes.saturating_sub(used);
+        for (name, value) in project_committed(
+            &items,
+            &prepared.module.schema,
+            super::RuntimeProjectionPurpose::MutationResult {
+                action: effect.action(),
+                kind,
+            },
+            context.auth.as_ref(),
+            context.projection_context.as_deref(),
+            prepared.limits,
+            remaining,
+        )
+        .await
+        .map_err(|_| committed_error("mutation_payload_failed"))?
+        {
+            values.insert(async_graphql::Name::new(name), value);
+        }
     }
     // Related records are read now, through each child's authorized layer.
     for (key, value) in super::execution::payload_relations(
@@ -1357,6 +1365,52 @@ fn committed_error(code: &'static str) -> async_graphql::Error {
     })
 }
 
+/// Bytes an encoded scalar adds to the response, as read layers count them.
+fn value_bytes(value: &Value) -> usize {
+    match value {
+        Value::String(text) => text.len(),
+        _ => 16,
+    }
+}
+
+/// Resolve each projected field of one committed record within `remaining`
+/// response bytes. Each projection is charged its byte count before the next
+/// resolves, and the one that exceeds the remainder is refused with
+/// `cost_exceeded` before its object is copied into the payload.
+#[allow(clippy::too_many_arguments)]
+async fn project_committed(
+    items: &[(&super::projection::ProjectedPlan, RuntimeValue)],
+    schema: &ValidatedRuntimeSchema,
+    purpose: super::RuntimeProjectionPurpose,
+    auth: Option<&DbAuthContext>,
+    context: Option<&(dyn std::any::Any + Send + Sync)>,
+    limits: RuntimeGraphqlLimits,
+    mut remaining: usize,
+) -> Result<Vec<(String, Value)>, RuntimeGraphqlError> {
+    let mut output = Vec::with_capacity(items.len());
+    for (projected, stored) in items {
+        let (mut values, bytes) = projected
+            .resolve(
+                schema,
+                std::slice::from_ref(stored),
+                purpose,
+                auth,
+                context,
+                limits,
+                remaining,
+            )
+            .await?;
+        remaining = remaining
+            .checked_sub(bytes)
+            .ok_or_else(|| RuntimeGraphqlError::new("cost_exceeded"))?;
+        let value = values
+            .pop()
+            .ok_or_else(|| RuntimeGraphqlError::new("projection_failed"))?;
+        output.push((projected.api_name.clone(), value));
+    }
+    Ok(output)
+}
+
 fn reserve_payload(prepared: &Prepared, payload: &Value, key: &str) -> async_graphql::Result<()> {
     use std::sync::atomic::Ordering;
     let maximum = prepared.limits.max_response_bytes;
@@ -1372,4 +1426,64 @@ fn reserve_payload(prepared: &Prepared, payload: &Value, key: &str) -> async_gra
         })
         .map_err(|_| committed_error("mutation_payload_failed"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::projection::tests::{fixture, materialized, reset_materialized};
+    use super::*;
+
+    fn purpose() -> super::super::RuntimeProjectionPurpose {
+        super::super::RuntimeProjectionPurpose::MutationResult {
+            action: RuntimeMutationAction::Update,
+            kind: RuntimeMutationRecordKind::CommittedResult,
+        }
+    }
+
+    /// Projections of one committed record share the remaining budget: each is
+    /// charged before the next resolves, and the one that exceeds the
+    /// remainder is refused before its object is copied (#528).
+    #[tokio::test]
+    async fn committed_projections_share_the_remaining_budget() {
+        let (schema, plans) = fixture();
+        let file = RuntimeValue::Uuid(uuid::Uuid::from_bytes([1; 16]));
+        let items = plans
+            .iter()
+            .map(|plan| (plan, file.clone()))
+            .collect::<Vec<_>>();
+        let run = |remaining: usize| {
+            project_committed(
+                &items,
+                &schema,
+                purpose(),
+                None,
+                None,
+                Default::default(),
+                remaining,
+            )
+        };
+        // Both objects (100 bytes each) fit in 200 bytes.
+        reset_materialized();
+        let both = run(200).await.unwrap();
+        assert_eq!(both.len(), 2);
+        assert_eq!(materialized(), 2);
+        // With 150 bytes the first resolves and the second, which would need
+        // 100 of the 50 left, is refused without being copied.
+        reset_materialized();
+        let refused = run(150).await;
+        assert_eq!(
+            refused.err().map(RuntimeGraphqlError::code),
+            Some("cost_exceeded")
+        );
+        assert_eq!(materialized(), 1);
+        // Earlier mutation roots already used the budget: 90 bytes remain, so
+        // the first projection is refused and nothing is copied.
+        reset_materialized();
+        let refused = run(90).await;
+        assert_eq!(
+            refused.err().map(RuntimeGraphqlError::code),
+            Some("cost_exceeded")
+        );
+        assert_eq!(materialized(), 0);
+    }
 }
