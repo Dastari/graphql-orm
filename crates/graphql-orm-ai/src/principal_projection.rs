@@ -195,7 +195,15 @@ pub(crate) async fn resolve_current_reference(
     if is_delegated_reference(reference) {
         return Err(agql_auth::AuthError::Forbidden);
     }
-    resolver.resolve(reference).await
+    let resolved = resolver.resolve(reference).await?;
+    if resolved.reference() != reference
+        || reference
+            .expires_at
+            .is_some_and(|expiry| expiry <= resolved.resolved_at())
+    {
+        return Err(agql_auth::AuthError::Forbidden);
+    }
+    Ok(resolved)
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -567,6 +575,46 @@ mod tests {
             expires_at: OffsetDateTime::UNIX_EPOCH + Duration::days(20_000),
         });
         assert!(!is_delegated_reference(&token.reference()));
+    }
+
+    #[tokio::test]
+    async fn resolution_refuses_wrong_reference_and_expiry() {
+        struct Fixed(agql_auth::ResolvedPrincipal);
+        #[async_trait::async_trait]
+        impl agql_auth::CurrentPrincipalResolver for Fixed {
+            async fn resolve(
+                &self,
+                _: &PrincipalReference,
+            ) -> agql_auth::AuthResult<agql_auth::ResolvedPrincipal> {
+                Ok(self.0.clone())
+            }
+        }
+        let principal = user("tenant");
+        let reference = principal.reference();
+        let expired = agql_auth::ResolvedPrincipal::new(
+            reference.clone(),
+            principal.clone(),
+            reference.expires_at.unwrap(),
+        )
+        .unwrap();
+        assert!(
+            resolve_current_reference(&Fixed(expired), &reference)
+                .await
+                .is_err()
+        );
+        let current = agql_auth::ResolvedPrincipal::new(
+            reference.clone(),
+            principal,
+            OffsetDateTime::UNIX_EPOCH,
+        )
+        .unwrap();
+        let mut wrong = reference.clone();
+        wrong.subject = "other".into();
+        assert!(
+            resolve_current_reference(&Fixed(current), &wrong)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

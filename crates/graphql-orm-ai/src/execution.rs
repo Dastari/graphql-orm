@@ -795,6 +795,19 @@ pub trait AuthenticatedGraphqlExecutor: Send + Sync {
     ) -> Result<ToolGraphqlResponse, ToolExecutionError>;
 }
 
+fn validate_dispatch_principal(
+    principal: &ResolvedPrincipal,
+    reference: &PrincipalReference,
+) -> Result<(), ToolExecutionError> {
+    let now = time::OffsetDateTime::now_utc();
+    if principal.reference() != reference
+        || reference.expires_at.is_some_and(|expiry| expiry <= now)
+    {
+        return Err(ToolExecutionError::Reauthorization);
+    }
+    Ok(())
+}
+
 /// Security-preserving bridge that always rehydrates before constructing and
 /// executing a tool request.
 #[derive(Clone)]
@@ -893,6 +906,7 @@ impl AuthenticatedToolBridge {
             )
             .await
             .map_err(|_| ToolExecutionError::Reauthorization)?;
+            validate_dispatch_principal(&principal, principal_reference)?;
             let authorization = self
                 .authorization_policy
                 .authorize_request(&principal, descriptor, &request)
@@ -961,6 +975,7 @@ impl AuthenticatedToolBridge {
         )
         .await
         .map_err(|_| ToolExecutionError::Reauthorization)?;
+        validate_dispatch_principal(&principal, principal_reference)?;
         let authorization = self
             .authorization_policy
             .authorize_request(&principal, descriptor, request)
