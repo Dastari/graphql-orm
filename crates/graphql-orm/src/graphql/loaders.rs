@@ -859,6 +859,14 @@ where
     if keys.is_empty() {
         return Ok(HashMap::new());
     }
+    // Results are keyed, so a repeated key needs loading once. Assembly below
+    // moves each parent's rows out of the statement's result; a second
+    // occurrence in the same statement would find them gone.
+    let mut seen = std::collections::HashSet::with_capacity(keys.len());
+    let keys = keys
+        .into_iter()
+        .filter(|key| seen.insert(key.clone()))
+        .collect::<Vec<_>>();
 
     let mut grouped_keys: HashMap<RelationGroupKey, Vec<CompositeRelationQueryKey>> =
         HashMap::new();
