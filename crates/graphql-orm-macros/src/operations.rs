@@ -5234,6 +5234,7 @@ fn generate_graphql_operations_unfiltered(
     let scan_connection_type = quote::format_ident!("{}AuthorizedScanPage", struct_name);
     let scan_query_name = apply_graphql_case(&format!("{}Scan", plural_name), resolver_case);
     let keyset_order_input = quote::format_ident!("{}KeysetOrderByInput", struct_name);
+    let keyset_order_field = quote::format_ident!("{}OrderField", struct_name);
     let runtime_keyset_available = primary_key_fields.iter().all(|field| {
         field.meta.graphql_readable()
             && !field.meta.graphql_skip
@@ -5245,6 +5246,7 @@ fn generate_graphql_operations_unfiltered(
         let mut runtime_metadata = Vec::new();
         let mut runtime_values = Vec::new();
         let mut runtime_orders = Vec::new();
+        let mut runtime_ordered_arms = Vec::new();
         let mut primary_columns = Vec::new();
         for field in fields {
             let meta = parse_field_metadata(field)?;
@@ -5293,6 +5295,20 @@ fn generate_graphql_operations_unfiltered(
                     });
                 }
             });
+            // The typed ordered form addresses the fields that are also
+            // generated order-input fields.
+            if meta.sortable && meta.order {
+                let variant = crate::entity::order_field_variant(
+                    &crate::entity::rust_ident_from_graphql_name(&graphql_name, ident.span()),
+                );
+                runtime_ordered_arms.push(quote! {
+                    #keyset_order_field::#variant => {
+                        let mut order = Self::default();
+                        order.#ident = Some(direction);
+                        order
+                    }
+                });
+            }
             if is_primary_key {
                 primary_columns.push(column);
             }
@@ -5388,6 +5404,31 @@ fn generate_graphql_operations_unfiltered(
                     #[derive(::graphql_orm::async_graphql::InputObject, Default, Clone, Debug)]
                     pub struct #keyset_order_input { #(#runtime_fields)* }
                     impl #keyset_order_input {
+                        /// Build an ordered keyset sort from typed `(field, direction)`
+                        /// pairs: the first pair is the primary sort key, and the cursor's
+                        /// key order follows the list. The complete primary key is still
+                        /// appended as the tiebreak. A field that cannot be a keyset key
+                        /// is refused with `INVALID_INPUT`.
+                        #[allow(unreachable_patterns)]
+                        pub fn ordered(
+                            fields: impl IntoIterator<Item = (#keyset_order_field, ::graphql_orm::graphql::orm::OrderDirection)>,
+                        ) -> ::std::result::Result<Vec<Self>, ::graphql_orm::graphql::errors::OrmPublicError> {
+                            fields
+                                .into_iter()
+                                .map(|(field, direction)| {
+                                    Ok(match field {
+                                        #(#runtime_ordered_arms)*
+                                        _ => {
+                                            return Err(::graphql_orm::graphql::errors::OrmPublicError::with_message(
+                                                ::graphql_orm::graphql::errors::OrmErrorCode::InvalidInput,
+                                                "this field cannot be a keyset sort key",
+                                            ));
+                                        }
+                                    })
+                                })
+                                .collect()
+                        }
+
                         fn __gom_columns(items: Vec<Self>) -> ::graphql_orm::async_graphql::Result<Vec<::graphql_orm::graphql::orm::KeysetOrderColumn>> {
                             let mut columns = Vec::new();
                             for item in items {

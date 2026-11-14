@@ -1071,6 +1071,28 @@ where
         self
     }
 
+    /// Add ordering terms in the order given: the first pair is the primary
+    /// sort key. Each pair is one generated orderable field and a direction,
+    /// and is applied exactly as one [`Self::order_by`] call, so the same
+    /// orderable-field and read-policy checks apply and it composes with
+    /// other ordering calls in call order.
+    ///
+    /// Use this, or chained `order_by` calls, when precedence matters: one
+    /// generated `OrderByInput` value with several fields set always sorts in
+    /// the entity's field declaration order.
+    pub fn order_by_fields<K>(
+        mut self,
+        fields: impl IntoIterator<Item = (K, super::OrderDirection)>,
+    ) -> Self
+    where
+        K: super::DatabaseOrderField,
+    {
+        for (field, direction) in fields {
+            self = self.order_by(field.order(direction));
+        }
+        self
+    }
+
     pub fn default_order(mut self) -> Self {
         self.query = self.query.default_order();
         self
@@ -1524,6 +1546,28 @@ where
         O: DatabaseOrderBy,
     {
         self.query = self.query.order_by(&order);
+        self
+    }
+
+    /// Add ordering terms in the order given: the first pair is the primary
+    /// sort key. Each pair is one generated orderable field and a direction,
+    /// and is applied exactly as one [`Self::order_by`] call, so the same
+    /// orderable-field and read-policy checks apply and it composes with
+    /// other ordering calls in call order.
+    ///
+    /// Use this, or chained `order_by` calls, when precedence matters: one
+    /// generated `OrderByInput` value with several fields set always sorts in
+    /// the entity's field declaration order.
+    pub fn order_by_fields<K>(
+        mut self,
+        fields: impl IntoIterator<Item = (K, super::OrderDirection)>,
+    ) -> Self
+    where
+        K: super::DatabaseOrderField,
+    {
+        for (field, direction) in fields {
+            self = self.order_by(field.order(direction));
+        }
         self
     }
 

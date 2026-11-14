@@ -376,6 +376,23 @@ pub trait DatabaseOrderBy {
     }
 }
 
+/// One orderable field of a generated entity, for ordering with explicit
+/// precedence.
+///
+/// The entity derives generate `<Entity>OrderField`, an enum with one variant
+/// per field of `<Entity>OrderByInput`, and implement this trait for it. A
+/// field and a direction make the single-field order input that
+/// `order_by` accepts, so `order_by_fields([(Field::A, Asc), (Field::B, Asc)])`
+/// equals `.order_by({a: Asc}).order_by({b: Asc})` and sorts by `a` first
+/// whatever the declaration order of the entity's fields.
+pub trait DatabaseOrderField: Copy {
+    /// The generated order input this field belongs to.
+    type OrderBy: DatabaseOrderBy;
+
+    /// The order input that sorts by this field only.
+    fn order(self, direction: OrderDirection) -> Self::OrderBy;
+}
+
 /// Internal bridge used by the generated complex-object composition macro.
 ///
 /// This is public only because macro expansion occurs in the consuming crate.
@@ -510,8 +527,36 @@ where
     }
 
     /// Add one generated deterministic ordering input.
+    ///
+    /// Calls compose in call order: the first call is the primary sort key.
+    /// One input value with several fields set sorts in the entity's field
+    /// **declaration** order, not in the order the fields are written, because
+    /// a struct literal carries no field order. Use one call per field, or
+    /// [`Self::order_by_fields`], when precedence matters.
     pub fn order_by(mut self, order: O) -> Self {
         self.query = self.query.order_by(&order);
+        self
+    }
+
+    /// Add ordering terms in the order given: the first pair is the primary
+    /// sort key. Each pair is one generated orderable field and a direction,
+    /// and is applied exactly as one [`Self::order_by`] call, so the same
+    /// orderable-field and read-policy checks apply and it composes with
+    /// other ordering calls in call order.
+    ///
+    /// Use this, or chained `order_by` calls, when precedence matters: one
+    /// generated `OrderByInput` value with several fields set always sorts in
+    /// the entity's field declaration order.
+    pub fn order_by_fields<K>(
+        mut self,
+        fields: impl IntoIterator<Item = (K, OrderDirection)>,
+    ) -> Self
+    where
+        K: DatabaseOrderField<OrderBy = O>,
+    {
+        for (field, direction) in fields {
+            self = self.order_by(field.order(direction));
+        }
         self
     }
 
@@ -4303,6 +4348,28 @@ where
         self
     }
 
+    /// Add ordering terms in the order given: the first pair is the primary
+    /// sort key. Each pair is one generated orderable field and a direction,
+    /// and is applied exactly as one [`Self::order_by`] call, so the same
+    /// orderable-field and read-policy checks apply and it composes with
+    /// other ordering calls in call order.
+    ///
+    /// Use this, or chained `order_by` calls, when precedence matters: one
+    /// generated `OrderByInput` value with several fields set always sorts in
+    /// the entity's field declaration order.
+    pub fn order_by_fields<K>(
+        mut self,
+        fields: impl IntoIterator<Item = (K, OrderDirection)>,
+    ) -> Self
+    where
+        K: DatabaseOrderField<OrderBy = P::Order>,
+    {
+        for (field, direction) in fields {
+            self = self.order_by(field.order(direction));
+        }
+        self
+    }
+
     /// Read at most `limit` rows, exactly. A limit above the database's
     /// maximum page limit fails with `PAGE_LIMIT_EXCEEDED` instead of being
     /// reduced. Without a limit, `fetch_all` reads at most the maximum and
@@ -4436,6 +4503,28 @@ where
 
     pub fn order_by(mut self, order: P::Order) -> Self {
         self.state = self.state.order_by(order);
+        self
+    }
+
+    /// Add ordering terms in the order given: the first pair is the primary
+    /// sort key. Each pair is one generated orderable field and a direction,
+    /// and is applied exactly as one [`Self::order_by`] call, so the same
+    /// orderable-field and read-policy checks apply and it composes with
+    /// other ordering calls in call order.
+    ///
+    /// Use this, or chained `order_by` calls, when precedence matters: one
+    /// generated `OrderByInput` value with several fields set always sorts in
+    /// the entity's field declaration order.
+    pub fn order_by_fields<K>(
+        mut self,
+        fields: impl IntoIterator<Item = (K, OrderDirection)>,
+    ) -> Self
+    where
+        K: DatabaseOrderField<OrderBy = P::Order>,
+    {
+        for (field, direction) in fields {
+            self = self.order_by(field.order(direction));
+        }
         self
     }
 
@@ -4621,6 +4710,28 @@ where
         if let Some(sort) = order.to_sort_expression() {
             self.order_clauses.push(sort.clause);
             self.order_values.push(sort.values);
+        }
+        self
+    }
+
+    /// Add ordering terms in the order given: the first pair is the primary
+    /// sort key. Each pair is one generated orderable field and a direction,
+    /// and is applied exactly as one [`Self::order_by`] call, so the same
+    /// orderable-field and read-policy checks apply and it composes with
+    /// other ordering calls in call order.
+    ///
+    /// Use this, or chained `order_by` calls, when precedence matters: one
+    /// generated `OrderByInput` value with several fields set always sorts in
+    /// the entity's field declaration order.
+    pub fn order_by_fields<K>(
+        mut self,
+        fields: impl IntoIterator<Item = (K, OrderDirection)>,
+    ) -> Self
+    where
+        K: DatabaseOrderField,
+    {
+        for (field, direction) in fields {
+            self = self.order_by(&field.order(direction));
         }
         self
     }
@@ -5815,6 +5926,29 @@ where
         O: DatabaseOrderBy,
     {
         self.query = self.query.order_by(&order);
+        self
+    }
+
+    /// Add ordering terms in the order given: the first pair is the primary
+    /// sort key. Each pair is one generated orderable field and a direction,
+    /// and is applied exactly as one [`Self::order_by`] call, so the same
+    /// orderable-field and read-policy checks apply and it composes with
+    /// other ordering calls in call order.
+    ///
+    /// Use this, or chained `order_by` calls, when precedence matters: one
+    /// generated `OrderByInput` value with several fields set always sorts in
+    /// the entity's field declaration order.
+    pub fn order_by_fields<K>(
+        mut self,
+        fields: impl IntoIterator<Item = (K, OrderDirection)>,
+    ) -> Self
+    where
+        O: DatabaseOrderBy,
+        K: DatabaseOrderField<OrderBy = O>,
+    {
+        for (field, direction) in fields {
+            self = self.order_by(field.order(direction));
+        }
         self
     }
 

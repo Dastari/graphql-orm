@@ -3159,7 +3159,19 @@ fn is_rust_keyword(ident: &str) -> bool {
     )
 }
 
-fn rust_ident_from_graphql_name(graphql_name: &str, span: proc_macro2::Span) -> syn::Ident {
+/// The `<Entity>OrderField` variant for one generated order-input field.
+pub(crate) fn order_field_variant(order_field: &syn::Ident) -> syn::Ident {
+    use syn::ext::IdentExt as _;
+    syn::Ident::new(
+        &order_field.unraw().to_string().to_case(Case::Pascal),
+        order_field.span(),
+    )
+}
+
+pub(crate) fn rust_ident_from_graphql_name(
+    graphql_name: &str,
+    span: proc_macro2::Span,
+) -> syn::Ident {
     let snake = to_snake_case(graphql_name);
     if is_rust_keyword(&snake) {
         syn::Ident::new_raw(&snake, span)
@@ -5799,6 +5811,54 @@ fn generate_entity_tokens(
         &input.vis,
     )?;
 
+    // The Rust-only ordered form: one variant per order-input field. It is
+    // not a GraphQL type, so the schema is unchanged.
+    let order_field_enum = quote::format_ident!("{}OrderField", struct_name);
+    let order_field_variants: Vec<syn::Ident> = sortable_columns
+        .iter()
+        .map(|(field_ident, _)| order_field_variant(field_ident))
+        .collect();
+    let order_field_arms: Vec<_> = sortable_columns
+        .iter()
+        .zip(&order_field_variants)
+        .map(|((field_ident, _), variant)| {
+            quote! { Self::#variant => order.#field_ident = Some(direction), }
+        })
+        .collect();
+    let order_field_definition = if order_field_variants.is_empty() {
+        quote! {}
+    } else {
+        let enum_doc = format!(
+            "One orderable field of `{struct_name}`, for ordering with explicit precedence.\n\n\
+             `order_by_fields([(Field::A, Asc), (Field::B, Asc)])` on a generated query builder \
+             sorts by `A` first, then `B`, whatever order the entity declares its fields in. \
+             One `{order_by_name_str}` value with several fields set cannot express that: it \
+             always sorts in field declaration order."
+        );
+        quote! {
+            #[doc = #enum_doc]
+            #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+            pub enum #order_field_enum {
+                #(#order_field_variants,)*
+            }
+
+            impl ::graphql_orm::graphql::orm::DatabaseOrderField for #order_field_enum {
+                type OrderBy = #order_by_name;
+
+                fn order(
+                    self,
+                    direction: ::graphql_orm::graphql::orm::OrderDirection,
+                ) -> #order_by_name {
+                    let mut order = #order_by_name::default();
+                    match self {
+                        #(#order_field_arms)*
+                    }
+                    order
+                }
+            }
+        }
+    };
+
     // Generate order_by to_sql_order implementation
     let order_by_match_arms: Vec<_> = sortable_columns
         .iter()
@@ -6210,6 +6270,13 @@ fn generate_entity_tokens(
             #relation_order_storage
         }
 
+        #order_field_definition
+
+        /// Ordering precedence: one value with several fields set sorts in the
+        /// entity's field **declaration** order, because a struct literal carries
+        /// no field order. A GraphQL client passes a list of single-field values
+        /// for an ordered sort; Rust code chains one `order_by` call per field or
+        /// uses `order_by_fields` with the generated `OrderField` enum.
         impl #order_by_name {
             /// Authorize relation count ordering under the current request.
             /// Each count covers only target rows the request may read; callback
