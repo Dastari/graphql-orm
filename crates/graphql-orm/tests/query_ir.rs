@@ -205,7 +205,7 @@ fn mssql_dialect_quotes_identifiers_and_renders_helpers() {
     );
     assert_eq!(
         dialect.relation_key_cast("[JobId]"),
-        "CAST([JobId] AS NVARCHAR(4000))"
+        "CAST([JobId] AS NVARCHAR(MAX))"
     );
     assert_eq!(
         dialect.days_ago_expr(7),

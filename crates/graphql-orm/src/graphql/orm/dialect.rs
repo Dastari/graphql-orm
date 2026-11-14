@@ -1426,7 +1426,9 @@ impl SqlDialect for DatabaseBackend {
     fn relation_key_cast(&self, column: &str) -> String {
         match self {
             DatabaseBackend::Postgres => format!("CAST({column} AS TEXT)"),
-            DatabaseBackend::Mssql => format!("CAST({column} AS NVARCHAR(4000))"),
+            // Unbounded: `NVARCHAR(4000)` cuts a longer key, and two keys
+            // that share their first 4,000 characters would read as one.
+            DatabaseBackend::Mssql => format!("CAST({column} AS NVARCHAR(MAX))"),
             DatabaseBackend::Sqlite | DatabaseBackend::Mysql => format!("CAST({column} AS TEXT)"),
         }
     }
