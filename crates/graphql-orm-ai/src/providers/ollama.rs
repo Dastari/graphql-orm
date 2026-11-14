@@ -18,6 +18,8 @@ use crate::{
 };
 
 const MAXIMUM_NDJSON_LINE_BYTES: usize = 2 * 1024 * 1024;
+const MAXIMUM_STREAM_BYTES: usize = 16 * 1024 * 1024;
+const MAXIMUM_STREAM_CHUNKS: usize = 16_384;
 const MAXIMUM_SCHEMA_BYTES: usize = 1024 * 1024;
 const MAXIMUM_KEEP_ALIVE: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -311,6 +313,13 @@ impl AiProvider for OllamaProvider {
         context: ProviderRequestContext,
     ) -> Result<ProviderEventStream, ProviderError> {
         context.validate_request(&ProviderKind::Ollama, &request)?;
+        if !context.permits_destination(
+            &ProviderKind::Ollama,
+            &request,
+            self.endpoint_guard.endpoint().as_str(),
+        ) {
+            return Err(ProviderError::EgressDenied);
+        }
         if request.reasoning_summary.maximum_bytes().is_some() {
             return Err(ProviderError::Unsupported);
         }
@@ -448,8 +457,15 @@ fn normalized_stream(
         let mut started = false;
         let mut completed = false;
         let mut tool_call_count = 0usize;
+        let mut stream_bytes = 0usize;
+        let mut stream_chunks = 0usize;
         while let Some(chunk) = chunks.next().await {
             let chunk = chunk.map_err(|_| ProviderError::Unavailable)?;
+            stream_bytes = stream_bytes.checked_add(chunk.len()).ok_or(ProviderError::Rejected)?;
+            stream_chunks = stream_chunks.checked_add(1).ok_or(ProviderError::Rejected)?;
+            if stream_bytes > MAXIMUM_STREAM_BYTES || stream_chunks > MAXIMUM_STREAM_CHUNKS {
+                Err(ProviderError::Rejected)?;
+            }
             buffer.extend_from_slice(&chunk);
             loop {
                 let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') else {
@@ -686,17 +702,19 @@ mod tests {
         model: &str,
         request: &ModelRequest,
         attachment: Option<AiResolvedProviderAttachment>,
+        destination: &str,
     ) -> ProviderRequestContext {
         let session_id = AiSessionId::new();
         let run_id = AiRunId::new();
         let attempt_id = uuid::Uuid::new_v4();
-        let inference_manifest = manifest(
+        let mut inference_manifest = manifest(
             model,
             session_id,
             run_id,
             AiEgressCapability::ModelInference,
             request,
         );
+        inference_manifest.destination = format!("{}/", destination.trim_end_matches('/'));
         let proof = AiEgressDecision::allow(&inference_manifest, "test", "test-user")
             .authorize(&inference_manifest)
             .expect("manifest should authorize");
@@ -738,13 +756,14 @@ mod tests {
         )
         .expect("context should validate");
         if let Some(attachment) = attachment {
-            let image_manifest = manifest(
+            let mut image_manifest = manifest(
                 model,
                 session_id,
                 run_id,
                 AiEgressCapability::ImageAnalysis,
                 request,
             );
+            image_manifest.destination = format!("{}/", destination.trim_end_matches('/'));
             let image_proof = AiEgressDecision::allow(&image_manifest, "test", "test-user")
                 .authorize(&image_manifest)
                 .expect("image manifest should authorize");
@@ -777,6 +796,7 @@ mod tests {
                 AiEgressCapability::ToolResult,
                 request,
             );
+            tool_manifest.destination = format!("{}/", destination.trim_end_matches('/'));
             tool_manifest.sources = vec![AiDataSourceRef {
                 kind: "application_tool_result".to_owned(),
                 reference: uuid::Uuid::new_v4().to_string(),
@@ -862,7 +882,7 @@ mod tests {
             provider_profile_id: "profile-local".to_owned(),
             provider_kind: "ollama".to_owned(),
             model: model.to_owned(),
-            destination: "local-model-boundary".to_owned(),
+            destination: "http://127.0.0.1:11434/".to_owned(),
             destination_trust: AiDestinationTrust::Local,
             capability,
             scope: AiScope::new("project", "test"),
@@ -904,7 +924,7 @@ mod tests {
     }
 
     async fn mock_server(
-        response_body: &'static str,
+        response_body: &str,
     ) -> (
         String,
         oneshot::Receiver<Vec<u8>>,
@@ -915,6 +935,7 @@ mod tests {
             .expect("loopback listener should bind");
         let address = listener.local_addr().expect("listener should have address");
         let (sender, receiver) = oneshot::channel();
+        let response_body = response_body.to_owned();
         let task = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.expect("request should connect");
             let mut request = Vec::new();
@@ -1039,7 +1060,12 @@ mod tests {
             image_bytes.clone(),
         )
         .expect("image bytes should bind");
-        let provider_context = context("local-test", &model_request, Some(resolved));
+        let provider_context = context(
+            "local-test",
+            &model_request,
+            Some(resolved),
+            "http://127.0.0.1:11434",
+        );
         let body = provider
             .request_body(&model_request, &provider_context)
             .expect("supported request should map");
@@ -1053,7 +1079,8 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(image_bytes)
         );
 
-        let missing_image_proof = context("local-test", &model_request, None);
+        let missing_image_proof =
+            context("local-test", &model_request, None, "http://127.0.0.1:11434");
         assert!(matches!(
             provider.request_body(&model_request, &missing_image_proof),
             Err(ProviderError::EgressDenied)
@@ -1070,7 +1097,8 @@ mod tests {
     fn stateless_request_maps_exact_native_tool_history() {
         let provider = provider("http://127.0.0.1:11434");
         let model_request = stateless_tool_request("local-test");
-        let provider_context = context("local-test", &model_request, None);
+        let provider_context =
+            context("local-test", &model_request, None, "http://127.0.0.1:11434");
         let body = provider
             .request_body(&model_request, &provider_context)
             .expect("stateless request should map");
@@ -1087,6 +1115,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deployment_authorization_does_not_replace_exact_destination_proof() {
+        let provider = provider("http://127.0.0.1:9");
+        let request = request("local-test");
+        let context = context("local-test", &request, None, "http://127.0.0.1:11434");
+        assert!(matches!(
+            provider.stream(request, context).await,
+            Err(ProviderError::EgressDenied)
+        ));
+    }
+
+    #[tokio::test]
+    async fn total_ndjson_bytes_are_bounded_even_with_small_lines() {
+        let line = "{\"model\":\"local-test\",\"message\":{\"role\":\"assistant\",\"content\":\"x\"},\"done\":false}\n";
+        let body = line.repeat(MAXIMUM_STREAM_BYTES / line.len() + 1);
+        let (base_url, _request, server) = mock_server(&body).await;
+        let provider = provider(&base_url);
+        let request = request("local-test");
+        let context = context("local-test", &request, None, &base_url);
+        let result = provider
+            .stream(request, context)
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await;
+        assert!(matches!(result, Err(ProviderError::Rejected)));
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn ndjson_stream_rejects_wrong_model_and_truncation() {
         let wrong_model = concat!(
             "{\"model\":\"swapped-model\",\"message\":{\"role\":\"assistant\",\"content\":\"unsafe\"},\"done\":false}\n",
@@ -1098,7 +1155,7 @@ mod tests {
         let error = wrong_model_provider
             .stream(
                 model_request.clone(),
-                context("local-test", &model_request, None),
+                context("local-test", &model_request, None, &base_url),
             )
             .await
             .expect("HTTP stream should start")
@@ -1115,7 +1172,7 @@ mod tests {
         let error = provider
             .stream(
                 model_request.clone(),
-                context("local-test", &model_request, None),
+                context("local-test", &model_request, None, &base_url),
             )
             .await
             .expect("HTTP stream should start")
@@ -1140,7 +1197,7 @@ mod tests {
         let events = provider
             .stream(
                 model_request.clone(),
-                context("local-test", &model_request, None),
+                context("local-test", &model_request, None, &base_url),
             )
             .await
             .expect("stream should start")
@@ -1187,7 +1244,7 @@ mod tests {
         let events = provider
             .stream(
                 model_request.clone(),
-                context("local-test", &model_request, None),
+                context("local-test", &model_request, None, &base_url),
             )
             .await
             .expect("tool stream should start")
