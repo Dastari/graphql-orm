@@ -6450,7 +6450,8 @@ fn is_page_argument(name: &str, graphql_type: &str, schema: &FinishedSchema) -> 
         || name.eq_ignore_ascii_case("window")
         || name.eq_ignore_ascii_case("limit")
         || name.eq_ignore_ascii_case("first")
-        || name.eq_ignore_ascii_case("groupLimit"))
+        || name.eq_ignore_ascii_case("groupLimit")
+        || name.eq_ignore_ascii_case("group_limit"))
     {
         return false;
     }
@@ -7262,6 +7263,10 @@ mod tests {
     }
 
     fn aggregate_semantic_catalog() -> GraphqlSemanticCatalog {
+        aggregate_semantic_catalog_bound("groupLimit")
+    }
+
+    fn aggregate_semantic_catalog_bound(bound_name: &'static str) -> GraphqlSemanticCatalog {
         let mut base = semantic_catalog();
         base.entities.push(GraphqlEntitySemanticMetadata {
             generated_input_members: Vec::new(),
@@ -7287,7 +7292,7 @@ mod tests {
             "ParentAggregate",
             vec![
                 GraphqlOperationArgumentDescriptor::generated_with_description(
-                    "groupLimit",
+                    bound_name,
                     "Positive maximum result groups.",
                     "i32",
                     "Int!",
@@ -10680,6 +10685,38 @@ mod tests {
             })),
             Err(crate::AiDisclosureError::IdentityMismatch)
         );
+    }
+
+    #[test]
+    fn snake_aggregate_bound_is_server_injected_and_not_model_selected() {
+        for name in ["group_limit", "GROUP_LIMIT"] {
+            let sdl = SDL.replace("groupLimit", name);
+            let semantic = aggregate_semantic_catalog_bound(name);
+            let catalog = AiGraphqlQueryCapabilityCatalog::compile(
+                "inventory",
+                GraphqlExecutionTargetId::parse("inventory.graphql").unwrap(),
+                &sdl,
+                &semantic,
+                AiGraphqlQueryCapabilityLimits::default(),
+            )
+            .expect("canonical aggregate bound spelling compiles");
+            let capability = catalog.capabilities().find(|c| c.is_aggregate()).unwrap();
+            let mut plan = json!({"arguments": {"groupBy": ["name"], "metrics": [{"operator": "SUM", "field": "amount"}]}, "maximumItems": 5});
+            let compiled = capability.compile(plan.clone()).unwrap();
+            let prefix = format!("{name}: $");
+            let variable = compiled
+                .descriptor()
+                .document
+                .split_once(&prefix)
+                .unwrap()
+                .1
+                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .next()
+                .unwrap();
+            assert_eq!(compiled.variables()[variable], json!(5));
+            plan["arguments"][name] = json!(999);
+            assert!(capability.compile(plan).is_err());
+        }
     }
 
     #[test]

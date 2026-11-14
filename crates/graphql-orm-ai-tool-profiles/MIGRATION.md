@@ -12,6 +12,12 @@ supersedes: []
 
 ## 0.22.0 to 0.23.0: explicit handwritten input disclosure
 
+Generated aggregate roots accept their canonical `groupLimit` or `group_limit`
+spelling for the server-owned bound. Plans supply `maximumItems`; the host
+injects that value into the bound argument. The model cannot supply the bound.
+No SDL or data migration is needed.
+
+
 Generated input compilation requires producer metadata from ORM/macros 0.149.0
 and catalogue 0.8.0. Undisclosed generated members remain closed even when a
 host declares custom inputs. Query, mutation and subscription catalogues expose
