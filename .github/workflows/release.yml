@@ -69,21 +69,12 @@ jobs:
     timeout-minutes: 120
     permissions:
       contents: read
-    env:
-      CARGO_BUILD_JOBS: "2"
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
           ref: ${{ inputs.target_ref }}
-      - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - name: Reclaim runner disk
-        uses: ./.github/actions/reclaim-runner-disk
-      - run: scripts/run-owned-database-lanes.sh postgres
-      - run: scripts/run-owned-database-lanes.sh postgres-legacy
+      - uses: ./.github/actions/owned-postgres-complete
 
   dependency-audit:
     if: inputs.validation_profile == 'full'
@@ -133,6 +124,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           encoded=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
           echo "::add-mask::${encoded}"
           header="AUTHORIZATION: basic ${encoded}"
@@ -786,6 +778,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           encoded=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
           echo "::add-mask::${encoded}"
           header="AUTHORIZATION: basic ${encoded}"
@@ -797,7 +790,6 @@ jobs:
           GIT_CONFIG_KEY_0: http.https://github.com/.extraheader
           GIT_CONFIG_VALUE_0: ${{ steps.git-auth.outputs.header }}
           TARGET_REF: ${{ inputs.target_ref }}
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           # The release identity proof - current main, unused workspace tag,
@@ -910,6 +902,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           encoded=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
           echo "::add-mask::${encoded}"
           header="AUTHORIZATION: basic ${encoded}"
@@ -921,7 +914,6 @@ jobs:
           GIT_CONFIG_KEY_0: http.https://github.com/.extraheader
           GIT_CONFIG_VALUE_0: ${{ steps.git-auth.outputs.header }}
           TARGET_REF: ${{ inputs.target_ref }}
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           # The release identity proof - current main, unused workspace tag,
@@ -983,7 +975,6 @@ jobs:
           GIT_CONFIG_KEY_0: http.https://github.com/.extraheader
           GIT_CONFIG_VALUE_0: ${{ steps.git-auth.outputs.header }}
           RELEASE_ID: ${{ inputs.release_id }}
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
@@ -1061,6 +1052,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           encoded=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
           echo "::add-mask::${encoded}"
           header="AUTHORIZATION: basic ${encoded}"
@@ -1072,7 +1064,6 @@ jobs:
           GIT_CONFIG_KEY_0: http.https://github.com/.extraheader
           GIT_CONFIG_VALUE_0: ${{ steps.git-auth.outputs.header }}
           TARGET_REF: ${{ inputs.target_ref }}
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           # The release identity proof - current main, unused workspace tag,
@@ -1151,6 +1142,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           encoded=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
           echo "::add-mask::${encoded}"
           header="AUTHORIZATION: basic ${encoded}"
@@ -1162,7 +1154,6 @@ jobs:
           GIT_CONFIG_KEY_0: http.https://github.com/.extraheader
           GIT_CONFIG_VALUE_0: ${{ steps.git-auth.outputs.header }}
           TARGET_REF: ${{ inputs.target_ref }}
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           # The release identity proof - current main, unused workspace tag,
@@ -1224,7 +1215,6 @@ jobs:
           GIT_CONFIG_KEY_0: http.https://github.com/.extraheader
           GIT_CONFIG_VALUE_0: ${{ steps.git-auth.outputs.header }}
           RELEASE_ID: ${{ inputs.release_id }}
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"

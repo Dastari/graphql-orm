@@ -20,6 +20,10 @@ The rules are:
 - Container images used by tests and local compose files are pinned by digest,
   and compose files publish ports on IPv4 loopback only, without fixed
   default passwords.
+- Literal Docker/Podman run image arguments in scanned test sources must also
+  carry a digest when untagged (otherwise they pull latest). This static check
+  does not cover names/tags assembled from separate values, dynamic images, or
+  files outside the scanned test/support directories. It is not a Rust parser.
 
 The checks read text with indentation-based parsing rather than a YAML library,
 so they run on a bare runner Python and on any checkout passed with `--root`.
@@ -411,6 +415,99 @@ def check_image_defaults(root, fail):
             fail(path, f"default test image is not pinned by digest: {match[1]}")
 
 
+def argument_tokens(text):
+    """Split a literal Rust/Python argument array, preserving dynamic positions."""
+    parts, start, depth, quoted, escaped = [], 0, 0, None, False
+    for i, char in enumerate(text):
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == '\\':
+                escaped = True
+            elif char == quoted:
+                quoted = None
+        elif char in {'"', "'"}:
+            quoted = char
+        elif char in '([{':
+            depth += 1
+        elif char in ')]}':
+            depth -= 1
+        elif char == ',' and depth == 0:
+            parts.append(text[start:i].strip())
+            start = i + 1
+    parts.append(text[start:].strip())
+    return [re.fullmatch(r'''(?:r#*)?(["'])([^"'\n]+)\1#*''', part)[2]
+            if re.fullmatch(r'''(?:r#*)?(["'])([^"'\n]+)\1#*''', part) else None
+            for part in parts if part]
+
+
+def literal_run_images(text):
+    # Options with a separate value must not be mistaken for image names.
+    value_options = {'--name', '--env', '-e', '--publish', '-p', '--volume', '-v',
+                     '--label', '-l', '--network', '--user', '-u', '--workdir', '-w',
+                     '--hostname', '-h', '--entrypoint', '--add-host', '--memory', '-m',
+                     '--cpus', '--pull', '--health-cmd', '--health-interval',
+                     '--health-timeout', '--health-retries', '--platform', '--shm-size'}
+    calls = []
+    for command in re.finditer(r'Command::new\(\s*"(?:docker|podman)"\s*\)(.*?);', text, re.S):
+        body = command[1]
+        array = re.search(r'\.args\(\s*&?\[(.*?)\]\s*\)', body, re.S)
+        if array:
+            calls.append(argument_tokens(array[1]))
+        else:
+            # Literal arg chains; dynamic positions remain None.
+            args = re.findall(r'\.arg\((.*?)\)(?=\s*\.|\s*$)', body, re.S)
+            calls.append([argument_tokens(value)[0] if argument_tokens(value) else None for value in args])
+    for array in re.finditer(r'''\[\s*(["'])(?:docker|podman)\1\s*,(.*?)\]''', text, re.S):
+        calls.append(argument_tokens(array[2]))
+    for args in calls:
+        if not args or args[0] != 'run':
+            continue
+        i = 1
+        while i < len(args):
+            value = args[i]
+            if value is None:
+                break  # Dynamic image: outside this literal-only check.
+            if value in value_options:
+                i += 2
+            elif value == '--':
+                if i + 1 < len(args) and args[i + 1] is not None:
+                    yield args[i + 1]
+                break
+            elif value.startswith('-'):
+                i += 1
+            else:
+                yield value
+                break
+
+
+def check_owned_postgres(root, fail):
+    action = './.github/actions/owned-postgres-complete'
+    for workflow, job in [('ci.yml', 'owned-postgres-complete'),
+                          ('owned-postgres-manual.yml', 'qualify-postgres'),
+                          ('release.yml', 'owned-postgres-complete')]:
+        path = '.github/workflows/' + workflow
+        body = jobs((root / path).read_text()).get(job, '')
+        targets = [target for target, _ in uses_lines(body)]
+        if (len(targets) != 2 or not targets[0].startswith('actions/checkout@')
+                or targets[-1] != action or run_scripts(body)
+                or '    timeout-minutes: 120\n' not in body
+                or permissions(body) != {'contents': 'read'}):
+            fail(path, 'owned PostgreSQL caller must use the shared action with the bounded read-only job')
+    ci = (root / '.github/workflows/ci.yml').read_text()
+    if 'workflow_dispatch' in ci:
+        fail('.github/workflows/ci.yml', 'manual PostgreSQL dispatch must be separate from CI')
+    manual = (root / '.github/workflows/owned-postgres-manual.yml').read_text()
+    if ('on:\n  workflow_dispatch:\n' not in manual or '  push:' in manual
+            or '  pull_request:' in manual or 'group: owned-postgres-manual-' not in manual):
+        fail('.github/workflows/owned-postgres-manual.yml', 'manual PostgreSQL trigger/concurrency is not isolated')
+    shared = (root / '.github/actions/owned-postgres-complete/action.yml').read_text()
+    for command in ['scripts/run-owned-database-lanes.sh postgres\n',
+                    'scripts/run-owned-database-lanes.sh postgres-legacy\n']:
+        if command not in shared:
+            fail(action, 'shared action is missing an owned PostgreSQL family')
+
+
 def check(root):
     fail = Failures()
     files = sorted((root / ".github/workflows").glob("*.y*ml"))
@@ -427,10 +524,15 @@ def check(root):
                     fail(path, f"job container image is not pinned by digest: {image}")
     for file in test_source_files(root):
         path = file.relative_to(root).as_posix()
+        text = file.read_text()
+        for image in literal_run_images(text):
+            if not IMAGE_DIGEST.search(image) and not re.fullmatch(r'sha256:[0-9a-f]{64}', image):
+                fail(path, f"container run image is not pinned by digest: {image}")
         for literal in re.findall(r'''["']([^"'\n]+)["']''', file.read_text()):
             if (TEST_IMAGE.fullmatch(literal) and not IMAGE_DIGEST.search(literal)
                     and literal not in NON_IMAGE_TEST_LITERALS.get(path, [])):
                 fail(path, f"Rust test image is not pinned by digest: {literal}")
+    check_owned_postgres(root, fail)
     check_release_validation(root, fail)
     for dockerfile in (root / "crates").rglob("*"):
         if not dockerfile.is_file() or not (dockerfile.name == 'Dockerfile'

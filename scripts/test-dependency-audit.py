@@ -44,6 +44,7 @@ class AuditTests(unittest.TestCase):
 
     def test_index_failure_cannot_pass_as_a_clean_json_report(self):
         audit.check_preflight(1, 'Updating crates.io index')
+        audit.check_preflight(1, "Updating crates.io index\nAdvisory: user couldn\'t authenticate")
         for code, output in [(1, "Updating crates.io index: couldn't update crates.io index"),
                              (2, 'Updating crates.io index'), (0, '')]:
             with self.assertRaises(ValueError):

@@ -49,10 +49,11 @@ credential path uses NTLM and symmetric signing. S3's SigV4a owner is updated
 to aws-sigv4 1.6.4, using the patched crypto-bigint 0.7.10 line; it does not rely
 on this disposition.
 
-This acceptance does not cover Auth signing services, consumer applications,
-other crate versions, or a future workspace EC signer. Introducing private EC
-operations invalidates it immediately. Keep the raw unsuppressed audit finding; the exact-version CI disposition below does not suppress raw reports. Follow up upstream on a JWT aws_lc_rs backend
-or a release adopting the corrected RustCrypto owners.
+This acceptance does not cover Auth signing services, consumer applications, other crate
+versions, or a future workspace EC signer. Introducing private EC operations invalidates
+it immediately. Keep the raw unsuppressed audit finding; the exact-version CI
+disposition below does not suppress raw reports. Follow up upstream on a JWT aws_lc_rs
+backend or a release adopting the corrected RustCrypto owners.
 
 ## TLS certificate distrust patches
 
@@ -92,27 +93,30 @@ update alone does not validate a deployment image.
 
 ## Owner-local SMB dependency
 
-Storage 0.7.4 carries the reviewed SMB 0.10.2 directory-stream backport as an
-optional owner-local dependency. Its [provenance](../../crates/graphql-orm-storage/vendor/smb/PROVENANCE.json)
-identifies the original registry archive, exact upstream patch and retained MIT
-license. The [supplemental evidence](../archive/2026/dependency-review-2026-10-15/smb-addendum.md)
-records actual 5d155ba source/lock mappings and complete-with-findings collection;
-the earlier frozen scan remains evidence for its original source.
+Storage 0.7.4 carries the reviewed SMB 0.10.2 directory-stream backport as an optional
+owner-local dependency. Its
+[provenance](../../crates/graphql-orm-storage/vendor/smb/PROVENANCE.json) identifies the
+original registry archive, exact upstream patch and retained MIT license. The
+[supplemental evidence](../archive/2026/dependency-review-2026-10-15/smb-addendum.md)
+records actual 5d155ba source/lock mappings and complete-with-findings collection; the
+earlier frozen scan remains evidence for its original source.
 
-cargo-audit 0.22.2 [skips non-default-registry sources](https://github.com/RustSec/rustsec/blob/cargo-audit/v0.22.2/rustsec/src/database.rs#L133-L143),
+cargo-audit 0.22.2 [skips non-default-registry
+sources](https://github.com/RustSec/rustsec/blob/cargo-audit/v0.22.2/rustsec/src/database.rs#L133-L143),
 including source-less workspace paths and downstream Git dependencies. Ordinary
-root/fixture scans therefore do not assess the backported package. The
-supplemental original-registry SMB identity/checksum lookup uses the same frozen
-advisory database and requires individual applicability review against patched
-files and selected features; it does not establish absence of vulnerabilities.
-Registry companions retain ordinary audit coverage. Reassess upstream advisories
-and the backport whenever its code, features or source changes.
+root/fixture scans therefore do not assess the backported package. The supplemental
+original-registry SMB identity/checksum lookup uses the same frozen advisory database
+and requires individual applicability review against patched files and selected
+features; it does not establish absence of vulnerabilities. Registry companions retain
+ordinary audit coverage. Reassess upstream advisories and the backport whenever its
+code, features or source changes.
 
 Storage 0.8.1 adds an owner-local security patch for
 [GHSA-439h-2cx8-xwgx](https://github.com/Dastari/graphql-orm/security/advisories/GHSA-439h-2cx8-xwgx):
-the client verifies signing or encryption before acting on a response status.
-Upstream smb-rs has the same ordering, so a registry update would not fix it;
-provenance records the patch, and the [native SMB reference](../../crates/graphql-orm-storage/docs/native-smb.md#response-verification)
+the client verifies signing or encryption before acting on a response status. Upstream
+smb-rs has the same ordering, so a registry update would not fix it; provenance records
+the patch, and the [native SMB
+reference](../../crates/graphql-orm-storage/docs/native-smb.md#response-verification)
 states the corrected behaviour. Re-review it with any vendor update.
 
 ## Retained findings and conditions
@@ -130,13 +134,14 @@ in the protected-release review packet.
 
 ### Router XML initialization
 
-The router constructs [typed internal Hive configuration](../../crates/graphql-orm-router/src/server.rs)
-in `build_hive_config`, directly deserializes it, exposes no raw Hive storage or
-plugin registry, and supplies no storage map. Its
-[file configuration](../../crates/graphql-orm-router/src/file_config.rs) rejects
-unknown fields; the CLI uses that project loader rather than Hive's overlay
-loader. Persisted-document options remain disabled through initialization and
-reload. Hive's empty StorageManager constructs no S3 runtime or credential reader.
+The router constructs [typed internal Hive
+configuration](../../crates/graphql-orm-router/src/server.rs) in `build_hive_config`,
+directly deserializes it, exposes no raw Hive storage or plugin registry, and supplies
+no storage map. Its [file
+configuration](../../crates/graphql-orm-router/src/file_config.rs) rejects unknown
+fields; the CLI uses that project loader rather than Hive's overlay loader.
+Persisted-document options remain disabled through initialization and reload. Hive's
+empty StorageManager constructs no S3 runtime or credential reader.
 
 Generic Hive S3 WebIdentity/STS and S3 Express credentials have real XML response
 paths. object_store's serde reader constructs NsReader, so neither advisory is
@@ -144,12 +149,16 @@ excluded merely because the consumer uses deserialization. Ordinary GraphQL inpu
 alone was not shown to reach those readers. Exposing upstream storage, raw engine
 configuration, plugins or loader/environment merging invalidates this disposition.
 
-Primary source anchors: [reviewed project translation](https://github.com/Dastari/graphql-orm/blob/84e7d0b0542da7c4425f3875ab9547f26d24dbb8/crates/graphql-orm-router/src/server.rs#L866),
-[Hive StorageManager](https://github.com/graphql-hive/router/blob/15c50cf622e9d83bd4a25b3e190a124bcb67ee19/bin/router/src/storage/mod.rs#L18),
-[persisted-document initialization](https://github.com/graphql-hive/router/blob/15c50cf622e9d83bd4a25b3e190a124bcb67ee19/bin/router/src/pipeline/persisted_documents/mod.rs#L183),
-and [object_store's fixed owning requirement](https://raw.githubusercontent.com/apache/arrow-rs-object-store/v0.14.1/Cargo.toml).
-The reviewed fixed owner crosses Hive's existing requirement; use a compatible
-owning update rather than an unreviewed semver override.
+Primary source anchors: [reviewed project
+translation](https://github.com/Dastari/graphql-orm/blob/84e7d0b0542da7c4425f3875ab9547f26d24dbb8/crates/graphql-orm-router/src/server.rs#L866),
+[Hive
+StorageManager](https://github.com/graphql-hive/router/blob/15c50cf622e9d83bd4a25b3e190a124bcb67ee19/bin/router/src/storage/mod.rs#L18),
+[persisted-document
+initialization](https://github.com/graphql-hive/router/blob/15c50cf622e9d83bd4a25b3e190a124bcb67ee19/bin/router/src/pipeline/persisted_documents/mod.rs#L183),
+and [object_store's fixed owning
+requirement](https://raw.githubusercontent.com/apache/arrow-rs-object-store/v0.14.1/Cargo.toml).
+The reviewed fixed owner crosses Hive's existing requirement; use a compatible owning
+update rather than an unreviewed semver override.
 
 ### LRU defaults and extensions
 
@@ -167,10 +176,11 @@ LruCache or independently initialized host exporters. LRU 0.16.4 is still
 affected; the upstream fix starts at 0.18.2. The selected AWS-owned 0.18.5 copy
 does not repair unrelated 0.16.x owners.
 
-Primary sources: [fix](https://github.com/jeromefroe/lru-rs/pull/238),
-[async-graphql cache defaults](https://docs.rs/crate/async-graphql/7.2.1/source/src/dataloader/mod.rs),
+Primary sources: [fix](https://github.com/jeromefroe/lru-rs/pull/238), [async-graphql
+cache defaults](https://docs.rs/crate/async-graphql/7.2.1/source/src/dataloader/mod.rs),
 [libdd key type](https://docs.rs/crate/libdd-sampling/6.0.0/source/src/glob_matcher.rs),
-and [Hive exporter gate](https://github.com/graphql-hive/router/blob/15c50cf622e9d83bd4a25b3e190a124bcb67ee19/bin/router/src/telemetry/traces/mod.rs#L119).
+and [Hive exporter
+gate](https://github.com/graphql-hive/router/blob/15c50cf622e9d83bd4a25b3e190a124bcb67ee19/bin/router/src/telemetry/traces/mod.rs#L119).
 
 ### RSA operations and credentials
 
@@ -186,10 +196,14 @@ Other mechanisms, credentials and downstream feature unification need a new
 trace. SQLx MySQL is absent from the selected profiles and outside the advertised
 ORM backend set; lockfile presence is a separate observation.
 
-Primary sources: [auth signing](https://github.com/Dastari/agql-auth/blob/59c0a38f82e8c75459474238799a81f29d4ffa58/src/service.rs#L1456),
-[JWKS public-key extraction](https://github.com/Dastari/agql-auth/blob/59c0a38f82e8c75459474238799a81f29d4ffa58/src/service.rs#L2271),
-[selected JWT RSA implementation](https://docs.rs/crate/jsonwebtoken/10.4.0/source/src/crypto/rust_crypto/rsa.rs),
-[SMB authenticator](https://docs.rs/crate/smb/0.10.2/source/src/session/authenticator.rs),
+Primary sources: [auth
+signing](https://github.com/Dastari/agql-auth/blob/59c0a38f82e8c75459474238799a81f29d4ffa58/src/service.rs#L1456),
+[JWKS public-key
+extraction](https://github.com/Dastari/agql-auth/blob/59c0a38f82e8c75459474238799a81f29d4ffa58/src/service.rs#L2271),
+[selected JWT RSA
+implementation](https://docs.rs/crate/jsonwebtoken/10.4.0/source/src/crypto/rust_crypto/rsa.rs),
+[SMB
+authenticator](https://docs.rs/crate/smb/0.10.2/source/src/session/authenticator.rs),
 and [RSA upstream tracking](https://github.com/RustCrypto/RSA/issues/626).
 
 ## Maintenance warnings and acceptance limits
@@ -204,11 +218,12 @@ maintainers should pursue an owning parser migration with YAML compatibility
 review; no blanket exclusion for all VRL/configuration paths is established.
 Unmaintained status alone does not establish an exploit.
 
-The scan uses a fixed advisory revision and then-available local registry/index
-data. It certifies neither future advisories nor registry freshness. The original
-eight reports and the two supplemental changed-lock reports retain nonzero
-findings exits; raw reports have no ignore list; the exact CI dispositions above are separate. The supplemental identity-only
-lookup exits zero within the scope above; the aggregate remains with findings.
+The scan uses a fixed advisory revision and then-available local registry/index data. It
+certifies neither future advisories nor registry freshness. The original eight reports
+and the two supplemental changed-lock reports retain nonzero findings exits; raw reports
+have no ignore list; the exact CI dispositions above are separate. The supplemental
+identity-only lookup exits zero within the scope above; the aggregate remains with
+findings.
 
 This dependency review records graph/source dispositions separately from
 feature, provider and owned-service runtime acceptance. Follow the release
@@ -231,14 +246,15 @@ maintenance warnings and yanks fail the gate. Scanner execution/parse failures
 also fail. No severity threshold or blanket ignore applies.
 
 The single machine-readable [disposition file](../../dependency-audit-dispositions.json)
-contains exact advisory/package/version identities, reasons and expiry dates.
-Changing or renewing it requires ordinary repository review. These are technical
-dispositions, not new assertions of owner risk acceptance. The existing
-crypto-bigint owner acceptance above remains limited to its original conditions.
-CI warns during the fourteen days before expiry, fails after expiry, and fails
-on identities absent from every tracked lock. Remove obsolete entries during
-review; follow the [release review procedure](../operations/release/process.md#dependency-disposition-review). Raw cargo-audit output is never filtered. Advisory/index connectivity failures
-fail closed; a fresh database clone and index preflight precede the JSON scans.
+contains exact advisory/package/version identities, reasons and expiry dates. Changing
+or renewing it requires ordinary repository review. These are technical dispositions,
+not new assertions of owner risk acceptance. The existing crypto-bigint owner acceptance
+above remains limited to its original conditions. CI warns during the fourteen days
+before expiry, fails after expiry, and fails on identities absent from every tracked
+lock. Remove obsolete entries during review; follow the [release review
+procedure](../operations/release/process.md#dependency-disposition-review). Raw
+cargo-audit output is never filtered. Advisory/index connectivity failures fail closed;
+a fresh database clone and index preflight precede the JSON scans.
 
 Compatible lockfile updates repair Quinn protocol/UDP findings
 RUSTSEC-2026-0523, RUSTSEC-2026-0524 and RUSTSEC-2026-0538, rustix

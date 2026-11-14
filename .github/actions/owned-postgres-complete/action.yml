@@ -1,0 +1,20 @@
+name: Complete owned PostgreSQL qualification
+description: Shared PostgreSQL execution for main CI, manual qualification and full release validation
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
+    - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+    - name: Reclaim runner disk
+      uses: ./.github/actions/reclaim-runner-disk
+    - name: Run both owned PostgreSQL families
+      shell: bash
+      env:
+        CARGO_BUILD_JOBS: "2"
+        CARGO_PROFILE_DEV_DEBUG: "0"
+        CARGO_PROFILE_TEST_DEBUG: "0"
+        CARGO_INCREMENTAL: "0"
+      run: |
+        set -euo pipefail
+        scripts/run-owned-database-lanes.sh postgres
+        scripts/run-owned-database-lanes.sh postgres-legacy

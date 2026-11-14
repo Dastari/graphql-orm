@@ -16,6 +16,7 @@ AUTH_PREPARE = r'''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           encoded=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
           echo "::add-mask::${encoded}"
           header="AUTHORIZATION: basic ${encoded}"
@@ -60,8 +61,6 @@ def jobs(text):
     text = text.replace("          persist-credentials: false\n", "")
     text = text.replace(AUTH_PREPARE, '')
     text = text.replace(AUTH_ENV, '')
-    text = text.replace('          TARGET_REF: ${{ inputs.target_ref }}\n          GH_TOKEN: ${{ github.token }}\n',
-                        '          TARGET_REF: ${{ inputs.target_ref }}\n')
     text = text.replace("        with:\n      -", "      -")
     matches = list(re.finditer(r"(?m)^  ([a-z][a-z0-9-]*):\n", text))
     return {match[1]: text[match.start():matches[i + 1].start() if i + 1 < len(matches) else len(text)]
@@ -139,6 +138,9 @@ def check_publisher_split(bundle, publisher, bundle_name, validator, reference=N
         require(published.get(name) == built[name], f"publisher setup changed: {name}")
     if reference is not None:
         original = named_steps(reference)
+        # Raw GH_TOKEN is no longer needed by the Git-only tag step.
+        original['Create annotated release tags'] = original['Create annotated release tags'].replace(
+            '          GH_TOKEN: ${{ github.token }}\n', '')
         previous_install = 'cargo install cargo-cyclonedx --version 0.5.9 --locked'
         current_install = 'python3 scripts/install-reviewed-cargo-tool.py cargo-cyclonedx'
         require(current_install in built['Build approved router artifact'], 'reviewed CycloneDX installer missing')

@@ -10,9 +10,11 @@ supersedes: []
 
 # Workspace release process
 
-The repository uses independent package versions and immutable Git-only
-workspace releases under [ADR-0013](../../decisions/ADR-0013-explicit-source-only-release-verification-profiles.md). It is a virtual Cargo workspace, not one Cargo package, so
-there is deliberately no single SemVer value for the repository.
+The repository uses independent package versions and immutable Git-only workspace
+releases under
+[ADR-0013](../../decisions/ADR-0013-explicit-source-only-release-verification-profiles.md).
+It is a virtual Cargo workspace, not one Cargo package, so there is deliberately no
+single SemVer value for the repository.
 
 ## Release identities
 
@@ -177,16 +179,16 @@ python3 scripts/generate-release-manifest.py \
   --notes-output /tmp/workspace-release.md
 ```
 
-`--verify-tags` permits an existing package tag only when that tag's package
-publishable source is byte-identical under the comparison policy above, using Cargo's
-archive independently at both refs. Contents, executable modes, and all generated
-manifest fields (including inherited lints) are compared. The PR policy uses the
-same comparison. Tests, fixtures, and fixture lockfiles excluded by Cargo do not require a bump; tests
-that Cargo includes do. Generated resolution/provenance files are handled
-separately, as described in the [reference](../../reference/published-source.md).
-The manifest's `packageSourceTree` still records the entire Git directory for
-provenance; it is not the equality gate. See the
-[release tag check runbook](../runbooks/release-tag-check.md) for diagnosis.
+`--verify-tags` permits an existing package tag only when that tag's package publishable
+source is byte-identical under the comparison policy above, using Cargo's archive
+independently at both refs. Contents, executable modes, and all generated manifest
+fields (including inherited lints) are compared. The PR policy uses the same comparison.
+Tests, fixtures, and fixture lockfiles excluded by Cargo do not require a bump; tests
+that Cargo includes do. Generated resolution/provenance files are handled separately, as
+described in the [reference](../../reference/published-source.md). The manifest's
+`packageSourceTree` still records the entire Git directory for provenance; it is not the
+equality gate. See the [release tag check runbook](../runbooks/release-tag-check.md) for
+diagnosis.
 
 ## Publish through GitHub Actions
 
@@ -435,14 +437,15 @@ source obligations, and the actual delivery contents before providing the
 workflow's `router_distribution_approval` reference. Do not treat a missing
 notice as an automatically approved exception.
 
-External `agql-auth` dependencies select a reviewed full revision, or may select
-an actually published `v<version>` release tag. The manifest keeps its full locked
-commit in `externalGitDependencies[].revision` and records `tag` only for a tag
-selector; all other external Git dependencies still require full revision pins. Generation fails if the lockfile has no unique matching source
-or disagrees with an explicit revision. Verify the auth release's attested manifest
-and peeled tag before adopting it. Consumers seeking one Cargo source must use the
-same canonical selector: a `rev`, tag and path remain different sources even at
-the same SHA. A reviewed merged revision is not proof of release publication.
+External `agql-auth` dependencies select a reviewed full revision, or may select an
+actually published `v<version>` release tag. The manifest keeps its full locked commit
+in `externalGitDependencies[].revision` and records `tag` only for a tag selector; all
+other external Git dependencies still require full revision pins. Generation fails if
+the lockfile has no unique matching source or disagrees with an explicit revision.
+Verify the auth release's attested manifest and peeled tag before adopting it. Consumers
+seeking one Cargo source must use the same canonical selector: a `rev`, tag and path
+remain different sources even at the same SHA. A reviewed merged revision is not proof
+of release publication.
 
 Pure Rust libraries do not receive optimized binary artifacts. Downstream
 Cargo builds compile them from the pinned Git source.
@@ -463,14 +466,17 @@ Cargo builds compile them from the pinned Git source.
 
 ## Broader PostgreSQL lanes
 
-Main pushes, PostgreSQL-only manual CI dispatches, and full release validation each run one additional owned-PostgreSQL
-job: `scripts/run-owned-database-lanes.sh postgres` followed by `postgres-legacy`.
-It adds no PR-push runner, preserves all existing PR gates, and reuses one cache
-and runner across both commands. The hard budget is 120 Linux runner minutes per
-main push/full release (actual minutes must be measured from Actions; this is a
-ceiling, not a measured price). Existing disposable-container safety checks still
-refuse ambient database URLs. Known runtime defects remain owned by their issues;
-this job does not hide failures with continue-on-error.
+Main pushes, separate manual PostgreSQL dispatches, and full release validation each run
+one additional owned-PostgreSQL job: `scripts/run-owned-database-lanes.sh postgres`
+followed by `postgres-legacy`. The shared `.github/actions/owned-postgres-complete`
+action owns both commands. Manual qualification uses `owned-postgres-manual.yml`,
+isolated from CI's trigger, concurrency group and other job names. It adds no PR-push
+runner, preserves all existing PR gates, and reuses one cache and runner across both
+commands. The hard budget is 120 Linux runner minutes per main push/full release (actual
+minutes must be measured from Actions; this is a ceiling, not a measured price).
+Existing disposable-container safety checks still refuse ambient database URLs. Known
+runtime defects remain owned by their issues; this job does not hide failures with
+continue-on-error.
 
 
 ## Dependency disposition review

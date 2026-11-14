@@ -148,14 +148,38 @@ class SupplyChainTests(unittest.TestCase):
             self.assertReported("Dockerfile image is not pinned by digest")
             path.unlink()
 
-    def test_manual_dispatch_is_postgres_only(self):
-        workflow = supply_chain.jobs((self.root / '.github/workflows/ci.yml').read_text())
-        for name, body in workflow.items():
-            if name == 'owned-postgres-complete':
-                self.assertIn("|| github.event_name == 'workflow_dispatch'", body)
-                self.assertIn('uses: ./.github/actions/reclaim-runner-disk', body)
-            else:
-                self.assertIn("if: github.event_name != 'workflow_dispatch'", body)
+    def test_manual_dispatch_is_separate_and_shares_the_postgres_action(self):
+        ci = (self.root / '.github/workflows/ci.yml').read_text()
+        self.assertNotIn('workflow_dispatch', ci)
+        self.assertIn("if: github.event_name == 'push' && github.ref == 'refs/heads/main'",
+                      supply_chain.jobs(ci)['owned-postgres-complete'])
+        manual = (self.root / '.github/workflows/owned-postgres-manual.yml').read_text()
+        self.assertIn('  workflow_dispatch:', manual)
+        self.assertNotIn('  push:', manual)
+        self.assertNotIn('  pull_request:', manual)
+        self.assertIn('group: owned-postgres-manual-', manual)
+        for file, name in [('ci.yml', 'owned-postgres-complete'),
+                           ('owned-postgres-manual.yml', 'qualify-postgres'),
+                           ('release.yml', 'owned-postgres-complete')]:
+            body = supply_chain.jobs((self.root / '.github/workflows' / file).read_text())[name]
+            self.assertIn('uses: ./.github/actions/owned-postgres-complete', body)
+            self.assertIn('timeout-minutes: 120', body)
+        self.edit('.github/workflows/owned-postgres-manual.yml',
+                  './.github/actions/owned-postgres-complete', './.github/actions/other')
+        self.assertReported('owned PostgreSQL caller must use the shared action')
+
+    def test_untagged_container_run_image_is_rejected(self):
+        path = self.root / 'crates/example/tests/container.rs'
+        path.parent.mkdir(parents=True)
+        for call in ['Command::new("docker").args(["run", "redis"]).status();',
+                     'Command::new("podman").arg("run").arg("redis").status();',
+                     'subprocess.run(["docker", "run", "redis"])',
+                     "subprocess.run(['docker', 'run', 'redis'])",
+                     'Command::new("docker").args(["run", "-d", "--name", "owned", "docker.io/library/redis"]).status();']:
+            path.write_text(call)
+            self.assertReported('container run image is not pinned by digest')
+        path.write_text('Command::new("docker").args(["run", "redis@sha256:' + 'a' * 64 + '"]).status();')
+        self.assertEqual(self.messages(), [])
 
     def test_credentials_are_masked_and_never_passed_in_git_argv(self):
         workflow = supply_chain.jobs((self.root / '.github/workflows/release.yml').read_text())
@@ -165,6 +189,7 @@ class SupplyChainTests(unittest.TestCase):
                 continue
             count += 1
             self.assertEqual(body.count('- id: git-auth'), 1)
+            self.assertIn('set -euo pipefail\n          encoded=$(', body)
             self.assertIn('echo "::add-mask::${encoded}"', body)
             self.assertIn('echo "::add-mask::${header}"', body)
             self.assertIn('GIT_CONFIG_KEY_0: http.https://github.com/.extraheader', body)
@@ -172,10 +197,18 @@ class SupplyChainTests(unittest.TestCase):
             self.assertNotIn('git config http.', body)
             # Only Git steps receive the config, not the later bundle compiler.
             for step in supply_chain.steps(body):
+                if any('name: ' + name in step for name in
+                       ['Restore release tag visibility', 'Create annotated release tags']):
+                    self.assertNotIn('GH_TOKEN:', step)
                 if 'GIT_CONFIG_COUNT:' in step:
                     self.assertTrue('git fetch' in step or 'git push' in step)
                     self.assertNotIn('cargo ', step)
         self.assertEqual(count, 5)
+
+    def test_workspace_integrity_runs_both_contract_suites(self):
+        ci = supply_chain.jobs((self.root / '.github/workflows/ci.yml').read_text())
+        for script in ['test-release-workflow-contract.py', 'test-reviewed-cargo-tool.py']:
+            self.assertIn('python3 scripts/' + script, ci['workspace-integrity'])
 
     def test_current_tree_passes(self):
         self.assertEqual(self.messages(), [])

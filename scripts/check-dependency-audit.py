@@ -51,7 +51,8 @@ def check_database(report, revision):
 
 def check_preflight(returncode, output):
     if (returncode not in (0, 1) or 'Updating' not in output or 'crates.io index' not in output
-            or "couldn't" in output.lower()):
+            or "couldn't update crates.io index" in output.lower()
+            or "couldn't open crates.io index" in output.lower()):
         raise ValueError('advisory database/index freshness preflight failed; refusing cached-only acceptance')
 
 
