@@ -274,7 +274,10 @@ impl OrmAiConfigurationService {
             },
             graphql_orm::graphql::pagination::KeysetConnectionInput {
                 after,
-                first: Some(crate::orm_read_bounds::client_page_limit(self.database.pagination_config(), 100)),
+                first: Some(crate::orm_read_bounds::client_page_limit(
+                    self.database.pagination_config(),
+                    100,
+                )),
                 ..Default::default()
             },
         )
