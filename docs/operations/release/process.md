@@ -472,3 +472,10 @@ ceiling, not a measured price). Existing disposable-container safety checks stil
 refuse ambient database URLs. Known runtime defects remain owned by their issues;
 this job does not hide failures with continue-on-error.
 
+For #107, `scripts/check-async-trait-clippy.sh 1.99.0` creates a bounded temporary
+async-trait 0.1.89 trait reproducer and runs warnings-denied Clippy. Run it through
+the shared build-slot wrapper on shared build machines. No lint suppression or
+baseline change is introduced. A passing reproducer alone is insufficient: before
+advancing the baseline, run storage and every AI provider/backend Clippy lane.
+Rust 1.99 is not installed in the N7 implementation environment; compatibility
+remains open pending that qualification and an owning async-trait fix.
