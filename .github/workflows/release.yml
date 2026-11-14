@@ -80,6 +80,8 @@ jobs:
           ref: ${{ inputs.target_ref }}
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Reclaim runner disk
+        uses: ./.github/actions/reclaim-runner-disk
       - run: scripts/run-owned-database-lanes.sh postgres
       - run: scripts/run-owned-database-lanes.sh postgres-legacy
 
@@ -97,7 +99,7 @@ jobs:
           ref: ${{ inputs.target_ref }}
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
       - name: Install the reviewed advisory scanner
-        run: cargo install cargo-audit --version 0.22.2 --locked
+        run: python3 scripts/install-reviewed-cargo-tool.py cargo-audit
       - run: python3 scripts/test-dependency-audit.py
       - name: Audit all tracked root and fixture lockfiles
         run: python3 scripts/check-dependency-audit.py
@@ -126,8 +128,21 @@ jobs:
           persist-credentials: false
           ref: ${{ inputs.target_ref }}
           fetch-depth: 0
+      - id: git-auth
+        name: Prepare masked Git authentication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          encoded=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::${encoded}"
+          header="AUTHORIZATION: basic ${encoded}"
+          echo "::add-mask::${header}"
+          printf 'header=%s\n' "${header}" >> "${GITHUB_OUTPUT}"
       - name: Prove the selected source is current main
         env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: http.https://github.com/.extraheader
+          GIT_CONFIG_VALUE_0: ${{ steps.git-auth.outputs.header }}
           VALIDATION_PROFILE: ${{ inputs.validation_profile }}
           RELEASE_APPROVAL: ${{ inputs.release_approval_reference }}
           TARGET_REF: ${{ inputs.target_ref }}
@@ -144,7 +159,7 @@ jobs:
           [[ "${RELEASE_ID}" =~ ^workspace-[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]+$ ]]
           test "${GITHUB_REF}" = refs/heads/main
           test "${GITHUB_SHA}" = "${TARGET_REF}"
-          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)" fetch origin main --tags --force
+          git fetch origin main --tags --force
           test "$(git rev-parse HEAD)" = "${TARGET_REF}"
           test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
           if git show-ref --verify --quiet "refs/tags/${RELEASE_ID}"; then
@@ -766,8 +781,21 @@ jobs:
           persist-credentials: false
           ref: ${{ inputs.target_ref }}
           fetch-depth: 0
+      - id: git-auth
+        name: Prepare masked Git authentication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          encoded=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::${encoded}"
+          header="AUTHORIZATION: basic ${encoded}"
+          echo "::add-mask::${header}"
+          printf 'header=%s\n' "${header}" >> "${GITHUB_OUTPUT}"
       - name: Restore release tag visibility
         env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: http.https://github.com/.extraheader
+          GIT_CONFIG_VALUE_0: ${{ steps.git-auth.outputs.header }}
           TARGET_REF: ${{ inputs.target_ref }}
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -778,7 +806,7 @@ jobs:
           # re-establishes the tag data that the manifest generator and the tag
           # step read, and confirms this runner checked out the validated
           # commit.
-          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)" fetch origin main --tags --force
+          git fetch origin main --tags --force
           test "$(git rev-parse HEAD)" = "${TARGET_REF}"
       - name: Reclaim runner disk
         # Only the optional router artifact compiles anything in this job.
@@ -807,7 +835,7 @@ jobs:
           test "$(rustc -vV | sed -n 's/^host: //p')" = "x86_64-unknown-linux-gnu"
           SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
           export SOURCE_DATE_EPOCH
-          cargo install cargo-cyclonedx --version 0.5.9 --locked
+          python3 scripts/install-reviewed-cargo-tool.py cargo-cyclonedx
           cargo build -p graphql-orm-router --release --features auth-agql --locked
           cargo cyclonedx \
             --manifest-path crates/graphql-orm-router/Cargo.toml \
@@ -877,8 +905,21 @@ jobs:
           persist-credentials: false
           ref: ${{ inputs.target_ref }}
           fetch-depth: 0
+      - id: git-auth
+        name: Prepare masked Git authentication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          encoded=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::${encoded}"
+          header="AUTHORIZATION: basic ${encoded}"
+          echo "::add-mask::${header}"
+          printf 'header=%s\n' "${header}" >> "${GITHUB_OUTPUT}"
       - name: Restore release tag visibility
         env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: http.https://github.com/.extraheader
+          GIT_CONFIG_VALUE_0: ${{ steps.git-auth.outputs.header }}
           TARGET_REF: ${{ inputs.target_ref }}
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -889,7 +930,7 @@ jobs:
           # re-establishes the tag data that the manifest generator and the tag
           # step read, and confirms this runner checked out the validated
           # commit.
-          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)" fetch origin main --tags --force
+          git fetch origin main --tags --force
           test "$(git rev-parse HEAD)" = "${TARGET_REF}"
       - name: Verify the bundle artifact identity
         env:
@@ -938,6 +979,9 @@ jobs:
           subject-path: release-dist/*
       - name: Create annotated release tags
         env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: http.https://github.com/.extraheader
+          GIT_CONFIG_VALUE_0: ${{ steps.git-auth.outputs.header }}
           RELEASE_ID: ${{ inputs.release_id }}
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -945,7 +989,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           [[ "${RELEASE_ID}" =~ ^workspace-[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]+$ ]]
-          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)" fetch origin main --tags --force
+          git fetch origin main --tags --force
           test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
           test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
           if git show-ref --verify --quiet "refs/tags/${RELEASE_ID}"; then
@@ -959,7 +1003,7 @@ jobs:
           package_tags=$(jq -er '.packages | map(.tag) | sort | .[]' "release-dist/${RELEASE_ID}.json")
           test "${package_tags}" = "${expected_tags}"
           while IFS= read -r package_tag; do
-            [[ "${package_tag}" =~ ^[a-z0-9-]+-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            [[ "${package_tag}" =~ ^[a-z][a-z0-9-]*-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           done <<<"${package_tags}"
           tags_to_push=()
           while IFS= read -r package_tag; do
@@ -971,7 +1015,7 @@ jobs:
           done < <(jq -r '.packages[].tag' "release-dist/${RELEASE_ID}.json")
           git tag -a "${RELEASE_ID}" -m "${RELEASE_ID}"
           tags_to_push+=("refs/tags/${RELEASE_ID}")
-          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)" push --atomic origin "${tags_to_push[@]}"
+          git push --atomic origin "${tags_to_push[@]}"
       - name: Publish immutable workspace release
         env:
           RELEASE_ID: ${{ inputs.release_id }}
@@ -1012,8 +1056,21 @@ jobs:
           persist-credentials: false
           ref: ${{ inputs.target_ref }}
           fetch-depth: 0
+      - id: git-auth
+        name: Prepare masked Git authentication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          encoded=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::${encoded}"
+          header="AUTHORIZATION: basic ${encoded}"
+          echo "::add-mask::${header}"
+          printf 'header=%s\n' "${header}" >> "${GITHUB_OUTPUT}"
       - name: Restore release tag visibility
         env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: http.https://github.com/.extraheader
+          GIT_CONFIG_VALUE_0: ${{ steps.git-auth.outputs.header }}
           TARGET_REF: ${{ inputs.target_ref }}
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -1024,7 +1081,7 @@ jobs:
           # re-establishes the tag data that the manifest generator and the tag
           # step read, and confirms this runner checked out the validated
           # commit.
-          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)" fetch origin main --tags --force
+          git fetch origin main --tags --force
           test "$(git rev-parse HEAD)" = "${TARGET_REF}"
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -1089,8 +1146,21 @@ jobs:
           persist-credentials: false
           ref: ${{ inputs.target_ref }}
           fetch-depth: 0
+      - id: git-auth
+        name: Prepare masked Git authentication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          encoded=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::${encoded}"
+          header="AUTHORIZATION: basic ${encoded}"
+          echo "::add-mask::${header}"
+          printf 'header=%s\n' "${header}" >> "${GITHUB_OUTPUT}"
       - name: Restore release tag visibility
         env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: http.https://github.com/.extraheader
+          GIT_CONFIG_VALUE_0: ${{ steps.git-auth.outputs.header }}
           TARGET_REF: ${{ inputs.target_ref }}
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -1101,7 +1171,7 @@ jobs:
           # re-establishes the tag data that the manifest generator and the tag
           # step read, and confirms this runner checked out the validated
           # commit.
-          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)" fetch origin main --tags --force
+          git fetch origin main --tags --force
           test "$(git rev-parse HEAD)" = "${TARGET_REF}"
       - name: Verify the bundle artifact identity
         env:
@@ -1150,17 +1220,17 @@ jobs:
           subject-path: target/scoped-dist/*
       - name: Create annotated release tags
         env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: http.https://github.com/.extraheader
+          GIT_CONFIG_VALUE_0: ${{ steps.git-auth.outputs.header }}
           RELEASE_ID: ${{ inputs.release_id }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)" fetch origin main
-          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
-          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
           [[ "${RELEASE_ID}" =~ ^workspace-[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]+$ ]]
-          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)" fetch origin main --tags --force
+          git fetch origin main --tags --force
           test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
           test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
           if git show-ref --verify --quiet "refs/tags/${RELEASE_ID}"; then
@@ -1174,7 +1244,7 @@ jobs:
           package_tags=$(jq -er '.packages | map(.tag) | sort | .[]' "target/scoped-dist/${RELEASE_ID}.json")
           test "${package_tags}" = "${expected_tags}"
           while IFS= read -r package_tag; do
-            [[ "${package_tag}" =~ ^[a-z0-9-]+-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            [[ "${package_tag}" =~ ^[a-z][a-z0-9-]*-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           done <<<"${package_tags}"
           tags_to_push=()
           while IFS= read -r package_tag; do
@@ -1186,7 +1256,7 @@ jobs:
           done < <(jq -r '.packages[].tag' "target/scoped-dist/${RELEASE_ID}.json")
           git tag -a "${RELEASE_ID}" -m "${RELEASE_ID}"
           tags_to_push+=("refs/tags/${RELEASE_ID}")
-          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)" push --atomic origin "${tags_to_push[@]}"
+          git push --atomic origin "${tags_to_push[@]}"
       - name: Publish immutable workspace release
         env:
           RELEASE_ID: ${{ inputs.release_id }}

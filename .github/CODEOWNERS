@@ -1,2 +1,2 @@
-# Default repository owner; branch protection config controls enforcement.
+# Default repository owner; enforced if branch protection requires code-owner review.
 * @Dastari

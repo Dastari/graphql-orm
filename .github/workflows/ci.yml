@@ -31,7 +31,7 @@ permissions:
 
 jobs:
   owned-postgres-complete:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
@@ -46,10 +46,13 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Reclaim runner disk
+        uses: ./.github/actions/reclaim-runner-disk
       - run: scripts/run-owned-database-lanes.sh postgres
       - run: scripts/run-owned-database-lanes.sh postgres-legacy
 
   dependency-audit:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -60,7 +63,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
       - name: Install the reviewed advisory scanner
-        run: cargo install cargo-audit --version 0.22.2 --locked
+        run: python3 scripts/install-reviewed-cargo-tool.py cargo-audit
       - run: python3 scripts/test-dependency-audit.py
       - name: Audit all tracked root and fixture lockfiles
         run: python3 scripts/check-dependency-audit.py
@@ -72,6 +75,7 @@ jobs:
           if-no-files-found: error
 
   workspace-integrity:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -117,6 +121,7 @@ jobs:
       - run: cargo test -p graphql-orm-operation-catalog -p graphql-orm-ai-tool-profiles
 
   s3-security:
+    if: github.event_name != 'workflow_dispatch'
     name: Owned S3 transport and single-attempt deletion
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -145,6 +150,7 @@ jobs:
   # Rustdoc, the fixture workspaces it drives, runtime GraphQL on owned
   # backends, and the PostgreSQL and SQL Server lanes.
   orm:
+    if: github.event_name != 'workflow_dispatch'
     name: ORM default suite, Clippy and Rustdoc
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -167,6 +173,7 @@ jobs:
       - run: RUSTDOCFLAGS="-D warnings" cargo doc -p graphql-orm -p graphql-orm-macros --no-deps
 
   schema-export:
+    if: github.event_name != 'workflow_dispatch'
     name: Dedicated schema export
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -181,6 +188,7 @@ jobs:
       - run: scripts/check-schema-export.sh
 
   orm-fixtures:
+    if: github.event_name != 'workflow_dispatch'
     name: ORM fixture workspaces
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -195,6 +203,7 @@ jobs:
         run: cargo test --manifest-path skills/verify/Cargo.toml --target-dir target/fixtures --locked
 
   orm-runtime-graphql:
+    if: github.event_name != 'workflow_dispatch'
     name: ORM runtime GraphQL on owned backends
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -219,6 +228,7 @@ jobs:
   # Fixture workspaces build into the shared target/fixtures directory used by
   # the fixture runner tests, never into the source tree.
   orm-backends:
+    if: github.event_name != 'workflow_dispatch'
     name: ORM PostgreSQL and SQL Server lanes
     runs-on: ubuntu-latest
     timeout-minutes: 75
@@ -280,6 +290,7 @@ jobs:
         run: cargo test -p graphql-orm --locked --no-default-features --features mssql --test federation_entity_keys_mssql --test runtime_records --test query_ir --test composite_primary_keys --test zero_public_write_inputs_backends --test mssql_transport
 
   orm-security-sqlite:
+    if: github.event_name != 'workflow_dispatch'
     name: Current authority and subscription privacy (SQLite)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -301,6 +312,7 @@ jobs:
         run: bash scripts/run-security-test-targets.sh sqlite,receiver-admission receiver_admission
 
   orm-security-portable:
+    if: github.event_name != 'workflow_dispatch'
     name: Portable authorization and scan bounds (${{ matrix.backend }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -325,6 +337,7 @@ jobs:
         run: cargo clippy -p graphql-orm --locked --no-default-features --features "${{ matrix.backend }},auth-agql" --lib -- -D warnings
 
   sqlserver-security:
+    if: github.event_name != 'workflow_dispatch'
     name: Owned SQL Server transport and transaction checks
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -346,6 +359,7 @@ jobs:
         run: cargo test -p graphql-orm --locked --no-default-features --features mssql --test mssql_tls --test mssql_transport --test mssql_notifications -- --ignored --test-threads=1
 
   orm-text-group-pages:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -377,6 +391,7 @@ jobs:
           cargo clippy --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --target-dir target/fixtures --locked --no-default-features --features sqlite --all-targets -- -D warnings
 
   orm-policy-projections:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -400,6 +415,7 @@ jobs:
   # The suites that spell names through tests/support/graphql_case.rs, under
   # every snake-case feature together (#267).
   orm-case-features:
+    if: github.event_name != 'workflow_dispatch'
     name: ORM snake-case naming
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -412,8 +428,9 @@ jobs:
       - run: cargo test -p graphql-orm --locked --no-default-features --features sqlite,resolver-case-snake,argument-case-snake,field-case-snake --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test grouped_aggregates --test record_version_ui --test subscription_path_order --test composite_subscription_scopes --test operation_catalog_sdl_conformance
 
   companions:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -429,6 +446,7 @@ jobs:
       - run: RUSTDOCFLAGS="-D warnings -D missing_docs" cargo doc -p graphql-orm-ai -p graphql-orm-operation-catalog -p graphql-orm-ai-tool-profiles --features graphql-orm-ai/provider-openai,graphql-orm-ai/provider-anthropic,graphql-orm-ai/provider-xai,graphql-orm-ai/provider-ollama,graphql-orm-ai/provider-openai-compatible,graphql-orm-ai/provider-chat-completions,graphql-orm-ai/local-harness --no-deps
 
   ai-provider-tls:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -441,6 +459,7 @@ jobs:
         run: scripts/check-ai-provider-tls.sh all
 
   router:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -465,6 +484,7 @@ jobs:
       - run: RUSTDOCFLAGS="-D warnings -D missing_docs" cargo doc -p graphql-orm-router --no-deps --locked --features auth-agql
 
   router-msrv:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -479,7 +499,7 @@ jobs:
       - run: cargo test -p graphql-orm-router --locked
 
   package-release-policy:
-    if: github.event_name == 'pull_request'
+    if: github.event_name != 'workflow_dispatch' && (github.event_name == 'pull_request')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -490,8 +510,9 @@ jobs:
       - run: scripts/check-package-release-policy.sh "${BASE_SHA}"
 
   alternate-features:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -522,6 +543,7 @@ jobs:
           python3 scripts/verify-smb-backport.py --archive "${archive}"
 
   ai-postgres-parity:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -534,7 +556,7 @@ jobs:
         run: cargo test -p graphql-orm-ai --no-default-features --features postgres,provider-openai --test postgres_parity -- --test-threads=1
 
   semver:
-    if: github.event_name == 'pull_request'
+    if: github.event_name != 'workflow_dispatch' && (github.event_name == 'pull_request')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:

@@ -461,9 +461,9 @@ Cargo builds compile them from the pinned Git source.
 - Consumers roll forward to a newly reviewed workspace tag and its recorded
   commit; published Git history is never rewritten.
 
-## Broader PostgreSQL and compiler follow-up lanes
+## Broader PostgreSQL lanes
 
-Main pushes and full release validation each run one additional owned-PostgreSQL
+Main pushes, PostgreSQL-only manual CI dispatches, and full release validation each run one additional owned-PostgreSQL
 job: `scripts/run-owned-database-lanes.sh postgres` followed by `postgres-legacy`.
 It adds no PR-push runner, preserves all existing PR gates, and reuses one cache
 and runner across both commands. The hard budget is 120 Linux runner minutes per
@@ -472,10 +472,33 @@ ceiling, not a measured price). Existing disposable-container safety checks stil
 refuse ambient database URLs. Known runtime defects remain owned by their issues;
 this job does not hide failures with continue-on-error.
 
-For #107, `scripts/check-async-trait-clippy.sh 1.99.0` creates a bounded temporary
-async-trait 0.1.89 trait reproducer and runs warnings-denied Clippy. Run it through
-the shared build-slot wrapper on shared build machines. No lint suppression or
-baseline change is introduced. A passing reproducer alone is insufficient: before
-advancing the baseline, run storage and every AI provider/backend Clippy lane.
-Rust 1.99 is not installed in the N7 implementation environment; compatibility
-remains open pending that qualification and an owning async-trait fix.
+
+## Dependency disposition review
+
+The current exact-version dispositions are due **2026-12-04**. CI emits warning
+annotations beginning **2026-11-20**, fourteen days before that date, without
+failing an otherwise accepted graph. Expired dispositions fail beginning the day
+after their review date. A disposition that matches no finding across all eleven
+tracked locks also fails; there are no permanent or blanket exemptions.
+
+Before the review date, run `python3 scripts/check-dependency-audit.py` through
+the shared build-slot wrapper where required. Inspect the unfiltered JSON reports
+and recorded advisory database revision. Upgrade affected owners where compatible;
+remove entries only when no tracked lock reports that exact identity. For each
+retained identity, re-check its owning feature paths and technical conditions,
+record a specific reason and next review date in
+`dependency-audit-dispositions.json`, and update the canonical
+[dependency disposition reference](../../reference/dependency-security-disposition.md).
+Submit the changes for repository review. Renewing a date does not create or
+extend owner acceptance of risk.
+
+The scan requires a fresh advisory-database clone and a successful registry-index
+freshness preflight before the JSON scans. cargo-audit 0.22.2 can silently omit
+yank checking after an index-fetch failure in JSON mode, so the preflight checks
+its human output and rejects fetch/open failures. Advisory database, registry
+index or connectivity failures fail the job; cached-only acceptance is forbidden.
+Any JSON reports and preflight output produced are retained on failure.
+Because cargo-audit 0.22.2 omits Git revision fields with `--no-fetch`, the raw
+reports are bound by SHA-256 to the fresh checkout's verified full Git revision in
+`database-provenance.json`. The scanner checks the checkout remains unchanged;
+it never fills or rewrites the raw reports' missing metadata.

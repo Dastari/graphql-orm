@@ -115,7 +115,12 @@ impl OwnedPostgres {
     pub(crate) async fn postgis_pool(
         label: &str,
     ) -> Result<graphql_orm::sqlx::PgPool, Box<dyn std::error::Error>> {
-        Self::pool_image(label, 5, "postgis/postgis:17-3.5").await
+        Self::pool_image(
+            label,
+            5,
+            "postgis/postgis:17-3.5@sha256:01a6a70e41e6c4467c8f55f6063555ed72db2d6662cd0d571040d42eadaeb6f6",
+        )
+        .await
     }
 
     async fn pool_image(

@@ -10,13 +10,56 @@ from replay_release import (COMPILERS, EXCLUDED_JOBS, QUALIFIED, ROOT, commands,
                             metadata_commands, require, source)
 
 
-AUTHENTICATED_GIT = ('git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic '
-                     "$(printf 'x-access-token:%s' \"$GH_TOKEN\" | base64 -w0)\"")
+AUTH_PREPARE = r'''
+      - id: git-auth
+        name: Prepare masked Git authentication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          encoded=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::${encoded}"
+          header="AUTHORIZATION: basic ${encoded}"
+          echo "::add-mask::${header}"
+          printf 'header=%s\n' "${header}" >> "${GITHUB_OUTPUT}"
+'''[1:]
+AUTH_ENV = r'''
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: http.https://github.com/.extraheader
+          GIT_CONFIG_VALUE_0: ${{ steps.git-auth.outputs.header }}
+'''[1:]
+TAG_HARDENING = r'''
+          [[ "${RELEASE_ID}" =~ ^workspace-[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]+$ ]]
+          git fetch origin main --tags --force
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          if git show-ref --verify --quiet "refs/tags/${RELEASE_ID}"; then
+            echo "release tag already exists: ${RELEASE_ID}" >&2
+            exit 1
+          fi
+          # Compare the entire tag set with the trusted checked-out package manifests.
+          expected_tags=$(for manifest in crates/*/Cargo.toml; do
+            awk -F '"' '/^name = / && !name {name=$2} /^version = / {print name "-v" $2; exit}' "$manifest"
+          done | LC_ALL=C sort)
+          package_tags=$(jq -er '.packages | map(.tag) | sort | .[]' "BUNDLE_DIR/${RELEASE_ID}.json")
+          test "${package_tags}" = "${expected_tags}"
+          while IFS= read -r package_tag; do
+            [[ "${package_tag}" =~ ^[a-z][a-z0-9-]*-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          done <<<"${package_tags}"
+'''[1:]
+
+
+def check_tag_hardening(tag_step, directory):
+    start = tag_step.index('          [[ "${RELEASE_ID}" =~')
+    end = tag_step.index('          tags_to_push=()')
+    require(tag_step[start:end] == TAG_HARDENING.replace('BUNDLE_DIR', directory),
+            'publisher tag hardening differs from exact reviewed literal')
+    return tag_step[:start] + tag_step[end:]
 
 
 def jobs(text):
     text = text.replace("          persist-credentials: false\n", "")
-    text = text.replace(AUTHENTICATED_GIT + ' fetch origin', 'git fetch origin')
+    text = text.replace(AUTH_PREPARE, '')
+    text = text.replace(AUTH_ENV, '')
     text = text.replace('          TARGET_REF: ${{ inputs.target_ref }}\n          GH_TOKEN: ${{ github.token }}\n',
                         '          TARGET_REF: ${{ inputs.target_ref }}\n')
     text = text.replace("        with:\n      -", "      -")
@@ -84,6 +127,8 @@ def job_needs(body):
 def check_publisher_split(bundle, publisher, bundle_name, validator, reference=None):
     """The publisher's steps, split across a read-only bundle job."""
     built, published = named_steps(bundle), named_steps(publisher)
+    check_tag_hardening(published["Create annotated release tags"],
+                        "release-dist" if bundle_name == "release-bundle" else "target/scoped-dist")
     for name in BUNDLE_STEPS:
         require(name not in published, f"publisher runs a bundle step: {name}")
     for name in PUBLISH_STEPS:
@@ -94,18 +139,13 @@ def check_publisher_split(bundle, publisher, bundle_name, validator, reference=N
         require(published.get(name) == built[name], f"publisher setup changed: {name}")
     if reference is not None:
         original = named_steps(reference)
+        previous_install = 'cargo install cargo-cyclonedx --version 0.5.9 --locked'
+        current_install = 'python3 scripts/install-reviewed-cargo-tool.py cargo-cyclonedx'
+        require(current_install in built['Build approved router artifact'], 'reviewed CycloneDX installer missing')
+        built['Build approved router artifact'] = built['Build approved router artifact'].replace(current_install, previous_install)
         for name in BUNDLE_STEPS + SHARED_STEPS:
             require(built.get(name) == original[name], f"bundle step changed: {name}")
-        tag_step = published["Create annotated release tags"]
-        for required in ['test "${package_tags}" = "${expected_tags}"',
-                         'test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"',
-                         '[[ "${RELEASE_ID}" =~ ^workspace-',
-                         '[[ "${package_tag}" =~ ^[a-z0-9-]+-v']:
-            require(required in tag_step, "publisher tag hardening missing: " + required)
-        start = tag_step.index('          [[ "${RELEASE_ID}" =~')
-        end = tag_step.index('          tags_to_push=()')
-        tag_step = tag_step[:start] + tag_step[end:]
-        tag_step = tag_step.replace(AUTHENTICATED_GIT + ' push --atomic origin', 'git push --atomic origin')
+        tag_step = check_tag_hardening(published["Create annotated release tags"], "release-dist")
         published["Create annotated release tags"] = tag_step
         for name in PUBLISH_STEPS:
             require(published[name] == original[name], f"publisher step changed: {name}")
@@ -254,7 +294,6 @@ def main():
                           "release-scoped-bundle", "replay-scoped-validate")
     require("--verification-evidence" in new["release-scoped-bundle"]
             and 'push --atomic origin' in new["release-scoped"]
-            and 'git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic' in new["release-scoped"]
             and 'test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"' in new["release-scoped"],
             "scoped evidence/atomic publication missing")
     require("environment: release" in new["guard"] and 'test "${INCLUDE_ROUTER}" = false' in new["guard"]

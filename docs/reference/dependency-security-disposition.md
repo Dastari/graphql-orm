@@ -235,8 +235,10 @@ contains exact advisory/package/version identities, reasons and expiry dates.
 Changing or renewing it requires ordinary repository review. These are technical
 dispositions, not new assertions of owner risk acceptance. The existing
 crypto-bigint owner acceptance above remains limited to its original conditions.
-An expired disposition fails CI even if that identity has left a selected graph;
-remove obsolete entries during review. Raw cargo-audit output is never filtered.
+CI warns during the fourteen days before expiry, fails after expiry, and fails
+on identities absent from every tracked lock. Remove obsolete entries during
+review; follow the [release review procedure](../operations/release/process.md#dependency-disposition-review). Raw cargo-audit output is never filtered. Advisory/index connectivity failures
+fail closed; a fresh database clone and index preflight precede the JSON scans.
 
 Compatible lockfile updates repair Quinn protocol/UDP findings
 RUSTSEC-2026-0523, RUSTSEC-2026-0524 and RUSTSEC-2026-0538, rustix
