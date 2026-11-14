@@ -254,3 +254,16 @@ locks receive the same compatible rustix patch where present.
 | pin-utils 0.1.0 / RUSTSEC-2026-0441 | S3 aws-smithy-runtime, optional SMB sspi → async-dnssd, and Hive reqwest-retry → wasmtimer. Unmaintained; replacing these owners needs upstream/API review. No exploit or unreachability inference. |
 | unsafe-libyaml 0.2.11 / RUSTSEC-2024-0449 | Hive/VRL → serde_yaml and serde_yaml_ng. Unmaintained parser; migrate owning dependencies with YAML compatibility review. |
 
+### Duplicate crypto and HTTP stacks (#498)
+
+No compatible lockfile-only unification is available across the major-version
+requirements: ORM and pinned agql-auth require jsonwebtoken 10, while the workspace
+router requires 11; Hive/object_store/SSPI retain reqwest 0.12 while project AI
+and router use 0.13. Moving either external pin or a public dependency contract
+is outside this batch. Keep both until the owning requirements converge.
+Rustls ring and aws-lc-rs are selected by different owners; removing one requires
+review of the unified provider/backend configuration. Native TLS/OpenSSL is
+required by the pinned Tiberius transport and optional SDK owners; changing it
+would overlap #516. These duplicates remain explicit follow-ups, not resolved
+by updating the lockfile.
+
