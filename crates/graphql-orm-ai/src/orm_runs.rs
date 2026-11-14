@@ -8613,6 +8613,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recovery_quarantines_a_null_lease_expiry_and_still_recovers_the_rest() {
+        let fixture = fixture().await;
+        let broken = seed_queued(&fixture).await;
+        let broken_lease = fixture
+            .service
+            .claim_next("worker-broken")
+            .await
+            .expect("claim should succeed")
+            .expect("run should be eligible");
+        fixture
+            .service
+            .start(&broken_lease)
+            .await
+            .expect("broken run should start");
+        let healthy = seed_queued(&fixture).await;
+        fixture
+            .service
+            .claim_next("worker-healthy")
+            .await
+            .expect("claim should succeed")
+            .expect("run should be eligible");
+        // A leased row with no expiry must be scanned, not silently omitted.
+        let current = run_record(&fixture, broken).await;
+        let outcome = fixture
+            .database
+            .transaction(TransactionMode::Default, move |tx| {
+                Box::pin(async move {
+                    tx.compare_and_swap::<AiRunRecord>(
+                        &current.id,
+                        current.row_version,
+                        AiRunRecordWhereInput::default(),
+                        UpdateAiRunRecordInput {
+                            lease_expires_at: Some(None),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("test corruption should commit");
+        assert!(matches!(outcome, ConditionalUpdateOutcome::Updated(_)));
+
+        fixture.clock.advance_seconds(61);
+        let report = fixture
+            .service
+            .recover_expired_leases()
+            .await
+            .expect("one malformed row must not abort the recovery pass");
+        assert_eq!(report.requeued, 1);
+        assert_eq!(report.quarantined, 1);
+        assert_eq!(
+            run_record(&fixture, healthy).await.state,
+            AiRunState::RetryScheduled.as_str()
+        );
+        let quarantined = run_record(&fixture, broken).await;
+        assert_eq!(quarantined.state, AiRunState::RecoveryRequired.as_str());
+        assert_eq!(
+            quarantined.error_code.as_deref(),
+            Some("lease_recovery_state_invalid")
+        );
+        assert!(quarantined.lease_owner.is_none());
+        assert!(quarantined.lease_expires_at.is_none());
+        // The quarantined row leaves the scan, so the next pass is clean.
+        let next = fixture
+            .service
+            .recover_expired_leases()
+            .await
+            .expect("the next pass should succeed");
+        assert_eq!(next, AiRunRecoveryReport::default());
+    }
+
+    #[tokio::test]
     async fn a_failed_legacy_terminal_event_cannot_block_a_healthy_claim() {
         let fixture = fixture().await;
         let one = seed_queued(&fixture).await;
