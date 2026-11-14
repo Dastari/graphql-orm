@@ -70,31 +70,32 @@ message, and `SmbStorageConfig` gains a field. See [MIGRATION.md](MIGRATION.md).
 - SMB: `SmbStorageBackend::sweep_temp_files(quiesced, older_than)` removes
   temporary upload files that a lost process or connection left on the
   share, as `LocalStorageBackend::sweep_temp_files` does for local roots,
-  and returns an `SmbTempSweepReport`. It requires an
-  `SmbUploadsQuiesced`, the host's statement that no upload to the
-  repository is in progress. It walks the root prefix within the configured
-  listing limits and deadline and considers only exact backend temporary
-  names (`.<uuid>.uploading`, and the pre-0.9.0 `.<name>.<uuid>.uploading`)
-  whose last-write time is at least `older_than` before the server's current
-  time, read from a file the sweep creates and removes; callers' keys ending
-  in `.uploading` are kept, and `older_than` below one hour is refused. It
-  walks depth-first and holds every directory from the share root down to
-  the one it works in, each opened with `FILE_OPEN_REPARSE_POINT`, checked
-  on the handle not to be a reparse point, and opened without delete
-  sharing, so other SMB clients cannot rename, delete or replace a directory
-  above a candidate until the sweep leaves it; a directory it cannot hold
-  that way is skipped with its subtree and counted, never opened by path
-  alone. Entries reported as reparse points are skipped. Each candidate is
-  opened exclusively without following a reparse point and removed through
-  that handle, once, only if it still has the size and last-write time
-  enumeration saw; a file another handle has open, or one that changed, is
-  skipped. Changes made on the server's file system outside SMB, and links
-  a server resolves itself (as Samba does for symbolic links by default),
-  are beyond what a client can detect or prevent. A fifth owner-local
-  vendor patch, `share-access-override`, adds the share-access option the
-  exclusive and hold opens need. The test-only `smb-sweep-test-hooks`
-  feature adds a barrier between enumeration and removal for the managed
-  Samba suite; applications must not enable it.
+  and returns an `SmbTempSweepReport`. It is a maintenance-window operation:
+  it requires an `SmbRepositoryQuiesced`, the host's statement that, for the
+  whole sweep, no other party modifies the repository tree (no uploads,
+  renames, deletions, or directory or reparse-point changes), and must not
+  run on a share where an untrusted party has write access to that tree. It
+  runs on its own SMB connection, which is disconnected if the sweep is
+  cancelled, times out or fails, so the server releases every handle it
+  held. It considers only exact backend temporary names
+  (`.<uuid>.uploading`, and the pre-0.9.0 `.<name>.<uuid>.uploading`) whose
+  last-write time is at least `older_than` before the server's current time,
+  read from a file the sweep creates and removes; callers' keys ending in
+  `.uploading` are kept, and `older_than` below one hour is refused. As
+  defence in depth it holds every directory from the share root down to the
+  one it works in (opened with `FILE_OPEN_REPARSE_POINT`, checked not to be a
+  reparse point, without delete sharing), skips and counts directories it
+  cannot hold that way and reparse entries, re-checks the held parent handle
+  before each candidate, and removes each candidate through an exclusive
+  handle only if its size and last-write time are unchanged. These stop
+  other SMB clients from renaming, deleting or replacing held directories on
+  servers that enforce share modes; they do not stop a client with write
+  access from emptying a held directory and turning it into a junction, nor
+  changes outside SMB. Files removed before an error stay removed. A fifth
+  owner-local vendor patch, `share-access-override`, adds the share-access
+  option the exclusive and hold opens need. The test-only
+  `smb-sweep-test-hooks` feature adds a barrier between enumeration and
+  removal for the managed Samba suite; applications must not enable it.
   ([#593](https://github.com/Dastari/graphql-orm/issues/593))
 
 ## 0.11.0 (unreleased)

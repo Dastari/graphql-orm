@@ -322,22 +322,26 @@ impl fmt::Debug for SmbStorageConfig {
     }
 }
 
-/// The host's statement that no upload to the repository is in progress,
-/// required by [`SmbStorageBackend::sweep_temp_files`].
+/// The host's statement that nothing else modifies the repository tree while
+/// [`SmbStorageBackend::sweep_temp_files`] runs.
 ///
-/// Construct it only when every writer of the share below this backend's root
-/// prefix, on every host, is stopped or paused for the whole sweep, for
-/// example during a maintenance window. Age alone cannot protect an upload in
-/// progress: an upload can pause past the sweep age and then resume. The
-/// sweep has further checks, an exclusive open and an unchanged size and
-/// last-write time, but they cannot protect a writer that has closed its
-/// handle between writes.
+/// The sweep is a maintenance-window operation on a repository tree the host
+/// controls. Construct this only when, for the whole sweep, no other party
+/// modifies the tree below this backend's root prefix at all: no uploads, no
+/// renames or deletions, and no directory or reparse-point changes, from any
+/// host or process, through SMB or on the server itself. Never sweep a share
+/// where an untrusted party has write access to the repository tree. The
+/// sweep's own checks are defence in depth, not a replacement for this: age
+/// cannot protect an upload that pauses and resumes, and an SMB client with
+/// write access can empty a directory the sweep holds and turn it into a
+/// junction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SmbUploadsQuiesced(());
+pub struct SmbRepositoryQuiesced(());
 
-impl SmbUploadsQuiesced {
-    /// States that no upload to the repository is in progress or will start
-    /// while the sweep runs.
+impl SmbRepositoryQuiesced {
+    /// States that, for the whole sweep, no other party modifies the
+    /// repository tree: no uploads, renames, deletions, or directory or
+    /// reparse-point changes.
     #[must_use]
     pub const fn confirmed_by_host() -> Self {
         Self(())
@@ -364,6 +368,10 @@ pub struct SmbTempSweepReport {
     /// the server refuses to follow, a reparse point, a directory another
     /// client holds with delete access, or one that vanished.
     pub skipped_directories: usize,
+    /// Handles or the sweep's connection that failed to close cleanly. The
+    /// sweep's dedicated connection is disconnected regardless, which makes
+    /// the server release them.
+    pub cleanup_failures: usize,
 }
 
 /// Options controlling whether a probe may create the configured root prefix.
@@ -756,33 +764,39 @@ impl SmbStorageBackend {
     /// including a caller's key that merely ends in `.uploading`, is kept, as
     /// is a file whose server reports no last-write time.
     ///
-    /// `quiesced` is the host's statement that no upload to the repository is
-    /// in progress for the whole sweep; see [`SmbUploadsQuiesced`]. Age is
-    /// measured against the server's clock, read from a file the sweep
-    /// creates and removes, never against this host's clock.
+    /// `quiesced` is the host's statement that, for the whole sweep, no other
+    /// party modifies the repository tree; see [`SmbRepositoryQuiesced`].
+    /// Never run it on a share where an untrusted party has write access to
+    /// the repository tree. Age is measured against the server's clock, read
+    /// from a file the sweep creates and removes, never against this host's
+    /// clock. The sweep runs on its own SMB connection; if it is cancelled,
+    /// times out or fails, dropping it disconnects that connection, so the
+    /// server releases every handle it held.
     ///
-    /// Every directory from the share root down to the one being processed,
-    /// root prefix included, is held open for as long as the sweep works
-    /// below it: opened as itself with `FILE_OPEN_REPARSE_POINT`, checked on
-    /// the handle not to be a reparse point, and opened without delete
-    /// sharing, so a server that enforces share modes refuses to rename,
-    /// delete or replace it while it is held. A directory that cannot be held
-    /// that way is skipped with everything below it and counted; it is never
-    /// opened by path alone. Entries the server reports as reparse points are
-    /// skipped and counted. Each candidate is then opened exclusively,
-    /// without following a reparse point, and removed through that handle,
-    /// once, only if it is still a plain file with the size and last-write
-    /// time enumeration saw; a file another handle has open, or one that
-    /// changed, is skipped.
+    /// Defence in depth behind that precondition: every directory from the
+    /// share root down to the one being processed, root prefix included, is
+    /// held open while the sweep works below it, opened as itself with
+    /// `FILE_OPEN_REPARSE_POINT`, checked on the handle not to be a reparse
+    /// point, and opened without delete sharing. A directory that cannot be
+    /// held that way is skipped with everything below it and counted; it is
+    /// never opened by path alone. Entries reported as reparse points are
+    /// skipped and counted. Immediately before each candidate is opened, the
+    /// held parent's handle is asked again whether it has become a reparse
+    /// point, and its remaining candidates are skipped if so. Each candidate
+    /// is opened exclusively, without following a reparse point, and removed
+    /// through that handle, once, only if it is still a plain file with the
+    /// size and last-write time enumeration saw.
     ///
-    /// These guarantees hold against other SMB clients of a server that
-    /// enforces share modes. Changes made directly on the server's file
-    /// system, outside SMB, are beyond what a client can prevent: never run
-    /// the sweep on a share whose tree untrusted parties can change outside
-    /// SMB. A server that resolves links itself and presents them as
-    /// ordinary directories, as Samba does for symbolic links by default,
-    /// gives the client nothing to detect; keep links out of repository trees
-    /// on such servers, or disable link following on the share.
+    /// What these checks stop: on a server that enforces share modes, other
+    /// SMB clients cannot rename, delete or replace a held directory, a file
+    /// another handle has open is not removed, and a reported reparse point
+    /// is never followed. What they do not stop: an SMB client with write
+    /// access can empty a held directory and set a reparse point on it,
+    /// after which a candidate path can resolve outside the root (the parent
+    /// re-check narrows that window but does not close it), and changes made
+    /// on the server's file system outside SMB bypass share modes. A server
+    /// that resolves links itself, as Samba does for symbolic links by
+    /// default, gives the client nothing to detect.
     ///
     /// Removing the temporary name of a conditional create whose link
     /// outcome was unknown leaves any object linked at its key in place; no
@@ -792,17 +806,18 @@ impl SmbStorageBackend {
     ///
     /// Returns a non-retryable configuration error when `older_than` is less
     /// than one hour, a listing-limit or deadline error when the walk reaches
-    /// a limit, and the first failed request's error, after closing every
-    /// held handle; files removed before the error stay removed. An error
+    /// a limit, and the first failed request's error. The sweep removes files
+    /// as it goes: files removed before an error remain removed. An error
     /// after a removal request may have reached the server is a
     /// non-retryable single-attempt error. The sweep is never retried
     /// internally.
     pub async fn sweep_temp_files(
         &self,
-        quiesced: SmbUploadsQuiesced,
+        quiesced: SmbRepositoryQuiesced,
         older_than: Duration,
     ) -> Result<SmbTempSweepReport, StorageError> {
-        self.sweep_with(quiesced, older_than, None).await
+        self.sweep_with(quiesced, older_than, SweepHooks::none())
+            .await
     }
 
     /// Runs [`Self::sweep_temp_files`], awaiting `barrier` for each
@@ -816,11 +831,12 @@ impl SmbStorageBackend {
     #[cfg(feature = "smb-sweep-test-hooks")]
     pub async fn sweep_temp_files_with_barrier(
         &self,
-        quiesced: SmbUploadsQuiesced,
+        quiesced: SmbRepositoryQuiesced,
         older_than: Duration,
         barrier: &SmbSweepBarrier,
     ) -> Result<SmbTempSweepReport, StorageError> {
-        self.sweep_with(quiesced, older_than, Some(barrier)).await
+        self.sweep_with(quiesced, older_than, SweepHooks { barrier })
+            .await
     }
 
     /// Opens the directory at the root-relative `key` with delete access and
@@ -866,29 +882,47 @@ impl SmbStorageBackend {
 
     async fn sweep_with(
         &self,
-        quiesced: SmbUploadsQuiesced,
+        quiesced: SmbRepositoryQuiesced,
         older_than: Duration,
-        barrier: Option<&SweepBarrier>,
+        hooks: SweepHooks<'_>,
     ) -> Result<SmbTempSweepReport, StorageError> {
-        let SmbUploadsQuiesced(()) = quiesced;
+        let SmbRepositoryQuiesced(()) = quiesced;
         if older_than < MIN_TEMP_SWEEP_AGE {
             return Err(invalid_config(
                 "the temporary-file sweep age must be at least one hour",
             ));
         }
         let limits = ListingLimits::from_config(&self.inner.config);
-        let snapshot = self.client_snapshot().await;
+        // A dedicated connection: if this future is dropped, times out or
+        // fails part-way, dropping the guard disconnects it, and the server
+        // releases every handle the sweep held, whatever state individual
+        // closes reached. The backend's shared connection never holds them.
+        let session = SweepSession::connect(self).await?;
         let mut chain = Vec::new();
         let walked = within_listing_deadline(
             limits.timeout,
-            self.sweep_walk(&snapshot.client, limits, older_than, barrier, &mut chain),
+            self.sweep_walk(session.client(), limits, older_than, &hooks, &mut chain),
         )
         .await;
-        // Release every held directory, innermost first, whatever happened.
+        // Release every held directory, innermost first, whatever happened,
+        // and count closes that failed; disconnecting releases them anyway.
+        let mut cleanup_failures = 0;
         while let Some(held) = chain.pop() {
-            let _ = self.with_timeout("close", held.directory.close()).await;
+            if self
+                .with_timeout("close", held.directory.close())
+                .await
+                .is_err()
+            {
+                cleanup_failures += 1;
+            }
         }
-        walked
+        if session.shutdown().await.is_err() {
+            cleanup_failures += 1;
+        }
+        walked.map(|mut report| {
+            report.cleanup_failures += cleanup_failures;
+            report
+        })
     }
 
     /// Walks the root prefix depth-first, holding in `chain` every directory
@@ -898,7 +932,7 @@ impl SmbStorageBackend {
         client: &Client,
         limits: ListingLimits,
         older_than: Duration,
-        barrier: Option<&SweepBarrier>,
+        hooks: &SweepHooks<'_>,
         chain: &mut Vec<HeldDirectory>,
     ) -> Result<SmbTempSweepReport, StorageError> {
         let mut report = SmbTempSweepReport::default();
@@ -1012,12 +1046,19 @@ impl SmbStorageBackend {
                 last_write: entry.last_write,
                 size: entry.size,
             };
-            if let Some(barrier) = barrier {
-                barrier(SmbSweepCandidate {
-                    key: file.key.clone(),
-                    server_now,
-                })
-                .await;
+            hooks.before_candidate(&file.key, server_now).await;
+            // Ask the held directory itself, not its path, whether it has
+            // become a reparse point since it was opened. This narrows, but
+            // does not close, the window in which another client with write
+            // access could empty it and turn it into a junction.
+            let parent = chain.last_mut().expect("the chain is not empty");
+            let basic: FileBasicInformation = self
+                .with_timeout("sweep", parent.directory.query_info())
+                .await?;
+            if basic.file_attributes.reparse_point() {
+                parent.entries = Vec::new().into_iter();
+                report.skipped_directories += 1;
+                continue;
             }
             match self.remove_stale_temp_file(client, &file).await? {
                 StaleRemoval::Removed => report.removed += 1,
@@ -2054,10 +2095,9 @@ fn holdable_directory(directory: bool, reparse_point: bool) -> bool {
 }
 
 /// A sweep candidate, handed to the test-only barrier before it is opened.
+#[cfg(feature = "smb-sweep-test-hooks")]
 #[derive(Clone, Debug)]
 #[non_exhaustive]
-// Only the test-only barrier reads it.
-#[cfg_attr(not(feature = "smb-sweep-test-hooks"), allow(dead_code))]
 pub struct SmbSweepCandidate {
     /// Root-relative key of the temporary file.
     pub key: String,
@@ -2066,10 +2106,105 @@ pub struct SmbSweepCandidate {
 }
 
 /// A test-only barrier the sweep awaits for each candidate.
+#[cfg(feature = "smb-sweep-test-hooks")]
 pub type SmbSweepBarrier = dyn Fn(SmbSweepCandidate) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
     + Send
     + Sync;
-type SweepBarrier = SmbSweepBarrier;
+
+/// Observation points of one sweep: a barrier with the test-only feature,
+/// nothing otherwise.
+#[cfg(feature = "smb-sweep-test-hooks")]
+struct SweepHooks<'a> {
+    barrier: &'a SmbSweepBarrier,
+}
+
+#[cfg(not(feature = "smb-sweep-test-hooks"))]
+struct SweepHooks<'a> {
+    _none: std::marker::PhantomData<&'a ()>,
+}
+
+impl SweepHooks<'_> {
+    #[cfg(not(feature = "smb-sweep-test-hooks"))]
+    fn none() -> Self {
+        Self {
+            _none: std::marker::PhantomData,
+        }
+    }
+
+    #[cfg(feature = "smb-sweep-test-hooks")]
+    fn none() -> Self {
+        static NONE: fn(
+            SmbSweepCandidate,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+            |_| Box::pin(async {});
+        Self { barrier: &NONE }
+    }
+
+    /// Runs before a candidate is opened.
+    #[cfg(feature = "smb-sweep-test-hooks")]
+    async fn before_candidate(&self, key: &str, server_now: SystemTime) {
+        (self.barrier)(SmbSweepCandidate {
+            key: key.to_string(),
+            server_now,
+        })
+        .await;
+    }
+
+    #[cfg(not(feature = "smb-sweep-test-hooks"))]
+    #[allow(clippy::unused_async)]
+    async fn before_candidate(&self, _key: &str, _server_now: SystemTime) {}
+}
+
+/// The sweep's own SMB connection. Dropping it without
+/// [`SweepSession::shutdown`], as when the sweep is cancelled, times out or
+/// fails, closes the connection in the background, so the server releases
+/// every handle opened through it.
+struct SweepSession {
+    client: Arc<Client>,
+    connection: Option<Arc<smb::Connection>>,
+}
+
+impl SweepSession {
+    async fn connect(backend: &SmbStorageBackend) -> Result<Self, StorageError> {
+        let config = &backend.inner.config;
+        let connected = connect_client(config, 0, Some(backend.inner.server_guid)).await?;
+        let connection = connected
+            .client
+            .get_connection(&config.server)
+            .await
+            .map_err(|error| map_smb_error("connect", error))?;
+        Ok(Self {
+            client: connected.client,
+            connection: Some(connection),
+        })
+    }
+
+    fn client(&self) -> &Client {
+        &self.client
+    }
+
+    /// Logs off and disconnects in order.
+    async fn shutdown(mut self) -> Result<(), StorageError> {
+        self.connection = None;
+        self.client
+            .close()
+            .await
+            .map_err(|error| map_smb_error("close", error))
+    }
+}
+
+impl Drop for SweepSession {
+    fn drop(&mut self) {
+        if let Some(connection) = self.connection.take()
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        {
+            runtime.spawn(async move {
+                let _ = connection.close().await;
+            });
+        }
+    }
+}
 
 /// A directory held open with delete access by test infrastructure.
 #[cfg(feature = "smb-sweep-test-hooks")]

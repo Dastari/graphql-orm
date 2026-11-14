@@ -49,14 +49,19 @@ Update the storage requirement to 0.12.0 and refresh the consumer lockfile.
    are not portable, and existing objects stay addressable.
 5. **SMB temporary-file sweep precondition.** The new
    `SmbStorageBackend::sweep_temp_files(quiesced, older_than)` requires an
-   `SmbUploadsQuiesced` witness, built with
-   `SmbUploadsQuiesced::confirmed_by_host()`. Construct it only after every
-   writer of the share below the backend's root prefix, on every host, is
-   stopped or paused, and keep them quiescent until the sweep returns: an
-   upload can pause past any age and resume, and the sweep's exclusive-open
-   and unchanged-size checks cannot protect a writer that closed its handle
-   between writes. Run it only on shares whose tree untrusted parties cannot
-   change outside SMB; see [native SMB](docs/native-smb.md#atomicity-and-streaming).
+   `SmbRepositoryQuiesced` witness, built with
+   `SmbRepositoryQuiesced::confirmed_by_host()`. The sweep is a
+   maintenance-window operation: construct the witness only when, for the
+   whole sweep, no other party modifies the tree below the backend's root
+   prefix at all, from any host or process, through SMB or on the server
+   itself: no uploads, no renames or deletions, and no directory or
+   reparse-point changes. Keep that true until the sweep returns. Never run it
+   on a share where an untrusted party has write access to the repository
+   tree: its directory holds, reparse checks and exclusive opens are defence
+   in depth and cannot stop a client with write access from emptying a held
+   directory and turning it into a junction. The sweep removes files as it
+   goes; files removed before an error stay removed. See
+   [native SMB](docs/native-smb.md#atomicity-and-streaming).
 
 ## 0.10.0 to 0.11.0: SMB signing, conditional-create outcomes, S3 messages
 

@@ -79,8 +79,8 @@ pub use s3::{S3StorageBackend, S3StorageConfig};
 pub use service::{ObjectStorage, StorageService};
 #[cfg(feature = "smb")]
 pub use smb::{
-    SmbBackendDiagnostics, SmbDialect, SmbProbeOptions, SmbProbeResult, SmbStorageBackend,
-    SmbStorageConfig, SmbTempSweepReport, SmbUploadsQuiesced,
+    SmbBackendDiagnostics, SmbDialect, SmbProbeOptions, SmbProbeResult, SmbRepositoryQuiesced,
+    SmbStorageBackend, SmbStorageConfig, SmbTempSweepReport,
 };
 #[cfg(feature = "smb-sweep-test-hooks")]
 pub use smb::{SmbHeldDirectory, SmbSweepBarrier, SmbSweepCandidate};

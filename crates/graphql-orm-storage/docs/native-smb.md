@@ -458,70 +458,78 @@ this writer's complete object or none, and its temporary file remains.
 
 `SmbStorageBackend::sweep_temp_files(quiesced, older_than)` removes
 temporary files that a lost process or connection left behind, and returns an
-`SmbTempSweepReport` of what it removed and skipped. Run it only while no
-upload to the repository is in progress on any host, for example in a
-maintenance window: `quiesced` is an `SmbUploadsQuiesced` the host constructs
-with `SmbUploadsQuiesced::confirmed_by_host()` to state exactly that. Age
-alone cannot protect an upload in progress, because an upload can pause past
-any age and then resume.
+`SmbTempSweepReport` of what it removed and skipped. It is a maintenance
+operation on a repository tree the host controls. `quiesced` is an
+`SmbRepositoryQuiesced` the host constructs with
+`SmbRepositoryQuiesced::confirmed_by_host()` to state that, for the whole
+sweep, no other party modifies the repository tree at all: no uploads, no
+renames or deletions, and no directory or reparse-point changes, from any
+host or process. Never run the sweep on a share where an untrusted party has
+write access to the repository tree. Age alone cannot protect an upload in
+progress, because an upload can pause past any age and then resume.
 
-The sweep walks the root prefix within the listing limits and deadline, and
-considers only files named exactly `.<uuid>.uploading`, or
-`.<name>.<uuid>.uploading` as versions before 0.9.0 wrote, whose last-write
-time is at least `older_than` before the server's current time. It reads that
-time from a file it creates under the root prefix, with a temporary name
-listings hide, and removes through the same handle, so this host's clock is
-never compared with the server's. A caller's key that merely ends in
-`.uploading`, and a file without a last-write time, is kept. `older_than`
-must be at least one hour. As defence in depth, each candidate is opened with
-no share access and without following a reparse point; a file another handle
-has open fails with a sharing violation and is skipped, and a file whose type,
-size or last-write time differs from what enumeration saw is skipped. A
-candidate that passes is removed through that same handle, once; an error
-after the removal request may have reached the server is a non-retryable
-single-attempt error.
+The sweep runs on its own SMB connection, not the backend's shared one. It
+walks the root prefix within the listing limits and deadline, and considers
+only files named exactly `.<uuid>.uploading`, or `.<name>.<uuid>.uploading`
+as versions before 0.9.0 wrote, whose last-write time is at least `older_than`
+before the server's current time. It reads that time from a file it creates
+under the root prefix, with a temporary name listings hide, and removes
+through the same handle, so this host's clock is never compared with the
+server's. A caller's key that merely ends in `.uploading`, and a file without
+a last-write time, is kept. `older_than` must be at least one hour.
 
-The sweep walks depth-first and holds the directory chain it works in. Every
-directory from the share root down to the one being processed, root prefix
-included, stays open from its enumeration through the removal of its
-candidates and the descent into its children, and is closed when the walk
-leaves it; at most `max_listing_depth` directories below the root are held,
-and a deeper tree fails the sweep. Each held handle is opened with
-`FILE_OPEN_REPARSE_POINT`, so it is the named directory itself and never a
-reparse point's target, is checked on the handle to be a plain directory and
-not a reparse point, and is opened without `FILE_SHARE_DELETE`. While it is
-held, a server that enforces share modes refuses every other open that asks
-for delete access to it, so no client can rename, delete or replace that
-directory, for example with a junction to a directory outside the root that
-contains an identically named file. A candidate is opened by path only while
-its whole ancestor chain is held, so the path resolves through those
-directories. A directory that cannot be held that way (a sharing violation
-because another client has it open with delete access, an access denial, a
-link the server refuses, a reparse point, or a name that is no longer a
-directory) is skipped with everything below it and counted in
-`skipped_directories`; the sweep never falls back to opening it by path
-alone. Entries the server reports with the reparse attribute are skipped and
-counted.
+The checks below are defence in depth behind that precondition, not a
+replacement for it:
 
-What this guarantees: against other SMB clients of a server that enforces
-share modes for every client of the share, no directory above a candidate can
-be renamed, replaced or redirected between enumeration and removal, and the
-removed file is the plain file enumeration saw, at that path, below the root
-prefix. What it does not guarantee: a change made directly on the server's
-file system, outside SMB, bypasses share modes, and no client can prevent it,
-so a local process on the server could still redirect a path. Never run the
-sweep on a share whose tree untrusted parties can change outside SMB. A
-server that resolves links itself and presents them as ordinary directories,
-as Samba does for symbolic links by default, gives the client nothing to
-detect: keep links out of repository trees on such servers, or disable link
-following on the share. Samba refuses links that leave the share
-(`wide links = no`), and the sweep skips those.
+- The sweep walks depth-first and holds the directory chain it works in.
+  Every directory from the share root down to the one being processed, root
+  prefix included, stays open from its enumeration through the removal of its
+  candidates and the descent into its children; at most `max_listing_depth`
+  directories below the root are held, and a deeper tree fails the sweep.
+  Each held handle is opened with `FILE_OPEN_REPARSE_POINT`, checked on the
+  handle to be a plain directory and not a reparse point, and opened without
+  `FILE_SHARE_DELETE`. A directory that cannot be held that way is skipped
+  with everything below it and counted in `skipped_directories`; it is never
+  opened by path alone. Entries the server reports with the reparse
+  attribute are skipped and counted.
+- Immediately before each candidate is opened, the sweep asks the held parent
+  directory's handle, not its path, whether it has become a reparse point,
+  and skips that directory's remaining candidates, counted, if it has.
+- Each candidate is opened with no share access and without following a
+  reparse point; a file another handle has open fails with a sharing
+  violation and is skipped, and a file whose type, size or last-write time
+  differs from what enumeration saw is skipped. A candidate that passes is
+  removed through that same handle, once; an error after the removal request
+  may have reached the server is a non-retryable single-attempt error.
+- If the sweep is cancelled, times out or fails part-way, dropping it
+  disconnects its connection, so the server releases every handle it held
+  even when an individual close was interrupted. Closes that fail on a
+  normal finish are counted in `cleanup_failures`.
+
+What these checks stop: on a server that enforces share modes for every
+client of the share, another SMB client cannot rename, delete or replace a
+directory the sweep holds, a file another handle has open is not removed,
+and a reparse point the server reports is never followed. What they do not
+stop: an SMB client with write access can empty a held directory and set a
+reparse point on it, which needs only write access to an empty directory, so
+a candidate path could then resolve outside the root; the parent re-check
+narrows that window but cannot close it. Changes made directly on the
+server's file system, outside SMB, bypass share modes altogether. A server
+that resolves links itself and presents them as ordinary directories, as
+Samba does for symbolic links by default, gives the client nothing to detect.
+These are why the precondition above is required. Samba refuses links that
+leave the share (`wide links = no`), and the sweep skips those.
+
+The sweep removes files as it goes. When a later subtree fails, a request
+fails or a listing limit or the deadline is reached, the sweep returns an
+error and files it removed before that remain removed.
 
 The managed Samba suite holds a candidate's directory at a barrier between
 enumeration and removal and checks that a second SMB session cannot rename
 it, that a file whose size changes at the barrier is kept, that a directory
-another client holds with delete access is skipped, and that the sweep's
-reference time is the server's. Samba 4.12 reports no reparse points to SMB2
+another client holds with delete access is skipped, that the sweep's
+reference time is the server's, and that cancelling a sweep at the barrier
+releases its held directories. Samba 4.12 reports no reparse points to SMB2
 clients, so junctions and reparse handles are covered by decision-level unit
 tests, and the shared host clock means a skewed client clock is covered by a
 unit test only. The barrier is available only with the test-only
@@ -530,10 +538,9 @@ unit test only. The barrier is available only with the test-only
 Removing a stalled upload's temporary file makes that upload fail; it never
 removes a published object, because publishing is a rename or a hard link,
 and removing the temporary name of a conditional create whose outcome was
-unknown leaves an object linked at its key in place. A listing failure
-removes nothing. Cleanup of temporary files is best
-effort, so completed snapshots must still be verified. Backup manifests are written last and do not advertise incomplete
-payload sets.
+unknown leaves an object linked at its key in place. Cleanup of temporary
+files is best effort, so completed snapshots must still be verified. Backup
+manifests are written last and do not advertise incomplete payload sets.
 
 ## Probe and troubleshooting
 

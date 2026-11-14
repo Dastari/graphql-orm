@@ -1123,7 +1123,7 @@ async fn samba_portable_keys_refuse_windows_unsafe_names() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires the managed Samba container harness"]
 async fn samba_sweep_removes_only_stale_temporary_files() {
-    use graphql_orm_storage::{SmbSweepBarrier, SmbSweepCandidate, SmbUploadsQuiesced};
+    use graphql_orm_storage::{SmbRepositoryQuiesced, SmbSweepBarrier, SmbSweepCandidate};
     use std::sync::Mutex;
 
     let fixture = owned_fixture();
@@ -1132,7 +1132,7 @@ async fn samba_sweep_removes_only_stale_temporary_files() {
     let store = SmbStorageBackend::connect(test_config(root.clone()))
         .await
         .expect("connect");
-    let quiesced = SmbUploadsQuiesced::confirmed_by_host();
+    let quiesced = SmbRepositoryQuiesced::confirmed_by_host();
     let hour = Duration::from_secs(60 * 60);
     let caller_lookalike = format!("sweep/x.{}.uploading", Uuid::new_v4());
     let callers = [
@@ -1380,6 +1380,7 @@ async fn samba_sweep_removes_only_stale_temporary_files() {
     assert_eq!(report.skipped_changed, 1, "{report:?}");
     // The directory held with delete access and the link out of the share.
     assert_eq!(report.skipped_directories, 2, "{report:?}");
+    assert_eq!(report.cleanup_failures, 0, "{report:?}");
 
     // The held directory could not be renamed while the sweep held it.
     let attempts = attempts.lock().expect("attempts").clone();
@@ -1481,8 +1482,69 @@ async fn samba_sweep_removes_only_stale_temporary_files() {
     ))
     .expect("removed once released");
 
+    // Cancelling a sweep while it holds directories releases them: its own
+    // connection is disconnected, so another client can rename them.
+    let cancel_temp = format!("sweep/cancel/.{}.uploading", Uuid::new_v4());
+    store
+        .put_blob(
+            "sweep/cancel/kept.bin",
+            StorageByteStream::from_bytes(Bytes::from_static(b"caller")),
+            BlobPutOptions::default(),
+        )
+        .await
+        .expect("create the directory");
     shell(format!(
-        "rm -f '{share}/{fresh}' '{share}/{half_hour}' '{share}/{future}' '{share}/{changing}'\n\
+        "set -e\nowner=$(stat -c %u:%g '{share}/sweep')\n\
+         printf partial > '{share}/{cancel_temp}'\nchown \"$owner\" '{share}/{cancel_temp}'\n\
+         touch -t 202001010000 '{share}/{cancel_temp}'"
+    ))
+    .expect("seed the cancelled sweep's candidate");
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let stalling: Box<SmbSweepBarrier> = {
+        let reached = Arc::clone(&reached);
+        let cancel_temp = cancel_temp.clone();
+        Box::new(move |candidate: SmbSweepCandidate| {
+            let reached = Arc::clone(&reached);
+            let stall = candidate.key == cancel_temp;
+            Box::pin(async move {
+                if stall {
+                    reached.notify_one();
+                    std::future::pending::<()>().await;
+                }
+            })
+        })
+    };
+    {
+        let sweep = store.sweep_temp_files_with_barrier(quiesced, hour, &stalling);
+        tokio::select! {
+            result = sweep => panic!("the stalled sweep finished: {result:?}"),
+            () = reached.notified() => {}
+        }
+        // The sweep future is dropped here, with `sweep/cancel` held.
+    }
+    let mut released = None;
+    for _ in 0..40 {
+        let (renamed, text) = smb_rename(
+            format!("{root}/sweep/cancel"),
+            format!("{root}/sweep/cancel-moved"),
+        );
+        if renamed {
+            released = Some(text);
+            break;
+        }
+        assert!(text.contains("NT_STATUS_SHARING_VIOLATION"), "{text}");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    released.expect("the cancelled sweep's held directory was released");
+    let (restored, text) = smb_rename(
+        format!("{root}/sweep/cancel-moved"),
+        format!("{root}/sweep/cancel"),
+    );
+    assert!(restored, "{text}");
+
+    shell(format!(
+        "rm -f '{share}/{fresh}' '{share}/{half_hour}' '{share}/{future}' '{share}/{changing}' \
+         '{share}/{cancel_temp}'\n\
          rm -rf '{outside}'"
     ))
     .expect("remove the seeded files");
