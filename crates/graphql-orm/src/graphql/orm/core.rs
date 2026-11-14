@@ -1996,8 +1996,10 @@ where
         surface: EntityAccessSurface,
         row: &(dyn std::any::Any + Send + Sync),
     ) -> async_graphql::Result<()> {
+        // The written row is checked under the same authority as the rest of
+        // the write: inside a `with_system_access` scope, the scoped handle.
         let result = self
-            .db
+            .database()
             .ensure_writable_row(ctx, entity_name, write_policy, surface, row)
             .await;
         if result.is_err() {
@@ -2541,7 +2543,7 @@ where
             ));
         };
         self.mutation
-            .db
+            .database()
             .ensure_entity_access(
                 None,
                 metadata.entity_name,
@@ -2553,7 +2555,7 @@ where
             .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
         // A declared write policy needs its row provider here too, before selection.
         self.mutation
-            .db
+            .database()
             .ensure_row_write_provider(metadata.entity_name, metadata.write_policy)
             .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
         if filter.is_empty() {
@@ -2578,7 +2580,7 @@ where
         let mut states = Vec::with_capacity(rows.len());
         for entity in &rows {
             self.mutation
-                .db
+                .database()
                 .ensure_writable_row(
                     None,
                     metadata.entity_name,
