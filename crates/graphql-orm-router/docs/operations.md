@@ -3,7 +3,7 @@ title: graphql-orm-router operations runbook
 kind: runbook
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-14
 review_by: 2027-02-07
 supersedes: []
 ---
@@ -64,6 +64,10 @@ than merely raising defaults.
 The authenticated router snapshot exposes request/error, cumulative downstream
 latency, active graph version, WebSocket/subscription gauges, refresh,
 composition, rejection, authorization-denial, and health values.
+`router_websocket_send_failures_total` counts best-effort WebSocket close and
+completion messages that failed because the peer had already gone. A steady
+rise points at abrupt client or private-endpoint disconnects; no payload or
+peer detail is recorded.
 When byte routes are configured, `GET /_router/metrics` also reports six
 objects keyed by route prefix: `router_byte_route_requests_total` (every
 request a route claims), `router_byte_route_rejected_total` (refused before
@@ -77,10 +81,42 @@ Hive Prometheus exporter adds execution histograms and the pinned subscription
 counters
 `hive.router.subscriptions.clients.lagged_messages_total` and
 `hive.router.subscriptions.subgraphs.dropped_messages_total`.
-Embedding hosts can also read `role_scope_stale_serve_total` from the JWKS
-provider and alert on any non-zero increase; stale serves emit warning logs.
+Set `telemetry.prometheus.omitOperationName` to drop the client-chosen
+operation-name attribute from the exported HTTP server and cost metrics; the
+default keeps it for existing dashboards.
+Embedding hosts can also read `role_scope_stale_serve_total`,
+`role_scope_stale_refusal_total`, and `role_scope_refresh_failure_total` from
+the JWKS provider. Alert on any increase: stale serves mean the catalogue is
+not refreshing, and refusals mean role-bearing requests are failing because a
+stale snapshot passed `maximumStalenessSeconds`. Both emit rate-limited warning
+logs; refresh failures log a redacted reason without URLs or header values.
+
+### Public HTTP server defaults
+
+These limits come from the pinned engine (Hive 0.2.19 on ntex 3.12) and are not
+configurable through the router. Wire tests pin the stalled-head,
+GET-mutation, and batching behaviour.
+
+- A request head must start arriving within 1 second and keep arriving at
+  256 bytes per second or more, for at most 16 seconds. A stalled head is
+  closed.
+- Idle keep-alive connections close after 5 seconds.
+- The request-head parse buffer is 64 KiB, so a `maxRequestHeaderBytes` above
+  64 KiB is effectively capped there.
+- The body read has no separate rate limit. It is bounded by
+  `maxRequestBodyBytes` and by `publicRequestTimeoutMs`, which covers the whole
+  handler, including the body read.
+- `GET` serves queries only. A mutation over `GET` fails with
+  `MUTATION_NOT_ALLOWED_OVER_HTTP_GET`. A JSON array body (request batching) is
+  refused.
+- Subgraph responses have no byte limit of their own; `subgraphRequestTimeoutMs`
+  bounds them. Subgraph URLs are deployment-owned or trusted registrations.
 
 ## Reload and recovery
+
+A refreshed router descriptor must keep the subgraph ID its source was
+admitted with. A changed ID fails that source's refresh and keeps its
+last-known-good input; restart the router to accept a new identity.
 
 Polling uses conditional ETags. A changed source is composed with every other
 active last-known-good source and published only after the complete runtime and
@@ -118,6 +154,12 @@ is not supported; requests without the supported subprotocol close with 4406.
   trailing `complete` is provided. The connection remains usable.
 - `SUBSCRIPTION_SCHEMA_RELOAD`: the selected graph retired; the `error` frame is
   terminal. Open a fresh connection and resubscribe without waiting for `complete`.
+- `SUBSCRIPTION_AUTHORIZATION_CHANGED`: a refreshed role-scope catalogue changed
+  the connection's effective scopes. The `error` is terminal; resubscribe on the
+  same connection, which is authorized against the new scopes.
+- `UNAUTHENTICATED` on a role-bearing connection: the role-scope catalogue is
+  past its maximum staleness. Subscriptions end; retry operations after backoff
+  on the same connection once the catalogue recovers.
 - `SERVICE_UNAVAILABLE` or `1011`: back off, query authoritative state, and
   reconnect. Missed events are not replayed.
 
