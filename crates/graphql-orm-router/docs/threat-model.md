@@ -3,7 +3,7 @@ title: graphql-orm-router threat model
 kind: architecture
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-14
 review_by: 2027-02-07
 supersedes: []
 ---
@@ -81,7 +81,11 @@ and RLS remain authoritative after router preflight.
 ## Residual deployment responsibilities
 
 - Terminate public and administrative TLS with a trusted proxy or service mesh;
-  restrict the admin and optional Prometheus listeners by network policy.
+  restrict the admin and optional Prometheus listeners by network policy. The
+  Prometheus exporter can bind a private or loopback `host` separately from
+  the public listener. Its metrics carry client-chosen operation names unless
+  `omitOperationName` is set; enable that where anonymous or untrusted clients
+  can send operations.
 - Apply per-client WebSocket connection limits at that proxy. The router's
   attempt rate and pending-connection budget are process-wide and charged
   before any credential is known.

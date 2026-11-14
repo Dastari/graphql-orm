@@ -579,3 +579,82 @@ fn the_catalogue_reports_a_policy_only_where_one_is_enforced() {
         assert!(!has_policy(public), "{public}");
     }
 }
+
+/// Records the assurance policies it was asked for and requires step-up.
+#[derive(Debug, Default)]
+struct StepUpRequired(std::sync::Mutex<Vec<String>>);
+impl AssuranceRequirementEvaluator for StepUpRequired {
+    fn enforce(
+        &self,
+        _check: &graphql_orm::graphql::assurance::AssuranceCheck<'_>,
+        _actor_class: AssuranceActorClass,
+        policy_id: &str,
+    ) -> async_graphql::Result<()> {
+        use async_graphql::ErrorExtensions as _;
+        self.0.lock().unwrap().push(policy_id.to_owned());
+        Err(
+            async_graphql::Error::new("additional authentication is required")
+                .extend_with(|_, extensions| extensions.set("code", "STEP_UP_REQUIRED")),
+        )
+    }
+}
+
+/// #575: a custom entity resolver runs below `_entities`, where no guard
+/// applies. It enforces the assurance requirement registered for its own
+/// catalogued coordinate, and any registered for `Query._entities`, after its
+/// declared authorization and before its body.
+#[tokio::test]
+async fn entity_resolvers_enforce_the_assurance_registered_for_their_coordinate() {
+    let query = "{ _entities(representations: [{__typename: \"DeclaredWidget\", id: \"w1\"}]) { ... on DeclaredWidget { id } } }";
+    for coordinate in ["findDeclaredWidgetById", "_entities"] {
+        let db = Database::connect_sqlite("sqlite::memory:").await.unwrap();
+        let calls = Calls::default();
+        let mut builder = OperationAssuranceRegistry::builder(
+            graphql_orm_operation_catalog(),
+            AssuranceSchemaConfig::legacy(),
+        );
+        if !builder.contains(GraphqlOperationKind::Query, coordinate) {
+            builder
+                .register_custom(
+                    format!("custom:{}:v1", coordinate.trim_start_matches('_')),
+                    GraphqlOperationKind::Query,
+                    coordinate,
+                    AssuranceActorClass::Interactive,
+                )
+                .unwrap();
+        }
+        builder
+            .require(GraphqlOperationKind::Query, coordinate, "read.recent-auth")
+            .unwrap();
+        let evaluator = Arc::new(StepUpRequired::default());
+        let schema = schema_builder(db)
+            .data(calls.clone())
+            .data(AssuranceEnforcement::new(
+                Arc::new(builder.build().unwrap()),
+                evaluator.clone(),
+            ))
+            .finish();
+
+        // Authentication still comes first: the evaluator is not asked.
+        let anonymous = schema.execute(Request::new(query)).await;
+        assert_eq!(code(&anonymous).as_deref(), Some("UNAUTHENTICATED"));
+        assert!(evaluator.0.lock().unwrap().is_empty(), "{coordinate}");
+
+        let response = schema.execute(Request::new(query).data(subject(&[]))).await;
+        assert_eq!(
+            code(&response).as_deref(),
+            Some("STEP_UP_REQUIRED"),
+            "{coordinate}"
+        );
+        assert_eq!(
+            evaluator.0.lock().unwrap().as_slice(),
+            ["read.recent-auth"],
+            "{coordinate}"
+        );
+        assert_eq!(
+            calls.resolvers.load(Ordering::SeqCst),
+            0,
+            "{coordinate}: the resolver body ran"
+        );
+    }
+}

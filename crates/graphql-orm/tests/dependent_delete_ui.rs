@@ -9,10 +9,12 @@ fn unsupported_dependent_delete_shapes_are_rejected() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let t = ui::test_cases();
     #[cfg(not(feature = "mssql"))]
-    {
-        t.compile_fail("tests/ui/dependent_delete_composite.rs");
-        t.compile_fail("tests/ui/dependent_delete_parent.rs");
-    }
+    t.compile_fail("tests/ui/dependent_delete_composite.rs");
+    // The expected output names the backend, so each backend has its own case.
+    #[cfg(feature = "sqlite")]
+    t.compile_fail("tests/ui/dependent_delete_parent.rs");
+    #[cfg(feature = "postgres")]
+    t.compile_fail("tests/ui/dependent_delete_parent_postgres.rs");
     #[cfg(feature = "mssql")]
     t.compile_fail("tests/ui/dependent_delete_mssql.rs");
 }

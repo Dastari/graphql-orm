@@ -183,8 +183,7 @@ impl MutationHook for OrderLifecycle {
                             }),
                             ..Default::default()
                         })
-                        .await
-                        .map_err(|error| async_graphql::Error::new(error.to_string()))?;
+                        .await?;
                 }
                 // After commit: a rollback can't leave the invoice deleted.
                 (MutationPhase::After, ChangeAction::Deleted, Some(order)) => {
@@ -270,6 +269,22 @@ fails their writes; the worked example uses `.ok().flatten()`.
 These writes reach your policies with `ctx = None`, so they need a policy that allows them
 ([In-process writes](#in-process-writes)).
 
+### Returning refusals from hooks
+
+A hook that returns `Err` rolls the write back, and a generated mutation reports the error to the
+client. The error's public `code` extension (`FORBIDDEN`, `CONFLICT`, `UNAUTHENTICATED`, ...) is how a
+client tells a deliberate refusal from an internal failure, so keep it:
+
+- **A refusal you decide:** return `OrmPublicError::forbidden().into_graphql_error()`, or
+  `OrmPublicError::with_message(OrmErrorCode::Conflict, "...").into_graphql_error()` for a message the
+  client may see.
+- **A failed nested write** (`hook_ctx.insert`, `update_by_id`, `delete_where`, ...): pass the error on
+  with `?`. The conversion keeps the ORM error as the source, and the ORM restores its public code from
+  it. Or map it with `graphql_error_from_sqlx`, which does the same explicitly.
+- **Never stringify it**, as in `async_graphql::Error::new(error.to_string())`. That drops the source
+  and the code: the client gets the driver's text as written, with no `code`, and can't tell a refusal
+  from a bug.
+
 ### Which work goes where
 
 | Work | Where | Why |
@@ -296,8 +311,7 @@ happen. The callback only tells the worker a row is ready.
 // Inside `on_mutation` (or a `db.transaction` callback), for the After phase of a create.
 hook_ctx
     .insert::<Job>(CreateJobInput { kind: "reindex".into(), subject: id.to_string() })
-    .await
-    .map_err(|error| async_graphql::Error::new(error.to_string()))?;
+    .await?;
 let wake = worker_wake.clone(); // for example an `Arc<tokio::sync::Notify>`
 hook_ctx.defer(move |_db| async move {
     wake.notify_one();
@@ -714,6 +728,7 @@ Only for services that use them:
 | Hand-written twin of a generated mutation | The generated mutation stays callable and skips the domain logic | Put the logic in a hook on the generated mutation |
 | Custom resolver with a generated name | `schema_roots!` refuses to compile it, naming both sides: a merged root would serve only one of them | Hook or transform. Pick a distinct name only for a genuine action |
 | Validation inside a custom resolver | Generated writes and repository writes bypass it | Field validators or the transform |
+| Stringifying a nested write's error in a hook (`Error::new(error.to_string())`) | The public `code` is lost, and driver text reaches the client | `?`, or `graphql_error_from_sqlx` |
 | Irreversible or slow side effect in a hook | A rollback can't undo it, and it holds locks | `hook_ctx.defer`, or a job row |
 | Treating `defer` as background or guaranteed | It delays the response, and a crash loses it | A job row in the transaction for anything that must happen, with `defer` only to wake the worker |
 | A hand-spawned delayed task from a hook | Racy: it can run before the commit or after a rollback | `hook_ctx.defer` |

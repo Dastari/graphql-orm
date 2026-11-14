@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     sync::Arc,
     time::Duration,
 };
@@ -24,6 +24,9 @@ const DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_PUBLIC_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_SUBGRAPH_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_WEBSOCKET_MESSAGE_BYTES: usize = 64 * 1024;
+/// Safety ceiling for every subscription count. Values above it are refused
+/// rather than reaching allocation or channel construction.
+const MAX_SUBSCRIPTION_LIMIT: usize = 1 << 20;
 const RESERVED_PUBLIC_HEADERS: &[&str] = &[
     "authorization",
     "cookie",
@@ -838,6 +841,15 @@ impl SubscriptionConfig {
                 format!("{name} must be greater than zero"),
             ));
         }
+        if let Some((name, _)) = bounded
+            .iter()
+            .find(|(_, value)| *value > MAX_SUBSCRIPTION_LIMIT)
+        {
+            return Err(RouterError::new(
+                RouterErrorKind::InvalidConfiguration,
+                format!("{name} must not exceed {MAX_SUBSCRIPTION_LIMIT}"),
+            ));
+        }
         if self.max_client_message_bytes == 0
             || self.max_client_message_bytes > MAX_WEBSOCKET_MESSAGE_BYTES
         {
@@ -1021,7 +1033,9 @@ pub struct RouterTelemetryConfig {
     pub(crate) log_level: RouterLogLevel,
     pub(crate) json_logs: bool,
     pub(crate) prometheus_port: Option<u16>,
+    pub(crate) prometheus_host: Option<IpAddr>,
     pub(crate) prometheus_path: String,
+    pub(crate) omit_operation_name_from_metrics: bool,
 }
 
 impl RouterTelemetryConfig {
@@ -1046,12 +1060,61 @@ impl RouterTelemetryConfig {
     }
 
     /// Enables Hive execution and subscription metrics on a separate port.
+    ///
+    /// The scrape listener binds the public listener's IP address on `port`.
     /// Network access control for this scrape listener is deployment-owned.
+    /// Use [`with_prometheus_listener`](Self::with_prometheus_listener) to
+    /// bind it to a different address, such as loopback or a private
+    /// interface.
     #[must_use]
     pub fn with_prometheus(mut self, port: u16, path: impl Into<String>) -> Self {
         self.prometheus_port = Some(port);
+        self.prometheus_host = None;
         self.prometheus_path = path.into();
         self
+    }
+
+    /// Enables Hive execution and subscription metrics on an explicit socket
+    /// address, independent of the public listener's IP address.
+    ///
+    /// The port follows the same rules as
+    /// [`with_prometheus`](Self::with_prometheus): nonzero and distinct from
+    /// the public and administrative listener ports, whatever their IP
+    /// addresses. The scrape listener has no application authentication. An
+    /// unspecified address (`0.0.0.0` or `::`) binds every interface and logs a
+    /// warning at startup.
+    #[must_use]
+    pub fn with_prometheus_listener(
+        mut self,
+        address: SocketAddr,
+        path: impl Into<String>,
+    ) -> Self {
+        self.prometheus_port = Some(address.port());
+        self.prometheus_host = Some(address.ip());
+        self.prometheus_path = path.into();
+        self
+    }
+
+    /// Removes the client-chosen `graphql.operation.name` attribute from every
+    /// exported metric that would carry it (the HTTP server request, body-size,
+    /// overhead and external-wait instruments, and the cost instruments).
+    ///
+    /// Off by default, so existing dashboards keep their series. Operation
+    /// names are chosen by clients, so each distinct name can start new metric
+    /// series and is retained as scrape text. Enable this where anonymous or
+    /// untrusted clients can send operations, accepting that per-operation
+    /// breakdowns disappear from these metrics.
+    #[must_use]
+    pub fn omit_operation_name_from_metrics(mut self, omit: bool) -> Self {
+        self.omit_operation_name_from_metrics = omit;
+        self
+    }
+
+    /// Returns the address the optional scrape listener binds for a router
+    /// whose public listener is `public_listener`.
+    pub(crate) fn prometheus_listener(&self, public_listener: SocketAddr) -> Option<SocketAddr> {
+        self.prometheus_port
+            .map(|port| SocketAddr::new(self.prometheus_host.unwrap_or(public_listener.ip()), port))
     }
 
     fn validate(
@@ -1089,7 +1152,9 @@ impl Default for RouterTelemetryConfig {
             log_level: RouterLogLevel::Info,
             json_logs: true,
             prometheus_port: None,
+            prometheus_host: None,
             prometheus_path: "/metrics".to_owned(),
+            omit_operation_name_from_metrics: false,
         }
     }
 }
@@ -1502,11 +1567,12 @@ fn redacted_url(value: &str) -> String {
     let Ok(mut url) = Url::parse(value) else {
         return "[invalid URL]".to_owned();
     };
-    if !url.username().is_empty() {
-        let _ = url.set_username("[redacted]");
+    // Redaction failure must never fall back to the original credentials.
+    if !url.username().is_empty() && url.set_username("[redacted]").is_err() {
+        return "[redacted URL]".to_owned();
     }
-    if url.password().is_some() {
-        let _ = url.set_password(Some("[redacted]"));
+    if url.password().is_some() && url.set_password(Some("[redacted]")).is_err() {
+        return "[redacted URL]".to_owned();
     }
     if url.query().is_some() {
         url.set_query(Some("[redacted]"));
@@ -1883,6 +1949,50 @@ mod tests {
         let debug = format!("{subgraph:?}");
         assert!(debug.contains("authorization"));
         assert!(!debug.contains("very-secret"));
+    }
+
+    #[test]
+    fn subscription_counts_have_upper_safety_bounds() {
+        type Setter = fn(SubscriptionConfig, usize) -> SubscriptionConfig;
+        let limit = MAX_SUBSCRIPTION_LIMIT;
+        let setters: [(&str, Setter); 6] = [
+            (
+                "maximum WebSocket connections",
+                SubscriptionConfig::with_max_connections,
+            ),
+            (
+                "maximum pending WebSocket connections",
+                SubscriptionConfig::with_max_pending_connections,
+            ),
+            (
+                "maximum WebSocket connection attempts per second",
+                SubscriptionConfig::with_max_connection_attempts_per_second,
+            ),
+            (
+                "maximum operations per WebSocket connection",
+                SubscriptionConfig::with_max_operations_per_connection,
+            ),
+            (
+                "subscription broadcast capacity",
+                SubscriptionConfig::with_broadcast_capacity,
+            ),
+            (
+                "subscription subgraph buffer capacity",
+                SubscriptionConfig::with_subgraph_buffer_capacity,
+            ),
+        ];
+        for (name, set) in setters {
+            set(SubscriptionConfig::new(), limit)
+                .validate()
+                .unwrap_or_else(|error| panic!("{name} at the bound: {error}"));
+            for value in [limit + 1, usize::MAX] {
+                let error = set(SubscriptionConfig::new(), value)
+                    .validate()
+                    .unwrap_err();
+                assert_eq!(error.kind(), RouterErrorKind::InvalidConfiguration);
+                assert!(error.to_string().starts_with(name), "{error}");
+            }
+        }
     }
 
     #[test]

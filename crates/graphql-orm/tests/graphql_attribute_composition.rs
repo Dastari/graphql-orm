@@ -87,6 +87,96 @@ struct Label {
     document: Option<Document>,
 }
 
+/// Valued `SimpleObject` options before or after `name` must not hide it
+/// from the ORM's static API-name metadata (#405).
+#[derive(GraphQLEntity, SimpleObject, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[graphql_entity(table = "alias_probes", plural = "AliasProbes", schema_only = true)]
+struct AliasProbe {
+    #[primary_key]
+    id: i64,
+    #[graphql(skip = false, name = "afterSkipFalse")]
+    after_skip_false: String,
+    #[graphql(name = "beforeSkipFalse", skip = false)]
+    before_skip_false: String,
+    #[graphql(skip_output = false, name = "afterSkipOutputFalse")]
+    after_skip_output_false: String,
+    #[graphql(name = "beforeSkipOutputFalse", skip_output = false)]
+    before_skip_output_false: String,
+    #[graphql(visible = true, name = "afterVisible")]
+    after_visible: String,
+    #[graphql(name = "beforeVisible", visible = true)]
+    before_visible: String,
+    #[graphql(skip = false)]
+    #[graphql(name = "separateAttributes")]
+    separate_attributes: String,
+}
+
+const ALIAS_PROBE_NAMES: [(&str, &str); 7] = [
+    ("after_skip_false", "afterSkipFalse"),
+    ("before_skip_false", "beforeSkipFalse"),
+    ("after_skip_output_false", "afterSkipOutputFalse"),
+    ("before_skip_output_false", "beforeSkipOutputFalse"),
+    ("after_visible", "afterVisible"),
+    ("before_visible", "beforeVisible"),
+    ("separate_attributes", "separateAttributes"),
+];
+
+struct AliasProbeQuery;
+#[graphql_orm::async_graphql::Object]
+impl AliasProbeQuery {
+    async fn probe(&self) -> AliasProbe {
+        AliasProbe {
+            id: 1,
+            after_skip_false: "a".into(),
+            before_skip_false: "b".into(),
+            after_skip_output_false: "c".into(),
+            before_skip_output_false: "d".into(),
+            after_visible: "e".into(),
+            before_visible: "f".into(),
+            separate_attributes: "g".into(),
+        }
+    }
+}
+
+#[tokio::test]
+async fn static_api_names_do_not_depend_on_graphql_option_order() {
+    let schema = Schema::build(
+        AliasProbeQuery,
+        graphql_orm::async_graphql::EmptyMutation,
+        graphql_orm::async_graphql::EmptySubscription,
+    )
+    .finish();
+    let sdl = schema.sdl();
+    let start = sdl.find("type AliasProbe {").expect("AliasProbe in SDL");
+    let body = &sdl[start..start + sdl[start..].find('}').unwrap()];
+    let metadata = AliasProbe::metadata();
+    for (rust_name, api_name) in ALIAS_PROBE_NAMES {
+        // The name async-graphql serves.
+        assert!(
+            body.contains(&format!("{api_name}: String!")),
+            "{api_name} is not served:\n{body}"
+        );
+        // The name the ORM's static metadata records for the same field.
+        let field = metadata
+            .fields
+            .iter()
+            .find(|field| field.name == rust_name)
+            .unwrap_or_else(|| panic!("{rust_name} field metadata"));
+        assert_eq!(field.api_name, api_name, "{rust_name}");
+        let column = <AliasProbe as graphql_orm::graphql::orm::DatabaseSchema>::columns()
+            .iter()
+            .find(|column| column.name == rust_name)
+            .unwrap_or_else(|| panic!("{rust_name} column"));
+        assert_eq!(column.api_name, api_name, "{rust_name}");
+    }
+    // The served values resolve under those names.
+    let selection = ALIAS_PROBE_NAMES.map(|(_, api_name)| api_name).join(" ");
+    let response = schema
+        .execute(format!("{{ probe {{ {selection} }} }}"))
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+}
+
 macro_rules! batch_load {
     ($($entity:ty => $column:literal),* $(,)?) => {$(
         impl graphql_orm::graphql::loaders::BatchLoadEntity for $entity {

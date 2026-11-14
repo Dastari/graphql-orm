@@ -325,7 +325,7 @@ impl TwinMutations {
             },
         )
         .await
-        .map_err(|error| async_graphql::Error::new(error.to_string()))?
+        .map_err(graphql_error_from_sqlx)?
         .is_some())
     }
 }
@@ -395,8 +395,7 @@ impl MutationHook for RecordingHook {
                         }),
                         ..Default::default()
                     })
-                    .await
-                    .map_err(|error| async_graphql::Error::new(error.to_string()))?;
+                    .await?;
             }
             if event.phase == MutationPhase::After {
                 let log = self.log.clone();
@@ -763,6 +762,109 @@ async fn writes_from_a_hook_run_hooks_and_deferred_work_precedes_the_response() 
             "deferred"
         ]
     );
+}
+
+/// How a hook hands a failed nested write back to the mutation.
+#[derive(Clone, Copy)]
+enum NestedWriteError {
+    Propagate,
+    Helper,
+    Stringify,
+}
+
+/// Inserts an order line for an order that does not exist before every order create, so the
+/// nested write fails its foreign key.
+struct NestedWriteHook(NestedWriteError);
+
+impl MutationHook for NestedWriteHook {
+    fn on_mutation<'a>(
+        &'a self,
+        _ctx: Option<&'a async_graphql::Context<'_>>,
+        hook_ctx: &'a mut MutationContext<'_>,
+        event: &'a MutationEvent,
+    ) -> BoxFuture<'a, async_graphql::Result<()>> {
+        Box::pin(async move {
+            if event.entity_name == "Order"
+                && event.action == ChangeAction::Created
+                && event.phase == MutationPhase::Before
+            {
+                let nested = hook_ctx
+                    .insert::<OrderLine>(CreateOrderLineInput {
+                        order_id: Uuid::new_v4(),
+                        sku: "orphan".into(),
+                    })
+                    .await;
+                match self.0 {
+                    NestedWriteError::Propagate => {
+                        nested?;
+                    }
+                    NestedWriteError::Helper => {
+                        nested.map_err(graphql_error_from_sqlx)?;
+                    }
+                    NestedWriteError::Stringify => {
+                        nested.map_err(|error| async_graphql::Error::new(error.to_string()))?;
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+async fn create_order_through_nested_write_hook(
+    style: NestedWriteError,
+) -> async_graphql::Response {
+    let mut db = database().await;
+    db.set_mutation_hook(NestedWriteHook(style));
+    let schema = schema_builder(db.clone()).finish();
+    let customer = Customer::insert(
+        &db,
+        CreateCustomerInput {
+            name: "Acme".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let response = schema
+        .execute(as_user(format!(
+            r#"mutation {{ createOrder(input: {{ customerId: "{}", reference: "A-1" }}) {{ success }} }}"#,
+            customer.id
+        )))
+        .await;
+    assert_eq!(
+        Order::count_all(&db).await.unwrap(),
+        0,
+        "the hook error rolls back"
+    );
+    response
+}
+
+fn error_code(response: &async_graphql::Response) -> Option<async_graphql::Value> {
+    response.errors[0]
+        .extensions
+        .as_ref()
+        .and_then(|extensions| extensions.get("code").cloned())
+}
+
+#[tokio::test]
+async fn a_hook_passes_a_nested_write_refusal_on_with_its_code() {
+    for style in [NestedWriteError::Propagate, NestedWriteError::Helper] {
+        let response = create_order_through_nested_write_hook(style).await;
+        assert_eq!(response.errors.len(), 1, "{:?}", response.errors);
+        assert_eq!(
+            error_code(&response),
+            Some(async_graphql::Value::from("CONSTRAINT_VIOLATION")),
+            "{:?}",
+            response.errors
+        );
+    }
+}
+
+#[tokio::test]
+async fn stringifying_a_nested_write_error_in_a_hook_loses_the_code() {
+    let response = create_order_through_nested_write_hook(NestedWriteError::Stringify).await;
+    assert_eq!(response.errors.len(), 1, "{:?}", response.errors);
+    assert_eq!(error_code(&response), None, "{:?}", response.errors);
 }
 
 #[tokio::test]
@@ -1299,8 +1401,7 @@ async fn touching_a_parent_in_a_child_hook_notifies_its_subscribers() {
                 {
                     hook_ctx
                         .update_by_id::<Order>(&line.order_id, UpdateOrderInput::default())
-                        .await
-                        .map_err(|error| async_graphql::Error::new(error.to_string()))?;
+                        .await?;
                 }
                 Ok(())
             })
@@ -1563,6 +1664,7 @@ async fn a_hidden_to_one_target_is_null_without_losing_the_parent() {
     assert!(data["order"]["customer"].is_null());
 }
 
+#[test]
 fn collection_filter_opt_in_is_typed_and_read_only() {
     let filter = CustomerWhereInput {
         orders: Some(vec![]),
@@ -1579,6 +1681,7 @@ fn collection_filter_opt_in_is_typed_and_read_only() {
     assert!(filter.__gom_require_scalar_write_filter().is_err());
 }
 
+#[test]
 fn private_read_predicate_is_validated_and_negatable() {
     let predicate = ReadPredicate::column::<SqliteBackend, Profile>(
         "hidden_note",

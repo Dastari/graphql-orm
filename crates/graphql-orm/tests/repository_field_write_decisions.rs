@@ -29,7 +29,11 @@ struct WriteAuthority {
     denied: Arc<Mutex<HashSet<Field>>>,
     repository: Arc<Mutex<HashSet<Field>>>,
     graphql: Arc<Mutex<HashSet<Field>>>,
+    /// What the GraphQL decision received for `LedgerNote.remark`: the
+    /// current row's `remark` (when a row was passed) and the value written.
+    remark_seen: Arc<Mutex<Vec<RemarkDecision>>>,
 }
+type RemarkDecision = (Option<Option<String>>, Option<Option<String>>);
 impl WriteAuthority {
     fn deny(&self, field: Field) {
         self.denied.lock().unwrap().insert(field);
@@ -74,11 +78,21 @@ impl FieldPolicy for WriteAuthority {
         entity: &'static str,
         field: &'static str,
         key: Option<&'static str>,
-        _: Option<&'a (dyn Any + Send + Sync)>,
-        _: Option<&'a (dyn Any + Send + Sync)>,
+        record: Option<&'a (dyn Any + Send + Sync)>,
+        value: Option<&'a (dyn Any + Send + Sync)>,
     ) -> BoxFuture<'a, async_graphql::Result<bool>> {
         assert_eq!(key, None);
         self.graphql.lock().unwrap().insert((entity, field));
+        if (entity, field) == ("LedgerNote", "remark") {
+            self.remark_seen.lock().unwrap().push((
+                record
+                    .and_then(|record| record.downcast_ref::<LedgerNote>())
+                    .map(|note| note.remark.clone()),
+                value
+                    .and_then(|value| value.downcast_ref::<Option<String>>())
+                    .cloned(),
+            ));
+        }
         let allowed = !self.denied.lock().unwrap().contains(&(entity, field));
         Box::pin(async move { Ok(allowed) })
     }
@@ -472,6 +486,37 @@ async fn graphql_writes_ask_only_the_graphql_decision_and_only_supplied_input_fi
     assert!(authority.repository_asked().is_empty());
 }
 
+/// The existing-row upsert asks about an omitted optional field with the
+/// current row and `None`, the value its update writes.
+#[tokio::test]
+async fn an_existing_row_upsert_passes_the_current_row_and_none_for_an_omitted_optional_field() {
+    let (db, authority) = database().await;
+    graphql_orm::sqlx::query("UPDATE ledger_notes SET remark = 'kept' WHERE slug = 'first'")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    let schema = schema_builder(db.clone()).finish();
+    let response = schema
+        .execute(Request::new(
+            "mutation { upsertLedgerNote(input: {id: \"n9\", slug: \"first\", body: \"b\"}) { success } }",
+        ))
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    assert_eq!(
+        *authority.remark_seen.lock().unwrap(),
+        [(Some(Some("kept".to_owned())), Some(None))]
+    );
+    // An upsert that inserts does not ask about the omitted field at all.
+    authority.remark_seen.lock().unwrap().clear();
+    let response = schema
+        .execute(Request::new(
+            "mutation { upsertLedgerNote(input: {id: \"n8\", slug: \"eighth\", body: \"b\"}) { success } }",
+        ))
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    assert!(authority.remark_seen.lock().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn a_deny_list_on_a_field_the_client_cannot_supply_blocks_only_writes_that_set_it() {
     let (db, authority) = database().await;
@@ -503,15 +548,26 @@ async fn a_deny_list_on_a_field_the_client_cannot_supply_blocks_only_writes_that
     // there the deny-list is obeyed.
     let response = schema
         .execute(Request::new(
-            "mutation { upsertLedgerNote(input: {id: \"n9\", slug: \"first\", body: \"b\"}) { success } }",
+            "mutation { upsertLedgerNote(input: {id: \"n9\", slug: \"first\", body: \"refused\"}) { success } }",
         ))
         .await;
-    let refusal = format!(
-        "{:?} {}",
-        response.errors,
-        response.data.into_json().unwrap()
+    assert_eq!(response.errors.len(), 1, "{:?}", response.errors);
+    assert_eq!(
+        response.errors[0]
+            .extensions
+            .as_ref()
+            .and_then(|extensions| extensions.get("code")),
+        Some(&async_graphql::Value::from("FORBIDDEN"))
     );
+    let refusal = format!("{:?}", response.errors);
     assert!(refusal.contains("internalTag"), "{refusal}");
+    // The refused upsert wrote nothing: the body is still the update's.
+    let bodies: Vec<String> =
+        graphql_orm::sqlx::query_scalar("SELECT body FROM ledger_notes WHERE slug = 'first'")
+            .fetch_all(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(bodies, ["b".to_owned()]);
     // Host code that writes the field through the repository is still asked.
     let error = LedgerNote::insert(
         &db,

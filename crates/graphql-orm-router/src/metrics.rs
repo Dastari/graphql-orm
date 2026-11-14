@@ -17,6 +17,7 @@ pub struct RouterMetricsSnapshot {
     pending_websocket_connections: usize,
     active_subscriptions: usize,
     websocket_rejections_total: u64,
+    websocket_send_failures_total: u64,
     schema_refresh_total: u64,
     composition_success_total: u64,
     composition_failure_total: u64,
@@ -95,6 +96,12 @@ impl RouterMetricsSnapshot {
         "Total public WebSocket upgrades rejected by an admission limit."
     );
     snapshot_getter!(
+        websocket_send_failures_total,
+        websocket_send_failures_total,
+        u64,
+        "Total best-effort WebSocket close or complete messages that failed because the peer had already gone. A steady rise points at abrupt client or private-endpoint disconnects."
+    );
+    snapshot_getter!(
         schema_refresh_total,
         schema_refresh_total,
         u64,
@@ -138,6 +145,7 @@ pub(crate) struct RouterMetrics {
     pending_websocket_connections: AtomicUsize,
     active_subscriptions: AtomicUsize,
     websocket_rejections_total: AtomicU64,
+    websocket_send_failures_total: AtomicU64,
     schema_refresh_total: AtomicU64,
     composition_success_total: AtomicU64,
     composition_failure_total: AtomicU64,
@@ -182,6 +190,9 @@ impl RouterMetrics {
                 .load(Ordering::Relaxed),
             active_subscriptions: self.active_subscriptions.load(Ordering::Relaxed),
             websocket_rejections_total: self.websocket_rejections_total.load(Ordering::Relaxed),
+            websocket_send_failures_total: self
+                .websocket_send_failures_total
+                .load(Ordering::Relaxed),
             schema_refresh_total: self.schema_refresh_total.load(Ordering::Relaxed),
             composition_success_total: self.composition_success_total.load(Ordering::Relaxed),
             composition_failure_total: self.composition_failure_total.load(Ordering::Relaxed),
@@ -230,6 +241,11 @@ impl RouterMetrics {
 
     pub(crate) fn websocket_rejected(&self) {
         self.websocket_rejections_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn websocket_send_failed(&self) {
+        self.websocket_send_failures_total
             .fetch_add(1, Ordering::Relaxed);
     }
 
@@ -443,6 +459,10 @@ mod tests {
         assert_eq!(metrics.snapshot().active_websocket_connections(), 2);
         assert_eq!(metrics.snapshot().active_subscriptions(), 2);
         assert_eq!(metrics.snapshot().websocket_rejections_total(), 1);
+        assert_eq!(metrics.snapshot().websocket_send_failures_total(), 0);
+        metrics.websocket_send_failed();
+        metrics.websocket_send_failed();
+        assert_eq!(metrics.snapshot().websocket_send_failures_total(), 2);
 
         metrics.websocket_disconnected();
         metrics.websocket_disconnected();

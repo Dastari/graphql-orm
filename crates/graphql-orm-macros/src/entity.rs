@@ -39,6 +39,8 @@ pub(crate) struct EntityMetadata {
     pub(crate) backup_restore_order: Option<i32>,
     pub(crate) read_policy: Option<String>,
     pub(crate) write_policy: Option<String>,
+    /// `policy = "open"`: the entity is deliberately open; a review marker only.
+    pub(crate) policy_open: bool,
     /// Optional async hook path invoked after create/update/delete mutations.
     pub(crate) notify_handler: Option<String>,
     pub(crate) notify_report_errors: bool,
@@ -376,6 +378,18 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;
                     metadata.write_policy = Some(lit.value());
+                } else if meta.path.is_ident("policy") {
+                    if metadata.policy_open {
+                        return Err(meta.error("policy may only be declared once per entity"));
+                    }
+                    let lit: syn::LitStr = meta.value()?.parse()?;
+                    if lit.value() != "open" {
+                        return Err(syn::Error::new(
+                            lit.span(),
+                            "policy accepts only \"open\": it records that the entity deliberately declares no read_policy or write_policy",
+                        ));
+                    }
+                    metadata.policy_open = true;
                 } else if meta.path.is_ident("notify") || meta.path.is_ident("notify_with") {
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;
@@ -823,6 +837,12 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
         return Err(syn::Error::new(
             proc_macro2::Span::call_site(),
             "retention_purge is valid only for append_only entities",
+        ));
+    }
+    if metadata.policy_open && (metadata.read_policy.is_some() || metadata.write_policy.is_some()) {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "policy = \"open\" states that the entity declares no policy; remove it or remove read_policy and write_policy",
         ));
     }
     if metadata.append_only
@@ -3139,7 +3159,19 @@ fn is_rust_keyword(ident: &str) -> bool {
     )
 }
 
-fn rust_ident_from_graphql_name(graphql_name: &str, span: proc_macro2::Span) -> syn::Ident {
+/// The `<Entity>OrderField` variant for one generated order-input field.
+pub(crate) fn order_field_variant(order_field: &syn::Ident) -> syn::Ident {
+    use syn::ext::IdentExt as _;
+    syn::Ident::new(
+        &order_field.unraw().to_string().to_case(Case::Pascal),
+        order_field.span(),
+    )
+}
+
+pub(crate) fn rust_ident_from_graphql_name(
+    graphql_name: &str,
+    span: proc_macro2::Span,
+) -> syn::Ident {
     let snake = to_snake_case(graphql_name);
     if is_rust_keyword(&snake) {
         syn::Ident::new_raw(&snake, span)
@@ -3671,6 +3703,11 @@ fn generate_entity_tokens(
             quote! { Some(#lit) }
         })
         .unwrap_or_else(|| quote! { None });
+    // An entity-level `auth = "none"` is an explicit decision to be public.
+    let policy_decision_declared = entity_meta.policy_open
+        || entity_meta.read_policy.is_some()
+        || entity_meta.write_policy.is_some()
+        || entity_meta.auth.as_deref() == Some("none");
     let legacy_graphql_complex = has_graphql_complex(&input.attrs)?;
     // Rustc removes derive lists before invoking derives. Valid externally owned
     // objects opt into complex or schema_only, so check those ownership modes.
@@ -5774,6 +5811,54 @@ fn generate_entity_tokens(
         &input.vis,
     )?;
 
+    // The Rust-only ordered form: one variant per order-input field. It is
+    // not a GraphQL type, so the schema is unchanged.
+    let order_field_enum = quote::format_ident!("{}OrderField", struct_name);
+    let order_field_variants: Vec<syn::Ident> = sortable_columns
+        .iter()
+        .map(|(field_ident, _)| order_field_variant(field_ident))
+        .collect();
+    let order_field_arms: Vec<_> = sortable_columns
+        .iter()
+        .zip(&order_field_variants)
+        .map(|((field_ident, _), variant)| {
+            quote! { Self::#variant => order.#field_ident = Some(direction), }
+        })
+        .collect();
+    let order_field_definition = if order_field_variants.is_empty() {
+        quote! {}
+    } else {
+        let enum_doc = format!(
+            "One orderable field of `{struct_name}`, for ordering with explicit precedence.\n\n\
+             `order_by_fields([(Field::A, Asc), (Field::B, Asc)])` on a generated query builder \
+             sorts by `A` first, then `B`, whatever order the entity declares its fields in. \
+             One `{order_by_name_str}` value with several fields set cannot express that: it \
+             always sorts in field declaration order."
+        );
+        quote! {
+            #[doc = #enum_doc]
+            #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+            pub enum #order_field_enum {
+                #(#order_field_variants,)*
+            }
+
+            impl ::graphql_orm::graphql::orm::DatabaseOrderField for #order_field_enum {
+                type OrderBy = #order_by_name;
+
+                fn order(
+                    self,
+                    direction: ::graphql_orm::graphql::orm::OrderDirection,
+                ) -> #order_by_name {
+                    let mut order = #order_by_name::default();
+                    match self {
+                        #(#order_field_arms)*
+                    }
+                    order
+                }
+            }
+        }
+    };
+
     // Generate order_by to_sql_order implementation
     let order_by_match_arms: Vec<_> = sortable_columns
         .iter()
@@ -6020,6 +6105,8 @@ fn generate_entity_tokens(
             }
 
             impl ::graphql_orm::graphql::orm::Entity for #struct_name {
+                const POLICY_DECISION_DECLARED: bool = #policy_decision_declared;
+
                 fn entity_name() -> &'static str {
                     #struct_name_str
                 }
@@ -6183,6 +6270,13 @@ fn generate_entity_tokens(
             #relation_order_storage
         }
 
+        #order_field_definition
+
+        /// Ordering precedence: one value with several fields set sorts in the
+        /// entity's field **declaration** order, because a struct literal carries
+        /// no field order. A GraphQL client passes a list of single-field values
+        /// for an ordered sort; Rust code chains one `order_by` call per field or
+        /// uses `order_by_fields` with the generated `OrderField` enum.
         impl #order_by_name {
             /// Authorize relation count ordering under the current request.
             /// Each count covers only target rows the request may read; callback
@@ -6705,6 +6799,8 @@ fn generate_entity_tokens(
         }
 
         impl ::graphql_orm::graphql::orm::Entity for #struct_name {
+            const POLICY_DECISION_DECLARED: bool = #policy_decision_declared;
+
             fn entity_name() -> &'static str {
                 #struct_name_str
             }
@@ -9093,6 +9189,33 @@ mod attribute_composition_tests {
         assert!(meta.graphql_skip && meta.skip_input);
         assert!(!has_graphql_object_skip(&field));
         assert_eq!(meta.serde_name, None);
+    }
+
+    /// #405: a valued `SimpleObject` option before `name` must not hide it.
+    #[test]
+    fn graphql_name_is_found_in_any_option_order() {
+        for tokens in [
+            quote::quote! { #[graphql(skip = false, name = "publicAlias")] label: String },
+            quote::quote! { #[graphql(name = "publicAlias", skip = false)] label: String },
+            quote::quote! { #[graphql(skip_output = false, name = "publicAlias")] label: String },
+            quote::quote! { #[graphql(name = "publicAlias", skip_output = false)] label: String },
+            quote::quote! { #[graphql(visible = false, name = "publicAlias")] label: String },
+            quote::quote! { #[graphql(visible = "visible_fn", name = "publicAlias")] label: String },
+            quote::quote! { #[graphql(name = "publicAlias", visible = false)] label: String },
+            quote::quote! { #[graphql(skip = false)] #[graphql(name = "publicAlias")] label: String },
+            quote::quote! { #[graphql(guard = "Guard::new()", skip = false, name = "publicAlias")] label: String },
+        ] {
+            let field: Field = Field::parse_named.parse2(tokens.clone()).unwrap();
+            let meta = parse_field_metadata(&field).unwrap();
+            assert_eq!(
+                meta.graphql_name.as_deref(),
+                Some("publicAlias"),
+                "{tokens}"
+            );
+            // `skip = false` keeps its documented legacy input exclusion.
+            let has_skip = tokens.to_string().contains("skip =");
+            assert_eq!(meta.skip_input, has_skip, "{tokens}");
+        }
     }
 
     #[test]

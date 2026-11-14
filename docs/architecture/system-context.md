@@ -3,7 +3,7 @@ title: GraphQL ORM system context
 kind: architecture
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-11
+last_reviewed: 2026-11-14
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -26,6 +26,7 @@ flowchart LR
     ORM --> Catalog
     Router[graphql-orm-router] --> Protocol[graphql-orm-router-protocol]
     ORM -. optional metadata export .-> Protocol
+    Catalog -. optional router-protocol feature .-> Protocol
     Router --> Federation[external federation runtime and composition]
     Router -. optional one-way bridge .-> Auth
     ORM -. optional one-way bridge .-> Auth[agql-auth exact external revision]
@@ -40,8 +41,10 @@ The allowed internal dependency direction is acyclic:
 `graphql-orm-backup -> graphql-orm-storage`,
 `graphql-orm -> graphql-orm-macros`,
 `graphql-orm -> graphql-orm-operation-catalog`, plus
-`graphql-orm-router -> graphql-orm-router-protocol` and optional
-`graphql-orm -> graphql-orm-router-protocol`.
+`graphql-orm-router -> graphql-orm-router-protocol`, optional
+`graphql-orm-operation-catalog -> graphql-orm-router-protocol` (its
+`router-protocol` feature, which the ORM's `router-protocol` feature
+enables), and optional `graphql-orm -> graphql-orm-router-protocol`.
 
 Internal packages use workspace path dependencies and the root `Cargo.lock`.
 No package uses a Git dependency on another package in this repository.

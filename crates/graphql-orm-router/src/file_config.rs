@@ -337,6 +337,9 @@ impl FileAuthentication {
             if let Some(seconds) = catalogue.cache_ttl_seconds {
                 role_scope = role_scope.with_cache_ttl(Duration::from_secs(seconds));
             }
+            if let Some(seconds) = catalogue.maximum_staleness_seconds {
+                role_scope = role_scope.with_maximum_staleness(Duration::from_secs(seconds));
+            }
             if let Some(seconds) = catalogue.maximum_signed_lifetime_seconds {
                 role_scope = role_scope.with_maximum_signed_lifetime(Duration::from_secs(seconds));
             }
@@ -382,6 +385,7 @@ struct FileRoleScopeCatalogue {
     url_from_env: Option<String>,
     audience: String,
     cache_ttl_seconds: Option<u64>,
+    maximum_staleness_seconds: Option<u64>,
     maximum_signed_lifetime_seconds: Option<u64>,
     clock_skew_leeway_seconds: Option<u64>,
     retry_backoff_seconds: Option<u64>,
@@ -790,7 +794,14 @@ impl FileTelemetry {
             value = value.with_log_level(level.into());
         }
         if let Some(prometheus) = self.prometheus {
-            value = value.with_prometheus(prometheus.port, prometheus.path);
+            value = value.omit_operation_name_from_metrics(prometheus.omit_operation_name);
+            value = match prometheus.host {
+                Some(host) => value.with_prometheus_listener(
+                    std::net::SocketAddr::new(host, prometheus.port),
+                    prometheus.path,
+                ),
+                None => value.with_prometheus(prometheus.port, prometheus.path),
+            };
         }
         value
     }
@@ -819,7 +830,13 @@ impl From<FileLogLevel> for RouterLogLevel {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct FilePrometheus {
+    /// Optional IP address literal for the scrape listener. Omitted, the
+    /// exporter binds the public listener's IP address.
+    host: Option<std::net::IpAddr>,
     port: u16,
+    /// Removes the client-chosen operation-name attribute from metrics.
+    #[serde(default)]
+    omit_operation_name: bool,
     #[serde(default = "default_metrics_path")]
     path: String,
 }
@@ -1008,6 +1025,68 @@ mod tests {
             error.to_string().contains("public token audience"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn prometheus_scrape_address_is_opt_in_and_otherwise_follows_the_public_listener() {
+        let telemetry =
+            |prometheus: &str| {
+                let file = FILE.replace(r#""prometheus": {"port": 4900}"#, prometheus);
+                RouterFileConfig::from_json(&file)
+                    .unwrap()
+                    .into_router_config_with(|name| {
+                        Ok((name == "PRODUCTS_SCHEMA_TOKEN")
+                            .then(|| "Bearer schema-secret".to_owned()))
+                    })
+                    .unwrap()
+                    .validate()
+                    .map(|config| config.telemetry.prometheus_listener(config.listener))
+            };
+        assert_eq!(
+            telemetry(r#""prometheus": {"port": 4900}"#).unwrap(),
+            Some("127.0.0.1:4900".parse().unwrap()),
+            "without a host the exporter keeps the public listener's IP address"
+        );
+        assert_eq!(
+            telemetry(r#""prometheus": {"host": "127.0.0.2", "port": 4900, "path": "/internal"}"#)
+                .unwrap(),
+            Some("127.0.0.2:4900".parse().unwrap())
+        );
+        assert_eq!(
+            telemetry(r#""prometheus": {"host": "::1", "port": 4900}"#).unwrap(),
+            Some("[::1]:4900".parse().unwrap())
+        );
+        // The port must still differ from the public port on another address.
+        let error = telemetry(r#""prometheus": {"host": "127.0.0.2", "port": 4000}"#).unwrap_err();
+        assert!(error.to_string().contains("distinct"), "{error}");
+        // Host names would need DNS at startup, and an IPv6 zone ID names a
+        // host-local interface; only plain IP literals are accepted.
+        for host in ["metrics.internal", "fe80::1%2", "fe80::1%eth0", "[::1]"] {
+            assert!(
+                RouterFileConfig::from_json(&FILE.replace(
+                    r#""prometheus": {"port": 4900}"#,
+                    &format!(r#""prometheus": {{"host": "{host}", "port": 4900}}"#)
+                ))
+                .is_err(),
+                "{host}"
+            );
+        }
+        let omit = |prometheus: &str| {
+            RouterFileConfig::from_json(
+                &FILE.replace(r#""prometheus": {"port": 4900}"#, prometheus),
+            )
+            .unwrap()
+            .into_router_config_with(|name| {
+                Ok((name == "PRODUCTS_SCHEMA_TOKEN").then(|| "Bearer schema-secret".to_owned()))
+            })
+            .unwrap()
+            .telemetry
+            .omit_operation_name_from_metrics
+        };
+        assert!(!omit(r#""prometheus": {"port": 4900}"#), "off by default");
+        assert!(omit(
+            r#""prometheus": {"port": 4900, "omitOperationName": true}"#
+        ));
     }
 
     #[test]
@@ -1395,6 +1474,7 @@ mod tests {
                 "urlFromEnv": "ROLE_SCOPE_URL",
                 "audience": "resource-servers",
                 "cacheTtlSeconds": 120,
+                "maximumStalenessSeconds": 600,
                 "maximumSignedLifetimeSeconds": 86400,
                 "clockSkewLeewaySeconds": 30,
                 "retryBackoffSeconds": 2,
@@ -1423,6 +1503,39 @@ mod tests {
             })
             .unwrap_err();
         assert!(missing.to_string().contains("ROLE_SCOPE_URL"));
+
+        let config = RouterFileConfig::from_json(&json)
+            .unwrap()
+            .into_router_config_with(|name| {
+                Ok(match name {
+                    "PRODUCTS_SCHEMA_TOKEN" => Some("Bearer schema-secret".to_owned()),
+                    "ROLE_SCOPE_URL" => Some("https://identity.example/role-scopes".to_owned()),
+                    "ROLE_SCOPE_TOKEN" => Some("Bearer catalogue-secret".to_owned()),
+                    _ => None,
+                })
+            })
+            .unwrap();
+        let provider = format!("{:?}", config.authentication.as_ref().unwrap());
+        assert!(provider.contains("maximum_staleness: 600s"), "{provider}");
+        let unbounded = RouterFileConfig::from_json(&json.replacen(
+            r#""maximumStalenessSeconds": 600"#,
+            r#""maximumStalenessSeconds": 86401"#,
+            1,
+        ))
+        .unwrap()
+        .into_router_config_with(|name| {
+            Ok(match name {
+                "PRODUCTS_SCHEMA_TOKEN" => Some("Bearer schema-secret".to_owned()),
+                "ROLE_SCOPE_URL" => Some("https://identity.example/role-scopes".to_owned()),
+                "ROLE_SCOPE_TOKEN" => Some("Bearer catalogue-secret".to_owned()),
+                _ => None,
+            })
+        })
+        .unwrap_err();
+        assert!(
+            unbounded.to_string().contains("maximum staleness"),
+            "{unbounded}"
+        );
 
         let unknown = json.replacen(
             r#""maxBodyBytes": 262144"#,

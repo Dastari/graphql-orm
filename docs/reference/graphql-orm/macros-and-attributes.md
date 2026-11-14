@@ -3,7 +3,7 @@ title: GraphQL ORM macro and attribute reference
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-14
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -56,6 +56,7 @@ surface. In a build with more than one backend feature, `backend` is required.
 | `ai_mutations` | `(create = "…", upsert = "…", update = "…", update_many = "…", delete = "…", delete_many = "…")` | each value is `"automatic"`, `"approval_required"`, or `"prohibited"`; omitted categories are prohibited |
 | `retention_purge` | nonempty policy-key string | absent |
 | `keyset`, `read_policy`, `write_policy`, `notify`, `notify_with` | string | absent |
+| `policy` | `"open"` | absent; records that the entity deliberately declares no `read_policy` or `write_policy`, for `schema_roots!` `require_policies`. No run-time effect; cannot be combined with a policy key |
 | `notify_on_error` | `"propagate"` or `"report"` | `"propagate"`; single-row GraphQL notification failure policy |
 | `backup_export_order`, `backup_restore_order` | integer | absent |
 | `upsert` | comma-separated columns | at least one column; may appear once |
@@ -759,6 +760,13 @@ missing. An empty or incomplete manual list therefore cannot hide a collision, a
 at start-up rather than at compile time. A schema assembled by hand with `Schema::build` gets neither
 check.
 
+`require_policies: true` is an opt-in review gate. Every entity in `entities` must then record a
+policy decision in its declaration: an entity `read_policy` or `write_policy`, an
+entity-level `auth = "none"`, or `#[graphql_entity(policy = "open")]` for an entity that is deliberately open to every subject the
+schema's `auth` setting admits. An entity with none fails to compile with an error naming it. The
+marker changes nothing at run time, accepts only `"open"`, and cannot be combined with a policy
+key. The default, `false`, requires nothing.
+
 `generated_mutations` defaults to `"all"`; it accepts
 `"all"`, `"none"`, `"allowlist"`, or `"denylist"`. An allowlist/denylist
 requires its matching nonempty list, and every listed entity must be in
@@ -834,7 +842,12 @@ generated code enforces before the resolver body runs. The catalogue's
 These are the admission checks a generated operation with `auth = "required"`
 and the same fixed `operation_authorization` scopes runs, in the same order:
 authentication and scopes, then operation assurance, then any host guard, then
-the resolver. Entity, row and field policies are not part of a handwritten
+the resolver. A `#[graphql(entity)]` resolver is served below `Query._entities`,
+where no guard applies, so the attribute puts the same checks at the start of
+its body: its declared authorization, then the assurance requirement
+registered for its own coordinate, then any registered for `_entities`. It
+therefore needs a named `&Context<'_>` argument and a `Result` return type,
+public or not. Entity, row and field policies are not part of a handwritten
 root; they remain the resolver's work. A declared requirement does not follow the schema-level `auth`
 default, so `auth: "none"` in `schema_roots!` never opens a described root.
 Scope strings follow the `operation_authorization` rules; scope templates are

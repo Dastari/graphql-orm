@@ -15,6 +15,7 @@ mod byte_route;
 mod config;
 mod federation;
 mod file_config;
+mod http_body;
 mod jwt;
 mod lifecycle;
 mod metrics;

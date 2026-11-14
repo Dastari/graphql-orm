@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
     sync::Arc,
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 use futures::future::BoxFuture;
@@ -33,6 +33,8 @@ pub struct AuthenticatedPrincipal {
     subject: String,
     scopes: Arc<[String]>,
     expires_at: Option<SystemTime>,
+    authority_valid_until: Option<Instant>,
+    authority_generation: Option<u64>,
 }
 
 impl AuthenticatedPrincipal {
@@ -66,7 +68,44 @@ impl AuthenticatedPrincipal {
             subject,
             scopes: scopes.into(),
             expires_at,
+            authority_valid_until: None,
+            authority_generation: None,
         })
+    }
+
+    /// Marks scopes that came from an external authority, such as a signed
+    /// role-scope catalogue, as valid only until `deadline` on the provider's
+    /// [`monotonic_now`](AuthenticationProvider::monotonic_now) clock.
+    ///
+    /// Long-lived transports re-authenticate once the deadline passes before
+    /// they run another operation, and end subscriptions when that fails.
+    /// Principals with direct scopes only carry no deadline.
+    #[must_use]
+    pub fn with_authority_valid_until(mut self, deadline: Instant) -> Self {
+        self.authority_valid_until = Some(deadline);
+        self
+    }
+
+    /// Monotonic deadline for externally expanded scopes, when any were
+    /// expanded.
+    pub fn authority_valid_until(&self) -> Option<Instant> {
+        self.authority_valid_until
+    }
+
+    /// Records which generation of the external authority the scopes were
+    /// expanded from, as reported by
+    /// [`AuthenticationProvider::authority_generation`]. Long-lived transports
+    /// re-authenticate before the next operation once the provider reports a
+    /// different generation.
+    #[must_use]
+    pub fn with_authority_generation(mut self, generation: u64) -> Self {
+        self.authority_generation = Some(generation);
+        self
+    }
+
+    /// Authority generation the scopes were expanded from, when recorded.
+    pub fn authority_generation(&self) -> Option<u64> {
+        self.authority_generation
     }
 
     /// Stable subject identifier from the validated credential.
@@ -92,6 +131,8 @@ impl fmt::Debug for AuthenticatedPrincipal {
             .field("subject", &self.subject)
             .field("scope_count", &self.scopes.len())
             .field("expires_at", &self.expires_at)
+            .field("authority_valid_until", &self.authority_valid_until)
+            .field("authority_generation", &self.authority_generation)
             .finish()
     }
 }
@@ -175,6 +216,22 @@ pub trait AuthenticationProvider: Send + Sync + fmt::Debug + 'static {
     /// platform. Long-lived transports reject initialization on this error.
     fn current_time(&self) -> Result<SystemTime, AuthenticationError> {
         Ok(SystemTime::now())
+    }
+
+    /// Returns the monotonic clock that
+    /// [`AuthenticatedPrincipal::authority_valid_until`] deadlines use.
+    /// Defaults to [`Instant::now`].
+    fn monotonic_now(&self) -> Instant {
+        Instant::now()
+    }
+
+    /// Current generation of the external authority that expands scopes, such
+    /// as the accepted role-scope catalogue snapshot. It must be a cheap read:
+    /// long-lived transports compare it with
+    /// [`AuthenticatedPrincipal::authority_generation`] before every operation
+    /// and on a short tick. `None`, the default, means no such authority.
+    fn authority_generation(&self) -> Option<u64> {
+        None
     }
 
     /// Periodic refresh interval for remote verification state.

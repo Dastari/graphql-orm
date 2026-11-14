@@ -56,6 +56,12 @@ use crate::{
 
 const STATIC_GRAPH_PLUGIN: &str = "graphql-orm-router-static-graph";
 static NEXT_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
+/// One-shot handoff of each prepared runtime into its Hive plugin.
+///
+/// Hive builds plugins from serialisable configuration only, so the plugin
+/// config carries a process-unique `runtime_id` and `on_plugin_init` removes
+/// the matching entry. Every failure before that point removes it too, so an
+/// entry never outlives one router start and is never shared between routers.
 static PLUGIN_RUNTIMES: OnceLock<Mutex<BTreeMap<u64, PluginRuntime>>> = OnceLock::new();
 
 /// Prepares and runs a router on its owned Ntex runtime.
@@ -114,6 +120,7 @@ fn run_on_owned_runtime(
         .build(hive_router::ntex::rt::DefaultRuntime)
         .block_on(async move {
             #[cfg(target_family = "unix")]
+            // A dropped sender means the signal thread ended; shut down too.
             let shutdown = async move {
                 let _ = process_signals.receiver.await;
             };
@@ -132,7 +139,9 @@ fn run_on_owned_runtime(
     #[cfg(target_family = "unix")]
     {
         process_signals.handle.close();
-        let _ = process_signals.thread.join();
+        if process_signals.thread.join().is_err() {
+            tracing::warn!("the process signal thread panicked during shutdown");
+        }
     }
     result
 }
@@ -164,6 +173,7 @@ impl ProcessSignals {
         let thread = std::thread::Builder::new()
             .name("graphql-orm-router-signals".to_owned())
             .spawn(move || {
+                // A send fails only when the runtime already stopped listening.
                 if signals.forever().next().is_some() {
                     let _ = sender.send(());
                 }
@@ -403,6 +413,16 @@ impl PreparedRouter {
         if let Some(internal) = &internal_subscription {
             internal.continuity.install(&mut telemetry.context);
         }
+        if self
+            .config
+            .telemetry
+            .prometheus_listener(self.config.listener)
+            .is_some_and(|listener| listener.ip().is_unspecified())
+        {
+            tracing::warn!(
+                "the unauthenticated Prometheus exporter binds every interface; restrict it with network policy"
+            );
+        }
         if let Some(warning) = crate::byte_route::public_route_warning(&self.config.byte_routes) {
             tracing::warn!("{warning}");
         }
@@ -585,6 +605,15 @@ struct SelectedNodeLookup(Option<Arc<crate::node_lookup::NodeLookup>>);
 #[derive(Clone, Copy)]
 struct TrustedInternalSubscription;
 
+/// Bearer of a private subscription connection whose scopes expire with an
+/// external authority snapshot. Kept in memory only, never formatted.
+struct RetainedConnectionBearer(String);
+
+/// Why an operation's principal could not be confirmed.
+fn authority_unavailable() -> GraphQLError {
+    GraphQLError::from_message_and_code("authentication service unavailable", "UNAUTHENTICATED")
+}
+
 type InstallVerifiedRuntime = Arc<dyn Fn(&web::HttpRequest) + Send + Sync>;
 
 struct VerifiedRuntime {
@@ -672,6 +701,48 @@ impl StaticGraphPlugin {
             },
         );
         Ok(())
+    }
+}
+
+impl StaticGraphPlugin {
+    /// Returns this operation's principal. Hive shares one plugin context
+    /// across the operations of a private subscription connection; once the
+    /// connection's expanded scopes pass their authority deadline, or the
+    /// provider reports a newer authority generation, its retained bearer is
+    /// authenticated again. The result replaces the old principal, so a
+    /// refreshed catalogue's removals apply at once and a stale one refuses
+    /// the operation.
+    fn operation_principal(
+        &self,
+        context: &hive_router::plugins::plugin_context::PluginContext,
+    ) -> Result<Option<AuthenticatedPrincipal>, crate::AuthenticationError> {
+        let principal = context
+            .get_ref::<AuthenticatedPrincipal>()
+            .map(|principal| (*principal).clone());
+        let Some(principal) = principal else {
+            return Ok(None);
+        };
+        let (Some(deadline), Some(provider)) = (
+            principal.authority_valid_until(),
+            &self.runtime.authentication,
+        ) else {
+            return Ok(Some(principal));
+        };
+        let generation_changed = principal.authority_generation().is_some()
+            && provider.authority_generation() != principal.authority_generation();
+        if !generation_changed && provider.monotonic_now() < deadline {
+            return Ok(Some(principal));
+        }
+        // Ordinary HTTP requests authenticate per request and retain nothing.
+        let bearer = context
+            .get_ref::<RetainedConnectionBearer>()
+            .map(|bearer| bearer.0.clone());
+        let Some(bearer) = bearer else {
+            return Ok(Some(principal));
+        };
+        let refreshed = provider.authenticate_bearer(&bearer)?;
+        context.insert(refreshed.clone());
+        Ok(Some(refreshed))
     }
 }
 
@@ -796,6 +867,19 @@ impl RouterPlugin for StaticGraphPlugin {
             };
             match provider.authenticate_bearer(token) {
                 Ok(principal) => {
+                    // A private subscription connection keeps this principal for
+                    // every later operation; retain its bearer when the scopes
+                    // expire with an external authority, to re-expand them.
+                    if principal.authority_valid_until().is_some()
+                        && payload
+                            .context
+                            .get_ref::<TrustedInternalSubscription>()
+                            .is_some()
+                    {
+                        payload
+                            .context
+                            .insert(RetainedConnectionBearer(token.to_owned()));
+                    }
                     payload.context.insert(principal);
                     payload.proceed()
                 }
@@ -955,7 +1039,17 @@ impl RouterPlugin for StaticGraphPlugin {
             }
             return OnGraphqlAnalysisHookResult::Proceed;
         };
-        let principal = payload.context.get_ref::<AuthenticatedPrincipal>();
+        let principal = match self.operation_principal(payload.context) {
+            Ok(principal) => principal,
+            Err(_) => {
+                return OnGraphqlAnalysisHookResult::EndWithResponse(
+                    PlanExecutionOutput::from_graphql_errors_to_response(
+                        vec![authority_unavailable()],
+                        hive_router::http::StatusCode::SERVICE_UNAVAILABLE,
+                    ),
+                );
+            }
+        };
         // Hive has already moved supplied values into its coerced-variable
         // payload at this hook. The public WebSocket gateway therefore copies
         // a bounded projection of authorization-capable scalar values into a
@@ -988,7 +1082,7 @@ impl RouterPlugin for StaticGraphPlugin {
         let denials = catalog.authorize_operation(
             payload.filtered_operation_for_plan,
             variables,
-            principal.as_deref(),
+            principal.as_ref(),
             self.runtime.scope_matcher.as_ref(),
             if trusted_subscription {
                 VariableResolution::Complete
@@ -1035,7 +1129,15 @@ impl RouterPlugin for StaticGraphPlugin {
             }
             return payload.proceed();
         };
-        let principal = payload.context.get_ref::<AuthenticatedPrincipal>();
+        let principal = match self.operation_principal(payload.context) {
+            Ok(principal) => principal,
+            Err(_) => {
+                return payload.end_with_graphql_error(
+                    authority_unavailable(),
+                    hive_router::http::StatusCode::SERVICE_UNAVAILABLE,
+                );
+            }
+        };
         // WebSocket plugin context is connection-scoped, so never cache an
         // operation's variables there. The execute hook owns the exact coerced
         // values for this HTTP or WebSocket operation and still runs before any
@@ -1045,7 +1147,7 @@ impl RouterPlugin for StaticGraphPlugin {
         let denials = catalog.authorize_operation(
             payload.operation_for_plan,
             variables,
-            principal.as_deref(),
+            principal.as_ref(),
             self.runtime.scope_matcher.as_ref(),
             VariableResolution::Complete,
         );
@@ -1396,8 +1498,16 @@ fn build_hive_config(
         "persisted_documents": config.persisted_documents.as_ref().map_or_else(
             || json!({"enabled": false}), |documents| documents.hive_config()),
         "supergraph": {"source": "plugin"},
+        // The router binds its public listener itself. Hive 0.2.19 reads
+        // `http.host` only to bind the detached Prometheus exporter, so this
+        // is the exporter's IP address: the public listener's IP unless the
+        // host configured a separate scrape address.
         "http": {
-            "host": config.listener.ip().to_string(),
+            "host": config
+                .telemetry
+                .prometheus_listener(config.listener)
+                .map_or(config.listener.ip(), |listener| listener.ip())
+                .to_string(),
             "port": config.listener.port(),
             "graphql_endpoint": config.graphql_path,
         },
@@ -1443,7 +1553,8 @@ fn build_hive_config(
                         "enabled": true,
                         "port": port,
                         "path": config.telemetry.prometheus_path.as_str(),
-                    }]
+                    }],
+                    "instrumentation": {"instruments": metric_attribute_filters(&config.telemetry)}
                 }
             }),
         ),
@@ -1455,6 +1566,41 @@ fn build_hive_config(
             format!("failed to translate validated router configuration: {error}"),
         )
     })
+}
+
+/// Every Hive 0.2.19 metric that carries the client-chosen operation name.
+/// A test pins this list against the engine's own metric catalogue.
+const OPERATION_NAME_METRICS: [&str; 8] = {
+    use hive_router::telemetry::metrics::catalog::names;
+    [
+        names::HTTP_SERVER_REQUEST_DURATION,
+        names::HTTP_SERVER_REQUEST_BODY_SIZE,
+        names::HTTP_SERVER_RESPONSE_BODY_SIZE,
+        names::REQUEST_OVERHEAD_DURATION,
+        names::REQUEST_EXTERNAL_WAIT_DURATION,
+        names::COST_ESTIMATED,
+        names::COST_ACTUAL,
+        names::COST_DELTA,
+    ]
+};
+
+/// Hive's per-instrument attribute filters: empty, the engine default, unless
+/// the operator asked to omit the operation name.
+fn metric_attribute_filters(telemetry: &crate::RouterTelemetryConfig) -> serde_json::Value {
+    use hive_router::telemetry::metrics::catalog::labels::GRAPHQL_OPERATION_NAME;
+    if !telemetry.omit_operation_name_from_metrics {
+        return json!({});
+    }
+    OPERATION_NAME_METRICS
+        .iter()
+        .map(|name| {
+            (
+                (*name).to_owned(),
+                json!({"attributes": {GRAPHQL_OPERATION_NAME: false}}),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>()
+        .into()
 }
 
 #[cfg(test)]
@@ -1635,6 +1781,105 @@ mod tests {
             serialized["telemetry"]["metrics"]["exporters"][0]["port"],
             4900
         );
+        // Hive binds its detached exporter on `http.host`; by default that is
+        // the public listener's IP address, exactly as before.
+        assert_eq!(serialized["http"]["host"], "127.0.0.1");
+        assert_eq!(serialized["http"]["port"], 4000);
+    }
+
+    #[test]
+    fn operation_name_metric_filter_is_opt_in_and_covers_every_carrying_metric() {
+        use hive_router::telemetry::metrics::catalog::{labels, labels_for};
+        for name in OPERATION_NAME_METRICS {
+            assert!(
+                labels_for(name)
+                    .is_some_and(|known| known.contains(&labels::GRAPHQL_OPERATION_NAME)),
+                "{name} must carry the operation name in the pinned engine"
+            );
+        }
+        let translate = |telemetry: crate::RouterTelemetryConfig| {
+            let config = RouterConfig::new("127.0.0.1:4000".parse().unwrap())
+                .allow_plaintext_http(true)
+                .allow_anonymous_development(true)
+                .with_subgraph(StaticSubgraph::new(
+                    "status",
+                    "http://status.test/graphql",
+                    "http://status.test/sdl",
+                ))
+                .with_telemetry(telemetry.with_prometheus(4900, "/metrics"))
+                .validate()
+                .unwrap();
+            serde_json::to_value(build_hive_config(&config, 9, None).unwrap()).unwrap()
+        };
+        let default = translate(crate::RouterTelemetryConfig::new());
+        assert_eq!(
+            default["telemetry"]["metrics"]["instrumentation"]["instruments"],
+            json!({}),
+            "the default keeps every engine attribute"
+        );
+        let omitted =
+            translate(crate::RouterTelemetryConfig::new().omit_operation_name_from_metrics(true));
+        let instruments = &omitted["telemetry"]["metrics"]["instrumentation"]["instruments"];
+        assert_eq!(
+            instruments.as_object().unwrap().len(),
+            OPERATION_NAME_METRICS.len()
+        );
+        for name in OPERATION_NAME_METRICS {
+            assert_eq!(
+                instruments[name]["attributes"][labels::GRAPHQL_OPERATION_NAME],
+                false,
+                "{instruments}"
+            );
+        }
+    }
+
+    #[test]
+    fn private_hive_telemetry_translation_binds_an_explicit_scrape_address() {
+        let config = |telemetry: crate::RouterTelemetryConfig| {
+            RouterConfig::new("0.0.0.0:4000".parse().unwrap())
+                .allow_plaintext_http(true)
+                .allow_anonymous_development(true)
+                .with_subgraph(StaticSubgraph::new(
+                    "status",
+                    "http://status.test/graphql",
+                    "http://status.test/sdl",
+                ))
+                .with_telemetry(telemetry)
+                .validate()
+        };
+        let separate = config(
+            crate::RouterTelemetryConfig::new()
+                .with_prometheus_listener("127.0.0.1:4900".parse().unwrap(), "/metrics"),
+        )
+        .unwrap();
+        let serialized =
+            serde_json::to_value(build_hive_config(&separate, 9, None).unwrap()).unwrap();
+        assert_eq!(serialized["http"]["host"], "127.0.0.1");
+        assert_eq!(serialized["http"]["port"], 4000);
+        assert_eq!(
+            serialized["telemetry"]["metrics"]["exporters"][0]["port"],
+            4900
+        );
+
+        // Without metrics, the translation is unchanged.
+        let disabled = config(crate::RouterTelemetryConfig::new()).unwrap();
+        let serialized =
+            serde_json::to_value(build_hive_config(&disabled, 9, None).unwrap()).unwrap();
+        assert_eq!(serialized["http"]["host"], "0.0.0.0");
+        assert_eq!(serialized["telemetry"]["metrics"]["exporters"], json!([]));
+
+        // A separate address never relaxes the port rule: Hive attaches an
+        // exporter that shares the public port to the public router instead.
+        for port in [0, 4000] {
+            let error = config(
+                crate::RouterTelemetryConfig::new().with_prometheus_listener(
+                    std::net::SocketAddr::new("127.0.0.2".parse().unwrap(), port),
+                    "/metrics",
+                ),
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), RouterErrorKind::InvalidConfiguration);
+        }
     }
 
     #[test]

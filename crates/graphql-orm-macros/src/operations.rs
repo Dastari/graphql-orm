@@ -3084,8 +3084,9 @@ fn generate_graphql_operations_unfiltered(
                     // keeps the client-supplied rule. ORM-managed version
                     // columns are not the client's to write.
                     let existing_row_asks = upsert_update_candidate && !meta.managed_version;
-                    let supplied_is_constant = !(keyless && is_option_type(field_type));
-                    if graphql_create_asks && (supplied_is_constant || !existing_row_asks) {
+                    let supplied_condition_is_constant = !(keyless && is_option_type(field_type));
+                    if graphql_create_asks && (supplied_condition_is_constant || !existing_row_asks)
+                    {
                         upsert_policy_checks_graphql.push(quote! {
                             if #graphql_create_condition {
                                 #graphql_check
@@ -5233,6 +5234,7 @@ fn generate_graphql_operations_unfiltered(
     let scan_connection_type = quote::format_ident!("{}AuthorizedScanPage", struct_name);
     let scan_query_name = apply_graphql_case(&format!("{}Scan", plural_name), resolver_case);
     let keyset_order_input = quote::format_ident!("{}KeysetOrderByInput", struct_name);
+    let keyset_order_field = quote::format_ident!("{}OrderField", struct_name);
     let runtime_keyset_available = primary_key_fields.iter().all(|field| {
         field.meta.graphql_readable()
             && !field.meta.graphql_skip
@@ -5244,6 +5246,7 @@ fn generate_graphql_operations_unfiltered(
         let mut runtime_metadata = Vec::new();
         let mut runtime_values = Vec::new();
         let mut runtime_orders = Vec::new();
+        let mut runtime_ordered_arms = Vec::new();
         let mut primary_columns = Vec::new();
         for field in fields {
             let meta = parse_field_metadata(field)?;
@@ -5292,6 +5295,20 @@ fn generate_graphql_operations_unfiltered(
                     });
                 }
             });
+            // The typed ordered form addresses the fields that are also
+            // generated order-input fields.
+            if meta.sortable && meta.order {
+                let variant = crate::entity::order_field_variant(
+                    &crate::entity::rust_ident_from_graphql_name(&graphql_name, ident.span()),
+                );
+                runtime_ordered_arms.push(quote! {
+                    #keyset_order_field::#variant => {
+                        let mut order = Self::default();
+                        order.#ident = Some(direction);
+                        order
+                    }
+                });
+            }
             if is_primary_key {
                 primary_columns.push(column);
             }
@@ -5380,6 +5397,37 @@ fn generate_graphql_operations_unfiltered(
             });
         }
         let fingerprint = format!("v1:{}", fingerprint_parts.join(","));
+        // Without an orderable field there is no `OrderField` enum to take.
+        let runtime_ordered_method = if runtime_ordered_arms.is_empty() {
+            quote! {}
+        } else {
+            quote! {
+                        /// Build an ordered keyset sort from typed `(field, direction)`
+                        /// pairs: the first pair is the primary sort key, and the cursor's
+                        /// key order follows the list. The complete primary key is still
+                        /// appended as the tiebreak. A field that cannot be a keyset key
+                        /// is refused with `INVALID_INPUT`.
+                        #[allow(unreachable_patterns)]
+                        pub fn ordered(
+                            fields: impl IntoIterator<Item = (#keyset_order_field, ::graphql_orm::graphql::orm::OrderDirection)>,
+                        ) -> ::std::result::Result<Vec<Self>, ::graphql_orm::graphql::errors::OrmPublicError> {
+                            fields
+                                .into_iter()
+                                .map(|(field, direction)| {
+                                    Ok(match field {
+                                        #(#runtime_ordered_arms)*
+                                        _ => {
+                                            return Err(::graphql_orm::graphql::errors::OrmPublicError::with_message(
+                                                ::graphql_orm::graphql::errors::OrmErrorCode::InvalidInput,
+                                                "this field cannot be a keyset sort key",
+                                            ));
+                                        }
+                                    })
+                                })
+                                .collect()
+                        }
+            }
+        };
         let runtime_order_definitions = if runtime_keyset_available {
             quote! {
                     /// Scalar-only runtime keyset order. Each list entry must select
@@ -5387,6 +5435,8 @@ fn generate_graphql_operations_unfiltered(
                     #[derive(::graphql_orm::async_graphql::InputObject, Default, Clone, Debug)]
                     pub struct #keyset_order_input { #(#runtime_fields)* }
                     impl #keyset_order_input {
+                        #runtime_ordered_method
+
                         fn __gom_columns(items: Vec<Self>) -> ::graphql_orm::async_graphql::Result<Vec<::graphql_orm::graphql::orm::KeysetOrderColumn>> {
                             let mut columns = Vec::new();
                             for item in items {
@@ -8844,11 +8894,17 @@ fn generate_graphql_operations_unfiltered(
                     ::graphql_orm::graphql::orm::TransactionMode::StateMachine,
                     auth_context.as_ref(),
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
-                let current_entity = EntityQuery::<#struct_name, #backend_marker>::new()
-                    .where_clause(
-                        &format!("{} = {}", #sql_dialect.render_identifier_path(#struct_name::PRIMARY_KEY), #struct_name::__gom_placeholder(1)),
-                        #pk_bind_value
-                    )
+                let current_entity = ::std::boxed::Box::pin(::graphql_orm::graphql::orm::with_write_target_prefilter(
+                    db,
+                    Some(ctx),
+                    EntityQuery::<#struct_name, #backend_marker>::new()
+                        .where_clause(
+                            &format!("{} = {}", #sql_dialect.render_identifier_path(#struct_name::PRIMARY_KEY), #struct_name::__gom_placeholder(1)),
+                            #pk_bind_value
+                        ),
+                ))
+                    .await
+                    .map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?
                     .fetch_one_for_write_in_transaction(&mut hook_ctx)
                     .await
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
@@ -9465,11 +9521,17 @@ fn generate_graphql_operations_unfiltered(
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
 
                 // Fetch entity before deletion for notification purposes
-                let entity = EntityQuery::<#struct_name, #backend_marker>::new()
-                    .where_clause(
-                        &format!("{} = {}", #sql_dialect.render_identifier_path(#struct_name::PRIMARY_KEY), #struct_name::__gom_placeholder(1)),
-                        #pk_bind_value
-                    )
+                let entity = ::std::boxed::Box::pin(::graphql_orm::graphql::orm::with_write_target_prefilter(
+                    db,
+                    Some(ctx),
+                    EntityQuery::<#struct_name, #backend_marker>::new()
+                        .where_clause(
+                            &format!("{} = {}", #sql_dialect.render_identifier_path(#struct_name::PRIMARY_KEY), #struct_name::__gom_placeholder(1)),
+                            #pk_bind_value
+                        ),
+                ))
+                    .await
+                    .map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?
                     .fetch_one_for_write_in_transaction(&mut hook_ctx)
                     .await
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
@@ -10296,39 +10358,35 @@ fn generate_graphql_operations_unfiltered(
             {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow, SqlValue};
 
-                if let Some(db) = (provider as &dyn ::std::any::Any).downcast_ref::<::graphql_orm::db::Database<#backend_marker>>() {
-                    db.ensure_entity_access(
-                        None,
-                        #entity_name_lit,
-                        <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
-                        ::graphql_orm::graphql::orm::EntityAccessKind::Write,
-                        ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
-                    ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
-                    db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
-                    let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin(
+                // Every provider takes the same authorized path. A provider that is
+                // not a `Database` carries no policies, hooks or transforms, so it
+                // is the default handle over its pool: an entity or field that
+                // declares a policy key is refused as misconfigured, and the
+                // schema policy is the one the pool stands for.
+                let __gom_pool_database;
+                let db = match (provider as &dyn ::std::any::Any).downcast_ref::<::graphql_orm::db::Database<#backend_marker>>() {
+                    Some(db) => db,
+                    None => {
+                        // Boxed: this future is embedded in every caller's.
+                        __gom_pool_database = ::std::boxed::Box::new(::graphql_orm::db::Database::<#backend_marker>::__gom_default_for_pool(provider.pool().clone()));
+                        &*__gom_pool_database
+                    }
+                };
+                db.ensure_entity_access(
+                    None,
+                    #entity_name_lit,
+                    <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
+                    ::graphql_orm::graphql::orm::EntityAccessKind::Write,
+                    ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
+                ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
+                db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
+                let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin(
                     db,
                     ::graphql_orm::graphql::orm::TransactionMode::Default,
                 ).await?;
-                    let entity = Self::__gom_insert_with_mutation_context(&mut hook_ctx, input).await?;
-                    hook_ctx.commit_and_emit().await?;
-                    Ok(entity)
-                } else {
-                    let pool = provider.pool();
-                    #created_pk_init
-                    let sql = Self::__gom_rebind_sql(#insert_sql, 1);
-                    let mut bind_values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
-                    #prepend_pk_bind
-                    #(#insert_binds_repo)*
-                    ::graphql_orm::graphql::orm::execute_with_binds::<#backend_marker>(&sql, &bind_values, pool).await?;
-                    EntityQuery::<Self, #backend_marker>::new()
-                        .where_clause(
-                            &format!("{} = {}", #sql_dialect.render_identifier_path(<Self as DatabaseEntity>::PRIMARY_KEY), Self::__gom_placeholder(1)),
-                            #created_pk_value,
-                        )
-                        .fetch_one(pool)
-                    .await?
-                    .ok_or(::graphql_orm::sqlx::Error::RowNotFound)
-                }
+                let entity = Self::__gom_insert_with_mutation_context(&mut hook_ctx, input).await?;
+                hook_ctx.commit_and_emit().await?;
+                Ok(entity)
             }
 
             /// Insert multiple entity records transactionally using the generated create input.
@@ -10584,26 +10642,18 @@ fn generate_graphql_operations_unfiltered(
                     auth_context,
                 )
                 .await?;
-                let matched_entities = EntityQuery::<Self, #backend_marker>::new()
-                    .filter_with_entity_matching(&where_input)
-                    .fetch_all_for_write_in_transaction(&mut hook_ctx)
-                    .await?;
-                // GraphQL candidates exclude rows the caller can neither read nor write,
-                // before any count or refusal can depend on them.
-                let mut candidates = Vec::with_capacity(matched_entities.len());
-                for entity in matched_entities {
-                    if db.authorize_write_target(
-                        graphql_ctx,
-                        #entity_name_lit,
-                        <Self as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
-                        <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
-                        access_surface,
-                        &entity as &(dyn ::std::any::Any + Send + Sync),
-                    ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)? {
-                        candidates.push(entity);
-                    }
-                }
-                let matched_entities = candidates;
+                // The runtime selects, locks and classifies the targets. A row a
+                // GraphQL caller can neither read nor write is left out before any
+                // count or refusal can depend on it, and the bulk write bound counts
+                // targets only; a repository write keeps the unbounded read.
+                let matched_entities = ::std::boxed::Box::pin(::graphql_orm::graphql::orm::bulk_write_targets::<Self, #backend_marker>(
+                    db,
+                    graphql_ctx,
+                    &mut hook_ctx,
+                    EntityQuery::<Self, #backend_marker>::new()
+                        .filter_with_entity_matching(&where_input),
+                ))
+                .await?;
 
                 if #has_notify_handler && graphql_ctx.is_some() && matched_entities.len() > 1000 {
                     return Err(::graphql_orm::graphql::errors::sqlx_error_from_public(
@@ -11040,26 +11090,18 @@ fn generate_graphql_operations_unfiltered(
                     auth_context,
                 )
                 .await?;
-                let matched_entities = EntityQuery::<Self, #backend_marker>::new()
-                    .filter_with_entity_matching(&where_input)
-                    .fetch_all_for_write_in_transaction(&mut hook_ctx)
-                    .await?;
-                // GraphQL candidates exclude rows the caller can neither read nor write,
-                // before any count or refusal can depend on them.
-                let mut candidates = Vec::with_capacity(matched_entities.len());
-                for entity in matched_entities {
-                    if db.authorize_write_target(
-                        graphql_ctx,
-                        #entity_name_lit,
-                        <Self as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
-                        <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
-                        access_surface,
-                        &entity as &(dyn ::std::any::Any + Send + Sync),
-                    ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)? {
-                        candidates.push(entity);
-                    }
-                }
-                let matched_entities = candidates;
+                // The runtime selects, locks and classifies the targets. A row a
+                // GraphQL caller can neither read nor write is left out before any
+                // count or refusal can depend on it, and the bulk write bound counts
+                // targets only; a repository write keeps the unbounded read.
+                let matched_entities = ::std::boxed::Box::pin(::graphql_orm::graphql::orm::bulk_write_targets::<Self, #backend_marker>(
+                    db,
+                    graphql_ctx,
+                    &mut hook_ctx,
+                    EntityQuery::<Self, #backend_marker>::new()
+                        .filter_with_entity_matching(&where_input),
+                ))
+                .await?;
 
                 if #has_notify_handler && graphql_ctx.is_some() && matched_entities.len() > 1000 {
                     return Err(::graphql_orm::graphql::errors::sqlx_error_from_public(

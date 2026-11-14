@@ -3,12 +3,92 @@ title: graphql-orm-router migration guide
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-14
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # graphql-orm-router migration guide
+
+## 0.14.0 to 0.15.0: router hardening
+
+### Breaking changes
+
+#### Role-scope catalogue maximum staleness (can refuse requests)
+
+This applies to `auth-agql` builds with `roleScopeCatalogue`. Earlier routers
+kept expanding authorization roles from the last verified snapshot for as long
+as refreshes failed. Now a snapshot that is stale (past `cacheTtlSeconds` or its
+signed expiry, whichever is first) serves roles for at most
+`maximumStalenessSeconds`, 900 by default. After that, **requests carrying
+`authorization_roles` that the old router served are refused as unavailable**
+until the catalogue refreshes. Direct-scope-only requests are unaffected.
+
+Established WebSocket connections follow the catalogue too. When a new snapshot
+is accepted, or the old one passes its deadline, a role-bearing connection is
+re-expanded against the current snapshot at its next operation, or within
+about 500 ms without client activity. The new expansion replaces the old one:
+
+- **Changed effective scopes:** the connection's subscriptions end with
+  `SUBSCRIPTION_AUTHORIZATION_CHANGED`, and the next query, mutation or
+  subscription is authorized against the new scopes. A removed role or scope
+  is refused from then on.
+- **Unchanged effective scopes:** subscriptions keep running.
+- **Stale catalogue:** operations fail with `UNAUTHENTICATED`, and
+  subscriptions end with that error.
+
+The socket stays open in every case. Clients should resubscribe when they see
+either error code. Direct-scope connections are unaffected. Staleness is
+measured on a monotonic clock, so wall-clock steps neither reopen nor extend a
+snapshot. Whether that clock advances during system suspend depends on the
+platform; restart or force a refresh after resume where that matters.
+
+Before upgrading, make sure the catalogue endpoint is reliably reachable, and
+alert on `role_scope_stale_serve_total`, `role_scope_stale_refusal_total` and
+`role_scope_refresh_failure_total`. To allow a longer outage window, set
+`maximumStalenessSeconds` (up to 86400) or call
+`RoleScopeCatalogueConfig::with_maximum_staleness`. There is no unbounded
+setting. With default settings the JWKS cache, which goes stale 15 minutes
+after a failed refresh, already refuses every bearer credential in an issuer
+outage, so the default staleness adds no new outage mode in that case.
+
+#### Subgraph identity on refresh
+
+A refresh refuses a router descriptor whose `subgraph.id` changed since the
+source was admitted, and the source keeps its last-known-good input. If a
+subgraph's identity is meant to change, restart the router after deploying it.
+
+#### Subscription count caps
+
+`SubscriptionConfig` counts above 1048576 now fail validation with
+`InvalidConfiguration`. Lower any such value.
+
+### Other changes
+
+- **Prometheus scrape address (opt-in).** Nothing changes unless you opt in.
+  To move the unauthenticated exporter off the public interface, add an IP
+  literal, `"telemetry": {"prometheus": {"host": "127.0.0.1", "port": 9090}}`,
+  or use `RouterTelemetryConfig::with_prometheus_listener(address, path)`. The
+  port must still differ from the public and administrative ports. A router
+  whose exporter binds `0.0.0.0` or `::` now logs a startup warning.
+- **Operation-name metric attribute (opt-in).** Set
+  `"omitOperationName": true` under `telemetry.prometheus`, or call
+  `RouterTelemetryConfig::omit_operation_name_from_metrics(true)`, to drop the
+  client-chosen operation name from exported HTTP server and cost metrics. We
+  recommend it where anonymous or untrusted clients can send operations.
+  Dashboards that group by operation name lose that breakdown.
+- Custom `AuthenticationClock` and `AuthenticationProvider` implementations
+  inherit default `monotonic_now` methods. A test clock that simulates elapsed
+  time should override `AuthenticationClock::monotonic_now`, as role-scope
+  staleness now follows it. A custom provider that marks principals with
+  `AuthenticatedPrincipal::with_authority_valid_until` must return deadlines on
+  its own `monotonic_now` clock, and may report
+  `AuthenticationProvider::authority_generation` so transports re-expand
+  after an authority change.
+- Outbound fetches send `User-Agent: graphql-orm-router/<version>`. Update any
+  upstream allow-list that matched `graphql-orm-router/0.1`.
+- `GET /_router/metrics` adds `router_websocket_send_failures_total`. Strict
+  consumers of that JSON object should accept the new key.
 
 ## 0.13.0 to 0.14.0: persisted documents
 

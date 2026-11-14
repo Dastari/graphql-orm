@@ -295,7 +295,52 @@ struct ConnectionState {
     next_operation: u64,
     local_loss: hive_router::tokio::sync::watch::Sender<u64>,
     permit: Option<ConnectionPermit>,
+    /// Present only while the connection's scopes came from an external
+    /// authority with a deadline, such as role-scope catalogue expansion.
+    authority: Option<ConnectionAuthority>,
+    /// The public socket, once initialised, so any authority check can end
+    /// subscriptions on it.
+    public_sink: Option<ws::WsSink>,
 }
+
+/// The retained bearer of a connection whose expanded scopes expire with, or
+/// change with, the authority snapshot they came from. Never logged.
+struct ConnectionAuthority {
+    bearer: String,
+    valid_until: std::time::Instant,
+    generation: Option<u64>,
+    scopes: Vec<String>,
+}
+
+impl ConnectionAuthority {
+    fn from_principal(bearer: &str, principal: &crate::AuthenticatedPrincipal) -> Option<Self> {
+        principal
+            .authority_valid_until()
+            .map(|valid_until| ConnectionAuthority {
+                bearer: bearer.to_owned(),
+                valid_until,
+                generation: principal.authority_generation(),
+                scopes: principal.scopes().to_vec(),
+            })
+    }
+}
+
+/// What a re-check of the connection's authority found.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AuthorityCheck {
+    /// Still valid with the same effective scopes.
+    Unchanged,
+    /// Re-expanded to different effective scopes.
+    ScopesChanged,
+    /// Could not be confirmed (stale or unavailable).
+    Unavailable,
+}
+
+/// How often a connection whose authority has lapsed checks it again.
+const AUTHORITY_RETRY: std::time::Duration = std::time::Duration::from_millis(500);
+/// How often a connection with expanded scopes checks the provider's authority
+/// generation without client activity. Each check is one atomic read.
+const AUTHORITY_GENERATION_POLL: std::time::Duration = std::time::Duration::from_millis(500);
 
 struct Operation {
     internal_id: String,
@@ -327,6 +372,52 @@ impl ConnectionState {
             .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
     }
 
+    /// Re-checks the connection's externally expanded scopes. The retained
+    /// bearer is authenticated again once their deadline passes or the
+    /// provider reports a newer authority generation, so the current snapshot
+    /// decides: the result replaces the old scopes, never adds to them.
+    fn confirm_authority(&mut self) -> AuthorityCheck {
+        let provider = self.gateway.authentication.clone();
+        let Some(authority) = &mut self.authority else {
+            return AuthorityCheck::Unchanged;
+        };
+        let generation_changed = authority.generation.is_some()
+            && provider.authority_generation() != authority.generation;
+        if !generation_changed && provider.monotonic_now() < authority.valid_until {
+            return AuthorityCheck::Unchanged;
+        }
+        let Ok(principal) = provider.authenticate_bearer(&authority.bearer) else {
+            return AuthorityCheck::Unavailable;
+        };
+        let changed = principal.scopes() != authority.scopes.as_slice();
+        let bearer = std::mem::take(&mut authority.bearer);
+        match ConnectionAuthority::from_principal(&bearer, &principal) {
+            Some(renewed) => *authority = renewed,
+            None => self.authority = None,
+        }
+        if changed {
+            AuthorityCheck::ScopesChanged
+        } else {
+            AuthorityCheck::Unchanged
+        }
+    }
+
+    /// Ends every subscription after the connection's authority lapsed or its
+    /// effective scopes changed, and returns their public and internal IDs.
+    /// One-shot operations finish.
+    fn end_subscriptions_for_lapsed_authority(&mut self) -> Vec<(String, String)> {
+        let ended = self
+            .operations
+            .iter()
+            .filter(|(_, operation)| operation.subscription)
+            .map(|(id, operation)| (id.clone(), operation.internal_id.clone()))
+            .collect::<Vec<_>>();
+        for (id, _) in &ended {
+            self.remove_operation(id);
+        }
+        ended
+    }
+
     fn remove_operation(&mut self, id: &str) {
         if self.operations.remove(id).is_some() {
             self.gateway.remove_operations(1);
@@ -351,16 +442,20 @@ impl ConnectionState {
     }
 
     fn terminate_and_close_internal(&mut self) {
-        let _ = self.terminate_and_close_internal_once();
+        self.terminate_and_close_internal_once();
     }
 
     fn terminate_and_close_internal_once(&mut self) -> bool {
         let termination = self.terminate();
         if let Some(internal) = termination.internal_sink {
+            let metrics = self.gateway.metrics.clone();
             rt::spawn(async move {
-                let _ = internal
-                    .send(close_message(1000, "Client disconnected"))
-                    .await;
+                send_best_effort(
+                    &internal,
+                    close_message(1000, "Client disconnected"),
+                    &metrics,
+                )
+                .await;
             });
         }
         termination.first
@@ -439,6 +534,8 @@ async fn create_connection_service(
         next_operation: 0,
         local_loss: hive_router::tokio::sync::watch::channel(0).0,
         permit: Some(permit),
+        authority: None,
+        public_sink: None,
     }));
 
     spawn_continuity_watch(
@@ -455,9 +552,12 @@ async fn create_connection_service(
         );
     } else {
         state.borrow_mut().terminate_and_close_internal();
-        let _ = sink
-            .send(close_message(4406, "Subprotocol not acceptable"))
-            .await;
+        send_best_effort(
+            &sink,
+            close_message(4406, "Subprotocol not acceptable"),
+            &gateway.metrics,
+        )
+        .await;
     }
 
     let service_state = state.clone();
@@ -470,9 +570,13 @@ async fn create_connection_service(
     let shutdown = fn_shutdown(async move || {
         let termination = state.borrow_mut().terminate();
         if let Some(internal) = termination.internal_sink {
-            let _ = internal
-                .send(close_message(1000, "Client disconnected"))
-                .await;
+            let metrics = state.borrow().gateway.metrics.clone();
+            send_best_effort(
+                &internal,
+                close_message(1000, "Client disconnected"),
+                &metrics,
+            )
+            .await;
         }
     });
     Ok(chain(service).and_then(shutdown))
@@ -488,22 +592,28 @@ fn spawn_connection_init_timeout(
         let Some(state) = state.upgrade() else {
             return;
         };
-        let termination = {
+        let (termination, metrics) = {
             let mut state = state.borrow_mut();
             if state.phase != ConnectionPhase::WaitingForInit {
                 return;
             }
-            state.terminate()
+            (state.terminate(), state.gateway.metrics.clone())
         };
         if let Some(internal) = termination.internal_sink {
-            let _ = internal
-                .send(close_message(1000, "Connection initialization timed out"))
-                .await;
+            send_best_effort(
+                &internal,
+                close_message(1000, "Connection initialization timed out"),
+                &metrics,
+            )
+            .await;
         }
         if termination.first {
-            let _ = sink
-                .send(close_message(4408, "Connection initialisation timeout"))
-                .await;
+            send_best_effort(
+                &sink,
+                close_message(4408, "Connection initialisation timeout"),
+                &metrics,
+            )
+            .await;
         }
     });
 }
@@ -521,15 +631,22 @@ fn spawn_expiry(
             return;
         };
         let termination = state.borrow_mut().terminate();
+        let metrics = state.borrow().gateway.metrics.clone();
         if let Some(internal) = termination.internal_sink {
-            let _ = internal
-                .send(close_message(1000, "Credential expired"))
-                .await;
+            send_best_effort(
+                &internal,
+                close_message(1000, "Credential expired"),
+                &metrics,
+            )
+            .await;
         }
         if termination.first {
-            let _ = sink
-                .send(close_message(4401, "Bearer credential expired"))
-                .await;
+            send_best_effort(
+                &sink,
+                close_message(4401, "Bearer credential expired"),
+                &metrics,
+            )
+            .await;
         }
     });
 }
@@ -559,7 +676,8 @@ async fn handle_frame(
         ws::Frame::Close(reason) => {
             let termination = state.borrow_mut().terminate();
             if let Some(internal) = termination.internal_sink {
-                let _ = internal.send(ws::Message::Close(reason.clone())).await;
+                let metrics = state.borrow().gateway.metrics.clone();
+                send_best_effort(&internal, ws::Message::Close(reason.clone()), &metrics).await;
             }
             Ok(termination.first.then(|| ws::Message::Close(reason)))
         }
@@ -654,10 +772,16 @@ async fn initialize_connection(
             .borrow_mut()
             .terminate_with_public_close(1013, "Too many connections");
     };
+    let watch_authority = principal.authority_valid_until().is_some();
     {
         let mut state = state.borrow_mut();
         state.permit = Some(permit);
         state.phase = ConnectionPhase::Connecting;
+        state.authority = ConnectionAuthority::from_principal(token, &principal);
+        state.public_sink = Some(external_sink.clone());
+    }
+    if watch_authority {
+        spawn_authority_watch(Rc::downgrade(&state), external_sink.clone());
     }
     spawn_expiry(
         Rc::downgrade(&state),
@@ -710,25 +834,40 @@ fn selected_subscription(message: &Value) -> Option<bool> {
     Some(operation.operation_type() == cynic_parser::common::OperationType::Subscription)
 }
 
+/// One frame from the private Hive endpoint. A text frame is JSON-parsed once,
+/// on arrival, and the parsed message travels through the bridge queue.
+enum BridgeFrame {
+    Message(Value),
+    Control(ws::Frame),
+}
+
+impl BridgeFrame {
+    /// Unparseable text is dropped here, exactly as the public translation
+    /// would drop it later.
+    fn parse(frame: ws::Frame) -> Option<Self> {
+        match frame {
+            ws::Frame::Text(bytes) => serde_json::from_slice(&bytes).ok().map(Self::Message),
+            frame => Some(Self::Control(frame)),
+        }
+    }
+}
+
 fn enqueue_subscription_frame(
-    tx: &hive_router::tokio::sync::mpsc::Sender<
-        Result<ws::Frame, hive_router::ntex::ws::error::WsError<()>>,
-    >,
+    tx: &hive_router::tokio::sync::mpsc::Sender<BridgeFrame>,
     frame: ws::Frame,
     state: &SharedConnectionState,
-) -> Option<ws::Frame> {
+) -> Option<BridgeFrame> {
+    let frame = BridgeFrame::parse(frame)?;
     let id = match &frame {
-        ws::Frame::Text(bytes) => serde_json::from_slice::<Value>(bytes)
-            .ok()
-            .and_then(|message| message.get("id").and_then(Value::as_str).map(str::to_owned)),
-        _ => None,
+        BridgeFrame::Message(message) => message.get("id").and_then(Value::as_str),
+        BridgeFrame::Control(_) => None,
     };
     let mut state = state.borrow_mut();
-    let Some(operation) = id.as_ref().and_then(|id| {
+    let Some(operation) = id.and_then(|id| {
         state
             .operations
             .values_mut()
-            .find(|operation| operation.internal_id == *id && operation.subscription)
+            .find(|operation| operation.internal_id == id && operation.subscription)
     }) else {
         return Some(frame);
     };
@@ -736,7 +875,7 @@ fn enqueue_subscription_frame(
         return None;
     }
     if matches!(
-        tx.try_send(Ok(frame)),
+        tx.try_send(frame),
         Err(hive_router::tokio::sync::mpsc::error::TrySendError::Full(_))
     ) {
         operation.lost = true;
@@ -777,7 +916,7 @@ async fn connect_internal(
     let bridge_state = state.clone();
     let bridge_external = external_sink.clone();
     rt::spawn(async move {
-        let _ = connection
+        let ended = connection
             .seal()
             .start(fn_service(move |frame| {
                 let state = bridge_state.clone();
@@ -787,25 +926,32 @@ async fn connect_internal(
                     // One-shot results and connection controls never enter the
                     // lossy subscription queue, even when it is saturated.
                     match queued {
-                        Some(ws::Frame::Text(bytes)) => {
-                            if let Some(text) = public_server_message(&bytes, &state)
+                        Some(BridgeFrame::Message(message)) => {
+                            if let Some(text) = public_server_message(message, &state)
                                 && sink.send(ws::Message::Text(text.into())).await.is_err()
                             {
                                 state.borrow_mut().terminate_and_close_internal();
                             }
                         }
-                        Some(ws::Frame::Ping(bytes)) => {
+                        Some(BridgeFrame::Control(ws::Frame::Ping(bytes))) => {
                             return Ok::<_, ()>(Some(ws::Message::Pong(bytes)));
                         }
-                        Some(ws::Frame::Close(reason)) => {
+                        Some(BridgeFrame::Control(ws::Frame::Close(reason))) => {
                             state.borrow_mut().terminate_and_close_internal();
-                            let _ = sink.send(ws::Message::Close(reason)).await;
+                            let metrics = state.borrow().gateway.metrics.clone();
+                            send_best_effort(&sink, ws::Message::Close(reason), &metrics).await;
                         }
-                        Some(ws::Frame::Binary(_) | ws::Frame::Continuation(_)) => {
+                        Some(BridgeFrame::Control(
+                            ws::Frame::Binary(_) | ws::Frame::Continuation(_),
+                        )) => {
                             state.borrow_mut().terminate_and_close_internal();
-                            let _ = sink
-                                .send(close_message(1011, "Subscription transport unavailable"))
-                                .await;
+                            let metrics = state.borrow().gateway.metrics.clone();
+                            send_best_effort(
+                                &sink,
+                                close_message(1011, "Subscription transport unavailable"),
+                                &metrics,
+                            )
+                            .await;
                         }
                         _ => {}
                     }
@@ -813,6 +959,11 @@ async fn connect_internal(
                 }
             }))
             .await;
+        // The bridge's own state handling already terminated the connection;
+        // record only that the private transport ended abnormally.
+        if ended.is_err() {
+            tracing::debug!("private subscription bridge ended with a transport error");
+        }
     });
     state.borrow_mut().internal_sink = Some(internal_sink.clone());
     let init = json!({
@@ -836,9 +987,7 @@ async fn connect_internal(
 }
 
 async fn forward_internal_messages(
-    mut receiver: hive_router::tokio::sync::mpsc::Receiver<
-        Result<ws::Frame, hive_router::ntex::ws::error::WsError<()>>,
-    >,
+    mut receiver: hive_router::tokio::sync::mpsc::Receiver<BridgeFrame>,
     internal_sink: ws::WsSink,
     external_sink: ws::WsSink,
     state: SharedConnectionState,
@@ -850,16 +999,15 @@ async fn forward_internal_messages(
     }
 
     let mut end = ForwardEnd::InternalFailure;
+    // Only subscription messages enter this queue; connection controls are
+    // answered inline by the bridge service. The control arms stay exhaustive.
     while let Some(frame) = receiver.recv().await {
-        let Ok(frame) = frame else {
-            break;
-        };
         match frame {
-            ws::Frame::Text(bytes) => {
+            BridgeFrame::Message(message) => {
                 if external_sink.io().is_wr_backpressure() {
                     state.borrow_mut().lose_connection_subscriptions();
                 }
-                let Some(text) = public_server_message(&bytes, &state) else {
+                let Some(text) = public_server_message(message, &state) else {
                     continue;
                 };
                 if external_sink
@@ -871,37 +1019,44 @@ async fn forward_internal_messages(
                     break;
                 }
             }
-            ws::Frame::Ping(bytes) => {
+            BridgeFrame::Control(ws::Frame::Ping(bytes)) => {
                 if internal_sink.send(ws::Message::Pong(bytes)).await.is_err() {
                     break;
                 }
             }
-            ws::Frame::Pong(_) => {}
-            ws::Frame::Close(reason) => {
+            BridgeFrame::Control(ws::Frame::Pong(_) | ws::Frame::Text(_)) => {}
+            BridgeFrame::Control(ws::Frame::Close(reason)) => {
                 end = ForwardEnd::InternalClose(reason);
                 break;
             }
-            ws::Frame::Binary(_) | ws::Frame::Continuation(_) => break,
+            BridgeFrame::Control(ws::Frame::Binary(_) | ws::Frame::Continuation(_)) => break,
         }
     }
     let termination = state.borrow_mut().terminate();
     if !termination.first {
         return;
     }
+    let metrics = state.borrow().gateway.metrics.clone();
     match end {
         ForwardEnd::InternalClose(reason) => {
-            let _ = external_sink.send(ws::Message::Close(reason)).await;
+            send_best_effort(&external_sink, ws::Message::Close(reason), &metrics).await;
         }
         ForwardEnd::InternalFailure => {
-            let _ = external_sink
-                .send(close_message(1011, "Subscription transport unavailable"))
-                .await;
+            send_best_effort(
+                &external_sink,
+                close_message(1011, "Subscription transport unavailable"),
+                &metrics,
+            )
+            .await;
         }
         ForwardEnd::ExternalFailure => {
             if let Some(internal) = termination.internal_sink {
-                let _ = internal
-                    .send(close_message(1000, "Client disconnected"))
-                    .await;
+                send_best_effort(
+                    &internal,
+                    close_message(1000, "Client disconnected"),
+                    &metrics,
+                )
+                .await;
             }
         }
     }
@@ -909,8 +1064,7 @@ async fn forward_internal_messages(
 
 // Hive can emit complete after an error. Translate each bridge generation back to
 // its public ID only while active: error is terminal, even if that ID is reused.
-fn public_server_message(bytes: &[u8], state: &SharedConnectionState) -> Option<String> {
-    let mut message = serde_json::from_slice::<Value>(bytes).ok()?;
+fn public_server_message(mut message: Value, state: &SharedConnectionState) -> Option<String> {
     let mut state = state.borrow_mut();
     match message.get("type").and_then(Value::as_str) {
         Some("connection_ack") => {
@@ -928,10 +1082,14 @@ fn public_server_message(bytes: &[u8], state: &SharedConnectionState) -> Option<
             if state.operation_lost(&state.operations[&id]) {
                 if let Some(internal) = state.internal_sink.clone() {
                     let complete = json!({"id": internal_id, "type": "complete"});
+                    let metrics = state.gateway.metrics.clone();
                     rt::spawn(async move {
-                        let _ = internal
-                            .send(ws::Message::Text(complete.to_string().into()))
-                            .await;
+                        send_best_effort(
+                            &internal,
+                            ws::Message::Text(complete.to_string().into()),
+                            &metrics,
+                        )
+                        .await;
                     });
                 }
                 state.remove_operation(&id);
@@ -966,6 +1124,17 @@ async fn forward_subscribe(
         return state
             .borrow_mut()
             .terminate_with_public_close(4400, "Subscription ID is required");
+    }
+    // Duplicate IDs are connection errors before any authority work.
+    if state.borrow().operations.contains_key(&id) {
+        return state
+            .borrow_mut()
+            .terminate_with_public_close(4409, "Subscriber already exists");
+    }
+    if enforce_authority(&state).await == AuthorityCheck::Unavailable {
+        return Some(ws::Message::Text(
+            authority_unavailable_error(&id).to_string().into(),
+        ));
     }
     {
         let mut state = state.borrow_mut();
@@ -1130,6 +1299,38 @@ fn inject_operation_variables_inner(
         return;
     }
 
+    // Trim with exact compact-JSON size arithmetic rather than re-serialising
+    // the whole message per removed entry. An object entry costs its encoded
+    // key, a colon and its encoded value, plus one comma unless it is alone.
+    let mut encoded_len = message.to_string().len();
+    while encoded_len > internal_max_bytes {
+        let Some(projected) = message
+            .get_mut("payload")
+            .and_then(Value::as_object_mut)
+            .and_then(|payload| payload.get_mut("extensions"))
+            .and_then(Value::as_object_mut)
+            .and_then(|extensions| extensions.get_mut(INTERNAL_SUBSCRIPTION_VARIABLES_EXTENSION))
+            .and_then(Value::as_object_mut)
+        else {
+            break;
+        };
+        let Some(name) = projected.keys().next_back().cloned() else {
+            break;
+        };
+        let Some(value) = projected.remove(&name) else {
+            break;
+        };
+        let entry = serde_json::to_string(&name)
+            .expect("JSON variable name")
+            .len()
+            + 1
+            + value.to_string().len();
+        let separator = usize::from(!projected.is_empty());
+        encoded_len = encoded_len.saturating_sub(entry + separator);
+    }
+
+    // Confirm with one real serialization; this also removes an emptied
+    // projection when the message is still too large.
     while message.to_string().len() > internal_max_bytes {
         let Some(projected) = message
             .get_mut("payload")
@@ -1213,6 +1414,137 @@ fn close_message(code: u16, description: &str) -> ws::Message {
     }))
 }
 
+/// Sends a best-effort close or completion to a peer that may already have
+/// gone. A failure only means the peer closed first, so it is counted rather
+/// than propagated. Neither the message nor the peer is recorded.
+async fn send_best_effort(sink: &impl ControlSink, message: ws::Message, metrics: &RouterMetrics) {
+    if !sink.send_control(message).await {
+        metrics.websocket_send_failed();
+    }
+}
+
+/// A WebSocket peer that accepts one best-effort control message.
+trait ControlSink {
+    /// Attempts the send; `false` means the peer was already gone.
+    fn send_control(&self, message: ws::Message) -> impl std::future::Future<Output = bool>;
+}
+
+impl ControlSink for ws::WsSink {
+    fn send_control(&self, message: ws::Message) -> impl std::future::Future<Output = bool> {
+        let sent = self.send(message);
+        async move { sent.await.is_ok() }
+    }
+}
+
+/// The operation-scoped refusal when a connection's expanded scopes can no
+/// longer be confirmed, matching the HTTP refusal.
+fn authority_unavailable_error(id: &str) -> Value {
+    json!({"id": id, "type": "error", "payload": [{
+        "message": "authentication service unavailable",
+        "extensions": {"code": "UNAUTHENTICATED"}
+    }]})
+}
+
+/// The terminal error for a subscription ended because the connection's
+/// effective scopes changed; the client may resubscribe under the new scopes.
+fn authorization_changed_error(id: &str) -> Value {
+    json!({"id": id, "type": "error", "payload": [{
+        "message": "Authorization changed; resubscribe",
+        "extensions": {"code": "SUBSCRIPTION_AUTHORIZATION_CHANGED"}
+    }]})
+}
+
+/// Re-checks the connection's authority and, when it lapsed or its effective
+/// scopes changed, ends the connection's subscriptions with the matching
+/// terminal error. Subscriptions keep running when the scopes are unchanged.
+async fn enforce_authority(state: &SharedConnectionState) -> AuthorityCheck {
+    let (check, ended, public, internal, metrics) = {
+        let mut state = state.borrow_mut();
+        if state.phase == ConnectionPhase::Closed {
+            return AuthorityCheck::Unchanged;
+        }
+        let check = state.confirm_authority();
+        if check == AuthorityCheck::Unchanged {
+            return check;
+        }
+        (
+            check,
+            state.end_subscriptions_for_lapsed_authority(),
+            state.public_sink.clone(),
+            state.internal_sink.clone(),
+            state.gateway.metrics.clone(),
+        )
+    };
+    let error = if check == AuthorityCheck::ScopesChanged {
+        authorization_changed_error
+    } else {
+        authority_unavailable_error
+    };
+    for (id, internal_id) in ended {
+        if let Some(public) = &public {
+            send_best_effort(
+                public,
+                ws::Message::Text(error(&id).to_string().into()),
+                &metrics,
+            )
+            .await;
+        }
+        if let Some(internal) = &internal {
+            let complete = json!({"id": internal_id, "type": "complete"});
+            send_best_effort(
+                internal,
+                ws::Message::Text(complete.to_string().into()),
+                &metrics,
+            )
+            .await;
+        }
+    }
+    check
+}
+
+/// Watches a connection with expanded scopes without client activity: at its
+/// authority deadline, and every [`AUTHORITY_GENERATION_POLL`] for a newer
+/// authority generation. A lapse ends its subscriptions with
+/// [`authority_unavailable_error`] (the connection stays open and recovers
+/// with the authority); changed effective scopes end them with
+/// [`authorization_changed_error`].
+fn spawn_authority_watch(state: Weak<RefCell<ConnectionState>>, sink: ws::WsSink) {
+    rt::spawn(async move {
+        loop {
+            let delay = {
+                let Some(state) = state.upgrade() else {
+                    return;
+                };
+                let state = state.borrow();
+                if state.phase == ConnectionPhase::Closed {
+                    return;
+                }
+                let Some(authority) = &state.authority else {
+                    return;
+                };
+                authority
+                    .valid_until
+                    .saturating_duration_since(state.gateway.authentication.monotonic_now())
+                    .min(AUTHORITY_GENERATION_POLL)
+            };
+            hive_router::tokio::select! {
+                _ = hive_router::tokio::time::sleep(delay.max(std::time::Duration::from_millis(10))) => {}
+                _ = sink.on_disconnect() => return,
+            }
+            let Some(shared) = state.upgrade() else {
+                return;
+            };
+            if enforce_authority(&shared).await == AuthorityCheck::Unavailable {
+                drop(shared);
+                hive_router::tokio::select! {
+                    _ = hive_router::tokio::time::sleep(AUTHORITY_RETRY) => {}
+                    _ = sink.on_disconnect() => return,
+                }
+            }
+        }
+    });
+}
+
 fn continuity_error(id: &str) -> Value {
     json!({"id": id, "type": "error", "payload": [{
         "message": "Subscription continuity lost; resubscribe and refetch",
@@ -1269,9 +1601,13 @@ fn spawn_continuity_watch(
                 }
                 if let Some(internal) = &internal {
                     let complete = json!({"id": internal_id, "type": "complete"});
-                    let _ = internal
-                        .send(ws::Message::Text(complete.to_string().into()))
-                        .await;
+                    let metrics = state.borrow().gateway.metrics.clone();
+                    send_best_effort(
+                        internal,
+                        ws::Message::Text(complete.to_string().into()),
+                        &metrics,
+                    )
+                    .await;
                 }
             }
         }
@@ -1281,6 +1617,11 @@ fn spawn_continuity_watch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pre-parse test entry point: frames arrive as text.
+    fn public_server_message(bytes: &[u8], state: &SharedConnectionState) -> Option<String> {
+        super::public_server_message(serde_json::from_slice(bytes).ok()?, state)
+    }
 
     #[derive(Debug)]
     struct UnusedAuthentication;
@@ -1321,6 +1662,8 @@ mod tests {
             operations,
             next_operation: 0,
             permit: None,
+            authority: None,
+            public_sink: None,
             local_loss: hive_router::tokio::sync::watch::channel(0).0,
         }))
     }
@@ -1539,6 +1882,8 @@ mod tests {
             next_operation: 1,
             local_loss: hive_router::tokio::sync::watch::channel(0).0,
             permit: None,
+            authority: None,
+            public_sink: None,
         }));
         gateway.add_operation();
         if continuity_lost {
@@ -1680,6 +2025,90 @@ mod tests {
         assert!(!endpoint.authorizes(&endpoint.path, Some(std::str::from_utf8(&flipped).unwrap())));
         assert!(!endpoint.authorizes(&endpoint.path, Some(segment)));
         assert!(endpoint.authorizes(&endpoint.path, Some(&endpoint.secret)));
+    }
+
+    struct FixedSink(bool);
+
+    impl ControlSink for FixedSink {
+        fn send_control(&self, _: ws::Message) -> impl std::future::Future<Output = bool> {
+            std::future::ready(self.0)
+        }
+    }
+
+    #[ntex::test]
+    async fn failed_best_effort_sends_are_counted() {
+        let metrics = RouterMetrics::default();
+        send_best_effort(&FixedSink(true), close_message(1000, "done"), &metrics).await;
+        assert_eq!(metrics.snapshot().websocket_send_failures_total(), 0);
+        for _ in 0..2 {
+            send_best_effort(&FixedSink(false), close_message(1000, "gone"), &metrics).await;
+        }
+        assert_eq!(metrics.snapshot().websocket_send_failures_total(), 2);
+    }
+
+    #[test]
+    fn projection_trim_matches_the_reserialising_reference() {
+        let message = || {
+            let mut variables = serde_json::Map::new();
+            for index in 0..40 {
+                variables.insert(format!("v{index:02}"), json!(format!("value-{index}")));
+            }
+            variables.insert("quo\"te".to_owned(), json!("needs \"escaping\""));
+            variables.insert(
+                "multibyte".to_owned(),
+                json!("\u{fc}mlaut \u{20ac} \u{1f600}"),
+            );
+            variables.insert("control".to_owned(), json!("line\nbreak\u{1}"));
+            variables.insert("unicode\u{e9}".to_owned(), json!(12.5));
+            variables.insert("flag".to_owned(), json!(true));
+            variables.insert("nothing".to_owned(), Value::Null);
+            json!({
+                "id": "operation",
+                "type": "subscribe",
+                "payload": {
+                    "query": "subscription { event }",
+                    "variables": variables,
+                    "extensions": {"client": true}
+                }
+            })
+        };
+        // The old algorithm: re-serialise after every removed entry.
+        let reference = |limit: usize| {
+            let mut value = message();
+            inject_operation_variables(&mut value, usize::MAX);
+            while value.to_string().len() > limit {
+                let extensions = value["payload"]["extensions"].as_object_mut().unwrap();
+                let Some(projected) = extensions
+                    .get_mut(INTERNAL_SUBSCRIPTION_VARIABLES_EXTENSION)
+                    .and_then(Value::as_object_mut)
+                else {
+                    break;
+                };
+                let Some(name) = projected.keys().next_back().cloned() else {
+                    extensions.remove(INTERNAL_SUBSCRIPTION_VARIABLES_EXTENSION);
+                    break;
+                };
+                projected.remove(&name);
+            }
+            value
+        };
+        let full = {
+            let mut value = message();
+            inject_operation_variables(&mut value, usize::MAX);
+            value.to_string().len()
+        };
+        for limit in (0..=full + 2).step_by(7).chain([full, full - 1, 1]) {
+            let mut trimmed = message();
+            inject_operation_variables(&mut trimmed, limit);
+            let expected = reference(limit);
+            assert_eq!(trimmed, expected, "limit {limit}");
+            // Compare the exact serialized bytes sent to the private endpoint.
+            assert_eq!(
+                trimmed.to_string().into_bytes(),
+                expected.to_string().into_bytes(),
+                "limit {limit}"
+            );
+        }
     }
 
     #[test]

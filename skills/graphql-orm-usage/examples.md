@@ -210,7 +210,7 @@ impl OrderActions {
         // An in-process read: the row check below is what authorizes it.
         let order = Order::find_by_id(db, &id)
             .await
-            .map_err(|error| async_graphql::Error::new(error.to_string()))?
+            .map_err(graphql_error_from_sqlx)?
             .ok_or_else(|| OrmPublicError::forbidden().into_graphql_error())?;
         db.ensure_writable_row(
             Some(ctx),

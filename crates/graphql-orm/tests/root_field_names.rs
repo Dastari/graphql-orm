@@ -68,7 +68,26 @@ impl DescribedDigits {
     async fn s3bucket_status(&self, max_v2items: i32, page2_size: i32) -> i32 {
         max_v2items + page2_size
     }
+
+    /// Returns the status of an HTTP/2 stream.
+    async fn http2_status(&self, stream_id2: i32) -> i32 {
+        stream_id2
+    }
+
+    /// Returns the second version of a link.
+    async fn get_url_v2(&self, x_y_z1: i32) -> i32 {
+        x_y_z1
+    }
+
+    /// Counts items in a numbered group.
+    async fn item9_count_10x(&self, r#type: i32) -> i32 {
+        r#type
+    }
 }
+
+/// Identifiers on which `convert_case` and Inflector split differently (#576).
+const DISAGREEING_IDENTIFIERS: [&str; 4] =
+    ["s3BucketStatus", "http2Status", "getUrlV2", "item9Count10X"];
 
 /// The fields and argument names async-graphql serves for a query root.
 async fn served<T>(root: T, type_name: &str) -> Vec<(String, Vec<String>)>
@@ -149,6 +168,14 @@ async fn described_roots_catalogue_the_served_field_and_argument_names() {
         })
         .collect::<Vec<_>>();
     assert_eq!(catalogued, served);
+    // The fixture really covers names where digits meet letters: each is
+    // served and catalogued under the same coordinate.
+    for field in DISAGREEING_IDENTIFIERS {
+        assert!(
+            served.iter().any(|(name, _)| name == field),
+            "{field} is not served: {served:?}"
+        );
+    }
 }
 
 mod merged {

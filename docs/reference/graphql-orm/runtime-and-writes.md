@@ -3,7 +3,7 @@ title: "Runtime, Writes, And Policies"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-14
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -187,6 +187,37 @@ impl NestedCreate {
 The host authorizes the caller in a custom root field, as for any hand-written resolver. The
 compiled, executed version, including the rollback of a refused second row, is
 `a_nested_create_is_one_transaction` in `tests/link_relation_patterns.rs`.
+
+### Ordering precedence in Rust queries
+
+A generated `<Entity>OrderByInput` has one optional direction per orderable field. One value with
+several fields set sorts in the entity's field **declaration** order, not in the order the fields
+are written, because a Rust struct literal carries no field order:
+
+```rust,ignore
+// `id` is declared before `expires_at`: this is ORDER BY id ASC, expires_at ASC.
+query.order_by(&ThingOrderByInput { expires_at: Some(Asc), id: Some(Asc), ..Default::default() })
+```
+
+State precedence explicitly instead. Every generated query builder (`EntityQuery`,
+`Entity::query(..)`, `tx.query::<T>()`, repository-only and projection builders, repository
+search) has `order_by_fields`, which takes `(field, direction)` pairs of the generated
+`<Entity>OrderField` enum; the first pair is the primary sort key:
+
+```rust,ignore
+use ThingOrderField as Field;
+query.order_by_fields([(Field::ExpiresAt, Asc), (Field::Id, Asc)])
+// equal to one call per field, which also keeps call order:
+query.order_by(&Field::ExpiresAt.order(Asc)).order_by(&Field::Id.order(Asc))
+```
+
+Each pair is applied as one `order_by` call, so the same orderable-field and read-policy checks
+apply, and it composes with other ordering calls in call order. For keyset pages,
+`<Entity>KeysetOrderByInput::ordered([(Field::ExpiresAt, Asc), (Field::Id, Asc)])` builds the
+ordered list `keyset_page_ordered` takes; the cursor's key order follows the list and the primary
+key is still appended as the tiebreak. `<Entity>OrderField` is a Rust type only. GraphQL clients
+already pass a list of single-field order inputs for an ordered sort, and the generated SDL is
+unchanged.
 
 ## Field Controls
 
@@ -374,7 +405,8 @@ There is no transform for deletes or for raw pool/SQL writes.
 This costs one transform invocation and one retained input/SQL plan per matched
 row. Bulk writes already execute by locked primary key, so it adds no update SQL
 round trips. The existing 1,000-row bound for GraphQL `notify_with` bulk writes
-is unchanged; other bulk writes gain no new bound. `InternalMutationHook` means
+is unchanged; generated GraphQL bulk writes also have the
+[bulk write bound](#bulk-write-bound). `InternalMutationHook` means
 a write made while a mutation hook is executing; ordinary transaction helpers
 report `Repository`.
 
@@ -407,6 +439,42 @@ that do not write). Composite-key helpers have no duplicate wrapper/helper call.
 
 A hook sees the event, not the mutation's arguments. Generated mutations have no typed transient input;
 [#221](https://github.com/Dastari/graphql-orm/issues/221) tracks that capability.
+
+### Transaction extensions
+
+The code that begins a transaction can attach typed values to it, and the mutation hook reads them
+for that transaction's writes. Use this when a hook must admit a write for one reviewed workflow
+step that it refuses for every other writer:
+
+```rust,ignore
+db.transaction(TransactionMode::StateMachine, |tx| {
+    Box::pin(async move {
+        tx.insert_extension(ReviewedStep { ticket })?;
+        tx.update_by_id::<Ledger>(&id, input).await?;
+        Ok(())
+    })
+})
+.await?;
+
+// In MutationHook::on_mutation:
+let reviewed = hook_ctx.extension::<ReviewedStep>();
+```
+
+- `insert_extension::<T>(value)` stores one value per type and returns the one it replaces;
+  `extension::<T>()` borrows it; `remove_extension::<T>()` takes it back.
+- The value lives in that `MutationContext`. Every write of the transaction sees it: single-row
+  and bulk writes (once per row's hook call) and the nested writes a hook makes.
+- It is dropped before the commit and before a rollback. A deferred post-commit action, a queued
+  event, another transaction, another `Database` handle or clone, and a generated GraphQL mutation
+  never see one. Generated resolvers open their own transaction and attach nothing, and no request
+  input can set one.
+- Only the transaction's owner sets or removes extensions: inside a mutation hook both calls are
+  refused with `CONFLICT`, so a hook cannot grant itself a capability.
+- A transaction with no extension allocates nothing for the feature, and hooks that never call
+  `extension` behave as before.
+
+To present an authority to **policies** rather than to the hook, see
+[repository / system access](strict-authorization.md#repository-system-access).
 
 ### After-commit work
 
@@ -537,6 +605,59 @@ let database = Database::builder(pool)
     .unbounded_pagination()
     .build();
 ```
+
+### Bulk write bound
+
+Generated GraphQL `updateMany` and `deleteMany` select and lock their target rows before they
+write. `PaginationConfig::max_bulk_write_rows`, default `10_000`
+(`PaginationConfig::DEFAULT_MAX_BULK_WRITE_ROWS`), bounds the rows one bulk mutation field may
+write:
+
+- **What it counts.** The rows the caller is allowed to write: matches of the filter after
+  visibility. A row the caller can neither read nor write is never counted. For a fixed set of
+  rows the caller may write, the payload is therefore the same whether or not other, hidden rows
+  match the filter.
+- **Over the bound.** The write is refused before any row changes. The payload reports
+  `success: false` and `errorCode = "PAGE_LIMIT_EXCEEDED"`; the message names no row count. A bulk
+  write is never truncated to the bound, and one at or under it returns what an unbounded one
+  returns. Target rows are locked and written in primary-key order.
+- **How targets are selected.** When no row policy is installed and the filter is rendered
+  completely in SQL, every match is a target: one locking read with a look-ahead row decides the
+  bound. When the row policy decides in Rust (any installed `RowPolicy`: its callbacks classify
+  every candidate, with or without a
+  [`write_target_prefilter`](strict-authorization.md#row-policy-on-generated-writes)), or the
+  filter has a part evaluated in Rust (SQLite spatial predicates), candidates are read in pages of
+  500, the Rust predicate and the row policy are applied per page, and only targets count against
+  the bound.
+- **Scan budget.** That paged scan reads at most `PaginationConfig::max_scanned_rows` candidates
+  (default `10_000`), plus one look-ahead row: the same budget, configuration and refusal as a
+  [visible-row read](#repository-limits-and-offsets-count-visible-rows). A scan that would need
+  more candidates fails with `PAGE_LIMIT_EXCEEDED` and the scan-budget message, before any row
+  changes. Whether the budget runs out can depend on rows the caller cannot see; that is the
+  documented residual of the budget, and it is the only way hidden rows can affect a bulk write.
+  A `write_target_prefilter` removes hidden rows in SQL, so they are neither read nor counted
+  against the budget. Set the budget in trusted code.
+- **Per field.** The bound applies to each bulk mutation field. A request with several aliased
+  bulk mutations may write up to the bound in each; there is no request-wide budget. Limit
+  aliases, complexity or depth at the schema if a request-wide ceiling is needed.
+
+```rust
+let database = Database::builder(pool)
+    .max_bulk_write_rows(Some(50_000)) // `None` removes the bound
+    .build();
+```
+
+`PaginationConfig::with_max_bulk_write_rows` sets it on a config value, and
+`PaginationConfig::unbounded()` and `unbounded_pagination()` remove it together with the page
+limits and the scan budget. Repository `update_where`, `delete_where` and their transaction forms
+are trusted code and are not bounded by this setting; `update_where_bounded` and
+`delete_where_bounded` take an explicit ceiling there. The 1,000-row `notify_with` bound is
+separate and also counts only the rows the caller may write.
+
+Run the cross-backend regression suite for the bound, the write-target prefilter, bare-pool
+inserts, scoped system access, transaction extensions and ordered sorts through
+`scripts/run-owned-database-lanes.sh bulk-write-targets`; PostgreSQL and SQL Server use test-owned
+disposable containers.
 
 ### Rust repository limits never truncate
 

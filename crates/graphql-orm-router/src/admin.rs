@@ -1,6 +1,5 @@
 use std::{collections::BTreeMap, sync::Arc, time::UNIX_EPOCH};
 
-use futures::StreamExt;
 use graphql_orm_router_protocol::SubgraphDescriptor;
 use reqwest::header::ETAG;
 use serde::Deserialize;
@@ -10,6 +9,7 @@ use url::Url;
 use crate::{
     AdminConfig, AuthenticatedPrincipal, AuthenticationErrorKind, AuthenticationProvider,
     RouterError, RouterErrorKind, ScopeMatcher, StaticSubgraph, TrustedSubgraph,
+    http_body::{BoundedBodyError, USER_AGENT, read_bounded_body},
     lifecycle::{FetchedSubgraph, GraphLifecycle},
     network::{NetworkPolicy, ResolvedUrl},
     server::strict_bearer_token,
@@ -367,6 +367,7 @@ async fn metrics_handler(
         "router_pending_websocket_connections": metrics.pending_websocket_connections(),
         "router_active_subscriptions": metrics.active_subscriptions(),
         "router_websocket_rejections_total": metrics.websocket_rejections_total(),
+        "router_websocket_send_failures_total": metrics.websocket_send_failures_total(),
         "router_schema_refresh_total": metrics.schema_refresh_total(),
         "router_composition_success_total": metrics.composition_success_total(),
         "router_composition_failure_total": metrics.composition_failure_total(),
@@ -558,7 +559,7 @@ async fn fetch_resource(
     let mut request = client
         .get(target.as_str())
         .header("accept", accept)
-        .header("user-agent", "graphql-orm-router/0.1");
+        .header("user-agent", USER_AGENT);
     for (name, value) in headers {
         request = request.header(name, value);
     }
@@ -575,37 +576,24 @@ async fn fetch_resource(
             format!("{field} returned a non-success status"),
         ));
     }
-    if response
-        .content_length()
-        .is_some_and(|length| length > maximum as u64)
-    {
-        return Err(RouterError::new(
-            RouterErrorKind::Registration,
-            format!("{field} exceeds its configured size limit"),
-        ));
-    }
     let etag = response
         .headers()
         .get(ETAG)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
-    let mut bytes = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| {
+    let bytes = read_bounded_body(response, maximum)
+        .await
+        .map_err(|error| {
             RouterError::new(
                 RouterErrorKind::Registration,
-                format!("failed while reading {field}"),
+                match error {
+                    BoundedBodyError::TooLarge => {
+                        format!("{field} exceeds its configured size limit")
+                    }
+                    BoundedBodyError::Read => format!("failed while reading {field}"),
+                },
             )
         })?;
-        if bytes.len().saturating_add(chunk.len()) > maximum {
-            return Err(RouterError::new(
-                RouterErrorKind::Registration,
-                format!("{field} exceeds its configured size limit"),
-            ));
-        }
-        bytes.extend_from_slice(&chunk);
-    }
     Ok((bytes, etag))
 }
 

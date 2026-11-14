@@ -6,7 +6,7 @@ use std::{
 };
 
 use arc_swap::ArcSwap;
-use futures::{StreamExt, lock::Mutex};
+use futures::lock::Mutex;
 use graphql_orm_router_protocol::{RootOperationType, SubgraphDescriptor};
 use hive_router::plugins::hooks::on_supergraph_load::SupergraphOptions;
 use reqwest::{
@@ -22,6 +22,7 @@ use crate::{
     federation::{
         ActiveGraph, CandidateSubgraph, FederationError, build_active_graph_with_options,
     },
+    http_body::{BoundedBodyError, USER_AGENT, read_bounded_body},
     metrics::{RouterMetrics, RouterMetricsSnapshot},
     node_lookup::NodeLookupConfig,
     server::ActiveGraphIdentity,
@@ -1097,6 +1098,20 @@ async fn fetch_pair(
                             ),
                         ));
                     }
+                    // A source keeps the subgraph ID it was admitted with: the
+                    // first fetch for a static source, or the trusted binding
+                    // for a dynamic one. A refresh never re-binds it.
+                    if let Some(admitted) = previous.and_then(|input| input.descriptor.as_ref())
+                        && admitted.subgraph.id != descriptor.subgraph.id
+                    {
+                        return Err(RouterError::new(
+                            RouterErrorKind::AuthorizationMetadata,
+                            format!(
+                                "router descriptor for subgraph `{}` changed its subgraph ID; restart the router to accept a new identity",
+                                subgraph.name
+                            ),
+                        ));
+                    }
                     (Some(descriptor), etag)
                 }
             }
@@ -1139,7 +1154,7 @@ async fn fetch_bounded(
     let mut request = client
         .get(url)
         .header("accept", accept)
-        .header("user-agent", "graphql-orm-router/0.1");
+        .header("user-agent", USER_AGENT);
     for (name, value) in headers {
         request = request.header(name, value);
     }
@@ -1164,37 +1179,26 @@ async fn fetch_bounded(
             ),
         ));
     }
-    if response
-        .content_length()
-        .is_some_and(|length| length > max_bytes as u64)
-    {
-        return Err(RouterError::new(
-            kind,
-            format!("{resource} for subgraph `{subgraph}` exceeds its configured size limit"),
-        ));
-    }
     let etag = response
         .headers()
         .get(ETAG)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
-    let mut bytes = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| {
+    let bytes = read_bounded_body(response, max_bytes)
+        .await
+        .map_err(|error| {
             RouterError::new(
                 kind,
-                format!("failed while reading {resource} for subgraph `{subgraph}`"),
+                match error {
+                    BoundedBodyError::TooLarge => format!(
+                        "{resource} for subgraph `{subgraph}` exceeds its configured size limit"
+                    ),
+                    BoundedBodyError::Read => {
+                        format!("failed while reading {resource} for subgraph `{subgraph}`")
+                    }
+                },
             )
         })?;
-        if bytes.len().saturating_add(chunk.len()) > max_bytes {
-            return Err(RouterError::new(
-                kind,
-                format!("{resource} for subgraph `{subgraph}` exceeds its configured size limit"),
-            ));
-        }
-        bytes.extend_from_slice(&chunk);
-    }
     Ok(ConditionalBody::Modified { bytes, etag })
 }
 
@@ -1406,6 +1410,52 @@ mod tests {
         descriptor.fingerprints.authorization = descriptor.authorization_fingerprint();
         descriptor.fingerprints.combined = descriptor.combined_fingerprint();
         descriptor
+    }
+
+    #[ntex::test]
+    async fn refreshed_descriptor_keeps_the_admitted_subgraph_id() {
+        let sdl = MutableEndpoint::new("type Query { value: String! }", "sdl-1");
+        let admitted =
+            endpoint_noise_descriptor("http://old.internal/graphql", "http://old.internal/sdl");
+        let protocol = MutableEndpoint::new(&serde_json::to_string(&admitted).unwrap(), "d-1");
+        let config = StaticSubgraph::new("products", "http://products.test/graphql", sdl.url())
+            .with_protocol_url(protocol.url());
+        let client = Client::builder().no_proxy().build().unwrap();
+        let initial = fetch_initial(&client, &config, 1024 * 1024).await.unwrap();
+
+        // A changed descriptor with the same identity refreshes normally.
+        let mut same_identity =
+            endpoint_noise_descriptor("https://new.example/graphql", "https://new.example/sdl");
+        same_identity.fingerprints.combined = same_identity.combined_fingerprint();
+        protocol.set(&serde_json::to_string(&same_identity).unwrap(), "d-2", 200);
+        let refreshed = fetch_refresh(&client, &config, &initial, 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            refreshed.descriptor.as_ref().unwrap().subgraph.id.as_str(),
+            "products-service"
+        );
+
+        let mut moved = admitted.clone();
+        moved.subgraph.id = SubgraphId::try_from("other-service".to_owned()).unwrap();
+        moved.fingerprints.authorization = moved.authorization_fingerprint();
+        moved.fingerprints.combined = moved.combined_fingerprint();
+        protocol.set(&serde_json::to_string(&moved).unwrap(), "d-3", 200);
+        let Err(error) = fetch_refresh(&client, &config, &refreshed, 1024 * 1024).await else {
+            panic!("a refresh must not re-bind the subgraph ID");
+        };
+        assert_eq!(error.kind(), RouterErrorKind::AuthorizationMetadata);
+        assert!(
+            error.to_string().contains("changed its subgraph ID"),
+            "{error}"
+        );
+
+        // A fresh admission, as after a restart, accepts the new identity.
+        let restarted = fetch_initial(&client, &config, 1024 * 1024).await.unwrap();
+        assert_eq!(
+            restarted.descriptor.as_ref().unwrap().subgraph.id.as_str(),
+            "other-service"
+        );
     }
 
     #[ntex::test]

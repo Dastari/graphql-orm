@@ -890,6 +890,44 @@ where
     }
 }
 
+/// Typed values scoped to one transaction; see
+/// [`MutationContext::insert_extension`]. Allocates nothing until a value is
+/// attached.
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+#[derive(Default)]
+struct TransactionExtensions(
+    // One pointer wide: a `MutationContext` is stored in every generated
+    // write's future.
+    #[allow(clippy::box_collection)]
+    Option<Box<std::collections::HashMap<std::any::TypeId, Box<dyn std::any::Any + Send + Sync>>>>,
+);
+
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+impl TransactionExtensions {
+    fn insert<T: Send + Sync + 'static>(&mut self, value: T) -> Option<T> {
+        self.0
+            .get_or_insert_with(Default::default)
+            .insert(std::any::TypeId::of::<T>(), Box::new(value))
+            .and_then(|previous| previous.downcast::<T>().ok())
+            .map(|previous| *previous)
+    }
+
+    fn get<T: Send + Sync + 'static>(&self) -> Option<&T> {
+        self.0
+            .as_ref()?
+            .get(&std::any::TypeId::of::<T>())?
+            .downcast_ref::<T>()
+    }
+
+    fn remove<T: Send + Sync + 'static>(&mut self) -> Option<T> {
+        self.0
+            .as_mut()?
+            .remove(&std::any::TypeId::of::<T>())
+            .and_then(|value| value.downcast::<T>().ok())
+            .map(|value| *value)
+    }
+}
+
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub struct MutationContext<'tx, B: WriteBackend = DefaultWriteBackend> {
     db: &'tx crate::db::Database<B>,
@@ -899,6 +937,10 @@ pub struct MutationContext<'tx, B: WriteBackend = DefaultWriteBackend> {
     deferred_events: Vec<Box<dyn DeferredEventEmitter<B>>>,
     deferred_actions: Vec<Box<dyn PostCommitActionRunner<B>>>,
     hook_depth: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// The handle policies see while a [`Self::with_system_access`] scope is open.
+    scoped_db: Option<Box<crate::db::Database<B>>>,
+    /// Typed values attached by the code that began this transaction.
+    extensions: TransactionExtensions,
     /// Tables whose PostgreSQL change journal recorder this transaction has verified.
     #[cfg_attr(
         not(all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))),
@@ -1026,6 +1068,28 @@ where
         O: DatabaseOrderBy,
     {
         self.query = self.query.order_by(&order);
+        self
+    }
+
+    /// Add ordering terms in the order given: the first pair is the primary
+    /// sort key. Each pair is one generated orderable field and a direction,
+    /// and is applied exactly as one [`Self::order_by`] call, so the same
+    /// orderable-field and read-policy checks apply and it composes with
+    /// other ordering calls in call order.
+    ///
+    /// Use this, or chained `order_by` calls, when precedence matters: one
+    /// generated `OrderByInput` value with several fields set always sorts in
+    /// the entity's field declaration order.
+    pub fn order_by_fields<K>(
+        mut self,
+        fields: impl IntoIterator<Item = (K, super::OrderDirection)>,
+    ) -> Self
+    where
+        K: super::DatabaseOrderField,
+    {
+        for (field, direction) in fields {
+            self = self.order_by(field.order(direction));
+        }
         self
     }
 
@@ -1485,6 +1549,28 @@ where
         self
     }
 
+    /// Add ordering terms in the order given: the first pair is the primary
+    /// sort key. Each pair is one generated orderable field and a direction,
+    /// and is applied exactly as one [`Self::order_by`] call, so the same
+    /// orderable-field and read-policy checks apply and it composes with
+    /// other ordering calls in call order.
+    ///
+    /// Use this, or chained `order_by` calls, when precedence matters: one
+    /// generated `OrderByInput` value with several fields set always sorts in
+    /// the entity's field declaration order.
+    pub fn order_by_fields<K>(
+        mut self,
+        fields: impl IntoIterator<Item = (K, super::OrderDirection)>,
+    ) -> Self
+    where
+        K: super::DatabaseOrderField,
+    {
+        for (field, direction) in fields {
+            self = self.order_by(field.order(direction));
+        }
+        self
+    }
+
     pub fn default_order(mut self) -> Self {
         self.query = self.query.default_order();
         self
@@ -1624,6 +1710,8 @@ where
             deferred_events: Vec::new(),
             deferred_actions: Vec::new(),
             hook_depth: Default::default(),
+            scoped_db: None,
+            extensions: TransactionExtensions::default(),
             change_journal_verified_tables: Vec::new(),
         }
     }
@@ -1676,8 +1764,117 @@ where
         ))
     }
 
+    /// The database handle this transaction runs on. Inside a
+    /// [`Self::with_system_access`] scope it is that handle labelled with the
+    /// scope's [`SystemAccess`](crate::graphql::auth::SystemAccess).
     pub fn database(&self) -> &crate::db::Database<B> {
-        self.db
+        match &self.scoped_db {
+            Some(scoped) => scoped,
+            None => self.db,
+        }
+    }
+
+    /// Run `scope` with this transaction's writes and reads presenting a named
+    /// [`SystemAccess`](crate::graphql::auth::SystemAccess) to policies.
+    ///
+    /// A mutation hook's nested writes reach entity, row and field policies
+    /// without the originating request (`ctx = None`, the `Repository`
+    /// surface), so a policy cannot tell them from any other in-process
+    /// caller. Inside the scope, the handle those policies receive carries
+    /// `access`: they read it with
+    /// [`Database::system_access`](crate::db::Database::system_access), and
+    /// repository field decisions receive it as
+    /// `AccessContext::System`. The hook decides from the request it was given
+    /// whether to open the scope, and the policy decides whether the named
+    /// access may do the write. Nothing is granted by the label itself.
+    ///
+    /// The previous access is restored when `scope` completes. If the returned
+    /// future is dropped before that, the transaction can no longer commit.
+    pub async fn with_system_access<T, F>(
+        &mut self,
+        access: crate::graphql::auth::SystemAccess,
+        scope: F,
+    ) -> T
+    where
+        F: for<'a> FnOnce(&'a mut Self) -> futures::future::BoxFuture<'a, T>,
+    {
+        /// Poisons the transaction unless the scope ran to completion.
+        struct Abandoned(
+            std::sync::Arc<super::runtime_transaction::RuntimeTransactionState>,
+            bool,
+        );
+        impl Drop for Abandoned {
+            fn drop(&mut self) {
+                if self.1 {
+                    self.0.poison();
+                }
+            }
+        }
+        let scoped = Box::new(self.db.clone().with_system_access(access));
+        let previous = self.scoped_db.replace(scoped);
+        let mut abandoned = Abandoned(self.runtime_state.clone(), true);
+        let value = scope(self).await;
+        abandoned.1 = false;
+        self.scoped_db = previous;
+        value
+    }
+
+    /// Attach a typed value to this transaction for its mutation hooks to
+    /// read with [`Self::extension`], returning the value it replaces.
+    ///
+    /// The value belongs to this transaction only: it is dropped before the
+    /// commit or rollback, and is never visible to deferred post-commit
+    /// actions, queued events, other transactions, other handles or generated
+    /// GraphQL resolvers. Only the code that began the transaction sets it,
+    /// typically the callback of
+    /// [`Database::transaction`](crate::db::Database::transaction).
+    ///
+    /// # Errors
+    ///
+    /// Refused with `CONFLICT` while a mutation hook is running: a hook reads
+    /// extensions and cannot grant itself one.
+    pub fn insert_extension<T>(
+        &mut self,
+        value: T,
+    ) -> Result<Option<T>, crate::graphql::errors::OrmPublicError>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.require_transaction_owner()?;
+        Ok(self.extensions.insert(value))
+    }
+
+    /// The value of type `T` attached to this transaction, if any.
+    pub fn extension<T>(&self) -> Option<&T>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.extensions.get::<T>()
+    }
+
+    /// Remove and return the value of type `T` attached to this transaction.
+    ///
+    /// # Errors
+    ///
+    /// Refused with `CONFLICT` while a mutation hook is running.
+    pub fn remove_extension<T>(
+        &mut self,
+    ) -> Result<Option<T>, crate::graphql::errors::OrmPublicError>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.require_transaction_owner()?;
+        Ok(self.extensions.remove::<T>())
+    }
+
+    fn require_transaction_owner(&self) -> Result<(), crate::graphql::errors::OrmPublicError> {
+        if self.hook_depth.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+            return Err(crate::graphql::errors::OrmPublicError::with_message(
+                crate::graphql::errors::OrmErrorCode::Conflict,
+                "transaction extensions are set by the code that began the transaction, not by a mutation hook",
+            ));
+        }
+        Ok(())
     }
 
     pub fn actor<T>(&self, ctx: Option<&async_graphql::Context<'_>>) -> Option<T>
@@ -1843,8 +2040,10 @@ where
         surface: EntityAccessSurface,
         row: &(dyn std::any::Any + Send + Sync),
     ) -> async_graphql::Result<()> {
+        // The written row is checked under the same authority as the rest of
+        // the write: inside a `with_system_access` scope, the scoped handle.
         let result = self
-            .db
+            .database()
             .ensure_writable_row(ctx, entity_name, write_policy, surface, row)
             .await;
         if result.is_err() {
@@ -1877,8 +2076,13 @@ where
             deferred_events,
             deferred_actions,
             hook_depth: _,
+            scoped_db: _,
+            extensions,
             change_journal_verified_tables: _,
         } = self;
+        // Transaction extensions end before the commit: nothing that runs
+        // afterwards, including a deferred action, can observe one.
+        drop(extensions);
         B::commit_write_transaction(tx).await?;
         for event in deferred_events {
             event.emit(db);
@@ -1893,7 +2097,9 @@ where
 
     /// Roll back and consume this transaction without emitting side effects.
     #[doc(hidden)]
-    pub async fn rollback(self) -> crate::Result<()> {
+    pub async fn rollback(mut self) -> crate::Result<()> {
+        // Transaction extensions end with the transaction.
+        self.extensions = TransactionExtensions::default();
         B::rollback_write_transaction(self.tx).await
     }
 
@@ -1936,7 +2142,7 @@ where {
     where
         T: MutationContextInsert<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
         T::insert_in_mutation_context(self, input).await
     }
 
@@ -1948,7 +2154,7 @@ where {
         T: MutationContextUpsert<B> + Entity,
     {
         self.require_state_machine("upsert")?;
-        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
         T::upsert_in_mutation_context(self, input).await
     }
 
@@ -1960,7 +2166,7 @@ where {
     where
         T: MutationContextUpdateById<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
         T::update_by_id_in_mutation_context(self, id, input).await
     }
 
@@ -1972,7 +2178,7 @@ where {
     where
         T: MutationContextUpdateWhere<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
         T::update_where_in_mutation_context(self, where_input, input).await
     }
 
@@ -1988,7 +2194,7 @@ where {
     where
         T: MutationContextCompareAndSwap<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
         T::compare_and_swap_in_mutation_context(self, id, expected_version, expected, input).await
     }
 
@@ -1999,7 +2205,7 @@ where {
     where
         T: MutationContextDeleteById<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
         T::delete_by_id_in_mutation_context(self, id).await
     }
 
@@ -2010,7 +2216,7 @@ where {
     where
         T: MutationContextDeleteWhere<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
         T::delete_where_in_mutation_context(self, where_input).await
     }
 
@@ -2038,7 +2244,7 @@ where {
         T: MutationContextFindById<B> + Entity,
     {
         let metadata = T::metadata();
-        self.db
+        self.database()
             .ensure_entity_access(
                 None,
                 metadata.entity_name,
@@ -2052,7 +2258,7 @@ where {
         let Some(row) = row else {
             return Ok(None);
         };
-        if authorize_repository_row::<T, B>(self.db, &row).await? {
+        if authorize_repository_row::<T, B>(self.database(), &row).await? {
             Ok(Some(row))
         } else {
             Ok(None)
@@ -2068,7 +2274,7 @@ where {
         T: MutationContextFindByKey<B> + Entity,
     {
         let metadata = T::metadata();
-        self.db
+        self.database()
             .ensure_entity_access(
                 None,
                 metadata.entity_name,
@@ -2082,7 +2288,7 @@ where {
         let Some(row) = row else {
             return Ok(None);
         };
-        if authorize_repository_row::<T, B>(self.db, &row).await? {
+        if authorize_repository_row::<T, B>(self.database(), &row).await? {
             Ok(Some(row))
         } else {
             Ok(None)
@@ -2098,7 +2304,7 @@ where {
     where
         T: MutationContextUpdateByKey<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
         T::update_by_key_in_mutation_context(self, key, input).await
     }
 
@@ -2110,7 +2316,7 @@ where {
     where
         T: MutationContextDeleteByKey<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
         T::delete_by_key_in_mutation_context(self, key).await
     }
 
@@ -2122,7 +2328,7 @@ where {
     where
         T: MutationContextInsertIfAbsent<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
         T::insert_if_absent_in_mutation_context(self, input).await
     }
 
@@ -2136,7 +2342,7 @@ where {
     where
         T: MutationContextBoundedUpdateWhere<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
         T::update_where_bounded_in_mutation_context(self, where_input, input, limit).await
     }
 
@@ -2149,7 +2355,7 @@ where {
     where
         T: MutationContextBoundedDeleteWhere<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
         T::delete_where_bounded_in_mutation_context(self, where_input, limit).await
     }
 
@@ -2163,7 +2369,7 @@ where {
     where
         T: MutationContextPredicateUpdate<B> + Entity,
     {
-        ensure_transaction_entity_write_access::<T, B>(self.db).await?;
+        ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
         T::update_if_in_mutation_context(self, key, expected, input).await
     }
 
@@ -2176,7 +2382,7 @@ where {
         T: MutationContextKeysetPage<B> + Entity,
     {
         let metadata = T::metadata();
-        self.db
+        self.database()
             .ensure_entity_access(
                 None,
                 metadata.entity_name,
@@ -2190,7 +2396,7 @@ where {
                     crate::graphql::errors::sqlx_error_from_graphql(error),
                 )
             })?;
-        if page.include_total_count && self.db.row_policy().is_some() {
+        if page.include_total_count && self.database().row_policy().is_some() {
             return Err(crate::graphql::errors::OrmPublicError::new(
                 crate::graphql::errors::OrmErrorCode::AuthorizationMisconfigured,
             )
@@ -2200,7 +2406,7 @@ where {
         }
         let connection = T::keyset_page_in_mutation_context(self, filter, page).await?;
         for edge in &connection.edges {
-            if !authorize_repository_row::<T, B>(self.db, &edge.node)
+            if !authorize_repository_row::<T, B>(self.database(), &edge.node)
                 .await
                 .map_err(crate::graphql::errors::OrmPublicError::from)?
             {
@@ -2221,7 +2427,7 @@ where {
         T: MutationContextKeysetConnectionPage<B> + Entity,
     {
         let metadata = T::metadata();
-        self.db
+        self.database()
             .ensure_entity_access(
                 None,
                 metadata.entity_name,
@@ -2235,7 +2441,7 @@ where {
                     crate::graphql::errors::sqlx_error_from_graphql(error),
                 )
             })?;
-        if page.include_total_count && self.db.row_policy().is_some() {
+        if page.include_total_count && self.database().row_policy().is_some() {
             return Err(crate::graphql::errors::OrmPublicError::new(
                 crate::graphql::errors::OrmErrorCode::AuthorizationMisconfigured,
             )
@@ -2245,7 +2451,7 @@ where {
         }
         let connection = T::keyset_connection_page_in_mutation_context(self, filter, page).await?;
         for edge in &connection.edges {
-            if !authorize_repository_row::<T, B>(self.db, &edge.node)
+            if !authorize_repository_row::<T, B>(self.database(), &edge.node)
                 .await
                 .map_err(crate::graphql::errors::OrmPublicError::from)?
             {
@@ -2381,7 +2587,7 @@ where
             ));
         };
         self.mutation
-            .db
+            .database()
             .ensure_entity_access(
                 None,
                 metadata.entity_name,
@@ -2393,7 +2599,7 @@ where
             .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
         // A declared write policy needs its row provider here too, before selection.
         self.mutation
-            .db
+            .database()
             .ensure_row_write_provider(metadata.entity_name, metadata.write_policy)
             .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
         if filter.is_empty() {
@@ -2418,7 +2624,7 @@ where
         let mut states = Vec::with_capacity(rows.len());
         for entity in &rows {
             self.mutation
-                .db
+                .database()
                 .ensure_writable_row(
                     None,
                     metadata.entity_name,
@@ -3167,6 +3373,37 @@ pub trait RowPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
         surface: EntityAccessSurface,
         row: &'a (dyn std::any::Any + Send + Sync),
     ) -> futures::future::BoxFuture<'a, async_graphql::Result<bool>>;
+
+    /// Optionally narrow, in SQL, the rows a generated GraphQL write selects
+    /// as its targets.
+    ///
+    /// Generated GraphQL `update`, `delete`, `updateMany` and `deleteMany`
+    /// lock the rows their key or filter selects and then classify each with
+    /// [`Self::can_write_row`] and [`Self::can_read_row`]; a row the caller
+    /// can neither write nor read is treated as missing. Return a predicate
+    /// that selects the rows this caller can read **or** write, and rows
+    /// outside it are never selected, locked or passed to a callback, which
+    /// removes the timing and lock-contention difference between a hidden row
+    /// and a missing one. It also keeps hidden rows out of
+    /// [`PaginationConfig::max_bulk_write_rows`](super::PaginationConfig::max_bulk_write_rows).
+    ///
+    /// The predicate only narrows. Every selected row still goes through the
+    /// row callbacks, so it can never grant a write. A row it leaves out is
+    /// treated exactly like a missing row, including a row the callbacks
+    /// would have allowed, so it must not exclude rows the caller can write.
+    /// The default, `None`, keeps the callback-only behaviour. `policy_key`
+    /// is the entity's write policy key. Errors fail the write closed.
+    /// Repository writes do not ask.
+    fn write_target_prefilter<'a>(
+        &'a self,
+        _ctx: Option<&'a async_graphql::Context<'_>>,
+        _db: &'a crate::db::Database<B>,
+        _entity_name: &'static str,
+        _policy_key: Option<&'static str>,
+        _surface: EntityAccessSurface,
+    ) -> futures::future::BoxFuture<'a, async_graphql::Result<Option<super::ReadPredicate>>> {
+        Box::pin(async { Ok(None) })
+    }
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
