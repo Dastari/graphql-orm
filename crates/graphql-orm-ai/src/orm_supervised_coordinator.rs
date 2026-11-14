@@ -1395,33 +1395,35 @@ impl AiSupervisedAgentCoordinator {
         } else {
             None
         };
-        let provider_result = if let Some(session_plan) = provider_session {
-            let Some(service) = &self.provider_session_service else {
-                return (self
-                    .finish_recovery(
-                        &lease,
-                        &guard,
-                        AiAgentRecoveryPhase::ProviderTurn,
-                        "provider_session_service_unavailable",
-                        None,
-                    )
-                    .await)
-                    .map(SupervisedTurnStep::Finished);
-            };
-            self.execute_retained_provider_with_heartbeats(
-                &mut lease,
-                provider_plan,
-                session_plan,
-                service.clone(),
-                native_execution
-                    .clone()
-                    .map(|execution| execution as Arc<dyn crate::AiProviderDynamicToolExecution>),
-            )
-            .await
-        } else {
-            self.execute_provider_with_heartbeats(&mut lease, provider_plan)
+        let provider_result =
+            if let Some(session_plan) = provider_session {
+                let Some(service) = &self.provider_session_service else {
+                    return (self
+                        .finish_recovery(
+                            &lease,
+                            &guard,
+                            AiAgentRecoveryPhase::ProviderTurn,
+                            "provider_session_service_unavailable",
+                            None,
+                        )
+                        .await)
+                        .map(SupervisedTurnStep::Finished);
+                };
+                // Provider execution nests reset, cleanup and generated fenced writes.
+                // Heap-pin its state so those frames do not accumulate with this step.
+                Box::pin(self.execute_retained_provider_with_heartbeats(
+                    &mut lease,
+                    provider_plan,
+                    session_plan,
+                    service.clone(),
+                    native_execution.clone().map(|execution| {
+                        execution as Arc<dyn crate::AiProviderDynamicToolExecution>
+                    }),
+                ))
                 .await
-        };
+            } else {
+                Box::pin(self.execute_provider_with_heartbeats(&mut lease, provider_plan)).await
+            };
         let result = match provider_result {
             Ok(result) => result,
             Err(SupervisedProviderTurnFailure::Provider) => {
