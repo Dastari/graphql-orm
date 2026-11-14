@@ -756,3 +756,5 @@ SDL export builds. Runtime builds must leave it disabled; see
 [schema export](../../docs/reference/graphql-orm/schema-export.md).
 
 Version 0.93.0 shares generated scalar-filter SQL and semantic metadata builders to reduce consumer compile cost. SQL, binds, SDL and public contracts are unchanged; no data migration is needed.
+
+Test infrastructure in 0.144.0 pins owned PostgreSQL images by digest; no runtime API changes.

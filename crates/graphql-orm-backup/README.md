@@ -158,3 +158,5 @@ layout.
 - [Storage `BlobStore` integration](../graphql-orm-storage/docs/backup-integration.md)
 - [SMB integration](docs/smb.md)
 - [Migration guide](MIGRATION.md) and [changelog](CHANGELOG.md)
+
+Test infrastructure in 0.18.0 pins owned PostgreSQL images by digest; no runtime API changes.
