@@ -64,7 +64,7 @@ pub use codex_version_readiness::{
 #[cfg(feature = "provider-codex-app-server")]
 mod codex_app_server;
 
-#[cfg(all(test, feature = "provider-codex-app-server"))]
+#[cfg(all(test, feature = "provider-codex-app-server", feature = "sqlite"))]
 pub(crate) use codex_app_server::tests::canonical_dynamic_tool_catalog;
 
 #[cfg(all(test, feature = "provider-openai-core"))]
@@ -132,9 +132,5 @@ mod grok_acp_wire;
 #[cfg(feature = "provider-grok-acp")]
 pub use grok_acp_wire::{AiGrokAcpWireProcess, AiGrokAcpWireTransport};
 
-#[cfg(all(
-    test,
-    feature = "provider-grok-acp",
-    any(feature = "sqlite", feature = "postgres")
-))]
+#[cfg(all(test, feature = "provider-grok-acp", feature = "sqlite"))]
 pub(crate) use grok_acp_wire::tests::ExecutorWireFactory;
