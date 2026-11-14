@@ -548,6 +548,45 @@ async fn wide_batches_stay_under_the_parameter_limit(connection: &str) -> TestRe
         assert_eq!(page.total_count, 2, "parent {n}");
     }
 
+    // Duplicate parents inside one chunk and across the chunk boundary
+    // (665 three-column keys fill a statement that binds nothing else): every
+    // occurrence resolves to its rows, unpaged and paged.
+    for paged in [false, true] {
+        let page = paged.then_some(PaginationRequest {
+            limit: Some(2),
+            offset: 0,
+        });
+        let duplicated = |n: i64| key(n, None, Vec::new(), page.clone());
+        let mut keys = vec![duplicated(1), duplicated(1), duplicated(2), duplicated(1)];
+        keys.extend((3..=664).map(duplicated));
+        // Positions 665 and 666 sit on either side of the first boundary.
+        keys.extend([
+            duplicated(700),
+            duplicated(700),
+            duplicated(2),
+            duplicated(700),
+        ]);
+        keys.extend((701..=800).map(duplicated));
+        let results = loader
+            .load(&keys)
+            .await
+            .map_err(|error| format!("duplicates, paged {paged}: {error}"))?;
+        for key in &keys {
+            let n = match &key.parent_values[0] {
+                SqlValue::Int(n) => *n,
+                other => panic!("{other:?}"),
+            };
+            let page = &results[key];
+            let expected = if paged {
+                vec![n * 10 + 1, n * 10 + 2]
+            } else {
+                vec![n * 10 + 1, n * 10 + 2, n * 10 + 3]
+            };
+            assert_eq!(ids(page), expected, "paged: {paged}, parent {n}");
+            assert_eq!(page.total_count, 3, "paged: {paged}, parent {n}");
+        }
+    }
+
     // Per-parent limits and ordering across chunks, with the filter applied
     // to the counts as well as the rows.
     let keys = (1..=800)
@@ -584,7 +623,12 @@ async fn wide_batches_stay_under_the_parameter_limit(connection: &str) -> TestRe
         .load(&[key(1, Some(oversized), Vec::new(), None)])
         .await
         .expect_err("no room for one key");
-    assert_eq!(error, "graphql-orm-public:INVALID_INPUT");
+    assert_eq!(
+        graphql_orm::graphql::errors::graphql_error_from_loader(error)
+            .extensions
+            .and_then(|extensions| extensions.get("code").cloned()),
+        Some(graphql_orm::async_graphql::Value::from("INVALID_INPUT"))
+    );
 
     // An empty batch runs nothing.
     assert!(

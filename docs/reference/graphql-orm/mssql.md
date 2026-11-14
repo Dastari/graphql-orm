@@ -757,8 +757,15 @@ Delivery is at-least-once, and consumers must be idempotent. `receive` reads
 the message and ends its conversation inside a transaction that commits only
 after the message has reached the process. If ending the conversation fails,
 the connection is lost or the future is dropped before that commit, the
-message returns to the queue and a later `receive` delivers it again. Messages
-are invalidation hints, so handling one twice repeats a refresh. SQL Server
+message returns to the queue and a later `receive` delivers it again. Once a
+message has been read, `receive` returns it even if the commit fails or its
+response is lost; `uncertain_acknowledgements()` counts those cases, and the
+connection re-establishes itself before the next call. A `receive` future
+dropped while the commit is in progress leaves its message in the connection,
+and the next `receive` returns it at once. Keep the same connection value
+after an error or a cancelled call: dropping it during that commit is the one
+case that can lose a message. Messages are invalidation hints, so handling one
+twice repeats a refresh; the ORM itself has no consumer of them. SQL Server
 disables a queue after five consecutive rolled-back receives.
 
 The external owner must enable Broker and provision a dedicated queue and service

@@ -88,7 +88,12 @@ backends". The first two entries are breaking for hosts.
   at-least-once: the receive and `END CONVERSATION` commit only after the
   message has been read. If ending the conversation fails, or the connection
   is lost before the commit, the message stays on the queue and is delivered
-  again, so a message can arrive twice and consumers must be idempotent.
+  again. A message that has been read is returned as `Ok` even when its
+  commit fails or the commit response is lost; `uncertain_acknowledgements()`
+  counts those cases and the connection re-establishes itself before the
+  next call, so keep using the same value after an error or a cancelled
+  `receive` instead of discarding it. A message can arrive twice and hosts
+  consuming these notifications must be idempotent.
   Five consecutive rolled-back receives disable the queue under SQL Server's
   poison-message handling.
 
