@@ -64,6 +64,10 @@ than merely raising defaults.
 The authenticated router snapshot exposes request/error, cumulative downstream
 latency, active graph version, WebSocket/subscription gauges, refresh,
 composition, rejection, authorization-denial, and health values.
+`router_websocket_send_failures_total` counts best-effort WebSocket close and
+completion messages that failed because the peer had already gone. A steady
+rise points at abrupt client or private-endpoint disconnects; no payload or
+peer detail is recorded.
 When byte routes are configured, `GET /_router/metrics` also reports six
 objects keyed by route prefix: `router_byte_route_requests_total` (every
 request a route claims), `router_byte_route_rejected_total` (refused before

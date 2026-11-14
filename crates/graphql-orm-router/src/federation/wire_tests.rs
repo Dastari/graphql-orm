@@ -1845,6 +1845,7 @@ fn authenticated_admin_registration_binds_identity_destinations_and_restart_stat
     assert!(metrics["router_graphql_requests_total"].as_u64().unwrap() >= 2);
     assert!(metrics["router_subgraph_requests_total"].as_u64().unwrap() >= 2);
     assert_eq!(metrics["router_websocket_rejections_total"], 0);
+    assert_eq!(metrics["router_websocket_send_failures_total"], 0);
     // A router without byte routes reports none of their keys.
     assert!(
         metrics

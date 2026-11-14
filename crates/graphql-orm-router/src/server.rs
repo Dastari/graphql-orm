@@ -120,6 +120,7 @@ fn run_on_owned_runtime(
         .build(hive_router::ntex::rt::DefaultRuntime)
         .block_on(async move {
             #[cfg(target_family = "unix")]
+            // A dropped sender means the signal thread ended; shut down too.
             let shutdown = async move {
                 let _ = process_signals.receiver.await;
             };
@@ -138,7 +139,9 @@ fn run_on_owned_runtime(
     #[cfg(target_family = "unix")]
     {
         process_signals.handle.close();
-        let _ = process_signals.thread.join();
+        if process_signals.thread.join().is_err() {
+            tracing::warn!("the process signal thread panicked during shutdown");
+        }
     }
     result
 }
@@ -170,6 +173,7 @@ impl ProcessSignals {
         let thread = std::thread::Builder::new()
             .name("graphql-orm-router-signals".to_owned())
             .spawn(move || {
+                // A send fails only when the runtime already stopped listening.
                 if signals.forever().next().is_some() {
                     let _ = sender.send(());
                 }

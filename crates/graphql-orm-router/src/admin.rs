@@ -367,6 +367,7 @@ async fn metrics_handler(
         "router_pending_websocket_connections": metrics.pending_websocket_connections(),
         "router_active_subscriptions": metrics.active_subscriptions(),
         "router_websocket_rejections_total": metrics.websocket_rejections_total(),
+        "router_websocket_send_failures_total": metrics.websocket_send_failures_total(),
         "router_schema_refresh_total": metrics.schema_refresh_total(),
         "router_composition_success_total": metrics.composition_success_total(),
         "router_composition_failure_total": metrics.composition_failure_total(),

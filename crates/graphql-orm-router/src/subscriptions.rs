@@ -351,16 +351,20 @@ impl ConnectionState {
     }
 
     fn terminate_and_close_internal(&mut self) {
-        let _ = self.terminate_and_close_internal_once();
+        self.terminate_and_close_internal_once();
     }
 
     fn terminate_and_close_internal_once(&mut self) -> bool {
         let termination = self.terminate();
         if let Some(internal) = termination.internal_sink {
+            let metrics = self.gateway.metrics.clone();
             rt::spawn(async move {
-                let _ = internal
-                    .send(close_message(1000, "Client disconnected"))
-                    .await;
+                send_best_effort(
+                    &internal,
+                    close_message(1000, "Client disconnected"),
+                    &metrics,
+                )
+                .await;
             });
         }
         termination.first
@@ -455,9 +459,12 @@ async fn create_connection_service(
         );
     } else {
         state.borrow_mut().terminate_and_close_internal();
-        let _ = sink
-            .send(close_message(4406, "Subprotocol not acceptable"))
-            .await;
+        send_best_effort(
+            &sink,
+            close_message(4406, "Subprotocol not acceptable"),
+            &gateway.metrics,
+        )
+        .await;
     }
 
     let service_state = state.clone();
@@ -470,9 +477,13 @@ async fn create_connection_service(
     let shutdown = fn_shutdown(async move || {
         let termination = state.borrow_mut().terminate();
         if let Some(internal) = termination.internal_sink {
-            let _ = internal
-                .send(close_message(1000, "Client disconnected"))
-                .await;
+            let metrics = state.borrow().gateway.metrics.clone();
+            send_best_effort(
+                &internal,
+                close_message(1000, "Client disconnected"),
+                &metrics,
+            )
+            .await;
         }
     });
     Ok(chain(service).and_then(shutdown))
@@ -488,22 +499,28 @@ fn spawn_connection_init_timeout(
         let Some(state) = state.upgrade() else {
             return;
         };
-        let termination = {
+        let (termination, metrics) = {
             let mut state = state.borrow_mut();
             if state.phase != ConnectionPhase::WaitingForInit {
                 return;
             }
-            state.terminate()
+            (state.terminate(), state.gateway.metrics.clone())
         };
         if let Some(internal) = termination.internal_sink {
-            let _ = internal
-                .send(close_message(1000, "Connection initialization timed out"))
-                .await;
+            send_best_effort(
+                &internal,
+                close_message(1000, "Connection initialization timed out"),
+                &metrics,
+            )
+            .await;
         }
         if termination.first {
-            let _ = sink
-                .send(close_message(4408, "Connection initialisation timeout"))
-                .await;
+            send_best_effort(
+                &sink,
+                close_message(4408, "Connection initialisation timeout"),
+                &metrics,
+            )
+            .await;
         }
     });
 }
@@ -521,15 +538,22 @@ fn spawn_expiry(
             return;
         };
         let termination = state.borrow_mut().terminate();
+        let metrics = state.borrow().gateway.metrics.clone();
         if let Some(internal) = termination.internal_sink {
-            let _ = internal
-                .send(close_message(1000, "Credential expired"))
-                .await;
+            send_best_effort(
+                &internal,
+                close_message(1000, "Credential expired"),
+                &metrics,
+            )
+            .await;
         }
         if termination.first {
-            let _ = sink
-                .send(close_message(4401, "Bearer credential expired"))
-                .await;
+            send_best_effort(
+                &sink,
+                close_message(4401, "Bearer credential expired"),
+                &metrics,
+            )
+            .await;
         }
     });
 }
@@ -559,7 +583,8 @@ async fn handle_frame(
         ws::Frame::Close(reason) => {
             let termination = state.borrow_mut().terminate();
             if let Some(internal) = termination.internal_sink {
-                let _ = internal.send(ws::Message::Close(reason.clone())).await;
+                let metrics = state.borrow().gateway.metrics.clone();
+                send_best_effort(&internal, ws::Message::Close(reason.clone()), &metrics).await;
             }
             Ok(termination.first.then(|| ws::Message::Close(reason)))
         }
@@ -792,7 +817,7 @@ async fn connect_internal(
     let bridge_state = state.clone();
     let bridge_external = external_sink.clone();
     rt::spawn(async move {
-        let _ = connection
+        let ended = connection
             .seal()
             .start(fn_service(move |frame| {
                 let state = bridge_state.clone();
@@ -814,15 +839,20 @@ async fn connect_internal(
                         }
                         Some(BridgeFrame::Control(ws::Frame::Close(reason))) => {
                             state.borrow_mut().terminate_and_close_internal();
-                            let _ = sink.send(ws::Message::Close(reason)).await;
+                            let metrics = state.borrow().gateway.metrics.clone();
+                            send_best_effort(&sink, ws::Message::Close(reason), &metrics).await;
                         }
                         Some(BridgeFrame::Control(
                             ws::Frame::Binary(_) | ws::Frame::Continuation(_),
                         )) => {
                             state.borrow_mut().terminate_and_close_internal();
-                            let _ = sink
-                                .send(close_message(1011, "Subscription transport unavailable"))
-                                .await;
+                            let metrics = state.borrow().gateway.metrics.clone();
+                            send_best_effort(
+                                &sink,
+                                close_message(1011, "Subscription transport unavailable"),
+                                &metrics,
+                            )
+                            .await;
                         }
                         _ => {}
                     }
@@ -830,6 +860,11 @@ async fn connect_internal(
                 }
             }))
             .await;
+        // The bridge's own state handling already terminated the connection;
+        // record only that the private transport ended abnormally.
+        if ended.is_err() {
+            tracing::debug!("private subscription bridge ended with a transport error");
+        }
     });
     state.borrow_mut().internal_sink = Some(internal_sink.clone());
     let init = json!({
@@ -902,20 +937,27 @@ async fn forward_internal_messages(
     if !termination.first {
         return;
     }
+    let metrics = state.borrow().gateway.metrics.clone();
     match end {
         ForwardEnd::InternalClose(reason) => {
-            let _ = external_sink.send(ws::Message::Close(reason)).await;
+            send_best_effort(&external_sink, ws::Message::Close(reason), &metrics).await;
         }
         ForwardEnd::InternalFailure => {
-            let _ = external_sink
-                .send(close_message(1011, "Subscription transport unavailable"))
-                .await;
+            send_best_effort(
+                &external_sink,
+                close_message(1011, "Subscription transport unavailable"),
+                &metrics,
+            )
+            .await;
         }
         ForwardEnd::ExternalFailure => {
             if let Some(internal) = termination.internal_sink {
-                let _ = internal
-                    .send(close_message(1000, "Client disconnected"))
-                    .await;
+                send_best_effort(
+                    &internal,
+                    close_message(1000, "Client disconnected"),
+                    &metrics,
+                )
+                .await;
             }
         }
     }
@@ -941,10 +983,14 @@ fn public_server_message(mut message: Value, state: &SharedConnectionState) -> O
             if state.operation_lost(&state.operations[&id]) {
                 if let Some(internal) = state.internal_sink.clone() {
                     let complete = json!({"id": internal_id, "type": "complete"});
+                    let metrics = state.gateway.metrics.clone();
                     rt::spawn(async move {
-                        let _ = internal
-                            .send(ws::Message::Text(complete.to_string().into()))
-                            .await;
+                        send_best_effort(
+                            &internal,
+                            ws::Message::Text(complete.to_string().into()),
+                            &metrics,
+                        )
+                        .await;
                     });
                 }
                 state.remove_operation(&id);
@@ -1258,6 +1304,15 @@ fn close_message(code: u16, description: &str) -> ws::Message {
     }))
 }
 
+/// Sends a best-effort close or completion to a peer that may already have
+/// gone. A failure only means the peer closed first, so it is counted rather
+/// than propagated. Neither the message nor the peer is recorded.
+async fn send_best_effort(sink: &ws::WsSink, message: ws::Message, metrics: &RouterMetrics) {
+    if sink.send(message).await.is_err() {
+        metrics.websocket_send_failed();
+    }
+}
+
 fn continuity_error(id: &str) -> Value {
     json!({"id": id, "type": "error", "payload": [{
         "message": "Subscription continuity lost; resubscribe and refetch",
@@ -1314,9 +1369,13 @@ fn spawn_continuity_watch(
                 }
                 if let Some(internal) = &internal {
                     let complete = json!({"id": internal_id, "type": "complete"});
-                    let _ = internal
-                        .send(ws::Message::Text(complete.to_string().into()))
-                        .await;
+                    let metrics = state.borrow().gateway.metrics.clone();
+                    send_best_effort(
+                        internal,
+                        ws::Message::Text(complete.to_string().into()),
+                        &metrics,
+                    )
+                    .await;
                 }
             }
         }

@@ -35,6 +35,8 @@ exporter binds `0.0.0.0` or `::` now logs a startup warning.
   `InvalidConfiguration`. Lower any such value.
 - Outbound fetches send `User-Agent: graphql-orm-router/<version>`. Update any
   upstream allow-list that matched `graphql-orm-router/0.1`.
+- `GET /_router/metrics` adds `router_websocket_send_failures_total`. Strict
+  consumers of that JSON object should accept the new key.
 
 ### Role-scope catalogue maximum staleness (can refuse requests)
 

@@ -1550,11 +1550,12 @@ fn redacted_url(value: &str) -> String {
     let Ok(mut url) = Url::parse(value) else {
         return "[invalid URL]".to_owned();
     };
-    if !url.username().is_empty() {
-        let _ = url.set_username("[redacted]");
+    // Redaction failure must never fall back to the original credentials.
+    if !url.username().is_empty() && url.set_username("[redacted]").is_err() {
+        return "[redacted URL]".to_owned();
     }
-    if url.password().is_some() {
-        let _ = url.set_password(Some("[redacted]"));
+    if url.password().is_some() && url.set_password(Some("[redacted]")).is_err() {
+        return "[redacted URL]".to_owned();
     }
     if url.query().is_some() {
         url.set_query(Some("[redacted]"));

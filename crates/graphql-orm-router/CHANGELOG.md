@@ -45,7 +45,19 @@ supersedes: []
     authorization-variable projection is trimmed without re-serialising the
     whole message for every removed entry.
   - The engine's slow-request, keep-alive, GET-mutation, batching and
-    subgraph-response defaults are documented and pinned by tests.
+    subgraph-response defaults are documented, and the slow-request,
+    GET-mutation and batching behaviour is pinned by tests.
+- Router errors that used to be swallowed are now counted or logged (router part
+  of #512). Failed best-effort WebSocket close and completion sends increment
+  the new `router_websocket_send_failures_total` admin metric
+  (`RouterMetricsSnapshot::websocket_send_failures_total`). An abnormal end of
+  the private subscription bridge logs at debug. A failed cleanup of a private
+  persisted-document snapshot logs a warning with the error kind only, and a
+  panicked signal thread logs a warning at shutdown. URL redaction in
+  diagnostics returns `[redacted URL]` rather than ever falling back to
+  credentials it could not replace. The remaining ignored results are
+  documented in place. No log or metric carries URLs, header values, tokens or
+  document text.
 
 ## 0.14.0 (unreleased)
 
