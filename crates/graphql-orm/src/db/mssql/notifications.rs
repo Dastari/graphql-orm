@@ -189,13 +189,30 @@ impl MssqlQueryNotificationConnection {
     /// The received conversation is ended. Malformed, oversized, and unknown
     /// messages return `Other`, requiring conservative resynchronization.
     ///
-    /// Receiving the message and ending its conversation are one transaction
-    /// in one batch: if ending the conversation fails, the receive is rolled
-    /// back, the message stays on the queue and the error is returned. SQL
-    /// Server disables a queue after five consecutive rolled-back receives
-    /// (poison-message handling), so a persistent failure stops delivery
-    /// visibly instead of dropping notifications.
+    /// Delivery is **at-least-once; consumers must be idempotent.** The
+    /// message is received and its conversation ended inside a transaction
+    /// that commits only after the message has been read by this process. If
+    /// ending the conversation fails, or the connection fails or the future
+    /// is dropped before the commit, the transaction rolls back, the message
+    /// stays on the queue and a later `receive` returns it again. A message
+    /// may therefore be delivered more than once and never less. Messages
+    /// are invalidation hints, so handling one twice only repeats a refresh.
+    ///
+    /// SQL Server disables a queue after five consecutive rolled-back
+    /// receives (poison-message handling), so a persistent failure stops
+    /// delivery visibly instead of dropping notifications.
     pub async fn receive(
+        &mut self,
+        wait_ms: u32,
+    ) -> crate::Result<Option<MssqlQueryNotificationMessage>> {
+        let message = self.receive_unacknowledged(wait_ms).await?;
+        self.acknowledge().await?;
+        Ok(message)
+    }
+
+    /// Receive at most one message and end its conversation, leaving the
+    /// transaction open. Nothing is durable until [`Self::acknowledge`].
+    async fn receive_unacknowledged(
         &mut self,
         wait_ms: u32,
     ) -> crate::Result<Option<MssqlQueryNotificationMessage>> {
@@ -227,20 +244,39 @@ impl MssqlQueryNotificationConnection {
             },
         ))
     }
+
+    /// Commit the receive whose message this process now holds.
+    async fn acknowledge(&mut self) -> crate::Result<()> {
+        self.client
+            .simple_query(ACKNOWLEDGE_BATCH)
+            .await
+            .map_err(map_tiberius_error)?
+            .into_results()
+            .await
+            .map_err(map_tiberius_error)?;
+        Ok(())
+    }
 }
 
-/// One batch that receives at most one message and ends its conversation
-/// atomically. Its only result set is the received message, if any.
+/// Commits the transaction [`receive_batch`] left open.
+const ACKNOWLEDGE_BATCH: &str = "IF @@TRANCOUNT > 0 COMMIT TRANSACTION;";
+
+/// One batch that receives at most one message and ends its conversation in
+/// a transaction it leaves open; its only result set is the received message,
+/// if any. A transaction an interrupted earlier receive left open is rolled
+/// back first, which returns that message to the queue. If the receive or
+/// `END CONVERSATION` fails, the transaction is rolled back and the error
+/// rethrown.
 fn receive_batch(queue: &MssqlBrokerQueue, wait_ms: u32) -> String {
     format!(
-        "DECLARE @h uniqueidentifier, @t nvarchar(256), @b nvarchar(max); \
+        "IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION; \
+         DECLARE @h uniqueidentifier, @t nvarchar(256), @b nvarchar(max); \
          BEGIN TRY \
          BEGIN TRANSACTION; \
          WAITFOR (RECEIVE TOP (1) @h = conversation_handle, @t = message_type_name, \
          @b = CASE WHEN DATALENGTH(message_body) <= 16384 THEN CONVERT(nvarchar(max), message_body) ELSE NULL END \
          FROM {}), TIMEOUT {wait_ms}; \
          IF @h IS NOT NULL END CONVERSATION @h; \
-         COMMIT TRANSACTION; \
          END TRY \
          BEGIN CATCH \
          IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION; \
@@ -371,7 +407,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn receive_and_end_conversation_are_one_transaction() {
+    fn the_receive_batch_leaves_its_transaction_for_the_acknowledgement() {
         let queue = MssqlBrokerQueue::new("dbo", "ChangeQueue").unwrap();
         let sql = receive_batch(&queue, 250);
         let position = |needle: &str| {
@@ -381,18 +417,98 @@ mod tests {
         let begin = position("BEGIN TRANSACTION;");
         let receive = position("WAITFOR (RECEIVE TOP (1) @h = conversation_handle");
         let end = position("IF @h IS NOT NULL END CONVERSATION @h;");
-        let commit = position("COMMIT TRANSACTION;");
-        let rollback = position("IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION; THROW;");
+        let rollback = position("BEGIN CATCH IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION; THROW;");
         let select = position("SELECT @h AS conversation_handle");
-        assert!(begin < receive && receive < end && end < commit, "{sql}");
-        assert!(commit < rollback && rollback < select, "{sql}");
+        // A leftover transaction is rolled back before anything else.
+        assert!(
+            sql.starts_with("IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;"),
+            "{sql}"
+        );
+        assert!(begin < receive && receive < end && end < rollback, "{sql}");
+        assert!(rollback < select, "{sql}");
         assert!(
             sql.contains("FROM [dbo].[ChangeQueue]), TIMEOUT 250;"),
             "{sql}"
         );
-        // One batch: no second round trip can fail between the two steps.
-        assert_eq!(sql.matches("END CONVERSATION").count(), 1);
+        // The batch itself never commits: the message must reach this
+        // process first, and only the acknowledgement makes the receive durable.
+        assert!(!sql.contains("COMMIT"), "{sql}");
+        assert_eq!(ACKNOWLEDGE_BATCH, "IF @@TRANCOUNT > 0 COMMIT TRANSACTION;");
     }
+
+    /// Runs on a disposable SQL Server this test owns.
+    #[tokio::test]
+    #[ignore = "requires Docker; owns a disposable loopback SQL Server container"]
+    async fn unacknowledged_and_failed_receives_are_redelivered()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::super::owned_mssql::{OwnedSqlServer, execute_batch};
+
+        let mut server = OwnedSqlServer::start().await?;
+        let connection = server.connection_string.clone();
+        execute_batch(
+            &connection,
+            "CREATE QUEUE dbo.RedeliveryQueue; \
+             CREATE SERVICE RedeliverySource ON QUEUE dbo.RedeliveryQueue ([DEFAULT]); \
+             CREATE QUEUE dbo.RedeliveryReplies; \
+             CREATE SERVICE RedeliveryReplies ON QUEUE dbo.RedeliveryReplies ([DEFAULT]);",
+        )
+        .await?;
+        let send = "DECLARE @h uniqueidentifier; \
+             BEGIN DIALOG @h FROM SERVICE RedeliveryReplies TO SERVICE 'RedeliverySource' \
+             ON CONTRACT [DEFAULT] WITH ENCRYPTION = OFF; \
+             SEND ON CONVERSATION @h MESSAGE TYPE [DEFAULT] (N'payload');";
+        let queue = MssqlBrokerQueue::new("dbo", "RedeliveryQueue")?;
+        let connect = || MssqlQueryNotificationConnection::connect_ado(&connection, queue.clone());
+
+        // The message reaches this process, then the connection is lost
+        // before the acknowledgement: it must be delivered again.
+        execute_batch(&connection, send).await?;
+        let mut interrupted = connect().await?;
+        assert!(
+            interrupted.receive_unacknowledged(5000).await?.is_some(),
+            "the message is delivered"
+        );
+        drop(interrupted);
+        let mut listener = connect().await?;
+        assert!(
+            listener.receive(5000).await?.is_some(),
+            "an unacknowledged message is redelivered"
+        );
+        assert!(
+            listener.receive(200).await?.is_none(),
+            "an acknowledged message is delivered once"
+        );
+
+        // The same without a reconnect: an unacknowledged receive on a
+        // connection that is used again is rolled back and redelivered.
+        execute_batch(&connection, send).await?;
+        assert!(listener.receive_unacknowledged(5000).await?.is_some());
+        assert!(listener.receive(5000).await?.is_some());
+        assert!(listener.receive(200).await?.is_none());
+
+        // `END CONVERSATION` fails (an unknown handle stands in for the
+        // failure): the receive is rolled back and the message stays queued.
+        execute_batch(&connection, send).await?;
+        let failing = receive_batch(&queue, 5000).replace(
+            "END CONVERSATION @h;",
+            "END CONVERSATION 'ffffffff-ffff-ffff-ffff-ffffffffffff';",
+        );
+        assert_ne!(failing, receive_batch(&queue, 5000));
+        let error = execute_batch(&connection, &failing)
+            .await
+            .expect_err("ending an unknown conversation fails");
+        assert!(error.to_string().contains("conversation"), "{error}");
+        assert!(
+            listener.receive(5000).await?.is_some(),
+            "a failed receive leaves the message on the queue"
+        );
+        assert!(listener.receive(200).await?.is_none());
+
+        drop(listener);
+        server.cleanup()?;
+        Ok(())
+    }
+
     #[test]
     fn parses_change_expiry_and_invalid() {
         for (xml, kind) in [

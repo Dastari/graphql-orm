@@ -1,4 +1,8 @@
 mod notifications;
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../tests/support/owned_mssql.rs"]
+mod owned_mssql;
 mod transport;
 pub use notifications::{
     MssqlBrokerQueue, MssqlQueryNotificationConnection, MssqlQueryNotificationKind,
@@ -909,11 +913,7 @@ impl MssqlScalar for String {
         // `datetime2`, `datetime` or `smalldatetime` carries no offset and is
         // read as UTC, like the `SYSUTCDATETIME()` defaults the ORM writes.
         if let Ok(value) = index.try_get_raw::<tiberius::time::chrono::NaiveDateTime>(&row.inner) {
-            return Ok(value.map(|value| {
-                value
-                    .and_utc()
-                    .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
-            }));
+            return Ok(value.map(naive_utc_rfc3339));
         }
         if let Ok(value) = index.try_get_raw::<chrono::DateTime<chrono::FixedOffset>>(&row.inner) {
             return Ok(
@@ -1119,6 +1119,28 @@ impl MssqlScalar for rust_decimal::Decimal {
             })
             .transpose()
     }
+}
+
+/// RFC 3339 text of a date-time that carries no offset, read as UTC.
+///
+/// The legacy `datetime` type counts 1/300 of a second, which the driver
+/// truncates to nanoseconds (`.996666666` for the tick SQL Server shows as
+/// `.997`). Such a value is never a multiple of 100 ns, the unit of every
+/// other date-time type, so it is rounded to the millisecond the server shows.
+fn naive_utc_rfc3339(value: tiberius::time::chrono::NaiveDateTime) -> String {
+    use chrono::Timelike;
+    let nanos = value.nanosecond();
+    let value = if nanos % 100 == 0 {
+        value
+    } else {
+        // At most 299/300 s, so rounding never reaches the next second.
+        value
+            .with_nanosecond((nanos + 500_000) / 1_000_000 * 1_000_000)
+            .unwrap_or(value)
+    };
+    value
+        .and_utc()
+        .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
 }
 
 /// Convert a TDS numeric to `Decimal`, refusing values it cannot represent.
@@ -1416,6 +1438,33 @@ mod tests {
         let mut config = config();
         follow_route(&mut config, "node7.worker.database.example", 11042);
         assert_eq!(config.get_addr(), "node7.worker.database.example:11042");
+    }
+
+    #[test]
+    fn date_times_without_an_offset_read_as_rfc3339_utc() {
+        let at = |nanos: u32| {
+            chrono::NaiveDate::from_ymd_opt(2026, 11, 9)
+                .unwrap()
+                .and_hms_nano_opt(12, 34, 56, nanos)
+                .unwrap()
+        };
+        assert_eq!(naive_utc_rfc3339(at(0)), "2026-11-09T12:34:56Z");
+        assert_eq!(
+            naive_utc_rfc3339(at(125_000_000)),
+            "2026-11-09T12:34:56.125Z"
+        );
+        // `datetime2(7)` keeps its 100 ns digits.
+        assert_eq!(
+            naive_utc_rfc3339(at(123_456_700)),
+            "2026-11-09T12:34:56.123456700Z"
+        );
+        // Legacy `datetime` ticks of 1/300 s, truncated by the driver.
+        assert_eq!(naive_utc_rfc3339(at(3_333_333)), "2026-11-09T12:34:56.003Z");
+        assert_eq!(naive_utc_rfc3339(at(6_666_666)), "2026-11-09T12:34:56.007Z");
+        assert_eq!(
+            naive_utc_rfc3339(at(996_666_666)),
+            "2026-11-09T12:34:56.997Z"
+        );
     }
 
     #[test]
