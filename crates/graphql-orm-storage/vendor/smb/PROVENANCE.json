@@ -66,6 +66,14 @@
       ],
       "scope": "Owner-local hardening patch, not an upstream backport. Four server-reachable panics become typed errors: a transform nested inside a decrypted or decompressed payload is refused with Error::InvalidMessage; an async response header without an async ID is refused with Error::InvalidMessage; opening a file on a printer share is refused with Error::UnsupportedOperation, and dropping the unsupported handle closes it; a session key shorter than 16 bytes is refused with Error::InvalidState instead of being sliced. MS-SMB2 3.2.5.3.1 would right-pad a short key with zeros; this client fails closed instead. Includes the in-crate regression tests, and a test-only regression test in src/connection.rs that a server-selected dialect below ConnectionConfig::min_dialect fails negotiation with Error::NegotiationError and that NEGOTIATE was the only SMB2 message sent, so no credentials follow.",
       "upstream": "Upstream 0.12.0 is reported to no longer slice a short session key; the other three sites are not known to be fixed upstream. Replace with a reviewed upstream fix when one is adopted."
+    },
+    {
+      "id": "test-image-digest",
+      "patch_file": "PATCHES/test-image-digest.patch",
+      "patch_sha256": "992de03f0d9acc89497c3bbbc0dd912f22811b4cd4046ab5a808007a09c2042a",
+      "applies_after": "PATCHES/server-response-errors.patch",
+      "runtime_changed_files": [],
+      "scope": "Test-only: pin the archived Samba Dockerfile base image by OCI index digest; no SMB runtime changes."
     }
   ],
   "license": {
@@ -600,7 +608,7 @@
     "src/tree/dfs_tree.rs": "e51e2bb70cde3e854166e7758705fa4e90706be805d05920520882b36808a937",
     "src/tree/ipc_tree.rs": "4bd97825246e9a9c3de638a00a614cd52adad0fd7af45cf250ca8ec8f04515bf",
     "src/tree.rs": "592f32adc823e45d84f4f0d07abd3dff22e64614ecd160d6af24e3147b55e51b",
-    "tests/Dockerfile": "10e06e8fb000d985643663ae33748a481b7303453e357a2c914d687f7c6fdf39",
+    "tests/Dockerfile": "826fb18767c69942263f53a1ba4afaa8a93d85ec8dfe9b55f1a0a37096e54153",
     "tests/README.md": "f73d0052681dfc4084795d7fa765d2ed7b98338033db076bfb2ed7b82f583ca9",
     "tests/basic.rs": "9589dbc8aa904745c0197809f74154c6a2016cf500a0469af110ba595d7a947c",
     "tests/closes.rs": "0da550c496ea4f2533f73d60d2a52a69e1255d1bfc3be97761dc9f32cb576b19",

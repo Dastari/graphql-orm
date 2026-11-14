@@ -94,3 +94,5 @@ versions live in each crate's `Cargo.toml` and the release manifest.
 One active canonical document owns each topic. The lifecycle, metadata, and
 exceptions are defined by
 [ADR-0001](decisions/ADR-0001-documentation-authority-and-lifecycle.md).
+
+Security reports: [repository security policy](../SECURITY.md).

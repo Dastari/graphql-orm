@@ -3,8 +3,8 @@ title: Dependency security disposition
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-04
-review_by: 2026-11-15
+last_reviewed: 2026-11-14
+review_by: 2026-12-04
 supersedes: []
 ---
 
@@ -16,9 +16,10 @@ is complete **with findings**, including all eight unsuppressed raw audit
 outputs. This reference records the technical dispositions and their conditions;
 it does not make an affected dependency sound or certify an application's graph.
 
-The snapshot covers the unpublished ORM/macros 0.50.1 candidate and the reviewed
-agql-auth 0.21.3 revision. It is not a published release or whole-workspace
-runtime acceptance. The generated [package inventory](workspace-packages.md)
+The current review covers every tracked root and nested fixture lockfile on
+2026-11-14. The October evidence linked above remains historical evidence for
+its original source, not the current graph. This is not whole-workspace runtime
+acceptance. The generated [package inventory](workspace-packages.md)
 owns package paths and the release manifest owns package versions and
 external revisions. The
 [release process](../operations/release/process.md) owns validation and
@@ -48,11 +49,11 @@ credential path uses NTLM and symmetric signing. S3's SigV4a owner is updated
 to aws-sigv4 1.6.4, using the patched crypto-bigint 0.7.10 line; it does not rely
 on this disposition.
 
-This acceptance does not cover Auth signing services, consumer applications,
-other crate versions, or a future workspace EC signer. Introducing private EC
-operations invalidates it immediately. Keep the raw unsuppressed audit finding;
-no Cargo advisory ignore is added. Follow up upstream on a JWT aws_lc_rs backend
-or a release adopting the corrected RustCrypto owners.
+This acceptance does not cover Auth signing services, consumer applications, other crate
+versions, or a future workspace EC signer. Introducing private EC operations invalidates
+it immediately. Keep the raw unsuppressed audit finding; the exact-version CI
+disposition below does not suppress raw reports. Follow up upstream on a JWT aws_lc_rs
+backend or a release adopting the corrected RustCrypto owners.
 
 ## TLS certificate distrust patches
 
@@ -92,32 +93,35 @@ update alone does not validate a deployment image.
 
 ## Owner-local SMB dependency
 
-Storage 0.7.4 carries the reviewed SMB 0.10.2 directory-stream backport as an
-optional owner-local dependency. Its [provenance](../../crates/graphql-orm-storage/vendor/smb/PROVENANCE.json)
-identifies the original registry archive, exact upstream patch and retained MIT
-license. The [supplemental evidence](../archive/2026/dependency-review-2026-10-15/smb-addendum.md)
-records actual 5d155ba source/lock mappings and complete-with-findings collection;
-the earlier frozen scan remains evidence for its original source.
+Storage 0.7.4 carries the reviewed SMB 0.10.2 directory-stream backport as an optional
+owner-local dependency. Its
+[provenance](../../crates/graphql-orm-storage/vendor/smb/PROVENANCE.json) identifies the
+original registry archive, exact upstream patch and retained MIT license. The
+[supplemental evidence](../archive/2026/dependency-review-2026-10-15/smb-addendum.md)
+records actual 5d155ba source/lock mappings and complete-with-findings collection; the
+earlier frozen scan remains evidence for its original source.
 
-cargo-audit 0.22.2 [skips non-default-registry sources](https://github.com/RustSec/rustsec/blob/cargo-audit/v0.22.2/rustsec/src/database.rs#L133-L143),
+cargo-audit 0.22.2 [skips non-default-registry
+sources](https://github.com/RustSec/rustsec/blob/cargo-audit/v0.22.2/rustsec/src/database.rs#L133-L143),
 including source-less workspace paths and downstream Git dependencies. Ordinary
-root/fixture scans therefore do not assess the backported package. The
-supplemental original-registry SMB identity/checksum lookup uses the same frozen
-advisory database and requires individual applicability review against patched
-files and selected features; it does not establish absence of vulnerabilities.
-Registry companions retain ordinary audit coverage. Reassess upstream advisories
-and the backport whenever its code, features or source changes.
+root/fixture scans therefore do not assess the backported package. The supplemental
+original-registry SMB identity/checksum lookup uses the same frozen advisory database
+and requires individual applicability review against patched files and selected
+features; it does not establish absence of vulnerabilities. Registry companions retain
+ordinary audit coverage. Reassess upstream advisories and the backport whenever its
+code, features or source changes.
 
 Storage 0.8.1 adds an owner-local security patch for
 [GHSA-439h-2cx8-xwgx](https://github.com/Dastari/graphql-orm/security/advisories/GHSA-439h-2cx8-xwgx):
-the client verifies signing or encryption before acting on a response status.
-Upstream smb-rs has the same ordering, so a registry update would not fix it;
-provenance records the patch, and the [native SMB reference](../../crates/graphql-orm-storage/docs/native-smb.md#response-verification)
+the client verifies signing or encryption before acting on a response status. Upstream
+smb-rs has the same ordering, so a registry update would not fix it; provenance records
+the patch, and the [native SMB
+reference](../../crates/graphql-orm-storage/docs/native-smb.md#response-verification)
 states the corrected behaviour. Re-review it with any vendor update.
 
 ## Retained findings and conditions
 
-Maintenance roles and the **2026-11-15** review date below are recommended
+Maintenance roles and the **2026-12-04** review date below are recommended
 follow-up responsibilities, not assertions that an individual accepted risk.
 Re-review immediately when a condition changes, and expose retained findings
 in the protected-release review packet.
@@ -130,13 +134,14 @@ in the protected-release review packet.
 
 ### Router XML initialization
 
-The router constructs [typed internal Hive configuration](../../crates/graphql-orm-router/src/server.rs)
-in `build_hive_config`, directly deserializes it, exposes no raw Hive storage or
-plugin registry, and supplies no storage map. Its
-[file configuration](../../crates/graphql-orm-router/src/file_config.rs) rejects
-unknown fields; the CLI uses that project loader rather than Hive's overlay
-loader. Persisted-document options remain disabled through initialization and
-reload. Hive's empty StorageManager constructs no S3 runtime or credential reader.
+The router constructs [typed internal Hive
+configuration](../../crates/graphql-orm-router/src/server.rs) in `build_hive_config`,
+directly deserializes it, exposes no raw Hive storage or plugin registry, and supplies
+no storage map. Its [file
+configuration](../../crates/graphql-orm-router/src/file_config.rs) rejects unknown
+fields; the CLI uses that project loader rather than Hive's overlay loader.
+Persisted-document options remain disabled through initialization and reload. Hive's
+empty StorageManager constructs no S3 runtime or credential reader.
 
 Generic Hive S3 WebIdentity/STS and S3 Express credentials have real XML response
 paths. object_store's serde reader constructs NsReader, so neither advisory is
@@ -144,12 +149,16 @@ excluded merely because the consumer uses deserialization. Ordinary GraphQL inpu
 alone was not shown to reach those readers. Exposing upstream storage, raw engine
 configuration, plugins or loader/environment merging invalidates this disposition.
 
-Primary source anchors: [reviewed project translation](https://github.com/Dastari/graphql-orm/blob/84e7d0b0542da7c4425f3875ab9547f26d24dbb8/crates/graphql-orm-router/src/server.rs#L866),
-[Hive StorageManager](https://github.com/graphql-hive/router/blob/15c50cf622e9d83bd4a25b3e190a124bcb67ee19/bin/router/src/storage/mod.rs#L18),
-[persisted-document initialization](https://github.com/graphql-hive/router/blob/15c50cf622e9d83bd4a25b3e190a124bcb67ee19/bin/router/src/pipeline/persisted_documents/mod.rs#L183),
-and [object_store's fixed owning requirement](https://raw.githubusercontent.com/apache/arrow-rs-object-store/v0.14.1/Cargo.toml).
-The reviewed fixed owner crosses Hive's existing requirement; use a compatible
-owning update rather than an unreviewed semver override.
+Primary source anchors: [reviewed project
+translation](https://github.com/Dastari/graphql-orm/blob/84e7d0b0542da7c4425f3875ab9547f26d24dbb8/crates/graphql-orm-router/src/server.rs#L866),
+[Hive
+StorageManager](https://github.com/graphql-hive/router/blob/15c50cf622e9d83bd4a25b3e190a124bcb67ee19/bin/router/src/storage/mod.rs#L18),
+[persisted-document
+initialization](https://github.com/graphql-hive/router/blob/15c50cf622e9d83bd4a25b3e190a124bcb67ee19/bin/router/src/pipeline/persisted_documents/mod.rs#L183),
+and [object_store's fixed owning
+requirement](https://raw.githubusercontent.com/apache/arrow-rs-object-store/v0.14.1/Cargo.toml).
+The reviewed fixed owner crosses Hive's existing requirement; use a compatible owning
+update rather than an unreviewed semver override.
 
 ### LRU defaults and extensions
 
@@ -167,10 +176,11 @@ LruCache or independently initialized host exporters. LRU 0.16.4 is still
 affected; the upstream fix starts at 0.18.2. The selected AWS-owned 0.18.5 copy
 does not repair unrelated 0.16.x owners.
 
-Primary sources: [fix](https://github.com/jeromefroe/lru-rs/pull/238),
-[async-graphql cache defaults](https://docs.rs/crate/async-graphql/7.2.1/source/src/dataloader/mod.rs),
+Primary sources: [fix](https://github.com/jeromefroe/lru-rs/pull/238), [async-graphql
+cache defaults](https://docs.rs/crate/async-graphql/7.2.1/source/src/dataloader/mod.rs),
 [libdd key type](https://docs.rs/crate/libdd-sampling/6.0.0/source/src/glob_matcher.rs),
-and [Hive exporter gate](https://github.com/graphql-hive/router/blob/15c50cf622e9d83bd4a25b3e190a124bcb67ee19/bin/router/src/telemetry/traces/mod.rs#L119).
+and [Hive exporter
+gate](https://github.com/graphql-hive/router/blob/15c50cf622e9d83bd4a25b3e190a124bcb67ee19/bin/router/src/telemetry/traces/mod.rs#L119).
 
 ### RSA operations and credentials
 
@@ -186,10 +196,14 @@ Other mechanisms, credentials and downstream feature unification need a new
 trace. SQLx MySQL is absent from the selected profiles and outside the advertised
 ORM backend set; lockfile presence is a separate observation.
 
-Primary sources: [auth signing](https://github.com/Dastari/agql-auth/blob/59c0a38f82e8c75459474238799a81f29d4ffa58/src/service.rs#L1456),
-[JWKS public-key extraction](https://github.com/Dastari/agql-auth/blob/59c0a38f82e8c75459474238799a81f29d4ffa58/src/service.rs#L2271),
-[selected JWT RSA implementation](https://docs.rs/crate/jsonwebtoken/10.4.0/source/src/crypto/rust_crypto/rsa.rs),
-[SMB authenticator](https://docs.rs/crate/smb/0.10.2/source/src/session/authenticator.rs),
+Primary sources: [auth
+signing](https://github.com/Dastari/agql-auth/blob/59c0a38f82e8c75459474238799a81f29d4ffa58/src/service.rs#L1456),
+[JWKS public-key
+extraction](https://github.com/Dastari/agql-auth/blob/59c0a38f82e8c75459474238799a81f29d4ffa58/src/service.rs#L2271),
+[selected JWT RSA
+implementation](https://docs.rs/crate/jsonwebtoken/10.4.0/source/src/crypto/rust_crypto/rsa.rs),
+[SMB
+authenticator](https://docs.rs/crate/smb/0.10.2/source/src/session/authenticator.rs),
 and [RSA upstream tracking](https://github.com/RustCrypto/RSA/issues/626).
 
 ## Maintenance warnings and acceptance limits
@@ -204,11 +218,12 @@ maintainers should pursue an owning parser migration with YAML compatibility
 review; no blanket exclusion for all VRL/configuration paths is established.
 Unmaintained status alone does not establish an exploit.
 
-The scan uses a fixed advisory revision and then-available local registry/index
-data. It certifies neither future advisories nor registry freshness. The original
-eight reports and the two supplemental changed-lock reports retain nonzero
-findings exits; there is no broad ignore list. The supplemental identity-only
-lookup exits zero within the scope above; the aggregate remains with findings.
+The scan uses a fixed advisory revision and then-available local registry/index data. It
+certifies neither future advisories nor registry freshness. The original eight reports
+and the two supplemental changed-lock reports retain nonzero findings exits; raw reports
+have no ignore list; the exact CI dispositions above are separate. The supplemental
+identity-only lookup exits zero within the scope above; the aggregate remains with
+findings.
 
 This dependency review records graph/source dispositions separately from
 feature, provider and owned-service runtime acceptance. Follow the release
@@ -220,3 +235,66 @@ actual tested revision when reusing scoped prior evidence.
 Applications must review their own unified feature graph, current configuration,
 custom caches, policies and crypto APIs. Dependency or configuration changes
 invalidate the corresponding condition immediately, before the scheduled review.
+
+## Automated review on 2026-11-14
+
+CI and full release validation install cargo-audit 0.22.2 with its locked build
+graph and scan all eleven tracked lockfiles against the current RustSec database.
+Raw JSON reports, including retained findings and the database revision, are
+uploaded even on scan failure. New advisory IDs, affected package versions,
+maintenance warnings and yanks fail the gate. Scanner execution/parse failures
+also fail. No severity threshold or blanket ignore applies.
+
+The single machine-readable [disposition file](../../dependency-audit-dispositions.json)
+contains exact advisory/package/version identities, reasons and expiry dates. Changing
+or renewing it requires ordinary repository review. These are technical dispositions,
+not new assertions of owner risk acceptance. The existing crypto-bigint owner acceptance
+above remains limited to its original conditions. CI warns during the fourteen days
+before expiry, fails after expiry, and fails on identities absent from every tracked
+lock. Remove obsolete entries during review; follow the [release review
+procedure](../operations/release/process.md#dependency-disposition-review). Raw
+cargo-audit output is never filtered. Advisory/index connectivity failures fail closed;
+a fresh database clone and index preflight precede the JSON scans.
+
+Compatible lockfile updates repair Quinn protocol/UDP findings
+RUSTSEC-2026-0523, RUSTSEC-2026-0524 and RUSTSEC-2026-0538, rustix
+RUSTSEC-2026-0486 and the yanked clipboard-win 5.4.1 release. All affected nested
+locks receive the same compatible rustix patch where present.
+
+| Retained identity | Owning path and disposition |
+| --- | --- |
+| crypto-bigint 0.5.5 / RUSTSEC-2026-0387 | agql-auth → jsonwebtoken 10 and router jsonwebtoken 11 → p256/p384 → elliptic-curve. Existing conditional acceptance above; no auth pin change authorized. |
+| libsqlite3-sys 0.30.1 / RUSTSEC-2026-0459 | sqlx 0.8.6 → sqlx-sqlite. Fixed 0.39 is outside SQLx's range. Requires an owning SQLx migration and all-backend/API review; application SQL/data can reach SQLite, so this is retained risk rather than an unreachable path. |
+| quick-xml 0.39.4 / RUSTSEC-2026-0194, RUSTSEC-2026-0195 | hive-router → object_store 0.13. Fixed object_store owner crosses Hive's range. Router XML initialization conditions above apply. |
+| rsa 0.9.10 / RUSTSEC-2023-0071 | JWT RustCrypto and optional SMB crypto owners; no compatible fixed release. RSA operations and credentials conditions above apply. |
+| lru 0.16.3 and fixture 0.16.4 / RUSTSEC-2026-0253 | async-graphql DataLoader and Hive/libdd owners; neither range accepts fixed 0.18.2. NoCache/exporter/key conditions above apply; generic host caches remain exposed. |
+| atomic-polyfill 1.0.3 / RUSTSEC-2023-0089 | heapless/rstar spatial compatibility resolution. Unmaintained; optional graph presence does not establish runtime use. Seek an owning cleanup. |
+| pin-utils 0.1.0 / RUSTSEC-2026-0441 | S3 aws-smithy-runtime, optional SMB sspi → async-dnssd, and Hive reqwest-retry → wasmtimer. Unmaintained; replacing these owners needs upstream/API review. No exploit or unreachability inference. |
+| unsafe-libyaml 0.2.11 / RUSTSEC-2024-0449 | Hive/VRL → serde_yaml and serde_yaml_ng. Unmaintained parser; migrate owning dependencies with YAML compatibility review. |
+
+### Duplicate crypto and HTTP stacks (#498)
+
+No compatible lockfile-only unification is available across the major-version
+requirements: ORM and pinned agql-auth require jsonwebtoken 10, while the workspace
+router requires 11; Hive/object_store/SSPI retain reqwest 0.12 while project AI
+and router use 0.13. Moving either external pin or a public dependency contract
+is outside this batch. Keep both until the owning requirements converge.
+Rustls ring and aws-lc-rs are selected by different owners; removing one requires
+review of the unified provider/backend configuration. Native TLS/OpenSSL is
+required by the pinned Tiberius transport and optional SDK owners; changing it
+would overlap #516. These duplicates remain explicit follow-ups, not resolved
+by updating the lockfile.
+
+### Remaining repository/test hygiene (#545)
+
+PR base SHAs now enter shells through environment variables. All tracked fixture
+locks are scanned. The fixed qualified generator is still executed for the
+historical serialization comparison: it is repository-owned code loaded from a
+full immutable commit, not issue text or a moving ref. Only the current generator
+performs package-tag verification, preserving that gate while avoiding obsolete
+historical source-selection rules (#616).
+
+Sleep-based tests, missing-docs policy expansion, committed agent tooling and the
+synchronous public migration-file API require separate scoped decisions. No tests,
+lints or tool directories are removed here. The synchronous API documentation
+and timing-test refactors should be addressed with their owning runtime/API work.
