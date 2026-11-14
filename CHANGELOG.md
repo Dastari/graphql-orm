@@ -14,6 +14,11 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.146.0, AI 0.141.0
+
+- ORM adds `RlsIntrospectionBackend::probe_row_security`: PostgreSQL resolves every supplied table path and probes the current role in one read-only catalog query. Unknown/missing/unsupported relations return `None`; consumers must fail closed on errors or incomplete results. SQLite returns inactive security; other backends default to unknown. AI recovery uses this contract (#687). Macros remain version-aligned without generated-code changes.
+- AI runtime/provider fixes are detailed in the [AI changelog](crates/graphql-orm-ai/CHANGELOG.md#unreleased---01410).
+
 ## Unreleased
 
 - ORM and macros 0.143.0 (placeholder), AI 0.139.0 (placeholder): **breaking/security:** one authorization contract for field policies, handwritten roots and refusals. See the [migration guide](MIGRATION.md#01410-to-01430-one-authorization-contract).

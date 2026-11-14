@@ -10,6 +10,13 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.141.0
+
+- **Security:** privileged budget reclamation requires a live recovery epoch in its settlement transaction (#675). Consumed approval clones share an atomic execution claim; failed dispatches also spend that claim (#573). Direct automatic execution rejects incoherent tool descriptors (#466). Principal resolution validates reference equality and expiry; dispatch additionally checks wall-clock expiry (#464).
+- **Security:** inaccessible skill/profile credential identifiers return `NotFound`. Secret references reject `.` and `..` path segments. Rotation and removal retain previous secrets with pending cleanup evidence: only the host can establish that an opaque reference has no other users. Subscription reauthorization grace is capped at 120 seconds. Usage time filters use 64-bit bounds; apply AI schema module `0.79.0` with no column or data changes (#471).
+- **Providers:** Ollama requires exact normalized-origin destination proof and limits response streams to 16 MiB and 16,384 transport chunks, retaining the 2 MiB line and 64-call limits (#467). OpenAI file deletion requires an acknowledged delete before absence confirmation; an initial 404 fails closed (part of #468). Anthropic accepts bounded `max_tokens` and `stop_sequence` text stops; incomplete tool calls, `pause_turn`, and model mismatches still fail closed (part of #470). Optional Codex/Grok test fixtures use their SQLite consumers' gates (#432).
+- **Performance:** recovery uses ORM 0.146.0's single-query row-security probe and treats unknown or incomplete results conservatively (#687).
+
 ## Unreleased - 0.139.0
 
 - **Fix:** the crate's own persistence no longer depends on what the host `FieldPolicy` answers for repository field decisions. ORM 0.143.0 asks `can_write_repository_field` about every field a generated repository write touches (it already asked `can_read_repository_field` on reads), with no access context, so a host policy that refuses unknown entities or every call without an access context would have refused the crate's inserts, updates and compare-and-swap writes of its own records with `FORBIDDEN`. Every service now works on an internal handle whose field policy answers repository-surface decisions for the crate's own entities (the entities of `AiSchemaModule`, for fields without a policy key) and delegates every other entity, every declared key and both GraphQL surfaces to the host policy unchanged. A database without a field policy is used as it is.

@@ -10,6 +10,8 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.146.0 stays aligned with ORM 0.146.0 and its batched row-security probe. Generated operations are unchanged; no data migration is needed.
+
 Version 0.143.0 gives authorization one contract: every generated read path
 asks the field policy about a field with or without a policy key;
 `#[graphql_orm_custom_operations]` enforces the authorization it declares;

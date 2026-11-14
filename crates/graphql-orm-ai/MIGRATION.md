@@ -10,6 +10,37 @@ supersedes: []
 
 # Migration Guide
 
+## 0.139.0 to 0.141.0: runtime and provider bug batch
+
+Upgrade with ORM/macros 0.146.0. No data migration is needed. Usage timestamp
+filters now accept 64-bit Unix seconds; no stored column changes. Apply AI schema
+module `0.79.0` to record the updated filter contract.
+
+A consumed approval proof may dispatch at most once across all its clones.
+A failed dispatch spends the execution claim too; obtain a fresh approval rather
+than retrying the proof. The proof still does not replace resolver authorization.
+Automatic static tools must have coherent query/read-only or explicitly
+autonomous application-mutation metadata. Dispatch refuses expired references.
+Privileged reclamation is refused while the recovery epoch is closed.
+
+Secret references with relative `.` or `..` path segments must be replaced.
+Credential rotation/removal no longer deletes the previous secret automatically:
+its cleanup record remains pending. Hosts must establish that no profile or
+external secret-store user still needs that reference before revoking it. Fresh
+uncommitted values still use compensating deletion. Identifier-based skill and
+credential mutations mask inaccessible rows as `NotFound`. Subscription grace
+values above 120 seconds are clamped; zero still disables grace.
+
+Ollama egress manifests must name the normalized origin, including its trailing
+slash, for every transfer. Streams are limited to 16 MiB total and 16,384 HTTP
+chunks. File maintenance must receive a successful exact OpenAI deletion
+acknowledgement before a subsequent 404 confirms absence; an initial 404 leaves
+cleanup unresolved. Stored-response deletion remains a host responsibility.
+Anthropic accepts `max_tokens` and `stop_sequence` only with complete, bounded
+text state; model aliases and `pause_turn` remain unsupported. Lease-recovery
+clock-skew grace keeps its existing zero default and must be configured by hosts.
+
+
 ## 0.138.0 to 0.139.0: custody of the crate's own records under a host field policy
 
 Upgrade with ORM/macros 0.143.0. No GraphQL SDL, AI schema or data migration

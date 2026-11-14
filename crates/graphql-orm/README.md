@@ -10,6 +10,8 @@ supersedes: []
 
 # `graphql-orm`
 
+ORM 0.146.0 adds a conservative batched row-security probe for recovery and maintenance callers. Upgrade macros to the matching version; no data migration is needed.
+
 Version 0.143.0 gives authorization one contract: every generated read path
 asks the field policy about a field with or without a policy key;
 `#[graphql_orm_custom_operations]` enforces the authorization it declares;
