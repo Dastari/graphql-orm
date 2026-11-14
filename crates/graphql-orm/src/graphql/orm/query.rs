@@ -3862,6 +3862,12 @@ pub fn render_upsert_sql_with_managed_version(
         // failure would leave `@@ROWCOUNT` at 0 and the insert would run too.
         // The transaction count seen on entry travels in the source row, so
         // the batch declares no variable a surrounding batch could collide with.
+        // `CATCH` must reach `THROW` with the original error whatever state it
+        // finds. When the server already rolled back a caller's transaction
+        // (a deadlock victim, a trigger), the source table created inside it
+        // is gone and nothing is left to clean up; touching it would raise
+        // error 208 in place of the real one. In an uncommittable transaction
+        // (`XACT_STATE() = -1`) the table can be read but not dropped.
         let outer = "(SELECT TOP (1) [__graphql_orm_upsert_outer] FROM #graphql_orm_upsert_source)";
         return format!(
             "SELECT {source_projection}, @@TRANCOUNT AS [__graphql_orm_upsert_outer] \
@@ -3876,8 +3882,10 @@ pub fn render_upsert_sql_with_managed_version(
              IF {outer} = 0 COMMIT TRANSACTION; \
              END TRY \
              BEGIN CATCH \
+             IF OBJECT_ID(N'tempdb..#graphql_orm_upsert_source') IS NOT NULL BEGIN \
              IF {outer} = 0 AND @@TRANCOUNT > 0 ROLLBACK TRANSACTION; \
-             IF XACT_STATE() <> -1 DROP TABLE IF EXISTS #graphql_orm_upsert_source; \
+             IF XACT_STATE() <> -1 DROP TABLE #graphql_orm_upsert_source; \
+             END; \
              THROW; \
              END CATCH; \
              DROP TABLE #graphql_orm_upsert_source",
@@ -6261,6 +6269,17 @@ mod grouped_aggregate_tests {
             "{sql}"
         );
         assert!(rollback < position("THROW;"), "{sql}");
+        // Cleanup only touches the source table while it still exists, and
+        // nothing stands between a missing table and the rethrow.
+        let guard =
+            position("IF OBJECT_ID(N'tempdb..#graphql_orm_upsert_source') IS NOT NULL BEGIN");
+        assert!(position("BEGIN CATCH") < guard && guard < rollback, "{sql}");
+        assert!(
+            sql.contains(
+                "IF XACT_STATE() <> -1 DROP TABLE #graphql_orm_upsert_source; END; THROW;"
+            ),
+            "{sql}"
+        );
         // A caller's transaction is never committed or rolled back by the
         // batch, and the batch declares no variable.
         assert!(
