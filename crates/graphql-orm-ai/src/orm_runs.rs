@@ -6288,8 +6288,6 @@ async fn settle_stranded_budget_reservation(
 /// Row security the backend applies to the AI tables for the current role.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BackendRowSecurity {
-    /// The backend has no row security (SQLite).
-    None,
     /// Row security exists but is not active for this role on any AI table.
     Inactive,
     /// Row security is active for this role on at least one AI table.
@@ -6302,11 +6300,7 @@ enum BackendRowSecurity {
 /// is registered and the backend cannot be filtering the AI tables for the
 /// current role.
 fn filtering_excluded_decision(row_policy_registered: bool, backend: BackendRowSecurity) -> bool {
-    !row_policy_registered
-        && matches!(
-            backend,
-            BackendRowSecurity::None | BackendRowSecurity::Inactive
-        )
+    !row_policy_registered && backend == BackendRowSecurity::Inactive
 }
 
 /// Decides, once per recovery pass, whether reads can have been filtered.
@@ -6320,48 +6314,31 @@ fn filtering_excluded_decision(row_policy_registered: bool, backend: BackendRowS
 /// or incomplete introspection counts as "cannot be excluded". The run
 /// service is compiled only for SQLite and PostgreSQL.
 pub(crate) async fn recovery_filtering_excluded(database: &Database<DefaultWriteBackend>) -> bool {
-    use graphql_orm::graphql::orm::{OrmBackend, RlsIntrospectionBackend, RlsTableProbe};
-    let backend =
-        match <DefaultWriteBackend as RlsIntrospectionBackend>::introspect_rls_enforcement(
-            database.pool(),
-        )
-        .await
+    use graphql_orm::graphql::orm::{OrmBackend, RlsIntrospectionBackend};
+    let paths = <crate::AiSchemaModule as graphql_orm::graphql::orm::OrmSchemaModule>::entities(
+        &crate::AiSchemaModule,
+    )
+    .iter()
+    .map(|entity| {
+        <DefaultWriteBackend as OrmBackend>::DIALECT
+            .render_identifier_path(entity.table_name)
+            .into_owned()
+    })
+    .collect::<Vec<_>>();
+    let backend = match <DefaultWriteBackend as RlsIntrospectionBackend>::probe_row_security(
+        database.pool(),
+        &paths,
+    )
+    .await
+    {
+        Ok(states)
+            if states.len() == paths.len() && states.iter().all(|state| *state == Some(false)) =>
         {
-            Ok(None) => BackendRowSecurity::None,
-            Err(_) => BackendRowSecurity::Unknown,
-            Ok(Some(_)) => {
-                let probes = <crate::AiSchemaModule as graphql_orm::graphql::orm::OrmSchemaModule>::entities(
-                &crate::AiSchemaModule,
-            )
-            .iter()
-            .map(|entity| RlsTableProbe {
-                table_sql: <DefaultWriteBackend as OrmBackend>::DIALECT
-                    .render_identifier_path(entity.table_name)
-                    .into_owned(),
-                expressions: Vec::new(),
-                render: false,
-            })
-            .collect::<Vec<_>>();
-                match <DefaultWriteBackend as RlsIntrospectionBackend>::introspect_rls_target(
-                    database.pool(),
-                    &probes,
-                )
-                .await
-                {
-                    Ok(target)
-                        if target.tables.len() == probes.len()
-                            && target.tables.iter().all(|table| table.relation.is_some()) =>
-                    {
-                        if target.tables.iter().any(|table| table.row_security_active) {
-                            BackendRowSecurity::Active
-                        } else {
-                            BackendRowSecurity::Inactive
-                        }
-                    }
-                    _ => BackendRowSecurity::Unknown,
-                }
-            }
-        };
+            BackendRowSecurity::Inactive
+        }
+        Ok(states) if states.iter().any(|state| *state == Some(true)) => BackendRowSecurity::Active,
+        _ => BackendRowSecurity::Unknown,
+    };
     filtering_excluded_decision(database.row_policy().is_some(), backend)
 }
 
@@ -9547,13 +9524,11 @@ mod tests {
 
     #[test]
     fn filtering_is_excluded_only_without_any_possible_filter() {
-        use BackendRowSecurity::{Active, Inactive, None as NoRowSecurity, Unknown};
+        use BackendRowSecurity::{Active, Inactive, Unknown};
         for (row_policy, backend, excluded) in [
-            (false, NoRowSecurity, true),
             (false, Inactive, true),
             (false, Active, false),
             (false, Unknown, false),
-            (true, NoRowSecurity, false),
             (true, Inactive, false),
             (true, Active, false),
             (true, Unknown, false),

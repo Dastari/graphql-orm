@@ -229,6 +229,22 @@ pub trait IntrospectionBackend: OrmBackend {
 /// Non-Postgres backends use the default empty implementation so full schema
 /// target validation can remain backend-generic.
 pub trait RlsIntrospectionBackend: OrmBackend {
+    /// Probe whether row security filters each supplied SQL identifier path for
+    /// the current role. Results preserve input order, including duplicates.
+    /// `None` means unresolved or unsupported, never proof of unfiltered reads.
+    /// Callers must treat errors and incomplete results as unknown.
+    /// Inactive security does not prove a relation exists or that an ORM row
+    /// policy permits reads; SQLite reports inactivity without a lookup.
+    ///
+    /// # Errors
+    /// Returns an error if the backend cannot complete the catalog probe.
+    async fn probe_row_security(
+        _pool: &Self::Pool,
+        paths: &[String],
+    ) -> crate::Result<Vec<Option<bool>>> {
+        Ok(vec![None; paths.len()])
+    }
+
     /// Return live table RLS flags and policies known to this backend.
     ///
     /// Tables are keyed by a flattened `schema_table` name (bare for

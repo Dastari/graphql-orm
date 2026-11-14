@@ -1639,6 +1639,13 @@ async fn owned_postgres_row_security_hiding_a_session_skips_instead_of_quarantin
         .apply_migration(&migration, ApplyOptions::default())
         .await
         .expect("AI schema should apply to the owned PostgreSQL database");
+    let paths = vec![
+        "graphql_orm_ai_sessions".to_owned(),
+        "__missing_security_probe".to_owned(),
+        "graphql_orm_ai_sessions".to_owned(),
+    ];
+    let states = <PostgresBackend as graphql_orm::graphql::orm::RlsIntrospectionBackend>::probe_row_security(database.pool(), &paths).await.unwrap();
+    assert_eq!(states, vec![Some(false), None, Some(false)]);
     graphql_orm_ai::OrmAiRuntimeRecoveryService::new(
         database.clone(),
         std::sync::Arc::new(agql_auth::SystemClock),
