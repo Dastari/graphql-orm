@@ -1252,3 +1252,102 @@ async fn enforcement_passed_through_execute_data_still_refuses_in_resolvers() {
     );
     f.finish().await;
 }
+
+/// A query or mutation sent through `execute_stream` never reaches the request
+/// guard's `execute` hook, so nothing is prepared. Every runtime root, ORM or
+/// host, refuses with the one stable `request_not_prepared` code: no host
+/// resolver, read or write authority, or database connection runs, and no
+/// internal type name reaches the client (#578).
+#[tokio::test]
+async fn queries_and_mutations_over_execute_stream_refuse_unprepared() {
+    let f = Fixture::new().await;
+    let lookups = Arc::new(AtomicUsize::new(0));
+    let calls = lookups.clone();
+    let api = f
+        .composer()
+        .query_field(RuntimeHostField::new(
+            "hostLookup",
+            TypeRef::named_nn(TypeRef::BOOLEAN),
+            move |_| {
+                let calls = calls.clone();
+                FieldFuture::new(async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(Some(FieldValue::value(true)))
+                })
+            },
+        ))
+        .unwrap()
+        .finish()
+        .unwrap();
+    let id = graphql_orm::graphql::federation::encode_node_id("Event", vec!["e1".into()]);
+    let id = serde_json::to_string(&id.0).unwrap();
+    let mut operations = vec![
+        (
+            "posts".to_owned(),
+            "{ posts { edges { node { id } } } }".to_owned(),
+            1,
+        ),
+        (
+            "node".to_owned(),
+            format!("{{ node(NodeId: {id}) {{ NodeId }} }}"),
+            1,
+        ),
+        ("hostLookup".to_owned(), "{ hostLookup }".to_owned(), 1),
+        (
+            "mixed".to_owned(),
+            "{ hostLookup posts { edges { node { id } } } }".to_owned(),
+            2,
+        ),
+    ];
+    operations.extend(
+        MUTATIONS
+            .iter()
+            .map(|(root, query)| ((*root).to_owned(), (*query).to_owned(), 1)),
+    );
+    for (root, query, errors) in &operations {
+        f.reads.lock().unwrap().clear();
+        let before = f.acquisitions.load(Ordering::SeqCst);
+        let response = api
+            .execute_stream(f.request(query))
+            .next()
+            .await
+            .expect("one response");
+        let response = serde_json::to_value(response).unwrap();
+        let listed = response["errors"].as_array().cloned().unwrap_or_default();
+        assert_eq!(listed.len(), *errors, "{root}: {response}");
+        for error in &listed {
+            assert_eq!(
+                error["message"], "request_not_prepared",
+                "{root}: {response}"
+            );
+            assert_eq!(
+                error["extensions"]["code"], "request_not_prepared",
+                "{root}: {response}"
+            );
+        }
+        let text = response.to_string();
+        assert!(
+            !text.contains("graphql_orm") && !text.contains("does not exist"),
+            "{root} exposed an internal type: {text}"
+        );
+        assert_eq!(*f.reads.lock().unwrap(), Vec::<String>::new(), "{root}");
+        assert_eq!(
+            f.acquisitions.load(Ordering::SeqCst),
+            before,
+            "{root} reached the database"
+        );
+        assert_eq!(f.intents.load(Ordering::SeqCst), 0, "{root}");
+        assert_eq!(f.host_calls.load(Ordering::SeqCst), 0, "{root}");
+        assert_eq!(lookups.load(Ordering::SeqCst), 0, "{root}");
+    }
+    assert_eq!(f.count("ra_post").await, 1);
+    assert_eq!(f.count("ra_post_tags").await, 0);
+    assert_eq!(f.label().await.as_deref(), Some("first"));
+    // The same operations still run through `Schema::execute`.
+    let response = f
+        .run(&api, "{ hostLookup posts { edges { node { id } } } }")
+        .await;
+    assert!(response.get("errors").is_none(), "{response}");
+    assert_eq!(lookups.load(Ordering::SeqCst), 1);
+    f.finish().await;
+}

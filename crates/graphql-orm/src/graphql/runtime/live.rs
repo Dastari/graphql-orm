@@ -199,7 +199,7 @@ pub(super) fn node_field() -> Field {
                 GraphqlOperationKind::Query,
                 "node",
             )?;
-            let results = ctx.data::<super::execution::Results>()?;
+            let results = super::execution::Results::prepared(&ctx)?;
             let field = ctx.field();
             let key = field.alias().unwrap_or(field.name());
             results.admit(key)?;

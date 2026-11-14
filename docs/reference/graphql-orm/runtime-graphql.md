@@ -3,7 +3,7 @@ title: Runtime GraphQL reads and checked composition
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-14
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -71,6 +71,15 @@ let request = Request::new("{ notes(first:20) { edges { node { label } } totalCo
     ).with_cursor_scope(trusted_partition));
 let response = api.execute(request).await;
 ```
+
+Serve runtime queries and mutations with `Schema::execute`. The request guard
+prepares an operation in async-graphql's `execute` extension hook, which
+`execute_stream` does not run for queries and mutations. Over `execute_stream`
+(for example a graphql-ws transport) every runtime query and mutation root,
+including `RuntimeHostField` roots, refuses with the stable code
+`request_not_prepared`, before any host resolver, authority call or database
+work. Live `…Changed` subscriptions and host-owned subscription roots use
+`execute_stream` as before.
 
 Install protection before a protected module. The default profile requires it.
 Options are non-exhaustive so future D configuration can remain source-compatible;

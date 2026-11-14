@@ -129,7 +129,7 @@ pub(super) fn root_field(name: &str, object: &str, search: bool) -> Field {
                     GraphqlOperationKind::Query,
                     &root,
                 )?;
-                let results = ctx.data::<super::execution::Results>()?;
+                let results = super::execution::Results::prepared(&ctx)?;
                 let selection = ctx.field();
                 let key = selection.alias().unwrap_or(selection.name());
                 results.admit(key)?;

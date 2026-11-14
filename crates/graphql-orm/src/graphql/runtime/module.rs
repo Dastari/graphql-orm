@@ -644,12 +644,13 @@ impl RuntimeHostField {
         let mut field = Field::new(&self.name, self.ty, move |ctx| {
             let field = ctx.field();
             let key = field.alias().unwrap_or(field.name());
+            // Host query and mutation roots run only in an operation the request
+            // guard prepared, like every ORM root: over `execute_stream` they
+            // would otherwise skip the assurance pre-pass.
             let admitted =
                 crate::graphql::assurance::enforce_operation_assurance(ctx.ctx, kind, &root)
-                    .and_then(|()| {
-                        ctx.data_opt::<super::execution::Results>()
-                            .map_or(Ok(()), |results| results.admit(key))
-                    });
+                    .and_then(|()| super::execution::Results::prepared(&ctx))
+                    .and_then(|results| results.admit(key));
             match admitted {
                 Ok(()) => resolver(ctx),
                 Err(error) => {

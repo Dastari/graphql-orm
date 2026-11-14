@@ -223,6 +223,28 @@ impl Results {
             None => Ok(()),
         }
     }
+    /// The request guard's prepared results for a query or mutation root.
+    ///
+    /// The guard prepares an operation in the `execute` extension hook, which
+    /// async-graphql runs for [`Schema::execute`](async_graphql::dynamic::Schema::execute)
+    /// only. A query or mutation sent through `execute_stream` reaches its
+    /// resolvers unprepared, without the assurance pre-pass or any host read
+    /// authorization; every runtime root then refuses with the stable
+    /// `request_not_prepared` code and does no work.
+    pub(super) fn prepared<'a>(
+        ctx: &'a async_graphql::dynamic::ResolverContext<'_>,
+    ) -> async_graphql::Result<&'a Self> {
+        ctx.data_opt::<Self>()
+            .ok_or_else(|| coded_error(REQUEST_NOT_PREPARED))
+    }
+}
+/// Stable code of a runtime query or mutation root that the request guard did
+/// not prepare, for example one sent through `Schema::execute_stream`.
+pub(super) const REQUEST_NOT_PREPARED: &str = "request_not_prepared";
+/// A client-visible error carrying `code` as its message and `code` extension.
+pub(super) fn coded_error(code: &'static str) -> async_graphql::Error {
+    use async_graphql::ErrorExtensions;
+    async_graphql::Error::new(code).extend_with(|_, extensions| extensions.set("code", code))
 }
 /// Evaluate every executed root's assurance before request preparation reads
 /// the database or calls any host authority. A refused root is not prepared.

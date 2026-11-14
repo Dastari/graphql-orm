@@ -1088,10 +1088,14 @@ async fn execute<B: RuntimeMutationBackend>(
     database: Database<B>,
     ctx: ResolverContext<'_>,
 ) -> async_graphql::Result<FieldValue<'static>> {
-    let context = ctx.data::<RuntimeGraphqlRequest<B>>()?;
+    // Unprepared first: over `execute_stream` neither value is present, and the
+    // refusal must not name an internal type.
+    let results = super::execution::Results::prepared(&ctx)?;
+    let context = ctx
+        .data_opt::<RuntimeGraphqlRequest<B>>()
+        .ok_or_else(|| wire_error("authorization_missing"))?;
     let selection = ctx.field();
     let key = selection.alias().unwrap_or(selection.name());
-    let results = ctx.data::<super::execution::Results>()?;
     results.admit(key)?;
     let prepared = results
         .1
