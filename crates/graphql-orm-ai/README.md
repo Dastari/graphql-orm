@@ -10,7 +10,7 @@ supersedes: []
 
 # graphql-orm-ai
 
-AI 0.141.0 uses ORM/macros 0.146.0 and AI schema module `0.79.0` (no column or data migration). The runtime and provider bug batch tightens approval execution, principal validation, reclamation and egress bounds. Hosts now own retirement of previous shared secret references; see [migration guidance](MIGRATION.md#01390-to-01410-runtime-and-provider-bug-batch).
+AI 0.143.0 uses ORM/macros 0.150.0 and AI schema module `0.79.0` (no column or data migration). The runtime and provider bug batch tightens approval execution, principal validation, reclamation and egress bounds. Hosts now own retirement of previous shared secret references; see [migration guidance](MIGRATION.md#01400-to-01430-runtime-and-provider-bug-batch).
 
 Native quota retry and pending-quota lifecycle tests run on explicitly sized 1 MiB threads in the AI test lanes. Production provider/approval phases use heap-pinned futures, and an unstarted replacement drops its completed pass before the next pass starts.
 
@@ -764,3 +764,5 @@ method-only tracing warnings and a bounded counter. Initialization bytes,
 budgets, effect replay and version readiness (Related to #333) are unchanged.
 No data migration. See the [migration guide](MIGRATION.md) and
 [protocol contract and threat review](docs/provider-sessions-and-hosted-activity.md#optional-read-marker-notification-policy).
+
+Test-owned PostgreSQL infrastructure uses digest-pinned images.

@@ -10,7 +10,7 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.141.0
+## Unreleased - 0.143.0
 
 - **Reliability:** native approval/provider phases keep large futures on the heap, and the single unstarted quota replacement uses an iterative pass instead of retaining a recursive polling frame. Quota and pending-quota lifecycle regressions run on explicit 1 MiB threads without increasing the default test stack (#696).
 
@@ -20,7 +20,7 @@ supersedes: []
 - **Security:** privileged budget reclamation requires a live recovery epoch in its settlement transaction (#675). Consumed approval clones share an atomic execution claim; failed dispatches also spend that claim (#573). Principal resolution validates reference equality and expiry; dispatch additionally checks wall-clock expiry (#464).
 - **Security:** inaccessible skill/profile credential identifiers return `NotFound`. Secret references reject `.` and `..` path segments. Rotation and removal retain previous secrets with pending cleanup evidence: only the host can establish that an opaque reference has no other users. Subscription reauthorization grace is capped at 120 seconds. Usage time filters use 64-bit bounds; apply AI schema module `0.79.0` with no column or data changes (#471).
 - **Providers:** Ollama requires exact normalized-origin destination proof and limits response streams to 16 MiB and 16,384 transport chunks, retaining the 2 MiB line and 64-call limits (#467). OpenAI file deletion requires an acknowledged delete before absence confirmation; an initial 404 fails closed (part of #468). Anthropic accepts bounded `max_tokens` and `stop_sequence` text stops; incomplete tool calls, `pause_turn`, and model mismatches still fail closed (part of #470). Optional Codex/Grok test fixtures use their SQLite consumers' gates (#432).
-- **Performance:** recovery uses ORM 0.146.0's single-query row-security probe and treats unknown or incomplete results conservatively (#687).
+- **Performance:** recovery uses ORM 0.150.0's single-query row-security probe and treats unknown or incomplete results conservatively (#687).
 
 ## Unreleased - 0.139.0
 
@@ -174,6 +174,8 @@ require committed evidence that no turn in the whole run may have dispatched.
 A clean last turn cannot authorize replay of an earlier possible effect.
 
 ## Unreleased
+
+- graphql-orm-ai 0.140.0: pin test-owned PostgreSQL images by digest. No runtime API or data migration.
 
 - AI 0.122.0: retain ORM-backed regression coverage for added tools, removed tools, changes to tool schemas, and changes to unused tools across retained session cleanup/rebind. The reported stranded-conversation defect did not reproduce; no runtime or persistence change.
 

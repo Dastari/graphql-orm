@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.139.0 to 0.141.0: runtime and provider bug batch
+## 0.140.0 to 0.143.0: runtime and provider bug batch
 
 Native approval and retained-provider execution now split and heap-pin large
 future phases. A definitely unstarted quota replacement runs as a second pass
@@ -18,7 +18,7 @@ after the first pass drops, retaining the existing single-retry limit and all
 authorization/fencing checks. The quota lifecycle tests enforce 1 MiB thread
 stacks. This future-layout change needs no configuration or data migration.
 
-Upgrade with ORM/macros 0.146.0. No data migration is needed. Usage timestamp
+Upgrade with ORM/macros 0.150.0. No data migration is needed. Usage timestamp
 filters now accept 64-bit Unix seconds; no stored column changes. Apply AI schema
 module `0.79.0` to record the updated filter contract.
 
@@ -6989,3 +6989,7 @@ attached prepared context. The SDK verifies the exact confirmed unstarted
 cleanup again before this callback; an error category alone is insufficient.
 A host may offer ordinary semantic tools at zero image quota; no retained
 screenshot or completed native effect is replayed to manufacture capacity.
+
+## graphql-orm-ai 0.140.0
+
+Test infrastructure only: no API or data migration required. Owned PostgreSQL tests pull digest-pinned images.

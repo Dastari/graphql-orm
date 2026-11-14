@@ -10,7 +10,7 @@ supersedes: []
 
 # `graphql-orm`
 
-ORM 0.146.0 adds a conservative batched row-security probe for recovery and maintenance callers. Upgrade macros to the matching version; no data migration is needed.
+ORM 0.150.0 adds a conservative batched row-security probe for recovery and maintenance callers. Upgrade macros to the matching version; no data migration is needed.
 
 Version 0.143.0 gives authorization one contract: every generated read path
 asks the field policy about a field with or without a policy key;
@@ -817,3 +817,5 @@ SDL export builds. Runtime builds must leave it disabled; see
 [schema export](../../docs/reference/graphql-orm/schema-export.md).
 
 Version 0.93.0 shares generated scalar-filter SQL and semantic metadata builders to reduce consumer compile cost. SQL, binds, SDL and public contracts are unchanged; no data migration is needed.
+
+Test-owned PostgreSQL infrastructure uses digest-pinned images.

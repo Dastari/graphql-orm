@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.143.0 to 0.146.0: batched row-security probe
+## 0.144.0 to 0.150.0: batched row-security probe
 
 Upgrade ORM and macros together. No data migration is needed. The new optional
 backend method `RlsIntrospectionBackend::probe_row_security` preserves path order
@@ -19,8 +19,8 @@ implementations remain conservative. Only a complete list of `Some(false)`
 values excludes backend row security; errors, missing entries and `None` never do.
 An inactive result does not prove a relation exists or that an ORM row policy
 permits reads. SQLite reports inactive security without catalog lookups.
-See the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01390-to-01410-runtime-and-provider-bug-batch)
-when upgrading AI to 0.141.0.
+See the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01400-to-01430-runtime-and-provider-bug-batch)
+when upgrading AI to 0.143.0.
 
 
 ## 0.141.0 to 0.143.0: one authorization contract
@@ -109,16 +109,22 @@ host-managed timestamps, managed versions) or about a value only an input
 transform or hook set, and they never also ask the repository decision.
 
 The exception is an upsert that resolves to an existing row. Its update sets
-every column that is neither the primary key nor part of the upsert key, so an
-optional field the client left out is written as `NULL` and a `skip_input`
-field as its default. The statement is unchanged; the decision is now asked
+every writable input field outside the primary key and the upsert key,
+`skip_input` fields and host-managed timestamps included, so an optional field
+the client left out is written as `NULL` and a `skip_input` field as its
+default. ORM-managed timestamps and the managed version are not asked about. The statement is unchanged; the decision is now asked
 for each of those fields, with the current row and the value about to be
 written (`None` for an omitted optional field), whether or not the value
 differs from the stored one. A key-less field the client omitted was not asked
-before. An upsert that inserts keeps the client-supplied rule, and a managed
-version column is never asked about. A provider that denies a key-less field
-by name now refuses an upsert onto an existing row unless it allows that field
-for the caller; send the field's current value if the client means to keep it.
+before. An upsert that inserts keeps the client-supplied rule. A provider that
+denies a key-less field by name now refuses an upsert onto an existing row
+unless it allows that field for the caller. The remedy is in the policy: it
+receives the current row and the value about to be written, so it can allow
+the write when the two are equal or the caller is entitled to change the
+field. Sending the field's current value does not avoid the question (a sent
+value is asked about too, and a client cannot send a `skip_input` field or a
+host-managed timestamp at all); it only keeps the update from writing `NULL`
+over an optional field the client means to keep.
 
 `ignore_denied_field_write` and the optional-field rules for fields with a
 declared key are unchanged: such optional create and upsert fields are asked
@@ -5918,3 +5924,11 @@ access path.
 - The current `auth-agql` feature targets `agql-auth` 0.16.0 at revision
   `3bc38cd94794f1e868a9cc3a5551047b95a32105`; earlier release sections above
   retain their historical pins.
+
+## graphql-orm 0.144.0
+
+Test infrastructure only: no API or data migration required. Owned PostgreSQL tests pull digest-pinned images.
+
+## graphql-orm-macros 0.144.0
+
+Test infrastructure only: no API or data migration required. Owned PostgreSQL tests pull digest-pinned images.

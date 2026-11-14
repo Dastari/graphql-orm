@@ -14,14 +14,17 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.146.0, AI 0.141.0
+## Unreleased - ORM/macros 0.150.0, AI 0.143.0
 
 - Clarification of the AI 0.131.0 stored-reference refusal: claims can create and fail an internal attempt/lease in the same transaction. No lease reaches a worker, and no provider/tool dispatch or host callback is authorized by the refused reference (#608).
 
 - ORM adds `RlsIntrospectionBackend::probe_row_security`: PostgreSQL resolves every supplied table path and probes the current role in one read-only catalog query. Unknown/missing/unsupported relations return `None`; consumers must fail closed on errors or incomplete results. SQLite returns inactive security; other backends default to unknown. AI recovery uses this contract (#687). Macros remain version-aligned without generated-code changes.
-- AI runtime/provider fixes are detailed in the [AI changelog](crates/graphql-orm-ai/CHANGELOG.md#unreleased---01410).
+- AI runtime/provider fixes are detailed in the [AI changelog](crates/graphql-orm-ai/CHANGELOG.md#unreleased---01430).
 
 ## Unreleased
+
+- graphql-orm and graphql-orm-macros 0.144.0: pin test-owned PostgreSQL images by digest. No runtime API or data migration.
+- CI/release hygiene: exact expiring advisory dispositions for every tracked lockfile, scoped checkout credentials, manifest-bound release tags and main-only broad PostgreSQL execution; retain protected release approval and read-only bundle generation.
 
 - ORM and macros 0.143.0 (placeholder), AI 0.139.0 (placeholder): **breaking/security:** one authorization contract for field policies, handwritten roots and refusals. See the [migration guide](MIGRATION.md#01410-to-01430-one-authorization-contract).
   - **Breaking (fix):** every generated read path asks the installed `FieldPolicy` for a field's read decision, with the field's declared key or `None`. Generated scalar getters, `RecordVersion`, relation fields, relation-target field checks and `search_relation` sources previously asked only for fields that declare a `read_policy`, while `where`, `orderBy`, aggregates, search sources, Keyset cursors, subscription keys, `graphql_policy_object` fields and repository reads already asked for every field. A provider that denies a key-less field is now obeyed when the field is selected, on get-by-key roots, list and connection items, relations, mutation payloads, `Changed` events, Federation `_entities` and `NodeId` results and search hits. The generated `NodeId` field asks for itself and for every key field it encodes, each under a field context of its own name. Without a provider a key-less field stays readable in every mode. Scalar getters of a plain `SimpleObject` entity stay async-graphql's and are not asked; `graphql_policy_object` applies the rule to them. See [field read decisions](docs/reference/graphql-orm/strict-authorization.md#field-read-decisions) ([#447](https://github.com/Dastari/graphql-orm/issues/447)).

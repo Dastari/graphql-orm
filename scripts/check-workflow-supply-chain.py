@@ -20,6 +20,10 @@ The rules are:
 - Container images used by tests and local compose files are pinned by digest,
   and compose files publish ports on IPv4 loopback only, without fixed
   default passwords.
+- Literal Docker/Podman run image arguments in scanned test sources must also
+  carry a digest when untagged (otherwise they pull latest). This static check
+  does not cover names/tags assembled from separate values, dynamic images, or
+  files outside the scanned test/support directories. It is not a Rust parser.
 
 The checks read text with indentation-based parsing rather than a YAML library,
 so they run on a bare runner Python and on any checkout passed with `--root`.
@@ -67,6 +71,84 @@ IMAGE_DEFAULTS = {
         r"^IMAGE=\$\{SMB_TEST_IMAGE:-([^}]+)\}$", re.M
     ),
 }
+
+
+# Exact reviewed non-image test data (policy IDs, blob keys, sockets, failure
+# codes, and one intentional negative Samba-runner fixture). No prefix/path-wide
+# exemption: a new image-shaped literal in these files must still be reviewed.
+NON_IMAGE_TEST_LITERALS = {'crates/graphql-orm-ai/src/provider_calls/tests/static_offering_media_tests.rs': ['data:image'],
+ 'crates/graphql-orm-ai/src/provider_calls/tests/tool_media_tests.rs': ['data:image', 'v2:unknown'],
+ 'crates/graphql-orm-ai/tests/agql_session_bound_delegation.rs': ['sha256:reviewed-document'],
+ 'crates/graphql-orm-ai/tests/configuration_graphql.rs': ['ai:configure', 'pricing:test-v1'],
+ 'crates/graphql-orm-ai/tests/orm_attachments.rs': ['sha256:reviewed-document'],
+ 'crates/graphql-orm-ai/tests/orm_run_cancellation.rs': ['sha256:reviewed-document'],
+ 'crates/graphql-orm-ai/tests/orm_run_disposition.rs': ['automatic_continuation_plan_failed:conflict',
+                                                        'continuation_plan_failed:conflict',
+                                                        'initial_plan_failed:invalid_configuration',
+                                                        'supervised_continuation_plan_failed:budget_denied',
+                                                        'supervised_initial_plan_failed:Budget',
+                                                        'supervised_initial_plan_failed:budget_denied',
+                                                        'supervised_initial_plan_failed:egress_denied',
+                                                        'supervised_initial_plan_phase_invalid:conflict'],
+ 'crates/graphql-orm-ai/tests/orm_sessions.rs': ['sha256:reviewed-document'],
+ 'crates/graphql-orm-ai/tests/principal_projection.rs': ['host:a',
+                                                         'host:admin-clients',
+                                                         'host:b',
+                                                         'host:other-clients'],
+ 'crates/graphql-orm-ai/tests/runtime_contracts.rs': ['records:read', 'stale:scope'],
+ 'crates/graphql-orm-ai/tests/session_graphql.rs': ['ai:chat'],
+ 'crates/graphql-orm-router-protocol/tests/protocol.rs': ['sha256:UPPERCASE'],
+ 'crates/graphql-orm-router/tests/binary_smoke.rs': ['127.0.0.1:0'],
+ 'crates/graphql-orm-router/tests/outbound_proxy_environment.rs': ['127.0.0.1:0'],
+ 'crates/graphql-orm-storage/tests/local_blob.rs': ['a:b', 'bucket:x', 'dir/c:d'],
+ 'crates/graphql-orm-storage/tests/s3_https_transport.rs': ['rsa:2048'],
+ 'crates/graphql-orm-storage/tests/s3_integration.rs': ['127.0.0.1:0'],
+ 'crates/graphql-orm-storage/tests/samba/test_run.py': ['dperson/samba:latest'],
+ 'crates/graphql-orm-storage/tests/smb_integration.rs': ['contract/a:b'],
+ 'crates/graphql-orm/tests/append_only_create_authorization.rs': ['field:optional',
+                                                                  'hook:After',
+                                                                  'hook:Before',
+                                                                  'read:entity',
+                                                                  'read:row'],
+ 'crates/graphql-orm/tests/authorization_partitions.rs': ['bin:ff'],
+ 'crates/graphql-orm/tests/complete_group_pages.rs': ['alpha:r1',
+                                                      'alpha:r2',
+                                                      'beta:r1',
+                                                      'tenant-alpha:revision-1'],
+ 'crates/graphql-orm/tests/contract_gaps.rs': ['create:created-by-transform', 'create:repo-managed'],
+ 'crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/examples/complete_events.rs': ['verified-tenant-a:public-revision-1'],
+ 'crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/examples/policy_projections.rs': ['verified-tenant-alpha:public-revision-1'],
+ 'crates/graphql-orm/tests/generated_error_sanitization.rs': ['graphql-orm-public:INTERNAL_ERROR'],
+ 'crates/graphql-orm/tests/mssql_transport.rs': ['127.0.0.1:0'],
+ 'crates/graphql-orm/tests/portable_group_pages.rs': ['alpha:r2', 'verified-alpha:policy-r1'],
+ 'crates/graphql-orm/tests/postgres_rls_coverage.rs': ['bin:ab01ff'],
+ 'crates/graphql-orm/tests/query_shape_selection.rs': ['legacy:old'],
+ 'crates/graphql-orm/tests/row_policy_and_input_transform.rs': ['create:actor-a', 'update:actor-a'],
+ 'crates/graphql-orm/tests/spatial_sqlite.rs': ['row-secret:database-password'],
+ 'crates/graphql-orm/tests/support/owned_mssql.rs': ['rsa:2048']}
+# Fixture descriptor digests and Cargo's dep: feature syntax are also data.
+NON_IMAGE_TEST_LITERALS.update(
+{'crates/graphql-orm-router-protocol/tests/fixtures/generated_descriptor.json': ['sha256:0e9c92c674f7135bc3b43be7a6fdb0f33e41a5edb10902511ce30fe4443165e9',
+                                                                                 'sha256:98375039a27d0e8917f0804234da943b7d6ccba028a84d9aef4080a784b25c0d',
+                                                                                 'sha256:9b0ea0e669ba8144b8ef6ce53e795d33164014812d9f655efd2625ddf258fe25'],
+ 'crates/graphql-orm-router-protocol/tests/fixtures/handwritten_descriptor.json': ['sha256:1831af3828c65f488ac675f7c359572d27862608c7f1d7f4a695b85c43912e5d',
+                                                                                   'sha256:31f3b764a0f68aff7097e1ace35f45e2bcf6d676ffb491f0f0c3c6f38f5db1e4',
+                                                                                   'sha256:91a597d6cb0309e6f0ba3a34f0542474ab38ad8cfb3538171162afa12304936d'],
+ 'crates/graphql-orm/tests/fixtures/graphql-features/Cargo.toml': ['dep:agql-auth',
+                                                                   'dep:graphql-orm',
+                                                                   'dep:graphql-orm-ai',
+                                                                   'dep:graphql-orm-ai-tool-profiles',
+                                                                   'dep:graphql-orm-router',
+                                                                   'dep:tempfile']}
+)
+TEST_IMAGE = re.compile('(?:(?:[a-z0-9]+(?:[._-][a-z0-9]+)*)(?::[0-9]+)?/)*[a-z0-9]+(?:[._-][a-z0-9]+)*:[A-Za-z0-9_][A-Za-z0-9_.-]*(?:@sha256:[a-f0-9]{64})?')
+
+
+def test_source_files(root):
+    for file in (root / 'crates').rglob('*'):
+        if file.suffix in {'.rs', '.sh', '.py', '.toml', '.yaml', '.yml', '.json', '.js', '.ts'} and any(
+                part in {'tests', 'support', 'test_support', 'test-support'} for part in file.parts):
+            yield file
 
 
 class Failures:
@@ -242,11 +324,18 @@ def check_publishers(path, text, fail):
     top = workflow_permissions(text)
     if top is None or writes(top):
         fail(path, "workflow-level permissions must be explicit and read-only")
+    for step in steps(text):
+        if "uses: actions/checkout@" in step and "persist-credentials: false" not in step:
+            fail(path, "checkout must disable persisted credentials")
     all_jobs = jobs(text)
     for name, job_text in all_jobs.items():
+        if not re.search(r"(?m)^    timeout-minutes: [1-9][0-9]*$", job_text):
+            fail(path, f"{name}: job must have a positive timeout")
         if not writes(permissions(job_text)):
             continue
         code = strip_comments(job_text)
+        if 'test "${package_tags}" = "${expected_tags}"' not in code:
+            fail(path, "publisher must bind tags to workspace manifests")
         for target, _ in uses_lines(code):
             action = target.split("@", 1)[0]
             if action not in PUBLISHER_ACTIONS:
@@ -326,6 +415,99 @@ def check_image_defaults(root, fail):
             fail(path, f"default test image is not pinned by digest: {match[1]}")
 
 
+def argument_tokens(text):
+    """Split a literal Rust/Python argument array, preserving dynamic positions."""
+    parts, start, depth, quoted, escaped = [], 0, 0, None, False
+    for i, char in enumerate(text):
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == '\\':
+                escaped = True
+            elif char == quoted:
+                quoted = None
+        elif char in {'"', "'"}:
+            quoted = char
+        elif char in '([{':
+            depth += 1
+        elif char in ')]}':
+            depth -= 1
+        elif char == ',' and depth == 0:
+            parts.append(text[start:i].strip())
+            start = i + 1
+    parts.append(text[start:].strip())
+    return [re.fullmatch(r'''(?:r#*)?(["'])([^"'\n]+)\1#*''', part)[2]
+            if re.fullmatch(r'''(?:r#*)?(["'])([^"'\n]+)\1#*''', part) else None
+            for part in parts if part]
+
+
+def literal_run_images(text):
+    # Options with a separate value must not be mistaken for image names.
+    value_options = {'--name', '--env', '-e', '--publish', '-p', '--volume', '-v',
+                     '--label', '-l', '--network', '--user', '-u', '--workdir', '-w',
+                     '--hostname', '-h', '--entrypoint', '--add-host', '--memory', '-m',
+                     '--cpus', '--pull', '--health-cmd', '--health-interval',
+                     '--health-timeout', '--health-retries', '--platform', '--shm-size'}
+    calls = []
+    for command in re.finditer(r'Command::new\(\s*"(?:docker|podman)"\s*\)(.*?);', text, re.S):
+        body = command[1]
+        array = re.search(r'\.args\(\s*&?\[(.*?)\]\s*\)', body, re.S)
+        if array:
+            calls.append(argument_tokens(array[1]))
+        else:
+            # Literal arg chains; dynamic positions remain None.
+            args = re.findall(r'\.arg\((.*?)\)(?=\s*\.|\s*$)', body, re.S)
+            calls.append([argument_tokens(value)[0] if argument_tokens(value) else None for value in args])
+    for array in re.finditer(r'''\[\s*(["'])(?:docker|podman)\1\s*,(.*?)\]''', text, re.S):
+        calls.append(argument_tokens(array[2]))
+    for args in calls:
+        if not args or args[0] != 'run':
+            continue
+        i = 1
+        while i < len(args):
+            value = args[i]
+            if value is None:
+                break  # Dynamic image: outside this literal-only check.
+            if value in value_options:
+                i += 2
+            elif value == '--':
+                if i + 1 < len(args) and args[i + 1] is not None:
+                    yield args[i + 1]
+                break
+            elif value.startswith('-'):
+                i += 1
+            else:
+                yield value
+                break
+
+
+def check_owned_postgres(root, fail):
+    action = './.github/actions/owned-postgres-complete'
+    for workflow, job in [('ci.yml', 'owned-postgres-complete'),
+                          ('owned-postgres-manual.yml', 'qualify-postgres'),
+                          ('release.yml', 'owned-postgres-complete')]:
+        path = '.github/workflows/' + workflow
+        body = jobs((root / path).read_text()).get(job, '')
+        targets = [target for target, _ in uses_lines(body)]
+        if (len(targets) != 2 or not targets[0].startswith('actions/checkout@')
+                or targets[-1] != action or run_scripts(body)
+                or '    timeout-minutes: 120\n' not in body
+                or permissions(body) != {'contents': 'read'}):
+            fail(path, 'owned PostgreSQL caller must use the shared action with the bounded read-only job')
+    ci = (root / '.github/workflows/ci.yml').read_text()
+    if 'workflow_dispatch' in ci:
+        fail('.github/workflows/ci.yml', 'manual PostgreSQL dispatch must be separate from CI')
+    manual = (root / '.github/workflows/owned-postgres-manual.yml').read_text()
+    if ('on:\n  workflow_dispatch:\n' not in manual or '  push:' in manual
+            or '  pull_request:' in manual or 'group: owned-postgres-manual-' not in manual):
+        fail('.github/workflows/owned-postgres-manual.yml', 'manual PostgreSQL trigger/concurrency is not isolated')
+    shared = (root / '.github/actions/owned-postgres-complete/action.yml').read_text()
+    for command in ['scripts/run-owned-database-lanes.sh postgres\n',
+                    'scripts/run-owned-database-lanes.sh postgres-legacy\n']:
+        if command not in shared:
+            fail(action, 'shared action is missing an owned PostgreSQL family')
+
+
 def check(root):
     fail = Failures()
     files = sorted((root / ".github/workflows").glob("*.y*ml"))
@@ -340,7 +522,25 @@ def check(root):
             for image in re.findall(r"(?m)^\s+(?:image|container):[ \t]*(\S+)$", strip_comments(text)):
                 if not IMAGE_DIGEST.search(image.strip("'\"")):
                     fail(path, f"job container image is not pinned by digest: {image}")
+    for file in test_source_files(root):
+        path = file.relative_to(root).as_posix()
+        text = file.read_text()
+        for image in literal_run_images(text):
+            if not IMAGE_DIGEST.search(image) and not re.fullmatch(r'sha256:[0-9a-f]{64}', image):
+                fail(path, f"container run image is not pinned by digest: {image}")
+        for literal in re.findall(r'''["']([^"'\n]+)["']''', file.read_text()):
+            if (TEST_IMAGE.fullmatch(literal) and not IMAGE_DIGEST.search(literal)
+                    and literal not in NON_IMAGE_TEST_LITERALS.get(path, [])):
+                fail(path, f"Rust test image is not pinned by digest: {literal}")
+    check_owned_postgres(root, fail)
     check_release_validation(root, fail)
+    for dockerfile in (root / "crates").rglob("*"):
+        if not dockerfile.is_file() or not (dockerfile.name == 'Dockerfile'
+                or dockerfile.name.endswith('.Dockerfile') or dockerfile.name.startswith('Dockerfile.')):
+            continue
+        for image in re.findall(r"(?mi)^FROM (?:--platform=\S+ )?([^\s]+)", dockerfile.read_text()):
+            if image != "scratch" and not IMAGE_DIGEST.search(image):
+                fail(dockerfile.relative_to(root), f"Dockerfile image is not pinned by digest: {image}")
     check_compose(root, fail)
     check_image_defaults(root, fail)
     return fail.messages, len(files)
