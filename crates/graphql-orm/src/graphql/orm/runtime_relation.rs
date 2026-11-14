@@ -1469,8 +1469,7 @@ where
             if let Some((count_sql, count_values, _)) = &counted {
                 statements.push((count_sql, count_values));
             }
-            statements.push((&guard.sql, &guard.values));
-            let Some((rows, counts)) = guarded_rows::<B>(self.pool(), &statements, auth)
+            let Some((rows, counts)) = guarded_rows::<B>(self.pool(), guard, &statements, auth)
                 .await
                 .map_err(|error| {
                     RuntimeRelationError::new(RuntimeRelationErrorCode::BackendExecution)

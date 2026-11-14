@@ -29,10 +29,13 @@ request (an anonymous one where no principal exists), put a trusted internal
 schema's requests under `SystemAccess::new("<name>")` in the request data, or
 keep the old behaviour with `AuthorizationMode::LegacyPermissive` on the
 composer's `Database`. A live subscription registered without context is
-checked again inside each event's read transactions and immediately before each
-delivery, and ends with `authorization_misconfigured` once RLS is enabled on its
-module's tables: one catalog query per read transaction and per delivered
-event, for such subscriptions on PostgreSQL only. SQLite and other backends are
+checked again in each event's read transactions (which lock the tables they
+read `IN ACCESS SHARE MODE`, waiting at most two seconds, before checking and
+reading them) and immediately before each delivery, and ends with
+`authorization_misconfigured` once RLS is enabled on its module's tables or a
+lock times out: one lock statement and one catalog query per read transaction,
+and one catalog query per 256 module tables per delivered event, for such
+subscriptions on PostgreSQL only. SQLite and other backends are
 unaffected.
 
 **Serve runtime queries and mutations with `Schema::execute`.** Over

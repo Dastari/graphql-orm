@@ -620,9 +620,6 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                     context_exempt,
                 );
                 row_security.admit(&module, None).await.map_err(safe)?;
-                // Run last in each read transaction of this subscription, so
-                // the RLS state checked is the state the read ran under.
-                let read_guard = row_security.read_guard(&module).map(Arc::new);
                 let mut receiver = source
                     .0
                     .subscribe(&module.schema.fingerprint(), &c.id)
@@ -719,7 +716,7 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                         key,
                         protection.as_ref(),
                         limits,
-                        read_guard.as_deref(),
+                        row_security.read_guard(&eligibility).as_ref(),
                     )
                     .await;
                     fence(&mut receiver, &mut pending, module.schema.fingerprint())
@@ -745,7 +742,7 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                         let entity_field = entity_field.clone();
                         let shape = shape.clone();
                         let protection = protection.clone();
-                        let read_guard = read_guard.clone();
+
                         async move {
                             let (mut receiver, mut pending) = subscription_state?;
                             loop {
@@ -885,8 +882,15 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                                         continue;
                                     }
                                 }
-                                // RLS may have been enabled since registration: the
-                                // guard runs inside this read's own transaction.
+                                // RLS may have been enabled since registration: each
+                                // read transaction locks the tables it reads and checks
+                                // them before reading.
+                                let read_guard = (!context_exempt)
+                                    .then(|| {
+                                        super::execution::RowSecurity::new(&database, None, false)
+                                            .read_guard(&delivery)
+                                    })
+                                    .flatten();
                                 let current = super::execution::point(
                                     &database,
                                     request,
@@ -894,7 +898,7 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                                     &key,
                                     protection.as_ref(),
                                     limits,
-                                    read_guard.as_deref(),
+                                    read_guard.as_ref(),
                                 )
                                 .await;
                                 if let Err(code) =

@@ -2276,7 +2276,15 @@ async fn review_reload_error_terminal_is_independent_of_prior_visibility() {
             .await
             .unwrap();
         f.emit(key, RuntimeMutationAction::Update, None);
-        assert_terminal(&mut target, "SUBSCRIPTION_CONTINUITY_LOST").await;
+        // On PostgreSQL a subscription without database context locks and
+        // checks the table before each read; a dropped table fails that
+        // admission, which ends it as misconfigured. Either way the terminal
+        // does not depend on the key's prior visibility.
+        #[cfg(feature = "postgres")]
+        let terminal = "authorization_misconfigured";
+        #[cfg(not(feature = "postgres"))]
+        let terminal = "SUBSCRIPTION_CONTINUITY_LOST";
+        assert_terminal(&mut target, terminal).await;
     }
 }
 
@@ -2719,6 +2727,16 @@ async fn rls_enabled_during_delivery_authorization_ends_without_delivery() {
     .unwrap()
     .finish()
     .unwrap();
+    // Log every statement, so the test can see what each delivery ran.
+    for sql in [
+        "ALTER SYSTEM SET log_statement = 'all'",
+        "SELECT pg_reload_conf()",
+    ] {
+        graphql_orm::sqlx::query(sql)
+            .execute(f.db.pool())
+            .await
+            .unwrap();
+    }
     for (role, api) in [("owner", &f.api), ("reader", &reader_api)] {
         for after_read in [false, true] {
             let case = format!(
@@ -2768,6 +2786,33 @@ async fn rls_enabled_during_delivery_authorization_ends_without_delivery() {
             }
             f.authority.resume.notify_one();
             task.await.unwrap_or_else(|error| panic!("{case}: {error}"));
+            // After RLS was enabled the delivery locked the table and checked
+            // it, and never read it.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let log = f._owned.logs().unwrap();
+            let after = &log[log
+                .rfind("ENABLE ROW LEVEL SECURITY")
+                .unwrap_or_else(|| panic!("{case}: statement logging is off"))..];
+            let reads = |text: &str| {
+                text.lines()
+                    .filter(|line| {
+                        line.contains("execute")
+                            && line.contains("SELECT")
+                            && line.contains("FROM \"runtime_live_records\"")
+                    })
+                    .count()
+            };
+            assert!(
+                reads(&log) > 0,
+                "{case}: the baseline read is not in the log"
+            );
+            assert_eq!(reads(after), 0, "{case}: a read ran after RLS was enabled");
+            if !after_read {
+                assert!(
+                    after.contains("LOCK TABLE \"runtime_live_records\" IN ACCESS SHARE MODE"),
+                    "{case}: the read transaction took no lock"
+                );
+            }
         }
     }
     reader_pool.close().await;

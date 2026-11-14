@@ -335,15 +335,63 @@ impl<'a, B: RuntimeReadBackend> RowSecurity<'a, B> {
         self.admitted.extend(tables);
         Ok(())
     }
-    /// The catalog statement a live read runs last in its own transaction, or
-    /// `None` when this request is exempt from the check.
-    pub(super) fn read_guard(&self, module: &RuntimeGraphqlModule) -> Option<RuntimeReadGuard> {
+    /// The admission a live read runs first in its own transaction, or `None`
+    /// when this request is exempt: lock `plan`'s tables in `ACCESS SHARE` mode
+    /// (in name order, waiting at most [`READ_LOCK_TIMEOUT`]), which conflicts
+    /// with the lock `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` takes, so their
+    /// RLS state cannot change until the read commits; then check that none of
+    /// them has row-level security. The read runs only when both succeed.
+    pub(super) fn read_guard(&self, plan: &super::plan::Plan) -> Option<RuntimeReadGuard> {
         if self.exempt {
             return None;
         }
-        let tables = module_tables(module, None).into_iter().collect::<Vec<_>>();
-        Some(row_security_statement::<B>(&tables))
+        let tables = plan_tables(plan).into_iter().collect::<Vec<_>>();
+        let mut guard = row_security_statement::<B>(&tables);
+        guard.prelude = vec![
+            format!(
+                "SET LOCAL lock_timeout = '{}ms'",
+                READ_LOCK_TIMEOUT.as_millis()
+            ),
+            format!(
+                "LOCK TABLE {} IN ACCESS SHARE MODE",
+                tables
+                    .iter()
+                    .map(|table| B::DIALECT.quote_identifier(table))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            "SET LOCAL lock_timeout = DEFAULT".to_owned(),
+        ];
+        Some(guard)
     }
+}
+/// How long a guarded live read waits for its table locks, for example behind
+/// pending DDL, before the subscription ends with `authorization_misconfigured`.
+pub(super) const READ_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+/// Every table one read plan touches: each layer's collection, link and
+/// relation-filter tables, and the tables its predicates' subqueries read.
+pub(super) fn plan_tables(plan: &super::plan::Plan) -> std::collections::BTreeSet<String> {
+    fn visit(plan: &super::plan::Plan, tables: &mut std::collections::BTreeSet<String>) {
+        tables.insert(plan.collection.physical_table().to_owned());
+        if let Some(join) = plan.relation.as_ref().and_then(|relation| relation.join()) {
+            tables.insert(join.physical_table().to_owned());
+        }
+        if let Some(predicate) = &plan.predicate {
+            tables.extend(predicate.subquery_tables());
+        }
+        for site in &plan.relation_sites {
+            tables.insert(site.collection.physical_table().to_owned());
+            if let Some(join) = site.relation.join() {
+                tables.insert(join.physical_table().to_owned());
+            }
+        }
+        for child in &plan.children {
+            visit(child, tables);
+        }
+    }
+    let mut tables = std::collections::BTreeSet::new();
+    visit(plan, &mut tables);
+    tables
 }
 /// Every table a module's runtime operations can read or write: collection
 /// tables, link tables, search documents and, for writes, the tables of
@@ -383,6 +431,7 @@ fn row_security_statement<B: RuntimeReadBackend>(tables: &[String]) -> RuntimeRe
         .collect::<Vec<_>>()
         .join(", ");
     RuntimeReadGuard {
+        prelude: Vec::new(),
         sql: format!(
             "SELECT 1 AS row_security FROM pg_catalog.pg_class WHERE relrowsecurity AND oid IN ({candidates}) LIMIT 1"
         ),

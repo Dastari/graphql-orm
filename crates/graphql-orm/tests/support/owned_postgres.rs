@@ -144,6 +144,19 @@ impl OwnedPostgres {
         Ok(pool)
     }
 
+    /// The server's log so far, for tests that enable statement logging.
+    #[allow(dead_code)]
+    pub(crate) fn logs(&self) -> Result<String, Box<dyn std::error::Error>> {
+        let output = Command::new("docker")
+            .args(["logs", &self.container_id])
+            .output()?;
+        Ok(format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+
     pub(crate) fn cleanup(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if !self.has_exact_owned_identity() {
             return Err("refusing to clean up PostgreSQL without exact owned identity".into());
