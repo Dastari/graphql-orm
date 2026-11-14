@@ -896,7 +896,10 @@ where
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 #[derive(Default)]
 struct TransactionExtensions(
-    Option<std::collections::HashMap<std::any::TypeId, Box<dyn std::any::Any + Send + Sync>>>,
+    // One pointer wide: a `MutationContext` is stored in every generated
+    // write's future.
+    #[allow(clippy::box_collection)]
+    Option<Box<std::collections::HashMap<std::any::TypeId, Box<dyn std::any::Any + Send + Sync>>>>,
 );
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]

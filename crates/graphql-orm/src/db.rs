@@ -167,12 +167,20 @@ impl<B: OrmBackend> Database<B> {
     }
 
     /// The default handle over a bare pool: no policies, hooks or transforms,
-    /// the default authorization mode and the backend's default schema
-    /// policy. Generated write helpers that accept any pool provider use it
-    /// so a bare pool takes the same authorized path as a `Database`.
+    /// the default authorization mode and the schema policy the pool stands
+    /// for. A SQL Server pool deliberately opened for entity writes is
+    /// `ExternalWritable`, as `connect_ado_external_writable` makes its
+    /// handle; any other pool gets the backend's default. Generated write
+    /// helpers that accept any pool provider use it so a bare pool takes the
+    /// same authorized path as a `Database`.
     #[doc(hidden)]
     pub fn __gom_default_for_pool(pool: B::Pool) -> Self {
-        Self::base(pool, Self::default_schema_policy())
+        let schema_policy = if B::READ_ONLY && B::pool_permits_entity_writes(&pool) {
+            SchemaPolicy::ExternalWritable
+        } else {
+            Self::default_schema_policy()
+        };
+        Self::base(pool, schema_policy)
     }
 
     fn base(pool: B::Pool, schema_policy: SchemaPolicy) -> Self {

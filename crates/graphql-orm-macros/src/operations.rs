@@ -8845,7 +8845,7 @@ fn generate_graphql_operations_unfiltered(
                     ::graphql_orm::graphql::orm::TransactionMode::StateMachine,
                     auth_context.as_ref(),
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
-                let current_entity = ::graphql_orm::graphql::orm::with_write_target_prefilter(
+                let current_entity = ::std::boxed::Box::pin(::graphql_orm::graphql::orm::with_write_target_prefilter(
                     db,
                     Some(ctx),
                     EntityQuery::<#struct_name, #backend_marker>::new()
@@ -8853,7 +8853,7 @@ fn generate_graphql_operations_unfiltered(
                             &format!("{} = {}", #sql_dialect.render_identifier_path(#struct_name::PRIMARY_KEY), #struct_name::__gom_placeholder(1)),
                             #pk_bind_value
                         ),
-                )
+                ))
                     .await
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?
                     .fetch_one_for_write_in_transaction(&mut hook_ctx)
@@ -9472,7 +9472,7 @@ fn generate_graphql_operations_unfiltered(
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
 
                 // Fetch entity before deletion for notification purposes
-                let entity = ::graphql_orm::graphql::orm::with_write_target_prefilter(
+                let entity = ::std::boxed::Box::pin(::graphql_orm::graphql::orm::with_write_target_prefilter(
                     db,
                     Some(ctx),
                     EntityQuery::<#struct_name, #backend_marker>::new()
@@ -9480,7 +9480,7 @@ fn generate_graphql_operations_unfiltered(
                             &format!("{} = {}", #sql_dialect.render_identifier_path(#struct_name::PRIMARY_KEY), #struct_name::__gom_placeholder(1)),
                             #pk_bind_value
                         ),
-                )
+                ))
                     .await
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?
                     .fetch_one_for_write_in_transaction(&mut hook_ctx)
@@ -10313,13 +10313,14 @@ fn generate_graphql_operations_unfiltered(
                 // not a `Database` carries no policies, hooks or transforms, so it
                 // is the default handle over its pool: an entity or field that
                 // declares a policy key is refused as misconfigured, and the
-                // default schema policy applies.
+                // schema policy is the one the pool stands for.
                 let __gom_pool_database;
                 let db = match (provider as &dyn ::std::any::Any).downcast_ref::<::graphql_orm::db::Database<#backend_marker>>() {
                     Some(db) => db,
                     None => {
-                        __gom_pool_database = ::graphql_orm::db::Database::<#backend_marker>::__gom_default_for_pool(provider.pool().clone());
-                        &__gom_pool_database
+                        // Boxed: this future is embedded in every caller's.
+                        __gom_pool_database = ::std::boxed::Box::new(::graphql_orm::db::Database::<#backend_marker>::__gom_default_for_pool(provider.pool().clone()));
+                        &*__gom_pool_database
                     }
                 };
                 db.ensure_entity_access(
@@ -10595,13 +10596,13 @@ fn generate_graphql_operations_unfiltered(
                 // A GraphQL bulk write narrows its locking read with the host's
                 // write-target prefilter and takes at most the configured bulk
                 // write bound; a repository write keeps the unbounded read.
-                let matched_entities = ::graphql_orm::graphql::orm::bulk_write_targets::<Self, #backend_marker>(
+                let matched_entities = ::std::boxed::Box::pin(::graphql_orm::graphql::orm::bulk_write_targets::<Self, #backend_marker>(
                     db,
                     graphql_ctx,
                     &mut hook_ctx,
                     EntityQuery::<Self, #backend_marker>::new()
                         .filter_with_entity_matching(&where_input),
-                )
+                ))
                 .await?;
                 // GraphQL candidates exclude rows the caller can neither read nor write,
                 // before any count or refusal can depend on them.
@@ -11058,13 +11059,13 @@ fn generate_graphql_operations_unfiltered(
                 // A GraphQL bulk write narrows its locking read with the host's
                 // write-target prefilter and takes at most the configured bulk
                 // write bound; a repository write keeps the unbounded read.
-                let matched_entities = ::graphql_orm::graphql::orm::bulk_write_targets::<Self, #backend_marker>(
+                let matched_entities = ::std::boxed::Box::pin(::graphql_orm::graphql::orm::bulk_write_targets::<Self, #backend_marker>(
                     db,
                     graphql_ctx,
                     &mut hook_ctx,
                     EntityQuery::<Self, #backend_marker>::new()
                         .filter_with_entity_matching(&where_input),
-                )
+                ))
                 .await?;
                 // GraphQL candidates exclude rows the caller can neither read nor write,
                 // before any count or refusal can depend on them.

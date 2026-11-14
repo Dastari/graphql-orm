@@ -432,36 +432,19 @@ async fn bare_pool_insert_takes_the_authorized_path() {
     )
     .await
     .expect_err("a bare pool carries no policy provider");
-    // SQL Server handles are read-only unless the host opts in, which a bare
-    // pool cannot do, so its refusal comes first.
-    #[cfg(not(feature = "mssql"))]
     assert_eq!(
         OrmPublicError::from_sqlx(&error).code,
         OrmErrorCode::AuthorizationMisconfigured
     );
-    #[cfg(feature = "mssql")]
-    assert_eq!(
-        OrmPublicError::from_sqlx(&error).code,
-        OrmErrorCode::Forbidden
-    );
     assert_eq!(stored(&db).await.len(), 4);
 
-    // An entity without a policy key keeps working where the default handle
-    // allows writes, and is refused on SQL Server as a default handle is.
-    let inserted = TargetRecord::insert(db.pool(), new_record("bare")).await;
-    #[cfg(not(feature = "mssql"))]
-    {
-        assert_eq!(inserted.unwrap().record_key, "bare");
-        assert_eq!(stored(&db).await.len(), 5);
-    }
-    #[cfg(feature = "mssql")]
-    {
-        assert_eq!(
-            OrmPublicError::from_sqlx(&inserted.unwrap_err()).code,
-            OrmErrorCode::Forbidden
-        );
-        assert_eq!(stored(&db).await.len(), 4);
-    }
+    // An entity without a policy key keeps working. On SQL Server the pool
+    // itself was opened for entity writes, which the default handle honours.
+    let inserted = TargetRecord::insert(db.pool(), new_record("bare"))
+        .await
+        .unwrap();
+    assert_eq!(inserted.record_key, "bare");
+    assert_eq!(stored(&db).await.len(), 5);
 
     // The same call on the `Database` is unchanged.
     let inserted = TargetRecord::insert(&db, new_record("handle"))

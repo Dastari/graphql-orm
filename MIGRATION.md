@@ -21,14 +21,16 @@ generated repository helper `Entity::insert(provider, input)` accepts any
 policy, the write transform, mutation hooks and the written-row check. Called
 with a bare pool (`Entity::insert(&pool, input)` or
 `Entity::insert(db.pool(), input)`) it ran a raw `INSERT` with none of them,
-outside a transaction. It now behaves exactly as the same call on
-`Database::new(pool)`, a handle with nothing installed:
+outside a transaction. It now behaves as the same call on a default handle
+over that pool (`Database::new(pool)`; for a SQL Server pool opened for entity
+writes, the handle `connect_ado_external_writable` returns), with nothing
+installed:
 
 | Entity | Before | Now |
 | --- | --- | --- |
 | no `write_policy`, no field `write_policy` | raw `INSERT` | inserted through the generated path, in a transaction; result unchanged |
 | declares a `write_policy`, or a field with one | raw `INSERT` | `AUTHORIZATION_MISCONFIGURED` under the default mode: a bare pool has no provider |
-| any entity, SQL Server pool | raw `INSERT` | `FORBIDDEN`: a default SQL Server handle is read-only (`SchemaPolicy::ExternalReadOnly`) |
+| any entity, SQL Server pool | raw `INSERT`, refused by a read-only pool | unchanged outcome: a pool opened with `connect_ado_external_writable` stands for an `ExternalWritable` handle, any other pool for the read-only default (`FORBIDDEN`) |
 
 Hooks, transforms and `Changed` events installed on your `Database` still do
 not run for a bare pool, because the pool does not carry them. Pass the
