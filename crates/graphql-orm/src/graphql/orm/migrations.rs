@@ -4411,10 +4411,10 @@ impl RlsIntrospectionBackend for super::PostgresBackend {
         paths: &[String],
     ) -> crate::Result<Vec<Option<bool>>> {
         let rows = sqlx::query_scalar::<_, Option<bool>>(
-            "SELECT CASE WHEN c.relkind IN ('r', 'p') THEN pg_catalog.row_security_active(c.oid) ELSE NULL END
+            "SELECT CASE WHEN c.relkind OPERATOR(pg_catalog.=) ANY (ARRAY['r'::pg_catalog.\"char\", 'p'::pg_catalog.\"char\"]) THEN pg_catalog.row_security_active(c.oid) ELSE NULL END
              FROM pg_catalog.unnest($1::pg_catalog.text[]) WITH ORDINALITY AS input(path, position)
-             LEFT JOIN pg_catalog.pg_class c ON c.oid = pg_catalog.to_regclass(input.path)
-             ORDER BY input.position",
+             LEFT JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) pg_catalog.to_regclass(input.path)
+             ORDER BY input.position USING OPERATOR(pg_catalog.<)",
         ).bind(paths).fetch_all(pool).await?;
         Ok(rows)
     }
