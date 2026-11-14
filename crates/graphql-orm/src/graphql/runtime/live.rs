@@ -1237,6 +1237,7 @@ pub(super) fn event_semantics(
             })
             .collect::<Vec<_>>();
         extra_entities.push(GraphqlEntitySemanticMetadata {
+            generated_input_members: Vec::new(),
             entity_name: key_name.clone(),
             description: "Complete runtime key".into(),
             default_classification: c.effective_classification(),
@@ -1271,6 +1272,7 @@ pub(super) fn event_semantics(
     });
     fields.push(entity);
     let entity = GraphqlEntitySemanticMetadata {
+        generated_input_members: Vec::new(),
         entity_name: event.clone(),
         description: format!("Live changes of {object}"),
         default_classification: c.effective_classification(),

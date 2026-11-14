@@ -10,6 +10,47 @@ supersedes: []
 
 # Migration Guide
 
+## 0.140.0 to 0.142.0: exact tool registration and derived control-plane roots
+
+No data migration is needed, and no GraphQL SDL or persistent schema changes.
+Database-backed service references in backend-neutral Rustdoc remain readable
+when the selected backend does not provide those services.
+
+**Breaking Rust API:** `ai_control_plane_root_fields()` is added. The
+re-exported `AiGraphqlQueryCapabilityOptions` carries custom disclosure and is
+no longer `Copy`; clone it when reusing options. Its
+`maximum_relationship_argument_depth` accessor takes `&self`.
+
+AI 0.142.0 requires ORM/macros 0.149.0 and catalogue 0.8.0, which supply the
+host-only generated input contracts. It does not support ORM/macros 0.133.0.
+See the [contract migration](../../MIGRATION.md#01470-to-01490-host-only-generated-input-contracts).
+
+Static GraphQL variable definitions and the tool argument JSON Schema are both
+host-authored contracts. Registration checks the document's operation and
+selection rules; it does not cross-check variable definitions against that
+argument schema. Hosts keep the two declarations consistent.
+
+- Static tool documents must contain exactly one named operation. Its name must
+  equal the contract's `operation_name`, and its type must equal the
+  descriptor's `operation_kind`. Anonymous documents, documents with several
+  operations, and kind mismatches are refused with `InvalidConfiguration`.
+  Name the operation and declare its actual kind. A mutation document is
+  registered as a mutation tool and runs on the mutation path.
+- Documents that do not parse are refused. So are documents that spread an
+  undefined fragment or select, at any depth, an AI control-plane field name,
+  an introspection field other than `__typename`, or the federation fields
+  `_service` and `_entities`. Remote delegated requests apply the same check.
+  Use `ai_control_plane_root_fields()` to see the derived roots, and do not
+  nest an AI root under an application field.
+- An internal tool registered with a non-empty document must now parse as
+  GraphQL and pass the same check. Internal tools without a document are
+  unchanged.
+- Generated capability sets containing a control-plane root are refused as a
+  whole. Do not expose AI roots through the semantic catalogue of an
+  application target.
+- Handwritten operation inputs now need explicit disclosure declarations. See
+  the [tool-profiles 0.23.0 migration](../graphql-orm-ai-tool-profiles/MIGRATION.md#0220-to-0230-explicit-handwritten-input-disclosure).
+
 ## 0.138.0 to 0.139.0: custody of the crate's own records under a host field policy
 
 Upgrade with ORM/macros 0.143.0. No GraphQL SDL, AI schema or data migration

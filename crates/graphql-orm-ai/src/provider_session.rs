@@ -562,7 +562,7 @@ impl AiProviderStaticOfferingResetRequest {
 ///
 /// Consumers cannot construct or alter this value. It contains no provider
 /// cursor and grants no provider egress, tool, GraphQL, or application
-/// authority. [`AiProviderSessionService::rebind_for_run`] rehydrates the
+/// authority. `AiProviderSessionService::rebind_for_run` rehydrates the
 /// current principal and atomically revalidates every field before replacing
 /// the tombstone under the current server-authored descriptor. Exact provider
 /// absence severs the deleted generation from its historical descriptor; that
