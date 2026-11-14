@@ -3,7 +3,7 @@ title: Runtime collection identities and live subscriptions
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-07
+last_reviewed: 2026-11-14
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -33,6 +33,14 @@ and mismatched identities produce null, without an existence diagnostic. Field
 or operation authorization failures remain ordinary authorization errors,
 independent of whether a valid key exists. Aliases and list reads share the
 operation's admission and response budgets.
+
+`RecordVersion` and integer live-event keys (`id`, and the `key` members typed
+`Int`) carry the full 64-bit stored value, although GraphQL `Int` is 32-bit.
+JSON clients that parse numbers as doubles, such as browsers, lose precision
+above 2^53: an event for such a key cannot be matched to the record by an
+id the client encodes itself. Ordinary `RuntimeInt64` fields are strings and
+are unaffected. Where a client needs exact identity for such keys, select the
+record's `NodeId` in the event payload.
 
 Runtime creates initialize the declared version to 1; every runtime update,
 including no-op patches and link writes, increments it in the transaction.

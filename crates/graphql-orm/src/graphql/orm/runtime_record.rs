@@ -1404,6 +1404,52 @@ where
         .map_err(|error| map_sqlx_decode_error(field, error))
 }
 
+/// Decode a `timestamptz` with checked arithmetic.
+///
+/// sqlx's chrono decoder adds the stored microseconds to the PostgreSQL epoch
+/// unchecked, so `infinity`, `-infinity` or a year past chrono's range panics
+/// there. This reads the binary value and refuses those as `InvalidValue`.
+#[cfg(feature = "postgres")]
+fn postgres_get_timestamptz(
+    row: &sqlx::postgres::PgRow,
+    field: &RuntimeFieldHandle,
+) -> Result<Option<chrono::DateTime<Utc>>, RuntimeRecordError> {
+    use sqlx::{Row, ValueRef};
+    let value = row
+        .try_get_raw(field.physical_column.as_str())
+        .map_err(|error| map_sqlx_decode_error(field, error))?;
+    if value.is_null() {
+        return Ok(None);
+    }
+    // sqlx reports a mismatched column type before it decodes anything, and
+    // parses text results with range checks; only binary values reach the
+    // unchecked addition.
+    if !<chrono::DateTime<Utc> as sqlx::Type<sqlx::Postgres>>::compatible(&value.type_info())
+        || value.format() != sqlx::postgres::PgValueFormat::Binary
+    {
+        return postgres_get_optional::<chrono::DateTime<Utc>>(row, field);
+    }
+    let invalid = || RuntimeRecordError::new(RuntimeRecordErrorCode::InvalidValue).for_field(field);
+    let bytes: [u8; 8] = value
+        .as_bytes()
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(invalid)?;
+    let micros = i64::from_be_bytes(bytes);
+    // `infinity` and `-infinity` are the extreme values.
+    if micros == i64::MAX || micros == i64::MIN {
+        return Err(invalid());
+    }
+    let epoch = chrono::NaiveDate::from_ymd_opt(2000, 1, 1)
+        .and_then(|date| date.and_hms_opt(0, 0, 0))
+        .ok_or_else(invalid)?
+        .and_utc();
+    epoch
+        .checked_add_signed(chrono::TimeDelta::microseconds(micros))
+        .map(Some)
+        .ok_or_else(invalid)
+}
+
 #[cfg(feature = "postgres")]
 impl RuntimeRowDecoder for super::PostgresBackend {
     const RUNTIME_ROW_DECODING_SUPPORTED: bool = true;
@@ -1439,12 +1485,10 @@ impl RuntimeRowDecoder for super::PostgresBackend {
             RuntimeValueKind::Bytes => Ok(postgres_get_optional::<Vec<u8>>(row, field)?
                 .map(RuntimeValue::Bytes)
                 .unwrap_or(RuntimeValue::Null)),
-            RuntimeValueKind::DateTime => {
-                Ok(postgres_get_optional::<chrono::DateTime<Utc>>(row, field)?
-                    .map(RuntimeDateTime::from_utc)
-                    .map(RuntimeValue::DateTime)
-                    .unwrap_or(RuntimeValue::Null))
-            }
+            RuntimeValueKind::DateTime => Ok(postgres_get_timestamptz(row, field)?
+                .map(RuntimeDateTime::from_utc)
+                .map(RuntimeValue::DateTime)
+                .unwrap_or(RuntimeValue::Null)),
             RuntimeValueKind::Decimal(definition) => {
                 match postgres_get_optional::<rust_decimal::Decimal>(row, field)? {
                     Some(value) => decimal_value(field, definition, value),

@@ -940,3 +940,38 @@ async fn failing_hooks_roll_back_staged_claims_and_concurrent_claims_cannot_both
     assert_eq!(rows, 1);
     f.finish().await;
 }
+
+/// The response budget charges a projected object once for every record that
+/// carries it, not once per distinct stored value, so a page that repeats one
+/// value is refused before the next projector runs (#528).
+#[tokio::test]
+async fn projection_budget_counts_every_record_that_shares_a_value() {
+    let f = Fixture::new().await;
+    let projector = FileProjector::new(true);
+    let api = f.api(f.options(&projector)).unwrap();
+    // Banners: two.png (rows 1 and 3) and one.png (row 2): 7 bytes each, 21
+    // bytes for the page, or 14 when counted once per distinct value.
+    let query = "{ profiles { edges { node { banner { name } avatar { name } } } } }";
+    let ok = api
+        .execute(f.request(&read(), query, Default::default()))
+        .await;
+    assert!(ok.errors.is_empty(), "{:?}", ok.errors);
+    let before = projector.calls.load(Ordering::SeqCst);
+    let response = api
+        .execute(f.request(
+            &read(),
+            query,
+            RuntimeGraphqlLimits {
+                max_response_bytes: 20,
+                ..Default::default()
+            },
+        ))
+        .await;
+    assert_eq!(codes(&response), ["cost_exceeded"]);
+    assert_eq!(
+        projector.calls.load(Ordering::SeqCst) - before,
+        1,
+        "the avatar projector ran after the banners exceeded the budget"
+    );
+    f.finish().await;
+}

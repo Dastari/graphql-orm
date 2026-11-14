@@ -553,6 +553,18 @@ impl RuntimePredicate {
         render_expr(backend, &self.expr, values)
     }
 
+    /// Render for a FROM item aliased `row` (already quoted): relation
+    /// predicates correlate with `row` instead of the collection's bare table
+    /// name, which the alias hides.
+    pub(crate) fn render_for_alias(
+        &self,
+        backend: DatabaseBackend,
+        values: &mut Vec<SqlValue>,
+        row: &str,
+    ) -> String {
+        render_scoped(backend, &self.expr, values, Some(row), 0)
+    }
+
     /// Whether this predicate contains a relation (correlated subquery) node.
     pub fn has_relation_filters(&self) -> bool {
         fn visit(expr: &PredicateExpr) -> bool {

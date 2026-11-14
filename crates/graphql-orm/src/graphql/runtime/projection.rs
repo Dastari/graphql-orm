@@ -310,15 +310,24 @@ impl ProjectedPlan {
         let mut bytes = 0usize;
         let failed = || RuntimeGraphqlError::new("projection_failed");
         let mut distinct: Vec<RuntimeValue> = Vec::new();
+        // How many records carry each distinct value: each gets its own copy
+        // of the projected object in the response.
+        let mut uses: Vec<usize> = Vec::new();
         let mut keys = BTreeMap::new();
         for value in stored {
             if matches!(value, RuntimeValue::Null) {
                 continue;
             }
             let key = serde_json::to_string(value).map_err(|_| failed())?;
-            if let std::collections::btree_map::Entry::Vacant(entry) = keys.entry(key) {
-                entry.insert(distinct.len());
-                distinct.push(value.clone());
+            match keys.entry(key) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(distinct.len());
+                    distinct.push(value.clone());
+                    uses.push(1);
+                }
+                std::collections::btree_map::Entry::Occupied(entry) => {
+                    uses[*entry.get()] += 1;
+                }
             }
         }
         if distinct.len() > limits.projection.max_values_per_call {
@@ -371,6 +380,7 @@ impl ProjectedPlan {
                             return Err(failed());
                         }
                         let mut object = async_graphql::indexmap::IndexMap::new();
+                        let mut object_bytes = 0usize;
                         for name in &self.selected {
                             let declared = contract.object.field(name).ok_or_else(failed)?;
                             let encoded = match fields.get(name) {
@@ -382,7 +392,7 @@ impl ProjectedPlan {
                                 }
                                 _ => return Err(failed()),
                             };
-                            bytes = bytes
+                            object_bytes = object_bytes
                                 .checked_add(match &encoded {
                                     async_graphql::Value::String(text) => text.len(),
                                     _ => 16,
@@ -390,6 +400,10 @@ impl ProjectedPlan {
                                 .ok_or_else(failed)?;
                             object.insert(async_graphql::Name::new(name), encoded);
                         }
+                        bytes = object_bytes
+                            .checked_mul(uses[index])
+                            .and_then(|total| bytes.checked_add(total))
+                            .ok_or_else(|| RuntimeGraphqlError::new("cost_exceeded"))?;
                         async_graphql::Value::Object(object)
                     }
                 });

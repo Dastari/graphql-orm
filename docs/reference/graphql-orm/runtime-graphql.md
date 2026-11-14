@@ -86,6 +86,9 @@ Options are non-exhaustive so future D configuration can remain source-compatibl
 construct them with `Default` and explicit setters/field updates.
 `RuntimeGraphqlOptions::default().with_cursor_profile(RuntimeCursorProfile::Unprotected)` is an explicit alternative for hosts accepting
 readable existing cursors; it must not be used for confidential hidden keys.
+An unprotected cursor carries the effective order's values in plain text with a
+checksum anyone can recompute, so serving it implies read access to every
+sortable field and key in that order, including hidden tie-breakers.
 
 ## Operation assurance
 

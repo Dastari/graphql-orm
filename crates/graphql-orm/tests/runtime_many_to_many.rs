@@ -272,6 +272,9 @@ struct Authority {
     pause: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     /// Hide `secret` link targets through `link_target_visibility`.
     hide_secret_targets: bool,
+    /// Hide link targets whose `owner` is a `secret` node, through a relation
+    /// predicate in `link_target_visibility`.
+    hide_secret_owners: bool,
     /// Hide source rows with this label through the write grant.
     hidden_source: Option<&'static str>,
     /// Deny link mutations naming any of these target ids.
@@ -378,6 +381,26 @@ impl RuntimeWriteAuthority<Backend> for Authority {
                 .lock()
                 .unwrap()
                 .push(format!("visibility parent={}", parent(check.link_parent())));
+            if self.hide_secret_owners {
+                let target = check.relation.target();
+                let owner = self
+                    .schema
+                    .resolve_relation(target, &RelationId::new("owner").unwrap())
+                    .unwrap();
+                let filter = self.label_ne(owner.target(), "secret");
+                return Ok(Some(
+                    self.schema
+                        .runtime_relation_filter(
+                            target,
+                            &owner,
+                            RuntimeRelationQuantifier::Is,
+                            Some(filter),
+                            None,
+                            Default::default(),
+                        )
+                        .unwrap(),
+                ));
+            }
             Ok(self
                 .hide_secret_targets
                 .then(|| self.label_ne(check.relation.target(), "secret")))
@@ -582,6 +605,7 @@ impl Fixture {
             log: Default::default(),
             pause: None,
             hide_secret_targets: false,
+            hide_secret_owners: false,
             hidden_source: None,
             deny_targets: Vec::new(),
             requested: Default::default(),
@@ -2522,4 +2546,97 @@ mod graphql {
         );
         f.finish().await;
     }
+}
+
+/// Tags owned by nodes, so link visibility can filter tags through a relation.
+fn owned_tags_definition() -> RuntimeSchema {
+    let mut schema = definition();
+    let tag = schema
+        .collections
+        .iter_mut()
+        .find(|c| c.id == cid("tag"))
+        .unwrap();
+    let mut owner = field("tag.owner", "ownerId", RuntimeValueKind::Integer);
+    owner.nullable = true;
+    tag.fields.push(owner);
+    tag.relations.push(RuntimeRelation {
+        description: None,
+        classification: None,
+        export: None,
+        id: RelationId::new("owner").unwrap(),
+        api_name: "owner".into(),
+        target: cid("node"),
+        key_pairs: vec![RelationKeyPair {
+            source: fid("tag.owner"),
+            target: fid("node.id"),
+        }],
+        cardinality: RelationCardinality::One,
+        enforce_foreign_key: false,
+        on_delete: None,
+        join: None,
+    });
+    schema
+}
+
+/// A link visibility predicate may filter targets through their own
+/// relations: its correlated subquery is qualified by the target row inside
+/// the link read, so link mutations run and hidden links stay untouched (#528).
+#[tokio::test]
+async fn link_visibility_filters_targets_through_their_relations() {
+    let f = Fixture::with_definition(
+        owned_tags_definition(),
+        &[
+            "INSERT INTO mm_post (id, label) VALUES (1, 'first')",
+            "INSERT INTO mm_node (id, label) VALUES (1, 'a'), (2, 'secret')",
+            "INSERT INTO mm_tag (id, label, ownerid) VALUES (10, 'red', 1), (11, 'green', 2), (12, 'blue', 1)",
+            "INSERT INTO mm_post_tags (post_id, tag_id) VALUES (1, 11)",
+        ],
+    )
+    .await;
+    let hook = Hook::default();
+    let scoped = Authority {
+        hide_secret_owners: true,
+        ..f.authority(true)
+    };
+    // Replace touches only visible links: tag 11's owner is secret.
+    assert_eq!(
+        f.run(
+            f.link(1, RuntimeLinkChange::Replace(f.tags(&[10, 12])), 10),
+            Arc::new(scoped.clone()),
+            &hook
+        )
+        .await
+        .unwrap(),
+        ["+1-10", "+1-12"]
+    );
+    assert_eq!(f.links("mm_post_tags").await, [(1, 10), (1, 11), (1, 12)]);
+    assert_eq!(
+        f.run(
+            f.link(1, RuntimeLinkChange::Replace(f.tags(&[12])), 10),
+            Arc::new(scoped.clone()),
+            &hook
+        )
+        .await
+        .unwrap(),
+        ["-1-10"]
+    );
+    // A target hidden through its relation is refused like a missing one.
+    let error = f
+        .run(
+            f.link(
+                1,
+                RuntimeLinkChange::Delta {
+                    add: f.tags(&[11]),
+                    remove: Vec::new(),
+                },
+                10,
+            ),
+            Arc::new(scoped),
+            &hook,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(code(&error), Some("denied"));
+    assert_eq!(f.links("mm_post_tags").await, [(1, 11), (1, 12)]);
+    f.finish().await;
 }
