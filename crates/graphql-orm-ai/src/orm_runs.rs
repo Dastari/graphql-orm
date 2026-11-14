@@ -6523,7 +6523,7 @@ async fn terminal_event_session(
 /// `max(now, previous + 1)`, so repeated passes within one second still
 /// rotate. Returns `false` when the run changed since it was scanned (someone
 /// else progressed it); any other failure is returned as an error.
-async fn stamp_run_recovery_progress(
+pub(crate) async fn stamp_run_recovery_progress(
     tx: &mut MutationContext<'_, DefaultWriteBackend>,
     run_id: Uuid,
     observed_version: i64,
