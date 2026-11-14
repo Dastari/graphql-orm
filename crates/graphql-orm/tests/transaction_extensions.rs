@@ -55,6 +55,8 @@ struct Seen {
     nested: Mutex<Vec<Option<&'static str>>>,
     /// Whether a hook could attach an extension itself.
     hook_insert_refused: AtomicUsize,
+    /// Make the next fenced write's hook panic.
+    panic_next: AtomicBool,
 }
 
 /// Refuses every write to a fenced record unless the transaction carries the
@@ -77,6 +79,9 @@ impl MutationHook for FenceHook {
                 return Ok(());
             }
             self.0.steps.lock().unwrap().push(step);
+            if self.0.panic_next.swap(false, Ordering::SeqCst) {
+                panic!("hook failure under test");
+            }
             // A hook reads extensions; it cannot grant itself one.
             match hook_ctx.insert_extension(Correlation(0)) {
                 Err(error) if error.code == OrmErrorCode::Conflict => {
@@ -338,4 +343,117 @@ async fn the_owner_can_remove_an_extension_before_later_writes() {
         [Some("close-out"), None],
         "the second write saw no extension"
     );
+}
+
+#[tokio::test]
+async fn a_panicking_hook_drops_the_extension_with_the_transaction() {
+    use graphql_orm::futures::FutureExt as _;
+    let (db, seen) = setup().await;
+    let dropped = Arc::new(AtomicBool::new(false));
+    let extension = reviewed(&dropped);
+    seen.panic_next.store(true, Ordering::SeqCst);
+    let transaction = db.transaction(TransactionMode::Default, |tx| {
+        Box::pin(async move {
+            tx.insert_extension(extension)?;
+            tx.update_by_id::<FencedRecord>(&"r1".to_owned(), close())
+                .await
+                .map_err(OrmPublicError::from)?;
+            Ok(())
+        })
+    });
+    let outcome = std::panic::AssertUnwindSafe(transaction)
+        .catch_unwind()
+        .await;
+    assert!(outcome.is_err(), "the hook's panic propagates");
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "unwinding ended the extension"
+    );
+    assert_eq!(states(&db).await, ["open", "open", "open"]);
+
+    // The handle is usable, and its next transaction carries nothing over.
+    let outcome = db
+        .transaction(TransactionMode::Default, |tx| {
+            Box::pin(async move { Ok(tx.extension::<ReviewedStep>().is_none()) })
+        })
+        .await;
+    assert!(outcome.unwrap());
+}
+
+#[tokio::test]
+async fn cancelling_the_transaction_future_drops_the_extension() {
+    let (db, seen) = setup().await;
+    let dropped = Arc::new(AtomicBool::new(false));
+    let extension = reviewed(&dropped);
+    let transaction = db.transaction(TransactionMode::Default, |tx| {
+        Box::pin(async move {
+            tx.insert_extension(extension)?;
+            tx.update_by_id::<FencedRecord>(&"r1".to_owned(), close())
+                .await
+                .map_err(OrmPublicError::from)?;
+            // The request is cancelled while the transaction is open.
+            graphql_orm::futures::future::pending::<()>().await;
+            Ok(())
+        })
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), transaction)
+            .await
+            .is_err(),
+        "the transaction future was dropped mid-transaction"
+    );
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "cancellation ended the extension"
+    );
+    assert_eq!(*seen.steps.lock().unwrap(), [Some("close-out")]);
+    assert_eq!(states(&db).await, ["open", "open", "open"]);
+}
+
+/// What the spawned task observed: extension dropped, new transaction
+/// empty, fenced write refused.
+type SpawnedTask = Arc<Mutex<Option<tokio::task::JoinHandle<(bool, bool, bool)>>>>;
+
+#[tokio::test]
+async fn a_task_spawned_from_a_deferred_action_sees_no_extension() {
+    let (db, _) = setup().await;
+    let dropped = Arc::new(AtomicBool::new(false));
+    let extension = reviewed(&dropped);
+    let spawned: SpawnedTask = Default::default();
+    let handle = spawned.clone();
+    let was_dropped = dropped.clone();
+    db.transaction(TransactionMode::Default, |tx| {
+        Box::pin(async move {
+            tx.insert_extension(extension)?;
+            tx.update_by_id::<FencedRecord>(&"r1".to_owned(), close())
+                .await
+                .map_err(OrmPublicError::from)?;
+            tx.defer(move |db| async move {
+                // The action is handed the database, never the transaction.
+                let task = tokio::spawn(async move {
+                    let already_dropped = was_dropped.load(Ordering::SeqCst);
+                    // A transaction the task opens on that handle is a new one.
+                    let empty = db
+                        .transaction(TransactionMode::Default, |tx| {
+                            Box::pin(async move { Ok(tx.extension::<ReviewedStep>().is_none()) })
+                        })
+                        .await
+                        .unwrap();
+                    // And the fence refuses its writes like anyone else's.
+                    let refused = FencedRecord::update_by_id(&db, &"r2".to_owned(), close())
+                        .await
+                        .is_err();
+                    (already_dropped, empty, refused)
+                });
+                *handle.lock().unwrap() = Some(task);
+                Ok::<(), String>(())
+            });
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
+    let task = spawned.lock().unwrap().take().expect("the action ran");
+    assert_eq!(task.await.unwrap(), (true, true, true));
+    assert_eq!(states(&db).await, ["closed", "open", "open"]);
 }
