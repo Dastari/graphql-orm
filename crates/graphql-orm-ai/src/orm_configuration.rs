@@ -251,24 +251,6 @@ impl OrmAiConfigurationService {
             .map_err(|error| map_orm(OrmPublicError::from(error)))?
             .ok_or(AiError::NotFound)
     }
-
-    async fn complete_cleanup(&self, cleanup_id: Option<Uuid>, reference: &SecretRef) {
-        let Some(cleanup_id) = cleanup_id else {
-            return;
-        };
-        if self.secret_store.delete(reference).await.is_ok() {
-            let _ = AiSecretCleanupRecord::update_by_id(
-                &self.database,
-                &cleanup_id,
-                UpdateAiSecretCleanupRecordInput {
-                    state: Some("complete".to_owned()),
-                    completed_at: Some(Some(unix_seconds())),
-                    ..Default::default()
-                },
-            )
-            .await;
-        }
-    }
 }
 
 #[async_trait]
@@ -427,7 +409,10 @@ impl AiConfigurationService for OrmAiConfigurationService {
         let credentialed_move_authorized = match (profile_id, expected_version) {
             (Some(id), Some(expected_version)) => {
                 let current = self.profile(id).await?;
-                if current.scope_key != scope_hash || current.row_version != expected_version {
+                if current.scope_key != scope_hash {
+                    return Err(AiError::NotFound);
+                }
+                if current.row_version != expected_version {
                     return Err(AiError::Conflict);
                 }
                 if moves_credentialed_endpoint(&current, &provider_kind, base_url.as_deref()) {
@@ -474,9 +459,10 @@ impl AiConfigurationService for OrmAiConfigurationService {
                                 .ok_or_else(OrmPublicError::not_found)?;
                             // The authority decision above was made for exactly this
                             // version; any other version is a race and reports Conflict.
-                            if current.scope_key != scope_hash
-                                || current.row_version != expected_version
-                            {
+                            if current.scope_key != scope_hash {
+                                return Err(OrmPublicError::not_found());
+                            }
+                            if current.row_version != expected_version {
                                 return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                             }
                             if provider_kind == AiProviderKindInput::LocalHarness.as_str()
@@ -555,7 +541,11 @@ impl AiConfigurationService for OrmAiConfigurationService {
             &scope,
             AiConfigurationAction::ManageProviderCredentials,
         )
-        .await?;
+        .await
+        .map_err(|error| match error {
+            AiError::Forbidden => AiError::NotFound,
+            other => other,
+        })?;
         if existing.provider_kind == AiProviderKindInput::LocalHarness.as_str() {
             return Err(AiError::InvalidInput(
                 "local-harness profiles do not accept provider credentials".to_owned(),
@@ -653,9 +643,9 @@ impl AiConfigurationService for OrmAiConfigurationService {
                 return Err(map_transaction(error));
             }
         };
-        if let Some(previous) = previous_reference.as_ref() {
-            self.complete_cleanup(cleanup_id, previous).await;
-        }
+        // A SecretRef can be shared with another profile or an external user
+        // of the secret store. The pending cleanup is a host-owned task: this
+        // service cannot prove that deleting the old value is safe.
         provider_view(&profile)
     }
 
@@ -672,7 +662,11 @@ impl AiConfigurationService for OrmAiConfigurationService {
             &scope,
             AiConfigurationAction::ManageProviderCredentials,
         )
-        .await?;
+        .await
+        .map_err(|error| match error {
+            AiError::Forbidden => AiError::NotFound,
+            other => other,
+        })?;
         if existing.row_version != input.expected_version {
             return Err(AiError::Conflict);
         }
@@ -747,9 +741,9 @@ impl AiConfigurationService for OrmAiConfigurationService {
             })
             .await
             .map_err(map_transaction)?;
-        if let Some(previous) = previous_reference.as_ref() {
-            self.complete_cleanup(cleanup_id, previous).await;
-        }
+        // A SecretRef can be shared with another profile or an external user
+        // of the secret store. The pending cleanup is a host-owned task: this
+        // service cannot prove that deleting the old value is safe.
         provider_view(&profile)
     }
 

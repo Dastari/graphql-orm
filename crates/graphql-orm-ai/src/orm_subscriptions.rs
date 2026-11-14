@@ -98,10 +98,11 @@ impl OrmAiSubscriptionService {
     /// tolerated before the stream closes.
     ///
     /// An authoritative denial is never subject to this window. Zero disables
-    /// the grace period and restores fail-on-first-failure behavior.
+    /// the grace period and restores fail-on-first-failure behavior. Values
+    /// above 120 seconds are clamped to that ceiling.
     #[must_use]
     pub fn with_reauthorization_grace(mut self, grace: Duration) -> Self {
-        self.reauthorization_grace = grace;
+        self.reauthorization_grace = grace.min(Duration::from_secs(120));
         self
     }
 

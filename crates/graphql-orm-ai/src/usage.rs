@@ -77,12 +77,6 @@ impl AiUsageFilter {
             || input.created_from.is_some() != input.created_to.is_some()
             || matches!((input.created_from, input.created_to), (Some(from), Some(to))
                 if from >= to || to.saturating_sub(from) > MAXIMUM_USAGE_INTERVAL_SECONDS)
-            || input
-                .created_from
-                .is_some_and(|value| i32::try_from(value).is_err())
-            || input
-                .created_to
-                .is_some_and(|value| i32::try_from(value).is_err())
         {
             return Err(AiError::InvalidInput("invalid AI usage filter".to_owned()));
         }

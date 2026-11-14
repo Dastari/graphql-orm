@@ -2215,7 +2215,7 @@ pub(crate) struct AiUsageEntryRecord {
     pub tool_units: i64,
     pub image_units: i64,
     pub cost_microunits: Option<i64>,
-    #[filterable(type = "number")]
+    #[filterable(type = "int64")]
     #[sortable]
     pub created_at: i64,
 }

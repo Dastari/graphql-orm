@@ -444,7 +444,8 @@ impl AiSkillCatalogService for OrmAiSkillCatalogService {
         let skill = self.load_skill(input.skill_id).await?;
         let scope = skill_scope(&skill);
         self.require_access(principal, &scope, AiSkillAction::PublishVersion)
-            .await?;
+            .await
+            .map_err(hide_inaccessible_id)?;
         let expected_skill_version = input.expected_skill_version;
         let skill_id = input.skill_id;
         let prepared = self.prepare_version(principal, &scope, input).await?;
@@ -557,7 +558,8 @@ impl AiSkillCatalogService for OrmAiSkillCatalogService {
         let existing = self.load_skill(input.skill_id).await?;
         let scope = skill_scope(&existing);
         self.require_access(principal, &scope, AiSkillAction::SetEnabled)
-            .await?;
+            .await
+            .map_err(hide_inaccessible_id)?;
         let actor = principal.subject().to_owned();
         let (skill, version) = self
             .database
@@ -1225,5 +1227,12 @@ fn map_orm(error: OrmPublicError) -> AiError {
         OrmErrorCode::ServiceUnavailable
         | OrmErrorCode::InternalError
         | OrmErrorCode::AuthorizationMisconfigured => AiError::PersistenceFailed,
+    }
+}
+
+fn hide_inaccessible_id(error: AiError) -> AiError {
+    match error {
+        AiError::Forbidden => AiError::NotFound,
+        other => other,
     }
 }

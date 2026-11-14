@@ -294,9 +294,10 @@ async fn profile_and_credential_mutations_require_recent_mfa_and_cas() {
             1,
         )
         .await
-        .expect("rotation replaces and cleans the old reference");
+        .expect("rotation retains the old reference for host-owned cleanup");
     assert_eq!(rotated.row_version, 2);
-    assert_eq!(secrets.count(), 1);
+    // Old references can have other users, including outside this crate.
+    assert_eq!(secrets.count(), 2);
     let removed = service
         .remove_provider_credential(
             &principal,
@@ -309,7 +310,7 @@ async fn profile_and_credential_mutations_require_recent_mfa_and_cas() {
         .expect("credential removal records cleanup");
     assert!(!removed.credential_configured);
     assert_eq!(removed.row_version, 3);
-    assert_eq!(secrets.count(), 0);
+    assert_eq!(secrets.count(), 2);
 
     let profiles = service
         .provider_profiles(&principal, scope())
