@@ -6,8 +6,6 @@ use super::{MssqlClient, MssqlRow, MssqlTransportPolicy, map_tiberius_error};
 use quick_xml::{Reader, events::Event};
 use std::time::Duration;
 use tiberius::QueryNotification;
-use tokio::net::TcpStream;
-use tokio_util::compat::TokioAsyncWriteCompatExt;
 
 /// An externally provisioned, dedicated Service Broker queue.
 #[derive(Clone, Debug)]
@@ -107,16 +105,12 @@ impl MssqlQueryNotificationConnection {
     ) -> crate::Result<Self> {
         let config = super::transport::config_from_ado(connection_string, transport)?;
         let connect = async move {
-            let tcp = TcpStream::connect(config.get_addr()).await?;
-            tcp.set_nodelay(true)?;
-            let mut client = MssqlClient::connect(config, tcp.compat_write())
-                .await
-                .map_err(map_tiberius_error)?;
+            let mut client = super::open_client(config).await?;
             let rows = client.simple_query("SET ANSI_NULLS ON; SET ANSI_PADDING ON; SET ANSI_WARNINGS ON; SET CONCAT_NULL_YIELDS_NULL ON; SET QUOTED_IDENTIFIER ON; SET NUMERIC_ROUNDABORT OFF; SET ARITHABORT ON; SET TRANSACTION ISOLATION LEVEL READ COMMITTED; SELECT DB_NAME() AS db;")
                 .await.map_err(map_tiberius_error)?.into_first_result().await.map_err(map_tiberius_error)?;
             let database = rows
                 .first()
-                .and_then(|r| r.get::<&str, _>("db"))
+                .and_then(|r| r.try_get::<&str, _>("db").ok().flatten())
                 .ok_or_else(|| protocol("missing notification database"))?
                 .to_owned();
             Ok::<_, sqlx::Error>((client, database))
@@ -194,6 +188,13 @@ impl MssqlQueryNotificationConnection {
     /// Wait at most 60 seconds for one notification; `None` means timeout.
     /// The received conversation is ended. Malformed, oversized, and unknown
     /// messages return `Other`, requiring conservative resynchronization.
+    ///
+    /// Receiving the message and ending its conversation are one transaction
+    /// in one batch: if ending the conversation fails, the receive is rolled
+    /// back, the message stays on the queue and the error is returned. SQL
+    /// Server disables a queue after five consecutive rolled-back receives
+    /// (poison-message handling), so a persistent failure stops delivery
+    /// visibly instead of dropping notifications.
     pub async fn receive(
         &mut self,
         wait_ms: u32,
@@ -201,13 +202,9 @@ impl MssqlQueryNotificationConnection {
         if wait_ms > 60_000 {
             return Err(protocol("Broker wait exceeds 60000 milliseconds"));
         }
-        let sql = format!(
-            "WAITFOR (RECEIVE TOP (1) conversation_handle, message_type_name, CASE WHEN DATALENGTH(message_body) <= 16384 THEN CONVERT(nvarchar(max), message_body) ELSE NULL END AS body FROM {}), TIMEOUT {wait_ms};",
-            self.queue.0
-        );
         let row = self
             .client
-            .simple_query(sql)
+            .simple_query(receive_batch(&self.queue, wait_ms))
             .await
             .map_err(map_tiberius_error)?
             .into_row()
@@ -216,31 +213,42 @@ impl MssqlQueryNotificationConnection {
         let Some(row) = row else {
             return Ok(None);
         };
-        let handle = row
-            .try_get::<uuid::Uuid, _>("conversation_handle")
-            .map_err(map_tiberius_error)?
-            .ok_or_else(|| protocol("Broker message without conversation"))?;
         let message_type = row
             .try_get::<&str, _>("message_type_name")
             .map_err(map_tiberius_error)?;
         let body = row.try_get::<&str, _>("body").map_err(map_tiberius_error)?;
-        let result = if message_type
-            == Some("http://schemas.microsoft.com/SQL/Notifications/QueryNotification")
-        {
-            body.and_then(parse_notification).unwrap_or_else(other)
-        } else {
-            other()
-        };
-        // UUID formatting is generated from a decoded UUID, never SQL input.
-        self.client
-            .simple_query(format!("END CONVERSATION '{handle}';"))
-            .await
-            .map_err(map_tiberius_error)?
-            .into_results()
-            .await
-            .map_err(map_tiberius_error)?;
-        Ok(Some(result))
+        Ok(Some(
+            if message_type
+                == Some("http://schemas.microsoft.com/SQL/Notifications/QueryNotification")
+            {
+                body.and_then(parse_notification).unwrap_or_else(other)
+            } else {
+                other()
+            },
+        ))
     }
+}
+
+/// One batch that receives at most one message and ends its conversation
+/// atomically. Its only result set is the received message, if any.
+fn receive_batch(queue: &MssqlBrokerQueue, wait_ms: u32) -> String {
+    format!(
+        "DECLARE @h uniqueidentifier, @t nvarchar(256), @b nvarchar(max); \
+         BEGIN TRY \
+         BEGIN TRANSACTION; \
+         WAITFOR (RECEIVE TOP (1) @h = conversation_handle, @t = message_type_name, \
+         @b = CASE WHEN DATALENGTH(message_body) <= 16384 THEN CONVERT(nvarchar(max), message_body) ELSE NULL END \
+         FROM {}), TIMEOUT {wait_ms}; \
+         IF @h IS NOT NULL END CONVERSATION @h; \
+         COMMIT TRANSACTION; \
+         END TRY \
+         BEGIN CATCH \
+         IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION; \
+         THROW; \
+         END CATCH; \
+         SELECT @h AS conversation_handle, @t AS message_type_name, @b AS body WHERE @h IS NOT NULL;",
+        queue.0
+    )
 }
 
 fn protocol(message: &str) -> sqlx::Error {
@@ -361,6 +369,30 @@ fn append_id(id: &mut Option<String>, value: &str) -> Option<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn receive_and_end_conversation_are_one_transaction() {
+        let queue = MssqlBrokerQueue::new("dbo", "ChangeQueue").unwrap();
+        let sql = receive_batch(&queue, 250);
+        let position = |needle: &str| {
+            sql.find(needle)
+                .unwrap_or_else(|| panic!("{needle}: {sql}"))
+        };
+        let begin = position("BEGIN TRANSACTION;");
+        let receive = position("WAITFOR (RECEIVE TOP (1) @h = conversation_handle");
+        let end = position("IF @h IS NOT NULL END CONVERSATION @h;");
+        let commit = position("COMMIT TRANSACTION;");
+        let rollback = position("IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION; THROW;");
+        let select = position("SELECT @h AS conversation_handle");
+        assert!(begin < receive && receive < end && end < commit, "{sql}");
+        assert!(commit < rollback && rollback < select, "{sql}");
+        assert!(
+            sql.contains("FROM [dbo].[ChangeQueue]), TIMEOUT 250;"),
+            "{sql}"
+        );
+        // One batch: no second round trip can fail between the two steps.
+        assert_eq!(sql.matches("END CONVERSATION").count(), 1);
+    }
     #[test]
     fn parses_change_expiry_and_invalid() {
         for (xml, kind) in [
