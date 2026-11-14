@@ -10,6 +10,25 @@ supersedes: []
 
 # Migration Guide
 
+## 0.11.0 to 0.12.0: S3 conditional-create outcomes
+
+Update the storage requirement to 0.12.0 and refresh the consumer lockfile.
+
+1. **Unknown S3 conditional-create outcomes.** `put_blob_if_not_exists` on
+   `S3StorageBackend` sends its committing request once, without the SDK's
+   automatic retries. When that request's outcome is unknown, because its
+   response was lost or unreadable, it timed out or failed after it may have
+   been sent, or the server answered with HTTP 5xx, the call fails with
+   `StorageError::SingleAttemptFailed`, which is not retryable: the key may
+   hold this call's complete object. Such failures used to be retried inside
+   the SDK, where a retry after a lost success returned `Ok(None)` for the
+   writer's own object, or surfaced as a retryable `StorageError::Provider`.
+   Handle it as for local and SMB storage: do not report it as a collision,
+   and do not retry the same call blindly, because a retry would find the
+   key taken. `Ok(Some(_))` and `Ok(None)` keep their meanings. Code that
+   matched a retryable `Provider` error from this call to retry it must
+   treat `SingleAttemptFailed` as an unknown outcome instead.
+
 ## 0.10.0 to 0.11.0: SMB signing, conditional-create outcomes, S3 messages
 
 Update the storage requirement to 0.11.0 and refresh the consumer lockfile.

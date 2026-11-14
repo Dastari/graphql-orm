@@ -84,6 +84,13 @@ Implementations must make this operation atomic across all writers. The default
 returns non-retryable `StorageError::UnsupportedOperation` without provider I/O;
 custom providers must override it using a native atomic primitive. A separate
 existence check followed by a write is unsafe for deduplication and backup locks.
+The committing request must not be replayed either: a replay after a lost
+success fails the condition against the writer's own object. A create whose
+outcome is unknown therefore fails with non-retryable
+`StorageError::SingleAttemptFailed` on every native provider. Native S3 sends
+its conditional `PutObject` or `CompleteMultipartUpload` once, with SDK
+retries disabled; only a request that was never sent, or that the server
+refused with HTTP 4xx, keeps an ordinary error.
 
 `delete_blob_once` is the release capability for lock keys that another writer
 can immediately reuse. Its default returns `UnsupportedOperation` without I/O.

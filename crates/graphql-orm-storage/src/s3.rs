@@ -267,14 +267,21 @@ impl S3StorageBackend {
         if let Some(content_type) = options.content_type {
             request = request.content_type(content_type);
         }
-        if if_not_exists {
-            request = request.if_none_match("*");
+        if !if_not_exists {
+            return request.send().await.map(|_| true).map_err(map_s3_error);
         }
-
-        match request.send().await {
+        // One attempt: a retry after a lost success would fail the condition
+        // against this writer's own object and report the key as taken.
+        match request
+            .if_none_match("*")
+            .customize()
+            .config_override(single_attempt_config())
+            .send()
+            .await
+        {
             Ok(_) => Ok(true),
-            Err(err) if if_not_exists && is_precondition_failed(&err) => Ok(false),
-            Err(err) => Err(map_s3_error(err)),
+            Err(err) if is_precondition_failed(&err) => Ok(false),
+            Err(err) => Err(conditional_create_error(err)),
         }
     }
 
@@ -347,7 +354,7 @@ impl S3StorageBackend {
         let completed = CompletedMultipartUpload::builder()
             .set_parts(Some(state.completed_parts))
             .build();
-        let mut request = self
+        let request = self
             .client
             .complete_multipart_upload()
             .bucket(&self.config.bucket)
@@ -355,14 +362,26 @@ impl S3StorageBackend {
             .upload_id(&upload_id)
             .multipart_upload(completed);
 
-        if if_not_exists {
-            request = request.if_none_match("*");
-        }
-
-        let completed = match request.send().await {
-            Ok(_) => return Ok(true),
-            Err(err) if if_not_exists && is_precondition_failed(&err) => Ok(false),
-            Err(err) => Err(map_s3_error(err)),
+        let completed = if if_not_exists {
+            // The completion commits a conditional create: one attempt, as
+            // for a single conditional put. An abort after an unknown outcome
+            // cannot remove an object the completion already made.
+            match request
+                .if_none_match("*")
+                .customize()
+                .config_override(single_attempt_config())
+                .send()
+                .await
+            {
+                Ok(_) => return Ok(true),
+                Err(err) if is_precondition_failed(&err) => Ok(false),
+                Err(err) => Err(conditional_create_error(err)),
+            }
+        } else {
+            match request.send().await {
+                Ok(_) => return Ok(true),
+                Err(err) => Err(map_s3_error(err)),
+            }
         };
         let _ = self
             .client
@@ -442,7 +461,7 @@ impl BlobStore for S3StorageBackend {
             .bucket(&self.config.bucket)
             .key(provider_key)
             .customize()
-            .config_override(S3ConfigBuilder::new().retry_config(RetryConfig::disabled()))
+            .config_override(single_attempt_config())
             .send()
             .await
             .map_err(|error| StorageError::single_attempt(map_s3_error(error)))?;
@@ -754,6 +773,35 @@ fn is_missing_error<E: ProvideErrorMetadata>(err: &SdkError<E, HttpResponse>) ->
     match service_error_code(err) {
         Some(code) => matches!(code, "NoSuchKey" | "NotFound"),
         None => service_error_status(err) == Some(404),
+    }
+}
+
+/// A configuration override that disables the SDK's automatic retries, for
+/// requests that must not be replayed once they may have reached the server.
+pub(crate) fn single_attempt_config() -> S3ConfigBuilder {
+    S3ConfigBuilder::new().retry_config(RetryConfig::disabled())
+}
+
+/// Maps the failure of a single-attempt conditional create (`If-None-Match:
+/// *`) other than a failed condition.
+///
+/// Only a request that was never sent, or that the server answered with a
+/// client error (HTTP 4xx), certainly created nothing; it keeps the ordinary
+/// classification. Any other failure, such as a lost or unreadable response,
+/// a timeout, a transport failure after sending, or a server error, may have
+/// created the object, so it is a non-retryable
+/// [`StorageError::SingleAttemptFailed`].
+fn conditional_create_error<E>(err: SdkError<E, HttpResponse>) -> StorageError
+where
+    E: ProvideErrorMetadata + std::error::Error + 'static,
+{
+    let refused = matches!(err, SdkError::ConstructionFailure(_))
+        || service_error_status(&err).is_some_and(|status| (400..500).contains(&status));
+    let error = map_s3_error(err);
+    if refused {
+        error
+    } else {
+        StorageError::single_attempt(error)
     }
 }
 

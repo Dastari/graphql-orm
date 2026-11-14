@@ -10,6 +10,26 @@ supersedes: []
 
 # Changelog
 
+## 0.12.0 (unreleased)
+
+Breaking: S3 conditional creates whose outcome is unknown fail as
+single-attempt errors. See [MIGRATION.md](MIGRATION.md).
+
+- S3: `put_blob_if_not_exists` sends its committing request, the
+  conditional `PutObject` or, for a body larger than one part, the
+  conditional `CompleteMultipartUpload`, as one attempt with the SDK's
+  automatic retries disabled. Before, when the server created the object
+  but its response was lost, the SDK retried, the retry failed the
+  `If-None-Match` condition against this writer's own object, and the call
+  returned `Ok(None)`, so a lock holder could report its own lock as taken.
+  A failure whose outcome is unknown, because the response was lost or
+  unreadable, the request timed out or failed after it may have been sent,
+  or the server answered with HTTP 5xx, now fails with non-retryable
+  `StorageError::SingleAttemptFailed`, as on the local and SMB backends. A
+  request that was never sent or that the server refused with HTTP 4xx keeps
+  its classification, and a failed condition is still `Ok(None)`.
+  ([#657](https://github.com/Dastari/graphql-orm/issues/657))
+
 ## 0.11.0 (unreleased)
 
 Breaking: SMB `require_signing = false` is refused, SMB conditional creates
