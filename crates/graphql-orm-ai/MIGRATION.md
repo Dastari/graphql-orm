@@ -12,6 +12,12 @@ supersedes: []
 
 ## 0.140.0 to 0.143.0: runtime and provider bug batch
 
+The [security model](docs/security.md#content-protection-scope) now makes the
+existing protection boundary explicit: the crate ships no cipher and does not
+protect attachment bytes. Hosts supply application encryption/key management
+and blob-store confidentiality. This documentation correction changes no stored
+data or runtime behavior (part of #469).
+
 Native approval and retained-provider execution now split and heap-pin large
 future phases. A definitely unstarted quota replacement runs as a second pass
 after the first pass drops, retaining the existing single-retry limit and all

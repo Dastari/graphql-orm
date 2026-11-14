@@ -12,6 +12,8 @@ supersedes: []
 
 ## Unreleased - 0.143.0
 
+- **Documentation:** content protection provides an extension seam rather than a built-in cipher. The supplied database-managed protector stores JSON unchanged, and attachment bytes go directly to the host blob store; encryption and key management are host/deployment responsibilities (part of #469).
+
 - **Reliability:** native approval/provider phases keep large futures on the heap, and the single unstarted quota replacement uses an iterative pass instead of retaining a recursive polling frame. Quota and pending-quota lifecycle regressions run on explicit 1 MiB threads without increasing the default test stack (#696).
 
 - **Reliability:** approval-wait reconciliation isolates candidate failures and rotates examined waits durably, reporting `skipped` rather than aborting behind one unresolvable reference (#607). Resolver handles are private guarded newtypes; missing-grant credentials with an actor or operation are refused by run authorization. Claim/delegated-wait regressions cover operation-only references and the recovery-required branch without host resolver/protection callbacks (#608). Claim refusal may create and fail an internal attempt in one transaction; no lease reaches a worker.
