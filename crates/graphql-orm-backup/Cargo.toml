@@ -77,6 +77,11 @@ path = "tests/orm_016_postgres_conformance.rs"
 required-features = ["local", "orm-postgres"]
 
 [[test]]
+name = "lifecycle_safety"
+path = "tests/lifecycle_safety.rs"
+required-features = ["local"]
+
+[[test]]
 name = "manifest_authentication"
 path = "tests/manifest_authentication.rs"
 required-features = ["local"]
