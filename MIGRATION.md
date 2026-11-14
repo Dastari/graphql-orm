@@ -39,27 +39,37 @@ of policy-protected entities through a pool should seed through a `Database`
 with the policies they need, or with SQL.
 
 **Breaking: generated GraphQL bulk writes are bounded.** `updateMany` and
-`deleteMany` loaded and locked every row their filter matched. They now take
-at most `PaginationConfig::max_bulk_write_rows` rows, default `10_000`, plus
-one look-ahead row, ordered by primary key. When more rows match, the write is
+`deleteMany` loaded and locked every row their filter matched. Each bulk
+mutation field may now write at most `PaginationConfig::max_bulk_write_rows`
+rows, default `10_000`. When more rows the caller may write match, the write is
 refused before any row changes and the payload reports `success: false` with
 `errorCode = "PAGE_LIMIT_EXCEEDED"`; nothing is truncated and the message
-names no count. A bulk write under the bound returns what it returned before.
+names no count. A bulk write under the bound returns what it returned before;
+its rows are now locked and written in primary-key order.
 
+- The bound counts rows after visibility. A row the caller can neither read
+  nor write is not counted, so for a fixed set of rows the caller may write the
+  payload does not depend on other matching rows.
+- With a `RowPolicy` installed, or a filter part the ORM evaluates in Rust
+  (SQLite spatial predicates), the candidates are read and classified in pages
+  of 500 instead of in one read. That scan takes at most
+  `PaginationConfig::max_scanned_rows` candidates (default `10_000`), the
+  budget authorized reads already use; a scan that would need more is refused
+  with the same `PAGE_LIMIT_EXCEEDED` scan-budget refusal a read gets, before
+  any row changes. Hosts whose bulk filters match more candidates than the
+  budget, mostly hidden ones, should raise the budget in trusted code or return
+  a `write_target_prefilter` (below), which keeps hidden rows out of the scan.
 - Raise, lower or remove the bound per handle:
   `Database::builder(pool).max_bulk_write_rows(Some(50_000))`, or
   `db.with_pagination_config(PaginationConfig::default().with_max_bulk_write_rows(None))`.
   `PaginationConfig::unbounded()` and `DatabaseBuilder::unbounded_pagination()`
   already mean "no bounds" and remove it too.
+- The bound is per bulk mutation field. A request with several aliased bulk
+  mutations may write up to the bound in each; there is no request-wide budget.
 - Clients should treat `PAGE_LIMIT_EXCEEDED` on a bulk mutation as "narrow the
   filter and retry in parts".
 - `PaginationConfig` has a new public field, `max_bulk_write_rows`. A struct
   literal that lists every field needs it, or `..Default::default()`.
-- The bound counts the rows the locking read selects, before row policy, so it
-  can be reached because of rows the caller cannot see. Return a
-  `write_target_prefilter` (below) to keep those rows out of it.
-- A filter the ORM evaluates in Rust rather than in SQL is not limited in SQL;
-  the bound then applies to the rows that match.
 - Repository `update_where`, `delete_where` and their transaction forms are
   trusted code and are **not** bounded. Use `update_where_bounded` and
   `delete_where_bounded` where a worker needs a ceiling.
@@ -157,10 +167,39 @@ where they received `None`. Nothing else changes for existing hosts: the label
 grants nothing unless a policy looks at it, an unlabelled call is exactly what
 it was, and no surface or callback signature changed. The scope ends when its
 future completes; if that future is dropped first, the transaction can no
-longer commit. Keep a labelled handle out of GraphQL schema data. A separate
+longer commit. Inside a scope every policy check of a write uses the scope's
+access, the check of the row as written included, so a broadly privileged
+handle that enters a narrower scope is held to the narrower one. Keep a labelled handle out of GraphQL schema data. A separate
 `EntityAccessSurface` for hook writes and carrying the originating request's
 `Context` into nested writes are not part of this release; both would change
 what existing policies observe.
+
+**New: ordered sorts for Rust callers
+([#694](https://github.com/Dastari/graphql-orm/issues/694)).** One generated
+`<Entity>OrderByInput` value with several fields set sorts in the entity's
+field declaration order, not in the order the fields are written; that has not
+changed, for Rust callers or GraphQL clients, and is now documented. To state
+precedence, chain one `order_by` call per field or use the new ordered form:
+
+```rust,ignore
+use ThingOrderField as Field;
+EntityQuery::<Thing>::new()
+    .order_by_fields([(Field::ExpiresAt, Asc), (Field::Id, Asc)])
+    .fetch_all(&db)
+    .await?;
+
+// Keyset pages: the cursor's key order follows the list.
+let order = ThingKeysetOrderByInput::ordered([(Field::ExpiresAt, Asc), (Field::Id, Asc)])?;
+Thing::keyset_page_ordered(&db, filter, Some(order), page).await?;
+```
+
+Every entity derive now generates `<Entity>OrderField`, a Rust-only enum with
+one variant per order-input field, and every generated query builder has
+`order_by_fields`. If a module already defines a type named
+`<Entity>OrderField` next to an entity, rename it. Review code that passes a
+multi-field `OrderByInput` and relies on a particular primary sort key: reads
+that take "the earliest N" or the first row are the ones that silently depend
+on declaration order. The generated SDL is unchanged.
 
 **New: `require_policies` in `schema_roots!`.** An entity with no
 `read_policy` or `write_policy` is open to every subject the schema's `auth`

@@ -17,8 +17,8 @@ are bounded by `PaginationConfig::max_bulk_write_rows` and refused with
 `PAGE_LIMIT_EXCEEDED` above it; custom `#[graphql(entity)]` resolvers enforce
 operation assurance; `RowPolicy::write_target_prefilter`,
 `Database::with_system_access`, `MutationContext::with_system_access`,
-transaction extensions and `schema_roots!` `require_policies` are new and
-opt-in. Upgrade ORM/macros together; see the
+transaction extensions, `order_by_fields` with the generated `<Entity>OrderField`
+enum and `schema_roots!` `require_policies` are new and opt-in. Upgrade ORM/macros together; see the
 [root migration guide](../../MIGRATION.md#01430-to-01470-write-paths-hooks-and-authority).
 
 Version 0.143.0 gives authorization one contract: every generated read path

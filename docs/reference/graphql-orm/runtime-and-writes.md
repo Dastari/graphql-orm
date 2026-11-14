@@ -188,6 +188,37 @@ The host authorizes the caller in a custom root field, as for any hand-written r
 compiled, executed version, including the rollback of a refused second row, is
 `a_nested_create_is_one_transaction` in `tests/link_relation_patterns.rs`.
 
+### Ordering precedence in Rust queries
+
+A generated `<Entity>OrderByInput` has one optional direction per orderable field. One value with
+several fields set sorts in the entity's field **declaration** order, not in the order the fields
+are written, because a Rust struct literal carries no field order:
+
+```rust,ignore
+// `id` is declared before `expires_at`: this is ORDER BY id ASC, expires_at ASC.
+query.order_by(&ThingOrderByInput { expires_at: Some(Asc), id: Some(Asc), ..Default::default() })
+```
+
+State precedence explicitly instead. Every generated query builder (`EntityQuery`,
+`Entity::query(..)`, `tx.query::<T>()`, repository-only and projection builders, repository
+search) has `order_by_fields`, which takes `(field, direction)` pairs of the generated
+`<Entity>OrderField` enum; the first pair is the primary sort key:
+
+```rust,ignore
+use ThingOrderField as Field;
+query.order_by_fields([(Field::ExpiresAt, Asc), (Field::Id, Asc)])
+// equal to one call per field, which also keeps call order:
+query.order_by(&Field::ExpiresAt.order(Asc)).order_by(&Field::Id.order(Asc))
+```
+
+Each pair is applied as one `order_by` call, so the same orderable-field and read-policy checks
+apply, and it composes with other ordering calls in call order. For keyset pages,
+`<Entity>KeysetOrderByInput::ordered([(Field::ExpiresAt, Asc), (Field::Id, Asc)])` builds the
+ordered list `keyset_page_ordered` takes; the cursor's key order follows the list and the primary
+key is still appended as the tiebreak. `<Entity>OrderField` is a Rust type only. GraphQL clients
+already pass a list of single-field order inputs for an ordered sort, and the generated SDL is
+unchanged.
+
 ## Field Controls
 
 Fields can be marked read-only or excluded from specific generated surfaces.
@@ -577,21 +608,38 @@ let database = Database::builder(pool)
 
 ### Bulk write bound
 
-Generated GraphQL `updateMany` and `deleteMany` load and lock the rows their filter selects before
-they write. That work is bounded by `PaginationConfig::max_bulk_write_rows`, default `10_000`
-(`PaginationConfig::DEFAULT_MAX_BULK_WRITE_ROWS`):
+Generated GraphQL `updateMany` and `deleteMany` select and lock their target rows before they
+write. `PaginationConfig::max_bulk_write_rows`, default `10_000`
+(`PaginationConfig::DEFAULT_MAX_BULK_WRITE_ROWS`), bounds the rows one bulk mutation field may
+write:
 
-- The locking read takes at most the bound plus one look-ahead row, ordered by primary key.
-- When more rows match, the write is refused before any row changes. The payload reports
+- **What it counts.** The rows the caller is allowed to write: matches of the filter after
+  visibility. A row the caller can neither read nor write is never counted. For a fixed set of
+  rows the caller may write, the payload is therefore the same whether or not other, hidden rows
+  match the filter.
+- **Over the bound.** The write is refused before any row changes. The payload reports
   `success: false` and `errorCode = "PAGE_LIMIT_EXCEEDED"`; the message names no row count. A bulk
-  write is never truncated to the bound.
-- A write at or under the bound returns exactly what an unbounded one returns.
-- The bound counts the rows the locking read selects, before row policy classifies them. Whether
-  it is reached can therefore depend on rows the caller cannot see; a
-  [`write_target_prefilter`](strict-authorization.md#row-policy-on-generated-writes) removes those
-  rows in SQL, and from the count.
-- A filter the ORM evaluates in Rust instead of SQL is not limited in SQL: the bound then applies
-  to the rows that match.
+  write is never truncated to the bound, and one at or under it returns what an unbounded one
+  returns. Target rows are locked and written in primary-key order.
+- **How targets are selected.** When no row policy is installed and the filter is rendered
+  completely in SQL, every match is a target: one locking read with a look-ahead row decides the
+  bound. When the row policy decides in Rust (any installed `RowPolicy`: its callbacks classify
+  every candidate, with or without a
+  [`write_target_prefilter`](strict-authorization.md#row-policy-on-generated-writes)), or the
+  filter has a part evaluated in Rust (SQLite spatial predicates), candidates are read in pages of
+  500, the Rust predicate and the row policy are applied per page, and only targets count against
+  the bound.
+- **Scan budget.** That paged scan reads at most `PaginationConfig::max_scanned_rows` candidates
+  (default `10_000`), plus one look-ahead row: the same budget, configuration and refusal as a
+  [visible-row read](#repository-limits-and-offsets-count-visible-rows). A scan that would need
+  more candidates fails with `PAGE_LIMIT_EXCEEDED` and the scan-budget message, before any row
+  changes. Whether the budget runs out can depend on rows the caller cannot see; that is the
+  documented residual of the budget, and it is the only way hidden rows can affect a bulk write.
+  A `write_target_prefilter` removes hidden rows in SQL, so they are neither read nor counted
+  against the budget. Set the budget in trusted code.
+- **Per field.** The bound applies to each bulk mutation field. A request with several aliased
+  bulk mutations may write up to the bound in each; there is no request-wide budget. Limit
+  aliases, complexity or depth at the schema if a request-wide ceiling is needed.
 
 ```rust
 let database = Database::builder(pool)
@@ -601,14 +649,15 @@ let database = Database::builder(pool)
 
 `PaginationConfig::with_max_bulk_write_rows` sets it on a config value, and
 `PaginationConfig::unbounded()` and `unbounded_pagination()` remove it together with the page
-limits. Repository `update_where`, `delete_where` and their transaction forms are trusted code and
-are not bounded by this setting; `update_where_bounded` and `delete_where_bounded` take an explicit
-ceiling there. The 1,000-row `notify_with` bound is separate and still counts only the rows the
-caller may write.
+limits and the scan budget. Repository `update_where`, `delete_where` and their transaction forms
+are trusted code and are not bounded by this setting; `update_where_bounded` and
+`delete_where_bounded` take an explicit ceiling there. The 1,000-row `notify_with` bound is
+separate and also counts only the rows the caller may write.
 
-Run the cross-backend regression suite for the bound, the write-target prefilter and bare-pool
-inserts through `scripts/run-owned-database-lanes.sh bulk-write-targets`; PostgreSQL and SQL
-Server use test-owned disposable containers.
+Run the cross-backend regression suite for the bound, the write-target prefilter, bare-pool
+inserts, scoped system access, transaction extensions and ordered sorts through
+`scripts/run-owned-database-lanes.sh bulk-write-targets`; PostgreSQL and SQL Server use test-owned
+disposable containers.
 
 ### Rust repository limits never truncate
 

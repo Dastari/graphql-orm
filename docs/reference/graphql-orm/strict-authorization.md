@@ -348,14 +348,19 @@ cannot grant a write; a row it leaves out is treated as missing even where the
 callbacks would have allowed it, so it must not exclude rows the caller can
 write. The default returns `None`. Repository writes do not ask.
 
-A generated GraphQL bulk write loads and locks at most
-`PaginationConfig::max_bulk_write_rows` rows (default `10_000`) and is refused
-with `errorCode = "PAGE_LIMIT_EXCEEDED"` when its filter selects more; see
+A generated GraphQL bulk write may write at most
+`PaginationConfig::max_bulk_write_rows` rows (default `10_000`) per mutation
+field and is refused with `errorCode = "PAGE_LIMIT_EXCEEDED"` when more rows
+the caller may write match; see
 [bulk write bound](runtime-and-writes.md#bulk-write-bound). The bound counts
-the rows the locking read selects, before the classification above, so it can
-be reached because of rows the caller cannot see unless the prefilter removes
-them. For a dependent delete this holds for the
-root row only. A dependent child row the caller can neither read nor write is
+rows after the classification above, so hidden rows never decide whether it is
+reached. With a row policy installed the candidates are classified in pages
+under the read scan budget (`max_scanned_rows`); a scan that would need more
+candidates is refused as an authorized read is, which is the one way hidden
+rows can still affect the outcome, and a prefilter removes them from the scan.
+
+For a dependent delete, leaving hidden rows out holds for
+the root row only. A dependent child row the caller can neither read nor write is
 not left out. Like any other unauthorized dependent, it makes the whole delete
 refuse with `Dependent delete refused`, so the refusal can reveal that such a
 child exists. A write-only caller still writes rows it can't
@@ -419,7 +424,11 @@ Entity and row policies receive the `Database` the call runs on and read the lab
 `can_write_repository_field` receive it as `AccessContext::System`. The label grants nothing by
 itself: a policy that does not look at it decides as it did, and a call without one still presents
 no authority. A hook is given the originating request, so it decides from that request whether to
-open a scope; the policy then decides whether the named access may do the write. A scope ends when
+open a scope; the policy then decides whether the named access may do the write. Every policy
+check of a write made inside the scope uses the scope's access: entity access, field decisions,
+the existing row and the row as written. A handle with broad access that enters a narrower scope
+is therefore held to the narrower one, and a row it writes that the scope may not write is refused
+and blocks the commit, like any other refused written row. A scope ends when
 its future completes and restores the previous access; if the future is dropped first, the
 transaction can no longer commit. Keep a labelled handle out of GraphQL schema data, and let a
 policy that honours a label also require `ctx` to be `None`.

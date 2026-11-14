@@ -190,7 +190,7 @@ jobs:
         env:
           CARGO_BUILD_JOBS: "1"
         run: |
-          cargo test -p graphql-orm --locked --no-default-features --features postgres --test full_text_search --test owned_postgres_lifecycle --test postgres_rls --test postgres_rls_drift --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test point_read_visibility_backends --test migration_composite_uniques --test mutation_hook_public_errors --test visible_row_pages --test bulk_write_targets -- --include-ignored --test-threads=1
+          cargo test -p graphql-orm --locked --no-default-features --features postgres --test full_text_search --test owned_postgres_lifecycle --test postgres_rls --test postgres_rls_drift --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test point_read_visibility_backends --test migration_composite_uniques --test mutation_hook_public_errors --test visible_row_pages --test bulk_write_targets --test transaction_scope_backends --test ordered_sort -- --include-ignored --test-threads=1
           cargo test -p graphql-orm --locked --no-default-features --features postgres,change-journal --test postgres_rls_coverage --test postgres_change_journal_paths --test dependent_delete_repro --test backup_roundtrip -- --include-ignored --test-threads=1
           cargo test -p graphql-orm --locked --no-default-features --features postgres,change-journal --lib catalog_read_cancellation -- --include-ignored --test-threads=1
           cargo test -p graphql-orm --locked --no-default-features --features sqlite,change-journal --test dependent_delete_repro --test backup_roundtrip --test generated_error_sanitization
