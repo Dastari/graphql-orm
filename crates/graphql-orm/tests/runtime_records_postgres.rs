@@ -301,6 +301,9 @@ async fn disposable_postgres_runtime_records_match_sqlite_logically_and_fail_clo
 async fn disposable_postgres_runtime_query_filters_pages_and_counts()
 -> Result<(), Box<dyn std::error::Error>> {
     let owned = OwnedPostgres::start()?;
+    // The image restarts once after initialization; wait until a connection
+    // succeeds, as the other cases do, before the pool connects.
+    drop(owned.connect().await?);
     let database = graphql_orm::db::Database::connect_postgres(&owned.url).await?;
     graphql_orm::sqlx::query(
         "CREATE TABLE runtime_customers (
