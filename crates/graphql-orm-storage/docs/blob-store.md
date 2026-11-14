@@ -240,6 +240,17 @@ separator:
 | SMB | Refused everywhere, and listed names with `:` are skipped: Windows servers, and Samba with `streams_xattr`, open stream `b` of file `a` for `a:b`. |
 | S3 | Allowed. |
 
+`validate_portable_blob_key` applies `validate_blob_key` and also refuses
+what SMB servers and Windows file systems cannot store under the name as
+written: `:` and `< > " | ? *`, control characters, a component ending in
+`.` or a space (Windows strips them, so `report.` aliases `report`), and
+reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `CONIN$`, `CONOUT$`,
+`COM0`-`COM9`, `LPT0`-`LPT9` and their superscript-digit forms) in any ASCII
+case and with any extension. Hosts can call it for any provider whose keys
+may later move to such a target; the SMB backend applies it when
+`SmbStorageConfig::portable_keys` is set. It does not fold case, so keys that
+differ only in case still alias on a case-insensitive target.
+
 `list_blobs("")` is allowed and lists all blobs.
 
 ## Local filesystem trust boundary

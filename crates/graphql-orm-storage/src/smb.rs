@@ -29,7 +29,7 @@ use crate::{
     BlobBody, BlobListPage, BlobMetadata, BlobPutOptions, BlobStore, BlobWriteOutcome,
     StorageBackend, StorageByteStream, StorageError, StorageProviderErrorKind,
     key::{TEMP_SUFFIX, is_canonical_uuid, is_temp_file_name, temp_file_name},
-    validate_blob_key,
+    validate_blob_key, validate_portable_blob_key,
 };
 
 const DEFAULT_PORT: u16 = 445;
@@ -172,6 +172,16 @@ pub struct SmbStorageConfig {
     /// Most bytes of names and paths one listing may accumulate; 256 MiB by
     /// default. A larger listing fails instead of returning a partial result.
     pub max_listing_bytes: usize,
+    /// Accept only keys that [`validate_portable_blob_key`] accepts; `false`
+    /// by default. Enable it for a share on a Windows server, or on any
+    /// server whose clients include Windows, where a trailing dot or space,
+    /// a reserved device name or a character such as `?` would be stripped,
+    /// open a device or be refused. Keys, listing prefixes and the root
+    /// prefix are checked before any request, and listings skip stored names
+    /// that are not portable. It does not fold case.
+    ///
+    /// [`validate_portable_blob_key`]: crate::validate_portable_blob_key
+    pub portable_keys: bool,
 }
 
 impl SmbStorageConfig {
@@ -202,6 +212,7 @@ impl SmbStorageConfig {
             max_listing_entries: DEFAULT_MAX_LISTING_ENTRIES,
             listing_timeout: DEFAULT_LISTING_TIMEOUT,
             max_listing_bytes: DEFAULT_MAX_LISTING_BYTES,
+            portable_keys: false,
         }
     }
 
@@ -223,6 +234,9 @@ impl SmbStorageConfig {
         }
         if let Some(prefix) = &self.root_prefix {
             validate_blob_key(prefix)?;
+            if self.portable_keys {
+                validate_portable_blob_key(prefix)?;
+            }
             if prefix.contains(':') {
                 return Err(invalid_config(
                     "root prefix must not contain ':', an SMB stream separator",
@@ -297,6 +311,7 @@ impl fmt::Debug for SmbStorageConfig {
             .field("max_listing_entries", &self.max_listing_entries)
             .field("listing_timeout", &self.listing_timeout)
             .field("max_listing_bytes", &self.max_listing_bytes)
+            .field("portable_keys", &self.portable_keys)
             .finish()
     }
 }
@@ -750,7 +765,25 @@ impl SmbStorageBackend {
     }
 
     fn mapped_key(&self, key: &str) -> Result<String, StorageError> {
+        self.check_key_policy(key)?;
         map_key(self.inner.config.root_prefix.as_deref(), key)
+    }
+
+    /// Applies [`SmbStorageConfig::portable_keys`] to a caller's key.
+    fn check_key_policy(&self, key: &str) -> Result<(), StorageError> {
+        if self.inner.config.portable_keys {
+            validate_portable_blob_key(key)?;
+        }
+        Ok(())
+    }
+
+    /// Validates a listing prefix, applying [`SmbStorageConfig::portable_keys`].
+    fn check_prefix_policy(&self, prefix: &str) -> Result<(), StorageError> {
+        check_listing_prefix(prefix)?;
+        if self.inner.config.portable_keys {
+            crate::blob::validate_portable_blob_prefix(prefix)?;
+        }
+        Ok(())
     }
 
     fn remote_path(&self, key: &str) -> Result<UncPath, StorageError> {
@@ -1314,7 +1347,11 @@ impl SmbStorageBackend {
         };
         let root = self.inner.config.root_prefix.clone().unwrap_or_default();
         let mut keys = walk_listing(&source, root, prefix, limits).await?;
-        keys.retain(|key| !is_temp_key(key));
+        let portable = self.inner.config.portable_keys;
+        // A stored name this backend would refuse as a key is not listed.
+        keys.retain(|key| {
+            !is_temp_key(key) && (!portable || validate_portable_blob_key(key).is_ok())
+        });
         keys.sort();
         Ok(keys)
     }
@@ -2167,6 +2204,7 @@ impl BlobStore for SmbStorageBackend {
         _options: BlobPutOptions,
     ) -> Result<BlobWriteOutcome, StorageError> {
         // Checks the caller's key, not the longer temporary key.
+        self.check_key_policy(key)?;
         let temp = temp_key(key)?;
         let result = self.write_file(&temp, body).await;
         let outcome = match result {
@@ -2195,6 +2233,7 @@ impl BlobStore for SmbStorageBackend {
         // holds a partial object, then published as a hard link at the key
         // that the server refuses atomically when the key exists. Checks the
         // caller's key, not the longer temporary key.
+        self.check_key_policy(key)?;
         let temp = temp_key(key)?;
         let outcome = match self.write_file(&temp, body).await {
             Ok(outcome) => outcome,
@@ -2405,7 +2444,7 @@ impl BlobStore for SmbStorageBackend {
         continuation: Option<String>,
         limit: usize,
     ) -> Result<BlobListPage, StorageError> {
-        check_listing_prefix(prefix)?;
+        self.check_prefix_policy(prefix)?;
         if limit == 0 {
             return Err(StorageError::PreconditionFailed {
                 key: prefix.to_string(),
@@ -2430,7 +2469,7 @@ impl BlobStore for SmbStorageBackend {
     /// Lists the tree once, within one deadline and one set of limits,
     /// instead of re-listing it for every page.
     async fn list_blobs(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
-        check_listing_prefix(prefix)?;
+        self.check_prefix_policy(prefix)?;
         let mut keys = self.collect_keys(prefix).await?;
         keys.retain(|key| key.starts_with(prefix));
         Ok(keys)
@@ -4530,6 +4569,38 @@ mod tests {
         assert!(check_listing_prefix("").is_ok());
         assert!(check_listing_prefix("dir/").is_ok());
         assert!(check_key("dir/2026-11-12T10-00-00Z.json").is_ok());
+    }
+
+    /// `portable_keys` is opt-in: by default a trailing dot or a device name
+    /// stays a valid key, and with it the root prefix and listing prefixes
+    /// follow the portable rules (#482).
+    #[test]
+    fn portable_keys_are_opt_in_and_cover_the_root_and_listing_prefixes() {
+        let mut config = config();
+        assert!(!config.portable_keys, "the default keeps existing keys valid");
+        config.root_prefix = Some("backups/CON".to_string());
+        config.validate().expect("POSIX validation accepts a device name");
+        config.portable_keys = true;
+        assert!(matches!(
+            config.validate(),
+            Err(StorageError::InvalidStorageKey { .. })
+        ));
+        config.root_prefix = Some("backups/nightly".to_string());
+        config.validate().expect("a portable root prefix");
+        assert!(format!("{config:?}").contains("portable_keys: true"));
+
+        for prefix in ["", "dir/", "dir/par", "dir/report.", "dir/CO"] {
+            assert!(
+                crate::blob::validate_portable_blob_prefix(prefix).is_ok(),
+                "{prefix}"
+            );
+        }
+        for prefix in ["CON/", "dir./", "dir /x", "dir/a?b", "x:"] {
+            assert!(
+                crate::blob::validate_portable_blob_prefix(prefix).is_err(),
+                "{prefix}"
+            );
+        }
     }
 
     #[tokio::test]

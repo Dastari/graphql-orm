@@ -40,6 +40,16 @@ single-attempt errors. See [MIGRATION.md](MIGRATION.md).
   Hosts call it once before using a bucket for locks; nothing calls it
   implicitly. The owned RustFS lane passes it.
   ([#478](https://github.com/Dastari/graphql-orm/issues/478))
+- `validate_portable_blob_key` validates a key for SMB servers and Windows
+  file systems: on top of `validate_blob_key` it refuses `:`, `< > " | ? *`,
+  control characters, a component ending in `.` or a space, and reserved
+  device names such as `CON`, `NUL.txt`, `COM1` and `LPT¹`, in any ASCII
+  case. `SmbStorageConfig` gains `portable_keys`, `false` by default; when
+  set, keys, listing prefixes and `root_prefix` must be portable, refused
+  keys fail with `InvalidStorageKey` before any request, and listings skip
+  stored names that are not portable. Case aliasing is not addressed: keys
+  that differ only in case still name one file on a case-insensitive
+  server. ([#482](https://github.com/Dastari/graphql-orm/issues/482))
 
 ## 0.11.0 (unreleased)
 

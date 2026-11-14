@@ -133,6 +133,17 @@ paths, UNC paths, or SMB URLs.
 `.graphql-orm-storage` namespace and `:` are rejected. Windows servers, and
 Samba with `streams_xattr`, treat `:` as an alternate data stream separator,
 so `a:b` would open stream `b` of the file `a`; listings skip names with `:`.
+
+Set `portable_keys` to `true` for a share on a Windows server, or one that
+Windows clients also use. Keys, listing prefixes and `root_prefix` must then
+pass `validate_portable_blob_key`, which also refuses the characters
+`< > " | ? *`, control characters, a component ending in `.` or a space, and
+reserved device names such as `CON`, `NUL.txt` or `COM1`, in any ASCII case.
+A refused key fails with `InvalidStorageKey` before any request, and listings
+skip stored names that are not portable. It is off by default so that keys
+written earlier stay addressable; enable it before writing to a new share.
+It does not fold case: keys that differ only in case name the same file on a
+case-insensitive server.
 Passwords use `SecretString`, are redacted from `Debug`, and never enter errors
 or probe results. The backend moves the password straight into the SMB
 client's zeroizing secret, and no plain copy outlives the connection call.

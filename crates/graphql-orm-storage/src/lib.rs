@@ -58,6 +58,7 @@ pub use backend::{StorageBackend, StorageNamespace, unsupported_backend};
 pub use blob::{
     BlobBody, BlobListPage, BlobMetadata, BlobPutOptions, BlobStore, BlobWriteOutcome,
     BoxedStorageStream, StorageByteStream, collect_storage_stream, validate_blob_key,
+    validate_portable_blob_key,
 };
 pub use checksum::sha256_hex;
 pub use error::{StorageError, StorageProviderErrorKind};

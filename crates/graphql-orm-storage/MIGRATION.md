@@ -28,6 +28,12 @@ Update the storage requirement to 0.12.0 and refresh the consumer lockfile.
    key taken. `Ok(Some(_))` and `Ok(None)` keep their meanings. Code that
    matched a retryable `Provider` error from this call to retry it must
    treat `SingleAttemptFailed` as an unknown outcome instead.
+2. **`SmbStorageConfig::portable_keys`.** The configuration has a new public
+   field, `false` by default. Code that builds `SmbStorageConfig` with a
+   struct literal must set it; code that uses `SmbStorageConfig::new` and
+   assigns fields is unaffected. Set it to `true` for a share on a Windows
+   server, before writing to it: keys stored earlier that are not portable,
+   such as `report.` or `CON.txt`, are then refused and no longer listed.
 
 ## 0.10.0 to 0.11.0: SMB signing, conditional-create outcomes, S3 messages
 

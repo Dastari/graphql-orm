@@ -995,6 +995,94 @@ async fn samba_listing_follows_the_provider_prefix_contract() {
     }
 }
 
+/// With `portable_keys`, keys a Windows target cannot store as written are
+/// refused before any request, portable keys round-trip, and listings return
+/// only names the backend accepts as keys (#482).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the managed Samba container harness"]
+async fn samba_portable_keys_refuse_windows_unsafe_names() {
+    use graphql_orm_storage::{StorageError, validate_portable_blob_key};
+
+    let root = format!("graphql-orm-storage-portable/{}", Uuid::new_v4());
+    let posix = SmbStorageBackend::connect(test_config(root.clone()))
+        .await
+        .expect("connect");
+    let mut config = test_config(root);
+    config.portable_keys = true;
+    let portable = SmbStorageBackend::connect(config).await.expect("connect");
+    let body = || StorageByteStream::from_bytes(Bytes::from_static(b"portable"));
+
+    // Names a POSIX share stores, written without the portable mode.
+    for key in ["names/kept.bin", "names/CON.txt", "names/trailing."] {
+        posix
+            .put_blob(key, body(), BlobPutOptions::default())
+            .await
+            .unwrap_or_else(|error| panic!("{key}: {error}"));
+    }
+
+    for key in ["names/CON.txt", "names/trailing.", "names/a?b", "LPT1/x"] {
+        let refused = |result: Result<(), StorageError>| {
+            assert!(
+                matches!(result, Err(StorageError::InvalidStorageKey { .. })),
+                "{key}: {result:?}"
+            );
+        };
+        refused(
+            portable
+                .put_blob(key, body(), BlobPutOptions::default())
+                .await
+                .map(drop),
+        );
+        refused(
+            portable
+                .put_blob_if_not_exists(key, body(), BlobPutOptions::default())
+                .await
+                .map(drop),
+        );
+        refused(portable.get_blob(key).await.map(drop));
+        refused(portable.blob_exists(key).await.map(drop));
+        refused(portable.delete_blob(key).await);
+    }
+    assert!(matches!(
+        portable.list_blobs("CON/").await,
+        Err(StorageError::InvalidStorageKey { .. })
+    ));
+
+    portable
+        .put_blob("names/portable.bin", body(), BlobPutOptions::default())
+        .await
+        .expect("a portable key is written");
+    assert_eq!(
+        collect_storage_stream(
+            portable
+                .get_blob("names/portable.bin")
+                .await
+                .expect("read")
+                .body
+        )
+        .await
+        .expect("body"),
+        Bytes::from_static(b"portable")
+    );
+
+    // The portable listing is the POSIX listing without names that are not
+    // portable keys, however the server presents them.
+    let all = posix.list_blobs("names/").await.expect("list");
+    let expected: Vec<String> = all
+        .iter()
+        .filter(|key| validate_portable_blob_key(key).is_ok())
+        .cloned()
+        .collect();
+    let listed = portable.list_blobs("names/").await.expect("portable list");
+    assert_eq!(listed, expected);
+    assert!(listed.contains(&"names/kept.bin".to_string()), "{listed:?}");
+    assert!(!listed.contains(&"names/CON.txt".to_string()), "{listed:?}");
+
+    for key in all {
+        posix.delete_blob(&key).await.expect("delete");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires a managed Samba server limited to SMB 3.0"]
 async fn samba_refuses_a_dialect_below_the_minimum() {
