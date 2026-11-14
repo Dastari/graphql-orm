@@ -179,6 +179,8 @@ async fn single_attempt_delete_does_not_replay_after_lost_response_and_replaceme
             }
         }
     });
+    // This fixture tests other behaviour; it asserts enforcement instead of
+    // answering the conditional-create probe.
     let backend = S3StorageBackend::new(S3StorageConfig {
         endpoint_url: endpoint,
         region: "us-east-1".to_string(),
@@ -187,7 +189,8 @@ async fn single_attempt_delete_does_not_replay_after_lost_response_and_replaceme
         access_key_id: "owned-fixture".to_string(),
         secret_access_key: "owned-fixture-secret".to_string(),
         path_style: true,
-    });
+    })
+    .with_conditional_writes_verified_by_host();
     let (release, replacement) = tokio::time::timeout(Duration::from_secs(12), async {
         tokio::join!(backend.delete_blob_once("locks/repository.lock"), async {
             while deletes.load(Ordering::SeqCst) == 0 {
@@ -428,6 +431,8 @@ async fn s3_errors_are_classified_from_structured_metadata() {
         ],
         Arc::clone(&done),
     );
+    // This fixture tests other behaviour; it asserts enforcement instead of
+    // answering the conditional-create probe.
     let backend = S3StorageBackend::new(S3StorageConfig {
         endpoint_url: endpoint,
         region: "us-east-1".to_string(),
@@ -436,7 +441,8 @@ async fn s3_errors_are_classified_from_structured_metadata() {
         access_key_id: "owned-fixture".to_string(),
         secret_access_key: "owned-fixture-secret".to_string(),
         path_style: true,
-    });
+    })
+    .with_conditional_writes_verified_by_host();
 
     let provider_error = |result: Result<graphql_orm_storage::BlobBody, StorageError>| {
         let error = result.map(drop).expect_err("a provider error");
@@ -613,7 +619,14 @@ where
     (endpoint, server)
 }
 
+/// A backend for scripted fixtures that test other behaviour than the
+/// conditional-create probe: the host asserts enforcement.
 fn fixture_backend(endpoint: String) -> S3StorageBackend {
+    probing_fixture_backend(endpoint).with_conditional_writes_verified_by_host()
+}
+
+/// A backend that probes before its first conditional create.
+fn probing_fixture_backend(endpoint: String) -> S3StorageBackend {
     S3StorageBackend::new(S3StorageConfig {
         endpoint_url: endpoint,
         region: "us-east-1".to_string(),
@@ -835,6 +848,26 @@ async fn answered_conditional_put_failures_keep_their_classification() {
 /// Objects an in-memory fixture holds, by request path.
 type FixtureObjects = std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>>;
 
+/// A running in-memory S3 fixture.
+struct ProbeFixture {
+    endpoint: String,
+    server: std::thread::JoinHandle<()>,
+    objects: FixtureObjects,
+    /// `METHOD path` of every request, in order.
+    requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl ProbeFixture {
+    fn probe_requests(&self) -> usize {
+        self.requests
+            .lock()
+            .expect("requests")
+            .iter()
+            .filter(|request| request.contains("/.graphql-orm-probe-"))
+            .count()
+    }
+}
+
 /// An in-memory S3 for the conditional-create probe. `honours_put` and
 /// `honours_complete` select whether `If-None-Match: *` is enforced on
 /// `PutObject` and on `CompleteMultipartUpload`.
@@ -842,16 +875,22 @@ fn probe_fixture(
     honours_put: bool,
     honours_complete: bool,
     done: std::sync::Arc<std::sync::atomic::AtomicBool>,
-) -> (String, std::thread::JoinHandle<()>, FixtureObjects) {
+) -> ProbeFixture {
     use std::{
         collections::BTreeMap,
         sync::{Arc, Mutex},
     };
     let objects: FixtureObjects = Arc::default();
+    let requests: Arc<Mutex<Vec<String>>> = Arc::default();
     let uploads: Arc<Mutex<BTreeMap<String, Vec<u8>>>> = Arc::default();
     let server_objects = Arc::clone(&objects);
+    let server_requests = Arc::clone(&requests);
     let (endpoint, server) = serve_scripted_s3(
         move |request| {
+            server_requests
+                .lock()
+                .expect("requests")
+                .push(format!("{} {}", request.method, request.path));
             let mut objects = server_objects.lock().expect("objects");
             let mut uploads = uploads.lock().expect("uploads");
             let key = request.path.clone();
@@ -918,7 +957,12 @@ fn probe_fixture(
         },
         done,
     );
-    (endpoint, server, objects)
+    ProbeFixture {
+        endpoint,
+        server,
+        objects,
+        requests,
+    }
 }
 
 /// The conditional-create probe passes on a provider that enforces
@@ -934,12 +978,12 @@ async fn conditional_create_probe_refuses_a_provider_that_ignores_if_none_match(
 
     for (honours_put, honours_complete) in [(true, true), (false, true), (true, false)] {
         let done = Arc::new(AtomicBool::new(false));
-        let (endpoint, server, objects) =
-            probe_fixture(honours_put, honours_complete, Arc::clone(&done));
-        let backend = fixture_backend(endpoint);
+        let fixture = probe_fixture(honours_put, honours_complete, Arc::clone(&done));
+        let objects = Arc::clone(&fixture.objects);
+        let backend = probing_fixture_backend(fixture.endpoint.clone());
         let result = backend.probe_conditional_create().await;
         done.store(true, Ordering::SeqCst);
-        server.join().expect("fixture thread");
+        fixture.server.join().expect("fixture thread");
         if honours_put && honours_complete {
             result.expect("an enforcing provider passes the probe");
         } else {
@@ -956,4 +1000,77 @@ async fn conditional_create_probe_refuses_a_provider_that_ignores_if_none_match(
             objects.lock().expect("objects").keys().collect::<Vec<_>>()
         );
     }
+}
+
+/// Conditional creates fail closed: an instance probes before its first
+/// conditional create, a provider that ignores `If-None-Match` makes lock
+/// acquisition fail with a typed, non-retryable error, an enforcing one
+/// probes once per instance, and the host assertion skips the probe (#478).
+#[tokio::test]
+async fn conditional_creates_require_a_verified_provider() {
+    use graphql_orm_storage::{StorageError, StorageProviderErrorKind};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    let lock = |backend: S3StorageBackend| async move {
+        backend
+            .put_blob_if_not_exists(
+                "locks/repository.lock",
+                StorageByteStream::from_bytes(Bytes::from_static(b"owner")),
+                BlobPutOptions::default(),
+            )
+            .await
+    };
+
+    // A provider that ignores the condition: no lock is ever acquired.
+    let done = Arc::new(AtomicBool::new(false));
+    let fixture = probe_fixture(false, true, Arc::clone(&done));
+    let backend = probing_fixture_backend(fixture.endpoint.clone());
+    for _ in 0..2 {
+        let error = lock(backend.clone()).await.expect_err("fails closed");
+        assert!(
+            matches!(
+                error,
+                StorageError::RemoteProvider {
+                    kind: StorageProviderErrorKind::ConditionalCreateUnverified,
+                    retryable: false,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+        assert!(!error.is_retryable());
+    }
+    assert!(
+        fixture.objects.lock().expect("objects").is_empty(),
+        "no lock object and no probe object remain"
+    );
+    // A failed probe is not cached: each attempt probes again.
+    assert!(fixture.probe_requests() > 4, "{:?}", fixture.requests);
+    done.store(true, Ordering::SeqCst);
+    fixture.server.join().expect("fixture thread");
+
+    // An enforcing provider: probed once per instance, clones included.
+    let done = Arc::new(AtomicBool::new(false));
+    let fixture = probe_fixture(true, true, Arc::clone(&done));
+    let backend = probing_fixture_backend(fixture.endpoint.clone());
+    assert!(lock(backend.clone()).await.expect("acquired").is_some());
+    let after_first = fixture.probe_requests();
+    assert!(after_first > 0, "the first conditional create probes");
+    assert!(lock(backend.clone()).await.expect("held").is_none());
+    assert_eq!(fixture.probe_requests(), after_first, "probed once");
+    done.store(true, Ordering::SeqCst);
+    fixture.server.join().expect("fixture thread");
+
+    // The host assertion skips the probe, even on an ignoring provider.
+    let done = Arc::new(AtomicBool::new(false));
+    let fixture = probe_fixture(false, false, Arc::clone(&done));
+    let backend = probing_fixture_backend(fixture.endpoint.clone())
+        .with_conditional_writes_verified_by_host();
+    assert!(lock(backend).await.expect("written").is_some());
+    assert_eq!(fixture.probe_requests(), 0);
+    done.store(true, Ordering::SeqCst);
+    fixture.server.join().expect("fixture thread");
 }

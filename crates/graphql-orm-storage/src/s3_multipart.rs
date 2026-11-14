@@ -230,6 +230,9 @@ impl MultipartBlobStore for S3StorageBackend {
         options: MultipartStartOptions,
     ) -> Result<MultipartUploadHandle, StorageError> {
         let provider_key = self.provider_key(key)?;
+        if options.if_not_exists {
+            self.require_conditional_create().await?;
+        }
         let mut request = self
             .client
             .create_multipart_upload()
@@ -329,6 +332,9 @@ impl MultipartBlobStore for S3StorageBackend {
     ) -> Result<MultipartCompleteOutcome, StorageError> {
         check_handle(handle, StorageBackend::S3)?;
         let provider_key = self.provider_key(&handle.key)?;
+        if handle.if_not_exists {
+            self.require_conditional_create().await?;
+        }
         let stored = match self.stored_parts(handle, &provider_key).await {
             Ok(stored) => stored,
             Err(StorageError::Multipart {

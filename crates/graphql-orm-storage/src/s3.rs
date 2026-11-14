@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 use async_trait::async_trait;
 use aws_credential_types::Credentials;
@@ -12,6 +12,7 @@ use aws_sdk_s3::{
 use bytes::{Bytes, BytesMut};
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
+use tokio::sync::OnceCell;
 use tokio_util::io::ReaderStream;
 
 use crate::{
@@ -66,6 +67,18 @@ pub struct S3StorageBackend {
     pub(crate) config: S3StorageConfig,
     pub(crate) client: Client,
     pub(crate) multipart_max_part_size: u64,
+    /// Whether this instance may send conditional creates. Shared only by
+    /// clones, which have the same immutable configuration.
+    conditional_create: Arc<ConditionalCreateCapability>,
+}
+
+/// The conditional-create capability of one backend instance.
+#[derive(Debug, Default)]
+struct ConditionalCreateCapability {
+    /// The host asserted that the provider enforces `If-None-Match: *`.
+    verified_by_host: bool,
+    /// Set once a probe passed. A failed probe is never cached.
+    probed: OnceCell<()>,
 }
 
 impl S3StorageBackend {
@@ -90,7 +103,44 @@ impl S3StorageBackend {
             config,
             client: Client::from_conf(s3_config),
             multipart_max_part_size: crate::s3_multipart::DEFAULT_MAX_PART_SIZE,
+            conditional_create: Arc::default(),
         }
+    }
+
+    /// Asserts, as the host's responsibility, that the provider enforces
+    /// `If-None-Match: *` on `PutObject` and `CompleteMultipartUpload`, so
+    /// conditional creates skip [`Self::probe_conditional_create`].
+    ///
+    /// Use it only where the probe's writes are not permitted and the
+    /// provider's enforcement was verified another way. If the assertion is
+    /// wrong, `put_blob_if_not_exists` can report success to two writers of
+    /// the same key, so two holders can acquire one repository lock and
+    /// concurrent writers can replace each other's objects.
+    #[must_use]
+    pub fn with_conditional_writes_verified_by_host(mut self) -> Self {
+        self.conditional_create = Arc::new(ConditionalCreateCapability {
+            verified_by_host: true,
+            probed: OnceCell::new(),
+        });
+        self
+    }
+
+    /// Fails closed unless this instance's provider is known to enforce
+    /// conditional creates: the host asserted it, or a probe on this instance
+    /// passed. Runs the probe on first use; only a pass is cached.
+    pub(crate) async fn require_conditional_create(&self) -> Result<(), StorageError> {
+        if self.conditional_create.verified_by_host {
+            return Ok(());
+        }
+        self.conditional_create
+            .probed
+            .get_or_try_init(|| async {
+                self.probe_conditional_create()
+                    .await
+                    .map_err(conditional_create_unverified)
+            })
+            .await
+            .map(|_| ())
     }
 
     /// Sets the largest accepted multipart part, between 5 MiB and 5 GiB.
@@ -119,8 +169,11 @@ impl S3StorageBackend {
     ///
     /// Some S3-compatible providers accept the header but ignore it; on them
     /// a conditional create silently replaces an existing object and a lock
-    /// is not exclusive. Run this probe once, before using the bucket for
-    /// repository locks, and refuse to use the bucket when it fails.
+    /// is not exclusive. Every instance runs this probe before its first
+    /// conditional create, unless the host called
+    /// [`Self::with_conditional_writes_verified_by_host`], and fails the
+    /// create when it does not pass; hosts may also call it directly at
+    /// startup.
     ///
     /// The probe creates a random object, `.graphql-orm-probe-<uuid>` below
     /// the key prefix, and then tries to create the same key again with a
@@ -128,6 +181,14 @@ impl S3StorageBackend {
     /// completion. Both must be refused, and the object must keep its first
     /// content. The probe then deletes its object, also after a failure. It
     /// needs permission to write, read and delete below the key prefix.
+    ///
+    /// Its limits: it sends only a tiny `PutObject` and a one-part
+    /// completion, so it cannot certify enforcement that depends on object
+    /// size, part count, or a proxy or gateway that treats other requests
+    /// differently. If it is cancelled, or its cleanup fails, its
+    /// `.graphql-orm-probe-<uuid>` object, and possibly an incomplete
+    /// multipart upload for that key, can remain below the key prefix; both
+    /// are safe to delete.
     ///
     /// # Errors
     ///
@@ -600,6 +661,8 @@ impl BlobStore for S3StorageBackend {
         body: StorageByteStream,
         options: BlobPutOptions,
     ) -> Result<Option<BlobWriteOutcome>, StorageError> {
+        self.provider_key(key)?;
+        self.require_conditional_create().await?;
         self.put_blob_inner(key, body, options, true).await
     }
 
@@ -877,6 +940,25 @@ fn is_missing_error<E: ProvideErrorMetadata>(err: &SdkError<E, HttpResponse>) ->
     match service_error_code(err) {
         Some(code) => matches!(code, "NoSuchKey" | "NotFound"),
         None => service_error_status(err) == Some(404),
+    }
+}
+
+/// The typed, non-retryable failure of a conditional create whose
+/// capability could not be verified. The message is fixed: the probe's own
+/// error stays in the backend's diagnostics, not in this error.
+fn conditional_create_unverified(error: StorageError) -> StorageError {
+    let message = match error {
+        StorageError::UnsupportedOperation { .. } => {
+            "the provider ignored If-None-Match: *, so conditional creates are not exclusive"
+        }
+        _ => "the conditional-create probe did not complete, so exclusivity is unverified",
+    };
+    StorageError::RemoteProvider {
+        backend: StorageBackend::S3.as_str().to_string(),
+        kind: crate::StorageProviderErrorKind::ConditionalCreateUnverified,
+        operation: "conditional_create_probe".to_string(),
+        message: message.to_string(),
+        retryable: false,
     }
 }
 
