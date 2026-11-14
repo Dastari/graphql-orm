@@ -10296,39 +10296,34 @@ fn generate_graphql_operations_unfiltered(
             {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow, SqlValue};
 
-                if let Some(db) = (provider as &dyn ::std::any::Any).downcast_ref::<::graphql_orm::db::Database<#backend_marker>>() {
-                    db.ensure_entity_access(
-                        None,
-                        #entity_name_lit,
-                        <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
-                        ::graphql_orm::graphql::orm::EntityAccessKind::Write,
-                        ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
-                    ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
-                    db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
-                    let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin(
+                // Every provider takes the same authorized path. A provider that is
+                // not a `Database` carries no policies, hooks or transforms, so it
+                // is the default handle over its pool: an entity or field that
+                // declares a policy key is refused as misconfigured, and the
+                // default schema policy applies.
+                let __gom_pool_database;
+                let db = match (provider as &dyn ::std::any::Any).downcast_ref::<::graphql_orm::db::Database<#backend_marker>>() {
+                    Some(db) => db,
+                    None => {
+                        __gom_pool_database = ::graphql_orm::db::Database::<#backend_marker>::__gom_default_for_pool(provider.pool().clone());
+                        &__gom_pool_database
+                    }
+                };
+                db.ensure_entity_access(
+                    None,
+                    #entity_name_lit,
+                    <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
+                    ::graphql_orm::graphql::orm::EntityAccessKind::Write,
+                    ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
+                ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
+                db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
+                let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin(
                     db,
                     ::graphql_orm::graphql::orm::TransactionMode::Default,
                 ).await?;
-                    let entity = Self::__gom_insert_with_mutation_context(&mut hook_ctx, input).await?;
-                    hook_ctx.commit_and_emit().await?;
-                    Ok(entity)
-                } else {
-                    let pool = provider.pool();
-                    #created_pk_init
-                    let sql = Self::__gom_rebind_sql(#insert_sql, 1);
-                    let mut bind_values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
-                    #prepend_pk_bind
-                    #(#insert_binds_repo)*
-                    ::graphql_orm::graphql::orm::execute_with_binds::<#backend_marker>(&sql, &bind_values, pool).await?;
-                    EntityQuery::<Self, #backend_marker>::new()
-                        .where_clause(
-                            &format!("{} = {}", #sql_dialect.render_identifier_path(<Self as DatabaseEntity>::PRIMARY_KEY), Self::__gom_placeholder(1)),
-                            #created_pk_value,
-                        )
-                        .fetch_one(pool)
-                    .await?
-                    .ok_or(::graphql_orm::sqlx::Error::RowNotFound)
-                }
+                let entity = Self::__gom_insert_with_mutation_context(&mut hook_ctx, input).await?;
+                hook_ctx.commit_and_emit().await?;
+                Ok(entity)
             }
 
             /// Insert multiple entity records transactionally using the generated create input.

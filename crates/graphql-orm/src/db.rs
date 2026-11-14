@@ -159,6 +159,15 @@ impl<B: OrmBackend> Database<B> {
         }
     }
 
+    /// The default handle over a bare pool: no policies, hooks or transforms,
+    /// the default authorization mode and the backend's default schema
+    /// policy. Generated write helpers that accept any pool provider use it
+    /// so a bare pool takes the same authorized path as a `Database`.
+    #[doc(hidden)]
+    pub fn __gom_default_for_pool(pool: B::Pool) -> Self {
+        Self::base(pool, Self::default_schema_policy())
+    }
+
     fn base(pool: B::Pool, schema_policy: SchemaPolicy) -> Self {
         Self {
             pool,
