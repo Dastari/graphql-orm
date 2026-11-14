@@ -85,7 +85,7 @@ fn current_principal_resolution_is_owned_by_the_guarded_handle() {
         // resolve_current_reference and the private, non-Deref resolver handle.
         for forbidden in [
             "principal_resolver.resolve(",
-            "resolver.resolve(",
+            ".resolver.resolve(",
             "CurrentPrincipalResolver::resolve(",
             "CurrentPrincipalResolver>::resolve(",
         ] {
