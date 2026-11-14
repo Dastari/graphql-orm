@@ -165,9 +165,9 @@ at a time, so a slow older fetch never replaces a newer key set.
 `roleScopeCatalogue` is optional and requires `auth-agql`. Select exactly one
 of literal `url` or `urlFromEnv`. Request headers are loaded only through
 `requestHeadersFromEnv`; values never appear in JSON or diagnostics. Optional
-bounds are `cacheTtlSeconds`, `maximumSignedLifetimeSeconds`,
-`clockSkewLeewaySeconds`, `retryBackoffSeconds`,
-`maximumRetryBackoffSeconds`, and `maxBodyBytes`. The default response bound is
+bounds are `cacheTtlSeconds`, `maximumStalenessSeconds`,
+`maximumSignedLifetimeSeconds`, `clockSkewLeewaySeconds`,
+`retryBackoffSeconds`, `maximumRetryBackoffSeconds`, and `maxBodyBytes`. The default response bound is
 2 MiB for the complete signed JSON envelope, including the catalogue repeated
 inside its JWS. An explicit lower limit still applies. This is separate from
 the JWKS and public GraphQL request-body limits. Its URL is HTTPS-only except for
@@ -186,12 +186,18 @@ soft refresh age; it does not cap issuer lifetime.
 When configured, the distinct typed `authorization_roles` claim expands
 through the last signature-verified catalogue and is unioned with direct token
 scopes. Application `roles` are not expanded. Unknown authorization roles fail
-explicitly and request an immediate refresh. A failed refresh preserves and
-continues serving the last verified snapshot past its soft age or signed
-expiry, increments `role_scope_stale_serve_total`, and emits rate-limited warning
-logs. A role-bearing credential fails closed only when no verified snapshot is
-available or its role remains unknown; direct-scope-only credentials do not
-depend on the optional authority source.
+explicitly and request an immediate refresh. A snapshot is stale from its soft
+age or its signed expiry, whichever comes first. A failed refresh keeps serving
+the last verified snapshot after that point for at most
+`maximumStalenessSeconds` (default 900, at most 86400, `0` refuses as soon as the
+snapshot is stale), incrementing `role_scope_stale_serve_total` and emitting
+rate-limited warning logs. Past that bound, role-bearing credentials fail
+closed as unavailable (HTTP 503 / WebSocket refusal) and increment
+`role_scope_stale_refusal_total` until a refresh succeeds. A role-bearing
+credential also fails closed when no verified snapshot is available or its
+role remains unknown. Direct-scope-only credentials do not depend on the
+optional authority source. Every failed catalogue refresh, lazy or scheduled,
+increments `role_scope_refresh_failure_total` and logs its redacted reason.
 
 The router validates RS256 public keys only. Configuration has no private-key,
 token-signing, session, refresh-token, or RSA-decryption field.

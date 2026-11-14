@@ -77,8 +77,12 @@ Hive Prometheus exporter adds execution histograms and the pinned subscription
 counters
 `hive.router.subscriptions.clients.lagged_messages_total` and
 `hive.router.subscriptions.subgraphs.dropped_messages_total`.
-Embedding hosts can also read `role_scope_stale_serve_total` from the JWKS
-provider and alert on any non-zero increase; stale serves emit warning logs.
+Embedding hosts can also read `role_scope_stale_serve_total`,
+`role_scope_stale_refusal_total`, and `role_scope_refresh_failure_total` from
+the JWKS provider. Alert on any increase: stale serves mean the catalogue is
+not refreshing, and refusals mean role-bearing requests are failing because a
+stale snapshot passed `maximumStalenessSeconds`. Both emit rate-limited warning
+logs; refresh failures log a redacted reason without URLs or header values.
 
 ## Reload and recovery
 

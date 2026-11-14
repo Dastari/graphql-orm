@@ -20,6 +20,17 @@ supersedes: []
   unchanged. The port rules are unchanged: nonzero and distinct from the public
   and administrative ports whatever their addresses. The router logs a startup
   warning when the exporter binds every interface.
+- **Behaviour change:** a stale role-scope catalogue snapshot now has a
+  maximum staleness (#488). A snapshot is stale from its soft age or signed
+  expiry, whichever is first. While refreshes fail it keeps expanding roles for
+  at most `maximumStalenessSeconds`
+  (`RoleScopeCatalogueConfig::with_maximum_staleness`), 15 minutes by default
+  and at most 24 hours. After that, role-bearing credentials are refused as
+  unavailable until a refresh succeeds; they used to be served from the stale
+  snapshot indefinitely. Direct-scope-only credentials are unaffected. New
+  provider counters `role_scope_stale_refusal_total` and
+  `role_scope_refresh_failure_total` (which also counts scheduled refreshes)
+  go with rate-limited warning logs.
 
 ## 0.14.0 (unreleased)
 

@@ -25,6 +25,25 @@ or use `RouterTelemetryConfig::with_prometheus_listener(address, path)`. The
 port must still differ from the public and administrative ports. A router whose
 exporter binds `0.0.0.0` or `::` now logs a startup warning.
 
+### Role-scope catalogue maximum staleness (can refuse requests)
+
+This applies to `auth-agql` builds with `roleScopeCatalogue`. Earlier routers
+kept expanding authorization roles from the last verified snapshot for as long
+as refreshes failed. Now a snapshot that is stale (past `cacheTtlSeconds` or its
+signed expiry, whichever is first) serves roles for at most
+`maximumStalenessSeconds`, 900 by default. After that, **requests carrying
+`authorization_roles` that the old router served are refused as unavailable**
+until the catalogue refreshes. Direct-scope-only requests are unaffected.
+
+Before upgrading, make sure the catalogue endpoint is reliably reachable, and
+alert on `role_scope_stale_serve_total`, `role_scope_stale_refusal_total` and
+`role_scope_refresh_failure_total`. To allow a longer outage window, set
+`maximumStalenessSeconds` (up to 86400) or call
+`RoleScopeCatalogueConfig::with_maximum_staleness`. There is no unbounded
+setting. With default settings the JWKS cache, which goes stale 15 minutes
+after a failed refresh, already refuses every bearer credential in an issuer
+outage, so the default staleness adds no new outage mode in that case.
+
 ## 0.13.0 to 0.14.0: persisted documents
 
 Persisted documents remain disabled by default. Enable `persistedDocuments` or
