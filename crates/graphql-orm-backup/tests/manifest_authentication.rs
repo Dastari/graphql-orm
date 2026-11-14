@@ -1042,6 +1042,177 @@ async fn payload_swapped_after_verification_is_never_applied_or_compacted() {
     );
 }
 
+/// Change payloads take the same digest-checked path as table payloads: an
+/// incremental snapshot whose change payload is swapped after verification
+/// is never applied or compacted (#612).
+#[tokio::test]
+async fn change_payload_swapped_after_verification_is_never_applied_or_compacted() {
+    let temp = TempDir::new().expect("temp dir");
+    let inner = repository(&temp);
+    let full = backup_with_object(&inner, "media/a.txt").await;
+    let change = |name: &str| BackupChangeExport {
+        table_name: "users".to_string(),
+        primary_key: "2".to_string(),
+        action: graphql_orm_backup::BackupChangeAction::Create,
+        row: Some(row("users", "2", name)),
+        changed_at: 1_775_174_450,
+    };
+    let source = MockDatabase {
+        changes: vec![change("Grace")],
+        ..MockDatabase::default()
+    };
+    let incremental = create_incremental_backup(
+        &inner,
+        &source,
+        &MockObjectIndex {
+            object: entry_ref(&full.objects[0]),
+            bytes: Bytes::from_static(b"object bytes"),
+        },
+        IncrementalBackupRequest {
+            snapshot_id: Uuid::new_v4(),
+            parent_snapshot_id: full.snapshot_id,
+            created_at: full.created_at + 1,
+            app_id: full.app_id.clone(),
+            app_version: full.app_version.clone(),
+        },
+    )
+    .await
+    .expect("incremental backup")
+    .manifest;
+    let change_key = incremental
+        .database
+        .changes
+        .first()
+        .expect("the incremental snapshot stores a change payload")
+        .content_key
+        .clone();
+
+    // The genuine chain restores the change.
+    let target = MockDatabase::default();
+    restore_snapshot(
+        &inner,
+        &target,
+        incremental.snapshot_id,
+        RestoreContext::empty_database(),
+    )
+    .await
+    .expect("genuine chain restores");
+    assert_eq!(target.restored_changes().len(), 1);
+
+    let mut forged = Vec::new();
+    serde_json::to_writer(&mut forged, &change("forged")).expect("change json");
+    forged.push(b'\n');
+    let forged = Bytes::from(compress_payload(&forged).expect("compress"));
+
+    // Genuine bytes on the first read (verification), forged bytes after.
+    let swapping = SwappingRepository::new(inner.clone(), &change_key, forged.clone());
+    let target = MockDatabase::default();
+    let error = restore_snapshot(
+        &swapping,
+        &target,
+        incremental.snapshot_id,
+        RestoreContext::empty_database(),
+    )
+    .await
+    .expect_err("swapped change payload refused");
+    let BackupError::RestoreStageFailed { progress, source } = error else {
+        panic!("restore errors identify their stage");
+    };
+    // Chain restore applies stage by stage: the genuine full stage was
+    // applied, and the change stage failed while it was prepared.
+    assert_eq!(progress.phase, RestoreFailurePhase::Preparation);
+    assert_eq!(progress.failed_manifest_id, Some(incremental.snapshot_id));
+    assert_eq!(progress.completed_manifest_ids, [full.snapshot_id]);
+    assert!(matches!(
+        *source,
+        BackupError::ChecksumMismatch { ref key, .. } if *key == change_key
+    ));
+    assert_eq!(target.restored()[0].rows[0].values["name"], "Ada");
+    assert!(target.restored_changes().is_empty(), "forged change never applied");
+    assert!(swapping.reads() >= 2, "verification and use both read");
+
+    let swapping = SwappingRepository::new(inner.clone(), &change_key, forged);
+    let request = compact_request(incremental.snapshot_id);
+    let new_id = request.snapshot_id;
+    let error = compact_chain(&swapping, request)
+        .await
+        .expect_err("swapped change payload not compacted");
+    assert!(matches!(
+        error,
+        BackupError::ChecksumMismatch { ref key, .. } if *key == change_key
+    ));
+    assert!(
+        !inner
+            .blob_exists(&snapshot_manifest_key(new_id))
+            .await
+            .expect("exists"),
+        "no synthetic full sealed over a forged change"
+    );
+}
+
+/// Reads at most `chunks` chunks of each object stream, then reports success
+/// without reaching the end of the stream.
+struct EarlyStopSink {
+    chunks: usize,
+    restored: Mutex<Vec<BackupObjectRef>>,
+}
+
+#[async_trait]
+impl graphql_orm_backup::RestoreObjectSink for EarlyStopSink {
+    async fn restore_object(
+        &self,
+        _object: BackupObjectRef,
+        _bytes: Bytes,
+    ) -> Result<(), BackupError> {
+        unreachable!("the streaming method is overridden")
+    }
+
+    async fn restore_object_stream(
+        &self,
+        object: BackupObjectRef,
+        stream: StorageByteStream,
+    ) -> Result<(), BackupError> {
+        use futures::StreamExt;
+        let mut stream = stream.into_inner();
+        for _ in 0..self.chunks {
+            if stream.next().await.is_none() {
+                break;
+            }
+        }
+        self.restored.lock().expect("restored").push(object);
+        Ok(())
+    }
+}
+
+/// A sink that returns success before reading an object's stream to its end
+/// never saw the digest check, so restore fails instead of reporting the
+/// object restored (#612).
+#[tokio::test]
+async fn a_sink_that_stops_reading_early_fails_the_restore() {
+    let temp = TempDir::new().expect("temp dir");
+    let repository = repository(&temp);
+    let manifest = backup_with_object(&repository, "media/a.txt").await;
+    let object_key = manifest.objects[0].content_key.clone();
+    for chunks in [0, 1] {
+        let sink = EarlyStopSink {
+            chunks,
+            restored: Mutex::default(),
+        };
+        let error = restore_objects(&repository, &manifest, &sink)
+            .await
+            .expect_err("an unverified object must fail the restore");
+        assert!(
+            matches!(
+                error,
+                BackupError::ChecksumMismatch { ref key, ref actual, .. }
+                    if *key == object_key && actual.starts_with("unverified")
+            ),
+            "{chunks} chunks: {error:?}"
+        );
+        assert_eq!(sink.restored.lock().expect("restored").len(), 1);
+    }
+}
+
 #[tokio::test]
 async fn object_swapped_after_verification_never_reaches_the_live_store() {
     let temp = TempDir::new().expect("temp dir");
@@ -1456,12 +1627,18 @@ impl BackupObjectIndex for MockObjectIndex {
 #[derive(Clone, Default)]
 struct MockDatabase {
     tables: Vec<BackupTableExport>,
+    changes: Vec<BackupChangeExport>,
     restored: Arc<Mutex<Vec<BackupTableExport>>>,
+    restored_changes: Arc<Mutex<Vec<BackupChangeExport>>>,
 }
 
 impl MockDatabase {
     fn restored(&self) -> Vec<BackupTableExport> {
         self.restored.lock().expect("restored").clone()
+    }
+
+    fn restored_changes(&self) -> Vec<BackupChangeExport> {
+        self.restored_changes.lock().expect("restored").clone()
     }
 }
 
@@ -1487,7 +1664,7 @@ impl GraphqlOrmBackupAdapter for MockDatabase {
         &self,
         _parent_snapshot_id: Uuid,
     ) -> Result<Vec<BackupChangeExport>, BackupError> {
-        Ok(Vec::new())
+        Ok(self.changes.clone())
     }
 
     async fn restore_full(
@@ -1502,9 +1679,13 @@ impl GraphqlOrmBackupAdapter for MockDatabase {
 
     async fn restore_incremental(
         &self,
-        _changes: Vec<BackupChangeExport>,
+        changes: Vec<BackupChangeExport>,
         _context: RestoreContext,
     ) -> Result<(), BackupError> {
+        self.restored_changes
+            .lock()
+            .expect("restored")
+            .extend(changes);
         Ok(())
     }
 }
