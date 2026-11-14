@@ -642,6 +642,7 @@ async fn secret_cleanup_is_scoped_retryable_and_preserves_shared_references() {
         let database = database().await;
         let mut host = database.clone();
         host.set_field_policy(crate::custody_field_policy::tests::DenyEverything);
+        host.set_pagination_config(graphql_orm::graphql::orm::PaginationConfig::explicit_only(1));
         let policy = GrantedActions::new(&[
             AiConfigurationAction::ManageProviderProfiles,
             AiConfigurationAction::ManageProviderCredentials,

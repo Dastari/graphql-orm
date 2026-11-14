@@ -1972,8 +1972,13 @@ impl OrmAiApprovalWaitReconciliationService {
             .lock()
             .map_err(|_| AiError::PersistenceFailed)?
             .clone();
+        // Deployment-validated internal bounds must not inherit a client page
+        // ceiling. Only this read's cloned handle changes; the host keeps its cap.
+        let database = self.database.clone().with_pagination_config(
+            graphql_orm::graphql::orm::PaginationConfig::explicit_only(self.limits.maximum_candidate_scan as i64),
+        );
         let page = AiRunRecord::keyset_connection_page(
-            &self.database,
+            &database,
             AiRunRecordWhereInput {
                 state: Some(StringFilter {
                     eq: Some("waiting_approval".to_owned()),
@@ -3471,7 +3476,13 @@ mod tests {
 
     #[tokio::test]
     async fn reconciliation_preserves_live_wait_consumption_and_heartbeat() {
-        let fixture = fixture().await;
+        let mut fixture = fixture().await;
+        let host_limit = graphql_orm::graphql::orm::PaginationConfig::explicit_only(1);
+        fixture.reconciliation_service.database.set_pagination_config(host_limit);
+        fixture.reconciliation_service.host_database.set_pagination_config(host_limit);
+        fixture.reconciliation_service.limits = AiApprovalWaitReconciliationLimits::new(
+            Duration::minutes(5), Duration::days(3_650), 256,
+        ).unwrap();
         let (requested, tool_call_id) =
             request_wait(&fixture, fixture.now + Duration::hours(2)).await;
         let report = fixture
@@ -3480,6 +3491,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(report.still_waiting, 1);
+        assert_eq!(fixture.reconciliation_service.database().pagination_config(), host_limit);
         let view = fixture
             .approval_service
             .approval(&fixture.principal, requested.approval_id())
