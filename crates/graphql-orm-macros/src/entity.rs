@@ -3350,6 +3350,42 @@ pub(crate) fn default_relation_source_field(parsed_fields: &[ParsedField]) -> St
         .unwrap_or_else(|| "id".to_string())
 }
 
+/// `ORDER BY` text for an explicit SQL Server `default_sort` written without
+/// whitespace, such as `a,b`: each comma-separated column is quoted on its
+/// own. A comma inside `[...]`, `"..."` or parentheses belongs to its term.
+fn mssql_bare_default_sort(raw: &str) -> String {
+    let mut terms = Vec::new();
+    let mut term = String::new();
+    let mut depth = 0usize;
+    let mut closing = None;
+    for ch in raw.chars() {
+        match (closing, ch) {
+            (Some(end), _) => {
+                if ch == end {
+                    closing = None;
+                }
+            }
+            (None, '[') => closing = Some(']'),
+            (None, '"') => closing = Some('"'),
+            (None, '(') => depth += 1,
+            (None, ')') => depth = depth.saturating_sub(1),
+            (None, ',') if depth == 0 => {
+                terms.push(std::mem::take(&mut term));
+                continue;
+            }
+            _ => {}
+        }
+        term.push(ch);
+    }
+    terms.push(term);
+    terms
+        .iter()
+        .filter(|term| !term.is_empty())
+        .map(|term| backend_quote_identifier_path(BackendKind::Mssql, term))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// `ORDER BY` text for an omitted `default_sort`: every primary-key column in
 /// declaration order. `columns` hold each key's identity as `PRIMARY_KEYS`
 /// stores it.
@@ -5551,7 +5587,7 @@ fn generate_entity_tokens(
     // literal `id` column (#404).
     let default_sort = match entity_meta.default_sort.as_deref() {
         Some(raw) if backend == BackendKind::Mssql && !raw.chars().any(char::is_whitespace) => {
-            backend_quote_identifier_path(backend, raw)
+            mssql_bare_default_sort(raw)
         }
         Some(raw) => raw.to_string(),
         None => primary_key_default_sort(backend, &primary_key_cols),
@@ -8524,16 +8560,28 @@ mod mssql_money_attribute_tests {
 
     #[test]
     fn rejects_wrong_backend_and_conflicting_decimal_metadata() {
-        let wrong_backend: DeriveInput = parse_quote! {
-            #[graphql_entity(backend = "sqlite", table = "amounts", plural = "Amounts")]
-            struct Amount { #[primary_key] id: i64, #[graphql_orm(mssql_money)] value: rust_decimal::Decimal }
-        };
-        assert!(
-            generate_graphql_entity(&wrong_backend)
-                .unwrap_err()
-                .to_string()
-                .contains("mssql_money requires backend")
-        );
+        // Any enabled backend other than SQL Server is the wrong one; with
+        // only `mssql` enabled there is none to name.
+        let wrong =
+            crate::backend::enabled_backends()
+                .into_iter()
+                .find_map(|backend| match backend {
+                    BackendKind::Sqlite => Some("sqlite"),
+                    BackendKind::Postgres => Some("postgres"),
+                    BackendKind::Mssql => None,
+                });
+        if let Some(wrong) = wrong {
+            let wrong_backend: DeriveInput = parse_quote! {
+                #[graphql_entity(backend = #wrong, table = "amounts", plural = "Amounts")]
+                struct Amount { #[primary_key] id: i64, #[graphql_orm(mssql_money)] value: rust_decimal::Decimal }
+            };
+            assert!(
+                generate_graphql_entity(&wrong_backend)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("mssql_money requires backend")
+            );
+        }
         let conflicting: Field = parse_quote! {
             #[graphql_orm(mssql_money, decimal(precision = 18, scale = 4))]
             value: rust_decimal::Decimal
@@ -8947,6 +8995,52 @@ mod default_sort_tests {
                 &[backend_quote_identifier_path(BackendKind::Mssql, "id")]
             ),
             "[id]"
+        );
+    }
+
+    #[test]
+    fn bare_sql_server_default_sort_quotes_each_column() {
+        // `a,b` used to become the single identifier `[a,b]`.
+        assert_eq!(mssql_bare_default_sort("a,b"), "[a], [b]");
+        assert_eq!(
+            mssql_bare_default_sort("region,slot,id"),
+            "[region], [slot], [id]"
+        );
+        // One column, a schema-qualified column and quoted names are unchanged.
+        assert_eq!(mssql_bare_default_sort("id"), "[id]");
+        assert_eq!(
+            mssql_bare_default_sort("t.id,t.rank"),
+            "[t].[id], [t].[rank]"
+        );
+        assert_eq!(mssql_bare_default_sort("[a,b],[c]"), "[a,b], [c]");
+        assert_eq!(mssql_bare_default_sort("a,,b,"), "[a], [b]");
+    }
+
+    #[cfg(feature = "mssql")]
+    #[test]
+    fn explicit_sql_server_default_sort_keeps_every_term() {
+        let entity = |default_sort: &str| -> String {
+            let input: DeriveInput = syn::parse_quote! {
+                #[graphql_entity(backend = "mssql", table = "records", default_sort = #default_sort)]
+                struct Record {
+                    #[primary_key]
+                    a: String,
+                    #[primary_key]
+                    b: String,
+                }
+            };
+            generate_graphql_entity(&input).unwrap().to_string()
+        };
+        let bare = entity("a,b");
+        assert!(
+            bare.contains("const DEFAULT_SORT : & 'static str = \"[a], [b]\""),
+            "{bare}"
+        );
+        // A declaration with whitespace is still used exactly as written.
+        let spaced = entity("a ASC, b DESC");
+        assert!(
+            spaced.contains("const DEFAULT_SORT : & 'static str = \"a ASC, b DESC\""),
+            "{spaced}"
         );
     }
 
