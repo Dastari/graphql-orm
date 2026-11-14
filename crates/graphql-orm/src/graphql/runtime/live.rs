@@ -529,6 +529,7 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
     c: RuntimeCollection,
     limits: RuntimeGraphqlLimits,
     protection: Option<super::execution::Protection>,
+    row_security: Arc<super::execution::LiveRowSecurity>,
 ) -> SubscriptionField {
     let object = module.object_name(&c);
     let event_name = format!("{object}ChangedEvent");
@@ -553,6 +554,7 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
             let c = c.clone();
             let protection = protection.clone();
             let root = root.clone();
+            let row_security = row_security.clone();
             SubscriptionFieldFuture::new(async move {
                 // Before registration, admission reads or any event delivery.
                 crate::graphql::assurance::enforce_operation_assurance(
@@ -604,11 +606,17 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                 )
                 .map_err(safe)?;
                 // Before registration, admission reads or host authorization.
+                // A request with database context or trusted system access is
+                // exempt for the subscription's lifetime; any other is admitted
+                // again before each event's reads.
+                let context_exempt = request.auth.is_some()
+                    || ctx
+                        .data_opt::<crate::graphql::auth::SystemAccess>()
+                        .is_some();
                 super::execution::RowSecurity::new(
                     &database,
                     request.auth.as_ref(),
-                    ctx.data_opt::<crate::graphql::auth::SystemAccess>()
-                        .is_some(),
+                    context_exempt,
                 )
                 .admit(&module, None)
                 .await
@@ -734,6 +742,7 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                         let entity_field = entity_field.clone();
                         let shape = shape.clone();
                         let protection = protection.clone();
+                        let row_security = row_security.clone();
                         async move {
                             let (mut receiver, mut pending) = subscription_state?;
                             loop {
@@ -757,6 +766,7 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                                         }
                                     },
                                 };
+                                let dequeued = std::time::Instant::now();
                                 if let Err(code) =
                                     fence(&mut receiver, &mut pending, module.schema.fingerprint())
                                 {
@@ -827,6 +837,21 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                                 };
                                 if !key_set.contains(&identity) {
                                     continue;
+                                }
+                                // RLS may have been enabled since registration. Before
+                                // this event's reads, and so before its release: a failed
+                                // or impossible check ends the subscription and this
+                                // event delivers nothing.
+                                if !context_exempt
+                                    && row_security
+                                        .admit(&database, &module, dequeued)
+                                        .await
+                                        .is_err()
+                                {
+                                    return Some((
+                                        Err(wire_error("authorization_misconfigured")),
+                                        None,
+                                    ));
                                 }
                                 let grant =
                                     authorize_live(&original, request, protection.as_ref(), limits)

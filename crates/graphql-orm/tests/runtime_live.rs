@@ -2565,3 +2565,88 @@ async fn dependent_set_null_advances_record_version_and_refuses_stale_expected_c
         );
     }
 }
+
+/// Live subscriptions registered without a `DbAuthContext` are admitted again
+/// before each event's reads. Enabling row-level security after registration
+/// ends them with `authorization_misconfigured` and delivers nothing from that
+/// event, for the table owner (which RLS would not restrict) and for a role
+/// subject to RLS (which would read silently filtered rows) (#559).
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn enabling_rls_after_registration_ends_live_subscriptions_without_delivery() {
+    let f = Fixture::new().await;
+    for sql in [
+        "CREATE ROLE runtime_live_reader NOLOGIN",
+        "GRANT SELECT ON runtime_live_records TO runtime_live_reader",
+    ] {
+        graphql_orm::sqlx::query(sql)
+            .execute(f.db.pool())
+            .await
+            .unwrap();
+    }
+    let reader_pool = graphql_orm::sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .after_connect(|connection, _| {
+            Box::pin(async move {
+                graphql_orm::sqlx::query("SET ROLE runtime_live_reader")
+                    .execute(connection)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect(&f._owned.url)
+        .await
+        .unwrap();
+    let reader_api = RuntimeGraphqlComposer::new(
+        Database::<Backend>::new(reader_pool.clone()),
+        "Query",
+        Default::default(),
+    )
+    .unwrap()
+    .install(
+        RuntimeGraphqlModule::compile(
+            f.schema.clone(),
+            RuntimeGraphqlOptions::default()
+                .with_cursor_profile(RuntimeCursorProfile::Unprotected)
+                .with_live_source(
+                    f.source.clone(),
+                    RuntimeLiveProfile::ApplicationPolicy {
+                        match_profile: RuntimeMatchProfile::PostgresCUtf8,
+                    },
+                ),
+        )
+        .unwrap(),
+    )
+    .unwrap()
+    .finish()
+    .unwrap();
+    let mut owner = f.stream(LIVE).await;
+    let mut reader = reader_api.execute_stream(f.request(LIVE)).boxed();
+    tokio::select! {
+        response = reader.next() => panic!("registration produced a frame: {response:?}"),
+        () = f.source.subscribed.notified() => {}
+    }
+    // Both deliver while the table has no row-level security.
+    f.emit("visible", RuntimeMutationAction::Update, None);
+    for stream in [&mut owner, &mut reader] {
+        let value = next(stream).await;
+        assert!(value.errors.is_empty(), "{value:?}");
+        assert_eq!(
+            value.data.into_json().unwrap()["recordChanged"]["record"]["id"],
+            "visible"
+        );
+    }
+    for sql in [
+        "ALTER TABLE runtime_live_records ENABLE ROW LEVEL SECURITY",
+        "CREATE POLICY tenant_rows ON runtime_live_records USING (tenant = current_setting('app.tenant_id', true))",
+    ] {
+        graphql_orm::sqlx::query(sql)
+            .execute(f.db.pool())
+            .await
+            .unwrap();
+    }
+    f.emit("visible", RuntimeMutationAction::Update, None);
+    assert_terminal(&mut owner, "authorization_misconfigured").await;
+    assert_terminal(&mut reader, "authorization_misconfigured").await;
+    reader_pool.close().await;
+}

@@ -362,6 +362,40 @@ impl<'a, B: RuntimeReadBackend> RowSecurity<'a, B> {
         Ok(())
     }
 }
+/// The row-security admission shared by every live subscription of one module.
+///
+/// A live subscription registered without request context is admitted again
+/// for each event it would deliver, before any event read: RLS may be enabled
+/// after registration. One catalog check serves every subscription of the
+/// module that dequeued its event before the check started, so a published
+/// event costs one check per module however many subscriptions it reaches. A
+/// result is never reused for an event dequeued after its check started.
+#[derive(Default)]
+pub(super) struct LiveRowSecurity {
+    last: tokio::sync::Mutex<Option<(std::time::Instant, Result<(), RuntimeGraphqlError>)>>,
+}
+impl LiveRowSecurity {
+    /// Admit an event dequeued at `dequeued`, or refuse it.
+    pub(super) async fn admit<B: RuntimeReadBackend>(
+        &self,
+        database: &Database<B>,
+        module: &RuntimeGraphqlModule,
+        dequeued: std::time::Instant,
+    ) -> Result<(), RuntimeGraphqlError> {
+        let mut last = self.last.lock().await;
+        if let Some((started, result)) = *last
+            && started >= dequeued
+        {
+            return result;
+        }
+        let started = std::time::Instant::now();
+        let result = RowSecurity::new(database, None, false)
+            .admit(module, None)
+            .await;
+        *last = Some((started, result));
+        result
+    }
+}
 pub(super) struct GuardFactory<B: RuntimeReadBackend> {
     pub database: Database<B>,
     pub modules: Vec<RuntimeGraphqlModule>,

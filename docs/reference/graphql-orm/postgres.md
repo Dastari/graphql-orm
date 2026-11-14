@@ -524,7 +524,11 @@ includes a table with row-level security enabled (`pg_class.relrowsecurity`, rea
 such request) and the request carries no `DbAuthContext`. The module's tables are its collection
 tables, link tables, search document tables and, for mutations, the source tables of verified
 incoming dependencies. The check is per module, so a module that mixes RLS and non-RLS tables
-needs a `DbAuthContext` for all of its roots. Without the refusal, a role subject to RLS would
+needs a `DbAuthContext` for all of its roots. A live subscription registered
+without context is admitted again before each event's reads: one catalog check
+per module and event serves every subscription of that module, and is never
+reused for a later event. Once RLS is enabled the subscription ends with
+`authorization_misconfigured` and that event delivers nothing. Without the refusal, a role subject to RLS would
 return silently filtered (empty) results and a role that bypasses RLS, such as the table owner,
 would return every row. Host-owned `RuntimeHostField` resolvers are unaffected.
 

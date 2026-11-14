@@ -28,7 +28,10 @@ tables needs the context for all of its roots. Pass a `DbAuthContext` on every
 request (an anonymous one where no principal exists), put a trusted internal
 schema's requests under `SystemAccess::new("<name>")` in the request data, or
 keep the old behaviour with `AuthorizationMode::LegacyPermissive` on the
-composer's `Database`. SQLite and other backends are unaffected.
+composer's `Database`. A live subscription registered without context is
+checked again before each event and ends with `authorization_misconfigured`
+once RLS is enabled on its module's tables. SQLite and other backends are
+unaffected.
 
 **Serve runtime queries and mutations with `Schema::execute`.** Over
 `execute_stream` every runtime query and mutation root, including
