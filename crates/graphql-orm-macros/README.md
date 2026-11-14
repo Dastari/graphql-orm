@@ -10,6 +10,17 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.145.0 corrects SQL Server behaviour: server errors keep their
+number and class (`MssqlServerError`), so constraint violations and deadlocks
+are classified and a failed rollback no longer hides the real error; dates
+read as RFC 3339; out-of-range `DECIMAL` values are decode errors; wide
+relation batches stay under the 2,100-parameter limit; `limit: 0`, bracket
+`LIKE` patterns, float and date keys, the upsert batch, foreign-key and
+composite-unique DDL and a bare multi-column `default_sort` render correctly;
+and connections follow an Azure SQL redirect. Upgrade ORM/macros together;
+see the
+[root migration guide](../../MIGRATION.md#01430-to-01450-sql-server-correctness).
+
 Version 0.143.0 gives authorization one contract: every generated read path
 asks the field policy about a field with or without a policy key;
 `#[graphql_orm_custom_operations]` enforces the authorization it declares;

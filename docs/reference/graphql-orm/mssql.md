@@ -120,6 +120,12 @@ default of `NOCOUNT ON`.
 
 ## Connections
 
+Connections follow one routing redirect: under Azure SQL's Redirect connection
+policy the gateway answers the login with the address of the node that hosts
+the database, and the pool and the notification connection connect there under
+the same transport policy. Named instances (`server=host\\INSTANCE`) are not
+resolved through SQL Server Browser; give the instance's TCP port instead.
+
 SQL Server uses the platform native TLS transport. Linux builds need OpenSSL
 headers and `pkg-config`; runtime images need OpenSSL and CA certificates.
 Windows uses Schannel and macOS uses Security Framework. Cross-compilation and
@@ -269,7 +275,23 @@ which the pinned fork does not; that is part of the fork decision in
 
 An error that SQL Server reports, such as a constraint violation, resets the
 connection and returns it to the pool. A transport, TLS or protocol error, a timeout, or a
-dropped future closes it. Inside a transaction any error closes the connection.
+dropped future closes it. Inside a transaction, an error the server reports
+keeps the connection and fails the transaction: later statements and the
+commit are refused and the rollback ends whatever the server left open. Any
+other error closes the connection, and rolling back is then a no-op.
+
+### Errors
+
+An error the server reports is a `sqlx::Error::Database` holding a
+`graphql_orm::db::mssql::MssqlServerError` with the error `number()`,
+`state()` and `class()`. `as_database_error()` classifies it like the other
+backends: 2627 and 2601 are unique violations, 547 is a foreign-key or check
+violation and 515 is a not-null violation, so generated mutations report
+`CONSTRAINT_VIOLATION` for the first three. `is_retryable()` is true for
+1205, 1222, 3960, 41301, 41302, 41305, 41325, 41839, 40501, 40197 and 40613;
+a transaction that fails with one of them is reported as retryable. I/O and
+TLS failures are `sqlx::Error::Io` and `sqlx::Error::Tls`. When a transaction
+callback fails, its own error is returned even if the rollback also fails.
 
 ### Database handles
 
@@ -621,7 +643,14 @@ The MSSQL backend supports these common scalar shapes for generated reads and wr
 - `bit`
 - text strings: `nvarchar`, `varchar`, and compatible text values
 - binary values
-- `date`, `datetime`, and `datetime2` decoded to Rust strings when mapped to `String`
+- `date`, `datetime`, `smalldatetime`, `datetime2` and `datetimeoffset` decoded to Rust
+  strings when mapped to `String`. Date-time values are RFC 3339, the text the SQLite and
+  PostgreSQL backends hold: a type without an offset is read as UTC
+  (`2026-11-09T12:34:56Z`, with the fraction when it is not zero) and a `datetimeoffset`
+  keeps its offset (`2026-11-09T12:34:56+02:00`). `date` stays `2026-11-09`. Values are still
+  bound as text, so write ISO 8601 with a `T` to columns of the legacy `datetime` type.
+- a `DECIMAL` value beyond `rust_decimal`'s range (more than 28 decimal places or a 96-bit
+  mantissa) is a column decode error
 - `uniqueidentifier` mapped to `uuid::Uuid`
 - floating point values
 - fixed decimals declared with `#[graphql_orm(decimal(precision = P, scale = S))]` and mapped to
@@ -653,6 +682,14 @@ timeouts and a `NOCOUNT ON` session default:
 
 ```bash
 cargo test -p graphql-orm --no-default-features --features mssql --locked --test mssql_tls --test mssql_transport -- --ignored --test-threads=1
+```
+
+The correctness regression executes error classification, decoding, empty
+pages, `LIKE` patterns, wide relation batches, the upsert batch and rendered
+DDL on the owned server; it is part of `scripts/run-owned-database-lanes.sh mssql`:
+
+```bash
+cargo test -p graphql-orm --no-default-features --features mssql --locked --test mssql_correctness -- --ignored --test-threads=1
 ```
 
 Pure SQL rendering tests run with the default test suite:
