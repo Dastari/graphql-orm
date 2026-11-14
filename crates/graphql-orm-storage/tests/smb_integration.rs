@@ -1083,6 +1083,101 @@ async fn samba_portable_keys_refuse_windows_unsafe_names() {
     }
 }
 
+/// The sweep removes only this backend's temporary upload names older than
+/// the given age, keeps fresh temporary files and callers' keys that merely
+/// end in `.uploading`, and refuses an age below one hour (#593).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the managed Samba container harness"]
+async fn samba_sweep_removes_only_stale_temporary_files() {
+    let fixture = owned_fixture();
+    let root = format!("graphql-orm-storage-sweep/{}", Uuid::new_v4());
+    let store = SmbStorageBackend::connect(test_config(root.clone()))
+        .await
+        .expect("connect");
+    let caller_lookalike = format!("sweep/x.{}.uploading", Uuid::new_v4());
+    let callers = [
+        "sweep/kept.bin".to_string(),
+        "sweep/report.uploading".to_string(),
+        caller_lookalike.clone(),
+    ];
+    for key in &callers {
+        store
+            .put_blob(
+                key,
+                StorageByteStream::from_bytes(Bytes::from_static(b"caller")),
+                BlobPutOptions::default(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{key}: {error}"));
+    }
+    let stale = [
+        format!("sweep/.{}.uploading", Uuid::new_v4()),
+        format!(".{}.uploading", Uuid::new_v4()),
+        format!("sweep/.blob.bin.{}.uploading", Uuid::new_v4()),
+    ];
+    let fresh = format!("sweep/.{}.uploading", Uuid::new_v4());
+    let share = format!("/share/{root}");
+    let shell = |script: String| {
+        fixture.run_with(|container| {
+            let status = std::process::Command::new("docker")
+                .args(["exec", container, "sh", "-c", &script])
+                .status()
+                .map_err(|_| "cannot run in owned fixture".to_string())?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err("owned fixture command failed".to_string())
+            }
+        })
+    };
+    // Interrupted uploads, owned like the share's files; the stale ones and
+    // the callers' keys were last written in 2020. The fixture has BusyBox.
+    let mut script = format!("set -e\nowner=$(stat -c %u:%g '{share}/sweep')\n");
+    for name in stale.iter().chain([&fresh]) {
+        script.push_str(&format!(
+            "printf partial > '{share}/{name}'\nchown \"$owner\" '{share}/{name}'\n"
+        ));
+    }
+    for name in stale.iter().chain(&callers) {
+        script.push_str(&format!("touch -t 202001010000 '{share}/{name}'\n"));
+    }
+    shell(script).expect("seed temporary files");
+
+    let too_short = store
+        .sweep_temp_files(Duration::from_secs(30 * 60))
+        .await
+        .expect_err("an age below one hour is refused");
+    assert_refused(&too_short, StorageProviderErrorKind::Protocol);
+
+    let removed = store
+        .sweep_temp_files(Duration::from_secs(60 * 60))
+        .await
+        .expect("sweep");
+    assert_eq!(removed, stale.len());
+    let mut expected = callers.to_vec();
+    expected.sort();
+    assert_eq!(store.list_blobs("").await.expect("list"), expected);
+    let mut check = String::from("set -e\n");
+    for name in &stale {
+        check.push_str(&format!("test ! -e '{share}/{name}'\n"));
+    }
+    check.push_str(&format!("test -f '{share}/{fresh}'\n"));
+    shell(check).expect("stale temporary files removed and the fresh one kept");
+    // Nothing is left to remove.
+    assert_eq!(
+        store
+            .sweep_temp_files(Duration::from_secs(60 * 60))
+            .await
+            .expect("second sweep"),
+        0
+    );
+
+    shell(format!("rm -f '{share}/{fresh}'")).expect("remove the fresh temporary file");
+    for key in &callers {
+        store.delete_blob(key).await.expect("delete");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires a managed Samba server limited to SMB 3.0"]
 async fn samba_refuses_a_dialect_below_the_minimum() {

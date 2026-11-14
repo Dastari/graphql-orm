@@ -50,6 +50,17 @@ single-attempt errors. See [MIGRATION.md](MIGRATION.md).
   stored names that are not portable. Case aliasing is not addressed: keys
   that differ only in case still name one file on a case-insensitive
   server. ([#482](https://github.com/Dastari/graphql-orm/issues/482))
+- SMB: `SmbStorageBackend::sweep_temp_files(older_than)` removes temporary
+  upload files that a lost process or connection left on the share, as
+  `LocalStorageBackend::sweep_temp_files` does for local roots. It walks the
+  root prefix within the configured listing limits and deadline and removes,
+  with single-attempt deletions, only exact backend temporary names
+  (`.<uuid>.uploading`, and the pre-0.9.0 `.<name>.<uuid>.uploading`) whose
+  server last-write time is at least `older_than` old. Callers' keys ending in
+  `.uploading` are kept. `older_than` below one hour is refused, so clock
+  differences with the server cannot make an active upload look stale. Hosts
+  call it explicitly; nothing sweeps by default.
+  ([#593](https://github.com/Dastari/graphql-orm/issues/593))
 
 ## 0.11.0 (unreleased)
 

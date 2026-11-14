@@ -445,7 +445,23 @@ delete-on-close. Creating such a key keeps reporting the status as a
 non-retryable `Protocol` error, never as a conditional-create conflict.
 
 If the response to a conditional write's link is lost, the key may hold
-this writer's complete object or none, and its temporary file remains. Cleanup of temporary files is best
+this writer's complete object or none, and its temporary file remains.
+
+`SmbStorageBackend::sweep_temp_files(older_than)` removes temporary files
+that a lost process or connection left behind. It walks the root prefix
+within the listing limits and deadline, and removes, each with one
+single-attempt deletion, only files named exactly `.<uuid>.uploading`, or
+`.<name>.<uuid>.uploading` as versions before 0.9.0 wrote, whose server
+last-write time is at least `older_than` old. A caller's key that merely ends
+in `.uploading`, and a file without a last-write time, is kept. `older_than`
+must be at least one hour. Choose it longer than any upload, from any host,
+may go without writing, and longer than the clock difference with the server,
+because the sweep compares the server's last-write times with the local
+clock. Removing a stalled upload's temporary file makes that upload fail; it
+never removes a published object, because publishing is a rename or a hard
+link, and removing the temporary name of a conditional create whose outcome
+was unknown leaves an object linked at its key in place. A listing failure
+removes nothing. Cleanup of temporary files is best
 effort, so completed snapshots must still be verified. Backup manifests are written last and do not advertise incomplete
 payload sets.
 

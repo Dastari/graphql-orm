@@ -7,7 +7,7 @@ use std::{
         Arc, Weak,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use async_trait::async_trait;
@@ -56,6 +56,10 @@ const LISTED_PATH_OVERHEAD: usize = 64;
 /// Most pages one continuation chain of `list_blobs_page` may return. Each
 /// page re-lists the whole tree; `list_blobs` lists it once.
 const MAX_LISTING_PAGES: u64 = 1_024;
+/// Shortest age [`SmbStorageBackend::sweep_temp_files`] accepts, so that a
+/// small clock difference with the server cannot make an upload in progress
+/// look stale.
+const MIN_TEMP_SWEEP_AGE: Duration = Duration::from_secs(60 * 60);
 /// Prefix of this backend's continuation tokens.
 const CONTINUATION_PREFIX: &str = "smb1:";
 const READ_CHUNK_SIZE: usize = 256 * 1024;
@@ -692,6 +696,52 @@ impl SmbStorageBackend {
         })
     }
 
+    /// Removes this backend's stale temporary upload files below the root
+    /// prefix, returning how many it removed.
+    ///
+    /// A write whose process or connection is lost between creating its
+    /// temporary file and publishing it leaves the file on the share, hidden
+    /// from listings but counting against the share's quota. The sweep walks
+    /// the root prefix with the configured listing limits and deadline, and
+    /// removes only files named exactly as this backend names temporary
+    /// files, `.<uuid>.uploading` or the `.<name>.<uuid>.uploading` form of
+    /// versions before 0.9.0, whose server last-write time is at least
+    /// `older_than` old. Every other name, including a caller's key that
+    /// merely ends in `.uploading`, is kept, as is a file whose server
+    /// reports no last-write time. Each file is removed with one
+    /// single-attempt deletion that is never replayed.
+    ///
+    /// A temporary file of a write still in progress, from this or another
+    /// host, must not be removed: choose `older_than` longer than any upload
+    /// may go without writing, and longer than the clock difference between
+    /// this host and the server, whose last-write times the sweep compares
+    /// with this host's clock. Removing a stalled write's file makes that
+    /// write fail; it never removes a published object, and removing the
+    /// temporary name of a conditional create whose link outcome was unknown
+    /// leaves any object linked at its key in place.
+    ///
+    /// # Errors
+    ///
+    /// Returns a non-retryable configuration error when `older_than` is less
+    /// than one hour, the listing's error when the walk fails or reaches a
+    /// limit (nothing is removed then), and the first failed removal's
+    /// error, which is a non-retryable single-attempt error.
+    pub async fn sweep_temp_files(&self, older_than: Duration) -> Result<usize, StorageError> {
+        if older_than < MIN_TEMP_SWEEP_AGE {
+            return Err(invalid_config(
+                "the temporary-file sweep age must be at least one hour",
+            ));
+        }
+        let files = self.collect_files("").await?;
+        let stale = stale_temp_keys(files, SystemTime::now(), older_than);
+        let mut removed = 0;
+        for key in stale {
+            self.remove_file_once(&key).await?;
+            removed += 1;
+        }
+        Ok(removed)
+    }
+
     async fn client_snapshot(&self) -> ConnectedClient {
         let client = self.inner.client.read().await;
         ConnectedClient {
@@ -1308,22 +1358,40 @@ impl SmbStorageBackend {
     /// Lists every key once. One `listing_timeout` deadline covers both
     /// attempts and the reconnect between them.
     async fn collect_keys(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
+        let portable = self.inner.config.portable_keys;
+        let mut keys: Vec<String> = self
+            .collect_files(prefix)
+            .await?
+            .into_iter()
+            .map(|file| file.key)
+            // A stored name this backend would refuse as a key is not listed.
+            .filter(|key| {
+                !is_temp_key(key) && (!portable || validate_portable_blob_key(key).is_ok())
+            })
+            .collect();
+        keys.sort();
+        Ok(keys)
+    }
+
+    /// Lists every file once, temporary files included, within one
+    /// `listing_timeout` deadline.
+    async fn collect_files(&self, prefix: &str) -> Result<Vec<ListedFile>, StorageError> {
         let limits = ListingLimits::from_config(&self.inner.config);
         within_listing_deadline(
             limits.timeout,
-            retry_listing_once(|| self.collect_keys_attempt(limits, prefix)),
+            retry_listing_once(|| self.collect_files_attempt(limits, prefix)),
         )
         .await
     }
 
-    async fn collect_keys_attempt(
+    async fn collect_files_attempt(
         &self,
         limits: ListingLimits,
         prefix: &str,
-    ) -> Result<Vec<String>, StorageError> {
+    ) -> Result<Vec<ListedFile>, StorageError> {
         let snapshot = self.client_snapshot().await;
         match self
-            .collect_keys_once(&snapshot.client, limits, prefix)
+            .collect_files_once(&snapshot.client, limits, prefix)
             .await
         {
             Err(error) if error.is_retryable() => {
@@ -1334,26 +1402,19 @@ impl SmbStorageBackend {
         }
     }
 
-    async fn collect_keys_once(
+    async fn collect_files_once(
         &self,
         client: &Client,
         limits: ListingLimits,
         prefix: &str,
-    ) -> Result<Vec<String>, StorageError> {
+    ) -> Result<Vec<ListedFile>, StorageError> {
         let source = SmbListingSource {
             backend: self,
             client,
             base: self.share_path()?,
         };
         let root = self.inner.config.root_prefix.clone().unwrap_or_default();
-        let mut keys = walk_listing(&source, root, prefix, limits).await?;
-        let portable = self.inner.config.portable_keys;
-        // A stored name this backend would refuse as a key is not listed.
-        keys.retain(|key| {
-            !is_temp_key(key) && (!portable || validate_portable_blob_key(key).is_ok())
-        });
-        keys.sort();
-        Ok(keys)
+        walk_listing_files(&source, root, prefix, limits).await
     }
 }
 
@@ -1434,6 +1495,15 @@ impl ListingBudget {
 struct ListedEntry {
     name: String,
     directory: bool,
+    /// The server's last-write time, when it reported one.
+    last_write: Option<SystemTime>,
+}
+
+/// One file a listing walk returned, with its root-relative key.
+#[derive(Debug)]
+struct ListedFile {
+    key: String,
+    last_write: Option<SystemTime>,
 }
 
 /// Enumerates single directories for [`walk_listing`].
@@ -1484,12 +1554,27 @@ where
 /// Walks the tree under the share-relative `root` within `limits`, returning
 /// file keys relative to `root`. Only directories that can hold a key
 /// starting with `prefix` are entered, and only such files are returned.
+#[cfg(test)]
 async fn walk_listing<S: ListingSource>(
     source: &S,
     root: String,
     prefix: &str,
     limits: ListingLimits,
 ) -> Result<Vec<String>, StorageError> {
+    Ok(walk_listing_files(source, root, prefix, limits)
+        .await?
+        .into_iter()
+        .map(|file| file.key)
+        .collect())
+}
+
+/// Walks as [`walk_listing`] does, returning each file's last-write time too.
+async fn walk_listing_files<S: ListingSource>(
+    source: &S,
+    root: String,
+    prefix: &str,
+    limits: ListingLimits,
+) -> Result<Vec<ListedFile>, StorageError> {
     let mut budget = ListingBudget::new(limits);
     // Each entry is a root-relative directory path, whether enumeration
     // discovered it, and its depth below the root.
@@ -1544,7 +1629,10 @@ async fn walk_listing<S: ListingSource>(
                 }
                 stack.push((child, true, depth + 1));
             } else {
-                files.push(child);
+                files.push(ListedFile {
+                    key: child,
+                    last_write: entry.last_write,
+                });
             }
         }
     }
@@ -1818,7 +1906,11 @@ impl SmbListingSource<'_> {
                 continue;
             }
             budget.record_entry(&name)?;
-            listed.push(ListedEntry { name, directory });
+            listed.push(ListedEntry {
+                name,
+                directory,
+                last_write: file_time(entry.last_write_time.since_epoch()),
+            });
         }
         Ok(listed)
     }
@@ -2868,6 +2960,39 @@ fn temp_key(key: &str) -> Result<String, StorageError> {
     Ok(temp)
 }
 
+/// Seconds from the FILETIME epoch, 1601-01-01, to the Unix epoch.
+const FILETIME_UNIX_OFFSET: Duration = Duration::from_secs(11_644_473_600);
+
+/// Converts a FILETIME, as a duration since 1601-01-01 UTC, to a system time.
+/// Zero means the server reported no time, and a time before 1970 is not
+/// plausible for a file this backend wrote; both are `None`.
+fn file_time(since_1601: Duration) -> Option<SystemTime> {
+    if since_1601.is_zero() {
+        return None;
+    }
+    since_1601
+        .checked_sub(FILETIME_UNIX_OFFSET)
+        .and_then(|since_unix| SystemTime::UNIX_EPOCH.checked_add(since_unix))
+}
+
+/// Keys of this backend's temporary upload files whose server last-write time
+/// is at least `older_than` before `now`. A file without a last-write time,
+/// or one in the future, is never stale.
+fn stale_temp_keys(files: Vec<ListedFile>, now: SystemTime, older_than: Duration) -> Vec<String> {
+    let mut keys: Vec<String> = files
+        .into_iter()
+        .filter(|file| is_temp_key(&file.key))
+        .filter(|file| {
+            file.last_write
+                .and_then(|written| now.duration_since(written).ok())
+                .is_some_and(|age| age >= older_than)
+        })
+        .map(|file| file.key)
+        .collect();
+    keys.sort();
+    keys
+}
+
 /// Whether `key` names a temporary upload file this backend writes: exactly
 /// `.<uuid>.uploading`, or `.<name>.<uuid>.uploading` as versions before 0.9.0
 /// wrote, with the UUID in its lowercase hyphenated form. Any other name,
@@ -3310,7 +3435,11 @@ mod tests {
             let mut listed = Vec::new();
             for (name, directory) in (self.entries)(path) {
                 budget.record_entry(&name)?;
-                listed.push(ListedEntry { name, directory });
+                listed.push(ListedEntry {
+                    name,
+                    directory,
+                    last_write: None,
+                });
             }
             Ok(Some(listed))
         }
@@ -4569,6 +4698,55 @@ mod tests {
         assert!(check_listing_prefix("").is_ok());
         assert!(check_listing_prefix("dir/").is_ok());
         assert!(check_key("dir/2026-11-12T10-00-00Z.json").is_ok());
+    }
+
+    /// The sweep selects only exact temporary names whose server last-write
+    /// time is old enough; a caller's key ending in `.uploading`, a fresh or
+    /// future temporary file and one without a time are kept (#593).
+    #[test]
+    fn stale_temp_selection_keeps_every_other_name() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000_000);
+        let day = Duration::from_secs(24 * 60 * 60);
+        let uuid = |n: u128| Uuid::from_u128(n).hyphenated().to_string();
+        let file = |key: String, age: Option<Duration>| ListedFile {
+            key,
+            last_write: age.map(|age| now - age),
+        };
+        let files = vec![
+            file(format!("a/.{}.uploading", uuid(1)), Some(2 * day)),
+            file(format!(".{}.uploading", uuid(2)), Some(day)),
+            file(format!("a/.blob.bin.{}.uploading", uuid(3)), Some(3 * day)),
+            // Too recent, no time, or in the future.
+            file(format!("a/.{}.uploading", uuid(4)), Some(Duration::from_secs(60))),
+            file(format!("a/.{}.uploading", uuid(5)), None),
+            ListedFile {
+                key: format!("a/.{}.uploading", uuid(6)),
+                last_write: Some(now + day),
+            },
+            // Callers' keys, however old.
+            file("a/report.uploading".to_string(), Some(9 * day)),
+            file(format!("a/x.{}.uploading", uuid(7)), Some(9 * day)),
+            file(format!("a/.{}.uploading", uuid(0xabcd).to_uppercase()), Some(9 * day)),
+            file("a/kept.bin".to_string(), Some(9 * day)),
+        ];
+        assert_eq!(
+            stale_temp_keys(files, now, day),
+            [
+                format!(".{}.uploading", uuid(2)),
+                format!("a/.{}.uploading", uuid(1)),
+                format!("a/.blob.bin.{}.uploading", uuid(3)),
+            ]
+        );
+    }
+
+    #[test]
+    fn file_times_convert_from_the_1601_epoch() {
+        assert_eq!(file_time(Duration::ZERO), None);
+        assert_eq!(file_time(Duration::from_secs(1)), None, "before 1970");
+        assert_eq!(
+            file_time(FILETIME_UNIX_OFFSET + Duration::from_secs(5)),
+            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(5))
+        );
     }
 
     /// `portable_keys` is opt-in: by default a trailing dot or a device name
