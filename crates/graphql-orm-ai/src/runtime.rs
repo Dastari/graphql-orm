@@ -896,7 +896,7 @@ impl AiRuntime {
         binding: &AiApprovalBinding,
     ) -> Result<AiToolExecutionResult, AiError> {
         self.validate_prepared_mutation(&prepared)?;
-        if !approved_prepared_mutation_matches(&prepared, approval, binding) {
+        if !approved_prepared_mutation_matches(principal_reference, &prepared, approval, binding) {
             return Err(AiError::Forbidden);
         }
         approval.claim_execution()?;
@@ -1602,11 +1602,13 @@ impl AiRuntime {
 }
 
 fn approved_prepared_mutation_matches(
+    principal_reference: &PrincipalReference,
     prepared: &AiPreparedGraphqlMutation,
     approval: &ConsumedAiApproval,
     binding: &AiApprovalBinding,
 ) -> bool {
-    prepared.execution_policy == AiMutationExecutionPolicy::ApprovalRequired
+    approved_static_request_matches(principal_reference, &prepared.request, binding)
+        && prepared.execution_policy == AiMutationExecutionPolicy::ApprovalRequired
         && approval.binding_hash() == binding.stable_hash()
         && !approval.approval_id().0.is_nil()
         && prepared.capability_fingerprint == binding.tool_fingerprint
@@ -1824,17 +1826,44 @@ mod mutation_binding_tests {
     fn dynamic_approval_binds_capability_and_compiled_operation_independently() {
         let compiled_operation = operation("UpdateInventory");
         let prepared = prepared(compiled_operation.clone());
-        let binding = binding(compiled_operation);
+        let reference: PrincipalReference = serde_json::from_value(json!({
+            "kind": {"kind": "user_session"}, "subject": "owner", "session_id": "session-1"
+        }))
+        .unwrap();
+        let mut binding = binding(compiled_operation);
+        binding.tool_call_id = prepared.request.invocation.tool_call_id;
+        binding.argument_hash = crate::tools::canonical_json_digest(&prepared.request.variables);
+        binding.principal_reference_fingerprint =
+            AiApprovalBinding::principal_fingerprint(&reference);
         let approval = consumed(&binding);
         assert!(approved_prepared_mutation_matches(
-            &prepared, &approval, &binding
+            &reference, &prepared, &approval, &binding
         ));
+
+        for change in 0..6 {
+            let mut changed = self::prepared(operation("UpdateInventory"));
+            changed.request = prepared.request.clone();
+            let mut principal = reference.clone();
+            match change {
+                0 => changed.request.variables = json!({"impact": "different"}),
+                1 => changed.request.invocation.tool_call_id = AiToolCallId::new(),
+                2 => changed.request.invocation.scope = AiScope::new("tenant", "other"),
+                3 => principal.subject = "other".to_owned(),
+                4 => changed.request.invocation.delegation_reference = Some("other".to_owned()),
+                _ => principal.actor_subject = Some("other".to_owned()),
+            }
+            assert!(
+                !approved_prepared_mutation_matches(&principal, &changed, &approval, &binding),
+                "change {change}"
+            );
+        }
 
         let mut swapped_capability = binding.clone();
         swapped_capability.tool_fingerprint =
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned();
         let swapped_approval = consumed(&swapped_capability);
         assert!(!approved_prepared_mutation_matches(
+            &reference,
             &prepared,
             &swapped_approval,
             &swapped_capability,
@@ -1844,6 +1873,7 @@ mod mutation_binding_tests {
         swapped_operation.operation = operation("DeleteInventory");
         let swapped_approval = consumed(&swapped_operation);
         assert!(!approved_prepared_mutation_matches(
+            &reference,
             &prepared,
             &swapped_approval,
             &swapped_operation,
