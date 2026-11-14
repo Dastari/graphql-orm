@@ -1837,15 +1837,17 @@ async fn orm_arguments_receive_coerced_variable_defaults() {
 async fn host_arguments_are_validated_for_every_input_shape() {
     use async_graphql::dynamic::{Enum, EnumItem, InputObject, InputValue, Scalar};
     let f = Fixture::new().await;
-    let echoes = Arc::new(AtomicUsize::new(0));
+    // Every resolved argument map, exactly as the host resolver receives it.
+    let resolved = Arc::new(Mutex::new(Vec::<Value>::new()));
     let echo = |name: &str| {
-        let calls = echoes.clone();
-        RuntimeHostField::new(name, TypeRef::named_nn(TypeRef::BOOLEAN), move |_| {
-            let calls = calls.clone();
-            FieldFuture::new(async move {
-                calls.fetch_add(1, Ordering::SeqCst);
-                Ok(Some(FieldValue::value(true)))
-            })
+        let resolved = resolved.clone();
+        RuntimeHostField::new(name, TypeRef::named_nn(TypeRef::BOOLEAN), move |ctx| {
+            let arguments = async_graphql::Value::Object(ctx.args.as_index_map().clone());
+            resolved
+                .lock()
+                .unwrap()
+                .push(arguments.into_json().unwrap());
+            FieldFuture::new(async move { Ok(Some(FieldValue::value(true))) })
         })
     };
     let api = f
@@ -1893,126 +1895,167 @@ async fn host_arguments_are_validated_for_every_input_shape() {
         .unwrap();
     const FAR: &str = "\"+10000-01-01T00:00:00Z\"";
     const NEAR: &str = "\"2021-01-01T00:00:00Z\"";
-    let cases: Vec<(String, Value, bool)> = vec![
+    const NEAR_VALUE: &str = "2021-01-01T00:00:00Z";
+    // `Some(arguments)`: accepted, and the resolver must receive exactly these
+    // arguments. `None`: refused before the resolver runs.
+    let cases: Vec<(String, Value, Option<Value>)> = vec![
         // A custom scalar with a validator: defaults, variables and literals.
         (
             "query($e: Even = 3) { echo(even: $e) }".into(),
             json!({}),
-            false,
+            None,
         ),
         (
             "query($e: Even = 4) { echo(even: $e) }".into(),
             json!({}),
-            true,
+            Some(json!({"even": 4})),
         ),
         (
             "query($e: Even) { echo(even: $e) }".into(),
             json!({"e": 5}),
-            false,
+            None,
+        ),
+        (
+            "query($e: Even) { echo(even: $e) }".into(),
+            json!({"e": 8}),
+            Some(json!({"even": 8})),
         ),
         (
             format!("query($t: RuntimeDateTime = {NEAR}) {{ echo(input: {{even: 3, at: $t}}) }}"),
             json!({}),
-            false,
+            None,
         ),
         (
             format!("query($t: RuntimeDateTime = {NEAR}) {{ echo(input: {{even: 2, at: $t}}) }}"),
             json!({}),
-            true,
+            Some(json!({"input": {"even": 2, "at": NEAR_VALUE}})),
         ),
         // Object, list, enum and null defaults.
         (
             format!("query($i: EchoInput = {{when: {FAR}}}) {{ echo(input: $i) }}"),
             json!({}),
-            false,
+            None,
         ),
         (
             format!("query($i: EchoInput = {{when: {NEAR}}}) {{ echo(input: $i) }}"),
             json!({}),
-            true,
+            Some(json!({"input": {"when": NEAR_VALUE}})),
         ),
         (
             format!(
                 "query($l: [EchoInput!] = [{{when: {NEAR}}}, {{when: {FAR}}}]) {{ echo(inputs: $l) }}"
             ),
             json!({}),
-            false,
+            None,
         ),
         (
-            format!("query($l: [EchoInput!] = [{{when: {NEAR}}}]) {{ echo(inputs: $l) }}"),
+            format!(
+                "query($l: [EchoInput!] = [{{when: {NEAR}}}, {{even: 6}}]) {{ echo(inputs: $l) }}"
+            ),
             json!({}),
-            true,
+            Some(json!({"inputs": [{"when": NEAR_VALUE}, {"even": 6}]})),
         ),
         (
             "query($m: EchoMode = FAST) { echo(mode: $m) }".into(),
             json!({}),
-            true,
+            Some(json!({"mode": "FAST"})),
+        ),
+        (
+            "query($m: EchoMode = FAST) { echo(mode: $m) }".into(),
+            json!({"m": "SLOW"}),
+            Some(json!({"mode": "SLOW"})),
         ),
         (
             "query($m: EchoMode = FAST) { echo(mode: $m) }".into(),
             json!({"m": "MEDIUM"}),
-            false,
+            None,
         ),
         (
             "query($i: EchoInput = null) { echo(input: $i) }".into(),
             json!({}),
-            true,
+            Some(json!({"input": null})),
+        ),
+        // An omitted nullable variable without a default resolves to null.
+        (
+            "query($i: EchoInput) { echo(input: $i) }".into(),
+            json!({}),
+            Some(json!({"input": null})),
+        ),
+        // An explicit value overrides an object default; so does explicit null.
+        (
+            format!("query($i: EchoInput = {{when: {NEAR}}}) {{ echo(input: $i) }}"),
+            json!({"i": {"even": 10}}),
+            Some(json!({"input": {"even": 10}})),
+        ),
+        (
+            format!("query($i: EchoInput = {{when: {NEAR}}}) {{ echo(input: $i) }}"),
+            json!({"i": null}),
+            Some(json!({"input": null})),
         ),
         // Omitted versus explicit null for a non-null argument with a default.
         (
             "query($e: Even = 4) { need(value: $e) }".into(),
             json!({}),
-            true,
+            Some(json!({"value": 4})),
         ),
         (
             "query($e: Even = 4) { need(value: $e) }".into(),
             json!({"e": null}),
-            false,
+            None,
         ),
-        // A single value coerced to a list.
+        // A single value for a list argument: validated as a one-element list
+        // and passed to the dynamic resolver as written.
         (
             format!("{{ echo(inputs: {{when: {FAR}}}) }}"),
             json!({}),
-            false,
+            None,
         ),
         (
             format!("{{ echo(inputs: {{when: {NEAR}}}) }}"),
             json!({}),
-            true,
+            Some(json!({"inputs": {"when": NEAR_VALUE}})),
+        ),
+        (
+            format!("query($i: EchoInput = {{when: {NEAR}}}) {{ echo(inputs: $i) }}"),
+            json!({}),
+            Some(json!({"inputs": {"when": NEAR_VALUE}})),
         ),
         // Conflicting aliased fields.
         (
             "{ a: echo(even: 4) a: echo(even: 6) }".into(),
             json!({}),
-            false,
+            None,
         ),
         (
             "{ a: echo(even: 4) a: echo(even: 3) }".into(),
             json!({}),
-            false,
+            None,
         ),
     ];
-    for (query, variables, accepted) in cases {
-        let before = echoes.load(Ordering::SeqCst);
+    for (query, variables, expected) in cases {
+        resolved.lock().unwrap().clear();
         let (response, _) = f.observe_with(&api, &query, variables.clone()).await;
-        if accepted {
-            assert!(
-                response.get("errors").is_none(),
-                "{query} with {variables}: {response}"
-            );
-            assert_eq!(echoes.load(Ordering::SeqCst), before + 1, "{query}");
-        } else {
-            let errors = response["errors"].as_array().cloned().unwrap_or_default();
-            assert_eq!(errors.len(), 1, "{query} with {variables}: {response}");
-            assert_eq!(
-                errors[0]["message"], "invalid_graphql_input",
-                "{query}: {response}"
-            );
-            assert_eq!(
-                echoes.load(Ordering::SeqCst),
-                before,
-                "{query} reached the host resolver"
-            );
+        let received = std::mem::take(&mut *resolved.lock().unwrap());
+        match expected {
+            Some(arguments) => {
+                assert!(
+                    response.get("errors").is_none(),
+                    "{query} with {variables}: {response}"
+                );
+                assert_eq!(received, [arguments], "{query} with {variables}");
+            }
+            None => {
+                let errors = response["errors"].as_array().cloned().unwrap_or_default();
+                assert_eq!(errors.len(), 1, "{query} with {variables}: {response}");
+                assert_eq!(
+                    errors[0]["message"], "invalid_graphql_input",
+                    "{query}: {response}"
+                );
+                assert!(
+                    received.is_empty(),
+                    "{query} reached the host resolver: {received:?}"
+                );
+            }
         }
     }
     f.finish().await;
