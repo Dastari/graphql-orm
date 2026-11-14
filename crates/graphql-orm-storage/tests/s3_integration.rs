@@ -827,3 +827,130 @@ async fn answered_conditional_put_failures_keep_their_classification() {
     done.store(true, Ordering::SeqCst);
     server.join().expect("fixture thread");
 }
+
+/// An in-memory S3 for the conditional-create probe. `honours_put` and
+/// `honours_complete` select whether `If-None-Match: *` is enforced on
+/// `PutObject` and on `CompleteMultipartUpload`.
+fn probe_fixture(
+    honours_put: bool,
+    honours_complete: bool,
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> (
+    String,
+    std::thread::JoinHandle<()>,
+    std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>>,
+) {
+    use std::{
+        collections::BTreeMap,
+        sync::{Arc, Mutex},
+    };
+    let objects: Arc<Mutex<BTreeMap<String, Vec<u8>>>> = Arc::default();
+    let uploads: Arc<Mutex<BTreeMap<String, Vec<u8>>>> = Arc::default();
+    let server_objects = Arc::clone(&objects);
+    let (endpoint, server) = serve_scripted_s3(
+        move |request| {
+            let mut objects = server_objects.lock().expect("objects");
+            let mut uploads = uploads.lock().expect("uploads");
+            let key = request.path.clone();
+            let conditional = request.headers.contains("if-none-match: *");
+            let ok = |extra: &str, body: String| {
+                ScriptedReply::Respond("200 OK", extra.to_string(), body)
+            };
+            match request.method.as_str() {
+                "PUT" if request.query.contains("partNumber=") => {
+                    uploads.insert(key, request.body.clone());
+                    ok("ETag: \"part-1\"\r\n", String::new())
+                }
+                "PUT" => {
+                    if conditional && honours_put && objects.contains_key(&key) {
+                        return precondition_failed();
+                    }
+                    objects.insert(key, request.body.clone());
+                    ok("ETag: \"object\"\r\n", String::new())
+                }
+                "POST" if request.query.starts_with("uploads") => ok(
+                    "",
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?><InitiateMultipartUploadResult>\
+                     <UploadId>probe-upload</UploadId></InitiateMultipartUploadResult>"
+                        .to_string(),
+                ),
+                "POST" => {
+                    if conditional && honours_complete && objects.contains_key(&key) {
+                        return precondition_failed();
+                    }
+                    let body = uploads.remove(&key).expect("an uploaded part");
+                    objects.insert(key, body);
+                    ok(
+                        "",
+                        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+                         <CompleteMultipartUploadResult><ETag>\"multipart\"</ETag>\
+                         </CompleteMultipartUploadResult>"
+                            .to_string(),
+                    )
+                }
+                "GET" => match objects.get(&key) {
+                    Some(body) => {
+                        // The probe content is ASCII hex.
+                        let body = String::from_utf8(body.clone()).expect("ASCII probe content");
+                        ok("", body)
+                    }
+                    None => ScriptedReply::Respond(
+                        "404 Not Found",
+                        String::new(),
+                        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Error><Code>NoSuchKey</Code>\
+                         </Error>"
+                            .to_string(),
+                    ),
+                },
+                "DELETE" if request.query.contains("uploadId=") => {
+                    uploads.remove(&key);
+                    ScriptedReply::Respond("204 No Content", String::new(), String::new())
+                }
+                "DELETE" => {
+                    objects.remove(&key);
+                    ScriptedReply::Respond("204 No Content", String::new(), String::new())
+                }
+                other => panic!("unexpected request {other} {key}"),
+            }
+        },
+        done,
+    );
+    (endpoint, server, objects)
+}
+
+/// The conditional-create probe passes on a provider that enforces
+/// `If-None-Match: *` and fails closed, without leaving its probe object, on
+/// one that ignores it for a single put or a multipart completion (#478).
+#[tokio::test]
+async fn conditional_create_probe_refuses_a_provider_that_ignores_if_none_match() {
+    use graphql_orm_storage::StorageError;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    for (honours_put, honours_complete) in [(true, true), (false, true), (true, false)] {
+        let done = Arc::new(AtomicBool::new(false));
+        let (endpoint, server, objects) =
+            probe_fixture(honours_put, honours_complete, Arc::clone(&done));
+        let backend = fixture_backend(endpoint);
+        let result = backend.probe_conditional_create().await;
+        done.store(true, Ordering::SeqCst);
+        server.join().expect("fixture thread");
+        if honours_put && honours_complete {
+            result.expect("an enforcing provider passes the probe");
+        } else {
+            let error = result.expect_err("an ignored condition fails the probe");
+            assert!(
+                matches!(error, StorageError::UnsupportedOperation { .. }),
+                "put {honours_put}, complete {honours_complete}: {error:?}"
+            );
+            assert!(!error.is_retryable());
+        }
+        assert!(
+            objects.lock().expect("objects").is_empty(),
+            "the probe removes its object: {:?}",
+            objects.lock().expect("objects").keys().collect::<Vec<_>>()
+        );
+    }
+}

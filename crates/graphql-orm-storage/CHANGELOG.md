@@ -29,6 +29,17 @@ single-attempt errors. See [MIGRATION.md](MIGRATION.md).
   request that was never sent or that the server refused with HTTP 4xx keeps
   its classification, and a failed condition is still `Ok(None)`.
   ([#657](https://github.com/Dastari/graphql-orm/issues/657))
+- S3: `S3StorageBackend::probe_conditional_create` checks that the provider
+  enforces `If-None-Match: *`, which `put_blob_if_not_exists`, repository
+  locks and content deduplication rely on. It creates a random
+  `.graphql-orm-probe-<uuid>` object below the key prefix, tries to create
+  the key again with a conditional `PutObject` and with a conditional
+  one-part multipart completion, checks that both were refused and the
+  first content kept, and deletes the object. A provider that ignores the
+  condition fails with non-retryable `StorageError::UnsupportedOperation`.
+  Hosts call it once before using a bucket for locks; nothing calls it
+  implicitly. The owned RustFS lane passes it.
+  ([#478](https://github.com/Dastari/graphql-orm/issues/478))
 
 ## 0.11.0 (unreleased)
 

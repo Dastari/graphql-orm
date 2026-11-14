@@ -69,6 +69,13 @@ consistently.
 ## Provider Ownership
 
 S3-compatible storage lives in this crate as a `BlobStore` implementation.
+Its `put_blob_if_not_exists` relies on the provider enforcing
+`If-None-Match: *`; some S3-compatible providers accept the header and
+ignore it, and repository locks on them are not exclusive. Before using an
+S3 bucket for a backup repository, call
+`S3StorageBackend::probe_conditional_create` once and refuse the bucket when
+it fails. The probe creates, re-creates and deletes one random
+`.graphql-orm-probe-<uuid>` object below the key prefix.
 Future Azure Blob SDK integration should also live in this crate.
 `graphql-orm-backup` should adapt these providers instead of duplicating cloud
 SDK code.

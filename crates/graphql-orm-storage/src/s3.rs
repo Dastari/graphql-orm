@@ -113,6 +113,110 @@ impl S3StorageBackend {
         &self.config
     }
 
+    /// Checks that the provider enforces `If-None-Match: *`, which
+    /// [`BlobStore::put_blob_if_not_exists`], and so repository locks and
+    /// content deduplication, rely on.
+    ///
+    /// Some S3-compatible providers accept the header but ignore it; on them
+    /// a conditional create silently replaces an existing object and a lock
+    /// is not exclusive. Run this probe once, before using the bucket for
+    /// repository locks, and refuse to use the bucket when it fails.
+    ///
+    /// The probe creates a random object, `.graphql-orm-probe-<uuid>` below
+    /// the key prefix, and then tries to create the same key again with a
+    /// conditional `PutObject` and with a conditional one-part multipart
+    /// completion. Both must be refused, and the object must keep its first
+    /// content. The probe then deletes its object, also after a failure. It
+    /// needs permission to write, read and delete below the key prefix.
+    ///
+    /// # Errors
+    ///
+    /// Returns non-retryable [`StorageError::UnsupportedOperation`] when the
+    /// provider ignores the condition, and the request's error when a request
+    /// fails.
+    pub async fn probe_conditional_create(&self) -> Result<(), StorageError> {
+        let key = format!(".graphql-orm-probe-{}", uuid::Uuid::new_v4());
+        let provider_key = self.provider_key(&key)?;
+        let probed = self.probe_conditional_create_at(&provider_key).await;
+        // The key is unique and random, so an ordinary, retried delete is safe.
+        let deleted = self.delete_blob(&key).await;
+        probed?;
+        deleted
+    }
+
+    async fn probe_conditional_create_at(&self, provider_key: &str) -> Result<(), StorageError> {
+        let ignored = |request: &str| StorageError::UnsupportedOperation {
+            operation: format!(
+                "S3 conditional create: the provider ignored If-None-Match: * on {request}, \
+                 so put_blob_if_not_exists and repository locks would not be exclusive"
+            ),
+        };
+        let first = Bytes::from(uuid::Uuid::new_v4().simple().to_string());
+        let second = Bytes::from(uuid::Uuid::new_v4().simple().to_string());
+        let options = BlobPutOptions::default();
+        if !self
+            .put_single_blob(provider_key, first.clone(), options.clone(), true)
+            .await?
+        {
+            return Err(StorageError::Provider {
+                backend: StorageBackend::S3.as_str().to_string(),
+                message: "the random conditional-create probe key already existed".to_string(),
+                retryable: false,
+            });
+        }
+        if self
+            .put_single_blob(provider_key, second.clone(), options.clone(), true)
+            .await?
+        {
+            return Err(ignored("PutObject"));
+        }
+
+        let mut state = self.create_multipart_upload(provider_key, &options).await?;
+        let guard = MultipartAbortGuard::new(self, provider_key, &state);
+        if let Err(error) = self.upload_part(provider_key, &mut state, second).await {
+            guard.abort().await;
+            return Err(error);
+        }
+        // Completion aborts the upload itself unless it creates the object.
+        let completed = self
+            .complete_multipart_upload(provider_key, state, true)
+            .await;
+        guard.disarm();
+        if completed? {
+            return Err(ignored("CompleteMultipartUpload"));
+        }
+
+        // A refusal must also have left the first content in place.
+        let output = self
+            .client
+            .get_object()
+            .bucket(&self.config.bucket)
+            .key(provider_key)
+            .send()
+            .await
+            .map_err(map_s3_error)?;
+        let mut body = output.body;
+        let mut stored = BytesMut::new();
+        while let Some(chunk) = body.next().await {
+            let chunk = chunk.map_err(|error| StorageError::Provider {
+                backend: StorageBackend::S3.as_str().to_string(),
+                message: format!(
+                    "S3 response could not be read: {}",
+                    bounded_text(&DisplayErrorContext(&error).to_string())
+                ),
+                retryable: true,
+            })?;
+            stored.extend_from_slice(&chunk);
+            if stored.len() > first.len() {
+                break;
+            }
+        }
+        if stored != first {
+            return Err(ignored("a refused request that still replaced the object"));
+        }
+        Ok(())
+    }
+
     pub(crate) fn provider_key(&self, key: &str) -> Result<String, StorageError> {
         validate_blob_key(key)?;
         let Some(prefix) = self.config.key_prefix.as_deref() else {

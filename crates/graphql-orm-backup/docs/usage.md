@@ -522,7 +522,10 @@ fn backup_repository(
 
 `LocalBackupRepository` is built on top of the storage crate's local
 `BlobStore`. S3-compatible backup repositories should also use this adapter with
-the storage crate's S3 backend rather than adding AWS SDK code here.
+the storage crate's S3 backend rather than adding AWS SDK code here. Repository
+locks need a provider that enforces `If-None-Match: *`: call
+`S3StorageBackend::probe_conditional_create` once before wrapping an S3 bucket,
+and refuse the bucket when the probe fails.
 
 ## Verification
 
