@@ -1351,3 +1351,85 @@ async fn queries_and_mutations_over_execute_stream_refuse_unprepared() {
     assert_eq!(lookups.load(Ordering::SeqCst), 1);
     f.finish().await;
 }
+
+impl Fixture {
+    /// Runs `query` with exactly `variables`, returning the response and the
+    /// collections the host read authority checked.
+    async fn observe_with(
+        &self,
+        api: &Schema,
+        query: &str,
+        variables: Value,
+    ) -> (Value, Vec<String>) {
+        self.reads.lock().unwrap().clear();
+        let mut request = self.request(query);
+        request.variables = Variables::from_json(variables);
+        let response = serde_json::to_value(api.execute(request).await).unwrap();
+        (response, std::mem::take(&mut *self.reads.lock().unwrap()))
+    }
+}
+
+/// `@skip`/`@include` read an omitted variable's operation default, in the
+/// request guard and in execution alike: a root or field the guard leaves out
+/// is not executed, and one it prepares is returned (#582).
+#[tokio::test]
+async fn skip_and_include_agree_with_execution_when_variable_defaults_apply() {
+    let f = Fixture::new().await;
+    let api = f.composer().finish().unwrap();
+    const POSTS: &str = "posts { edges { node { id } } }";
+    for (directive, default, variables, executed) in [
+        ("skip", "true", json!({}), false),
+        ("skip", "false", json!({}), true),
+        ("skip", "true", json!({"v": false}), true),
+        ("skip", "false", json!({"v": true}), false),
+        ("include", "true", json!({}), true),
+        ("include", "false", json!({}), false),
+        ("include", "true", json!({"v": false}), false),
+        ("include", "false", json!({"v": true}), true),
+    ] {
+        let query = format!(
+            "query($v: Boolean = {default}) {{ posts @{directive}(if: $v) {{ edges {{ node {{ id }} }} }} tags {{ edges {{ node {{ label }} }} }} }}"
+        );
+        let (response, reads) = f.observe_with(&api, &query, variables.clone()).await;
+        let case = format!("{directive} = {default} with {variables}");
+        assert!(response.get("errors").is_none(), "{case}: {response}");
+        assert_eq!(response["data"]["tags"]["edges"][0]["node"]["label"], "red");
+        if executed {
+            assert_eq!(
+                response["data"]["posts"]["edges"][0]["node"]["id"], "1",
+                "{case}: {response}"
+            );
+            assert_eq!(reads, ["post", "tag"], "{case}");
+        } else {
+            assert!(
+                response["data"].get("posts").is_none(),
+                "{case}: {response}"
+            );
+            assert_eq!(reads, ["tag"], "{case}: a skipped root was prepared");
+        }
+    }
+    // A nested field the guard leaves out is not resolved either.
+    for (directive, default, present) in [("skip", "true", false), ("include", "true", true)] {
+        let query = format!(
+            "query($v: Boolean = {default}) {{ posts {{ edges {{ node {{ id label @{directive}(if: $v) }} }} }} }}"
+        );
+        let (response, _) = f.observe_with(&api, &query, json!({})).await;
+        assert!(response.get("errors").is_none(), "{query}: {response}");
+        let node = &response["data"]["posts"]["edges"][0]["node"];
+        assert_eq!(node.get("label").is_some(), present, "{query}: {response}");
+    }
+    // The same through a fragment spread and an inline fragment.
+    let (response, reads) = f
+        .observe_with(
+            &api,
+            &format!(
+                "query($v: Boolean = true) {{ ...Posts @skip(if: $v) ... @include(if: $v) {{ tags {{ edges {{ node {{ label }} }} }} }} }} fragment Posts on Query {{ {POSTS} }}"
+            ),
+            json!({}),
+        )
+        .await;
+    assert!(response.get("errors").is_none(), "{response}");
+    assert!(response["data"].get("posts").is_none(), "{response}");
+    assert_eq!(reads, ["tag"]);
+    f.finish().await;
+}

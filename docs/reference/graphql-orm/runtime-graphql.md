@@ -192,6 +192,17 @@ identities as resolution. Field/operator authorization uses validated requested
 capabilities captured before constant lowering: empty `in: []` is false and empty
 `notIn: []` is true, but neither bypasses filter-field or operator authorization.
 Explicit nested `and`, `or` and `not` capabilities remain visible to the host.
+
+Before validation the guard writes every omitted variable's operation default
+(or `null` for an omitted nullable variable without one) into the request
+variables, as GraphQL variable coercion requires. `@skip`/`@include`, argument
+validation, the guard's planning and execution therefore read the same values:
+`query($v: Boolean = true) { notes @skip(if: $v) { … } }` sent without variables
+leaves `notes` out everywhere. async-graphql 7.2.1 alone evaluates directives
+and validates arguments against the raw request variables. If another extension
+replaces the document so that a defaulted variable is missing at execution, the
+operation is refused with `invalid_graphql_input`. An explicit `null` for a
+directive condition is refused the same way.
 Use `RuntimeReadCheck::filter_operations` for requested filter authorization;
 the lowered predicate's referenced fields alone cannot represent constant inputs.
 A root list with full-text `search` also reports it as

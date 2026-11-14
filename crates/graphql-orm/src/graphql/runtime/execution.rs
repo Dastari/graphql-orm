@@ -359,6 +359,60 @@ pub(super) fn bounded_variables(
     }
     Ok(())
 }
+/// Coerce the selected operation's variables before async-graphql sees them:
+/// every variable the request omits takes its operation default, and a nullable
+/// one without a default takes `null`, as GraphQL variable coercion requires.
+///
+/// async-graphql 7.2.1 evaluates `@skip`/`@include` and validates arguments
+/// against the raw request variables, but resolves arguments with the defaults
+/// applied. With the defaults written into the request, directive evaluation,
+/// validation, this guard's planning and execution all read one set of values.
+fn apply_variable_defaults(
+    request: &mut Request,
+    max_nesting: usize,
+    limits: RuntimeGraphqlLimits,
+) -> Result<(), RuntimeGraphqlError> {
+    // The parser recurses; bound it exactly as `parse_query` does. A query
+    // that does not parse is refused there, unchanged.
+    bounded_query_nesting(&request.query, max_nesting)?;
+    let operation_name = request.operation_name.clone();
+    let Ok(document) = request.parsed_query() else {
+        return Ok(());
+    };
+    let Some((_, operation)) =
+        document
+            .operations
+            .iter()
+            .find(|(name, _)| match operation_name.as_deref() {
+                Some(expected) => name.is_some_and(|name| name == expected),
+                None => document.operations.iter().len() == 1,
+            })
+    else {
+        return Ok(());
+    };
+    let definitions = operation
+        .node
+        .variable_definitions
+        .iter()
+        .filter_map(|definition| {
+            definition
+                .node
+                .default_value()
+                .map(|value| (definition.node.name.node.clone(), value.clone()))
+        })
+        .collect::<Vec<_>>();
+    let mut changed = false;
+    for (name, value) in definitions {
+        if let std::collections::btree_map::Entry::Vacant(entry) = request.variables.entry(name) {
+            entry.insert(value);
+            changed = true;
+        }
+    }
+    if changed {
+        bounded_variables(&request.variables, limits)?;
+    }
+    Ok(())
+}
 // Allocation-free lexical nesting guard before the GraphQL parser recurses.
 fn bounded_query_nesting(query: &str, maximum: usize) -> Result<(), RuntimeGraphqlError> {
     let bytes = query.as_bytes();
@@ -425,7 +479,8 @@ impl<B: RuntimeReadBackend> Extension for Guard<B> {
             return Err(server(RuntimeGraphqlError::new("cost_exceeded")));
         }
         bounded_variables(&request.variables, limits).map_err(server)?;
-        let request = next.run(ctx, request).await?;
+        let mut request = next.run(ctx, request).await?;
+        apply_variable_defaults(&mut request, self.limits.max_depth, limits).map_err(server)?;
         *self.operation_name.lock().map_err(|_| server(invalid()))? =
             request.operation_name.clone();
         Ok(request)
@@ -504,7 +559,7 @@ impl<B: RuntimeReadBackend> Guard<B> {
         ctx: &ExtensionContext<'_>,
         operation_name: Option<&str>,
     ) -> Result<Results, RuntimeGraphqlError> {
-        let (document, mut variables) = self
+        let (document, variables) = self
             .parsed
             .lock()
             .map_err(|_| invalid())?
@@ -519,12 +574,21 @@ impl<B: RuntimeReadBackend> Guard<B> {
             })
             .ok_or_else(invalid)?
             .1;
-        for definition in &operation.node.variable_definitions {
-            if !variables.contains_key(&definition.node.name.node) {
-                if let Some(value) = definition.node.default_value() {
-                    variables.insert(definition.node.name.node.clone(), value.clone());
-                }
-            }
+        // `prepare_request` wrote every operation default into the request, so
+        // async-graphql evaluates `@skip`/`@include` and arguments with exactly
+        // these variables. A defaulted variable still missing here means the
+        // executed document is not the one prepared (another extension replaced
+        // it): directive evaluation could then differ, so refuse.
+        if operation
+            .node
+            .variable_definitions
+            .iter()
+            .any(|definition| {
+                !variables.contains_key(&definition.node.name.node)
+                    && definition.node.default_value().is_some()
+            })
+        {
+            return Err(invalid());
         }
         let request = ctx.data_opt::<RuntimeGraphqlRequest<B>>();
         let limits = request.map_or(self.limits, |request| {
