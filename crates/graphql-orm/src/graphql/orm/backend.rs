@@ -12,6 +12,15 @@ pub trait OrmBackend: Copy + Clone + Send + Sync + 'static {
     const DIALECT: DatabaseBackend;
     const READ_ONLY: bool;
 
+    /// Whether a bare pool was deliberately opened for entity writes when the
+    /// backend's handles are read-only by default ([`Self::READ_ONLY`]).
+    /// A generated helper given a pool instead of a `Database` uses it to
+    /// build the default handle that pool stands for.
+    #[doc(hidden)]
+    fn pool_permits_entity_writes(_pool: &Self::Pool) -> bool {
+        !Self::READ_ONLY
+    }
+
     fn fetch_rows<'a>(
         pool: &'a Self::Pool,
         sql: &'a str,
@@ -952,6 +961,10 @@ impl OrmBackend for MssqlBackend {
 
     const DIALECT: DatabaseBackend = DatabaseBackend::Mssql;
     const READ_ONLY: bool = true;
+
+    fn pool_permits_entity_writes(pool: &Self::Pool) -> bool {
+        pool.access_mode() == crate::db::mssql::MssqlAccessMode::ExternalWritable
+    }
 
     fn fetch_rows<'a>(
         pool: &'a Self::Pool,
