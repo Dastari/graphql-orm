@@ -1276,7 +1276,8 @@ impl<B: RuntimeReadBackend> RuntimeGraphqlComposer<B> {
             limits: self.limits,
             protection: self.protection,
         };
-        self.actions
+        let schema = self
+            .actions
             .into_iter()
             .fold(
                 Schema::build(
@@ -1293,7 +1294,13 @@ impl<B: RuntimeReadBackend> RuntimeGraphqlComposer<B> {
             .limit_complexity(self.limits.max_selections)
             .limit_recursive_depth(self.limits.max_depth)
             .finish()
-            .map_err(|_| RuntimeGraphqlError::new("invalid_composition"))
+            .map_err(|_| RuntimeGraphqlError::new("invalid_composition"))?;
+        // An omitted argument resolves to its default without validation, so
+        // every default must already be valid input, host types included.
+        if !super::scalar::argument_defaults_valid(schema.registry()) {
+            return Err(RuntimeGraphqlError::new("invalid_composition"));
+        }
+        Ok(schema)
     }
 }
 

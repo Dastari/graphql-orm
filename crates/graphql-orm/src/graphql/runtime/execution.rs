@@ -413,6 +413,132 @@ fn apply_variable_defaults(
     }
     Ok(())
 }
+/// Check every argument of the selected operation against its declared type,
+/// as execution resolves it: each variable value once against the variable's
+/// declared type, then each argument with its variable references standing for
+/// those checked values. Fragments are checked once, under their type
+/// condition. Introspection fields are left to async-graphql.
+fn validate_arguments(
+    registry: &async_graphql::registry::Registry,
+    document: &ExecutableDocument,
+    operation: &async_graphql::parser::types::OperationDefinition,
+    variables: &Variables,
+    limits: RuntimeGraphqlLimits,
+) -> Result<(), RuntimeGraphqlError> {
+    use async_graphql::parser::types::OperationType;
+    let mut budget = limits
+        .max_query_bytes
+        .saturating_add(limits.max_variable_nodes)
+        .saturating_mul(2);
+    for definition in &operation.variable_definitions {
+        let Some(value) = variables.get(&definition.node.name.node) else {
+            continue;
+        };
+        if !super::scalar::input_value_valid(
+            registry,
+            &definition.node.var_type.node.to_string(),
+            value,
+            &mut budget,
+        ) {
+            return Err(invalid());
+        }
+    }
+    let root = match operation.ty {
+        OperationType::Query => Some(registry.query_type.as_str()),
+        OperationType::Mutation => registry.mutation_type.as_deref(),
+        OperationType::Subscription => registry.subscription_type.as_deref(),
+    }
+    .ok_or_else(invalid)?;
+    let mut pending = Vec::new();
+    validate_selection_arguments(
+        registry,
+        &operation.selection_set.node,
+        root,
+        variables,
+        &mut budget,
+        &mut pending,
+    )?;
+    let mut checked = std::collections::BTreeSet::new();
+    while let Some(name) = pending.pop() {
+        if !checked.insert(name.clone()) {
+            continue;
+        }
+        let fragment = document.fragments.get(&name).ok_or_else(invalid)?;
+        validate_selection_arguments(
+            registry,
+            &fragment.node.selection_set.node,
+            fragment.node.type_condition.node.on.node.as_str(),
+            variables,
+            &mut budget,
+            &mut pending,
+        )?;
+    }
+    Ok(())
+}
+fn validate_selection_arguments(
+    registry: &async_graphql::registry::Registry,
+    set: &async_graphql::parser::types::SelectionSet,
+    ty: &str,
+    variables: &Variables,
+    budget: &mut usize,
+    fragments: &mut Vec<Name>,
+) -> Result<(), RuntimeGraphqlError> {
+    use async_graphql::parser::types::Selection;
+    for selection in &set.items {
+        match &selection.node {
+            Selection::Field(field) => {
+                let name = field.node.name.node.as_str();
+                if name.starts_with("__") {
+                    continue;
+                }
+                let definition = registry
+                    .types
+                    .get(ty)
+                    .and_then(|ty| ty.field_by_name(name))
+                    .ok_or_else(invalid)?;
+                for (argument, value) in &field.node.arguments {
+                    let declared = definition
+                        .args
+                        .get(argument.node.as_str())
+                        .ok_or_else(invalid)?;
+                    let value = value.node.clone().into_const_with(|variable| {
+                        Ok::<_, RuntimeGraphqlError>(match variables.get(&variable) {
+                            None | Some(Value::Null) => Value::Null,
+                            Some(_) => super::scalar::validated_variable(),
+                        })
+                    })?;
+                    if !super::scalar::input_value_valid(registry, &declared.ty, &value, budget) {
+                        return Err(invalid());
+                    }
+                }
+                validate_selection_arguments(
+                    registry,
+                    &field.node.selection_set.node,
+                    async_graphql::registry::MetaTypeName::concrete_typename(&definition.ty),
+                    variables,
+                    budget,
+                    fragments,
+                )?;
+            }
+            Selection::FragmentSpread(spread) => {
+                fragments.push(spread.node.fragment_name.node.clone());
+            }
+            Selection::InlineFragment(fragment) => validate_selection_arguments(
+                registry,
+                &fragment.node.selection_set.node,
+                fragment
+                    .node
+                    .type_condition
+                    .as_ref()
+                    .map_or(ty, |condition| condition.node.on.node.as_str()),
+                variables,
+                budget,
+                fragments,
+            )?,
+        }
+    }
+    Ok(())
+}
 // Allocation-free lexical nesting guard before the GraphQL parser recurses.
 fn bounded_query_nesting(query: &str, maximum: usize) -> Result<(), RuntimeGraphqlError> {
     let bytes = query.as_bytes();
@@ -532,9 +658,37 @@ impl<B: RuntimeReadBackend> Extension for Guard<B> {
         }
         // Argument, variable and default values are validated in this step:
         // the runtime scalars apply their input bounds only while it runs.
-        super::scalar::validating_input(next.run(ctx))
+        let result = super::scalar::validating_input(next.run(ctx))
             .await
-            .map_err(|_| vec![server(invalid())])
+            .map_err(|_| vec![server(invalid())])?;
+        // async-graphql skips an argument whose value names a missing variable
+        // and accepts any value for an input object; check every argument again
+        // with the values execution resolves.
+        let selected = self
+            .operation_name
+            .lock()
+            .map_err(|_| vec![server(invalid())])?
+            .clone();
+        let parsed = self.parsed.lock().map_err(|_| vec![server(invalid())])?;
+        let (document, variables) = parsed.as_ref().ok_or_else(|| vec![server(invalid())])?;
+        let operation = document
+            .operations
+            .iter()
+            .find(|(name, _)| match selected.as_deref() {
+                Some(expected) => name.is_some_and(|name| name == expected),
+                None => document.operations.iter().len() == 1,
+            })
+            .ok_or_else(|| vec![server(invalid())])?
+            .1;
+        validate_arguments(
+            &ctx.schema_env.registry,
+            document,
+            &operation.node,
+            variables,
+            self.limits,
+        )
+        .map_err(|error| vec![server(error)])?;
+        Ok(result)
     }
     async fn execute(
         &self,

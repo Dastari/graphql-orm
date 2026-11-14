@@ -1433,3 +1433,216 @@ async fn skip_and_include_agree_with_execution_when_variable_defaults_apply() {
     assert_eq!(reads, ["tag"]);
     f.finish().await;
 }
+
+/// A host input object holding runtime scalars, for host-field arguments.
+fn echo_input() -> async_graphql::dynamic::InputObject {
+    use async_graphql::dynamic::{InputObject, InputValue};
+    InputObject::new("EchoInput")
+        .field(InputValue::new("when", TypeRef::named("RuntimeDateTime")))
+        .field(InputValue::new("at", TypeRef::named("RuntimeDateTime")))
+}
+
+/// Host-field arguments are validated with the operation's variable defaults
+/// applied, so a literal out of the runtime scalar bounds never reaches the
+/// host resolver beside an omitted variable; a non-object value for a host
+/// input object is refused too (#583).
+#[tokio::test]
+async fn host_field_arguments_are_validated_after_variable_defaults_apply() {
+    let f = Fixture::new().await;
+    let echoes = Arc::new(AtomicUsize::new(0));
+    let calls = echoes.clone();
+    let api = f
+        .composer()
+        .register(echo_input().into())
+        .unwrap()
+        .query_field(
+            RuntimeHostField::new("echo", TypeRef::named_nn(TypeRef::BOOLEAN), move |_| {
+                let calls = calls.clone();
+                FieldFuture::new(async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(Some(FieldValue::value(true)))
+                })
+            })
+            .argument("input", TypeRef::named("EchoInput"), None)
+            .unwrap()
+            .argument("inputs", TypeRef::named_list("EchoInput"), None)
+            .unwrap(),
+        )
+        .unwrap()
+        .finish()
+        .unwrap();
+    const FAR: &str = "+10000-01-01T00:00:00Z";
+    for (query, variables) in [
+        // An omitted variable with a default inside an object literal.
+        (
+            format!(
+                "query($t: RuntimeDateTime = \"2020-01-01T00:00:00Z\") {{ echo(input: {{when: \"{FAR}\", at: $t}}) }}"
+            ),
+            json!({}),
+        ),
+        // ... inside a list literal.
+        (
+            format!(
+                "query($t: RuntimeDateTime = \"2020-01-01T00:00:00Z\") {{ echo(inputs: [{{when: \"{FAR}\"}}, {{at: $t}}]) }}"
+            ),
+            json!({}),
+        ),
+        // An omitted nullable variable without a default.
+        (
+            format!("query($t: RuntimeDateTime) {{ echo(input: {{when: \"{FAR}\", at: $t}}) }}"),
+            json!({}),
+        ),
+        // A non-object value for a host input object.
+        ("{ echo(input: 5) }".to_owned(), json!({})),
+        ("{ echo(inputs: [true]) }".to_owned(), json!({})),
+        (
+            "query($i: EchoInput) { echo(input: $i) }".to_owned(),
+            json!({"i": "not an object"}),
+        ),
+    ] {
+        let (response, _) = f.observe_with(&api, &query, variables).await;
+        let errors = response["errors"].as_array().cloned().unwrap_or_default();
+        assert_eq!(errors.len(), 1, "{query}: {response}");
+        assert_eq!(
+            errors[0]["message"], "invalid_graphql_input",
+            "{query}: {response}"
+        );
+        assert!(!response.to_string().contains("10000"), "{response}");
+        assert_eq!(
+            echoes.load(Ordering::SeqCst),
+            0,
+            "{query} reached the host resolver"
+        );
+    }
+    // Valid values, defaults included, still run.
+    let (response, _) = f
+        .observe_with(
+            &api,
+            "query($t: RuntimeDateTime = \"2020-01-01T00:00:00Z\") { echo(input: {when: \"2021-01-01T00:00:00Z\", at: $t}) }",
+            json!({}),
+        )
+        .await;
+    assert!(response.get("errors").is_none(), "{response}");
+    assert_eq!(echoes.load(Ordering::SeqCst), 1);
+    f.finish().await;
+}
+
+/// Argument defaults declared by the host are input the request never
+/// validates, so composition checks every one of them against its type:
+/// runtime scalar bounds, host input objects, and arguments of host types
+/// added through `register` or `subscription_root` (#583).
+#[tokio::test]
+async fn composition_refuses_host_argument_defaults_outside_their_types() {
+    use async_graphql::dynamic::{
+        Field, InputValue, Object, Subscription, SubscriptionField, SubscriptionFieldFuture,
+    };
+    let f = Fixture::new().await;
+    const FAR: &str = "+10000-01-01T00:00:00Z";
+    let refused = |result: Result<Schema, RuntimeGraphqlError>| {
+        assert_eq!(
+            result.err().map(RuntimeGraphqlError::code),
+            Some("invalid_composition")
+        );
+    };
+    fn flag(_: async_graphql::dynamic::ResolverContext<'_>) -> FieldFuture<'_> {
+        FieldFuture::new(async { Ok(Some(FieldValue::value(true))) })
+    }
+    // A host-field default typed with a host input object.
+    refused(
+        f.composer()
+            .register(echo_input().into())
+            .unwrap()
+            .query_field(
+                RuntimeHostField::new("echo", TypeRef::named_nn(TypeRef::BOOLEAN), flag)
+                    .argument(
+                        "input",
+                        TypeRef::named("EchoInput"),
+                        Some(async_graphql::value!({"when": FAR})),
+                    )
+                    .unwrap(),
+            )
+            .unwrap()
+            .finish(),
+    );
+    refused(
+        f.composer()
+            .register(echo_input().into())
+            .unwrap()
+            .query_field(
+                RuntimeHostField::new("echo", TypeRef::named_nn(TypeRef::BOOLEAN), flag)
+                    .argument(
+                        "input",
+                        TypeRef::named("EchoInput"),
+                        Some(async_graphql::value!(5)),
+                    )
+                    .unwrap(),
+            )
+            .unwrap()
+            .finish(),
+    );
+    // An argument default of a host object added through `register`.
+    let host_object = |default: &str| {
+        Object::new("Clock").field(
+            Field::new("tick", TypeRef::named(TypeRef::BOOLEAN), flag).argument(
+                InputValue::new("at", TypeRef::named("RuntimeDateTime"))
+                    .default_value(default.to_owned()),
+            ),
+        )
+    };
+    let with_object = |default: &str| {
+        f.composer()
+            .register(host_object(default).into())
+            .unwrap()
+            .query_field(RuntimeHostField::new(
+                "clock",
+                TypeRef::named("Clock"),
+                |_| FieldFuture::new(async { Ok(None::<FieldValue>) }),
+            ))
+            .unwrap()
+            .finish()
+    };
+    refused(with_object(FAR));
+    assert!(with_object("2020-01-01T00:00:00Z").is_ok());
+    // An argument default of a host subscription root field, beside a module
+    // without live collections.
+    let plain = Arc::new(
+        RuntimeSchema {
+            repository_only: false,
+            format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
+            collections: vec![collection("tag", "Tag", "Tags")],
+        }
+        .validate()
+        .unwrap(),
+    );
+    let with_subscription = |default: &str| {
+        RuntimeGraphqlComposer::<Backend>::new(f.db.clone(), "Query", Default::default())
+            .unwrap()
+            .install(
+                RuntimeGraphqlModule::compile(
+                    plain.clone(),
+                    RuntimeGraphqlOptions::default()
+                        .with_cursor_profile(RuntimeCursorProfile::Unprotected),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .subscription_root(
+                Subscription::new("HostSubscription").field(
+                    SubscriptionField::new("pulse", TypeRef::named_nn(TypeRef::BOOLEAN), |_| {
+                        SubscriptionFieldFuture::new(async {
+                            Ok(futures::stream::iter([Ok(FieldValue::value(true))]))
+                        })
+                    })
+                    .argument(
+                        InputValue::new("at", TypeRef::named("RuntimeDateTime"))
+                            .default_value(default.to_owned()),
+                    ),
+                ),
+            )
+            .unwrap()
+            .finish()
+    };
+    refused(with_subscription(FAR));
+    assert!(with_subscription("2020-01-01T00:00:00Z").is_ok());
+    f.finish().await;
+}

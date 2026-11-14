@@ -203,6 +203,16 @@ and validates arguments against the raw request variables. If another extension
 replaces the document so that a defaulted variable is missing at execution, the
 operation is refused with `invalid_graphql_input`. An explicit `null` for a
 directive condition is refused the same way.
+
+After async-graphql's validation the guard checks every argument of the
+selected operation again, including `RuntimeHostField` and host type arguments:
+each variable value once against its declared type, and each argument with its
+variable references in place. Runtime scalars use their input bounds; a value
+that is not an object for an input object, and a missing non-null value, are
+refused with `invalid_graphql_input` before any resolver runs. Composition
+(`finish`) refuses with `invalid_composition` any argument default, on a host
+field, a type added with `register` or a host subscription root, that is not a
+valid value of its type: async-graphql never validates schema defaults.
 Use `RuntimeReadCheck::filter_operations` for requested filter authorization;
 the lowered predicate's referenced fields alone cannot represent constant inputs.
 A root list with full-text `search` also reports it as
