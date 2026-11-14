@@ -520,6 +520,9 @@ pub struct JwksAuthenticationProvider {
     role_scope_stale_refusals: Arc<AtomicU64>,
     #[cfg(feature = "auth-agql")]
     role_scope_refresh_failure_total: Arc<AtomicU64>,
+    /// Incremented under the cache lock each time a snapshot is accepted.
+    #[cfg(feature = "auth-agql")]
+    role_scope_generation: Arc<AtomicU64>,
 }
 
 impl JwksAuthenticationProvider {
@@ -558,6 +561,8 @@ impl JwksAuthenticationProvider {
             role_scope_stale_refusals: Arc::new(AtomicU64::new(0)),
             #[cfg(feature = "auth-agql")]
             role_scope_refresh_failure_total: Arc::new(AtomicU64::new(0)),
+            #[cfg(feature = "auth-agql")]
+            role_scope_generation: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -711,10 +716,15 @@ impl JwksAuthenticationProvider {
         let refuse_at = stale_at
             .checked_add(config.maximum_staleness)
             .unwrap_or(stale_at);
+        let generation = self
+            .role_scope_generation
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1);
         *cache = Some(Arc::new(RoleScopeCache {
             loaded_at,
             stale_at,
             refuse_at,
+            generation,
             provider,
         }));
         self.role_scope_refresh_failures.store(0, Ordering::Release);
@@ -872,13 +882,13 @@ impl JwksAuthenticationProvider {
     }
 
     #[cfg(feature = "auth-agql")]
-    /// Expands authorization roles. With roles, also returns the monotonic
-    /// deadline after which the snapshot used no longer expands them.
+    /// Expands authorization roles. With roles, also returns the snapshot's
+    /// monotonic refusal deadline and generation.
     fn expand_roles(
         &self,
         roles: &[String],
         direct_scopes: Vec<String>,
-    ) -> Result<(Vec<String>, Option<Instant>), AuthenticationError> {
+    ) -> Result<(Vec<String>, Option<ExpansionAuthority>), AuthenticationError> {
         if roles.is_empty() {
             return Ok((direct_scopes, None));
         }
@@ -949,7 +959,7 @@ impl JwksAuthenticationProvider {
         })?;
         Ok((
             effective_scopes(direct_scopes, &expansion),
-            Some(cache.refuse_at),
+            Some((cache.refuse_at, cache.generation)),
         ))
     }
 
@@ -1029,7 +1039,9 @@ impl AuthenticationProvider for JwksAuthenticationProvider {
         let principal = AuthenticatedPrincipal::new(claims.sub, scopes, Some(expires_at))?;
         #[cfg(feature = "auth-agql")]
         let principal = match authority_valid_until {
-            Some(deadline) => principal.with_authority_valid_until(deadline),
+            Some((deadline, generation)) => principal
+                .with_authority_valid_until(deadline)
+                .with_authority_generation(generation),
             None => principal,
         };
         Ok(principal)
@@ -1041,6 +1053,14 @@ impl AuthenticationProvider for JwksAuthenticationProvider {
 
     fn monotonic_now(&self) -> Instant {
         self.config.clock.monotonic_now()
+    }
+
+    #[cfg(feature = "auth-agql")]
+    fn authority_generation(&self) -> Option<u64> {
+        self.config
+            .role_scope_catalogue
+            .is_some()
+            .then(|| self.role_scope_generation.load(Ordering::Acquire))
     }
 
     fn refresh_interval(&self) -> Option<Duration> {
@@ -1086,6 +1106,10 @@ struct JwksCache {
     keys: BTreeMap<String, DecodingKey>,
 }
 
+/// The refusal deadline and generation of the snapshot a role expansion used.
+#[cfg(feature = "auth-agql")]
+type ExpansionAuthority = (Instant, u64);
+
 #[cfg(feature = "auth-agql")]
 struct RoleScopeCache {
     loaded_at: SystemTime,
@@ -1094,6 +1118,8 @@ struct RoleScopeCache {
     stale_at: Instant,
     /// Monotonic point after which it no longer expands roles.
     refuse_at: Instant,
+    /// Acceptance order of this snapshot.
+    generation: u64,
     provider: StaticRoleScopeExpansion,
 }
 

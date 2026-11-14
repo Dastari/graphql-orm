@@ -444,26 +444,71 @@ async fn run_wire_app() {
 #[derive(Debug)]
 struct TestAuthenticationProvider;
 
+/// The `role-events` catalogue as the parent test controls it. The file holds
+/// either `fresh`/`stale`, or `key=value` lines: `state`, `generation`,
+/// space-separated `scopes`, and `lifetime_ms`.
+struct TestAuthority {
+    stale: bool,
+    generation: u64,
+    scopes: Vec<String>,
+    lifetime: Duration,
+}
+
+impl TestAuthority {
+    fn read() -> Self {
+        let mut authority = Self {
+            stale: false,
+            generation: 1,
+            scopes: vec![
+                "products.p1.events".to_owned(),
+                "products.failure.events".to_owned(),
+            ],
+            lifetime: ROLE_AUTHORITY_LIFETIME,
+        };
+        let content = env::var_os(AUTHORITY_CONTROL_ENV)
+            .and_then(|path| fs::read_to_string(path).ok())
+            .unwrap_or_default();
+        for line in content.lines().map(str::trim) {
+            match line.split_once('=') {
+                Some(("state", state)) => authority.stale = state == "stale",
+                None if !line.is_empty() => authority.stale = line == "stale",
+                Some(("generation", value)) => authority.generation = value.parse().unwrap(),
+                Some(("scopes", value)) => {
+                    authority.scopes = value.split_whitespace().map(str::to_owned).collect();
+                }
+                Some(("lifetime_ms", value)) => {
+                    authority.lifetime = Duration::from_millis(value.parse().unwrap());
+                }
+                _ => {}
+            }
+        }
+        authority
+    }
+}
+
 impl AuthenticationProvider for TestAuthenticationProvider {
+    fn authority_generation(&self) -> Option<u64> {
+        Some(TestAuthority::read().generation)
+    }
+
     fn authenticate_bearer(
         &self,
         token: &str,
     ) -> Result<AuthenticatedPrincipal, AuthenticationError> {
         if token == "role-events" {
-            let stale = env::var_os(AUTHORITY_CONTROL_ENV)
-                .and_then(|path| fs::read_to_string(path).ok())
-                .is_some_and(|state| state.trim() == "stale");
-            if stale {
+            let authority = TestAuthority::read();
+            if authority.stale {
                 return Err(AuthenticationError::unavailable(
                     "role-scope catalogue snapshot exceeded its maximum staleness",
                 ));
             }
             return Ok(AuthenticatedPrincipal::new(
                 "role-subject",
-                ["products.p1.events", "products.failure.events"],
+                authority.scopes,
                 SystemTime::now().checked_add(Duration::from_secs(3_600)),
             )?
-            .with_authority_valid_until(Instant::now() + ROLE_AUTHORITY_LIFETIME));
+            .with_authority_valid_until(Instant::now() + authority.lifetime)
+            .with_authority_generation(authority.generation));
         }
         let (subject, scopes) = match token {
             "product-p1" => ("test-subject", vec!["products.p1.read"]),
@@ -2595,6 +2640,124 @@ fn established_websocket_respects_the_role_authority_deadline() {
         role.wait_for_operation_message("renewed", "next")["payload"]["data"]["productChanged"]["id"],
         "p1"
     );
+    router.stop();
+}
+
+#[test]
+fn refreshed_role_catalogue_applies_to_established_websockets() {
+    let products = LoopbackSubgraph::start(SubgraphKind::Products);
+    let reviews = LoopbackSubgraph::start(SubgraphKind::Reviews);
+    let products_sdl = LoopbackSdl::start(PRODUCTS_V1);
+    let reviews_sdl = LoopbackSdl::start(REVIEWS);
+    let products_protocol = LoopbackProtocol::start(protocol_descriptor(
+        "products",
+        products.endpoint(),
+        products_sdl.endpoint(),
+        authenticated_product_operations(false),
+    ));
+    let reviews_protocol = LoopbackProtocol::start(protocol_descriptor(
+        "reviews",
+        reviews.endpoint(),
+        reviews_sdl.endpoint(),
+        Vec::new(),
+    ));
+    let temp = TemporaryConfig::new();
+    let control = temp.directory.join("authority");
+    // A long deadline: only the generation can trigger re-expansion here.
+    let catalogue = |generation: u64, scopes: &str| {
+        fs::write(
+            &control,
+            format!("state=fresh\ngeneration={generation}\nscopes={scopes}\nlifetime_ms=600000\n"),
+        )
+        .unwrap();
+    };
+    catalogue(1, "products.p1.events products.failure.events");
+    let child = Command::new(env::current_exe().expect("test executable path"))
+        .args([
+            "--exact",
+            "federation::wire_tests::router_child_entrypoint",
+            "--nocapture",
+        ])
+        .env(CHILD_ENV, "auth-subscriptions")
+        .env(AUTHORITY_CONTROL_ENV, &control)
+        .env(PRODUCTS_ENDPOINT_ENV, products.endpoint())
+        .env(REVIEWS_ENDPOINT_ENV, reviews.endpoint())
+        .env(PRODUCTS_SDL_ENDPOINT_ENV, products_sdl.endpoint())
+        .env(REVIEWS_SDL_ENDPOINT_ENV, reviews_sdl.endpoint())
+        .env(PRODUCTS_PROTOCOL_ENDPOINT_ENV, products_protocol.endpoint())
+        .env(REVIEWS_PROTOCOL_ENDPOINT_ENV, reviews_protocol.endpoint())
+        .env("RUST_TEST_THREADS", "1")
+        .env("RUST_LOG", "error")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("authority router child should start");
+    let mut router = TestRouter::from_child(child, false).0;
+    router.wait_until_ready();
+    let p1 = r#"subscription { productChanged(id: "p1") { id } }"#;
+
+    let mut role = TestWebSocket::connect_at(router.address, "/api/graphql");
+    role.connection_init_bearer("role-events");
+    role.subscribe("held", p1);
+    role.wait_for_operation_message("held", "next");
+    let mut direct = TestWebSocket::connect_at(router.address, "/api/graphql");
+    direct.connection_init_bearer("product-events");
+    direct.subscribe("direct", p1);
+    direct.wait_for_operation_message("direct", "next");
+
+    // An unrelated catalogue change leaves the effective scopes identical: the
+    // held subscription keeps running across several generation checks.
+    catalogue(2, "products.failure.events products.p1.events");
+    thread::sleep(Duration::from_millis(1_500));
+    role.subscribe("same", p1);
+    let message = role.next_message();
+    assert_eq!(
+        (message["id"].as_str(), message["type"].as_str()),
+        (Some("same"), Some("next")),
+        "identical effective scopes must not end the held subscription: {message}"
+    );
+
+    // The refreshed catalogue removes the authorizing scope while the role
+    // stays known. Without any client message, every subscription on the
+    // connection ends with the authorization-changed error.
+    catalogue(3, "products.failure.events");
+    let mut ended = std::collections::BTreeSet::new();
+    while ended.len() < 2 {
+        let message = role.next_message();
+        assert_eq!(
+            message["type"], "error",
+            "no further events may arrive: {message}"
+        );
+        assert_eq!(
+            message["payload"][0]["extensions"]["code"], "SUBSCRIPTION_AUTHORIZATION_CHANGED",
+            "{message}"
+        );
+        ended.insert(message["id"].as_str().unwrap().to_owned());
+    }
+    assert_eq!(ended, ["held", "same"].map(str::to_owned).into());
+
+    // Resubscribing is authorized against the new catalogue and refused.
+    role.subscribe("again", p1);
+    let refused = role.next_message();
+    assert_eq!(
+        (refused["id"].as_str(), refused["type"].as_str()),
+        (Some("again"), Some("next")),
+        "{refused}"
+    );
+    assert!(refused["payload"].get("data").is_none(), "{refused}");
+    assert_eq!(
+        refused["payload"]["errors"][0]["extensions"]["code"], "FORBIDDEN",
+        "{refused}"
+    );
+    role.wait_for_operation_message("again", "complete");
+    // Direct scopes are unaffected by catalogue generations.
+    direct.subscribe("direct-2", p1);
+    direct.wait_for_operation_message("direct-2", "next");
+
+    // Restoring the scope authorizes the next operation again.
+    catalogue(4, "products.p1.events products.failure.events");
+    role.subscribe("restored", p1);
+    role.wait_for_operation_message("restored", "next");
     router.stop();
 }
 

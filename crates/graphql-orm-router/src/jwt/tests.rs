@@ -876,6 +876,66 @@ fn role_expansion_carries_its_snapshot_deadline_and_direct_scopes_do_not() {
 
 #[cfg(feature = "auth-agql")]
 #[test]
+fn each_accepted_catalogue_advances_the_authority_generation() {
+    let keys = JwksFixture::start(jwks("key-a"));
+    let catalogue = JwksFixture::start(signed_catalogue("key-a", 1_000, 1_100));
+    let provider = provider_with_catalogue(&keys, &catalogue, Arc::new(TestClock::at(1_000)));
+    initialize(&provider).unwrap();
+    assert_eq!(
+        provider.authority_generation(),
+        Some(0),
+        "nothing accepted yet"
+    );
+    refresh_catalogue(&provider).unwrap();
+    let credential = token(
+        "key-a",
+        json!({
+            "sub": "user-7", "iss": "https://issuer.test", "aud": "graphql-router",
+            "exp": 9_000, "authorization_roles": ["inventory-operator"]
+        }),
+    );
+    let first = provider.authenticate_bearer(&credential).unwrap();
+    assert_eq!(first.authority_generation(), Some(1));
+    assert_eq!(provider.authority_generation(), Some(1));
+
+    // An identical snapshot is a new generation with the same expansion.
+    refresh_catalogue(&provider).unwrap();
+    let same = provider.authenticate_bearer(&credential).unwrap();
+    assert_eq!(same.authority_generation(), Some(2));
+    assert_eq!(same.scopes(), first.scopes());
+
+    // A refreshed catalogue without the role refuses its expansion, so a
+    // transport that re-authenticates on the new generation sees the removal.
+    catalogue.replace(signed_catalogue_with_role(
+        "key-a",
+        1_000,
+        1_100,
+        "other-role",
+    ));
+    refresh_catalogue(&provider).unwrap();
+    assert_eq!(provider.authority_generation(), Some(3));
+    assert_eq!(
+        provider
+            .authenticate_bearer(&credential)
+            .unwrap_err()
+            .kind(),
+        AuthenticationErrorKind::Unavailable
+    );
+    // Direct-scope principals carry no generation.
+    let direct = provider
+        .authenticate_bearer(&token(
+            "key-a",
+            json!({
+                "sub": "user-7", "iss": "https://issuer.test", "aud": "graphql-router",
+                "exp": 9_000, "scope": "profile.read"
+            }),
+        ))
+        .unwrap();
+    assert_eq!(direct.authority_generation(), None);
+}
+
+#[cfg(feature = "auth-agql")]
+#[test]
 fn role_catalogue_maximum_staleness_has_a_bounded_default() {
     let keys = JwksFixture::start(jwks("key-a"));
     let catalogue = JwksFixture::start(signed_catalogue("key-a", 1_000, 1_010));

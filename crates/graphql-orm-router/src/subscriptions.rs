@@ -298,17 +298,49 @@ struct ConnectionState {
     /// Present only while the connection's scopes came from an external
     /// authority with a deadline, such as role-scope catalogue expansion.
     authority: Option<ConnectionAuthority>,
+    /// The public socket, once initialised, so any authority check can end
+    /// subscriptions on it.
+    public_sink: Option<ws::WsSink>,
 }
 
-/// The retained bearer of a connection whose expanded scopes expire with the
-/// authority snapshot they came from. It is never logged or formatted.
+/// The retained bearer of a connection whose expanded scopes expire with, or
+/// change with, the authority snapshot they came from. Never logged.
 struct ConnectionAuthority {
     bearer: String,
     valid_until: std::time::Instant,
+    generation: Option<u64>,
+    scopes: Vec<String>,
+}
+
+impl ConnectionAuthority {
+    fn from_principal(bearer: &str, principal: &crate::AuthenticatedPrincipal) -> Option<Self> {
+        principal
+            .authority_valid_until()
+            .map(|valid_until| ConnectionAuthority {
+                bearer: bearer.to_owned(),
+                valid_until,
+                generation: principal.authority_generation(),
+                scopes: principal.scopes().to_vec(),
+            })
+    }
+}
+
+/// What a re-check of the connection's authority found.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AuthorityCheck {
+    /// Still valid with the same effective scopes.
+    Unchanged,
+    /// Re-expanded to different effective scopes.
+    ScopesChanged,
+    /// Could not be confirmed (stale or unavailable).
+    Unavailable,
 }
 
 /// How often a connection whose authority has lapsed checks it again.
 const AUTHORITY_RETRY: std::time::Duration = std::time::Duration::from_millis(500);
+/// How often a connection with expanded scopes checks the provider's authority
+/// generation without client activity. Each check is one atomic read.
+const AUTHORITY_GENERATION_POLL: std::time::Duration = std::time::Duration::from_millis(500);
 
 struct Operation {
     internal_id: String,
@@ -340,30 +372,39 @@ impl ConnectionState {
             .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
     }
 
-    /// Confirms the connection's externally expanded scopes before another
-    /// operation. Past their deadline the retained bearer is authenticated
-    /// again: a fresher snapshot renews the deadline (and applies role
-    /// changes in the private endpoint), and a stale one fails.
-    fn confirm_authority(&mut self) -> Result<(), ()> {
+    /// Re-checks the connection's externally expanded scopes. The retained
+    /// bearer is authenticated again once their deadline passes or the
+    /// provider reports a newer authority generation, so the current snapshot
+    /// decides: the result replaces the old scopes, never adds to them.
+    fn confirm_authority(&mut self) -> AuthorityCheck {
         let provider = self.gateway.authentication.clone();
         let Some(authority) = &mut self.authority else {
-            return Ok(());
+            return AuthorityCheck::Unchanged;
         };
-        if provider.monotonic_now() < authority.valid_until {
-            return Ok(());
+        let generation_changed = authority.generation.is_some()
+            && provider.authority_generation() != authority.generation;
+        if !generation_changed && provider.monotonic_now() < authority.valid_until {
+            return AuthorityCheck::Unchanged;
         }
-        let principal = provider
-            .authenticate_bearer(&authority.bearer)
-            .map_err(|_| ())?;
-        match principal.authority_valid_until() {
-            Some(deadline) => authority.valid_until = deadline,
+        let Ok(principal) = provider.authenticate_bearer(&authority.bearer) else {
+            return AuthorityCheck::Unavailable;
+        };
+        let changed = principal.scopes() != authority.scopes.as_slice();
+        let bearer = std::mem::take(&mut authority.bearer);
+        match ConnectionAuthority::from_principal(&bearer, &principal) {
+            Some(renewed) => *authority = renewed,
             None => self.authority = None,
         }
-        Ok(())
+        if changed {
+            AuthorityCheck::ScopesChanged
+        } else {
+            AuthorityCheck::Unchanged
+        }
     }
 
-    /// Ends every subscription after the connection's authority lapsed and
-    /// returns their public and internal IDs. One-shot operations finish.
+    /// Ends every subscription after the connection's authority lapsed or its
+    /// effective scopes changed, and returns their public and internal IDs.
+    /// One-shot operations finish.
     fn end_subscriptions_for_lapsed_authority(&mut self) -> Vec<(String, String)> {
         let ended = self
             .operations
@@ -494,6 +535,7 @@ async fn create_connection_service(
         local_loss: hive_router::tokio::sync::watch::channel(0).0,
         permit: Some(permit),
         authority: None,
+        public_sink: None,
     }));
 
     spawn_continuity_watch(
@@ -735,13 +777,8 @@ async fn initialize_connection(
         let mut state = state.borrow_mut();
         state.permit = Some(permit);
         state.phase = ConnectionPhase::Connecting;
-        state.authority =
-            principal
-                .authority_valid_until()
-                .map(|valid_until| ConnectionAuthority {
-                    bearer: token.to_owned(),
-                    valid_until,
-                });
+        state.authority = ConnectionAuthority::from_principal(token, &principal);
+        state.public_sink = Some(external_sink.clone());
     }
     if watch_authority {
         spawn_authority_watch(Rc::downgrade(&state), external_sink.clone());
@@ -1088,17 +1125,23 @@ async fn forward_subscribe(
             .borrow_mut()
             .terminate_with_public_close(4400, "Subscription ID is required");
     }
+    // Duplicate IDs are connection errors before any authority work.
+    if state.borrow().operations.contains_key(&id) {
+        return state
+            .borrow_mut()
+            .terminate_with_public_close(4409, "Subscriber already exists");
+    }
+    if enforce_authority(&state).await == AuthorityCheck::Unavailable {
+        return Some(ws::Message::Text(
+            authority_unavailable_error(&id).to_string().into(),
+        ));
+    }
     {
         let mut state = state.borrow_mut();
         // Duplicate IDs are connection errors, regardless of the new payload.
         // No operation-scoped terminal error may leave the old generation live.
         if state.operations.contains_key(&id) {
             return state.terminate_with_public_close(4409, "Subscriber already exists");
-        }
-        if state.confirm_authority().is_err() {
-            return Some(ws::Message::Text(
-                authority_unavailable_error(&id).to_string().into(),
-            ));
         }
         if let Some(documents) = &state.gateway.persisted_documents
             && let Err(code) = documents.prepare_websocket_payload(&mut message)
@@ -1402,10 +1445,69 @@ fn authority_unavailable_error(id: &str) -> Value {
     }]})
 }
 
-/// Watches the authority deadline of a connection with expanded scopes. Once
-/// it passes and cannot be renewed, the connection's subscriptions end with
-/// [`authority_unavailable_error`]; the connection stays open, and a later
-/// operation succeeds again once the authority refreshes.
+/// The terminal error for a subscription ended because the connection's
+/// effective scopes changed; the client may resubscribe under the new scopes.
+fn authorization_changed_error(id: &str) -> Value {
+    json!({"id": id, "type": "error", "payload": [{
+        "message": "Authorization changed; resubscribe",
+        "extensions": {"code": "SUBSCRIPTION_AUTHORIZATION_CHANGED"}
+    }]})
+}
+
+/// Re-checks the connection's authority and, when it lapsed or its effective
+/// scopes changed, ends the connection's subscriptions with the matching
+/// terminal error. Subscriptions keep running when the scopes are unchanged.
+async fn enforce_authority(state: &SharedConnectionState) -> AuthorityCheck {
+    let (check, ended, public, internal, metrics) = {
+        let mut state = state.borrow_mut();
+        if state.phase == ConnectionPhase::Closed {
+            return AuthorityCheck::Unchanged;
+        }
+        let check = state.confirm_authority();
+        if check == AuthorityCheck::Unchanged {
+            return check;
+        }
+        (
+            check,
+            state.end_subscriptions_for_lapsed_authority(),
+            state.public_sink.clone(),
+            state.internal_sink.clone(),
+            state.gateway.metrics.clone(),
+        )
+    };
+    let error = if check == AuthorityCheck::ScopesChanged {
+        authorization_changed_error
+    } else {
+        authority_unavailable_error
+    };
+    for (id, internal_id) in ended {
+        if let Some(public) = &public {
+            send_best_effort(
+                public,
+                ws::Message::Text(error(&id).to_string().into()),
+                &metrics,
+            )
+            .await;
+        }
+        if let Some(internal) = &internal {
+            let complete = json!({"id": internal_id, "type": "complete"});
+            send_best_effort(
+                internal,
+                ws::Message::Text(complete.to_string().into()),
+                &metrics,
+            )
+            .await;
+        }
+    }
+    check
+}
+
+/// Watches a connection with expanded scopes without client activity: at its
+/// authority deadline, and every [`AUTHORITY_GENERATION_POLL`] for a newer
+/// authority generation. A lapse ends its subscriptions with
+/// [`authority_unavailable_error`] (the connection stays open and recovers
+/// with the authority); changed effective scopes end them with
+/// [`authorization_changed_error`].
 fn spawn_authority_watch(state: Weak<RefCell<ConnectionState>>, sink: ws::WsSink) {
     rt::spawn(async move {
         loop {
@@ -1423,6 +1525,7 @@ fn spawn_authority_watch(state: Weak<RefCell<ConnectionState>>, sink: ws::WsSink
                 authority
                     .valid_until
                     .saturating_duration_since(state.gateway.authentication.monotonic_now())
+                    .min(AUTHORITY_GENERATION_POLL)
             };
             hive_router::tokio::select! {
                 _ = hive_router::tokio::time::sleep(delay.max(std::time::Duration::from_millis(10))) => {}
@@ -1431,41 +1534,12 @@ fn spawn_authority_watch(state: Weak<RefCell<ConnectionState>>, sink: ws::WsSink
             let Some(shared) = state.upgrade() else {
                 return;
             };
-            let (ended, internal, metrics) = {
-                let mut state = shared.borrow_mut();
-                if state.phase == ConnectionPhase::Closed {
-                    return;
+            if enforce_authority(&shared).await == AuthorityCheck::Unavailable {
+                drop(shared);
+                hive_router::tokio::select! {
+                    _ = hive_router::tokio::time::sleep(AUTHORITY_RETRY) => {}
+                    _ = sink.on_disconnect() => return,
                 }
-                if state.confirm_authority().is_ok() {
-                    continue;
-                }
-                (
-                    state.end_subscriptions_for_lapsed_authority(),
-                    state.internal_sink.clone(),
-                    state.gateway.metrics.clone(),
-                )
-            };
-            drop(shared);
-            for (id, internal_id) in ended {
-                send_best_effort(
-                    &sink,
-                    ws::Message::Text(authority_unavailable_error(&id).to_string().into()),
-                    &metrics,
-                )
-                .await;
-                if let Some(internal) = &internal {
-                    let complete = json!({"id": internal_id, "type": "complete"});
-                    send_best_effort(
-                        internal,
-                        ws::Message::Text(complete.to_string().into()),
-                        &metrics,
-                    )
-                    .await;
-                }
-            }
-            hive_router::tokio::select! {
-                _ = hive_router::tokio::time::sleep(AUTHORITY_RETRY) => {}
-                _ = sink.on_disconnect() => return,
             }
         }
     });
@@ -1589,6 +1663,7 @@ mod tests {
             next_operation: 0,
             permit: None,
             authority: None,
+            public_sink: None,
             local_loss: hive_router::tokio::sync::watch::channel(0).0,
         }))
     }
@@ -1808,6 +1883,7 @@ mod tests {
             local_loss: hive_router::tokio::sync::watch::channel(0).0,
             permit: None,
             authority: None,
+            public_sink: None,
         }));
         gateway.add_operation();
         if continuity_lost {

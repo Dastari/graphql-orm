@@ -707,9 +707,11 @@ impl StaticGraphPlugin {
 impl StaticGraphPlugin {
     /// Returns this operation's principal. Hive shares one plugin context
     /// across the operations of a private subscription connection; once the
-    /// connection's expanded scopes pass their authority deadline, its retained
-    /// bearer is authenticated again, so a refreshed catalogue renews them and
-    /// applies role changes, and a stale one refuses the operation.
+    /// connection's expanded scopes pass their authority deadline, or the
+    /// provider reports a newer authority generation, its retained bearer is
+    /// authenticated again. The result replaces the old principal, so a
+    /// refreshed catalogue's removals apply at once and a stale one refuses
+    /// the operation.
     fn operation_principal(
         &self,
         context: &hive_router::plugins::plugin_context::PluginContext,
@@ -726,7 +728,9 @@ impl StaticGraphPlugin {
         ) else {
             return Ok(Some(principal));
         };
-        if provider.monotonic_now() < deadline {
+        let generation_changed = principal.authority_generation().is_some()
+            && provider.authority_generation() != principal.authority_generation();
+        if !generation_changed && provider.monotonic_now() < deadline {
             return Ok(Some(principal));
         }
         // Ordinary HTTP requests authenticate per request and retain nothing.

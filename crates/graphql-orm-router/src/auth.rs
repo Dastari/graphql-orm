@@ -34,6 +34,7 @@ pub struct AuthenticatedPrincipal {
     scopes: Arc<[String]>,
     expires_at: Option<SystemTime>,
     authority_valid_until: Option<Instant>,
+    authority_generation: Option<u64>,
 }
 
 impl AuthenticatedPrincipal {
@@ -68,6 +69,7 @@ impl AuthenticatedPrincipal {
             scopes: scopes.into(),
             expires_at,
             authority_valid_until: None,
+            authority_generation: None,
         })
     }
 
@@ -88,6 +90,22 @@ impl AuthenticatedPrincipal {
     /// expanded.
     pub fn authority_valid_until(&self) -> Option<Instant> {
         self.authority_valid_until
+    }
+
+    /// Records which generation of the external authority the scopes were
+    /// expanded from, as reported by
+    /// [`AuthenticationProvider::authority_generation`]. Long-lived transports
+    /// re-authenticate before the next operation once the provider reports a
+    /// different generation.
+    #[must_use]
+    pub fn with_authority_generation(mut self, generation: u64) -> Self {
+        self.authority_generation = Some(generation);
+        self
+    }
+
+    /// Authority generation the scopes were expanded from, when recorded.
+    pub fn authority_generation(&self) -> Option<u64> {
+        self.authority_generation
     }
 
     /// Stable subject identifier from the validated credential.
@@ -114,6 +132,7 @@ impl fmt::Debug for AuthenticatedPrincipal {
             .field("scope_count", &self.scopes.len())
             .field("expires_at", &self.expires_at)
             .field("authority_valid_until", &self.authority_valid_until)
+            .field("authority_generation", &self.authority_generation)
             .finish()
     }
 }
@@ -204,6 +223,15 @@ pub trait AuthenticationProvider: Send + Sync + fmt::Debug + 'static {
     /// Defaults to [`Instant::now`].
     fn monotonic_now(&self) -> Instant {
         Instant::now()
+    }
+
+    /// Current generation of the external authority that expands scopes, such
+    /// as the accepted role-scope catalogue snapshot. It must be a cheap read:
+    /// long-lived transports compare it with
+    /// [`AuthenticatedPrincipal::authority_generation`] before every operation
+    /// and on a short tick. `None`, the default, means no such authority.
+    fn authority_generation(&self) -> Option<u64> {
+        None
     }
 
     /// Periodic refresh interval for remote verification state.
