@@ -179,15 +179,8 @@ pub(crate) fn is_delegated_reference(reference: &PrincipalReference) -> bool {
     }
 }
 
-/// The only way the engine resolves a principal reference for authority.
-///
-/// Releases before 0.130.0 could persist a delegated or sessionless request
-/// credential's reference on a run or on session-title work. Workers resolve
-/// stored references to the user session behind them, so this refuses the
-/// delegated shape before the host resolver is called, with the same
-/// non-transient error an expired or revoked reference produces. Callers map
-/// the error exactly as they map any other resolution failure, so these rows
-/// fail through the expired-reference path.
+/// Private resolver handle that enforces stored-reference identity, expiry and
+/// narrowing before returning authority to an engine service.
 #[derive(Clone)]
 pub(crate) struct AiCurrentPrincipalResolver {
     resolver: Arc<dyn agql_auth::CurrentPrincipalResolver>,
@@ -233,6 +226,15 @@ impl AiCurrentPrincipalResolver {
     }
 }
 
+/// The only way the engine resolves a principal reference for authority.
+///
+/// Releases before 0.130.0 could persist a delegated or sessionless request
+/// credential's reference on a run or on session-title work. Workers resolve
+/// stored references to the user session behind them, so this refuses the
+/// delegated shape before the host resolver is called, with the same
+/// non-transient error an expired or revoked reference produces. Callers map
+/// the error exactly as they map any other resolution failure, so these rows
+/// fail through the expired-reference path.
 pub(crate) async fn resolve_current_reference(
     resolver: &AiCurrentPrincipalResolver,
     reference: &PrincipalReference,

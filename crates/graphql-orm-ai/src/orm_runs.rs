@@ -1140,6 +1140,8 @@ impl OrmAiRunService {
                             current.row_version,
                             exact_state(&current.state),
                             UpdateAiRunRecordInput {
+                                recovery_examined_at: (current.recovery_examined_at != 0)
+                                    .then_some(0),
                                 state: Some(completion.final_state.as_str().to_owned()),
                                 lease_owner: Some(None),
                                 lease_expires_at: Some(None),
@@ -1233,6 +1235,8 @@ impl OrmAiRunService {
                                 current.row_version,
                                 exact_state(&current.state),
                                 UpdateAiRunRecordInput {
+                                    recovery_examined_at: (current.recovery_examined_at != 0)
+                                        .then_some(0),
                                     state: Some(AiRunState::RetryScheduled.as_str().to_owned()),
                                     attempt_id: Some(None),
                                     lease_owner: Some(None),
@@ -3894,6 +3898,8 @@ impl OrmAiRunService {
                         let run_update_input =
                             if let Some((parked, _)) = parked_provider_wait.as_ref() {
                                 UpdateAiRunRecordInput {
+                                    recovery_examined_at: (current.recovery_examined_at != 0)
+                                        .then_some(0),
                                     state: Some(AiRunState::WaitingApproval.as_str().to_owned()),
                                     attempt_id: Some(None),
                                     lease_owner: Some(None),
@@ -3909,6 +3915,8 @@ impl OrmAiRunService {
                                     OrmPublicError::new(OrmErrorCode::InternalError)
                                 })?;
                                 UpdateAiRunRecordInput {
+                                    recovery_examined_at: (current.recovery_examined_at != 0)
+                                        .then_some(0),
                                     state: Some(AiRunState::WaitingApproval.as_str().to_owned()),
                                     lease_expires_at: Some(Some(expiry.unix_timestamp())),
                                     lease_heartbeat_at: Some(Some(now.unix_timestamp())),
@@ -4150,6 +4158,8 @@ impl OrmAiRunService {
                                 current.row_version,
                                 exact_state(&current.state),
                                 UpdateAiRunRecordInput {
+                                    recovery_examined_at: (current.recovery_examined_at != 0)
+                                        .then_some(0),
                                     state: Some(AiRunState::Running.as_str().to_owned()),
                                     lease_expires_at: Some(Some(expiry.unix_timestamp())),
                                     lease_heartbeat_at: Some(Some(now.unix_timestamp())),
@@ -4575,6 +4585,8 @@ impl OrmAiRunService {
                                 current.row_version,
                                 exact_state(&current.state),
                                 UpdateAiRunRecordInput {
+                                    recovery_examined_at: (current.recovery_examined_at != 0)
+                                        .then_some(0),
                                     state: Some(AiRunState::Leased.as_str().to_owned()),
                                     attempt_id: Some(Some(attempt.id)),
                                     lease_owner: Some(Some(worker_id.clone())),
@@ -5032,6 +5044,7 @@ impl OrmAiRunService {
                                 run.row_version,
                                 exact_state(AiRunState::WaitingApproval.as_str()),
                                 UpdateAiRunRecordInput {
+                recovery_examined_at: (run.recovery_examined_at != 0).then_some(0),
                                     state: Some(AiRunState::WaitingTool.as_str().to_owned()),
                                     attempt_id: resumed_attempt
                                         .map(|(attempt_id, _)| Some(attempt_id)),
@@ -5556,6 +5569,8 @@ impl OrmAiRunService {
                             current.row_version,
                             exact_state(AiRunState::WaitingApproval.as_str()),
                             UpdateAiRunRecordInput {
+                                recovery_examined_at: (current.recovery_examined_at != 0)
+                                    .then_some(0),
                                 state: Some(final_state.as_str().to_owned()),
                                 lease_owner: Some(None),
                                 lease_expires_at: Some(None),
@@ -5689,6 +5704,8 @@ impl OrmAiRunService {
                             current.row_version,
                             exact_state(&current.state),
                             UpdateAiRunRecordInput {
+                                recovery_examined_at: (current.recovery_examined_at != 0)
+                                    .then_some(0),
                                 state: Some(next_state.as_str().to_owned()),
                                 lease_expires_at: Some(Some(expiry.unix_timestamp())),
                                 lease_heartbeat_at: Some(Some(now.unix_timestamp())),
@@ -6205,6 +6222,7 @@ async fn recover_expired_run(
             current.row_version,
             exact_state(&current.state),
             UpdateAiRunRecordInput {
+                recovery_examined_at: (current.recovery_examined_at != 0).then_some(0),
                 state: Some(transition.next_state.as_str().to_owned()),
                 attempt_id: Some(None),
                 lease_owner: Some(None),
@@ -6854,6 +6872,7 @@ async fn quarantine_unclaimable_run(
             current.row_version,
             exact_state(&current.state),
             UpdateAiRunRecordInput {
+                recovery_examined_at: (current.recovery_examined_at != 0).then_some(0),
                 state: Some(AiRunState::RecoveryRequired.as_str().to_owned()),
                 attempt_id: Some(None),
                 lease_owner: Some(None),
@@ -7101,6 +7120,7 @@ async fn refuse_delegated_claim(
             leased.row_version,
             exact_state(AiRunState::Leased.as_str()),
             UpdateAiRunRecordInput {
+                recovery_examined_at: (leased.recovery_examined_at != 0).then_some(0),
                 state: Some(AiRunState::Failed.as_str().to_owned()),
                 lease_owner: Some(None),
                 lease_expires_at: Some(None),
@@ -8937,6 +8957,27 @@ mod tests {
                 .limits
                 .with_lease_recovery_grace(Duration::seconds(61))
                 .is_err()
+        );
+        assert!(
+            fixture
+                .service
+                .limits
+                .with_lease_recovery_grace(Duration::seconds(-1))
+                .is_err()
+        );
+        assert!(
+            fixture
+                .service
+                .limits
+                .with_lease_recovery_grace(Duration::MAX)
+                .is_err()
+        );
+        assert!(
+            fixture
+                .service
+                .limits
+                .with_lease_recovery_grace(Duration::seconds(60))
+                .is_ok()
         );
         let recovering = OrmAiRunService::new(
             fixture.database.clone(),
@@ -11050,6 +11091,68 @@ mod tests {
             fixture.service.append_ui_intent_event(&lease, ui()).await,
             Err(AiError::RuntimeNotReady)
         ));
+    }
+
+    #[tokio::test]
+    async fn requeued_runs_clear_the_scan_stamp_and_keep_their_claim_order() {
+        let fixture = fixture().await;
+        let original = seed_queued_with_id(&fixture, Uuid::from_u128(1)).await;
+        AiRunRecord::update_by_id(
+            &fixture.database,
+            &original.0,
+            UpdateAiRunRecordInput {
+                recovery_examined_at: Some(123),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let lease = fixture.service.claim_next("first").await.unwrap().unwrap();
+        assert_eq!(lease.run_id(), original);
+        assert_eq!(
+            run_record(&fixture, original).await.recovery_examined_at,
+            0,
+            "claim clears stale scan history"
+        );
+        fixture.service.start(&lease).await.unwrap();
+        // Seed legacy scan history, then reconstruct its current test fence.
+        let record = AiRunRecord::update_by_id(
+            &fixture.database,
+            &original.0,
+            UpdateAiRunRecordInput {
+                recovery_examined_at: Some(234),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let lease = lease_from_record(&record).unwrap();
+        fixture
+            .service
+            .schedule_retry(&lease, Duration::ZERO, "retry")
+            .await
+            .unwrap();
+        assert_eq!(
+            run_record(&fixture, original).await.recovery_examined_at,
+            0,
+            "requeue clears scan history"
+        );
+        fixture.clock.advance_seconds(1);
+        for index in 2..10 {
+            seed_queued_with_id(&fixture, Uuid::from_u128(index)).await;
+        }
+        assert_eq!(
+            fixture
+                .service
+                .claim_next("next")
+                .await
+                .unwrap()
+                .unwrap()
+                .run_id(),
+            original,
+            "fresh backlog cannot starve a requeued run"
+        );
     }
 
     #[tokio::test]
