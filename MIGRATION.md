@@ -3,12 +3,67 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-14
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.143.0 to 0.148.0: runtime GraphQL guard and row-level security
+
+Upgrade runtime and macros together. No schema or data migration is needed.
+Generated SDL, operation catalogues and fingerprints are unchanged. Only runtime
+GraphQL compositions (`runtime-graphql`) change behaviour.
+
+**Breaking: PostgreSQL RLS tables need a `DbAuthContext`.** A runtime query,
+`node` lookup, mutation or live subscription registration whose module includes
+a table with row-level security enabled now fails with
+`authorization_misconfigured` unless the request carries a `DbAuthContext`
+(`RuntimeGraphqlRequest::new(.., Some(auth), ..)`). The check reads
+`pg_class.relrowsecurity` for the module's collection, link and search tables,
+and for mutations the tables of verified incoming dependencies, so RLS enabled
+outside the ORM counts. It is per module: a module that mixes RLS and non-RLS
+tables needs the context for all of its roots. Pass a `DbAuthContext` on every
+request (an anonymous one where no principal exists), put a trusted internal
+schema's requests under `SystemAccess::new("<name>")` in the request data, or
+keep the old behaviour with `AuthorizationMode::LegacyPermissive` on the
+composer's `Database`. SQLite and other backends are unaffected.
+
+**Serve runtime queries and mutations with `Schema::execute`.** Over
+`execute_stream` every runtime query and mutation root, including
+`RuntimeHostField` roots, now refuses with `request_not_prepared`. ORM roots
+already failed there (with an error naming an internal type); host roots ran
+without the operation-assurance pre-pass and now refuse too. Route queries and
+mutations of a streaming transport through `Schema::execute`; live
+subscriptions keep using `execute_stream`.
+
+**Variable defaults apply to `@skip`/`@include`.** Each omitted variable's
+operation default (or `null` for an omitted nullable variable without one) is
+written into the request before validation. `query($v: Boolean = true)` sent
+without variables now skips `@skip(if: $v)` selections and includes
+`@include(if: $v)` selections, as GraphQL specifies. Clients that relied on
+async-graphql's earlier raw-variable evaluation should pass the variable
+explicitly. An explicit `null` directive condition is refused with
+`invalid_graphql_input`.
+
+**Breaking: host arguments are validated with the resolved values.** A runtime
+scalar outside its input bounds in a literal next to an omitted variable, a
+non-object value for an input object, or a missing non-null value is refused
+with `invalid_graphql_input` before any resolver runs; such requests previously
+reached host resolvers. `RuntimeGraphqlComposer::finish` returns
+`invalid_composition` for an argument default that is not a valid value of its
+type, on a `RuntimeHostField`, a type added with `register` or a host
+`subscription_root`. Fix the default; for runtime scalars it must satisfy the
+same bounds as request input.
+
+**Other fixes.** Link mutations whose `link_target_visibility` predicate filters
+through a relation now run. PostgreSQL `timestamptz` values `infinity`,
+`-infinity` and years past 262143 decode as an `InvalidValue` record error
+instead of panicking; runtime GraphQL reports it as a failed read. A page that
+repeats one projected value is charged for every copy against
+`max_response_bytes`, so a budget that admitted it before may now return
+`cost_exceeded`.
 
 ## 0.141.0 to 0.143.0: one authorization contract
 

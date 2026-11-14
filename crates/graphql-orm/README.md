@@ -3,12 +3,21 @@ title: "graphql-orm"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-14
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm`
+
+Version 0.148.0 (placeholder) makes the runtime GraphQL request guard and
+async-graphql agree: variable defaults apply to `@skip`/`@include`, every
+argument is validated with the values execution resolves, argument defaults are
+checked at composition, and queries and mutations over `execute_stream` refuse
+with `request_not_prepared`. Runtime GraphQL refuses operations on PostgreSQL
+tables with row-level security without a `DbAuthContext`. Upgrade ORM/macros
+together; see the
+[root migration guide](../../MIGRATION.md#01430-to-01480-runtime-graphql-guard-and-row-level-security).
 
 Version 0.143.0 gives authorization one contract: every generated read path
 asks the field policy about a field with or without a policy key;
