@@ -899,6 +899,7 @@ impl AiRuntime {
         if !approved_prepared_mutation_matches(&prepared, approval, binding) {
             return Err(AiError::Forbidden);
         }
+        approval.claim_execution()?;
         let registered = AiRegisteredToolExecutionBinding::generated_mutation(
             &prepared.descriptor.id,
             &prepared.capability_fingerprint,
@@ -1054,6 +1055,7 @@ impl AiRuntime {
                 .with_provenance(provenance, &request)
                 .map_err(Self::map_tool_execution_error)?;
         }
+        approval.claim_execution()?;
         let (response, authorization) = self
             .tool_bridge
             .execute_registered_bound_requiring(
