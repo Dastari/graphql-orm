@@ -199,6 +199,25 @@ role remains unknown. Direct-scope-only credentials do not depend on the
 optional authority source. Every failed catalogue refresh, lazy or scheduled,
 increments `role_scope_refresh_failure_total` and logs its redacted reason.
 
+Staleness is measured on a monotonic clock. When a snapshot is accepted, the
+router converts its signed expiry and soft age into a remaining lifetime once,
+using wall time, and from then on counts elapsed time only. Moving the wall
+clock back after a refusal does not reopen the snapshot, and moving it forward
+does not extend it. A wall clock earlier than the snapshot's load time still
+fails closed.
+
+A role-expanded principal carries its snapshot's refusal deadline
+(`AuthenticatedPrincipal::authority_valid_until`). An HTTP request
+authenticates per request. A WebSocket connection keeps its principal, so once
+the deadline passes the router re-authenticates the connection's retained
+bearer before its next operation, both in the public gateway and in the
+private endpoint. A refreshed snapshot renews the deadline and applies role
+changes. A stale one refuses the operation with `UNAUTHENTICATED`, and a timer
+at the deadline ends the connection's subscriptions with the same error. The
+socket stays open, and a later operation succeeds once the catalogue
+refreshes. Only role-bearing connections retain their bearer in memory, and it
+is never logged.
+
 The router validates RS256 public keys only. Configuration has no private-key,
 token-signing, session, refresh-token, or RSA-decryption field.
 
@@ -573,13 +592,26 @@ binds it elsewhere instead, for example loopback or a private interface:
 "telemetry": {"prometheus": {"host": "127.0.0.1", "port": 9090, "path": "/metrics"}}
 ```
 
-Host names are refused so the bind needs no DNS. The port must still be nonzero
+Host names and IPv6 zone IDs are refused so the bind needs no DNS or
+interface lookup. The port must still be nonzero
 and distinct from the public and administrative ports whatever their
 addresses. An unspecified exporter address (`0.0.0.0` or `::`), whether set
 explicitly or inherited from the public listener, logs a startup warning. The
 exporter publishes Hive's metric families, which carry route, status, subgraph
 and GraphQL operation-name labels; it never carries bearer tokens, header
 values, subjects, scopes, or document text.
+
+`"omitOperationName": true` under `prometheus`
+(`RouterTelemetryConfig::omit_operation_name_from_metrics`) removes the
+`graphql.operation.name` attribute from every HTTP server and cost metric
+that carries it, through the engine's per-instrument attribute filters. It is
+a metrics-cardinality and privacy option and defaults to off, so existing
+dashboards keep their per-operation series. Operation names are chosen by
+clients: every distinct name can open new series (the metrics SDK caps each
+metric at 2,000 attribute sets and folds the rest into an overflow series), and
+the names stay in scrape output. Enable it where anonymous or untrusted
+clients can send operations; per-operation breakdowns then disappear from these
+metrics.
 
 ## Persisted documents
 

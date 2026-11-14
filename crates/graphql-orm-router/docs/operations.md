@@ -81,6 +81,9 @@ Hive Prometheus exporter adds execution histograms and the pinned subscription
 counters
 `hive.router.subscriptions.clients.lagged_messages_total` and
 `hive.router.subscriptions.subgraphs.dropped_messages_total`.
+Set `telemetry.prometheus.omitOperationName` to drop the client-chosen
+operation-name attribute from the exported HTTP server and cost metrics; the
+default keeps it for existing dashboards.
 Embedding hosts can also read `role_scope_stale_serve_total`,
 `role_scope_stale_refusal_total`, and `role_scope_refresh_failure_total` from
 the JWKS provider. Alert on any increase: stale serves mean the catalogue is

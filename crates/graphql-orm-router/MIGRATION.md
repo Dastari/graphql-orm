@@ -12,33 +12,9 @@ supersedes: []
 
 ## 0.14.0 to 0.15.0: router hardening
 
-### Prometheus scrape address (new, opt-in)
+### Breaking changes
 
-Nothing changes unless you opt in. To move the unauthenticated Prometheus
-exporter off the public interface, add an IP literal:
-
-```json
-"telemetry": {"prometheus": {"host": "127.0.0.1", "port": 9090}}
-```
-
-or use `RouterTelemetryConfig::with_prometheus_listener(address, path)`. The
-port must still differ from the public and administrative ports. A router whose
-exporter binds `0.0.0.0` or `::` now logs a startup warning.
-
-### Subgraph identity and subscription bounds (validation)
-
-- A refresh refuses a router descriptor whose `subgraph.id` changed since the
-  source was admitted, and the source keeps its last-known-good input. If a
-  subgraph's identity is meant to change, restart the router after deploying
-  it.
-- `SubscriptionConfig` counts above 1048576 now fail validation with
-  `InvalidConfiguration`. Lower any such value.
-- Outbound fetches send `User-Agent: graphql-orm-router/<version>`. Update any
-  upstream allow-list that matched `graphql-orm-router/0.1`.
-- `GET /_router/metrics` adds `router_websocket_send_failures_total`. Strict
-  consumers of that JSON object should accept the new key.
-
-### Role-scope catalogue maximum staleness (can refuse requests)
+#### Role-scope catalogue maximum staleness (can refuse requests)
 
 This applies to `auth-agql` builds with `roleScopeCatalogue`. Earlier routers
 kept expanding authorization roles from the last verified snapshot for as long
@@ -48,6 +24,14 @@ signed expiry, whichever is first) serves roles for at most
 `authorization_roles` that the old router served are refused as unavailable**
 until the catalogue refreshes. Direct-scope-only requests are unaffected.
 
+Established WebSocket connections follow the same deadline. Once it passes,
+the next operation on a role-bearing connection is re-authenticated: with a
+refreshed catalogue it proceeds with the current role expansion, and otherwise
+it fails with `UNAUTHENTICATED`. The connection's open subscriptions end with
+that error. The socket stays open, so clients can resubscribe after the
+catalogue recovers. Staleness is measured on a monotonic clock, so wall-clock
+steps neither reopen nor extend a snapshot.
+
 Before upgrading, make sure the catalogue endpoint is reliably reachable, and
 alert on `role_scope_stale_serve_total`, `role_scope_stale_refusal_total` and
 `role_scope_refresh_failure_total`. To allow a longer outage window, set
@@ -56,6 +40,42 @@ alert on `role_scope_stale_serve_total`, `role_scope_stale_refusal_total` and
 setting. With default settings the JWKS cache, which goes stale 15 minutes
 after a failed refresh, already refuses every bearer credential in an issuer
 outage, so the default staleness adds no new outage mode in that case.
+
+#### Subgraph identity on refresh
+
+A refresh refuses a router descriptor whose `subgraph.id` changed since the
+source was admitted, and the source keeps its last-known-good input. If a
+subgraph's identity is meant to change, restart the router after deploying it.
+
+#### Subscription count caps
+
+`SubscriptionConfig` counts above 1048576 now fail validation with
+`InvalidConfiguration`. Lower any such value.
+
+### Other changes
+
+- **Prometheus scrape address (opt-in).** Nothing changes unless you opt in.
+  To move the unauthenticated exporter off the public interface, add an IP
+  literal, `"telemetry": {"prometheus": {"host": "127.0.0.1", "port": 9090}}`,
+  or use `RouterTelemetryConfig::with_prometheus_listener(address, path)`. The
+  port must still differ from the public and administrative ports. A router
+  whose exporter binds `0.0.0.0` or `::` now logs a startup warning.
+- **Operation-name metric attribute (opt-in).** Set
+  `"omitOperationName": true` under `telemetry.prometheus`, or call
+  `RouterTelemetryConfig::omit_operation_name_from_metrics(true)`, to drop the
+  client-chosen operation name from exported HTTP server and cost metrics. We
+  recommend it where anonymous or untrusted clients can send operations.
+  Dashboards that group by operation name lose that breakdown.
+- Custom `AuthenticationClock` and `AuthenticationProvider` implementations
+  inherit default `monotonic_now` methods. A test clock that simulates elapsed
+  time should override `AuthenticationClock::monotonic_now`, as role-scope
+  staleness now follows it. A custom provider that marks principals with
+  `AuthenticatedPrincipal::with_authority_valid_until` must return deadlines on
+  its own `monotonic_now` clock.
+- Outbound fetches send `User-Agent: graphql-orm-router/<version>`. Update any
+  upstream allow-list that matched `graphql-orm-router/0.1`.
+- `GET /_router/metrics` adds `router_websocket_send_failures_total`. Strict
+  consumers of that JSON object should accept the new key.
 
 ## 0.13.0 to 0.14.0: persisted documents
 

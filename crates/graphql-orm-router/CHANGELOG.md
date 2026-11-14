@@ -12,41 +12,55 @@ supersedes: []
 
 ## 0.15.0 (unreleased)
 
-- The Prometheus exporter can bind its own address (#487). Set
-  `telemetry.prometheus.host` to an IP literal, or call
-  `RouterTelemetryConfig::with_prometheus_listener`, to put the unauthenticated
-  scrape listener on loopback or a private interface. Without it the exporter
-  keeps binding the public listener's IP address, so existing deployments are
-  unchanged. The port rules are unchanged: nonzero and distinct from the public
-  and administrative ports whatever their addresses. The router logs a startup
-  warning when the exporter binds every interface.
-- **Behaviour change:** a stale role-scope catalogue snapshot now has a
-  maximum staleness (#488). A snapshot is stale from its soft age or signed
-  expiry, whichever is first. While refreshes fail it keeps expanding roles for
-  at most `maximumStalenessSeconds`
-  (`RoleScopeCatalogueConfig::with_maximum_staleness`), 15 minutes by default
-  and at most 24 hours. After that, role-bearing credentials are refused as
+### Breaking changes
+
+- **Role-scope catalogue maximum staleness (#488), which can refuse requests that
+  0.14 served.** A snapshot is stale from its soft age or signed expiry,
+  whichever is first. While refreshes fail, it keeps expanding authorization
+  roles for at most `maximumStalenessSeconds`
+  (`RoleScopeCatalogueConfig::with_maximum_staleness`): 15 minutes by default,
+  at most 24 hours. After that, role-bearing credentials are refused as
   unavailable until a refresh succeeds; they used to be served from the stale
-  snapshot indefinitely. Direct-scope-only credentials are unaffected. New
-  provider counters `role_scope_stale_refusal_total` and
+  snapshot indefinitely. This also applies to established WebSocket
+  connections. A principal expanded from a snapshot carries that snapshot's
+  deadline (`AuthenticatedPrincipal::authority_valid_until`). Once the deadline
+  passes, the next operation on the connection re-authenticates its bearer.
+  A refreshed snapshot renews the deadline and applies role changes; a stale
+  one refuses the operation (`UNAUTHENTICATED`, "authentication service
+  unavailable") and ends the connection's subscriptions with the same error,
+  while the connection stays open. Staleness follows a monotonic clock fixed
+  when the snapshot is accepted, so moving the wall clock never reopens or
+  extends a snapshot; wall time only validates signed timestamps.
+  Direct-scope-only credentials and connections are unaffected. New provider
+  counters `role_scope_stale_refusal_total` and
   `role_scope_refresh_failure_total` (which also counts scheduled refreshes)
   go with rate-limited warning logs.
-- Router code-quality follow-ups from the 2026-11-09 audit (part of #539):
-  - **Behaviour change:** a schema refresh refuses a router descriptor whose
-    subgraph ID differs from the one its source was admitted with. The source
-    keeps its last-known-good input, and a restart accepts the new identity.
-  - **Behaviour change:** every `SubscriptionConfig` count is capped at
-    1048576. Larger values used to reach channel construction unchecked.
-  - Schema, registration, JWKS and role-catalogue fetches share one bounded body
-    reader. The outbound `User-Agent` is `graphql-orm-router/<version>`
-    instead of the fixed `graphql-orm-router/0.1`, and JWKS and catalogue
-    requests now send it too.
-  - Internal WebSocket frames are JSON-parsed once instead of twice, and the
-    authorization-variable projection is trimmed without re-serialising the
-    whole message for every removed entry.
-  - The engine's slow-request, keep-alive, GET-mutation, batching and
-    subgraph-response defaults are documented, and the slow-request,
-    GET-mutation and batching behaviour is pinned by tests.
+- **Subgraph identity is pinned on refresh (part of #539).** A schema refresh
+  refuses a router descriptor whose subgraph ID differs from the one its
+  source was admitted with. The source keeps its last-known-good input, and a
+  restart accepts the new identity.
+- **Subscription counts are capped (part of #539).** Every `SubscriptionConfig`
+  count must be at most 1048576. Larger values used to reach channel
+  construction unchecked.
+
+### Added
+
+- The Prometheus exporter can bind its own address (#487). Set
+  `telemetry.prometheus.host` to an IP literal (no host names or IPv6 zone
+  IDs), or call `RouterTelemetryConfig::with_prometheus_listener`, to put the
+  unauthenticated scrape listener on loopback or a private interface. Without
+  it the exporter keeps binding the public listener's IP address, so existing
+  deployments are unchanged. The port rules are unchanged: nonzero and distinct
+  from the public and administrative ports whatever their addresses. The
+  router logs a startup warning when the exporter binds every interface.
+- A metrics-cardinality and privacy option removes the client-chosen
+  `graphql.operation.name` attribute from every exported HTTP server and cost
+  metric that carries it. Set `telemetry.prometheus.omitOperationName` or call
+  `RouterTelemetryConfig::omit_operation_name_from_metrics`. It is off by
+  default, so existing dashboards keep their series.
+- `AuthenticationClock::monotonic_now` and
+  `AuthenticationProvider::monotonic_now` have default implementations, so
+  existing implementations keep compiling.
 - Router errors that used to be swallowed are now counted or logged (router part
   of #512). Failed best-effort WebSocket close and completion sends increment
   the new `router_websocket_send_failures_total` admin metric
@@ -58,6 +72,20 @@ supersedes: []
   credentials it could not replace. The remaining ignored results are
   documented in place. No log or metric carries URLs, header values, tokens or
   document text.
+
+### Changed
+
+- Router code-quality follow-ups from the 2026-11-09 audit (part of #539):
+  - Schema, registration, JWKS and role-catalogue fetches share one bounded body
+    reader. The outbound `User-Agent` is `graphql-orm-router/<version>`
+    instead of the fixed `graphql-orm-router/0.1`, and JWKS and catalogue
+    requests now send it too.
+  - Internal WebSocket frames are JSON-parsed once instead of twice, and the
+    authorization-variable projection is trimmed without re-serialising the
+    whole message for every removed entry.
+  - The engine's slow-request, keep-alive, GET-mutation, batching and
+    subgraph-response defaults are documented, and the slow-request,
+    GET-mutation and batching behaviour is pinned by tests.
 
 ## 0.14.0 (unreleased)
 

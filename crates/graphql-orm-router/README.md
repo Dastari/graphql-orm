@@ -20,7 +20,9 @@ Version 0.15.0 lets the Prometheus exporter bind its own `host` (opt-in; the
 default is unchanged) and bounds stale role-scope catalogue use: after
 `maximumStalenessSeconds` (default 15 minutes) of failed refreshes,
 role-bearing requests are refused as unavailable instead of being served from
-the stale snapshot. A refreshed descriptor must keep its subgraph ID, and
+the stale snapshot, including on established WebSocket connections. An
+opt-in `omitOperationName` drops client-chosen operation names from exported
+metrics. A refreshed descriptor must keep its subgraph ID, and
 subscription counts are capped at 2^20. See
 [MIGRATION.md](MIGRATION.md#0140-to-0150-router-hardening).
 
