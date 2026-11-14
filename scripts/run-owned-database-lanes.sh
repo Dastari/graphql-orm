@@ -143,7 +143,7 @@ run_mssql() {
     --test migration_composite_uniques -- --include-ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features mssql --test dependent_delete_ui
   cargo test -p graphql-orm --locked --no-default-features --features mssql \
-    --lib unacknowledged_and_failed_receives_are_redelivered -- --ignored --test-threads=1
+    --lib delivery_is_at_least_once_through_failures_and_cancellation -- --ignored --test-threads=1
   cargo test -p graphql-orm --no-default-features --features mssql \
     --test mssql_writes --test mssql_trigger_writes --test mssql_integration --test mssql_correctness --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial --test implicit_timestamp_defaults --test read_predicate --test point_read_visibility_backends --test visible_row_pages --locked -- --ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features sqlite \

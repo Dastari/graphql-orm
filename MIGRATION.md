@@ -85,17 +85,27 @@ backends". The first two entries are breaking for hosts.
 - **Connections.** The pool and the notification connection follow one
   routing redirect (Azure SQL's Redirect connection policy).
 - **Notifications.** `MssqlQueryNotificationConnection::receive` is
-  at-least-once: the receive and `END CONVERSATION` commit only after the
-  message has been read. If ending the conversation fails, or the connection
-  is lost before the commit, the message stays on the queue and is delivered
-  again. A message that has been read is returned as `Ok` even when its
-  commit fails or the commit response is lost; `uncertain_acknowledgements()`
-  counts those cases and the connection re-establishes itself before the
-  next call, so keep using the same value after an error or a cancelled
-  `receive` instead of discarding it. A message can arrive twice and hosts
-  consuming these notifications must be idempotent.
-  Five consecutive rolled-back receives disable the queue under SQL Server's
-  poison-message handling.
+  at-least-once and hosts must be idempotent. It returns a message while the
+  transaction that received it is still open; the receive is committed at the
+  start of the next `receive` or `register`, by the new `acknowledge()`, or
+  by the new `close()`. It used to commit before returning, so a failure
+  between the two batches lost the message. What a host must change:
+  - Call `close()` (or `acknowledge()`) before dropping a connection after a
+    handled message, including the reconnect of a re-arm loop. A message
+    that is never acknowledged is delivered again.
+  - Until it is acknowledged, a message's conversation group stays locked
+    for other receivers. Call `acknowledge()` after handling a message when
+    the next `receive` does not follow promptly.
+  - Keep the connection value after an error or a cancelled call; it opens a
+    new session by itself. `uncertain_acknowledgements()` counts
+    acknowledgements whose outcome is unknown.
+  - SQL Server disables a queue after five consecutive rolled-back receives
+    (poison-message handling). Unacknowledged drops, crashes, failed
+    acknowledgements and cancelled receives of a waiting message each count,
+    so a receive-and-reconnect loop that never acknowledges disables a
+    healthy queue. Re-enable it with `ALTER QUEUE ... WITH STATUS = ON`, or
+    create the queue with `POISON_MESSAGE_HANDLING (STATUS = OFF)` if endless
+    redelivery is acceptable.
 
 ## 0.144.0 to 0.147.0: write paths, hooks and authority
 

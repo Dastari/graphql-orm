@@ -753,20 +753,36 @@ and conversation completion change Broker state and require explicit authority.
 Database permissions remain authoritative; SELECT-prefix validation is not a SQL
 security sandbox. Deny this principal business DML and DDL.
 
-Delivery is at-least-once, and consumers must be idempotent. `receive` reads
-the message and ends its conversation inside a transaction that commits only
-after the message has reached the process. If ending the conversation fails,
-the connection is lost or the future is dropped before that commit, the
-message returns to the queue and a later `receive` delivers it again. Once a
-message has been read, `receive` returns it even if the commit fails or its
-response is lost; `uncertain_acknowledgements()` counts those cases, and the
-connection re-establishes itself before the next call. A `receive` future
-dropped while the commit is in progress leaves its message in the connection,
-and the next `receive` returns it at once. Keep the same connection value
-after an error or a cancelled call: dropping it during that commit is the one
-case that can lose a message. Messages are invalidation hints, so handling one
-twice repeats a refresh; the ORM itself has no consumer of them. SQL Server
-disables a queue after five consecutive rolled-back receives.
+Delivery is at-least-once, and hosts must be idempotent. `receive` returns a
+message while the transaction that received it and ended its conversation is
+still open; nothing is committed before the host holds the message. The
+receive is acknowledged (committed) at the start of the next `receive` or
+`register` call, by `acknowledge()`, or by `close()`.
+
+- Until it is acknowledged, a message's transaction stays open and its
+  conversation group is locked for other receivers. A host that handles
+  messages slowly should call `acknowledge()` after handling one, or accept
+  the lock.
+- An unacknowledged message is delivered again after a crash, a lost
+  connection, or dropping the connection value. Call `close()` on a clean
+  shutdown and before a deliberate reconnect.
+- A failed acknowledgement has an unknown outcome: the message was already
+  delivered and is delivered once more unless the commit had landed.
+  `uncertain_acknowledgements()` counts these, and the connection opens a new
+  session on its next use.
+- Cancelling a call is safe at every point. A cancelled wait closes its
+  session at once and SQL Server rolls the receive back. Keep using the same
+  connection value afterwards; it reconnects by itself.
+- **Poison-message handling.** SQL Server disables a queue after five
+  consecutive rolled-back receives. Each unacknowledged drop, crash, failed
+  acknowledgement or cancelled receive of a waiting message is one rollback,
+  so a loop that receives a message and reconnects without acknowledging it
+  disables a healthy queue. Acknowledge handled messages. To recover, run
+  `ALTER QUEUE ... WITH STATUS = ON`; a host that prefers endless redelivery
+  can create its queue with `POISON_MESSAGE_HANDLING (STATUS = OFF)`.
+
+Messages are invalidation hints, so handling one twice repeats a refresh; the
+ORM itself has no consumer of them.
 
 The external owner must enable Broker and provision a dedicated queue and service
 accepting `http://schemas.microsoft.com/SQL/Notifications/PostQueryNotification`.
@@ -790,9 +806,12 @@ ineligible query successfully and immediately enqueue an `Invalid` notification;
 applications must consume it and report degraded status instead of claiming an
 active subscription. `None` from receive means wait timeout, not expiry. Handle
 `Change`, `Expired`, `Invalid`, and `Other`, re-arm one-shot registrations, and
-reconcile data after reconnects or uncertain delivery. Discard the connection
-after cancellation or protocol errors. Reads should use a separate read-only
-pool while receive holds the notification connection.
+reconcile data after reconnects or uncertain delivery. After a cancelled call
+or an error, keep the connection value: it opens a new session on its next
+use. Acknowledge each handled message (`acknowledge()`, the next `receive`, or
+`close()` before dropping the connection); a message that is never
+acknowledged is delivered again. Reads should use a separate read-only pool
+while receive holds the notification connection.
 
 The included aggregate test uses `COUNT_BIG(*)` over a whole log table; it provides
 insert/delete invalidation without loading its entire history. It does not
