@@ -1358,6 +1358,22 @@ pub async fn fetch_rows_pair_with_auth<B: OrmBackend>(
     .await
 }
 
+/// Run an admitted read in one transaction carrying `auth`; see
+/// [`OrmBackend::fetch_rows_admitted_with_auth`].
+#[allow(clippy::type_complexity)]
+pub(crate) async fn fetch_rows_admitted_with_auth<B: OrmBackend>(
+    pool: &B::Pool,
+    prelude: &[&str],
+    admission: (&str, &[SqlValue]),
+    reads: &[(&str, &[SqlValue])],
+    auth: Option<&DbAuthContext>,
+) -> crate::Result<Option<crate::Result<Vec<Vec<B::Row>>>>> {
+    for _ in 0..prelude.len() + 1 + reads.len() {
+        record_executed_query();
+    }
+    B::fetch_rows_admitted_with_auth(pool, prelude, admission, reads, auth).await
+}
+
 pub async fn execute_with_binds_on<'e, B, E>(
     executor: E,
     sql: &str,

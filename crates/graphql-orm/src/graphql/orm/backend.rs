@@ -51,6 +51,43 @@ pub trait OrmBackend: Copy + Clone + Send + Sync + 'static {
         })
     }
 
+    /// Run an admitted read in one transaction carrying `auth`.
+    ///
+    /// Runs `prelude` (for example locks), then `admission`; when `admission`
+    /// returns any row the transaction is rolled back and the reads never run
+    /// (`Ok(None)`). Otherwise each of `reads` runs in order and the transaction
+    /// commits. An `Err` means the prelude or admission failed; a read failure
+    /// is `Ok(Some(Err(..)))`. Backends without transactional reads run the
+    /// statements one after another.
+    #[allow(clippy::type_complexity)]
+    fn fetch_rows_admitted_with_auth<'a>(
+        pool: &'a Self::Pool,
+        prelude: &'a [&'a str],
+        admission: (&'a str, &'a [SqlValue]),
+        reads: &'a [(&'a str, &'a [SqlValue])],
+        _auth: Option<&'a DbAuthContext>,
+    ) -> BoxFuture<'a, crate::Result<Option<crate::Result<Vec<Vec<Self::Row>>>>>> {
+        Box::pin(async move {
+            for sql in prelude {
+                Self::fetch_rows(pool, sql, &[]).await?;
+            }
+            if !Self::fetch_rows(pool, admission.0, admission.1)
+                .await?
+                .is_empty()
+            {
+                return Ok(None);
+            }
+            let mut results = Vec::with_capacity(reads.len());
+            for (sql, values) in reads {
+                match Self::fetch_rows(pool, sql, values).await {
+                    Ok(rows) => results.push(rows),
+                    Err(error) => return Ok(Some(Err(error))),
+                }
+            }
+            Ok(Some(Ok(results)))
+        })
+    }
+
     fn try_get_i64(row: &Self::Row, column: &str) -> crate::Result<i64>;
     fn try_get_f64(row: &Self::Row, column: &str) -> crate::Result<f64>;
     fn try_get_string(row: &Self::Row, column: &str) -> crate::Result<String>;
@@ -699,6 +736,47 @@ impl OrmBackend for PostgresBackend {
 
             tx.commit().await?;
             Ok((first, second))
+        })
+    }
+
+    fn fetch_rows_admitted_with_auth<'a>(
+        pool: &'a Self::Pool,
+        prelude: &'a [&'a str],
+        admission: (&'a str, &'a [SqlValue]),
+        reads: &'a [(&'a str, &'a [SqlValue])],
+        auth: Option<&'a DbAuthContext>,
+    ) -> BoxFuture<'a, crate::Result<Option<crate::Result<Vec<Vec<Self::Row>>>>>> {
+        Box::pin(async move {
+            let mut tx = pool.begin().await?;
+            if let Some(auth) = auth {
+                apply_postgres_auth_context(&mut tx, auth).await?;
+            }
+            for sql in prelude {
+                sqlx::query(sql).execute(&mut *tx).await?;
+            }
+            let sql = Self::normalize_sql(admission.0, 1);
+            let mut query = sqlx::query(&sql);
+            for value in admission.1 {
+                query = bind_postgres_value(query, value);
+            }
+            if !query.fetch_all(&mut *tx).await?.is_empty() {
+                tx.rollback().await?;
+                return Ok(None);
+            }
+            let mut results = Vec::with_capacity(reads.len());
+            for (sql, values) in reads {
+                let sql = Self::normalize_sql(sql, 1);
+                let mut query = sqlx::query(&sql);
+                for value in *values {
+                    query = bind_postgres_value(query, value);
+                }
+                match query.fetch_all(&mut *tx).await {
+                    Ok(rows) => results.push(rows),
+                    Err(error) => return Ok(Some(Err(error))),
+                }
+            }
+            tx.commit().await?;
+            Ok(Some(Ok(results)))
         })
     }
 

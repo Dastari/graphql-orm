@@ -10,7 +10,8 @@ use std::error::Error as StdError;
 use std::fmt;
 
 use super::runtime_query::{
-    cursor_after_sql, effective_terms, placeholder, render_order_terms, value_bind,
+    RuntimeReadGuard, cursor_after_sql, effective_terms, guarded_rows, placeholder,
+    render_order_terms, value_bind,
 };
 use super::{
     CollectionId, DatabaseBackend, DbAuthContext, FieldId, OrmBackend, RelationCardinality,
@@ -962,7 +963,25 @@ where
         request: &RuntimeAnchoredReadRequest,
         auth: Option<&DbAuthContext>,
     ) -> Result<RuntimeAnchoredConnection, RuntimeRelationError> {
-        let connection = self.execute_runtime_read(&request.inner, auth).await?;
+        self.execute_runtime_anchored_read_guarded(request, auth, None)
+            .await?
+            .ok_or_else(|| RuntimeRelationError::new(RuntimeRelationErrorCode::BackendExecution))
+    }
+
+    /// [`Self::execute_runtime_anchored_read`] with a guard run last in the
+    /// read's transaction; `None` when the guard refused the read.
+    pub(crate) async fn execute_runtime_anchored_read_guarded(
+        &self,
+        request: &RuntimeAnchoredReadRequest,
+        auth: Option<&DbAuthContext>,
+        guard: Option<&RuntimeReadGuard>,
+    ) -> Result<Option<RuntimeAnchoredConnection>, RuntimeRelationError> {
+        let Some(connection) = self
+            .execute_runtime_read_guarded(&request.inner, auth, guard)
+            .await?
+        else {
+            return Ok(None);
+        };
         let mut edges = Vec::with_capacity(connection.edges.len());
         for (parent_index, edge) in connection.edges.into_iter().enumerate() {
             let mut anchors = Vec::with_capacity(request.anchors.len());
@@ -995,11 +1014,11 @@ where
                 anchors,
             });
         }
-        Ok(RuntimeAnchoredConnection {
+        Ok(Some(RuntimeAnchoredConnection {
             edges,
             page_info: connection.page_info,
             total_count: connection.total_count,
-        })
+        }))
     }
 }
 
@@ -1364,6 +1383,23 @@ where
         request: &RuntimeRelationBatchRequest,
         auth: Option<&DbAuthContext>,
     ) -> Result<RuntimeRelationBatch, RuntimeRelationError> {
+        self.execute_runtime_relation_batch_guarded(request, auth, None)
+            .await?
+            .ok_or_else(|| {
+                RuntimeRelationError::new(RuntimeRelationErrorCode::BackendExecution)
+                    .for_relation(&request.relation)
+            })
+    }
+
+    /// [`Self::execute_runtime_relation_batch`] with a guard run last in the
+    /// batch's transaction; `None` when the guard refused the read. A batch
+    /// with no parent key to read executes no statement and no guard.
+    pub(crate) async fn execute_runtime_relation_batch_guarded(
+        &self,
+        request: &RuntimeRelationBatchRequest,
+        auth: Option<&DbAuthContext>,
+        guard: Option<&RuntimeReadGuard>,
+    ) -> Result<Option<RuntimeRelationBatch>, RuntimeRelationError> {
         if !B::RUNTIME_ROW_DECODING_SUPPORTED
             || !matches!(
                 B::DIALECT,
@@ -1406,14 +1442,14 @@ where
             })
             .collect::<Vec<_>>();
         if groups.is_empty() {
-            return Ok(RuntimeRelationBatch {
+            return Ok(Some(RuntimeRelationBatch {
                 results,
                 anchor_relations: request
                     .target_anchors
                     .iter()
                     .map(|spec| spec.relation.clone())
                     .collect(),
-            });
+            }));
         }
         let (sql, values) = render_relation_rows(request, B::DIALECT, &groups)?;
         let counts_requested = matches!(
@@ -1423,7 +1459,32 @@ where
                 ..
             }
         );
-        let (rows, count_rows, count_groups) = if counts_requested {
+        let (rows, count_rows, count_groups) = if let Some(guard) = guard {
+            let counted = if counts_requested {
+                Some(render_relation_counts(request, B::DIALECT, &groups)?)
+            } else {
+                None
+            };
+            let mut statements: Vec<(&str, &[SqlValue])> = vec![(&sql, &values)];
+            if let Some((count_sql, count_values, _)) = &counted {
+                statements.push((count_sql, count_values));
+            }
+            let Some((rows, counts)) = guarded_rows::<B>(self.pool(), guard, &statements, auth)
+                .await
+                .map_err(|error| {
+                    RuntimeRelationError::new(RuntimeRelationErrorCode::BackendExecution)
+                        .for_relation(&request.relation)
+                        .source(error)
+                })?
+            else {
+                return Ok(None);
+            };
+            (
+                rows,
+                counts,
+                counted.map(|(_, _, groups)| groups).unwrap_or_default(),
+            )
+        } else if counts_requested {
             let (count_sql, count_values, count_groups) =
                 render_relation_counts(request, B::DIALECT, &groups)?;
             let (rows, counts) = super::fetch_rows_pair_with_auth::<B>(
@@ -1584,13 +1645,13 @@ where
             }
         }
         results.sort_by_key(|result| result.parent_index);
-        Ok(RuntimeRelationBatch {
+        Ok(Some(RuntimeRelationBatch {
             results,
             anchor_relations: request
                 .target_anchors
                 .iter()
                 .map(|spec| spec.relation.clone())
                 .collect(),
-        })
+        }))
     }
 }

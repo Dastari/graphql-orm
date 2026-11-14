@@ -941,6 +941,156 @@ async fn failing_hooks_roll_back_staged_claims_and_concurrent_claims_cannot_both
     f.finish().await;
 }
 
+/// The response budget charges a projected object once for every record that
+/// carries it, not once per distinct stored value, so a page that repeats one
+/// value is refused before the next projector runs (#528).
+#[tokio::test]
+async fn projection_budget_counts_every_record_that_shares_a_value() {
+    let f = Fixture::new().await;
+    let projector = FileProjector::new(true);
+    let api = f.api(f.options(&projector)).unwrap();
+    // Banners: two.png (rows 1 and 3) and one.png (row 2): 7 bytes each, 21
+    // bytes for the page, or 14 when counted once per distinct value.
+    let query = "{ profiles { edges { node { banner { name } avatar { name } } } } }";
+    let ok = api
+        .execute(f.request(&read(), query, Default::default()))
+        .await;
+    assert!(ok.errors.is_empty(), "{:?}", ok.errors);
+    let before = projector.calls.load(Ordering::SeqCst);
+    let response = api
+        .execute(f.request(
+            &read(),
+            query,
+            RuntimeGraphqlLimits {
+                max_response_bytes: 20,
+                ..Default::default()
+            },
+        ))
+        .await;
+    assert_eq!(codes(&response), ["cost_exceeded"]);
+    assert_eq!(
+        projector.calls.load(Ordering::SeqCst) - before,
+        1,
+        "the avatar projector ran after the banners exceeded the budget"
+    );
+    f.finish().await;
+}
+
+/// Mutation roots of one request share the response budget, projections
+/// included: at the smallest budget that serves both roots everything is
+/// returned, and one byte less refuses the second root's payload, not the
+/// first's. Both mutations commit either way (#528).
+#[tokio::test]
+async fn mutation_roots_share_the_response_budget_with_their_projections() {
+    let f = Fixture::new().await;
+    // Large projected names, so the committed payloads, not the planning
+    // estimate, decide which budgets are enough.
+    let mut projector = Arc::try_unwrap(FileProjector::new(true)).ok().unwrap();
+    projector.files = BTreeMap::from([
+        (uuid(1), ("o".repeat(2_000), 10)),
+        (uuid(2), ("t".repeat(2_000), 20)),
+    ]);
+    let projector = Arc::new(projector);
+    let api = f.api(f.options(&projector)).unwrap();
+    let read = read();
+    const BOTH: &str = r#"mutation($schema:String!){
+        a: updateProfile(expectedSchema:$schema, key:{id:"1"}, input:{name:"a"}) { record { banner { name } } }
+        b: updateProfile(expectedSchema:$schema, key:{id:"2"}, input:{name:"b"}) { record { banner { name } } }
+    }"#;
+    let run = async |budget: usize| {
+        // Every write claims its banner; clear the claims between requests.
+        sqlx::query("DELETE FROM format_file_claims")
+            .execute(f.db.pool())
+            .await
+            .unwrap();
+        let limits = RuntimeGraphqlLimits {
+            max_response_bytes: budget,
+            ..Default::default()
+        };
+        api.execute(f.request(&read, BOTH, limits)).await
+    };
+    let served = run(RuntimeGraphqlLimits::default().max_response_bytes).await;
+    assert!(served.errors.is_empty(), "{:?}", served.errors);
+    // The smallest budget that serves both roots.
+    let (mut low, mut high) = (1usize, RuntimeGraphqlLimits::default().max_response_bytes);
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if run(middle).await.errors.is_empty() {
+            high = middle;
+        } else {
+            low = middle + 1;
+        }
+    }
+    // Count the projected objects copied into responses from here on.
+    let copies = Arc::new(AtomicUsize::new(0));
+    let _copies = tracing::subscriber::set_default(Copies(copies.clone()));
+    let exact = run(low).await;
+    assert!(exact.errors.is_empty(), "{:?}", exact.errors);
+    assert_eq!(
+        copies.swap(0, Ordering::SeqCst),
+        2,
+        "both banners are copied"
+    );
+    sqlx::query("UPDATE format_profiles SET name = 'reset' WHERE id IN (1, 2)")
+        .execute(f.db.pool())
+        .await
+        .unwrap();
+    let short = run(low - 1).await;
+    assert_eq!(
+        codes(&short),
+        ["mutation_payload_failed"],
+        "{:?}",
+        short.errors
+    );
+    // Root `b`'s banner, the one over the remainder, is refused before it is
+    // copied: only root `a`'s is.
+    assert_eq!(
+        copies.load(Ordering::SeqCst),
+        1,
+        "the refused banner was copied"
+    );
+    // The first root was served; the second, the one over the remainder, is refused.
+    // Root `b` is on line 3 of the operation.
+    assert_eq!(
+        short.errors[0]
+            .locations
+            .iter()
+            .map(|pos| pos.line)
+            .collect::<Vec<_>>(),
+        [3],
+        "{:?}",
+        short.errors
+    );
+    let names: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM format_profiles WHERE id IN (1, 2) ORDER BY id")
+            .fetch_all(f.db.pool())
+            .await
+            .unwrap();
+    assert_eq!(names, ["a", "b"], "both mutations committed");
+    f.finish().await;
+}
+
+/// Counts `graphql_orm::runtime_projection` events: one per projection call
+/// that copied objects into a response.
+struct Copies(Arc<AtomicUsize>);
+impl tracing::Subscriber for Copies {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        metadata.target() == "graphql_orm::runtime_projection"
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        if event.metadata().target() == "graphql_orm::runtime_projection" {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
 #[tokio::test]
 async fn projected_runtime_inputs_compile_public_scalar_capabilities() {
     use graphql_orm_ai_tool_profiles::{

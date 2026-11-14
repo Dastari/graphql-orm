@@ -3,7 +3,7 @@ title: "PostgreSQL RLS"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-14
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -515,15 +515,41 @@ reaches:
   ordering (`order_aggregate`) whose target is an RLS entity, even from a non-RLS root;
 - every entity a static dependent delete reads or writes.
 
-Entities without `#[graphql_rls]` are unaffected. The check applies to generated static entities
-only; runtime GraphQL collections do not carry RLS metadata
-([#559](https://github.com/Dastari/graphql-orm/issues/559)). Two explicit exceptions remain:
+Entities without `#[graphql_rls]` are unaffected.
+
+Runtime GraphQL applies the same rule from the database itself. A runtime query, `node` lookup,
+mutation or live subscription registration is refused with the lowercase runtime code
+`authorization_misconfigured`, before any host authority call or database work, when its module
+includes a table with row-level security enabled (`pg_class.relrowsecurity`, read live for every
+such request) and the request carries no `DbAuthContext`. The module's tables are its collection
+tables, link tables, search document tables and, for mutations, the source tables of verified
+incoming dependencies. The check is per module, so a module that mixes RLS and non-RLS tables
+needs a `DbAuthContext` for all of its roots. A live subscription registered
+without context is checked again at the two points where RLS state matters for
+an event. Each of the event's read transactions first locks the tables it reads
+`IN ACCESS SHARE MODE` (in name order, waiting at most two seconds), which
+conflicts with the lock `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` needs, so
+their RLS state cannot change until the read commits; it then checks that none
+of them has row-level security, and only then reads. After release
+authorization, admission is checked again immediately before the payload is
+handed to the subscriber, with no host code awaited in between. If either check
+finds RLS enabled or cannot run, including a lock timeout, the subscription
+ends with `authorization_misconfigured` and that event delivers nothing. This
+costs one lock statement and one catalog query per read transaction, and one
+catalog query per 256 module tables per delivered event, for subscriptions
+without a `DbAuthContext` on PostgreSQL only; subscriptions with a context or
+`SystemAccess`, `LegacyPermissive`, and other backends skip it. Without the refusal, a role subject to RLS would
+return silently filtered (empty) results and a role that bypasses RLS, such as the table owner,
+would return every row. Host-owned `RuntimeHostField` resolvers are unaffected.
+
+Two explicit exceptions remain, for generated and runtime GraphQL alike:
 
 - `SystemAccess::new("<name>")` in the request data is the named trusted bypass for an internal
   schema that deliberately runs without a principal. It only skips this ORM-side check. Under a
   correctly validated runtime role the database still applies RLS, and the generated predicates,
   which see no tenant or user, hide the rows. Use it with a pool whose role is meant to see them.
 - `AuthorizationMode::LegacyPermissive` keeps the earlier behaviour of running without settings.
+  For runtime GraphQL it is read from the composer's `Database`.
 
 ### Dependent deletes
 

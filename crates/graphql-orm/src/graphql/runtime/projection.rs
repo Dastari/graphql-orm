@@ -296,7 +296,13 @@ impl ProjectedPlan {
     }
 
     /// Call the projector once and return one output value per input record value,
-    /// plus the encoded bytes to reserve against the response budget.
+    /// plus the bytes charged against the response budget.
+    ///
+    /// `budget` is the response budget still available and `charge` the bytes
+    /// one copy of an output value takes in the response, by the rule of the
+    /// final response measure. Each distinct output is built once and charged
+    /// for every record that carries it; a total above `budget` is refused with
+    /// `cost_exceeded` before any output is copied to a record.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn resolve(
         &self,
@@ -306,19 +312,43 @@ impl ProjectedPlan {
         auth: Option<&DbAuthContext>,
         context: Option<&(dyn Any + Send + Sync)>,
         limits: super::RuntimeGraphqlLimits,
+        budget: usize,
+        charge: &(dyn Fn(&async_graphql::Value) -> Result<usize, RuntimeGraphqlError> + Sync),
     ) -> Result<(Vec<async_graphql::Value>, usize), RuntimeGraphqlError> {
-        let mut bytes = 0usize;
+        let over = || RuntimeGraphqlError::new("cost_exceeded");
+        // Records without a stored value output null; charge those first.
+        let nulls = stored
+            .iter()
+            .filter(|value| matches!(value, RuntimeValue::Null))
+            .count();
+        let mut bytes = if nulls == 0 {
+            0
+        } else {
+            charge(&async_graphql::Value::Null)?
+                .checked_mul(nulls)
+                .filter(|total| *total <= budget)
+                .ok_or_else(over)?
+        };
         let failed = || RuntimeGraphqlError::new("projection_failed");
         let mut distinct: Vec<RuntimeValue> = Vec::new();
+        // How many records carry each distinct value: each gets its own copy
+        // of the projected object in the response.
+        let mut uses: Vec<usize> = Vec::new();
         let mut keys = BTreeMap::new();
         for value in stored {
             if matches!(value, RuntimeValue::Null) {
                 continue;
             }
             let key = serde_json::to_string(value).map_err(|_| failed())?;
-            if let std::collections::btree_map::Entry::Vacant(entry) = keys.entry(key) {
-                entry.insert(distinct.len());
-                distinct.push(value.clone());
+            match keys.entry(key) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(distinct.len());
+                    distinct.push(value.clone());
+                    uses.push(1);
+                }
+                std::collections::btree_map::Entry::Occupied(entry) => {
+                    uses[*entry.get()] += 1;
+                }
             }
         }
         if distinct.len() > limits.projection.max_values_per_call {
@@ -382,19 +412,21 @@ impl ProjectedPlan {
                                 }
                                 _ => return Err(failed()),
                             };
-                            bytes = bytes
-                                .checked_add(match &encoded {
-                                    async_graphql::Value::String(text) => text.len(),
-                                    _ => 16,
-                                })
-                                .ok_or_else(failed)?;
                             object.insert(async_graphql::Name::new(name), encoded);
                         }
                         async_graphql::Value::Object(object)
                     }
                 });
+                // Every record carrying this value gets its own copy.
+                let output = outputs[index].as_ref().ok_or_else(failed)?;
+                bytes = charge(output)?
+                    .checked_mul(uses[index])
+                    .and_then(|total| bytes.checked_add(total))
+                    .filter(|total| *total <= budget)
+                    .ok_or_else(over)?;
             }
         }
+        // Only now, within budget, copy each object to the records that carry it.
         let values = stored
             .iter()
             .map(|value| {
@@ -402,9 +434,19 @@ impl ProjectedPlan {
                     return Ok(async_graphql::Value::Null);
                 }
                 let key = serde_json::to_string(value).map_err(|_| failed())?;
+                #[cfg(test)]
+                tests::MATERIALIZED.with(|count| count.set(count.get() + 1));
                 outputs[keys[&key]].clone().ok_or_else(failed)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let copies = stored.len() - nulls;
+        if copies > 0 {
+            tracing::trace!(
+                target: "graphql_orm::runtime_projection",
+                copies,
+                "projected objects copied into the response"
+            );
+        }
         Ok((values, bytes))
     }
 }
@@ -507,4 +549,207 @@ pub(super) fn merge_projected(
         })
         .map(str::to_owned)
         .collect();
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use crate::graphql::orm::{
+        CollectionId, RuntimeCollection, RuntimeField, RuntimeFormatPayload, RuntimeSchema,
+    };
+
+    thread_local! {
+        /// Per-record copies of projected objects made on this thread.
+        pub(crate) static MATERIALIZED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    const NAME: &str = "example.file_ref";
+
+    /// Resolves every value to an object whose `name` is 100 bytes.
+    struct Large(RuntimeProjectionContract);
+    impl RuntimeFieldProjector for Large {
+        fn contract(&self) -> &RuntimeProjectionContract {
+            &self.0
+        }
+        fn resolve<'a>(
+            &'a self,
+            batch: RuntimeProjectionBatch<'a>,
+        ) -> BoxFuture<'a, Result<RuntimeProjectionResults, RuntimeProjectionError>> {
+            Box::pin(async move {
+                let mut results = RuntimeProjectionResults::new();
+                for value in batch.values {
+                    results.insert(
+                        value.clone(),
+                        RuntimeProjected::Object(BTreeMap::from([(
+                            "name".to_owned(),
+                            RuntimeValue::String("x".repeat(100)),
+                        )])),
+                    );
+                }
+                Ok(results)
+            })
+        }
+    }
+
+    fn field(id: &str, kind: RuntimeValueKind, format: Option<RuntimeFieldFormat>) -> RuntimeField {
+        RuntimeField {
+            description: None,
+            classification: None,
+            export: None,
+            id: FieldId::new(id).unwrap(),
+            api_name: id.into(),
+            physical_column: id.into(),
+            value_kind: kind,
+            nullable: format.is_some(),
+            unique: false,
+            filterable: false,
+            sortable: false,
+            generated: false,
+            default: None,
+            format,
+            auto_timestamp: None,
+            auto_actor: None,
+        }
+    }
+
+    /// A schema with two projected fields, `avatar` and `banner`, whose objects
+    /// select a 100-byte `name`, and their plans in that order.
+    pub(crate) fn fixture() -> (ValidatedRuntimeSchema, Vec<ProjectedPlan>) {
+        let namespace = RuntimeFormatNamespace::new(NAME).unwrap();
+        let format = || {
+            Some(
+                RuntimeFieldFormat::new(namespace.clone(), 1, RuntimeFormatPayload::empty())
+                    .unwrap(),
+            )
+        };
+        let schema = RuntimeSchema {
+            repository_only: false,
+            format_version: 1,
+            collections: vec![RuntimeCollection {
+                node_identity: None,
+                live_subscriptions: None,
+                description: None,
+                classification: None,
+                id: CollectionId::new("files").unwrap(),
+                api_type_name: "File".into(),
+                api_plural_name: "Files".into(),
+                physical_table: "projection_files".into(),
+                primary_key: vec![FieldId::new("id").unwrap()],
+                append_only: false,
+                retention_purge: false,
+                fields: vec![
+                    field("id", RuntimeValueKind::Integer, None),
+                    field("avatar", RuntimeValueKind::Uuid, format()),
+                    field("banner", RuntimeValueKind::Uuid, format()),
+                ],
+                relations: vec![],
+                indexes: vec![],
+                composite_unique: vec![],
+                default_order: vec![],
+                label_fields: vec![],
+                search: None,
+            }],
+        }
+        .validate()
+        .unwrap();
+        let projector = Arc::new(Large(RuntimeProjectionContract {
+            namespace: namespace.clone(),
+            versions: 1..=1,
+            value_kinds: BTreeSet::from([RuntimeValueKind::Uuid]),
+            object: RuntimeProjectedObject::new(
+                "LargeFile",
+                vec![RuntimeProjectedField::new(
+                    "name",
+                    RuntimeValueKind::String,
+                    false,
+                )],
+            )
+            .unwrap(),
+            may_be_absent: false,
+        }));
+        let fields = ["avatar", "banner"].map(|id| FieldId::new(id).unwrap());
+        let bindings = compile(
+            &schema,
+            &fields
+                .iter()
+                .map(|id| (id.clone(), ProjectorRef(projector.clone())))
+                .collect(),
+            &[],
+        )
+        .unwrap();
+        let collection = schema
+            .resolve_collection(&CollectionId::new("files").unwrap())
+            .unwrap();
+        let plans = fields
+            .iter()
+            .map(|id| ProjectedPlan {
+                field: schema.resolve_field(&collection, id).unwrap(),
+                api_name: id.as_str().to_owned(),
+                binding: bindings[id].clone(),
+                selected: vec!["name".into()],
+            })
+            .collect();
+        (schema, plans)
+    }
+
+    /// The shape of a record selecting `avatar { name }` and `banner { name }`.
+    pub(crate) fn record_shape() -> super::super::execution::OutputShape {
+        use super::super::execution::OutputShape;
+        let object =
+            || OutputShape::of_fields(vec![("name", "name", OutputShape::of_fields(vec![]))]);
+        OutputShape::of_fields(vec![
+            ("avatar", "avatar", object()),
+            ("banner", "banner", object()),
+        ])
+    }
+    /// Bytes one projected object adds as `avatar` or `banner` (both six
+    /// letters): the key, the object and its 100-byte name, by the response
+    /// measure's rule.
+    pub(crate) const OBJECT_BYTES: usize = (6 * 6 + 4) + 2 + (4 * 6 + 4) + 2 + 100 * 6;
+
+    pub(crate) fn materialized() -> usize {
+        MATERIALIZED.with(std::cell::Cell::get)
+    }
+    pub(crate) fn reset_materialized() {
+        MATERIALIZED.with(|count| count.set(0));
+    }
+
+    /// A page repeating one stored value is charged for every copy of its
+    /// projected object, and refused before any copy is made (#528).
+    #[tokio::test]
+    async fn repeated_values_are_refused_before_per_record_copies() {
+        let (schema, plans) = fixture();
+        let plan = &plans[0];
+        let shared = RuntimeValue::Uuid(uuid::Uuid::from_bytes([1; 16]));
+        let other = RuntimeValue::Uuid(uuid::Uuid::from_bytes([2; 16]));
+        let mut stored = vec![shared; 49];
+        stored.push(other);
+        let shape = record_shape();
+        let shapes = super::super::execution::Shapes::of(&shape);
+        let charge = |value: &async_graphql::Value| shapes.field_bytes("avatar", value, usize::MAX);
+        let run = |budget: usize| {
+            plan.resolve(
+                &schema,
+                &stored,
+                RuntimeProjectionPurpose::Read,
+                None,
+                None,
+                Default::default(),
+                budget,
+                &charge,
+            )
+        };
+        // 50 records, from two distinct values, each charged in full.
+        let page = 50 * OBJECT_BYTES;
+        reset_materialized();
+        let refused = run(page - 1).await;
+        assert_eq!(
+            refused.err().map(RuntimeGraphqlError::code),
+            Some("cost_exceeded")
+        );
+        assert_eq!(materialized(), 0);
+        let (values, bytes) = run(page).await.unwrap();
+        assert_eq!((values.len(), bytes), (50, page));
+        assert_eq!(materialized(), 50);
+    }
 }

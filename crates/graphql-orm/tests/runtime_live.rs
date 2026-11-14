@@ -123,6 +123,10 @@ struct Authority {
     deny_title: AtomicBool,
     allow_delete: AtomicBool,
     pause: AtomicBool,
+    /// Pause the second delivery check of the next event: release
+    /// authorization, after the event's read.
+    pause_release: AtomicBool,
+    release_armed: AtomicBool,
     entered: Notify,
     resume: Notify,
     purposes: Mutex<Vec<RuntimeReadPurpose>>,
@@ -161,6 +165,15 @@ impl RuntimeReadAuthority for Authority {
             if check.purpose == RuntimeReadPurpose::SubscriptionDelivery
                 && self.pause.swap(false, Ordering::SeqCst)
             {
+                self.entered.notify_one();
+                self.resume.notified().await;
+            }
+            if check.purpose == RuntimeReadPurpose::SubscriptionDelivery
+                && self.pause_release.load(Ordering::SeqCst)
+                && self.release_armed.swap(true, Ordering::SeqCst)
+            {
+                self.pause_release.store(false, Ordering::SeqCst);
+                self.release_armed.store(false, Ordering::SeqCst);
                 self.entered.notify_one();
                 self.resume.notified().await;
             }
@@ -2263,7 +2276,15 @@ async fn review_reload_error_terminal_is_independent_of_prior_visibility() {
             .await
             .unwrap();
         f.emit(key, RuntimeMutationAction::Update, None);
-        assert_terminal(&mut target, "SUBSCRIPTION_CONTINUITY_LOST").await;
+        // On PostgreSQL a subscription without database context locks and
+        // checks the table before each read; a dropped table fails that
+        // admission, which ends it as misconfigured. Either way the terminal
+        // does not depend on the key's prior visibility.
+        #[cfg(feature = "postgres")]
+        let terminal = "authorization_misconfigured";
+        #[cfg(not(feature = "postgres"))]
+        let terminal = "SUBSCRIPTION_CONTINUITY_LOST";
+        assert_terminal(&mut target, terminal).await;
     }
 }
 
@@ -2564,6 +2585,237 @@ async fn dependent_set_null_advances_record_version_and_refuses_stale_expected_c
             RuntimeFieldState::Null
         );
     }
+}
+
+/// Live subscriptions registered without a `DbAuthContext` are admitted again
+/// before each event's reads. Enabling row-level security after registration
+/// ends them with `authorization_misconfigured` and delivers nothing from that
+/// event, for the table owner (which RLS would not restrict) and for a role
+/// subject to RLS (which would read silently filtered rows) (#559).
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn enabling_rls_after_registration_ends_live_subscriptions_without_delivery() {
+    let f = Fixture::new().await;
+    for sql in [
+        "CREATE ROLE runtime_live_reader NOLOGIN",
+        "GRANT SELECT ON runtime_live_records TO runtime_live_reader",
+    ] {
+        graphql_orm::sqlx::query(sql)
+            .execute(f.db.pool())
+            .await
+            .unwrap();
+    }
+    let reader_pool = graphql_orm::sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .after_connect(|connection, _| {
+            Box::pin(async move {
+                graphql_orm::sqlx::query("SET ROLE runtime_live_reader")
+                    .execute(connection)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect(&f._owned.url)
+        .await
+        .unwrap();
+    let reader_api = RuntimeGraphqlComposer::new(
+        Database::<Backend>::new(reader_pool.clone()),
+        "Query",
+        Default::default(),
+    )
+    .unwrap()
+    .install(
+        RuntimeGraphqlModule::compile(
+            f.schema.clone(),
+            RuntimeGraphqlOptions::default()
+                .with_cursor_profile(RuntimeCursorProfile::Unprotected)
+                .with_live_source(
+                    f.source.clone(),
+                    RuntimeLiveProfile::ApplicationPolicy {
+                        match_profile: RuntimeMatchProfile::PostgresCUtf8,
+                    },
+                ),
+        )
+        .unwrap(),
+    )
+    .unwrap()
+    .finish()
+    .unwrap();
+    let mut owner = f.stream(LIVE).await;
+    let mut reader = reader_api.execute_stream(f.request(LIVE)).boxed();
+    tokio::select! {
+        response = reader.next() => panic!("registration produced a frame: {response:?}"),
+        () = f.source.subscribed.notified() => {}
+    }
+    // Both deliver while the table has no row-level security.
+    f.emit("visible", RuntimeMutationAction::Update, None);
+    for stream in [&mut owner, &mut reader] {
+        let value = next(stream).await;
+        assert!(value.errors.is_empty(), "{value:?}");
+        assert_eq!(
+            value.data.into_json().unwrap()["recordChanged"]["record"]["id"],
+            "visible"
+        );
+    }
+    for sql in [
+        "ALTER TABLE runtime_live_records ENABLE ROW LEVEL SECURITY",
+        "CREATE POLICY tenant_rows ON runtime_live_records USING (tenant = current_setting('app.tenant_id', true))",
+    ] {
+        graphql_orm::sqlx::query(sql)
+            .execute(f.db.pool())
+            .await
+            .unwrap();
+    }
+    f.emit("visible", RuntimeMutationAction::Update, None);
+    assert_terminal(&mut owner, "authorization_misconfigured").await;
+    assert_terminal(&mut reader, "authorization_misconfigured").await;
+    reader_pool.close().await;
+}
+
+/// RLS enabled while a delivery waits on host authorization: before the
+/// event's read (the check inside the read transaction refuses) or after it,
+/// during release authorization (the check immediately before delivery
+/// refuses). Either way the subscription ends with
+/// `authorization_misconfigured` and the event delivers nothing, for the table
+/// owner and for a role subject to RLS (#559).
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn rls_enabled_during_delivery_authorization_ends_without_delivery() {
+    let f = Fixture::new().await;
+    for sql in [
+        "CREATE ROLE runtime_live_reader NOLOGIN",
+        "GRANT SELECT ON runtime_live_records TO runtime_live_reader",
+    ] {
+        graphql_orm::sqlx::query(sql)
+            .execute(f.db.pool())
+            .await
+            .unwrap();
+    }
+    let reader_pool = graphql_orm::sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .after_connect(|connection, _| {
+            Box::pin(async move {
+                graphql_orm::sqlx::query("SET ROLE runtime_live_reader")
+                    .execute(connection)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect(&f._owned.url)
+        .await
+        .unwrap();
+    let reader_api = RuntimeGraphqlComposer::new(
+        Database::<Backend>::new(reader_pool.clone()),
+        "Query",
+        Default::default(),
+    )
+    .unwrap()
+    .install(
+        RuntimeGraphqlModule::compile(
+            f.schema.clone(),
+            RuntimeGraphqlOptions::default()
+                .with_cursor_profile(RuntimeCursorProfile::Unprotected)
+                .with_live_source(
+                    f.source.clone(),
+                    RuntimeLiveProfile::ApplicationPolicy {
+                        match_profile: RuntimeMatchProfile::PostgresCUtf8,
+                    },
+                ),
+        )
+        .unwrap(),
+    )
+    .unwrap()
+    .finish()
+    .unwrap();
+    // Log every statement, so the test can see what each delivery ran.
+    for sql in [
+        "ALTER SYSTEM SET log_statement = 'all'",
+        "SELECT pg_reload_conf()",
+    ] {
+        graphql_orm::sqlx::query(sql)
+            .execute(f.db.pool())
+            .await
+            .unwrap();
+    }
+    for (role, api) in [("owner", &f.api), ("reader", &reader_api)] {
+        for after_read in [false, true] {
+            let case = format!(
+                "{role}, paused {}",
+                if after_read {
+                    "after the read"
+                } else {
+                    "before the read"
+                }
+            );
+            for sql in [
+                "ALTER TABLE runtime_live_records DISABLE ROW LEVEL SECURITY",
+                "DROP POLICY IF EXISTS tenant_rows ON runtime_live_records",
+            ] {
+                graphql_orm::sqlx::query(sql)
+                    .execute(f.db.pool())
+                    .await
+                    .unwrap();
+            }
+            let mut stream = api.execute_stream(f.request(LIVE)).boxed();
+            tokio::select! {
+                response = stream.next() => panic!("{case}: registration produced a frame: {response:?}"),
+                () = f.source.subscribed.notified() => {}
+            }
+            baseline(&f, &mut stream).await;
+            if after_read {
+                f.authority.pause_release.store(true, Ordering::SeqCst);
+            } else {
+                f.authority.pause.store(true, Ordering::SeqCst);
+            }
+            f.emit("visible", RuntimeMutationAction::Update, None);
+            // Poll the stream so the delivery advances to the paused check.
+            let task = tokio::spawn(async move {
+                assert_terminal(&mut stream, "authorization_misconfigured").await;
+            });
+            timeout(Duration::from_secs(10), f.authority.entered.notified())
+                .await
+                .unwrap_or_else(|_| panic!("{case}: delivery never reached host authorization"));
+            for sql in [
+                "ALTER TABLE runtime_live_records ENABLE ROW LEVEL SECURITY",
+                "CREATE POLICY tenant_rows ON runtime_live_records USING (tenant = current_setting('app.tenant_id', true))",
+            ] {
+                graphql_orm::sqlx::query(sql)
+                    .execute(f.db.pool())
+                    .await
+                    .unwrap();
+            }
+            f.authority.resume.notify_one();
+            task.await.unwrap_or_else(|error| panic!("{case}: {error}"));
+            // After RLS was enabled the delivery locked the table and checked
+            // it, and never read it.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let log = f._owned.logs().unwrap();
+            let after = &log[log
+                .rfind("ENABLE ROW LEVEL SECURITY")
+                .unwrap_or_else(|| panic!("{case}: statement logging is off"))..];
+            let reads = |text: &str| {
+                text.lines()
+                    .filter(|line| {
+                        line.contains("execute")
+                            && line.contains("SELECT")
+                            && line.contains("FROM \"runtime_live_records\"")
+                    })
+                    .count()
+            };
+            assert!(
+                reads(&log) > 0,
+                "{case}: the baseline read is not in the log"
+            );
+            assert_eq!(reads(after), 0, "{case}: a read ran after RLS was enabled");
+            if !after_read {
+                assert!(
+                    after.contains("LOCK TABLE \"runtime_live_records\" IN ACCESS SHARE MODE"),
+                    "{case}: the read transaction took no lock"
+                );
+            }
+        }
+    }
+    reader_pool.close().await;
 }
 
 #[tokio::test]
