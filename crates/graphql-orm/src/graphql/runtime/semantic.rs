@@ -389,7 +389,7 @@ impl RuntimeGraphqlModule {
                             GraphqlGeneratedInputKind::Where,
                             format!("{name}WhereInput"),
                             field.api_name.clone(),
-                            super::schema::filter_name(field.value_kind).into(),
+                            super::schema::filter_name(field.value_kind),
                         );
                     }
                     if c.primary_key.contains(&field.id) {
