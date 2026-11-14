@@ -31,8 +31,22 @@ struct ManifestSnapshot {
 
 impl Drop for ManifestSnapshot {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-        let _ = std::fs::remove_dir(&self.directory);
+        // Record a failed cleanup by error kind only; the private temporary
+        // path stays out of logs.
+        for (resource, result) in [
+            ("file", std::fs::remove_file(&self.path)),
+            ("directory", std::fs::remove_dir(&self.directory)),
+        ] {
+            if let Err(error) = result
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(
+                    resource,
+                    error_kind = ?error.kind(),
+                    "failed to remove a private persisted-document snapshot"
+                );
+            }
+        }
     }
 }
 
