@@ -66,6 +66,18 @@
       ],
       "scope": "Owner-local hardening patch, not an upstream backport. Four server-reachable panics become typed errors: a transform nested inside a decrypted or decompressed payload is refused with Error::InvalidMessage; an async response header without an async ID is refused with Error::InvalidMessage; opening a file on a printer share is refused with Error::UnsupportedOperation, and dropping the unsupported handle closes it; a session key shorter than 16 bytes is refused with Error::InvalidState instead of being sliced. MS-SMB2 3.2.5.3.1 would right-pad a short key with zeros; this client fails closed instead. Includes the in-crate regression tests, and a test-only regression test in src/connection.rs that a server-selected dialect below ConnectionConfig::min_dialect fails negotiation with Error::NegotiationError and that NEGOTIATE was the only SMB2 message sent, so no credentials follow.",
       "upstream": "Upstream 0.12.0 is reported to no longer slice a short session key; the other three sites are not known to be fixed upstream. Replace with a reviewed upstream fix when one is adopted."
+    },
+    {
+      "id": "share-access-override",
+      "patch_file": "PATCHES/share-access-override.patch",
+      "patch_sha256": "469867c4f7bb98502b73f9530fdb2a3b01e585cb07a374c3ee58ab47a4c4a392",
+      "applies_after": "PATCHES/server-response-errors.patch",
+      "runtime_changed_files": [
+        "src/resource.rs",
+        "src/tree.rs"
+      ],
+      "scope": "Owner-local API addition, not an upstream backport. FileCreateArgs gains share_access: Option<ShareAccessFlags>; None keeps the share type's default (read, write and delete on a disk share), and Some requests that share access instead. graphql-orm-storage's SMB temporary-file sweep opens a candidate with no share access, so a file another handle holds open fails with a sharing violation and is skipped instead of deleted. Includes an in-crate regression test of the requested share access.",
+      "upstream": "Not reported upstream. Replace with an upstream share-access option when one is adopted."
     }
   ],
   "license": {
@@ -587,7 +599,7 @@
     "src/resource/file.rs": "e56243cae8cdf2f4b824f499133199b9735656ba0f982e144a2a947f49e9c711",
     "src/resource/file_util.rs": "330ad0184a57f511446e630f620163d1f268df5801db3a0cab94ea47c1f3c9b2",
     "src/resource/pipe.rs": "195ef0cdd14d7463dddc48a9b85e7e97e25e81e8dc55101cdc78a9b8fe676f8a",
-    "src/resource.rs": "59a7c0ac6ef101b76d213c4995dc1fd55a64a876692f334d4701ff034d563139",
+    "src/resource.rs": "d625a5b144e9eb23767706eca7b4d74386502aa5974906b08cad266ece486771",
     "src/session/authenticator.rs": "90b0d8f7ac25a45a03a26afe22c0ddd75eb86154122ad0e55e159cdcef7a6644",
     "src/session/channel.rs": "56a1a9d984b30212f0ff289145dfe9506ede11f822592a17acf31e12f1a85126",
     "src/session/encryptor_decryptor.rs": "6bbe6417927d696bb5c26a8e94ddd4f2d8863c56084b41c7aa1d0a7fbe73f068",
@@ -599,7 +611,7 @@
     "src/sync_helpers.rs": "e348cb36cccce2fe61234b8f5781717b1123582628c77ee4171b09bfbb5fa6b0",
     "src/tree/dfs_tree.rs": "e51e2bb70cde3e854166e7758705fa4e90706be805d05920520882b36808a937",
     "src/tree/ipc_tree.rs": "4bd97825246e9a9c3de638a00a614cd52adad0fd7af45cf250ca8ec8f04515bf",
-    "src/tree.rs": "592f32adc823e45d84f4f0d07abd3dff22e64614ecd160d6af24e3147b55e51b",
+    "src/tree.rs": "55b33152f676112cbcf5571fcadb1f44c76f9a01a48cee6c6bac96d0b9381e43",
     "tests/Dockerfile": "10e06e8fb000d985643663ae33748a481b7303453e357a2c914d687f7c6fdf39",
     "tests/README.md": "f73d0052681dfc4084795d7fa765d2ed7b98338033db076bfb2ed7b82f583ca9",
     "tests/basic.rs": "9589dbc8aa904745c0197809f74154c6a2016cf500a0469af110ba595d7a947c",

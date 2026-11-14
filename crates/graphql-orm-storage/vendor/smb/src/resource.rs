@@ -37,6 +37,11 @@ pub struct FileCreateArgs {
     pub attributes: FileAttributes,
     pub options: CreateOptions,
     pub desired_access: FileAccessMask,
+    /// Share access to request instead of the share type's default (read,
+    /// write and delete on a disk share). `Some(ShareAccessFlags::new())`
+    /// requests an exclusive open, which fails with a sharing violation
+    /// while another handle has the file open.
+    pub share_access: Option<ShareAccessFlags>,
 }
 
 impl FileCreateArgs {
@@ -46,6 +51,7 @@ impl FileCreateArgs {
             attributes: FileAttributes::new(),
             options: CreateOptions::new(),
             desired_access: access,
+            share_access: None,
         }
     }
 
@@ -57,6 +63,7 @@ impl FileCreateArgs {
             attributes,
             options,
             desired_access: FileAccessMask::new().with_generic_all(true),
+            share_access: None,
         }
     }
 
@@ -69,6 +76,7 @@ impl FileCreateArgs {
             attributes,
             options,
             desired_access: FileAccessMask::new().with_generic_all(true),
+            share_access: None,
         }
     }
 
@@ -81,6 +89,7 @@ impl FileCreateArgs {
             desired_access: FileAccessMask::new()
                 .with_generic_read(true)
                 .with_generic_write(true),
+            share_access: None,
         }
     }
 }
@@ -102,14 +111,7 @@ impl Resource {
         share_type: ShareType,
         is_dfs: bool,
     ) -> crate::Result<Resource> {
-        let share_access = if share_type == ShareType::Disk {
-            ShareAccessFlags::new()
-                .with_read(true)
-                .with_write(true)
-                .with_delete(true)
-        } else {
-            ShareAccessFlags::new()
-        };
+        let share_access = requested_share_access(create_args, share_type);
 
         if share_type == ShareType::Print && create_args.disposition != CreateDisposition::Create {
             return Err(Error::InvalidArgument(
@@ -954,6 +956,45 @@ fn resource_kind(is_dir: bool, share_type: ShareType) -> crate::Result<ResourceK
         ShareType::Print => Err(Error::UnsupportedOperation(
             "printer share resources are not supported".to_string(),
         )),
+    }
+}
+
+/// The share access a create requests: the caller's override, or the share
+/// type's default.
+fn requested_share_access(create_args: &FileCreateArgs, share_type: ShareType) -> ShareAccessFlags {
+    create_args.share_access.unwrap_or_else(|| {
+        if share_type == ShareType::Disk {
+            ShareAccessFlags::new()
+                .with_read(true)
+                .with_write(true)
+                .with_delete(true)
+        } else {
+            ShareAccessFlags::new()
+        }
+    })
+}
+
+#[cfg(test)]
+mod share_access_tests {
+    use super::{FileCreateArgs, requested_share_access};
+    use crate::FileAccessMask;
+    use smb_msg::{ShareAccessFlags, ShareType};
+
+    #[test]
+    fn an_override_replaces_the_default_share_access() {
+        let mut args = FileCreateArgs::make_open_existing(FileAccessMask::new());
+        let default = requested_share_access(&args, ShareType::Disk);
+        assert!(default.read() && default.write() && default.delete());
+        args.share_access = Some(ShareAccessFlags::new());
+        assert_eq!(
+            requested_share_access(&args, ShareType::Disk),
+            ShareAccessFlags::new(),
+            "an exclusive open shares nothing"
+        );
+        assert_eq!(
+            requested_share_access(&FileCreateArgs::make_pipe(), ShareType::Pipe),
+            ShareAccessFlags::new()
+        );
     }
 }
 
