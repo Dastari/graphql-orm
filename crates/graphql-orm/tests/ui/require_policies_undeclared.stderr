@@ -1,0 +1,10 @@
+error[E0080]: evaluation panicked: schema_roots! `require_policies: true`: entity `UndecidedTag` declares no policy decision; add `read_policy` or `write_policy` to its entity attribute, or mark it deliberately open with `policy = "open"` (or public with `auth = "none"`)
+  --> tests/ui/require_policies_undeclared.rs:22:1
+   |
+22 | / schema_roots! {
+23 | |     backend: "sqlite",
+24 | |     require_policies: true,
+25 | |     query_custom_ops: [],
+26 | |     entities: [DecidedNote, UndecidedTag],
+27 | | }
+   | |_^ evaluation of `_` failed here

@@ -30,6 +30,7 @@ fn unenforceable_custom_authorization_is_rejected_at_compile_time() {
     tests.compile_fail("tests/ui/custom_authorization_public_with_scopes.rs");
     tests.compile_fail("tests/ui/custom_authorization_empty_scopes.rs");
     tests.compile_fail("tests/ui/custom_authorization_entity_without_context.rs");
+    tests.compile_fail("tests/ui/custom_entity_assurance_without_context.rs");
     tests.compile_fail("tests/ui/custom_authorization_replace_unstated.rs");
     tests.compile_fail("tests/ui/custom_authorization_replace_combined.rs");
     tests.compile_fail("tests/ui/custom_authorization_public_resolver_with_scopes.rs");

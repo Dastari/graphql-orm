@@ -621,3 +621,124 @@ async fn sqlite_bounded_mutations_reject_residual_filters_before_side_effects()
     assert_eq!(unchanged.location, point_value(7.25, 9.5));
     Ok(())
 }
+
+/// Sums the candidate rows the bulk write's locking reads fetched.
+#[derive(Clone, Default)]
+struct PlaceReads(Arc<AtomicUsize>);
+impl ReadQueryObserver for PlaceReads {
+    fn on_read(&self, sql: &str, fetched_rows: usize) {
+        if sql.contains("orm_spatial_places") {
+            self.0.fetch_add(fetched_rows, Ordering::SeqCst);
+        }
+    }
+}
+
+/// A generated GraphQL bulk write whose filter is evaluated in Rust (SQLite
+/// spatial predicates) pages its candidates: it never materializes more than
+/// the scan budget, and the bulk bound counts matching rows only (#446).
+#[tokio::test]
+async fn graphql_bulk_writes_page_residual_filter_candidates()
+-> Result<(), Box<dyn std::error::Error>> {
+    use graphql_orm::graphql::orm::{
+        DatabaseBackend, Entity, MigrationRunner, build_migration_plan,
+    };
+
+    let pool = graphql_orm::sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await?;
+    let database = graphql_orm::db::Database::new(pool.clone());
+    let target_schema = graphql_orm::graphql::orm::SchemaModel::from_entities(&[
+        <SqlitePlace as Entity>::metadata(),
+    ]);
+    let plan = build_migration_plan(
+        DatabaseBackend::Sqlite,
+        &graphql_orm::graphql::orm::SchemaModel {
+            extensions: Vec::new(),
+            tables: Vec::new(),
+        },
+        &target_schema,
+    );
+    database
+        .apply_migrations(&[leak_migration(&plan, "2026111401_bulk_residual_filter")])
+        .await?;
+    // Twelve candidates; two are at the origin.
+    for index in 0..12 {
+        let at_origin = index == 3 || index == 9;
+        SqlitePlace::insert(
+            &database,
+            CreateSqlitePlaceInput {
+                name: format!("place-{index}"),
+                location: if at_origin {
+                    point_value(0.0, 0.0)
+                } else {
+                    point_value(f64::from(index) + 1.0, 5.0)
+                },
+            },
+        )
+        .await?;
+    }
+    let renamed = || async {
+        let count: (i64,) = graphql_orm::sqlx::query_as(
+            "SELECT COUNT(*) FROM orm_spatial_places WHERE name = 'moved'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        count.0
+    };
+    let mutation = r#"mutation { updateSqlitePlaces(where: { location: { equals: { type: "Point", coordinates: [0.0, 0.0] } } }, input: { name: "moved" }) { success affectedCount errorCode error } }"#;
+    let run = |config: PaginationConfig| {
+        let reads = PlaceReads::default();
+        let database = database
+            .clone()
+            .with_pagination_config(config)
+            .with_read_query_observer(reads.clone());
+        async move {
+            let response = schema_builder(database)
+                .data(graphql_orm::graphql::auth::AuthSubject::new("bulk-user"))
+                .finish()
+                .execute(async_graphql::Request::new(mutation))
+                .await;
+            assert!(response.errors.is_empty(), "{:?}", response.errors);
+            let payload = response.data.into_json().unwrap()["updateSqlitePlaces"].clone();
+            (payload, reads.0.load(Ordering::SeqCst))
+        }
+    };
+
+    // The scan budget caps the candidates read: five, plus one look-ahead
+    // row, of the twelve the SQL part of the filter selects.
+    let (payload, fetched) = run(PaginationConfig::default().with_max_scanned_rows(Some(5))).await;
+    assert_eq!(payload["success"], false, "{payload}");
+    assert_eq!(payload["errorCode"], "PAGE_LIMIT_EXCEEDED");
+    assert!(
+        payload["error"].as_str().unwrap().contains("scan budget"),
+        "{payload}"
+    );
+    assert!(
+        fetched <= 6,
+        "fetched {fetched} candidates past a budget of 5"
+    );
+    assert_eq!(renamed().await, 0);
+
+    // The bulk bound counts the rows that match, not the candidates: two
+    // matches over a bound of one are refused, and nothing is written.
+    let (payload, fetched) =
+        run(PaginationConfig::default().with_max_bulk_write_rows(Some(1))).await;
+    assert_eq!(payload["errorCode"], "PAGE_LIMIT_EXCEEDED", "{payload}");
+    assert!(
+        payload["error"].as_str().unwrap().contains("bulk write"),
+        "{payload}"
+    );
+    assert!(fetched <= 12, "{fetched}");
+    assert_eq!(renamed().await, 0);
+
+    // Twelve candidates and two matches fit a bound of two.
+    let (payload, fetched) =
+        run(PaginationConfig::default().with_max_bulk_write_rows(Some(2))).await;
+    assert_eq!(payload["success"], true, "{payload}");
+    assert_eq!(payload["affectedCount"], 2);
+    assert_eq!(fetched, 12, "one page of candidates, read once");
+    assert_eq!(renamed().await, 2);
+    Ok(())
+}

@@ -104,6 +104,8 @@ pub struct Database<B: OrmBackend = DefaultBackend> {
     read_observer: Option<Arc<dyn crate::graphql::orm::ReadQueryObserver>>,
     subscription_key_limit: usize,
     subscription_authority_recheck_interval: std::time::Duration,
+    /// The named system access this handle presents to policies, if any.
+    system_access: Option<Arc<crate::graphql::auth::SystemAccess>>,
     _backend: PhantomData<B>,
 }
 
@@ -126,6 +128,7 @@ impl<B: OrmBackend> Clone for Database<B> {
             read_observer: self.read_observer.clone(),
             subscription_key_limit: self.subscription_key_limit,
             subscription_authority_recheck_interval: self.subscription_authority_recheck_interval,
+            system_access: self.system_access.clone(),
             _backend: PhantomData,
         }
     }
@@ -143,6 +146,10 @@ impl<B: OrmBackend> std::fmt::Debug for Database<B> {
             "subscription_authority_recheck_interval",
             &self.subscription_authority_recheck_interval,
         );
+        debug.field(
+            "system_access",
+            &self.system_access.as_deref().map(|access| &access.name),
+        );
         debug.field("has_mutation_hook", &self.mutation_hook.is_some());
         debug
             .field("has_field_policy", &self.field_policy.is_some())
@@ -157,6 +164,23 @@ impl<B: OrmBackend> Database<B> {
         } else {
             SchemaPolicy::Managed
         }
+    }
+
+    /// The default handle over a bare pool: no policies, hooks or transforms,
+    /// the default authorization mode and the schema policy the pool stands
+    /// for. A SQL Server pool deliberately opened for entity writes is
+    /// `ExternalWritable`, as `connect_ado_external_writable` makes its
+    /// handle; any other pool gets the backend's default. Generated write
+    /// helpers that accept any pool provider use it so a bare pool takes the
+    /// same authorized path as a `Database`.
+    #[doc(hidden)]
+    pub fn __gom_default_for_pool(pool: B::Pool) -> Self {
+        let schema_policy = if B::READ_ONLY && B::pool_permits_entity_writes(&pool) {
+            SchemaPolicy::ExternalWritable
+        } else {
+            Self::default_schema_policy()
+        };
+        Self::base(pool, schema_policy)
     }
 
     fn base(pool: B::Pool, schema_policy: SchemaPolicy) -> Self {
@@ -178,6 +202,7 @@ impl<B: OrmBackend> Database<B> {
             subscription_key_limit: DEFAULT_SUBSCRIPTION_KEY_LIMIT,
             subscription_authority_recheck_interval:
                 DEFAULT_SUBSCRIPTION_AUTHORITY_RECHECK_INTERVAL,
+            system_access: None,
             _backend: PhantomData,
         }
     }
@@ -207,6 +232,7 @@ impl<B: OrmBackend> Database<B> {
             subscription_key_limit: DEFAULT_SUBSCRIPTION_KEY_LIMIT,
             subscription_authority_recheck_interval:
                 DEFAULT_SUBSCRIPTION_AUTHORITY_RECHECK_INTERVAL,
+            system_access: None,
             _backend: PhantomData,
         }
     }
@@ -233,6 +259,7 @@ impl<B: OrmBackend> Database<B> {
             subscription_key_limit: DEFAULT_SUBSCRIPTION_KEY_LIMIT,
             subscription_authority_recheck_interval:
                 DEFAULT_SUBSCRIPTION_AUTHORITY_RECHECK_INTERVAL,
+            system_access: None,
             _backend: PhantomData,
         }
     }
@@ -259,6 +286,7 @@ impl<B: OrmBackend> Database<B> {
             subscription_key_limit: DEFAULT_SUBSCRIPTION_KEY_LIMIT,
             subscription_authority_recheck_interval:
                 DEFAULT_SUBSCRIPTION_AUTHORITY_RECHECK_INTERVAL,
+            system_access: None,
             _backend: PhantomData,
         }
     }
@@ -285,6 +313,7 @@ impl<B: OrmBackend> Database<B> {
             subscription_key_limit: DEFAULT_SUBSCRIPTION_KEY_LIMIT,
             subscription_authority_recheck_interval:
                 DEFAULT_SUBSCRIPTION_AUTHORITY_RECHECK_INTERVAL,
+            system_access: None,
             _backend: PhantomData,
         }
     }
@@ -314,6 +343,7 @@ impl<B: OrmBackend> Database<B> {
             subscription_key_limit: DEFAULT_SUBSCRIPTION_KEY_LIMIT,
             subscription_authority_recheck_interval:
                 DEFAULT_SUBSCRIPTION_AUTHORITY_RECHECK_INTERVAL,
+            system_access: None,
             _backend: PhantomData,
         }
     }
@@ -350,6 +380,7 @@ impl<B: OrmBackend> Database<B> {
             subscription_key_limit: DEFAULT_SUBSCRIPTION_KEY_LIMIT,
             subscription_authority_recheck_interval:
                 DEFAULT_SUBSCRIPTION_AUTHORITY_RECHECK_INTERVAL,
+            system_access: None,
             _backend: PhantomData,
         }
     }
@@ -415,6 +446,37 @@ impl<B: OrmBackend> Database<B> {
         self.event_senders
             .capacity
             .store(capacity, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The named system access this handle presents to policies, if any.
+    ///
+    /// Entity, row and field policies receive the handle a write or read runs
+    /// on, so a policy calls this to tell a labelled worker or hook scope from
+    /// a caller with no authority. `None` is not system authority.
+    pub fn system_access(&self) -> Option<&crate::graphql::auth::SystemAccess> {
+        self.system_access.as_deref()
+    }
+
+    /// Return a copy of this handle that presents `access` to policies.
+    ///
+    /// Use it for a trusted worker, migration or internal tool: its
+    /// repository calls and transactions still reach policies with
+    /// `ctx = None` on the `Repository` surface, and the policy can now
+    /// decide on the named access through [`Self::system_access`];
+    /// repository field decisions receive it as `AccessContext::System`. The
+    /// label grants nothing by itself: a policy that does not look at it
+    /// decides exactly as before. Keep a labelled handle out of GraphQL schema
+    /// data, where it would present the worker's name on client requests; a
+    /// policy should also check that `ctx` is `None`.
+    pub fn with_system_access(mut self, access: crate::graphql::auth::SystemAccess) -> Self {
+        self.system_access = Some(Arc::new(access));
+        self
+    }
+
+    /// Return a copy of this handle that presents no system access.
+    pub fn without_system_access(mut self) -> Self {
+        self.system_access = None;
+        self
     }
 
     /// Return the maximum length of the `Keys` list a generated `<Entity>Changed`
@@ -982,6 +1044,7 @@ impl<B: OrmBackend> Database<B> {
         policy_key: Option<&'static str>,
         record: Option<&(dyn Any + Send + Sync)>,
     ) -> Result<(), OrmPublicError> {
+        let access = self.repository_access(access);
         let allowed = match self.authorization_mode {
             AuthorizationMode::LegacyPermissive => {
                 if let Some(policy) = &self.field_policy {
@@ -1034,6 +1097,19 @@ impl<B: OrmBackend> Database<B> {
         }
     }
 
+    /// The access a repository field decision is asked with: the caller's
+    /// explicit context, or this handle's named system access.
+    fn repository_access<'a>(
+        &'a self,
+        access: Option<crate::graphql::auth::AccessContext<'a>>,
+    ) -> Option<crate::graphql::auth::AccessContext<'a>> {
+        access.or_else(|| {
+            self.system_access
+                .as_deref()
+                .map(crate::graphql::auth::AccessContext::System)
+        })
+    }
+
     /// Authorize a field supplied through an ordinary Rust repository input.
     ///
     /// # Errors
@@ -1054,6 +1130,7 @@ impl<B: OrmBackend> Database<B> {
         if !self.schema_policy.allows_entity_writes() {
             return Err(OrmPublicError::forbidden());
         }
+        let access = self.repository_access(access);
         let allowed = match self.authorization_mode {
             AuthorizationMode::LegacyPermissive => {
                 if let Some(policy) = &self.field_policy {
@@ -1168,6 +1245,36 @@ impl<B: OrmBackend> Database<B> {
             .await?;
         visibility.validate::<T, B>()?;
         Ok(visibility)
+    }
+
+    /// Resolve the installed row policy's optional SQL prefilter for the
+    /// target rows of a generated GraphQL write; see
+    /// [`RowPolicy::write_target_prefilter`](crate::graphql::orm::RowPolicy::write_target_prefilter).
+    /// `None` without a row policy or when the policy declares none.
+    pub async fn write_target_prefilter<T: crate::graphql::orm::Entity + 'static>(
+        &self,
+        ctx: Option<&async_graphql::Context<'_>>,
+        surface: crate::graphql::orm::EntityAccessSurface,
+    ) -> async_graphql::Result<Option<crate::graphql::orm::ReadPredicate>> {
+        let Some(policy) = &self.row_policy else {
+            return Ok(None);
+        };
+        let metadata = T::metadata();
+        let Some(predicate) = policy
+            .write_target_prefilter(
+                ctx,
+                self,
+                metadata.entity_name,
+                metadata.write_policy,
+                surface,
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        // A predicate built for another entity or backend fails closed.
+        crate::graphql::orm::ReadVisibility::Prefilter(predicate.clone()).validate::<T, B>()?;
+        Ok(Some(predicate))
     }
 
     pub(crate) async fn projection_read_visibility<P: crate::graphql::orm::ReadProjection<B>>(
@@ -2070,6 +2177,16 @@ impl<B: OrmBackend> DatabaseBuilder<B> {
     /// Pass `None` to disable limit capping.
     pub fn max_page_limit(mut self, limit: Option<i64>) -> Self {
         self.database.pagination_config.max_limit = limit;
+        self
+    }
+
+    /// Set the maximum rows one generated GraphQL `updateMany` or
+    /// `deleteMany` loads and locks; see
+    /// [`PaginationConfig::max_bulk_write_rows`]. A bulk write that selects
+    /// more is refused with `PAGE_LIMIT_EXCEEDED`. Pass `None` to remove the
+    /// bound.
+    pub fn max_bulk_write_rows(mut self, limit: Option<i64>) -> Self {
+        self.database.pagination_config.max_bulk_write_rows = limit;
         self
     }
 

@@ -56,6 +56,8 @@ mod schema_module;
 mod search;
 #[cfg(feature = "sqlite")]
 pub mod spatial;
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+mod write_targets;
 
 pub use backend::*;
 #[cfg(any(
@@ -117,6 +119,9 @@ pub use scalar_policy::*;
 pub use schema_manager::*;
 pub use schema_module::*;
 pub use search::*;
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+#[doc(hidden)]
+pub use write_targets::*;
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod static_deletes;
