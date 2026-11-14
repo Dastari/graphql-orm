@@ -79,6 +79,12 @@ exportable field result, including entirely nonexportable fields and closed
 relationship cycles, remain in the canonical GraphQL catalogue with
 `NeverExport` result metadata. This does not remove or authorize a resolver.
 
+Entity/catalogue equality excludes the host-only input contracts, matching public
+serialization and fingerprints. JSON/extension round trips have an empty sidecar;
+hosts reattach producer contracts before compiling unreadable generated members.
+A non-null hidden member with a default is not representable by this contract;
+current producers emit none.
+
 ## Install
 
 ```toml

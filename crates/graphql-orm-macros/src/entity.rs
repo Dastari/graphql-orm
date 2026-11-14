@@ -2993,6 +2993,21 @@ fn generated_hidden_input_members(
             .first()
             .is_some_and(|key| key.meta.auto_generated.unwrap_or(key.rust_name == "id"));
     let mut members = Vec::new();
+    for expression in &entity_meta.order_expressions {
+        let input = format!("{struct_name}OrderByInput");
+        let name = &expression.name;
+        members.push(quote! {
+            ::graphql_orm::graphql::orm::GraphqlGeneratedInputMember {
+                kind: ::graphql_orm::graphql::orm::GraphqlGeneratedInputKind::OrderBy,
+                input_type: ::std::string::String::from(#input),
+                field_name: ::std::string::String::from(#name),
+                type_ref: ::graphql_orm::graphql::orm::GraphqlSemanticTypeRef::named(
+                    "OrderDirection", ::graphql_orm::graphql::orm::GraphqlSemanticTypeKind::Enum, true,
+                ),
+                required: false,
+            }
+        });
+    }
     for field in fields {
         let meta = parse_field_metadata(field)?;
         if meta.is_relation {

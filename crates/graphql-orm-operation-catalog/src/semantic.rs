@@ -802,6 +802,10 @@ pub struct GraphqlGeneratedInputMember {
     /// Exact GraphQL input type, including list and nullability structure.
     pub type_ref: GraphqlSemanticTypeRef,
     /// Whether the generated member is non-null and has no default.
+    ///
+    /// This contract cannot represent a non-null member with a default:
+    /// validation requires `required` to be the inverse of outer nullability.
+    /// Current generators do not emit such undisclosed members.
     pub required: bool,
 }
 
@@ -814,7 +818,7 @@ impl std::fmt::Debug for GraphqlGeneratedInputMember {
 }
 
 /// Canonical semantic metadata for one public entity/type.
-#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphqlEntitySemanticMetadata {
     /// Public GraphQL entity/type identity.
@@ -828,7 +832,7 @@ pub struct GraphqlEntitySemanticMetadata {
     /// Host-only contracts for generated members that are never disclosed.
     ///
     /// Omitted from serde exports/imports, SDL, router extensions and public
-    /// catalogue fingerprints. Producers supply this metadata in memory;
+    /// catalogue fingerprints and equality. Producers supply this metadata in memory;
     /// serialized catalogues must be recomposed with their producer contracts
     /// before compiling capabilities that use these members.
     #[serde(skip)]
@@ -844,6 +848,19 @@ pub struct GraphqlEntitySemanticMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record_version: Option<GraphqlRecordVersionMetadata>,
 }
+
+impl PartialEq for GraphqlEntitySemanticMetadata {
+    fn eq(&self, other: &Self) -> bool {
+        self.entity_name == other.entity_name
+            && self.description == other.description
+            && self.default_classification == other.default_classification
+            && self.fields == other.fields
+            && self.label_fields == other.label_fields
+            && self.record_version == other.record_version
+    }
+}
+
+impl Eq for GraphqlEntitySemanticMetadata {}
 
 impl std::fmt::Debug for GraphqlEntitySemanticMetadata {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -2381,6 +2398,39 @@ mod filter_contract_tests {
         forged["entities"][0]["fields"][0]["filter_input"]["operators"][0]["graphql_name"] =
             serde_json::json!("privateId");
         assert!(GraphqlSemanticCatalog::from_extension_payload(forged).is_err());
+    }
+
+    #[test]
+    fn public_catalogue_equality_excludes_generated_input_contracts() {
+        let entity = GraphqlEntitySemanticMetadata {
+            entity_name: "Record".into(),
+            description: "Public record.".into(),
+            default_classification: GraphqlSemanticClassification::Internal,
+            fields: Vec::new().into_boxed_slice(),
+            label_fields: Vec::new(),
+            record_version: None,
+            generated_input_members: vec![GraphqlGeneratedInputMember {
+                kind: GraphqlGeneratedInputKind::OrderBy,
+                input_type: "RecordOrderByInput".into(),
+                field_name: "LabelLength".into(),
+                type_ref: GraphqlSemanticTypeRef::named(
+                    "OrderDirection",
+                    GraphqlSemanticTypeKind::Enum,
+                    true,
+                ),
+                required: false,
+            }],
+        };
+        let catalog = GraphqlSemanticCatalog::compose_descriptors([entity], []).unwrap();
+        let decoded =
+            GraphqlSemanticCatalog::from_extension_payload(catalog.extension_payload().unwrap())
+                .unwrap();
+        assert!(decoded.entities[0].generated_input_members.is_empty());
+        assert_eq!(decoded.fingerprint, catalog.fingerprint);
+        assert_eq!(decoded, catalog);
+        let mut different = decoded.entities[0].clone();
+        different.description = "Another public description.".into();
+        assert_ne!(different, catalog.entities[0]);
     }
 
     #[test]

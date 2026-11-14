@@ -668,3 +668,72 @@ async fn generated_composite_keys_and_keyset_keep_non_exportable_members_closed(
         );
     }
 }
+
+mod readable {
+    use super::*;
+    #[derive(
+        GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug,
+    )]
+    #[graphql_entity(table = "public_input_records", plural = "PublicInputRecords")]
+    pub struct PublicInputRecord {
+        #[primary_key]
+        #[sortable]
+        pub id: String,
+        #[filterable(type = "string")]
+        pub label: String,
+    }
+    schema_roots! {query_custom_ops: [], entities: [PublicInputRecord]}
+}
+
+#[tokio::test]
+async fn public_round_trips_require_recomposed_hidden_contracts() {
+    let hidden_sdl = optional::schema_builder(database().await).finish().sdl();
+    let hidden = optional::graphql_orm_semantic_catalog();
+    assert!(compile(&hidden_sdl, hidden).is_ok());
+    let public_sdl = readable::schema_builder(database().await).finish().sdl();
+    let public = readable::graphql_orm_semantic_catalog();
+    let original_count = compile(&public_sdl, public).unwrap().capabilities().count();
+    assert!(original_count > 0);
+    for catalog in [hidden, public] {
+        for decoded in [
+            serde_json::from_value::<GraphqlSemanticCatalog>(
+                serde_json::to_value(catalog).unwrap(),
+            )
+            .unwrap(),
+            GraphqlSemanticCatalog::from_extension_payload(catalog.extension_payload().unwrap())
+                .unwrap(),
+        ] {
+            assert!(
+                decoded
+                    .entities
+                    .iter()
+                    .all(|entity| entity.generated_input_members.is_empty())
+            );
+            assert_eq!(decoded.fingerprint, catalog.fingerprint);
+            if catalog.entities[0].entity_name == "PublicInputRecord" {
+                assert_eq!(
+                    compile(&public_sdl, &decoded)
+                        .unwrap()
+                        .capabilities()
+                        .count(),
+                    original_count
+                );
+            } else {
+                let error = compile(&hidden_sdl, &decoded)
+                    .expect_err("missing producer contracts return a host error");
+                let AiError::InvalidConfiguration(message) = error else {
+                    panic!("host configuration error expected")
+                };
+                assert!(message.starts_with("generated input "), "{message}");
+                assert!(
+                    catalog.entities[0]
+                        .generated_input_members
+                        .iter()
+                        .any(|member| message
+                            .contains(&format!("{}.{}", member.input_type, member.field_name))),
+                    "{message}"
+                );
+            }
+        }
+    }
+}

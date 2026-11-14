@@ -16,13 +16,18 @@ Upgrade ORM/macros together to 0.149.0 and operation catalogue to 0.8.0.
 `GraphqlEntitySemanticMetadata` gains `generated_input_members`. Macros and
 runtime producers supply the exact input identity, member, type and required
 flag for generated members that remain undisclosed, including configured
-relation-count ordering aliases. Handwritten struct
+relation-count ordering aliases and entity-level order expressions. Handwritten struct
 literals initialize this field with `Vec::new()` unless the host supplies a
 producer contract. This is a breaking Rust struct-literal change.
 
 The sidecar is host-only in-memory data: serde serialization/deserialization,
 SDL and router-protocol extensions omit it, and Debug formatting redacts its
-contents. It is not serialized anywhere. Hosts using public JSON/extension
+contents. It is not serialized anywhere. Entity and catalogue equality also exclude
+these contracts and compare public metadata. A JSON or extension round trip
+therefore remains equal, with the same fingerprint and an empty sidecar.
+Missing producer contracts for unreadable generated members return a host
+configuration error during capability compilation. A catalogue containing only
+readable generated members continues to compile after the round trip. Hosts using public JSON/extension
 payloads for AI compilation must reattach the producer's sidecar (for example,
 from `Entity::graphql_semantic_metadata()`) after deserialization. The entire
 catalogue is a trusted host assertion; its public fields and Deserialize
@@ -31,7 +36,9 @@ implementation do not prove resolver behavior.
 Existing SDL, operation catalogue bytes and operation fingerprints are
 unchanged. Public semantic catalogue bytes and semantic fingerprints are
 also unchanged: the host-only sidecar is excluded from the canonical public
-encoding and fingerprint. No persistent schema or data migration is needed.
+encoding and fingerprint. No persistent schema or data migration is needed. The hidden-member contract
+cannot represent a non-null member with a default: its required flag must be
+the inverse of outer nullability. Current generators emit no such hidden member.
 
 Tool profiles 0.23.0 retains readable input members while keeping these
 producer members closed. A required undisclosed member omits only the affected
