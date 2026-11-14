@@ -10,9 +10,9 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.140.0
+## Unreleased - 0.142.0
 
-- **Breaking:** require ORM/macros 0.144.0 and catalogue 0.8.0 for generated input contracts. Re-exported query options are non-`Copy`, and their relationship-depth accessor takes `&self`. Hosts can inspect capability-specific omission diagnostics without disclosing producer-hidden members.
+- **Breaking:** require ORM/macros 0.149.0 and catalogue 0.8.0 for generated input contracts. Re-exported query options are non-`Copy`, and their relationship-depth accessor takes `&self`. Hosts can inspect capability-specific omission diagnostics without disclosing producer-hidden members.
 
 - **Documentation:** backend-neutral API descriptions name optional database-backed services without unconditional links.
 
@@ -175,6 +175,8 @@ require committed evidence that no turn in the whole run may have dispatched.
 A clean last turn cannot authorize replay of an earlier possible effect.
 
 ## Unreleased
+
+- graphql-orm-ai 0.140.0: pin test-owned PostgreSQL images by digest. No runtime API or data migration.
 
 - AI 0.122.0: retain ORM-backed regression coverage for added tools, removed tools, changes to tool schemas, and changes to unused tools across retained session cleanup/rebind. The reported stranded-conversation defect did not reproduce; no runtime or persistence change.
 

@@ -10,9 +10,9 @@ supersedes: []
 
 # Migration Guide
 
-## 0.143.0 to 0.144.0: host-only generated input contracts
+## 0.144.0 to 0.149.0: host-only generated input contracts
 
-Upgrade ORM/macros together to 0.144.0 and operation catalogue to 0.8.0.
+Upgrade ORM/macros together to 0.149.0 and operation catalogue to 0.8.0.
 `GraphqlEntitySemanticMetadata` gains `generated_input_members`. Macros and
 runtime producers supply the exact input identity, member, type and required
 flag for generated members that remain undisclosed, including configured
@@ -5958,3 +5958,11 @@ access path.
 - The current `auth-agql` feature targets `agql-auth` 0.16.0 at revision
   `3bc38cd94794f1e868a9cc3a5551047b95a32105`; earlier release sections above
   retain their historical pins.
+
+## graphql-orm 0.144.0
+
+Test infrastructure only: no API or data migration required. Owned PostgreSQL tests pull digest-pinned images.
+
+## graphql-orm-macros 0.144.0
+
+Test infrastructure only: no API or data migration required. Owned PostgreSQL tests pull digest-pinned images.

@@ -12,7 +12,7 @@ supersedes: []
 
 ## 0.22.0 to 0.23.0: explicit handwritten input disclosure
 
-Generated input compilation requires producer metadata from ORM/macros 0.144.0
+Generated input compilation requires producer metadata from ORM/macros 0.149.0
 and catalogue 0.8.0. Undisclosed generated members remain closed even when a
 host declares custom inputs. Query, mutation and subscription catalogues expose
 host-only `diagnostics()` for capabilities omitted because a generated member

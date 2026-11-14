@@ -5,9 +5,8 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch:
 
-# Superseded PR heads share a group; main and manual runs are never canceled.
+# Superseded PR heads share a group; main runs are never canceled.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -21,6 +20,7 @@ env:
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
   CARGO_INCREMENTAL: "0"
+  BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
   # Disposable runners may pull the digest-pinned owned SQL Server image;
   # local and qualification runs default to never pulling.
   GRAPHQL_ORM_TEST_MSSQL_PULL: missing
@@ -29,18 +29,54 @@ permissions:
   contents: read
 
 jobs:
-  workspace-integrity:
+  owned-postgres-complete:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          persist-credentials: false
+      - uses: ./.github/actions/owned-postgres-complete
+
+  dependency-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
+      - name: Install the reviewed advisory scanner
+        run: python3 scripts/install-reviewed-cargo-tool.py cargo-audit
+      - run: python3 scripts/test-dependency-audit.py
+      - name: Audit all tracked root and fixture lockfiles
+        run: python3 scripts/check-dependency-audit.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: dependency-audit
+          path: target/dependency-audit/
+          if-no-files-found: error
+
+  workspace-integrity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
         with:
           components: rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Check documentation governance
-        run: python3 scripts/check-documentation.py --base "${{ github.event.pull_request.base.sha }}"
+        run: python3 scripts/check-documentation.py --base "${BASE_SHA}"
       - name: Check generated workspace inventory
         run: python3 scripts/generate-workspace-inventory.py --check
       - name: Check Git-only release metadata
@@ -51,6 +87,8 @@ jobs:
           python3 scripts/test-router-notices.py
           python3 scripts/check-workflow-supply-chain.py
           python3 scripts/test-workflow-supply-chain.py
+          python3 scripts/test-release-workflow-contract.py
+          python3 scripts/test-reviewed-cargo-tool.py
       - name: Check PR documentation impact
         if: github.event_name == 'pull_request'
         env:
@@ -82,6 +120,8 @@ jobs:
       CARGO_BUILD_JOBS: "1"
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
         with:
           components: clippy
@@ -101,9 +141,11 @@ jobs:
   orm:
     name: ORM default suite, Clippy and Rustdoc
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
         with:
           components: clippy
@@ -124,6 +166,8 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
         with:
           components: rustfmt
@@ -136,6 +180,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo test -p graphql-orm --test backend_coexistence_fixture --test cross_crate_relations_fixture --test federation_end_to_end_fixture --test migration_api_compatibility_fixture --test relationship_capability_fixture --test repository_aggregate_consumer_fixture
@@ -148,6 +194,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
         with:
           components: clippy
@@ -167,9 +215,11 @@ jobs:
   orm-backends:
     name: ORM PostgreSQL and SQL Server lanes
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 100
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
         with:
           components: clippy
@@ -231,6 +281,8 @@ jobs:
       CARGO_BUILD_JOBS: "1"
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Require current authority, strict policies, pagination, and private event delivery
@@ -255,6 +307,8 @@ jobs:
       CARGO_BUILD_JOBS: "1"
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
         with:
           components: clippy
@@ -272,6 +326,8 @@ jobs:
       CARGO_BUILD_JOBS: "2"
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Execute the complete owned MSSQL lane
@@ -285,9 +341,11 @@ jobs:
 
   orm-text-group-pages:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
         with:
           components: clippy
@@ -317,6 +375,8 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
         with:
           components: clippy
@@ -339,14 +399,19 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo test -p graphql-orm --locked --no-default-features --features sqlite,resolver-case-snake,argument-case-snake,field-case-snake --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test grouped_aggregates --test record_version_ui --test subscription_path_order --test composite_subscription_scopes --test operation_catalog_sdl_conformance --test generated_input_disclosure --test custom_input_disclosure_roots
 
   companions:
     runs-on: ubuntu-latest
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
         with:
           components: clippy
@@ -359,8 +424,11 @@ jobs:
 
   ai-provider-tls:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Ring build excludes aws-lc; each TLS stack compiles; guard refuses zero or two stacks
@@ -368,9 +436,11 @@ jobs:
 
   router:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
         with:
           components: clippy
@@ -393,6 +463,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: 1.90.0
@@ -403,16 +475,21 @@ jobs:
   package-release-policy:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          persist-credentials: false
           fetch-depth: 0
-      - run: scripts/check-package-release-policy.sh "${{ github.event.pull_request.base.sha }}"
+      - run: scripts/check-package-release-policy.sh "${BASE_SHA}"
 
   alternate-features:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
         with:
           components: clippy
@@ -443,6 +520,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Run ORM parity against a test-owned disposable PostgreSQL container
@@ -451,18 +530,20 @@ jobs:
   semver:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          persist-credentials: false
           fetch-depth: 0
       - name: Create baseline worktree
-        run: git worktree add ../graphql-orm-baseline "${{ github.event.pull_request.base.sha }}"
+        run: git worktree add ../graphql-orm-baseline "${BASE_SHA}"
       - name: Constrain the historical Hive telemetry dependency without changing its source or features
         run: python3 scripts/prepare-router-semver-baseline.py ../graphql-orm-baseline
       - id: companion-baseline
         name: Detect consolidated packages in the baseline
         run: |
-          if git cat-file -e "${{ github.event.pull_request.base.sha }}:crates/graphql-orm-ai/Cargo.toml"; then
+          if git cat-file -e "${BASE_SHA}:crates/graphql-orm-ai/Cargo.toml"; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
@@ -470,7 +551,7 @@ jobs:
       - id: router-baseline
         name: Detect router packages in the baseline
         run: |
-          if git cat-file -e "${{ github.event.pull_request.base.sha }}:crates/graphql-orm-router/Cargo.toml"; then
+          if git cat-file -e "${BASE_SHA}:crates/graphql-orm-router/Cargo.toml"; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"

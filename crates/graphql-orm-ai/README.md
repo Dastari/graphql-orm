@@ -10,9 +10,9 @@ supersedes: []
 
 # graphql-orm-ai
 
-Version `0.140.0` derives the AI control-plane root set from this crate's own GraphQL roots and applies it to static tools, generated capability sets and remote requests. Static tool documents must parse to exactly one operation of the declared kind and contract name, and handwritten operation inputs disclose only host-declared fields. No data migration is needed. See the [migration guide](MIGRATION.md#01390-to-01400-exact-tool-registration-and-derived-control-plane-roots).
+Version `0.142.0` derives the AI control-plane root set from this crate's own GraphQL roots and applies it to static tools, generated capability sets and remote requests. Static tool documents must parse to exactly one operation of the declared kind and contract name, and handwritten operation inputs disclose only host-declared fields. No data migration is needed. See the [migration guide](MIGRATION.md#01400-to-01420-exact-tool-registration-and-derived-control-plane-roots).
 
-AI 0.140.0 requires ORM/macros 0.144.0 and operation catalogue 0.8.0 for
+AI 0.142.0 requires ORM/macros 0.149.0 and operation catalogue 0.8.0 for
 host-only generated input contracts. Static GraphQL variable definitions and
 tool argument schemas are host-authored and are not cross-checked by registration.
 
@@ -766,3 +766,5 @@ method-only tracing warnings and a bounded counter. Initialization bytes,
 budgets, effect replay and version readiness (Related to #333) are unchanged.
 No data migration. See the [migration guide](MIGRATION.md) and
 [protocol contract and threat review](docs/provider-sessions-and-hosted-activity.md#optional-read-marker-notification-policy).
+
+Test-owned PostgreSQL infrastructure uses digest-pinned images.

@@ -229,7 +229,7 @@ impl OwnedPostgres {
                 &format!("POSTGRES_PASSWORD={password}"),
                 "--env",
                 &format!("POSTGRES_DB={database}"),
-                "postgres:17-alpine",
+                "postgres:17-alpine@sha256:d3244e8ce3f165ee3c93d9c4a4b1d0fe48b3a89e2287b717fdcbbde92d405065",
             ])
             .output()?;
         if !output.status.success() {

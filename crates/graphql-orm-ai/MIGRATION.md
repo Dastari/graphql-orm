@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.139.0 to 0.140.0: exact tool registration and derived control-plane roots
+## 0.140.0 to 0.142.0: exact tool registration and derived control-plane roots
 
 No data migration is needed, and no GraphQL SDL or persistent schema changes.
 Database-backed service references in backend-neutral Rustdoc remain readable
@@ -21,9 +21,9 @@ re-exported `AiGraphqlQueryCapabilityOptions` carries custom disclosure and is
 no longer `Copy`; clone it when reusing options. Its
 `maximum_relationship_argument_depth` accessor takes `&self`.
 
-AI 0.140.0 requires ORM/macros 0.144.0 and catalogue 0.8.0, which supply the
+AI 0.142.0 requires ORM/macros 0.149.0 and catalogue 0.8.0, which supply the
 host-only generated input contracts. It does not support ORM/macros 0.133.0.
-See the [contract migration](../../MIGRATION.md#01430-to-01440-host-only-generated-input-contracts).
+See the [contract migration](../../MIGRATION.md#01440-to-01490-host-only-generated-input-contracts).
 
 Static GraphQL variable definitions and the tool argument JSON Schema are both
 host-authored contracts. Registration checks the document's operation and
@@ -6980,3 +6980,7 @@ attached prepared context. The SDK verifies the exact confirmed unstarted
 cleanup again before this callback; an error category alone is insufficient.
 A host may offer ordinary semantic tools at zero image quota; no retained
 screenshot or completed native effect is replayed to manufacture capacity.
+
+## graphql-orm-ai 0.140.0
+
+Test infrastructure only: no API or data migration required. Owned PostgreSQL tests pull digest-pinned images.

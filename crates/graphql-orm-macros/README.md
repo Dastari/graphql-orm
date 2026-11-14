@@ -10,12 +10,12 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.144.0 emits host-only generated input member contracts for AI
+Version 0.149.0 emits host-only generated input member contracts for AI
 capability compilation. Readable members remain available; undisclosed members
 stay closed, and a required undisclosed member omits only its capability with a
 host diagnostic. Upgrade ORM/macros together and use catalogue 0.8.0. Existing
 SDL and public catalogue bytes/fingerprints are unchanged; no data migration is
-needed. See the [migration guide](../../MIGRATION.md#01430-to-01440-host-only-generated-input-contracts).
+needed. See the [migration guide](../../MIGRATION.md#01440-to-01490-host-only-generated-input-contracts).
 
 Version 0.143.0 gives authorization one contract: every generated read path
 asks the field policy about a field with or without a policy key;
@@ -763,3 +763,5 @@ SDL export builds. Runtime builds must leave it disabled; see
 [schema export](../../docs/reference/graphql-orm/schema-export.md).
 
 Version 0.93.0 shares generated scalar-filter SQL and semantic metadata builders to reduce consumer compile cost. SQL, binds, SDL and public contracts are unchanged; no data migration is needed.
+
+Test-owned PostgreSQL infrastructure uses digest-pinned images.
