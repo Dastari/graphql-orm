@@ -10,7 +10,7 @@ supersedes: []
 
 # Changelog
 
-## 0.18.0 (unreleased)
+## 0.19.0 (unreleased)
 
 Requires `graphql-orm-storage` 0.12.0. See [MIGRATION.md](MIGRATION.md).
 
@@ -18,10 +18,11 @@ Requires `graphql-orm-storage` 0.12.0. See [MIGRATION.md](MIGRATION.md).
   unknown outcome now fails with a non-retryable error instead of being
   retried inside the SDK, where a retry after a lost success reported the
   writer's own lock as held (storage
-  [#657](https://github.com/Dastari/graphql-orm/issues/657)). The usage
-  guide tells hosts to run `S3StorageBackend::probe_conditional_create`
-  before using an S3 bucket as a repository (storage
-  [#478](https://github.com/Dastari/graphql-orm/issues/478)).
+  [#657](https://github.com/Dastari/graphql-orm/issues/657)).
+- On S3, the first lock acquisition on a backend instance probes the
+  provider's `If-None-Match` enforcement and fails closed, acquiring no
+  lock, when the provider ignores the condition or the probe cannot
+  complete (storage [#478](https://github.com/Dastari/graphql-orm/issues/478)).
 - Restore tests cover a sink that returns success before reading an object
   to its end, which fails as unverified, and a change payload swapped after
   verification, which is never applied or compacted. The architecture and

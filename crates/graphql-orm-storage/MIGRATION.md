@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.11.0 to 0.12.0: S3 conditional-create outcomes
+## 0.11.0 to 0.12.0: S3 conditional creates, key errors, SMB configuration
 
 Update the storage requirement to 0.12.0 and refresh the consumer lockfile.
 
@@ -25,15 +25,28 @@ Update the storage requirement to 0.12.0 and refresh the consumer lockfile.
    writer's own object, or surfaced as a retryable `StorageError::Provider`.
    Handle it as for local and SMB storage: do not report it as a collision,
    and do not retry the same call blindly, because a retry would find the
-   key taken. `Ok(Some(_))` and `Ok(None)` keep their meanings. Code that
-   matched a retryable `Provider` error from this call to retry it must
-   treat `SingleAttemptFailed` as an unknown outcome instead.
-2. **`SmbStorageConfig::portable_keys`.** The configuration has a new public
+   key taken. `Ok(Some(_))` and `Ok(None)` keep their meanings.
+2. **S3 conditional creates probe first.** The first conditional create on
+   each `S3StorageBackend` instance, which includes the first repository
+   lock acquisition, now writes, re-creates and deletes one
+   `.graphql-orm-probe-<uuid>` object below the key prefix, so the
+   credentials need write, read and delete permission there. A provider
+   that fails the probe, or ignores `If-None-Match`, now gets a
+   non-retryable `RemoteProvider` error of kind
+   `ConditionalCreateUnverified` instead of an unsafe lock. Only where the
+   probe's writes are not permitted and enforcement was verified another
+   way, construct the backend with
+   `with_conditional_writes_verified_by_host()`; if that assertion is wrong,
+   two holders can acquire one lock.
+3. **`InvalidStorageKey` message.** Its `Display` is now the fixed
+   `invalid storage key`. Code that parsed the key from the message must
+   read the `key` field instead, and must not show it to untrusted clients.
+4. **`SmbStorageConfig::portable_keys`.** The configuration has a new public
    field, `false` by default. Code that builds `SmbStorageConfig` with a
    struct literal must set it; code that uses `SmbStorageConfig::new` and
    assigns fields is unaffected. Set it to `true` for a share on a Windows
-   server, before writing to it: keys stored earlier that are not portable,
-   such as `report.` or `CON.txt`, are then refused and no longer listed.
+   server, or one Windows clients use; it refuses new writes of keys that
+   are not portable, and existing objects stay addressable.
 
 ## 0.10.0 to 0.11.0: SMB signing, conditional-create outcomes, S3 messages
 

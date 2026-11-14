@@ -523,9 +523,14 @@ fn backup_repository(
 `LocalBackupRepository` is built on top of the storage crate's local
 `BlobStore`. S3-compatible backup repositories should also use this adapter with
 the storage crate's S3 backend rather than adding AWS SDK code here. Repository
-locks need a provider that enforces `If-None-Match: *`: call
-`S3StorageBackend::probe_conditional_create` once before wrapping an S3 bucket,
-and refuse the bucket when the probe fails.
+locks need a provider that enforces `If-None-Match: *`. The S3 backend probes
+the provider before its first conditional create, so the first lock
+acquisition on a new backend instance writes and deletes one
+`.graphql-orm-probe-<uuid>` object, and fails with a non-retryable
+`ConditionalCreateUnverified` storage error, acquiring no lock, when the
+provider ignores the condition or the probe cannot complete. See the storage
+[backup integration guide](../../graphql-orm-storage/docs/backup-integration.md#provider-ownership)
+for the probe's limits and the host opt-out.
 
 ## Verification
 

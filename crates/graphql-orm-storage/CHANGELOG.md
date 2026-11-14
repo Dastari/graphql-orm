@@ -13,7 +13,9 @@ supersedes: []
 ## 0.12.0 (unreleased)
 
 Breaking: S3 conditional creates whose outcome is unknown fail as
-single-attempt errors. See [MIGRATION.md](MIGRATION.md).
+single-attempt errors, an S3 backend probes its provider before its first
+conditional create and fails closed, `InvalidStorageKey` has a fixed
+message, and `SmbStorageConfig` gains a field. See [MIGRATION.md](MIGRATION.md).
 
 - S3: `put_blob_if_not_exists` sends its committing request, the
   conditional `PutObject` or, for a body larger than one part, the
@@ -29,37 +31,63 @@ single-attempt errors. See [MIGRATION.md](MIGRATION.md).
   request that was never sent or that the server refused with HTTP 4xx keeps
   its classification, and a failed condition is still `Ok(None)`.
   ([#657](https://github.com/Dastari/graphql-orm/issues/657))
-- S3: `S3StorageBackend::probe_conditional_create` checks that the provider
-  enforces `If-None-Match: *`, which `put_blob_if_not_exists`, repository
-  locks and content deduplication rely on. It creates a random
-  `.graphql-orm-probe-<uuid>` object below the key prefix, tries to create
-  the key again with a conditional `PutObject` and with a conditional
-  one-part multipart completion, checks that both were refused and the
-  first content kept, and deletes the object. A provider that ignores the
-  condition fails with non-retryable `StorageError::UnsupportedOperation`.
-  Hosts call it once before using a bucket for locks; nothing calls it
-  implicitly. The owned RustFS lane passes it.
+- S3: conditional creates fail closed unless the provider is known to
+  enforce `If-None-Match: *`, which repository locks and content
+  deduplication rely on. Before its first conditional create
+  (`put_blob_if_not_exists`, or a resumable multipart upload started or
+  completed with `if_not_exists`), each backend instance runs
+  `S3StorageBackend::probe_conditional_create` and caches only a pass, in
+  that instance and its clones. A probe that fails, or a provider that
+  ignores the condition, makes the create fail with non-retryable
+  `StorageError::RemoteProvider` of kind
+  `StorageProviderErrorKind::ConditionalCreateUnverified`, so no lock is
+  acquired. The probe creates a random `.graphql-orm-probe-<uuid>` object
+  below the key prefix, tries to create the key again with a conditional
+  `PutObject` and with a conditional one-part multipart completion, checks
+  that both were refused and the first content kept, and deletes the
+  object. `S3StorageBackend::with_conditional_writes_verified_by_host` is
+  the one opt-out, for providers where the probe's writes are not
+  permitted: the host asserts enforcement and takes responsibility for it.
+  The probe cannot certify enforcement that depends on object size or a
+  proxy, and a cancelled probe or failed cleanup can leave its object and
+  an incomplete upload for that key. The owned RustFS lane passes it.
   ([#478](https://github.com/Dastari/graphql-orm/issues/478))
 - `validate_portable_blob_key` validates a key for SMB servers and Windows
   file systems: on top of `validate_blob_key` it refuses `:`, `< > " | ? *`,
   control characters, a component ending in `.` or a space, and reserved
   device names such as `CON`, `NUL.txt`, `COM1` and `LPT¹`, in any ASCII
-  case. `SmbStorageConfig` gains `portable_keys`, `false` by default; when
-  set, keys, listing prefixes and `root_prefix` must be portable, refused
-  keys fail with `InvalidStorageKey` before any request, and listings skip
-  stored names that are not portable. Case aliasing is not addressed: keys
-  that differ only in case still name one file on a case-insensitive
-  server. ([#482](https://github.com/Dastari/graphql-orm/issues/482))
-- SMB: `SmbStorageBackend::sweep_temp_files(older_than)` removes temporary
-  upload files that a lost process or connection left on the share, as
-  `LocalStorageBackend::sweep_temp_files` does for local roots. It walks the
-  root prefix within the configured listing limits and deadline and removes,
-  with single-attempt deletions, only exact backend temporary names
-  (`.<uuid>.uploading`, and the pre-0.9.0 `.<name>.<uuid>.uploading`) whose
-  server last-write time is at least `older_than` old. Callers' keys ending in
-  `.uploading` are kept. `older_than` below one hour is refused, so clock
-  differences with the server cannot make an active upload look stale. Hosts
-  call it explicitly; nothing sweeps by default.
+  case. `SmbStorageConfig` gains `portable_keys`, `false` by default. When
+  set, it applies to new writes only: a written path, root prefix included,
+  must be portable, and a refused write fails with `InvalidStorageKey`
+  before any request. Reads, deletes and listings keep the ordinary
+  validation, so objects stored earlier stay listed, readable and
+  deletable. Case-folding and Unicode-normalisation aliasing are not
+  addressed. ([#482](https://github.com/Dastari/graphql-orm/issues/482))
+- `StorageError::InvalidStorageKey` displays the fixed message `invalid
+  storage key`. It used to print the key, which can reveal a repository path
+  or configured root prefix. The `key` field, and so `Debug`, still holds
+  it for host diagnostics; never return either to an untrusted client.
+- SMB: `SmbStorageBackend::sweep_temp_files(quiesced, older_than)` removes
+  temporary upload files that a lost process or connection left on the
+  share, as `LocalStorageBackend::sweep_temp_files` does for local roots,
+  and returns an `SmbTempSweepReport`. It requires an
+  `SmbUploadsQuiesced`, the host's statement that no upload to the
+  repository is in progress. It walks the root prefix within the configured
+  listing limits and deadline and considers only exact backend temporary
+  names (`.<uuid>.uploading`, and the pre-0.9.0 `.<name>.<uuid>.uploading`)
+  whose last-write time is at least `older_than` before the server's current
+  time, read from a file the sweep creates and removes; callers' keys ending
+  in `.uploading` are kept, and `older_than` below one hour is refused. It
+  never follows a reparse point the server reports: such entries are
+  skipped, and directories are opened as themselves and checked again
+  before they are entered. Each candidate is opened exclusively without
+  following a reparse point and removed through that handle, once, only if
+  it still has the size and last-write time enumeration saw; a file another
+  handle has open, or one that changed, is skipped. Servers that resolve
+  links themselves, as Samba does for symbolic links by default, present
+  them as ordinary directories, which no client can detect. A fourth
+  owner-local vendor patch, `share-access-override`, adds the share-access
+  option the exclusive open needs.
   ([#593](https://github.com/Dastari/graphql-orm/issues/593))
 
 ## 0.11.0 (unreleased)

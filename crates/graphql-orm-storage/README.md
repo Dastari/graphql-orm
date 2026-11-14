@@ -24,11 +24,13 @@ before using local directories or OS-mounted shares.
 
 Version 0.12.0 sends S3 conditional creates as one attempt, so a lost
 response is reported as an unknown outcome instead of the writer's own object
-appearing taken, adds `S3StorageBackend::probe_conditional_create` to check
-that a provider enforces `If-None-Match` before relying on it for locks, adds
-an opt-in portable key mode for SMB shares on Windows servers
-(`validate_portable_blob_key`, `SmbStorageConfig::portable_keys`), and adds
-`SmbStorageBackend::sweep_temp_files` for stale SMB temporary files. See
+appearing taken, and makes S3 conditional creates, and so repository locks,
+fail closed until a per-instance probe shows that the provider enforces
+`If-None-Match`. It adds an opt-in portable key mode for new writes to SMB
+shares on Windows servers (`validate_portable_blob_key`,
+`SmbStorageConfig::portable_keys`), a fixed `InvalidStorageKey` message that
+never reveals the key, and `SmbStorageBackend::sweep_temp_files` for stale SMB
+temporary files during a quiesced maintenance window. See
 [MIGRATION.md](MIGRATION.md).
 
 Version 0.11.0 makes SMB conditional creates publish only complete objects,

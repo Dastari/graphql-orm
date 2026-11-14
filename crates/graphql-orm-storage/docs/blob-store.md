@@ -90,7 +90,10 @@ outcome is unknown therefore fails with non-retryable
 `StorageError::SingleAttemptFailed` on every native provider. Native S3 sends
 its conditional `PutObject` or `CompleteMultipartUpload` once, with SDK
 retries disabled; only a request that was never sent, or that the server
-refused with HTTP 4xx, keeps an ordinary error.
+refused with HTTP 4xx, keeps an ordinary error. Native S3 also fails closed
+when the provider's enforcement is unverified: each backend instance probes
+the provider before its first conditional create (see
+[backup integration](backup-integration.md#provider-ownership)).
 
 `delete_blob_once` is the release capability for lock keys that another writer
 can immediately reuse. Its default returns `UnsupportedOperation` without I/O.
@@ -247,9 +250,15 @@ written: `:` and `< > " | ? *`, control characters, a component ending in
 reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `CONIN$`, `CONOUT$`,
 `COM0`-`COM9`, `LPT0`-`LPT9` and their superscript-digit forms) in any ASCII
 case and with any extension. Hosts can call it for any provider whose keys
-may later move to such a target; the SMB backend applies it when
-`SmbStorageConfig::portable_keys` is set. It does not fold case, so keys that
-differ only in case still alias on a case-insensitive target.
+may later move to such a target; the SMB backend applies it to new writes
+when `SmbStorageConfig::portable_keys` is set, never to reads, deletes or
+listings of existing keys. It does not resolve case-folding or Unicode
+normalisation, so keys that differ only in case or normalisation still alias
+on such a target.
+
+`StorageError::InvalidStorageKey` displays the fixed message `invalid storage
+key` and never the key, which can reveal a repository path or root prefix.
+The `key` field and `Debug` output hold it for host diagnostics only.
 
 `list_blobs("")` is allowed and lists all blobs.
 

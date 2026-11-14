@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.17.0 to 0.18.0: storage 0.12.0
+## 0.18.0 to 0.19.0: storage 0.12.0
 
 1. Move `graphql-orm-backup` and `graphql-orm-storage` together to one
    reviewed revision and refresh the lockfile. Storage 0.12.0 is required.
@@ -21,10 +21,14 @@ supersedes: []
    be held by this attempt. Inspect the lock with `read_repository_lock` and
    follow [locking and recovery](docs/usage.md#locking-and-recovery) before
    running again.
-3. Before using an S3 bucket as a repository, call
-   `S3StorageBackend::probe_conditional_create` once and refuse the bucket if
-   it fails: a provider that ignores `If-None-Match` cannot provide exclusive
-   repository locks.
+3. On S3, the first lock acquisition on each backend instance now writes,
+   re-creates and deletes one `.graphql-orm-probe-<uuid>` object below the
+   key prefix, so the repository credentials need write, read and delete
+   permission there. A provider that ignores `If-None-Match`, or a probe that
+   cannot complete, makes acquisition fail with a non-retryable
+   `ConditionalCreateUnverified` storage error instead of granting an unsafe
+   lock. See the storage migration guide for the host opt-out and its
+   consequences.
 
 ## 0.16.0 to 0.17.0: snapshot consistency and repository identity
 
