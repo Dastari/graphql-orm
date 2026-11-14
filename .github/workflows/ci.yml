@@ -29,6 +29,28 @@ permissions:
   contents: read
 
 jobs:
+  dependency-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
+      - name: Install the reviewed advisory scanner
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - run: python3 scripts/test-dependency-audit.py
+      - name: Audit all tracked root and fixture lockfiles
+        run: python3 scripts/check-dependency-audit.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: dependency-audit
+          path: target/dependency-audit/
+          if-no-files-found: error
+
   workspace-integrity:
     runs-on: ubuntu-latest
     timeout-minutes: 45

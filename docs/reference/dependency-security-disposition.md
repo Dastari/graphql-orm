@@ -3,8 +3,8 @@ title: Dependency security disposition
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-04
-review_by: 2026-11-15
+last_reviewed: 2026-11-14
+review_by: 2026-12-04
 supersedes: []
 ---
 
@@ -16,9 +16,10 @@ is complete **with findings**, including all eight unsuppressed raw audit
 outputs. This reference records the technical dispositions and their conditions;
 it does not make an affected dependency sound or certify an application's graph.
 
-The snapshot covers the unpublished ORM/macros 0.50.1 candidate and the reviewed
-agql-auth 0.21.3 revision. It is not a published release or whole-workspace
-runtime acceptance. The generated [package inventory](workspace-packages.md)
+The current review covers every tracked root and nested fixture lockfile on
+2026-11-14. The October evidence linked above remains historical evidence for
+its original source, not the current graph. This is not whole-workspace runtime
+acceptance. The generated [package inventory](workspace-packages.md)
 owns package paths and the release manifest owns package versions and
 external revisions. The
 [release process](../operations/release/process.md) owns validation and
@@ -50,8 +51,7 @@ on this disposition.
 
 This acceptance does not cover Auth signing services, consumer applications,
 other crate versions, or a future workspace EC signer. Introducing private EC
-operations invalidates it immediately. Keep the raw unsuppressed audit finding;
-no Cargo advisory ignore is added. Follow up upstream on a JWT aws_lc_rs backend
+operations invalidates it immediately. Keep the raw unsuppressed audit finding; the exact-version CI disposition below does not suppress raw reports. Follow up upstream on a JWT aws_lc_rs backend
 or a release adopting the corrected RustCrypto owners.
 
 ## TLS certificate distrust patches
@@ -117,7 +117,7 @@ states the corrected behaviour. Re-review it with any vendor update.
 
 ## Retained findings and conditions
 
-Maintenance roles and the **2026-11-15** review date below are recommended
+Maintenance roles and the **2026-12-04** review date below are recommended
 follow-up responsibilities, not assertions that an individual accepted risk.
 Re-review immediately when a condition changes, and expose retained findings
 in the protected-release review packet.
@@ -207,7 +207,7 @@ Unmaintained status alone does not establish an exploit.
 The scan uses a fixed advisory revision and then-available local registry/index
 data. It certifies neither future advisories nor registry freshness. The original
 eight reports and the two supplemental changed-lock reports retain nonzero
-findings exits; there is no broad ignore list. The supplemental identity-only
+findings exits; raw reports have no ignore list; the exact CI dispositions above are separate. The supplemental identity-only
 lookup exits zero within the scope above; the aggregate remains with findings.
 
 This dependency review records graph/source dispositions separately from
@@ -220,3 +220,37 @@ actual tested revision when reusing scoped prior evidence.
 Applications must review their own unified feature graph, current configuration,
 custom caches, policies and crypto APIs. Dependency or configuration changes
 invalidate the corresponding condition immediately, before the scheduled review.
+
+## Automated review on 2026-11-14
+
+CI and full release validation install cargo-audit 0.22.2 with its locked build
+graph and scan all eleven tracked lockfiles against the current RustSec database.
+Raw JSON reports, including retained findings and the database revision, are
+uploaded even on scan failure. New advisory IDs, affected package versions,
+maintenance warnings and yanks fail the gate. Scanner execution/parse failures
+also fail. No severity threshold or blanket ignore applies.
+
+The single machine-readable [disposition file](../../dependency-audit-dispositions.json)
+contains exact advisory/package/version identities, reasons and expiry dates.
+Changing or renewing it requires ordinary repository review. These are technical
+dispositions, not new assertions of owner risk acceptance. The existing
+crypto-bigint owner acceptance above remains limited to its original conditions.
+An expired disposition fails CI even if that identity has left a selected graph;
+remove obsolete entries during review. Raw cargo-audit output is never filtered.
+
+Compatible lockfile updates repair Quinn protocol/UDP findings
+RUSTSEC-2026-0523, RUSTSEC-2026-0524 and RUSTSEC-2026-0538, rustix
+RUSTSEC-2026-0486 and the yanked clipboard-win 5.4.1 release. All affected nested
+locks receive the same compatible rustix patch where present.
+
+| Retained identity | Owning path and disposition |
+| --- | --- |
+| crypto-bigint 0.5.5 / RUSTSEC-2026-0387 | agql-auth → jsonwebtoken 10 and router jsonwebtoken 11 → p256/p384 → elliptic-curve. Existing conditional acceptance above; no auth pin change authorized. |
+| libsqlite3-sys 0.30.1 / RUSTSEC-2026-0459 | sqlx 0.8.6 → sqlx-sqlite. Fixed 0.39 is outside SQLx's range. Requires an owning SQLx migration and all-backend/API review; application SQL/data can reach SQLite, so this is retained risk rather than an unreachable path. |
+| quick-xml 0.39.4 / RUSTSEC-2026-0194, RUSTSEC-2026-0195 | hive-router → object_store 0.13. Fixed object_store owner crosses Hive's range. Router XML initialization conditions above apply. |
+| rsa 0.9.10 / RUSTSEC-2023-0071 | JWT RustCrypto and optional SMB crypto owners; no compatible fixed release. RSA operations and credentials conditions above apply. |
+| lru 0.16.3 and fixture 0.16.4 / RUSTSEC-2026-0253 | async-graphql DataLoader and Hive/libdd owners; neither range accepts fixed 0.18.2. NoCache/exporter/key conditions above apply; generic host caches remain exposed. |
+| atomic-polyfill 1.0.3 / RUSTSEC-2023-0089 | heapless/rstar spatial compatibility resolution. Unmaintained; optional graph presence does not establish runtime use. Seek an owning cleanup. |
+| pin-utils 0.1.0 / RUSTSEC-2026-0441 | S3 aws-smithy-runtime, optional SMB sspi → async-dnssd, and Hive reqwest-retry → wasmtimer. Unmaintained; replacing these owners needs upstream/API review. No exploit or unreachability inference. |
+| unsafe-libyaml 0.2.11 / RUSTSEC-2024-0449 | Hive/VRL → serde_yaml and serde_yaml_ng. Unmaintained parser; migrate owning dependencies with YAML compatibility review. |
+
