@@ -2487,13 +2487,17 @@ impl FuzzyMatcher {
     }
 }
 
-/// Escape `%`, `_`, and `\` in a user string before binding it to a SQL
+/// Escape `%`, `_`, `[`, and `\` in a user string before binding it to a SQL
 /// `LIKE`/`ILIKE` predicate that uses `ESCAPE '\'`.
+///
+/// `[` opens a character class in SQL Server's `LIKE`, so an unescaped
+/// `[draft]` would match any one of those letters. SQLite and PostgreSQL treat
+/// an escaped `[` as the literal character, so one pattern serves every backend.
 pub fn escape_like_pattern(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for ch in value.chars() {
         match ch {
-            '\\' | '%' | '_' => {
+            '\\' | '%' | '_' | '[' => {
                 escaped.push('\\');
                 escaped.push(ch);
             }
@@ -2692,8 +2696,17 @@ fn render_select_query_inner(
     query: &SelectQuery,
     write_decision: bool,
 ) -> RenderedQuery {
+    // SQL Server rejects `FETCH NEXT 0 ROWS`; `TOP (0)` is its empty page.
+    let mssql_empty_page = dialect == DatabaseBackend::Mssql
+        && !query.count_only
+        && query
+            .pagination
+            .as_ref()
+            .is_some_and(|page| page.limit.is_some_and(|limit| limit <= 0));
     let projection = if query.count_only {
         dialect.count_projection().to_string()
+    } else if mssql_empty_page {
+        format!("TOP (0) {}", query.columns.join(", "))
     } else {
         query.columns.join(", ")
     };
@@ -2732,7 +2745,7 @@ fn render_select_query_inner(
         );
     }
 
-    if !query.count_only {
+    if !query.count_only && !mssql_empty_page {
         if let Some(page) = &query.pagination {
             if dialect == DatabaseBackend::Mssql && query.sorts.is_empty() {
                 sql.push_str(" ORDER BY (SELECT 1)");
@@ -2785,10 +2798,32 @@ pub fn render_aggregate_query(dialect: DatabaseBackend, query: &AggregateQuery) 
     RenderedQuery { sql, values }
 }
 
-fn aggregate_group_projection(dialect: DatabaseBackend, column: &str, alias: &str) -> String {
+fn aggregate_group_projection(
+    dialect: DatabaseBackend,
+    column: &str,
+    kind: AggregateFieldKind,
+    alias: &str,
+) -> String {
     match dialect {
-        DatabaseBackend::Mssql => format!("CAST({column} AS NVARCHAR(4000)) AS {alias}"),
+        DatabaseBackend::Mssql => format!("{} AS {alias}", mssql_lossless_text(column, kind)),
         _ => format!("CAST({column} AS TEXT) AS {alias}"),
+    }
+}
+
+/// SQL Server text for one aggregate value that loses nothing.
+///
+/// A plain `CAST(... AS NVARCHAR(4000))` renders a float with six significant
+/// digits, a `datetime` as `Nov  9 2026 12:34PM` and cuts text at 4,000
+/// characters. Style 3 is the 17-digit float form, style 126 is ISO 8601 for
+/// date and time types and leaves character types unchanged, and
+/// `NVARCHAR(MAX)` holds text of any length.
+fn mssql_lossless_text(expression: &str, kind: AggregateFieldKind) -> String {
+    match kind {
+        AggregateFieldKind::Floating => super::dialect::mssql_float_text(expression),
+        AggregateFieldKind::Text => format!("CONVERT(NVARCHAR(MAX), {expression}, 126)"),
+        AggregateFieldKind::Integral
+        | AggregateFieldKind::Decimal(_)
+        | AggregateFieldKind::Boolean => format!("CAST({expression} AS NVARCHAR(4000))"),
     }
 }
 
@@ -2835,8 +2870,11 @@ fn aggregate_metric_projection(
             aggregate_operator_sql(operator)
         ),
         (operator, Some(AggregateFieldKind::Text), DatabaseBackend::Mssql) => format!(
-            "CAST({}({argument}) AS NVARCHAR(4000)) AS {alias}",
-            aggregate_operator_sql(operator)
+            "{} AS {alias}",
+            mssql_lossless_text(
+                &format!("{}({argument})", aggregate_operator_sql(operator)),
+                AggregateFieldKind::Text
+            )
         ),
         (operator, _, _) => {
             format!(
@@ -2899,9 +2937,15 @@ fn render_grouped_aggregate_query_page(
     };
     let mut projections = ordered_groups
         .iter()
+        .zip(&query.groups)
         .enumerate()
-        .map(|(index, column)| {
-            aggregate_group_projection(dialect, column, &format!("__gom_group_{index:03}"))
+        .map(|(index, (column, field))| {
+            aggregate_group_projection(
+                dialect,
+                column,
+                field.kind,
+                &format!("__gom_group_{index:03}"),
+            )
         })
         .collect::<Vec<_>>();
     projections.extend(query.metrics.iter().enumerate().map(|(index, expression)| {
@@ -3811,13 +3855,31 @@ pub fn render_upsert_sql_with_managed_version(
             .map(|(value, column)| format!("{value} AS {column}"))
             .collect::<Vec<_>>()
             .join(", ");
+        // The update's key-range lock must still be held when the insert
+        // runs, so the pair shares one transaction: the caller's, or one the
+        // batch opens and ends itself when it runs in autocommit. `TRY` stops
+        // the batch at a failed update; without it (`XACT_ABORT` is off) the
+        // failure would leave `@@ROWCOUNT` at 0 and the insert would run too.
+        // The transaction count seen on entry travels in the source row, so
+        // the batch declares no variable a surrounding batch could collide with.
+        let outer = "(SELECT TOP (1) [__graphql_orm_upsert_outer] FROM #graphql_orm_upsert_source)";
         return format!(
-            "SELECT {source_projection} INTO #graphql_orm_upsert_source; \
+            "SELECT {source_projection}, @@TRANCOUNT AS [__graphql_orm_upsert_outer] \
+             INTO #graphql_orm_upsert_source; \
+             BEGIN TRY \
+             IF {outer} = 0 BEGIN TRANSACTION; \
              UPDATE target WITH (UPDLOCK, HOLDLOCK) SET {} \
              FROM {quoted_table} AS target CROSS JOIN #graphql_orm_upsert_source AS source \
              WHERE {predicates}; \
              IF @@ROWCOUNT = 0 BEGIN \
              INSERT INTO {quoted_table} ({}) SELECT {} FROM #graphql_orm_upsert_source; END; \
+             IF {outer} = 0 COMMIT TRANSACTION; \
+             END TRY \
+             BEGIN CATCH \
+             IF {outer} = 0 AND @@TRANCOUNT > 0 ROLLBACK TRANSACTION; \
+             IF XACT_STATE() <> -1 DROP TABLE IF EXISTS #graphql_orm_upsert_source; \
+             THROW; \
+             END CATCH; \
              DROP TABLE #graphql_orm_upsert_source",
             assignments.join(", "),
             quoted_insert_columns.join(", "),
@@ -6062,6 +6124,162 @@ mod grouped_aggregate_tests {
         assert!(rendered.sql.contains(" > $4"));
         assert_eq!(rendered.values.len(), 4);
         assert!(rendered.sql.ends_with("LIMIT 101"));
+    }
+
+    #[test]
+    fn sql_server_aggregate_text_is_lossless() {
+        let query = GroupedAggregateSqlQuery {
+            table: "history",
+            groups: vec![
+                field("ratio", AggregateFieldKind::Floating),
+                field("recorded_at", AggregateFieldKind::Text),
+                field("attempt", AggregateFieldKind::Integral),
+            ],
+            metrics: vec![AggregateExpression {
+                operator: super::super::GraphqlAggregateOperator::Max,
+                field: Some(field("note", AggregateFieldKind::Text)),
+            }],
+            filter: None,
+            group_limit: 10,
+        };
+        let sql = render_grouped_aggregate_query(DatabaseBackend::Mssql, &query).sql;
+        // 17 significant digits, not the default six (`1e+006`).
+        assert!(
+            sql.contains("CONVERT(NVARCHAR(40), CAST([ratio] AS FLOAT), 3) AS __gom_group_000"),
+            "{sql}"
+        );
+        // ISO 8601 with seconds, not `Nov  9 2026 12:34PM`, and no 4,000 cut.
+        assert!(
+            sql.contains("CONVERT(NVARCHAR(MAX), [recorded_at], 126) AS __gom_group_001"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("CAST([attempt] AS NVARCHAR(4000)) AS __gom_group_002"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("CONVERT(NVARCHAR(MAX), MAX([note]), 126) AS __gom_metric_000"),
+            "{sql}"
+        );
+        // Other backends keep their text cast.
+        let sqlite = render_grouped_aggregate_query(DatabaseBackend::Sqlite, &query).sql;
+        assert!(
+            sqlite.contains("CAST(\"ratio\" AS TEXT) AS __gom_group_000"),
+            "{sqlite}"
+        );
+    }
+
+    #[test]
+    fn a_zero_limit_renders_an_empty_page_on_every_dialect() {
+        let query = |limit| SelectQuery {
+            table: "work_records",
+            columns: vec!["id".to_string()],
+            filter: Some(FilterExpression::trusted_fragment(
+                "owner_id = ?",
+                vec![SqlValue::Int(7)],
+            )),
+            sorts: vec![SortExpression {
+                clause: "id ASC".to_string(),
+                values: Vec::new(),
+            }],
+            pagination: Some(PaginationRequest { limit, offset: 20 }),
+            count_only: false,
+        };
+        // SQL Server rejects `FETCH NEXT 0 ROWS ONLY`.
+        let mssql = render_select_query(DatabaseBackend::Mssql, &query(Some(0)));
+        assert_eq!(
+            mssql.sql,
+            "SELECT TOP (0) id FROM work_records WHERE owner_id = @P1 ORDER BY id ASC"
+        );
+        assert_eq!(mssql.values.len(), 1);
+        let negative = render_select_query(DatabaseBackend::Mssql, &query(Some(-3)));
+        assert_eq!(negative.sql, mssql.sql);
+        assert!(
+            render_select_query(DatabaseBackend::Mssql, &query(Some(5)))
+                .sql
+                .ends_with("ORDER BY id ASC OFFSET 20 ROWS FETCH NEXT 5 ROWS ONLY")
+        );
+        for dialect in [DatabaseBackend::Sqlite, DatabaseBackend::Postgres] {
+            assert!(
+                render_select_query(dialect, &query(Some(0)))
+                    .sql
+                    .ends_with("LIMIT 0 OFFSET 20")
+            );
+        }
+        // The dialect clause itself is never the rejected form.
+        for (limit, offset) in [(0, 0), (0, 40), (-1, 5)] {
+            let clause = DatabaseBackend::Mssql.render_pagination(Some(limit), offset);
+            assert!(!clause.contains("FETCH NEXT 0 "), "{clause}");
+            assert!(!clause.contains("FETCH NEXT -"), "{clause}");
+        }
+    }
+
+    #[test]
+    fn like_patterns_escape_sql_server_bracket_classes() {
+        // Unescaped, `[draft]` matches any one of d, r, a, f, t on SQL Server.
+        assert_eq!(contains_like_pattern("[draft]"), r"%\[draft]%");
+        assert_eq!(starts_with_like_pattern("a[b"), r"a\[b%");
+        assert_eq!(ends_with_like_pattern(r"50%_[\"), r"%50\%\_\[\\");
+        for dialect in [
+            DatabaseBackend::Mssql,
+            DatabaseBackend::Sqlite,
+            DatabaseBackend::Postgres,
+        ] {
+            assert!(dialect.ci_like("c", "?").ends_with(r"ESCAPE '\'"));
+        }
+    }
+
+    #[test]
+    fn sql_server_upsert_is_one_atomic_batch() {
+        let sql = render_upsert_sql(
+            DatabaseBackend::Mssql,
+            "settings",
+            &["id", "value"],
+            &["@P1", "@P2"],
+            &["id"],
+            &["value"],
+            false,
+        );
+        let position = |needle: &str| {
+            sql.find(needle)
+                .unwrap_or_else(|| panic!("{needle}: {sql}"))
+        };
+        let outer = "(SELECT TOP (1) [__graphql_orm_upsert_outer] FROM #graphql_orm_upsert_source)";
+        let begin = position(&format!("IF {outer} = 0 BEGIN TRANSACTION;"));
+        let update = position("UPDATE target WITH (UPDLOCK, HOLDLOCK)");
+        let insert = position("IF @@ROWCOUNT = 0 BEGIN INSERT INTO [settings]");
+        let commit = position(&format!("IF {outer} = 0 COMMIT TRANSACTION;"));
+        let rollback = position(&format!(
+            "IF {outer} = 0 AND @@TRANCOUNT > 0 ROLLBACK TRANSACTION;"
+        ));
+        // Both statements run inside one transaction, and a failed update
+        // leaves the TRY block before the insert.
+        assert!(position("BEGIN TRY") < begin && begin < update, "{sql}");
+        assert!(update < insert && insert < commit, "{sql}");
+        assert!(
+            commit < position("END TRY") && position("BEGIN CATCH") < rollback,
+            "{sql}"
+        );
+        assert!(rollback < position("THROW;"), "{sql}");
+        // A caller's transaction is never committed or rolled back by the
+        // batch, and the batch declares no variable.
+        assert!(
+            sql.contains("@@TRANCOUNT AS [__graphql_orm_upsert_outer]"),
+            "{sql}"
+        );
+        assert!(!sql.contains("DECLARE"), "{sql}");
+        // The other dialects keep their single-statement upsert.
+        let sqlite = render_upsert_sql(
+            DatabaseBackend::Sqlite,
+            "settings",
+            &["id", "value"],
+            &["?", "?"],
+            &["id"],
+            &["value"],
+            false,
+        );
+        assert!(sqlite.starts_with("INSERT INTO \"settings\""), "{sqlite}");
+        assert!(!sqlite.contains("TRANSACTION"));
     }
 
     #[test]

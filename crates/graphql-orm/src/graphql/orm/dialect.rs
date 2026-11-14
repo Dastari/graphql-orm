@@ -1286,6 +1286,17 @@ pub trait SqlDialect {
     fn count_projection(&self) -> &'static str;
     fn render_pagination(&self, limit: Option<i64>, offset: i64) -> String;
     fn relation_key_cast(&self, column: &str) -> String;
+    /// Largest number of bound values one batched statement should carry.
+    ///
+    /// SQL Server accepts 2,100 parameters per request and the driver's
+    /// `sp_executesql` call uses two of them. PostgreSQL's wire protocol
+    /// counts parameters in 16 bits and SQLite's default limit is 32,766.
+    fn max_statement_binds(&self) -> usize {
+        match self.backend() {
+            DatabaseBackend::Mssql => 2_000,
+            DatabaseBackend::Postgres | DatabaseBackend::Sqlite | DatabaseBackend::Mysql => 32_000,
+        }
+    }
     fn current_epoch_expr(&self) -> &'static str;
     fn current_date_expr(&self) -> &'static str;
     fn ci_like(&self, column: &str, placeholder: &str) -> String;
@@ -1374,11 +1385,18 @@ impl SqlDialect for DatabaseBackend {
     fn render_pagination(&self, limit: Option<i64>, offset: i64) -> String {
         match self {
             DatabaseBackend::Mssql => match limit {
+                // SQL Server rejects `FETCH NEXT 0 ROWS`. The select renderer
+                // serves an empty page with `TOP (0)` and never reaches this
+                // arm; for any other caller an offset past every row is the
+                // one clause that returns no rows.
+                Some(limit) if limit <= 0 => {
+                    format!(" OFFSET {} ROWS FETCH NEXT 1 ROWS ONLY", i64::MAX)
+                }
                 Some(limit) => {
                     format!(
                         " OFFSET {} ROWS FETCH NEXT {} ROWS ONLY",
                         offset.max(0),
-                        limit.max(0)
+                        limit
                     )
                 }
                 None if offset > 0 => format!(" OFFSET {} ROWS", offset),
@@ -1503,6 +1521,15 @@ impl SqlDialect for DatabaseBackend {
             }
         }
     }
+}
+
+/// SQL Server text of a `float` or `real` expression that round-trips.
+///
+/// The default conversion keeps six significant digits (`1e+006`); style 3 is
+/// the 17-digit form. A `real` is widened first so its text is the value Rust
+/// reads when it widens the same `f32`.
+pub(crate) fn mssql_float_text(expression: &str) -> String {
+    format!("CONVERT(NVARCHAR(40), CAST({expression} AS FLOAT), 3)")
 }
 
 pub fn current_backend() -> DatabaseBackend {
