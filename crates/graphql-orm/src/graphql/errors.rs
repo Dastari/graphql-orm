@@ -216,15 +216,22 @@ impl OrmPublicError {
         {
             return carrier.0.clone();
         }
-        let retryable = error
-            .as_database_error()
-            .and_then(|error| error.code())
-            .is_some_and(|code| {
-                matches!(
-                    code.as_ref(),
-                    "5" | "6" | "261" | "262" | "517" | "40001" | "40P01" | "55P03"
-                )
-            });
+        // SQL Server error numbers share the text space of SQLite result
+        // codes and SQLSTATEs (262 is a permission error there), so a SQL
+        // Server error is classified by its own type only.
+        let mssql = mssql_server_error(error);
+        let retryable = match mssql {
+            Some(retryable) => retryable,
+            None => error
+                .as_database_error()
+                .and_then(|error| error.code())
+                .is_some_and(|code| {
+                    matches!(
+                        code.as_ref(),
+                        "5" | "6" | "261" | "262" | "517" | "40001" | "40P01" | "55P03"
+                    )
+                }),
+        };
         if retryable {
             return Self {
                 retryable: true,
@@ -235,7 +242,9 @@ impl OrmPublicError {
             sqlx::Error::RowNotFound => Self::not_found(),
             // PostgreSQL `insufficient_privilege`: a row-level security
             // `WITH CHECK` refusal or a missing privilege.
-            sqlx::Error::Database(db) if db.code().as_deref() == Some("42501") => {
+            sqlx::Error::Database(db)
+                if mssql.is_none() && db.code().as_deref() == Some("42501") =>
+            {
                 Self::new(OrmErrorCode::Forbidden).with_internal(error.to_string())
             }
             sqlx::Error::Database(db)
@@ -300,6 +309,20 @@ impl OrmPublicError {
         }
         error
     }
+}
+
+/// `Some(retryable)` when `error` is an error SQL Server reported.
+#[cfg(feature = "mssql")]
+fn mssql_server_error(error: &sqlx::Error) -> Option<bool> {
+    error
+        .as_database_error()
+        .and_then(|error| error.try_downcast_ref::<crate::db::mssql::MssqlServerError>())
+        .map(crate::db::mssql::MssqlServerError::is_retryable)
+}
+
+#[cfg(not(feature = "mssql"))]
+fn mssql_server_error(_error: &sqlx::Error) -> Option<bool> {
+    None
 }
 
 /// Recognize a delete or key update refused by an SQLite `ON DELETE/UPDATE RESTRICT` action.

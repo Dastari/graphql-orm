@@ -1712,18 +1712,15 @@ where
                         } else {
                             crate::graphql::orm::TransactionError::Rejected(error)
                         };
-                        context
-                            .rollback()
-                            .await
-                            .map_err(classify_transaction_error::<B>)?;
+                        // The callback's error is the result. A rollback
+                        // that fails must not replace it: the transaction is
+                        // dropped uncommitted either way.
+                        log_failed_rollback(context.rollback().await);
                         return Err(classified);
                     }
                 };
                 if context.write_refused() {
-                    context
-                        .rollback()
-                        .await
-                        .map_err(classify_transaction_error::<B>)?;
+                    log_failed_rollback(context.rollback().await);
                     return Err(crate::graphql::orm::TransactionError::Rejected(
                         OrmPublicError::forbidden(),
                     ));
@@ -1814,28 +1811,22 @@ where
                         } else {
                             crate::graphql::orm::TransactionError::Rejected(error)
                         };
-                        context
-                            .rollback()
-                            .await
-                            .map_err(classify_transaction_error::<B>)?;
+                        // The callback's error is the result. A rollback
+                        // that fails must not replace it: the transaction is
+                        // dropped uncommitted either way.
+                        log_failed_rollback(context.rollback().await);
                         return Err(classified);
                     }
                 };
                 // A refused written row rolls back as the refusal it is.
                 if context.write_refused() {
-                    context
-                        .rollback()
-                        .await
-                        .map_err(classify_transaction_error::<B>)?;
+                    log_failed_rollback(context.rollback().await);
                     return Err(crate::graphql::orm::TransactionError::Rejected(
                         OrmPublicError::forbidden(),
                     ));
                 }
                 if context.runtime_cannot_commit() {
-                    context
-                        .rollback()
-                        .await
-                        .map_err(classify_transaction_error::<B>)?;
+                    log_failed_rollback(context.rollback().await);
                     return Err(crate::graphql::orm::TransactionError::Rejected(
                         OrmPublicError::with_message(
                             OrmErrorCode::Conflict,
@@ -1850,6 +1841,16 @@ where
                 Ok(value)
             })
             .await
+    }
+}
+
+/// Record a rollback that failed after the transaction's outcome was already
+/// decided. The work is never committed: dropping the transaction rolls it
+/// back, or closes its connection so the server does.
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+fn log_failed_rollback(result: crate::Result<()>) {
+    if let Err(error) = result {
+        tracing::warn!(%error, "transaction rollback failed after an earlier failure");
     }
 }
 
