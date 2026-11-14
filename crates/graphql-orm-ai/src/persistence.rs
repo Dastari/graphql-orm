@@ -1107,7 +1107,8 @@ pub(crate) struct AiAttachmentArtifactRecord {
 #[backend_selected_graphql_entity(
     table = "graphql_orm_ai_runs",
     plural = "GraphqlOrmAiRuns",
-    default_sort = "created_at ASC"
+    default_sort = "created_at ASC",
+    keyset = "recovery_examined_at asc, created_at asc, id asc"
 )]
 #[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
 #[cfg_attr(
@@ -2558,7 +2559,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.79.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.80.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 

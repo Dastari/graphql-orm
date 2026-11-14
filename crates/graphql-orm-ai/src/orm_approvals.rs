@@ -1634,6 +1634,7 @@ pub struct OrmAiApprovalWaitReconciliationService {
     content_protector: Arc<dyn AiContentProtector>,
     clock: Arc<dyn Clock>,
     limits: AiApprovalWaitReconciliationLimits,
+    scan_cursor: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl OrmAiApprovalWaitReconciliationService {
@@ -1663,6 +1664,7 @@ impl OrmAiApprovalWaitReconciliationService {
             content_protector,
             clock,
             limits: AiApprovalWaitReconciliationLimits::default(),
+            scan_cursor: Arc::default(),
         }
     }
 
@@ -1706,6 +1708,10 @@ impl OrmAiApprovalWaitReconciliationService {
             let id = run.id;
             let version = run.row_version;
             let state = run.state.clone();
+            let active_lease = run.lease_owner.is_some()
+                && run
+                    .lease_expires_at
+                    .is_some_and(|expiry| expiry > now.unix_timestamp());
             let result: Result<(), AiError> = async {
                 let snapshot = self.load_snapshot(run).await?;
                 let session = snapshot
@@ -1925,8 +1931,13 @@ impl OrmAiApprovalWaitReconciliationService {
                 Ok(())
             }
             .await;
-            if result.is_err() {
-                report.skipped += 1;
+            if result.is_ok() {
+                continue;
+            }
+            report.skipped += 1;
+            // Live workers retain their original CAS fence, even on resolution failure.
+            if active_lease {
+                continue;
             }
             let stamp = retry_transaction(self.run_service.maximum_transaction_retries(), || {
                 let state = state.clone();
@@ -1956,36 +1967,38 @@ impl OrmAiApprovalWaitReconciliationService {
     }
 
     async fn load_candidates(&self) -> Result<Vec<AiRunRecord>, AiError> {
-        let maximum_candidate_scan = self.limits.maximum_candidate_scan;
-        self.database
-            .transaction(TransactionMode::Default, move |tx| {
-                Box::pin(async move {
-                    let mut runs = tx
-                        .query::<AiRunRecord>()
-                        .filter(AiRunRecordWhereInput {
-                            state: Some(StringFilter {
-                                eq: Some("waiting_approval".to_owned()),
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        })
-                        .order_by(AiRunRecordOrderByInput {
-                            recovery_examined_at: Some(
-                                graphql_orm::graphql::orm::OrderDirection::Asc,
-                            ),
-                            created_at: Some(graphql_orm::graphql::orm::OrderDirection::Asc),
-                        })
-                        .internal_limit(maximum_candidate_scan as i64)
-                        .fetch_all()
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    runs.sort_by_key(|run| (run.recovery_examined_at, run.created_at, run.id));
-                    runs.truncate(maximum_candidate_scan);
-                    Ok(runs)
-                })
-            })
-            .await
-            .map_err(map_transaction)
+        let after = self
+            .scan_cursor
+            .lock()
+            .map_err(|_| AiError::PersistenceFailed)?
+            .clone();
+        let page = AiRunRecord::keyset_connection_page(
+            &self.database,
+            AiRunRecordWhereInput {
+                state: Some(StringFilter {
+                    eq: Some("waiting_approval".to_owned()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            KeysetConnectionInput {
+                after,
+                first: Some(self.limits.maximum_candidate_scan as i64),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(map_orm)?;
+        // Paging is read-only: valid waits and live lease fences must never be stamped.
+        *self
+            .scan_cursor
+            .lock()
+            .map_err(|_| AiError::PersistenceFailed)? = if page.page_info.has_next_page {
+            page.page_info.end_cursor
+        } else {
+            None
+        };
+        Ok(page.edges.into_iter().map(|edge| edge.node).collect())
     }
 
     async fn load_snapshot(&self, run: AiRunRecord) -> Result<ApprovalWaitSnapshot, AiError> {
@@ -3457,17 +3470,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reconciliation_preserves_live_wait_consumption_and_heartbeat() {
+        let fixture = fixture().await;
+        let (requested, tool_call_id) =
+            request_wait(&fixture, fixture.now + Duration::hours(2)).await;
+        let report = fixture
+            .reconciliation_service
+            .reconcile_waits("observer")
+            .await
+            .unwrap();
+        assert_eq!(report.still_waiting, 1);
+        let view = fixture
+            .approval_service
+            .approval(&fixture.principal, requested.approval_id())
+            .await
+            .unwrap()
+            .unwrap();
+        fixture
+            .approval_service
+            .decide_approval(
+                &fixture.principal,
+                DecideAiApprovalInput {
+                    id: view.id,
+                    decision: AiApprovalDecision::Approve,
+                    expected_version: view.row_version,
+                },
+            )
+            .await
+            .unwrap();
+        let (binding, preview) = approval_binding(&fixture, requested.lease(), tool_call_id);
+        let consumed = fixture
+            .approval_service
+            .consume_approval(
+                requested.lease(),
+                requested.approval_id(),
+                &binding,
+                &preview,
+            )
+            .await
+            .expect("valid waits retain their original fence");
+        // Heartbeats accept leased/running claims; consumption returns the resumed
+        // running fence derived from the unchanged approval-wait lease.
+        fixture
+            .run_service
+            .heartbeat(consumed.lease())
+            .await
+            .expect("the resumed worker can still heartbeat after reconciliation");
+    }
+
+    #[tokio::test]
     async fn an_unresolvable_wait_rotates_and_does_not_block_a_denied_wait() {
-        for expired in [true, false] {
+        for (expired, expired_lease) in [(true, false), (false, false), (false, true)] {
             let fixture = fixture().await;
             let (first, _) = request_wait(&fixture, fixture.now + Duration::hours(2)).await;
             let (second, _) = request_wait(&fixture, fixture.now + Duration::hours(2)).await;
-            let candidates = fixture
-                .reconciliation_service
-                .load_candidates()
+            let left = AiRunRecord::find_by_id(&fixture.database, &first.lease().run_id().0)
                 .await
+                .unwrap()
                 .unwrap();
-            let (bad, denied) = if candidates[0].id == first.lease().run_id().0 {
+            let right = AiRunRecord::find_by_id(&fixture.database, &second.lease().run_id().0)
+                .await
+                .unwrap()
+                .unwrap();
+            let (bad, denied) = if (left.created_at, left.id) < (right.created_at, right.id) {
                 (first, second)
             } else {
                 (second, first)
@@ -3528,7 +3593,28 @@ mod tests {
                 )
                 .unwrap(),
             );
+            if expired_lease {
+                fixture.clock.advance_seconds(3_601);
+            }
+            let before = AiRunRecord::find_by_id(&fixture.database, &bad.lease().run_id().0)
+                .await
+                .unwrap()
+                .unwrap();
             assert!(reconciler.reconcile_waits("first").await.is_ok());
+            let after = AiRunRecord::find_by_id(&fixture.database, &before.id)
+                .await
+                .unwrap()
+                .unwrap();
+            if expired_lease {
+                assert!(after.recovery_examined_at > 0);
+                // Simulate a restarted reconciler: durable failed-candidate order survives it.
+                *reconciler.scan_cursor.lock().unwrap() = None;
+            } else {
+                assert_eq!(
+                    after.row_version, before.row_version,
+                    "even a failed candidate keeps its active worker fence"
+                );
+            }
             let next = reconciler.reconcile_waits("next").await.unwrap();
             assert_eq!(next.cancelled_denied, 1);
         }
