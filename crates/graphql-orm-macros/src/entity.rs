@@ -9095,6 +9095,33 @@ mod attribute_composition_tests {
         assert_eq!(meta.serde_name, None);
     }
 
+    /// #405: a valued `SimpleObject` option before `name` must not hide it.
+    #[test]
+    fn graphql_name_is_found_in_any_option_order() {
+        for tokens in [
+            quote::quote! { #[graphql(skip = false, name = "publicAlias")] label: String },
+            quote::quote! { #[graphql(name = "publicAlias", skip = false)] label: String },
+            quote::quote! { #[graphql(skip_output = false, name = "publicAlias")] label: String },
+            quote::quote! { #[graphql(name = "publicAlias", skip_output = false)] label: String },
+            quote::quote! { #[graphql(visible = false, name = "publicAlias")] label: String },
+            quote::quote! { #[graphql(visible = "visible_fn", name = "publicAlias")] label: String },
+            quote::quote! { #[graphql(name = "publicAlias", visible = false)] label: String },
+            quote::quote! { #[graphql(skip = false)] #[graphql(name = "publicAlias")] label: String },
+            quote::quote! { #[graphql(guard = "Guard::new()", skip = false, name = "publicAlias")] label: String },
+        ] {
+            let field: Field = Field::parse_named.parse2(tokens.clone()).unwrap();
+            let meta = parse_field_metadata(&field).unwrap();
+            assert_eq!(
+                meta.graphql_name.as_deref(),
+                Some("publicAlias"),
+                "{tokens}"
+            );
+            // `skip = false` keeps its documented legacy input exclusion.
+            let has_skip = tokens.to_string().contains("skip =");
+            assert_eq!(meta.skip_input, has_skip, "{tokens}");
+        }
+    }
+
     #[test]
     fn owned_field_attributes_reject_unknown_or_malformed_options() {
         for tokens in [
