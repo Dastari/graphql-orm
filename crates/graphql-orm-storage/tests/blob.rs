@@ -145,5 +145,7 @@ fn validate_portable_blob_key_refuses_windows_unsafe_names() {
             matches!(error, StorageError::InvalidStorageKey { .. }),
             "{key}: {error:?}"
         );
+        // The public message never reveals the rejected key.
+        assert_eq!(error.to_string(), "invalid storage key");
     }
 }
