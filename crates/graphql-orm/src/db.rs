@@ -1179,6 +1179,36 @@ impl<B: OrmBackend> Database<B> {
         Ok(visibility)
     }
 
+    /// Resolve the installed row policy's optional SQL prefilter for the
+    /// target rows of a generated GraphQL write; see
+    /// [`RowPolicy::write_target_prefilter`](crate::graphql::orm::RowPolicy::write_target_prefilter).
+    /// `None` without a row policy or when the policy declares none.
+    pub async fn write_target_prefilter<T: crate::graphql::orm::Entity + 'static>(
+        &self,
+        ctx: Option<&async_graphql::Context<'_>>,
+        surface: crate::graphql::orm::EntityAccessSurface,
+    ) -> async_graphql::Result<Option<crate::graphql::orm::ReadPredicate>> {
+        let Some(policy) = &self.row_policy else {
+            return Ok(None);
+        };
+        let metadata = T::metadata();
+        let Some(predicate) = policy
+            .write_target_prefilter(
+                ctx,
+                self,
+                metadata.entity_name,
+                metadata.write_policy,
+                surface,
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        // A predicate built for another entity or backend fails closed.
+        crate::graphql::orm::ReadVisibility::Prefilter(predicate.clone()).validate::<T, B>()?;
+        Ok(Some(predicate))
+    }
+
     pub(crate) async fn projection_read_visibility<P: crate::graphql::orm::ReadProjection<B>>(
         &self,
     ) -> async_graphql::Result<crate::graphql::orm::ReadVisibility> {
@@ -2079,6 +2109,16 @@ impl<B: OrmBackend> DatabaseBuilder<B> {
     /// Pass `None` to disable limit capping.
     pub fn max_page_limit(mut self, limit: Option<i64>) -> Self {
         self.database.pagination_config.max_limit = limit;
+        self
+    }
+
+    /// Set the maximum rows one generated GraphQL `updateMany` or
+    /// `deleteMany` loads and locks; see
+    /// [`PaginationConfig::max_bulk_write_rows`]. A bulk write that selects
+    /// more is refused with `PAGE_LIMIT_EXCEEDED`. Pass `None` to remove the
+    /// bound.
+    pub fn max_bulk_write_rows(mut self, limit: Option<i64>) -> Self {
+        self.database.pagination_config.max_bulk_write_rows = limit;
         self
     }
 

@@ -3167,6 +3167,37 @@ pub trait RowPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
         surface: EntityAccessSurface,
         row: &'a (dyn std::any::Any + Send + Sync),
     ) -> futures::future::BoxFuture<'a, async_graphql::Result<bool>>;
+
+    /// Optionally narrow, in SQL, the rows a generated GraphQL write selects
+    /// as its targets.
+    ///
+    /// Generated GraphQL `update`, `delete`, `updateMany` and `deleteMany`
+    /// lock the rows their key or filter selects and then classify each with
+    /// [`Self::can_write_row`] and [`Self::can_read_row`]; a row the caller
+    /// can neither write nor read is treated as missing. Return a predicate
+    /// that selects the rows this caller can read **or** write, and rows
+    /// outside it are never selected, locked or passed to a callback, which
+    /// removes the timing and lock-contention difference between a hidden row
+    /// and a missing one. It also keeps hidden rows out of
+    /// [`PaginationConfig::max_bulk_write_rows`](super::PaginationConfig::max_bulk_write_rows).
+    ///
+    /// The predicate only narrows. Every selected row still goes through the
+    /// row callbacks, so it can never grant a write. A row it leaves out is
+    /// treated exactly like a missing row, including a row the callbacks
+    /// would have allowed, so it must not exclude rows the caller can write.
+    /// The default, `None`, keeps the callback-only behaviour. `policy_key`
+    /// is the entity's write policy key. Errors fail the write closed.
+    /// Repository writes do not ask.
+    fn write_target_prefilter<'a>(
+        &'a self,
+        _ctx: Option<&'a async_graphql::Context<'_>>,
+        _db: &'a crate::db::Database<B>,
+        _entity_name: &'static str,
+        _policy_key: Option<&'static str>,
+        _surface: EntityAccessSurface,
+    ) -> futures::future::BoxFuture<'a, async_graphql::Result<Option<super::ReadPredicate>>> {
+        Box::pin(async { Ok(None) })
+    }
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
