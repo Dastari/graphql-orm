@@ -71,10 +71,16 @@ repository_root=$(git rev-parse --show-toplevel)
 cd "${repository_root}"
 
 for provider in "${providers[@]}"; do
+  lane_started=${SECONDS}
   features="sqlite,${provider}"
   echo "provider-lanes: ${mode} ${provider}"
   case "${mode}" in
     test)
+      # The ordinary AI library and its large unit-test harness can otherwise
+      # compile together and exhaust a hosted runner. Build the harness first;
+      # retain normal build parallelism for the remaining, smaller targets.
+      CARGO_BUILD_JOBS=1 cargo test -p graphql-orm-ai --no-default-features \
+        --features "${features}" --locked --lib --no-run
       if [[ "${GRAPHQL_ORM_AI_PRUNE_TEST_EXECUTABLES:-0}" == 1 ]]; then
         # Cargo identifies the exact executables for this lane, including fresh
         # cached artifacts. Prune only after all tests/doc-tests have succeeded;
@@ -126,6 +132,7 @@ PYTHON
           --features "${features}" --no-deps --locked
       ;;
   esac
+  echo "provider-lanes: ${mode} ${provider} passed in $((SECONDS - lane_started))s"
 done
 
 echo "provider-lanes: ${mode} passed for ${#providers[@]} explicit lane(s)"
