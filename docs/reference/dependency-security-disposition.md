@@ -3,8 +3,8 @@ title: Dependency security disposition
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-14
-review_by: 2026-12-04
+last_reviewed: 2026-11-15
+review_by: 2027-02-15
 supersedes: []
 ---
 

@@ -286,23 +286,20 @@ impl AssuranceRequirementEvaluator for AgqlAssuranceEvaluator {
                 return Err(assurance_graphql_error("forbidden", "FORBIDDEN"));
             }
         };
-        match evaluation.state {
-            AssuranceEvaluationState::Satisfied => Ok(()),
-            state => {
-                let code = state
-                    .graphql_extension_code()
-                    .expect("denied assurance evaluation has a stable code");
-                let message = match state {
-                    AssuranceEvaluationState::Unauthenticated => "unauthenticated",
-                    AssuranceEvaluationState::StepUpRequired { .. } => {
-                        "additional authentication is required"
-                    }
-                    AssuranceEvaluationState::Forbidden { .. } => "forbidden",
-                    AssuranceEvaluationState::Satisfied => unreachable!(),
-                };
-                Err(assurance_graphql_error(message, code))
+        let message = match evaluation.state {
+            AssuranceEvaluationState::Satisfied => return Ok(()),
+            AssuranceEvaluationState::Unauthenticated => "unauthenticated",
+            AssuranceEvaluationState::StepUpRequired { .. } => {
+                "additional authentication is required"
             }
-        }
+            AssuranceEvaluationState::Forbidden { .. } => "forbidden",
+        };
+        // Every denied state carries a code; a missing one still denies.
+        let code = evaluation
+            .state
+            .graphql_extension_code()
+            .unwrap_or("FORBIDDEN");
+        Err(assurance_graphql_error(message, code))
     }
 }
 
