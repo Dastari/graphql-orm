@@ -274,6 +274,7 @@ async fn failed_run(
                 text: "Count my records".to_owned(),
                 attachment_ids: vec![],
                 client_message_id: Uuid::new_v4(),
+                references: Vec::new(),
             },
         )
         .await
@@ -1023,6 +1024,7 @@ async fn session_activity_tracks_retries_new_input_and_ignores_late_old_completi
                 text: "A new input takes precedence".to_owned(),
                 attachment_ids: vec![],
                 client_message_id: Uuid::new_v4(),
+                references: Vec::new(),
             },
         )
         .await
@@ -1070,6 +1072,7 @@ async fn session_activity_tracks_retries_new_input_and_ignores_late_old_completi
                 text: "Third input".to_owned(),
                 attachment_ids: vec![],
                 client_message_id: Uuid::new_v4(),
+                references: Vec::new(),
             },
         )
         .await

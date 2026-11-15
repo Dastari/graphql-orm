@@ -30,6 +30,18 @@ pub(crate) enum MockBackgroundRetrievalFailure {
     Rejected,
 }
 
+/// Captured wire content. `Debug` prints a count, never the content.
+#[cfg(test)]
+struct WireCapture(std::sync::Mutex<Vec<String>>);
+
+#[cfg(test)]
+impl std::fmt::Debug for WireCapture {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let entries = self.0.lock().map_or(0, |entries| entries.len());
+        write!(formatter, "WireCapture({entries} requests)")
+    }
+}
+
 /// Deterministic, network-free provider fixture.
 #[derive(Clone, Debug)]
 pub struct MockProvider {
@@ -61,9 +73,67 @@ pub struct MockProvider {
     #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
     discarded_provider_sessions: Arc<AtomicU64>,
     request_count: Arc<AtomicU64>,
+    #[cfg(test)]
+    wire_capture: Option<Arc<WireCapture>>,
 }
 
 impl MockProvider {
+    /// Records, for every accepted request, the user content exactly as an
+    /// adapter would send it: each JSON input value of the replayed history
+    /// and the current input after
+    /// [`crate::ModelDispatchReferences::wire_json`]. Crate tests only: the
+    /// capture holds whatever entity references resolved to.
+    #[cfg(all(test, feature = "sqlite"))]
+    pub(crate) fn with_wire_capture(mut self) -> Self {
+        self.wire_capture = Some(Arc::new(WireCapture(std::sync::Mutex::new(Vec::new()))));
+        self
+    }
+
+    /// The captured wire content, one entry per accepted request.
+    #[cfg(all(test, feature = "sqlite"))]
+    pub(crate) fn captured_wire(&self) -> Vec<String> {
+        self.wire_capture
+            .as_ref()
+            .and_then(|capture| capture.0.lock().ok().map(|entries| entries.clone()))
+            .unwrap_or_default()
+    }
+
+    #[cfg(not(test))]
+    fn capture_wire(&self, _dispatch: &crate::ModelDispatchRequest) {}
+
+    #[cfg(test)]
+    fn capture_wire(&self, dispatch: &crate::ModelDispatchRequest) {
+        let Some(capture) = &self.wire_capture else {
+            return;
+        };
+        let request = dispatch.request();
+        let history = match &request.continuation {
+            Some(crate::ModelContinuation::StatelessConversation { messages, .. }) => {
+                messages.as_slice()
+            }
+            _ => &[],
+        };
+        let wire = history
+            .iter()
+            .filter_map(|message| match message {
+                crate::ModelConversationMessage::User { content } => Some(content.as_slice()),
+                _ => None,
+            })
+            .flatten()
+            .chain(&request.input)
+            .map(|block| match block {
+                crate::ModelInputBlock::Json { value } => {
+                    dispatch.references().wire_json(value).to_string()
+                }
+                other => serde_json::to_string(other).unwrap_or_default(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if let Ok(mut entries) = capture.0.lock() {
+            entries.push(wire);
+        }
+    }
+
     /// Creates a local mock provider yielding the supplied events in order.
     pub fn new(events: impl Into<Vec<ProviderEvent>>) -> Self {
         Self {
@@ -102,6 +172,8 @@ impl MockProvider {
             #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
             discarded_provider_sessions: Arc::new(AtomicU64::new(0)),
             request_count: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            wire_capture: None,
         }
     }
 
@@ -260,10 +332,11 @@ impl AiProvider for MockProvider {
 
     async fn stream(
         &self,
-        request: ModelRequest,
+        dispatch: crate::ModelDispatchRequest,
         context: ProviderRequestContext,
     ) -> Result<ProviderEventStream, ProviderError> {
-        context.validate_request(&self.kind, &request)?;
+        context.validate_request(&self.kind, dispatch.request())?;
+        self.capture_wire(&dispatch);
         #[cfg(test)]
         if let Some(category) = self.stream_failure {
             return Err(ProviderError::Classified(category));
@@ -345,11 +418,14 @@ impl AiProvider for MockProvider {
 
     async fn submit_background(
         &self,
-        request: ModelRequest,
+        dispatch: crate::ModelDispatchRequest,
         context: ProviderRequestContext,
         binding: ProviderBackgroundBinding,
     ) -> Result<ProviderBackgroundSubmission, ProviderError> {
-        context.validate_request(&self.kind, &request)?;
+        context.validate_request(&self.kind, dispatch.request())?;
+        self.capture_wire(&dispatch);
+        #[cfg_attr(not(test), allow(unused_variables))]
+        let (request, _) = dispatch.into_parts();
         if binding.submission_key().is_empty() || binding.provider_profile_id().is_empty() {
             return Err(ProviderError::Rejected);
         }

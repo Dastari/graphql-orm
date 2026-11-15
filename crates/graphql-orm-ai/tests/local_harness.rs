@@ -429,7 +429,7 @@ async fn fake_process_receives_only_bounded_protocol_and_normalizes_output() {
     let provider = AiLocalHarnessProvider::new(registry, driver);
     let model_request = request("local/synthetic");
     let events = provider
-        .stream(model_request.clone(), context(&model_request))
+        .stream(model_request.clone().into(), context(&model_request))
         .await
         .expect("fake process should start")
         .try_collect::<Vec<_>>()
@@ -499,7 +499,7 @@ async fn stateless_replay_and_native_tool_events_use_the_reviewed_v2_protocol() 
     );
     let model_request = stateless_tool_request("local/synthetic");
     let events = provider
-        .stream(model_request.clone(), context(&model_request))
+        .stream(model_request.clone().into(), context(&model_request))
         .await
         .expect("stateless harness process should start")
         .try_collect::<Vec<_>>()
@@ -544,7 +544,7 @@ async fn unknown_model_and_forbidden_process_events_fail_closed() {
     let unknown_request = request("local/unknown");
     assert!(matches!(
         provider
-            .stream(unknown_request.clone(), context(&unknown_request))
+            .stream(unknown_request.clone().into(), context(&unknown_request))
             .await,
         Err(ProviderError::Unsupported)
     ));
@@ -554,14 +554,14 @@ async fn unknown_model_and_forbidden_process_events_fail_closed() {
     let swapped_context = context(&request("local/swapped-budget-model"));
     assert!(matches!(
         provider
-            .stream(model_request.clone(), swapped_context)
+            .stream(model_request.clone().into(), swapped_context)
             .await,
         Err(ProviderError::BudgetDenied)
     ));
     assert_eq!(state.lock().expect("fake state should lock").launches, 0);
 
     let error = provider
-        .stream(model_request.clone(), context(&model_request))
+        .stream(model_request.clone().into(), context(&model_request))
         .await
         .expect("fake process should start")
         .try_collect::<Vec<_>>()
@@ -588,7 +588,7 @@ async fn output_limits_and_truncated_frames_terminate_the_process() {
     );
     let model_request = request("local/synthetic");
     let error = provider
-        .stream(model_request.clone(), context(&model_request))
+        .stream(model_request.clone().into(), context(&model_request))
         .await
         .expect("fake process should start")
         .try_collect::<Vec<_>>()
@@ -608,7 +608,7 @@ async fn output_limits_and_truncated_frames_terminate_the_process() {
         Arc::new(AiJsonLinesLocalHarnessDriver::new(launcher)),
     );
     let error = provider
-        .stream(model_request.clone(), context(&model_request))
+        .stream(model_request.clone().into(), context(&model_request))
         .await
         .expect("fake process should start")
         .try_collect::<Vec<_>>()
@@ -644,7 +644,7 @@ async fn dropping_a_partial_stream_invokes_the_launcher_kill_on_drop_contract() 
     );
     let model_request = request("local/synthetic");
     let mut stream = provider
-        .stream(model_request.clone(), context(&model_request))
+        .stream(model_request.clone().into(), context(&model_request))
         .await
         .expect("fake process should start");
     assert!(matches!(

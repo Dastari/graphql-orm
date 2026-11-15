@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use super::openai::{CompatibleRouteBinding, OpenAiProvider, OpenAiProviderConfig};
 use crate::{
     AiOpenAiCompatibleProfileView, AiProvider, AiProviderEndpointPolicy, AiProviderKindInput,
-    AiProviderProfileView, AiSecretStore, ModelRequest, ProviderCapabilities, ProviderError,
-    ProviderEventStream, ProviderKind, ProviderRequestContext, SecretRef,
+    AiProviderProfileView, AiSecretStore, ProviderCapabilities, ProviderError, ProviderEventStream,
+    ProviderKind, ProviderRequestContext, SecretRef,
 };
 
 /// Immutable capabilities declared for one OpenAI-compatible endpoint.
@@ -270,7 +270,7 @@ impl AiProvider for OpenAiCompatibleProvider {
 
     async fn stream(
         &self,
-        request: ModelRequest,
+        request: crate::ModelDispatchRequest,
         context: ProviderRequestContext,
     ) -> Result<ProviderEventStream, ProviderError> {
         self.inner.stream(request, context).await
@@ -312,6 +312,7 @@ mod tests {
     use tokio::sync::oneshot;
 
     use super::*;
+    use crate::ModelRequest;
     use crate::{
         AiBudgetAmounts, AiBudgetReservation, AiBudgetReservationId, AiDataSourceRef,
         AiDestinationTrust, AiEgressCapability, AiEgressDecision, AiEgressManifest, AiRunId,
@@ -549,7 +550,10 @@ mod tests {
         .expect("compatible provider should build");
         let model_request = request();
         let events = provider
-            .stream(model_request.clone(), context(&model_request, &endpoint))
+            .stream(
+                model_request.clone().into(),
+                context(&model_request, &endpoint),
+            )
             .await
             .expect("compatible stream should start")
             .try_collect::<Vec<_>>()
@@ -590,7 +594,7 @@ mod tests {
         assert!(matches!(
             provider
                 .stream(
-                    model_request.clone(),
+                    model_request.clone().into(),
                     context(&model_request, "http://swapped.invalid/v1/responses")
                 )
                 .await,
@@ -711,7 +715,7 @@ mod tests {
         first.continuation_mode = ModelContinuationMode::StatelessReplay;
         first.tools = vec![read_tool()];
         let events = provider
-            .stream(first.clone(), context(&first, &endpoint))
+            .stream(first.clone().into(), context(&first, &endpoint))
             .await
             .expect("stateless stream should start")
             .try_collect::<Vec<_>>()
@@ -773,7 +777,7 @@ mod tests {
         }];
         let events = provider
             .stream(
-                second.clone(),
+                second.clone().into(),
                 context_with_tool_results(&second, &endpoint2, 1),
             )
             .await
@@ -827,7 +831,7 @@ mod tests {
         stateless.continuation_mode = ModelContinuationMode::StatelessReplay;
         assert!(matches!(
             provider
-                .stream(stateless.clone(), context(&stateless, &endpoint))
+                .stream(stateless.clone().into(), context(&stateless, &endpoint))
                 .await,
             Err(ProviderError::Unsupported)
         ));
@@ -848,7 +852,7 @@ mod tests {
         assert!(!text_only.capabilities().stateless_continuation);
         assert!(matches!(
             text_only
-                .stream(stateless.clone(), context(&stateless, &endpoint))
+                .stream(stateless.clone().into(), context(&stateless, &endpoint))
                 .await,
             Err(ProviderError::Unsupported)
         ));

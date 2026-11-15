@@ -151,7 +151,7 @@ impl AiProvider for MixedRetainedProvider {
 
     async fn stream(
         &self,
-        _: ModelRequest,
+        _: crate::ModelDispatchRequest,
         _: ProviderRequestContext,
     ) -> Result<ProviderEventStream, ProviderError> {
         panic!("mixed coordinator must use the native callback transport")
@@ -159,10 +159,11 @@ impl AiProvider for MixedRetainedProvider {
 
     async fn stream_with_dynamic_tools(
         &self,
-        request: ModelRequest,
+        request: crate::ModelDispatchRequest,
         context: ProviderRequestContext,
         responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> Result<ProviderEventStream, ProviderError> {
+        let (request, _) = request.into_parts();
         context.validate_request(&self.provider_kind(), &request)?;
         let turn = self.turns.fetch_add(1, Ordering::SeqCst);
         if self.scenario == CallbackScenario::StreamLimited {

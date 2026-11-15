@@ -280,6 +280,14 @@ impl ChatCompletionsProvider {
     }
 
     fn request_body(&self, request: &ModelRequest) -> Result<Value, ProviderError> {
+        self.dispatch_body(request, &crate::ModelDispatchReferences::withheld())
+    }
+
+    fn dispatch_body(
+        &self,
+        request: &ModelRequest,
+        references: &crate::ModelDispatchReferences,
+    ) -> Result<Value, ProviderError> {
         request.validate()?;
         if request.input.is_empty()
             || request.maximum_output_tokens.is_none()
@@ -326,12 +334,12 @@ impl ChatCompletionsProvider {
             messages.push(json!({"role": "system", "content": instructions.join("\n\n")}));
         }
         match &request.continuation {
-            None => messages.push(user_message(&request.input)?),
+            None => messages.push(user_message(&request.input, references)?),
             Some(ModelContinuation::StatelessConversation {
                 messages: history, ..
             }) => {
                 for message in history {
-                    messages.push(conversation_message(message, &definitions)?);
+                    messages.push(conversation_message(message, &definitions, references)?);
                 }
                 let Some(ModelConversationMessage::Assistant { tool_calls, .. }) = history.last()
                 else {
@@ -419,11 +427,12 @@ impl AiProvider for ChatCompletionsProvider {
 
     async fn stream(
         &self,
-        request: ModelRequest,
+        dispatch: crate::ModelDispatchRequest,
         context: ProviderRequestContext,
     ) -> Result<ProviderEventStream, ProviderError> {
+        let (request, references) = dispatch.into_parts();
         self.authorize(&request, &context)?;
-        let body = self.request_body(&request)?;
+        let body = self.dispatch_body(&request, &references)?;
         self.endpoint_guard.recheck()?;
         let mut post = self.client.post(self.endpoint.clone()).json(&body);
         if let Some(credential) = &self.config.credential {
@@ -524,12 +533,15 @@ fn tool_definition(tool: &ModelToolDefinition) -> Value {
     })
 }
 
-fn text_content(input: &[ModelInputBlock]) -> Result<String, ProviderError> {
+fn text_content(
+    input: &[ModelInputBlock],
+    references: &crate::ModelDispatchReferences,
+) -> Result<String, ProviderError> {
     input
         .iter()
         .map(|block| match block {
             ModelInputBlock::Text { text } => Ok(text.clone()),
-            ModelInputBlock::Json { value } => Ok(value.to_string()),
+            ModelInputBlock::Json { value } => Ok(references.wire_json(value).to_string()),
             ModelInputBlock::Attachment { .. } => Err(ProviderError::Unsupported),
             ModelInputBlock::ToolResult { .. } => Err(ProviderError::InvalidRequest),
         })
@@ -537,16 +549,20 @@ fn text_content(input: &[ModelInputBlock]) -> Result<String, ProviderError> {
         .map(|parts| parts.join("\n\n"))
 }
 
-fn user_message(input: &[ModelInputBlock]) -> Result<Value, ProviderError> {
-    Ok(json!({"role": "user", "content": text_content(input)?}))
+fn user_message(
+    input: &[ModelInputBlock],
+    references: &crate::ModelDispatchReferences,
+) -> Result<Value, ProviderError> {
+    Ok(json!({"role": "user", "content": text_content(input, references)?}))
 }
 
 fn conversation_message(
     message: &ModelConversationMessage,
     definitions: &BTreeMap<&str, &ModelToolDefinition>,
+    references: &crate::ModelDispatchReferences,
 ) -> Result<Value, ProviderError> {
     match message {
-        ModelConversationMessage::User { content } => user_message(content),
+        ModelConversationMessage::User { content } => user_message(content, references),
         ModelConversationMessage::Assistant {
             content,
             tool_calls,
@@ -1184,7 +1200,10 @@ mod tests {
         let provider = chat_provider(&endpoint, None, false, false);
         let model_request = request();
         let events = provider
-            .stream(model_request.clone(), context(&model_request, &endpoint, 0))
+            .stream(
+                model_request.clone().into(),
+                context(&model_request, &endpoint, 0),
+            )
             .await
             .expect("stream should start")
             .try_collect::<Vec<_>>()
@@ -1246,7 +1265,7 @@ mod tests {
         first.continuation_mode = ModelContinuationMode::StatelessReplay;
         first.tools = vec![tool()];
         let events = provider
-            .stream(first.clone(), context(&first, &endpoint, 0))
+            .stream(first.clone().into(), context(&first, &endpoint, 0))
             .await
             .expect("stream should start")
             .try_collect::<Vec<_>>()
@@ -1311,7 +1330,7 @@ mod tests {
             output: json!({"record": 7}),
         }];
         provider
-            .stream(second.clone(), context(&second, &endpoint, 1))
+            .stream(second.clone().into(), context(&second, &endpoint, 1))
             .await
             .expect("continuation should start")
             .try_collect::<Vec<_>>()
@@ -1352,7 +1371,10 @@ mod tests {
             model_request.continuation_mode = ModelContinuationMode::StatelessReplay;
             model_request.tools = vec![tool()];
             let result = provider
-                .stream(model_request.clone(), context(&model_request, &endpoint, 0))
+                .stream(
+                    model_request.clone().into(),
+                    context(&model_request, &endpoint, 0),
+                )
                 .await
                 .expect("stream should start")
                 .try_collect::<Vec<_>>()
@@ -1385,7 +1407,10 @@ mod tests {
         let model_request = request();
         assert!(matches!(
             provider
-                .stream(model_request.clone(), context(&model_request, &endpoint, 0))
+                .stream(
+                    model_request.clone().into(),
+                    context(&model_request, &endpoint, 0)
+                )
                 .await
                 .expect("stream should start")
                 .try_collect::<Vec<_>>()
@@ -1403,7 +1428,10 @@ mod tests {
         let provider = chat_provider(&endpoint, None, false, false);
         assert!(matches!(
             provider
-                .stream(model_request.clone(), context(&model_request, &endpoint, 0))
+                .stream(
+                    model_request.clone().into(),
+                    context(&model_request, &endpoint, 0)
+                )
                 .await
                 .expect("stream should start")
                 .try_collect::<Vec<_>>()
@@ -1425,7 +1453,10 @@ mod tests {
             .await;
             let provider = chat_provider(&endpoint, Some(reference()), false, false);
             let Err(error) = provider
-                .stream(model_request.clone(), context(&model_request, &endpoint, 0))
+                .stream(
+                    model_request.clone().into(),
+                    context(&model_request, &endpoint, 0),
+                )
                 .await
             else {
                 panic!("HTTP failure should be refused");
@@ -1512,7 +1543,10 @@ mod tests {
             .store(false, std::sync::atomic::Ordering::SeqCst);
         let model_request = request();
         let result = provider
-            .stream(model_request.clone(), context(&model_request, &endpoint, 0))
+            .stream(
+                model_request.clone().into(),
+                context(&model_request, &endpoint, 0),
+            )
             .await;
         assert!(
             matches!(result, Err(ProviderError::EgressDenied)),
@@ -1557,7 +1591,7 @@ mod tests {
         assert!(matches!(
             provider
                 .stream(
-                    model_request.clone(),
+                    model_request.clone().into(),
                     context(
                         &model_request,
                         "http://swapped.invalid/v1/chat/completions",

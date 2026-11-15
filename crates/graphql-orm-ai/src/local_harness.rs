@@ -661,10 +661,14 @@ impl AiProvider for AiLocalHarnessProvider {
 
     async fn stream(
         &self,
-        request: ModelRequest,
+        dispatch: crate::ModelDispatchRequest,
         context: ProviderRequestContext,
     ) -> Result<ProviderEventStream, ProviderError> {
-        context.validate_request(&ProviderKind::LocalHarness, &request)?;
+        context.validate_request(&ProviderKind::LocalHarness, dispatch.request())?;
+        // A harness driver receives a plain, cloneable request and runs a
+        // local process, so resolved reference data is never handed to it.
+        // Every entity reference reaches the driver as the unavailable marker.
+        let request = dispatch.into_unavailable_request();
         let registration = self
             .registry
             .registration(&request.model)

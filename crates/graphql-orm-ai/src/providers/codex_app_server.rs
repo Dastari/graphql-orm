@@ -1511,9 +1511,13 @@ impl AiProvider for AiCodexAppServerProvider {
 
     async fn stream(
         &self,
-        request: ModelRequest,
+        dispatch: crate::ModelDispatchRequest,
         context: ProviderRequestContext,
     ) -> Result<ProviderEventStream, ProviderError> {
+        // This adapter turns a request into a cloneable, queued turn for a
+        // local agent process, so it never takes resolved reference data:
+        // every entity reference is sent as the unavailable marker.
+        let request = dispatch.into_unavailable_request();
         self.capabilities()
             .validate_reasoning_effort(&request.model, request.reasoning_effort)?;
         context.validate_request(&ProviderKind::LocalHarness, &request)?;
@@ -1562,10 +1566,10 @@ impl AiProvider for AiCodexAppServerProvider {
 
     async fn dispatch(
         &self,
-        request: ModelRequest,
+        request: crate::ModelDispatchRequest,
         context: ProviderRequestContext,
     ) -> AiProviderDispatchOutcome {
-        if let Err(error) = self.prepare_dispatch(&request, &context).await {
+        if let Err(error) = self.prepare_dispatch(request.request(), &context).await {
             return AiProviderDispatchOutcome::RejectedBeforeDispatch(error);
         }
         codex_dispatch_outcome(self.stream(request, context).await)
@@ -1573,10 +1577,14 @@ impl AiProvider for AiCodexAppServerProvider {
 
     async fn stream_with_dynamic_tools(
         &self,
-        request: ModelRequest,
+        dispatch: crate::ModelDispatchRequest,
         context: ProviderRequestContext,
         responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> Result<ProviderEventStream, ProviderError> {
+        // This adapter turns a request into a cloneable, queued turn for a
+        // local agent process, so it never takes resolved reference data:
+        // every entity reference is sent as the unavailable marker.
+        let request = dispatch.into_unavailable_request();
         if !self.registration.experimental_dynamic_tools()
             || !self
                 .pool
@@ -1652,11 +1660,11 @@ impl AiProvider for AiCodexAppServerProvider {
 
     async fn dispatch_with_dynamic_tools(
         &self,
-        request: ModelRequest,
+        request: crate::ModelDispatchRequest,
         context: ProviderRequestContext,
         responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> AiProviderDispatchOutcome {
-        if let Err(error) = self.prepare_dispatch(&request, &context).await {
+        if let Err(error) = self.prepare_dispatch(request.request(), &context).await {
             return AiProviderDispatchOutcome::RejectedBeforeDispatch(error);
         }
         codex_dispatch_outcome(
@@ -11633,7 +11641,7 @@ pub(crate) mod tests {
             .with_provider_session(opened)
             .expect("opened provider session should match the run context");
         let events = provider
-            .stream_with_dynamic_tools(request, context, Arc::new(FakeDynamicResponder))
+            .stream_with_dynamic_tools(request.into(), context, Arc::new(FakeDynamicResponder))
             .await
             .expect("provider should dispatch initial activation directly")
             .collect::<Vec<_>>()
@@ -11686,7 +11694,7 @@ pub(crate) mod tests {
                 .expect("newly bound cursor should activate");
         let first = provider
             .stream_with_dynamic_tools(
-                request.clone(),
+                request.clone().into(),
                 context
                     .clone()
                     .with_provider_session(opened)
@@ -11702,7 +11710,7 @@ pub(crate) mod tests {
         let resumed = opened_session_with_descriptor(run_binding, cursor, descriptor.clone());
         let continuation = provider
             .stream_with_dynamic_tools(
-                request.clone(),
+                request.clone().into(),
                 context
                     .with_provider_session(resumed)
                     .expect("resumed session should match the request"),
@@ -11763,7 +11771,7 @@ pub(crate) mod tests {
             .expect("opened provider session should match the run context");
         counters.tool_free.store(true, Ordering::SeqCst);
         let events = provider
-            .stream_with_dynamic_tools(request, context, Arc::new(FakeDynamicResponder))
+            .stream_with_dynamic_tools(request.into(), context, Arc::new(FakeDynamicResponder))
             .await
             .expect("newly bound mixed turn should start without resume");
         let events = events.collect::<Vec<_>>().await;
@@ -11956,7 +11964,7 @@ pub(crate) mod tests {
         counters.tool_free.store(true, Ordering::SeqCst);
         let events = provider
             .stream_with_dynamic_tools(
-                first_turn,
+                first_turn.into(),
                 context
                     .with_provider_session(opened)
                     .expect("opened provider session should match the run context"),
@@ -12097,7 +12105,7 @@ pub(crate) mod tests {
             plan: generated_plan,
         };
         let events = provider
-            .stream_with_dynamic_tools(request.clone(), context, Arc::new(responder))
+            .stream_with_dynamic_tools(request.clone().into(), context, Arc::new(responder))
             .await
             .expect("newly bound generated-query turn should start once");
         let events = events.collect::<Vec<_>>().await;
@@ -12252,7 +12260,7 @@ pub(crate) mod tests {
             .with_provider_session(opened)
             .expect("opened provider session should match the run context");
         let events = provider
-            .stream(request, context)
+            .stream(request.into(), context)
             .await
             .expect("provider should dispatch tool-free activation directly")
             .collect::<Vec<_>>()
@@ -12568,7 +12576,7 @@ pub(crate) mod tests {
         let request = model_request();
         let context = provider_context("another-profile", &request);
         assert!(matches!(
-            provider.stream(request, context).await,
+            provider.stream(request.into(), context).await,
             Err(ProviderError::EgressDenied)
         ));
         assert_eq!(counters.launches.load(Ordering::SeqCst), 0);
@@ -12625,7 +12633,7 @@ pub(crate) mod tests {
         assert!(matches!(
             provider
                 .stream(
-                    request.clone(),
+                    request.clone().into(),
                     base_context
                         .clone()
                         .with_provider_session(wrong)
@@ -12646,7 +12654,7 @@ pub(crate) mod tests {
         .expect("exact effort claim should activate");
         let first = provider
             .stream(
-                request.clone(),
+                request.clone().into(),
                 base_context
                     .clone()
                     .with_provider_session(exact)
@@ -12662,7 +12670,7 @@ pub(crate) mod tests {
             opened_session_with_effort(binding, &registration, cursor, ModelReasoningEffort::High);
         let continuation = provider
             .stream(
-                request,
+                request.into(),
                 base_context
                     .with_provider_session(resumed)
                     .expect("resumed session should match the context binding"),
@@ -12696,7 +12704,7 @@ pub(crate) mod tests {
         assert!(matches!(
             disabled
                 .stream_with_dynamic_tools(
-                    request.clone(),
+                    request.clone().into(),
                     context.clone(),
                     Arc::new(FakeDynamicResponder),
                 )
@@ -12715,7 +12723,7 @@ pub(crate) mod tests {
         assert!(matches!(
             unverified
                 .stream_with_dynamic_tools(
-                    request.clone(),
+                    request.clone().into(),
                     context.clone(),
                     Arc::new(FakeDynamicResponder),
                 )
@@ -12728,7 +12736,7 @@ pub(crate) mod tests {
             pool(counters.clone(), 1, 2),
         );
         let events = enabled
-            .stream_with_dynamic_tools(request, context, Arc::new(FakeDynamicResponder))
+            .stream_with_dynamic_tools(request.into(), context, Arc::new(FakeDynamicResponder))
             .await
             .expect("explicit dynamic turn should start")
             .collect::<Vec<_>>()
@@ -12853,7 +12861,7 @@ pub(crate) mod tests {
             let provider = provider.clone();
             async move {
                 let _ = provider
-                    .stream_with_dynamic_tools(request, context, responder)
+                    .stream_with_dynamic_tools(request.into(), context, responder)
                     .await;
             }
         });
@@ -12885,7 +12893,7 @@ pub(crate) mod tests {
             .run_binding()
             .expect("test context should carry the exact run binding");
         let active = provider
-            .stream_with_dynamic_tools(request, context, Arc::new(FakeDynamicResponder))
+            .stream_with_dynamic_tools(request.into(), context, Arc::new(FakeDynamicResponder))
             .await
             .expect("dynamic provider turn should start");
 
@@ -12917,7 +12925,7 @@ pub(crate) mod tests {
             .run_binding()
             .expect("test context should carry the exact run binding");
         let active = provider
-            .stream_with_dynamic_tools(request, context, Arc::new(FakeDynamicResponder))
+            .stream_with_dynamic_tools(request.into(), context, Arc::new(FakeDynamicResponder))
             .await
             .expect("dynamic provider turn should start");
         // No dynamic tool call was dispatched, so this interrupt is inside the
@@ -12956,7 +12964,7 @@ pub(crate) mod tests {
             .run_binding()
             .expect("test context should carry the exact run binding");
         let active = provider
-            .stream(request, context)
+            .stream(request.into(), context)
             .await
             .expect("provider turn should start");
         assert_eq!(

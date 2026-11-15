@@ -1031,6 +1031,7 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
                 text: "Synthetic PostgreSQL parity message".to_owned(),
                 attachment_ids: vec![],
                 client_message_id: Uuid::new_v4(),
+                references: Vec::new(),
             },
         )
         .await
@@ -1089,6 +1090,7 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
                 text: "Generate a PostgreSQL-backed title".to_owned(),
                 attachment_ids: vec![],
                 client_message_id: Uuid::new_v4(),
+                references: Vec::new(),
             },
         )
         .await
@@ -1565,6 +1567,7 @@ async fn owned_postgres_retries_serialization_failures_in_concurrent_run_transit
                     text: "Synthetic concurrent transition".to_owned(),
                     attachment_ids: vec![],
                     client_message_id: Uuid::new_v4(),
+                    references: Vec::new(),
                 },
             )
             .await
@@ -1686,6 +1689,7 @@ async fn owned_postgres_row_security_hiding_a_session_skips_instead_of_quarantin
                 text: "Synthetic row security recovery".to_owned(),
                 attachment_ids: vec![],
                 client_message_id: Uuid::new_v4(),
+                references: Vec::new(),
             },
         )
         .await

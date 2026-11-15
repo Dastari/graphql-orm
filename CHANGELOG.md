@@ -25,6 +25,10 @@ for historical context.
   backup adapter 0.23.0 fixes mixed-case target clearing and restore preflight;
   see its [changelog](crates/graphql-orm-backup/CHANGELOG.md).
 
+## Unreleased - AI 0.145.0
+
+- AI adds per-message structured entity references. Only the reference handle is stored; the provider-call executor resolves it for the current principal at every dispatch. **Breaking** for custom `AiProvider` implementations (the dispatch methods take `ModelDispatchRequest`) and for hosts that build `SendAiMessageInput` or `SendAiMessagePayload` literals; apply AI schema module `0.81.0`. Details are in the [AI changelog](crates/graphql-orm-ai/CHANGELOG.md#unreleased---01450).
+
 ## Unreleased - ORM/macros 0.158.0
 
 - ORM and macros 0.158.0 (placeholder): runtime response budget, relation statements, search helper names and request-path panics. One change is breaking for hosts whose searchable base table name is longer than 42 bytes or ends in `_` and 16 hexadecimal digits. See the [migration guide](MIGRATION.md#01570-to-01580-runtime-budget-search-helper-names-and-typed-refusals).

@@ -124,7 +124,9 @@ async fn provider_context_rejects_model_swap_before_mock_receives_request() {
     }]);
 
     assert!(matches!(
-        provider.stream(request("swapped-model"), context).await,
+        provider
+            .stream(request("swapped-model").into(), context)
+            .await,
         Err(ProviderError::BudgetDenied)
     ));
     assert_eq!(provider.request_count(), 0);
@@ -162,7 +164,7 @@ async fn each_provider_builtin_requires_its_own_egress_capability() {
 
     assert!(matches!(
         provider
-            .stream(web_request.clone(), base_context.clone())
+            .stream(web_request.clone().into(), base_context.clone())
             .await,
         Err(ProviderError::EgressDenied)
     ));
@@ -177,7 +179,7 @@ async fn each_provider_builtin_requires_its_own_egress_capability() {
         .with_authorized_transfer(web.clone(), proof(&web))
         .expect("separate web grant should bind");
     let events = provider
-        .stream(web_request, context)
+        .stream(web_request.into(), context)
         .await
         .expect("fully authorized request should start")
         .try_collect::<Vec<_>>()
@@ -275,7 +277,7 @@ async fn provider_metadata_is_bounded_unique_and_included_in_egress_size() {
     }));
     let provider = MockProvider::new(vec![]);
     assert!(matches!(
-        provider.stream(schema_heavy, context).await,
+        provider.stream(schema_heavy.into(), context).await,
         Err(ProviderError::EgressDenied)
     ));
     assert_eq!(provider.request_count(), 0);
@@ -374,7 +376,7 @@ async fn stateless_replay_requires_one_unique_proof_for_every_tool_result() {
     let provider = MockProvider::new(vec![ProviderEvent::ResponseCompleted { response_id: None }]);
     assert!(matches!(
         provider
-            .stream(stateless_request.clone(), base.clone())
+            .stream(stateless_request.clone().into(), base.clone())
             .await,
         Err(ProviderError::EgressDenied)
     ));
@@ -396,7 +398,9 @@ async fn stateless_replay_requires_one_unique_proof_for_every_tool_result() {
         .with_authorized_transfer(first.clone(), proof(&first))
         .expect("first tool proof should bind");
     assert!(matches!(
-        provider.stream(stateless_request.clone(), one_proof).await,
+        provider
+            .stream(stateless_request.clone().into(), one_proof)
+            .await,
         Err(ProviderError::EgressDenied)
     ));
 
@@ -407,7 +411,7 @@ async fn stateless_replay_requires_one_unique_proof_for_every_tool_result() {
         .with_authorized_transfer(second.clone(), proof(&second))
         .expect("current proof should bind");
     provider
-        .stream(stateless_request, exact)
+        .stream(stateless_request.into(), exact)
         .await
         .expect("exact replay proofs should pass")
         .try_collect::<Vec<_>>()
@@ -495,7 +499,7 @@ async fn attachment_egress_is_bound_to_exact_id_checksum_and_bytes() {
         response_id: Some("mock".to_owned()),
     }]);
     provider
-        .stream(attachment_request.clone(), context.clone())
+        .stream(attachment_request.clone().into(), context.clone())
         .await
         .expect("exact attachment should pass context validation")
         .try_collect::<Vec<_>>()
@@ -525,7 +529,7 @@ async fn attachment_egress_is_bound_to_exact_id_checksum_and_bytes() {
         let mut swapped = attachment_request.clone();
         swapped.input = vec![swapped_block];
         assert!(matches!(
-            provider.stream(swapped, context.clone()).await,
+            provider.stream(swapped.into(), context.clone()).await,
             Err(ProviderError::EgressDenied)
         ));
     }

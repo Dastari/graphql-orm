@@ -797,17 +797,21 @@ impl AiProvider for AiGrokAcpProvider {
     }
     async fn stream(
         &self,
-        _request: ModelRequest,
+        _request: crate::ModelDispatchRequest,
         _context: ProviderRequestContext,
     ) -> Result<ProviderEventStream, ProviderError> {
         Err(ProviderError::Unsupported)
     }
     async fn stream_with_dynamic_tools(
         &self,
-        request: ModelRequest,
+        dispatch: crate::ModelDispatchRequest,
         context: ProviderRequestContext,
         responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> Result<ProviderEventStream, ProviderError> {
+        // This adapter turns a request into a cloneable, queued turn for a
+        // local agent process, so it never takes resolved reference data:
+        // every entity reference is sent as the unavailable marker.
+        let request = dispatch.into_unavailable_request();
         let binding = self.validate_context(&request, &context)?;
         let session = context.provider_session().ok_or_else(rejected)?;
         let guard = self.activate(binding, session).await?;

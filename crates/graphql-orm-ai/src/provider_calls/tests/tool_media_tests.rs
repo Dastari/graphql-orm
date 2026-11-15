@@ -351,9 +351,10 @@ impl crate::AiProvider for MediaProvider {
     }
     async fn stream(
         &self,
-        request: ModelRequest,
+        request: crate::ModelDispatchRequest,
         context: ProviderRequestContext,
     ) -> Result<crate::ProviderEventStream, ProviderError> {
+        let (request, _) = request.into_parts();
         context.authorize_tool_source_delivery().await?;
         self.custody.delivered_images.fetch_add(
             context.retained_tool_result_images().len(),
@@ -400,13 +401,14 @@ impl crate::AiProvider for MediaProvider {
     }
     async fn stream_with_dynamic_tools(
         &self,
-        request: ModelRequest,
+        request: crate::ModelDispatchRequest,
         context: ProviderRequestContext,
         responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> Result<crate::ProviderEventStream, ProviderError> {
+        let (request, _) = request.into_parts();
         context.authorize_tool_source_delivery().await?;
         if self.custody.complete_after_capture.load(Ordering::SeqCst) {
-            return self.stream(request, context).await;
+            return self.stream(request.into(), context).await;
         }
         let definition = request
             .tools
@@ -2072,6 +2074,7 @@ async fn prepared_original_task_survives_a_later_queued_message_without_new_huma
                 text: "Complete this exact original task".into(),
                 attachment_ids: Vec::new(),
                 client_message_id: original_client_id,
+                references: Vec::new(),
             },
         )
         .await
@@ -2096,6 +2099,7 @@ async fn prepared_original_task_survives_a_later_queued_message_without_new_huma
                 text: "A separate later task must not replace the active task".into(),
                 attachment_ids: Vec::new(),
                 client_message_id: Uuid::new_v4(),
+                references: Vec::new(),
             },
         )
         .await
@@ -2456,6 +2460,7 @@ async fn exercise_owned_static_reset(
                         .into(),
                     attachment_ids: Vec::new(),
                     client_message_id: Uuid::new_v4(),
+                    references: Vec::new(),
                 },
             )
             .await
