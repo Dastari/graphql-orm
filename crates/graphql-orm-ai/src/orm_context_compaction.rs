@@ -1693,10 +1693,9 @@ mod tests {
                 _scope: &AiScope,
                 _reference: &crate::AiEntityReferenceInput,
             ) -> Result<Option<crate::AiResolvedEntityReference>, AiError> {
-                Ok(self
-                    .0
-                    .load(std::sync::atomic::Ordering::SeqCst)
-                    .then(|| crate::AiResolvedEntityReference::new(serde_json::json!({"note": PAYLOAD}))))
+                Ok(self.0.load(std::sync::atomic::Ordering::SeqCst).then(|| {
+                    crate::AiResolvedEntityReference::new(serde_json::json!({"note": PAYLOAD}))
+                }))
             }
         }
         let fixture = fixture().await;
@@ -1718,10 +1717,11 @@ mod tests {
         });
 
         // Message one carries the reference, stored as a handle block.
-        let first_block = AiMessageBlockRecord::find_by_id(&fixture.database, &fixture.first_block_id)
-            .await
-            .expect("block lookup should succeed")
-            .expect("first block should exist");
+        let first_block =
+            AiMessageBlockRecord::find_by_id(&fixture.database, &fixture.first_block_id)
+                .await
+                .expect("block lookup should succeed")
+                .expect("first block should exist");
         let message_id = first_block.message_id;
         let handle = serde_json::to_value(ProtectedContentEnvelope::DatabaseManaged {
             value: crate::entity_references::stored_handle_content(&reference),
@@ -1772,7 +1772,10 @@ mod tests {
             .expect("compaction should prepare");
         let summarizer_prompt =
             serde_json::to_string(prepared.model_request()).expect("request serializes");
-        assert!(summarizer_prompt.contains("r-compacted"), "the handle is kept");
+        assert!(
+            summarizer_prompt.contains("r-compacted"),
+            "the handle is kept"
+        );
         assert!(!summarizer_prompt.contains(PAYLOAD));
         assert!(!summarizer_prompt.contains("\"data\""));
         let result = AiProviderCallResult::test_context_compaction_result(

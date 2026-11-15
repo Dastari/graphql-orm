@@ -43,8 +43,15 @@ resolved data.
   scope policy on every call, because it is called again at every use. The
   host worker that builds provider requests calls
   `OrmAiSessionService::entity_reference_model_input` with the run's current
-  principal for each turn, uses the result for that request only, and
-  authorizes its egress like any other block. See
+  principal for the first request of a run, and before every later provider
+  request (tool-result continuation, resumed or recovered run, retry) calls
+  `AiAgentContinuation::resolve_entity_references` or
+  `AiEntityReferenceRegistry::resolve_request_for_use` with the then-current
+  principal. Stored continuations and checkpoints hold handles only, so a
+  skipped call sends no reference data. Egress for the resolved request is
+  authorized like any other block. Data already sent to a provider cannot be
+  recalled: with provider-retained continuation or a retained provider
+  session the provider keeps the first request of a run. See
   [entity references](docs/entity-references.md).
 - **Anthropic model aliases:** call `AnthropicProvider::with_model_snapshot`
   for each alias a deployment requests, naming the dated snapshot it resolves

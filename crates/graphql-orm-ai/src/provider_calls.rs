@@ -16451,9 +16451,10 @@ mod tests {
                 _scope: &AiScope,
                 _reference: &crate::AiEntityReferenceInput,
             ) -> Result<Option<crate::AiResolvedEntityReference>, AiError> {
-                Ok(self.0.load(Ordering::SeqCst).then(|| {
-                    crate::AiResolvedEntityReference::new(json!({"owner_note": FIELD}))
-                }))
+                Ok(self
+                    .0
+                    .load(Ordering::SeqCst)
+                    .then(|| crate::AiResolvedEntityReference::new(json!({"owner_note": FIELD}))))
             }
         }
         let access = Arc::new(AtomicBool::new(true));

@@ -618,12 +618,14 @@ async fn a_backup_holds_handles_only_and_a_restored_session_reauthorizes_on_use(
     // The reference resolved, and was used, on the source deployment.
     let used = turn_input(&original, &owner, id, &[sent.message_id]).await;
     assert_eq!(used[0][0]["data"]["name"], PAYLOAD_MARKER);
-    assert!(protector
-        .stored
-        .lock()
-        .unwrap()
-        .iter()
-        .all(|value| !value.contains(PAYLOAD_MARKER) && !value.contains(FIELD_MARKER)));
+    assert!(
+        protector
+            .stored
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|value| !value.contains(PAYLOAD_MARKER) && !value.contains(FIELD_MARKER))
+    );
 
     // The exported backup carries the handle and no resolved value.
     let (schema, rows) = export_snapshot(&source).await;
@@ -718,20 +720,26 @@ async fn a_request_is_resolved_again_before_every_provider_call() {
 
     // A retry after the field scope is revoked drops the field.
     widgets.field_scope.store(false, Ordering::SeqCst);
-    registry.resolve_request_for_use(&owner, &scope, &mut request).await;
+    registry
+        .resolve_request_for_use(&owner, &scope, &mut request)
+        .await;
     assert!(wire(&request).contains(PAYLOAD_MARKER));
     assert!(!wire(&request).contains(FIELD_MARKER));
 
     // A retry after the row is revoked carries the marker.
     widgets.row_access.store(false, Ordering::SeqCst);
-    registry.resolve_request_for_use(&owner, &scope, &mut request).await;
+    registry
+        .resolve_request_for_use(&owner, &scope, &mut request)
+        .await;
     assert!(!wire(&request).contains(PAYLOAD_MARKER));
     assert!(wire(&request).contains(r#""status":"unavailable""#));
     assert!(wire(&request).contains("What is the state of this widget?"));
 
     // Withholding reduces every reference to its handle, with no data.
     widgets.row_access.store(true, Ordering::SeqCst);
-    registry.resolve_request_for_use(&owner, &scope, &mut request).await;
+    registry
+        .resolve_request_for_use(&owner, &scope, &mut request)
+        .await;
     assert!(wire(&request).contains(PAYLOAD_MARKER));
     withhold_request_entity_references(&mut request);
     assert!(!wire(&request).contains(PAYLOAD_MARKER));

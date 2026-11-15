@@ -21,7 +21,8 @@ is never treated as an instruction.
 ## The rule: store the handle, resolve at every use
 
 Only the handle (`kind` and `id`) is stored. What a reference resolves to is
-never stored: not in the message, not in a summary, not in a checkpoint.
+never stored by this crate: not in the message, not in a summary, not in a
+continuation, and not in a checkpoint.
 
 Every time a reference is used, the host hook is called again with the
 principal that is acting at that moment, and the answer is used once:
@@ -30,7 +31,8 @@ principal that is acting at that moment, and the answer is used once:
 | --- | --- | --- |
 | Submitting the message | the sender | `send_message`, for the notices only |
 | A client reading the transcript | the reader | `message_blocks` |
-| Building a model turn | the run's current principal | `OrmAiSessionService::entity_reference_model_input` |
+| Building the first provider request of a run | the run's current principal | `OrmAiSessionService::entity_reference_model_input` |
+| Building every later provider request (tool-result continuation, resumed, recovered or reclaimed run, retry) | the run's current principal | `AiAgentContinuation::resolve_entity_references`, or `AiEntityReferenceRegistry::resolve_request_for_use` |
 
 So a user who could read a record when they referenced it, and later loses the
 row, a field of it, or a scope, stops seeing it in the transcript and stops
@@ -143,6 +145,64 @@ Resolved reference data is one more data source of the provider request. It
 needs an egress manifest entry and a disclosure decision like any other block;
 resolution proves read permission, not permission to disclose externally.
 
+## Continuations, checkpoints and retries
+
+A run that calls tools sends more than one provider request. In stateless
+replay mode each later request replays the earlier user input as history.
+
+- **What is kept.** When the crate builds that history
+  (`AiProviderCallResult` to `AiAgentContinuation`), every entity-reference
+  block is reduced to a handle block:
+  `{"type": "entity_reference", "status": "handle", "reference": {...}}`. The
+  continuation, the coordinator checkpoints, parked subscription and approval
+  waits, and the hash that chains one turn to the next all use that form. The
+  same reduction is applied again whenever a continuation is written to or
+  read from a checkpoint. A resolved value is therefore never checkpointed or
+  replayed from stored state.
+- **What the host does before each provider call.** Resolve the continuation
+  with the run's freshly rehydrated principal, then build the plan from it:
+
+  ```rust
+  let continuation = continuation
+      .resolve_entity_references(&registry, &current_principal, &scope)
+      .await;
+  let plan = AiProviderCallPlan::new_continuation_with_read_capabilities(/* ... */ continuation /* ... */)?;
+  ```
+
+  A host that builds the `ModelRequest` itself calls
+  `registry.resolve_request_for_use(&current_principal, &scope, &mut request)`
+  before sealing the plan. Either call reduces every reference in the request
+  to its handle and resolves it again, so it is also the step to repeat for a
+  retry and after adopting a checkpoint in a resumed, recovered or reclaimed
+  run. The egress manifest is sealed after this step, over the bytes that will
+  be sent.
+- **If the step is skipped,** the request replays handle blocks with no data.
+  Skipping it can lose context; it cannot disclose a stale value.
+- **Reserved block type.** A JSON input block whose `type` is
+  `entity_reference` is treated as an entity reference in every stored, hashed
+  or replayed copy of a request and is reduced to its handle there. Do not use
+  that `type` for anything else.
+
+### What the crate cannot recall
+
+Data that was already sent to a provider stays with that provider.
+
+- With **provider-retained continuation** (`ModelContinuationMode::ProviderRetained`,
+  OpenAI `previous_response_id`, `store_responses = true`) and with
+  **retained provider sessions** (the Codex app-server and Grok adapters), the
+  provider keeps the first request of a run, including any reference data it
+  contained, and continues from it. A later turn of that chain can still draw
+  on that data after access is revoked. The crate does not resend it and
+  cannot remove it from the provider's stored response or thread; see
+  [session retention](session-retention.md#stored-provider-responses-are-not-deleted).
+- The model's own earlier output, and tool results, may repeat reference data
+  it was given. Those are stored as assistant and tool content under their own
+  rules.
+
+A deployment that must stop disclosure on revocation within a running tool
+loop should use stateless replay (`store_responses = false`), where every
+request is rebuilt and resolved again.
+
 ## Tools
 
 Application tools never receive reference data from the crate. Tool task
@@ -174,8 +234,9 @@ deployment's current policy, the first time it is used.
 | Resolved bytes per use | 64 KiB | at most 1 MiB |
 | References resolved per use (`maximum_resolutions_per_use`) | 16 | at most 256 |
 
-One use is one submission, one `message_blocks` page, or one
-`entity_reference_model_input` call (one model turn). The hook is called at
+One use is one submission, one `message_blocks` page, one
+`entity_reference_model_input` call, or one provider request resolved with
+`resolve_entity_references` or `resolve_request_for_use`. The hook is called at
 most `maximum_resolutions_per_use` times in a use, in order; references beyond
 the cap are not resolved and become the unavailable marker. A turn that
 includes many referencing messages therefore costs a bounded number of host
