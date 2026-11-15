@@ -75,7 +75,42 @@ for provider in "${providers[@]}"; do
   echo "provider-lanes: ${mode} ${provider}"
   case "${mode}" in
     test)
-      cargo test -p graphql-orm-ai --no-default-features --features "${features}" --locked
+      if [[ "${GRAPHQL_ORM_AI_PRUNE_TEST_EXECUTABLES:-0}" == 1 ]]; then
+        # Cargo identifies the exact executables for this lane, including fresh
+        # cached artifacts. Prune only after all tests/doc-tests have succeeded;
+        # retain dependency libraries, build scripts and other packages' tests.
+        artifacts=$(mktemp)
+        trap 'rm -f "${artifacts}"' EXIT
+        cargo test -p graphql-orm-ai --no-default-features --features "${features}" \
+          --locked --message-format=json | tee "${artifacts}"
+        python3 - "${artifacts}" <<'PYTHON'
+import json
+from pathlib import Path
+import sys
+
+executables = set()
+for line in Path(sys.argv[1]).read_text().splitlines():
+    try:
+        artifact = json.loads(line)
+    except json.JSONDecodeError:
+        continue  # Test harness output is not Cargo JSON.
+    if not isinstance(artifact, dict):
+        continue
+    if (artifact.get("reason") == "compiler-artifact"
+            and artifact.get("profile", {}).get("test")
+            and artifact.get("executable")):
+        path = Path(artifact["executable"])
+        if path.parent.name == "deps" and path.parent.parent.name == "debug":
+            executables.add(path)
+for path in executables:
+    path.unlink(missing_ok=True)
+print(f"provider-lanes: pruned {len(executables)} completed test executable(s)")
+PYTHON
+        rm -f "${artifacts}"
+        trap - EXIT
+      else
+        cargo test -p graphql-orm-ai --no-default-features --features "${features}" --locked
+      fi
       ;;
     check)
       cargo check -p graphql-orm-ai --all-targets --no-default-features \
