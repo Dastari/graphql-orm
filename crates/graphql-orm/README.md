@@ -10,14 +10,14 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.152.0 (placeholder) makes the runtime GraphQL request guard and
+Version 0.155.0 (placeholder) makes the runtime GraphQL request guard and
 async-graphql agree: variable defaults apply to `@skip`/`@include`, every
 argument is validated with the values execution resolves, argument defaults are
 checked at composition, and queries and mutations over `execute_stream` refuse
 with `request_not_prepared`. Runtime GraphQL refuses operations on PostgreSQL
 tables with row-level security without a `DbAuthContext`. Upgrade ORM/macros
 together; see the
-[root migration guide](../../MIGRATION.md#01490-to-01520-runtime-graphql-guard-and-row-level-security).
+[root migration guide](../../MIGRATION.md#01510-to-01550-runtime-graphql-guard-and-row-level-security).
 
 Version 0.149.0 emits host-only generated input member contracts for AI
 capability compilation. Readable members remain available; undisclosed members

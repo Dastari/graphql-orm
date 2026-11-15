@@ -4224,6 +4224,18 @@ impl DeletePolicy {
             DeletePolicy::SetNull => "SET NULL",
         }
     }
+
+    /// The `ON DELETE` action as `backend` spells it.
+    ///
+    /// SQL Server has no `RESTRICT` keyword; its `NO ACTION` refuses the
+    /// delete in the same way. [`Self::as_sql`] stays the backend-neutral
+    /// spelling used for schema hashes.
+    pub fn as_sql_for(&self, backend: DatabaseBackend) -> &'static str {
+        match (self, backend) {
+            (DeletePolicy::Restrict, DatabaseBackend::Mssql) => "NO ACTION",
+            _ => self.as_sql(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

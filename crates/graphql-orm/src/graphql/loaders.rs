@@ -89,11 +89,24 @@ impl RelationKey {
         assert_eq!(parts.len(), kinds.len(), "relation key type arity mismatch");
         // SQL Server may render UUID text with a different case than Rust.
         // Normalize the declared UUID domain, keeping ordinary strings exact.
+        // Each backend spells a float its own way (`1e+15`, `1.0e+006`,
+        // `0.10000000000000001`), so a float is read back as the number and
+        // spelled the way `from_sql_values` spells the parent's value.
         for (part, kind) in parts.iter_mut().zip(kinds) {
-            if *kind == RelationKeyPartKind::Uuid
-                && let Ok(uuid) = uuid::Uuid::parse_str(part)
-            {
-                *part = uuid.to_string();
+            match kind {
+                RelationKeyPartKind::Uuid => {
+                    if let Ok(uuid) = uuid::Uuid::parse_str(part) {
+                        *part = uuid.to_string();
+                    }
+                }
+                RelationKeyPartKind::Float => {
+                    if let Ok(value) = part.trim().parse::<f64>() {
+                        *part = value.to_string();
+                    }
+                }
+                RelationKeyPartKind::String
+                | RelationKeyPartKind::Int
+                | RelationKeyPartKind::Bool => {}
             }
         }
 
@@ -598,6 +611,7 @@ pub fn relation_key_projection(
         },
         RelationKeyPartKind::Float => match dialect {
             DatabaseBackend::Sqlite => format!("printf('%.17g', {column})"),
+            DatabaseBackend::Mssql => crate::graphql::orm::mssql_float_text(column),
             _ => crate::graphql::orm::SqlDialect::relation_key_cast(&dialect, column),
         },
         RelationKeyPartKind::String | RelationKeyPartKind::Uuid | RelationKeyPartKind::Int => {
@@ -643,6 +657,94 @@ pub fn relation_key_filter(
         .join(" OR ");
 
     FilterExpression::trusted_fragment(clauses, values)
+}
+
+/// Split one batch group so no statement binds more values than the backend
+/// accepts.
+///
+/// Each key binds `key_arity` values and the statement binds `other_binds`
+/// more: everything it carries besides the keys. Every parent's rows are
+/// selected, ranked and counted per key, so splitting a group changes how
+/// many statements run and nothing about any result. A group that fits, which
+/// is every group below the backend's limit, stays one statement.
+///
+/// # Errors
+///
+/// When `other_binds` leave no room for even one key, the batch cannot be
+/// sent and the caller gets `INVALID_INPUT`; see [`bind_limit_exceeded`].
+fn bind_limited_groups<K>(
+    dialect: DatabaseBackend,
+    group: Vec<K>,
+    key_arity: usize,
+    other_binds: usize,
+) -> Result<Vec<Vec<K>>, String> {
+    if group.is_empty() {
+        return Ok(Vec::new());
+    }
+    let key_arity = key_arity.max(1);
+    let budget =
+        crate::graphql::orm::SqlDialect::max_statement_binds(&dialect).saturating_sub(other_binds);
+    let per_statement = budget / key_arity;
+    if per_statement == 0 {
+        return Err(bind_limit_exceeded());
+    }
+    if group.len() <= per_statement {
+        return Ok(vec![group]);
+    }
+    let mut groups = Vec::with_capacity(group.len().div_ceil(per_statement));
+    let mut keys = group.into_iter().peekable();
+    while keys.peek().is_some() {
+        groups.push(keys.by_ref().take(per_statement).collect());
+    }
+    Ok(groups)
+}
+
+/// The one check every batched statement passes before it is sent: its
+/// rendered bind count against the backend's limit. Group sizes are planned
+/// from the counted parts of a statement; this is taken from the statement
+/// itself, so a part the plan missed is refused here rather than sent.
+fn ensure_within_bind_limit(dialect: DatabaseBackend, bound_values: usize) -> Result<(), String> {
+    if bound_values > crate::graphql::orm::SqlDialect::max_statement_binds(&dialect) {
+        return Err(bind_limit_exceeded());
+    }
+    Ok(())
+}
+
+/// A batched statement would bind more values than the backend accepts even
+/// for a single key: the request's own filter and sort values fill the limit.
+/// Reported as `INVALID_INPUT`, the code for a request the client must
+/// reduce; the statement is never sent.
+fn bind_limit_exceeded() -> String {
+    use crate::graphql::errors::{OrmErrorCode, OrmPublicError};
+    crate::graphql::errors::loader_error_from_sqlx(crate::graphql::errors::sqlx_error_from_public(
+        OrmPublicError::with_message(
+            OrmErrorCode::InvalidInput,
+            "the request binds more values than one batched statement accepts",
+        ),
+    ))
+}
+
+/// Bound values one relation statement carries besides its parent keys: the
+/// relation's filter (which includes any authorization predicate the resolver
+/// added), its bound sort values and the two row-number bounds of a page.
+fn relation_statement_binds(dialect: DatabaseBackend, sample: &CompositeRelationQueryKey) -> usize {
+    let filter = sample.filter.as_ref().map_or(0, |filter| {
+        let mut values = Vec::new();
+        let mut next_index = 1usize;
+        crate::graphql::orm::render_filter_expression(
+            dialect,
+            filter,
+            &mut next_index,
+            &mut values,
+        );
+        values.len()
+    });
+    let sorts = sample
+        .sorts
+        .iter()
+        .map(|sort| sort.values.len())
+        .sum::<usize>();
+    filter + sorts + 2
 }
 
 fn relation_key_alias(index: usize) -> String {
@@ -757,6 +859,14 @@ where
     if keys.is_empty() {
         return Ok(HashMap::new());
     }
+    // Results are keyed, so a repeated key needs loading once. Assembly below
+    // moves each parent's rows out of the statement's result; a second
+    // occurrence in the same statement would find them gone.
+    let mut seen = std::collections::HashSet::with_capacity(keys.len());
+    let keys = keys
+        .into_iter()
+        .filter(|key| seen.insert(key.clone()))
+        .collect::<Vec<_>>();
 
     let mut grouped_keys: HashMap<RelationGroupKey, Vec<CompositeRelationQueryKey>> =
         HashMap::new();
@@ -775,7 +885,18 @@ where
 
     let mut results = HashMap::new();
 
+    let mut groups = Vec::new();
     for group in grouped_keys.into_values() {
+        let (arity, other_binds) = group.first().map_or((1, 0), |sample| {
+            (
+                sample.fk_columns.len(),
+                relation_statement_binds(B::DIALECT, sample),
+            )
+        });
+        groups.extend(bind_limited_groups(B::DIALECT, group, arity, other_binds)?);
+    }
+
+    for group in groups {
         let sample = group
             .first()
             .ok_or_else(|| "relation batch group should not be empty".to_string())?;
@@ -870,6 +991,7 @@ where
             let start = offset.max(0);
             let row_sql = rendered.sql;
             let row_values = rendered.values;
+            ensure_within_bind_limit(B::DIALECT, row_values.len())?;
 
             let mut count_values = Vec::new();
             let mut next_index = 1usize;
@@ -893,6 +1015,7 @@ where
             }
             count_sql.push_str(" GROUP BY ");
             count_sql.push_str(&partition_columns);
+            ensure_within_bind_limit(B::DIALECT, count_values.len())?;
 
             let needs_rows = selection.rows || (selection.has_next_page && !selection.count);
             let (count_rows, rows) = if selection.count && needs_rows {
@@ -1024,6 +1147,7 @@ where
             },
         );
 
+        ensure_within_bind_limit(B::DIALECT, rendered.values.len())?;
         // Count relation batches alongside federation batches so their bounded
         // statement count can be verified through the public ORM counter.
         let rows = crate::graphql::orm::fetch_rows_with_auth::<B>(
@@ -1129,37 +1253,35 @@ where
             }
 
             let backend = B::DIALECT;
-            let params = (1..=keys.len())
-                .map(|index| backend.placeholder(index))
-                .collect::<Vec<_>>()
-                .join(", ");
             let batch_column = backend.quote_identifier_path(T::batch_column());
-            let sql = format!(
-                "SELECT {} FROM {} WHERE {} IN ({})",
-                T::column_names().join(", "),
-                backend.render_identifier_path(T::TABLE_NAME),
-                batch_column,
-                params
-            );
-            let values = keys
-                .iter()
-                .cloned()
-                .map(SqlValue::String)
-                .collect::<Vec<_>>();
-
-            let rows = B::fetch_rows(db.pool(), &sql, &values)
-                .await
-                .map_err(crate::graphql::errors::loader_error_from_sqlx)?;
-
             let mut grouped: HashMap<String, Vec<T>> =
-                keys.into_iter().map(|key| (key, Vec::new())).collect();
+                keys.iter().cloned().map(|key| (key, Vec::new())).collect();
 
-            for row in rows {
-                let key = T::batch_key_from_row(&row)
+            for keys in bind_limited_groups(backend, keys, 1, 0)? {
+                let params = (1..=keys.len())
+                    .map(|index| backend.placeholder(index))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let sql = format!(
+                    "SELECT {} FROM {} WHERE {} IN ({})",
+                    T::column_names().join(", "),
+                    backend.render_identifier_path(T::TABLE_NAME),
+                    batch_column,
+                    params
+                );
+                let values = keys.into_iter().map(SqlValue::String).collect::<Vec<_>>();
+
+                let rows = B::fetch_rows(db.pool(), &sql, &values)
+                    .await
                     .map_err(crate::graphql::errors::loader_error_from_sqlx)?;
-                let entity =
-                    T::from_row(&row).map_err(crate::graphql::errors::loader_error_from_sqlx)?;
-                grouped.entry(key).or_default().push(entity);
+
+                for row in rows {
+                    let key = T::batch_key_from_row(&row)
+                        .map_err(crate::graphql::errors::loader_error_from_sqlx)?;
+                    let entity = T::from_row(&row)
+                        .map_err(crate::graphql::errors::loader_error_from_sqlx)?;
+                    grouped.entry(key).or_default().push(entity);
+                }
             }
 
             Ok(grouped)
@@ -1392,7 +1514,13 @@ where
 
             let mut results = HashMap::new();
 
+            let mut groups = Vec::new();
             for group in grouped_keys.into_values() {
+                let arity = group.first().map_or(1, |sample| sample.columns.len());
+                groups.extend(bind_limited_groups(B::DIALECT, group, arity, 0)?);
+            }
+
+            for group in groups {
                 let sample = group
                     .first()
                     .ok_or_else(|| "federation key batch group should not be empty".to_string())?;
@@ -1433,6 +1561,7 @@ where
                     },
                 );
 
+                ensure_within_bind_limit(B::DIALECT, rendered.values.len())?;
                 // Routed through the counted helper rather than the backend
                 // method so the one-statement-per-batch guarantee is
                 // observable through `query_count`.
@@ -1474,6 +1603,186 @@ where
 
             Ok(results)
         }
+    }
+}
+
+#[cfg(test)]
+mod bind_limit_tests {
+    use super::*;
+    use crate::graphql::orm::{FilterExpression, SqlDialect, SqlValue};
+
+    fn key(filter: Option<FilterExpression>, sort_values: usize) -> CompositeRelationQueryKey {
+        let values = vec![SqlValue::Int(1); 3];
+        CompositeRelationQueryKey {
+            relation: "children",
+            parent_key: RelationKey::from_sql_values(&values),
+            parent_values: values,
+            fk_columns: vec!["a", "b", "c"],
+            key_part_kinds: vec![RelationKeyPartKind::Int; 3],
+            where_signature: None,
+            order_signature: None,
+            page_signature: None,
+            filter,
+            sorts: vec![crate::graphql::orm::SortExpression {
+                clause: "rank ASC".into(),
+                values: vec![SqlValue::Int(0); sort_values],
+            }],
+            pagination: None,
+            auth_context: None,
+        }
+    }
+
+    fn binds(count: usize) -> FilterExpression {
+        FilterExpression::trusted_fragment(
+            vec!["x = ?"; count].join(" AND "),
+            vec![SqlValue::Int(1); count],
+        )
+    }
+
+    #[test]
+    fn sql_server_batches_stay_under_the_parameter_limit() {
+        // 1,000 parents of a three-column relation bind 3,000 values, above
+        // SQL Server's 2,100 parameters.
+        let keys = (0..1000).collect::<Vec<i32>>();
+        let groups = bind_limited_groups(DatabaseBackend::Mssql, keys.clone(), 3, 5).unwrap();
+        assert!(groups.len() > 1);
+        assert_eq!(groups.concat(), keys, "every key is loaded once, in order");
+        for group in &groups {
+            assert!(group.len() * 3 + 5 <= 2_000);
+        }
+        // The other backends accept the same batch as one statement.
+        for dialect in [DatabaseBackend::Sqlite, DatabaseBackend::Postgres] {
+            assert_eq!(
+                bind_limited_groups(dialect, keys.clone(), 3, 5)
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+        assert!(
+            bind_limited_groups(DatabaseBackend::Mssql, Vec::<i32>::new(), 3, 5)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn groups_split_exactly_at_the_limit() {
+        // 2,000 binds: 5 others leave 1,995, which is 665 three-column keys.
+        let sizes = |count: usize| {
+            bind_limited_groups(DatabaseBackend::Mssql, vec![0u8; count], 3, 5)
+                .unwrap()
+                .iter()
+                .map(Vec::len)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(sizes(664), [664]);
+        assert_eq!(sizes(665), [665], "exactly at the limit is one statement");
+        assert_eq!(sizes(666), [665, 1], "one over the limit is two");
+        assert_eq!(sizes(1330), [665, 665]);
+        assert_eq!(sizes(1331), [665, 665, 1]);
+        // Single-column keys with nothing else bound fill the limit exactly.
+        let single = |count: usize| {
+            bind_limited_groups(DatabaseBackend::Mssql, vec![0u8; count], 1, 0)
+                .unwrap()
+                .len()
+        };
+        assert_eq!(single(2_000), 1);
+        assert_eq!(single(2_001), 2);
+        // Duplicate keys are kept: each chunk is loaded as it was given.
+        assert_eq!(
+            bind_limited_groups(DatabaseBackend::Mssql, vec![7, 7, 7], 1, 1_998).unwrap(),
+            [vec![7, 7], vec![7]]
+        );
+    }
+
+    #[test]
+    fn a_batch_with_no_room_for_one_key_is_refused_not_sent() {
+        // A three-column key needs three binds; 1,998 others leave two.
+        let error = bind_limited_groups(DatabaseBackend::Mssql, vec![1, 2], 3, 1_998)
+            .expect_err("one key does not fit");
+        assert_eq!(error, "graphql-orm-public:INVALID_INPUT");
+        assert_eq!(
+            bind_limited_groups(DatabaseBackend::Mssql, vec![1, 2], 3, 1_997).unwrap(),
+            [vec![1], vec![2]]
+        );
+        assert!(bind_limited_groups(DatabaseBackend::Mssql, vec![1], 3, 9_000).is_err());
+        // The check on the rendered statement itself.
+        assert!(ensure_within_bind_limit(DatabaseBackend::Mssql, 2_000).is_ok());
+        assert_eq!(
+            ensure_within_bind_limit(DatabaseBackend::Mssql, 2_001).unwrap_err(),
+            "graphql-orm-public:INVALID_INPUT"
+        );
+        // Headroom below SQL Server's 2,100 parameters for the RPC's own.
+        assert!(DatabaseBackend::Mssql.max_statement_binds() + 2 < 2_100);
+    }
+
+    #[test]
+    fn every_bound_part_of_a_relation_statement_is_counted() {
+        let dialect = DatabaseBackend::Mssql;
+        assert_eq!(relation_statement_binds(dialect, &key(None, 0)), 2);
+        assert_eq!(
+            relation_statement_binds(dialect, &key(Some(binds(4)), 0)),
+            6
+        );
+        // Bound sort values are rendered into the unpaged statement too.
+        assert_eq!(
+            relation_statement_binds(dialect, &key(Some(binds(4)), 3)),
+            9
+        );
+
+        // The plan and the rendered statement agree for a full chunk.
+        let sample = key(Some(binds(40)), 7);
+        let other = relation_statement_binds(dialect, &sample);
+        let per_statement =
+            bind_limited_groups(dialect, vec![(); 5_000], 3, other).unwrap()[0].len();
+        let parents = vec![vec![SqlValue::Int(1); 3]; per_statement];
+        let rendered = crate::graphql::orm::render_select_query(
+            dialect,
+            &crate::graphql::orm::SelectQuery {
+                table: "children",
+                columns: vec!["id".into()],
+                filter: Some(FilterExpression::And(vec![
+                    relation_key_filter(&sample.fk_columns, &parents),
+                    sample.filter.clone().unwrap(),
+                ])),
+                sorts: sample.sorts.clone(),
+                pagination: None,
+                count_only: false,
+            },
+        );
+        assert_eq!(rendered.values.len(), per_statement * 3 + other - 2);
+        assert!(ensure_within_bind_limit(dialect, rendered.values.len()).is_ok());
+        assert!(rendered.values.len() + 3 > dialect.max_statement_binds() - 2);
+    }
+
+    #[test]
+    fn float_relation_keys_match_on_every_backend_spelling() {
+        let parent = RelationKey::from_sql_values(&[SqlValue::Float(1_000_000.0)]);
+        // PostgreSQL, SQL Server style 3 and SQLite `%.17g` spellings.
+        for text in ["1e+06", "1.0000000000000000e+006", "1000000"] {
+            assert_eq!(
+                RelationKey::from_projected_parts(vec![text.into()], &[RelationKeyPartKind::Float]),
+                parent,
+                "{text}"
+            );
+        }
+        let tenth = RelationKey::from_sql_values(&[SqlValue::Float(0.1)]);
+        for text in ["0.10000000000000001", "1.0000000000000001e-001", "0.1"] {
+            assert_eq!(
+                RelationKey::from_projected_parts(vec![text.into()], &[RelationKeyPartKind::Float]),
+                tenth,
+                "{text}"
+            );
+        }
+        assert_eq!(
+            relation_key_projection(
+                DatabaseBackend::Mssql,
+                "[ratio]",
+                RelationKeyPartKind::Float
+            ),
+            "CONVERT(NVARCHAR(40), CAST([ratio] AS FLOAT), 3)"
+        );
     }
 }
 
