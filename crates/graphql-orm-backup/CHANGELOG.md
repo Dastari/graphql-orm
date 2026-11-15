@@ -10,6 +10,16 @@ supersedes: []
 
 # Changelog
 
+## 0.23.0 (unreleased)
+
+- PostgreSQL ORM restores resolve bare mixed-case entity table names with the
+  shared ORM renderer. Clearing a restore target and checking its emptiness
+  now address the same historically folded table as export/import, instead
+  of failing with `42P01`. Requires ORM 0.159.0 for the optional ORM adapter.
+  Manifest verification, schema preflight and RLS refusal behavior are unchanged.
+- Tests cover a mixed-case PostgreSQL backup/export, target clear, emptiness
+  preflight and restore round-trip (#716).
+
 ## 0.22.0 (unreleased)
 
 Requires `graphql-orm-storage` 0.14.0, whose SMB handle close is

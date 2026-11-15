@@ -60,3 +60,44 @@ async fn restore_emptiness_refuses_rows_hidden_by_rls() -> Result<(), Box<dyn st
     owner.close().await;
     Ok(())
 }
+
+#[derive(GraphQLSchemaEntity, Clone, Debug)]
+#[graphql_entity(table = "MixedBackupNotes", plural = "MixedBackupNotes")]
+#[allow(dead_code)]
+struct MixedBackupNote {
+    #[primary_key]
+    id: String,
+    title: String,
+}
+
+#[tokio::test]
+#[ignore = "requires test-owned PostgreSQL container"]
+async fn mixed_case_backup_restore_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    let pool = owned_postgres::OwnedPostgres::pool("backup-table-case", 1).await?;
+    let db = Arc::new(graphql_orm::db::Database::new(pool.clone()));
+    let plan = db
+        .schema()
+        .plan_migration_to_entities("mixed-backup", "create", &[MixedBackupNote::metadata()])
+        .await?;
+    db.schema()
+        .apply_migration(&plan, ApplyOptions::default())
+        .await?;
+    graphql_orm::sqlx::query("INSERT INTO MixedBackupNotes VALUES ('one', 'preserved')")
+        .execute(&pool)
+        .await?;
+    let adapter = OrmBackupAdapter::new(db, vec![MixedBackupNote::metadata()]);
+    let schema = adapter.schema_snapshot().await?;
+    let rows = adapter.export_full().await?;
+    assert!(!adapter.restore_target_is_empty().await?);
+    adapter.clear_restore_target().await?;
+    assert!(adapter.restore_target_is_empty().await?);
+    adapter
+        .restore_full(schema, rows, RestoreContext::empty_database())
+        .await?;
+    let title: String =
+        graphql_orm::sqlx::query_scalar("SELECT title FROM MixedBackupNotes WHERE id = 'one'")
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(title, "preserved");
+    Ok(())
+}

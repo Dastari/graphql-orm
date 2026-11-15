@@ -159,7 +159,7 @@ impl ReadPredicate {
             joins.push(format!(
                 "__gom_visibility.{} = {}.{}",
                 B::DIALECT.quote_identifier(destination),
-                B::DIALECT.quote_identifier_path(S::TABLE_NAME),
+                B::DIALECT.render_table_identifier_path(S::TABLE_NAME),
                 B::DIALECT.quote_identifier(source)
             ));
         }
@@ -172,7 +172,7 @@ impl ReadPredicate {
         );
         let clause = format!(
             "EXISTS (SELECT 1 FROM (SELECT * FROM {} WHERE {}) AS __gom_visibility WHERE {})",
-            B::DIALECT.quote_identifier_path(T::TABLE_NAME),
+            B::DIALECT.render_table_identifier_path(T::TABLE_NAME),
             predicate,
             joins.join(" AND ")
         );

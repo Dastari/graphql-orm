@@ -249,22 +249,21 @@ async fn a_case_variant_of_the_helper_name_is_refused_before_any_ddl() {
     assert_eq!(conflict(at_apply), wanted);
     assert_eq!(conflict(plan().await.unwrap_err()), wanted);
     // Nothing ran: the base table does not exist and the squatter is intact.
+    #[cfg(feature = "sqlite")]
     assert!(!f.stored("MixedNotes").await);
+    #[cfg(feature = "postgres")]
+    assert!(!f.stored("mixednotes").await);
     assert!(f.stored(&variant).await);
     // Once the name is free the same plan applies and plans clean again.
-    // SQLite only: on PostgreSQL a mixed-case base table cannot be applied at
-    // all, for a reason that has nothing to do with search (#716).
     f.run(&format!("DROP TABLE \"{variant}\"")).await;
+    f.db.schema()
+        .apply_migration(&planned, ApplyOptions::default())
+        .await
+        .unwrap();
     #[cfg(feature = "sqlite")]
-    {
-        f.db.schema()
-            .apply_migration(&planned, ApplyOptions::default())
-            .await
-            .unwrap();
-        assert!(f.stored("MixedNotes").await);
-        assert!(plan().await.unwrap().steps.is_empty());
-    }
+    assert!(f.stored("MixedNotes").await);
     #[cfg(feature = "postgres")]
-    assert!(plan().await.is_ok());
+    assert!(f.stored("mixednotes").await);
+    assert!(plan().await.unwrap().steps.is_empty());
     f.finish().await;
 }

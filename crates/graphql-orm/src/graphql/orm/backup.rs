@@ -1,5 +1,5 @@
 use super::{
-    BackupValueKind, ColumnBackupPolicy, EntityBackupDescriptor, EntityMetadata,
+    BackupValueKind, ColumnBackupPolicy, DatabaseBackend, EntityBackupDescriptor, EntityMetadata,
     GraphqlOrmSchemaSnapshot, MutationEvent, MutationPhase, SqlValue,
     backup_descriptors_from_entities, current_backend, execute_with_binds_on,
     schema_snapshot_from_entities,
@@ -1399,7 +1399,7 @@ async fn export_table_rows(
     let sql = format!(
         "SELECT {} FROM {} ORDER BY {}",
         select_columns,
-        quote_identifier(&entity.table_name),
+        quote_table_identifier(&entity.table_name),
         key_columns
             .iter()
             .map(|column| quote_identifier(column))
@@ -1489,7 +1489,7 @@ async fn import_table_rows(
         .join(", ");
     let insert_sql = format!(
         "INSERT INTO {} ({}) VALUES ({})",
-        quote_identifier(&entity.table_name),
+        quote_table_identifier(&entity.table_name),
         column_sql,
         placeholder_sql
     );
@@ -1551,7 +1551,7 @@ async fn import_table_rows(
         }
         let update_sql = format!(
             "UPDATE {} SET {} WHERE {} = {}",
-            quote_identifier(&entity.table_name),
+            quote_table_identifier(&entity.table_name),
             self_columns
                 .iter()
                 .map(|column| format!(
@@ -2144,7 +2144,7 @@ async fn table_row_count_on(
 ) -> crate::Result<i64> {
     let sql = format!(
         "SELECT COUNT(*) AS count FROM {}",
-        quote_identifier(table_name)
+        quote_table_identifier(table_name)
     );
     let row = sqlx::query(&sql).fetch_one(&mut **tx).await?;
     row.try_get::<i64, _>("count")
@@ -2167,7 +2167,7 @@ async fn table_row_count_on(
 ) -> crate::Result<i64> {
     let sql = format!(
         "SELECT COUNT(*) AS count FROM {}",
-        quote_identifier(table_name)
+        quote_table_identifier(table_name)
     );
     sqlx::query("SET LOCAL row_security = off")
         .execute(&mut **tx)
@@ -2408,7 +2408,7 @@ async fn check_portable_date_times(
     }
     let sql = format!(
         "SELECT 1 FROM {} WHERE {} LIMIT 1",
-        quote_identifier(&entity.table_name),
+        quote_table_identifier(&entity.table_name),
         outside.join(" OR ")
     );
     if fetch_snapshot_rows(snapshot, &sql).await?.is_empty() {
@@ -2514,6 +2514,14 @@ fn decode_backup_change_parts(
         actor_id,
         correlation_id,
     })
+}
+
+fn quote_table_identifier(identifier: &str) -> String {
+    if current_backend() == DatabaseBackend::Postgres {
+        current_backend().render_table_identifier_path(identifier)
+    } else {
+        quote_identifier(identifier)
+    }
 }
 
 fn quote_identifier(identifier: &str) -> String {

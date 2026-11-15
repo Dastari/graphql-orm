@@ -3,12 +3,18 @@ title: "graphql-orm-macros"
 kind: reference
 status: active
 owner: graphql-orm-macros-maintainers
-last_reviewed: 2026-11-14
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm-macros`
+
+Version 0.159.0 fixes PostgreSQL static tables declared with mixed-case bare
+names. Table references follow PostgreSQL's historical folding, so migrations,
+reads/writes, RLS and search helpers resolve the same table while declared
+metadata and helper digests stay unchanged. Existing installs need no rename. See the
+[migration guide](../../MIGRATION.md#01580-to-01590-postgresql-table-name-case).
 
 Version 0.158.0 closes follow-ups from the recent batches. The runtime GraphQL
 response budget reserves every selected layer's structure and stored fields

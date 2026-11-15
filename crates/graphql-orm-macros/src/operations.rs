@@ -4966,7 +4966,7 @@ fn generate_graphql_operations_unfiltered(
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
-                let quoted_table = dialect.quote_identifier_path(#table_name);
+                let quoted_table = dialect.render_table_identifier_path(#table_name);
                 let update = format!(
                     "UPDATE {quoted_table} SET {} WHERE {}",
                     set_clauses.join(", "),
@@ -4994,7 +4994,7 @@ fn generate_graphql_operations_unfiltered(
             {
                 format!(
                     "UPDATE {} SET {} WHERE {} RETURNING {}",
-                    dialect.quote_identifier_path(#table_name),
+                    dialect.render_table_identifier_path(#table_name),
                     set_clauses.join(", "),
                     predicates.join(" AND "),
                     <Self as DatabaseEntity>::column_names()
@@ -6910,7 +6910,7 @@ fn generate_graphql_operations_unfiltered(
                         .collect::<Vec<_>>().join(", ");
                     let sql = format!(
                         "SELECT {columns} FROM {}{} WHERE {}{}",
-                        dialect.quote_identifier_path(#table_name),
+                        dialect.render_table_identifier_path(#table_name),
                         #upsert_read_lock_hint,
                         Self::__gom_key_where_clause_at(1),
                         lock_suffix,
@@ -7161,7 +7161,7 @@ fn generate_graphql_operations_unfiltered(
                     let key_start = values.len() + 1;
                     let sql = Self::__gom_rebind_sql(&format!(
                         "UPDATE {} SET {} WHERE {}{}",
-                        dialect.quote_identifier_path(#table_name),
+                        dialect.render_table_identifier_path(#table_name),
                         set_clauses.join(", "),
                         Self::__gom_key_where_clause_at(key_start),
                         Self::__gom_managed_version_guard(),
@@ -7222,7 +7222,7 @@ fn generate_graphql_operations_unfiltered(
                     let dialect = <#backend_marker as OrmBackend>::DIALECT;
                     let sql = format!(
                         "DELETE FROM {} WHERE {}",
-                        dialect.quote_identifier_path(#table_name),
+                        dialect.render_table_identifier_path(#table_name),
                         Self::__gom_key_where_clause_at(1),
                     );
                     let result = hook_ctx.execute(&sql, &Self::__gom_key_values(key),
@@ -7442,7 +7442,7 @@ fn generate_graphql_operations_unfiltered(
                     let expected_clause = Self::__gom_rebind_sql(expected_clause, expected_start);
                     let sql = Self::__gom_rebind_sql(&format!(
                         "UPDATE {} SET {} WHERE {}{} AND ({expected_clause})",
-                        dialect.quote_identifier_path(#table_name),
+                        dialect.render_table_identifier_path(#table_name),
                         set_clauses.join(", "),
                         Self::__gom_key_where_clause_at(key_start),
                         Self::__gom_managed_version_guard(),

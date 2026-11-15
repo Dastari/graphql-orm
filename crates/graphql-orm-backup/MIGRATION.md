@@ -10,6 +10,14 @@ supersedes: []
 
 # Migration Guide
 
+## To 0.23.0: PostgreSQL mixed-case table restore
+
+When using the optional PostgreSQL ORM adapter, upgrade ORM/macros to 0.159.0
+and backup to 0.23.0 on the same reviewed revision. Bare mixed-case table
+names retain PostgreSQL's historical folding during target clear and
+restore preflight, as they already do during export/import. Existing tables,
+backup manifests and metadata need no rename or conversion. SQLite is unchanged.
+
 ## To 0.22.0: storage 0.14.0
 
 Move `graphql-orm-backup` and `graphql-orm-storage` together to one reviewed

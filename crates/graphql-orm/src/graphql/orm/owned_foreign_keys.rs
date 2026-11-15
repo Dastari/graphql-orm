@@ -131,7 +131,10 @@ pub(super) fn validate_postgres<'a>(
     Box::pin(async move {
         // pg_catalog includes incoming constraints from other schemas and reserved/system
         // sources. information_schema may omit constraints and does not expose every action.
-        let tables: Vec<&str> = ownership.tables().collect();
+        let tables: Vec<String> = ownership
+            .tables()
+            .map(super::dialect::postgres_resolved_identifier)
+            .collect();
         let unsupported: Option<(String, String)> = sqlx::query_as(
             "SELECT pg_catalog.concat(sn.nspname, '.', s.relname), con.conname::pg_catalog.text
              FROM pg_catalog.pg_constraint con

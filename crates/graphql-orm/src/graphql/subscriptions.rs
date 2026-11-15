@@ -633,7 +633,7 @@ where
             predicates.push(format!(
                 "__gom_propagation_target.{} = {}.{}",
                 B::DIALECT.quote_identifier_path(target.name),
-                B::DIALECT.quote_identifier_path(S::TABLE_NAME),
+                B::DIALECT.render_table_identifier_path(S::TABLE_NAME),
                 B::DIALECT.quote_identifier_path(source.name)
             ));
             source_fields.push(source.api_name);
@@ -641,7 +641,7 @@ where
         }
         let clause = format!(
             "EXISTS (SELECT 1 FROM {} AS __gom_propagation_target WHERE {})",
-            B::DIALECT.quote_identifier_path(T::TABLE_NAME),
+            B::DIALECT.render_table_identifier_path(T::TABLE_NAME),
             predicates.join(" AND ")
         );
         let row = authorize_subscription_row_matching::<S, B>(

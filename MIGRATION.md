@@ -10,6 +10,34 @@ supersedes: []
 
 # Migration Guide
 
+## 0.158.0 to 0.159.0: PostgreSQL table-name case
+
+Upgrade ORM and macros together. Static PostgreSQL table references now agree
+with the historical `CREATE TABLE` rendering: a bare, non-reserved component
+of `table = "MixedNotes"` resolves to `mixednotes`. Quoted table references in
+indexes and DML fold the component before quoting it. Introspection resolves
+each declared path with the same SQL semantics and reports the physical table
+under its declared name, so an unchanged entity plans no migration.
+
+Quoting every declaration verbatim would redirect an existing folded install
+to a different, case-sensitive table. This release keeps the existing table,
+declared metadata, generated constants, search-helper digests and search
+metadata identities. Lower-case names keep their existing statement rendering.
+Already delimited components and names that require quoting retain their
+previous spelling; SQLite and SQL Server are unchanged. No table rename or
+data copy is required. Recompile entities to use the corrected generated DML.
+Generated GraphQL names are unchanged.
+
+Bare declarations remain confined to `current_schema()` during planning; a
+same-named table later in `search_path` is not adopted or changed. Qualified
+paths may name another schema. Two PostgreSQL declarations that resolve to
+one identifier are refused before DDL with `TableIdentifierConflict`
+(`TableIdentifierConflict::from_error`), even without search indexes. Owned
+planning uses its existing `TargetCollision` diagnostic.
+Dependent-delete ownership checks use resolved catalog names while preserving
+declared metadata. PostgreSQL users of the optional backup adapter should also
+upgrade to [backup 0.23.0](crates/graphql-orm-backup/MIGRATION.md#to-0230-postgresql-mixed-case-table-restore).
+
 ## 0.157.0 to 0.158.0: runtime budget, search helper names and typed refusals
 
 Upgrade runtime and macros together. Generated SDL, operation catalogues and

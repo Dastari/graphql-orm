@@ -14,9 +14,21 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.159.0
+
+- Fix PostgreSQL static entities with bare mixed-case table names (#716). Render quoted table references with the historical PostgreSQL folding of bare table components, and resolve declared names during introspection. Create/alter/index/trigger/RLS statements, reads and writes, catalog checks and search helpers address the same table while metadata and helper digests remain unchanged. Existing folded installs need no migration; lower-case names are unchanged. See [migration guidance](MIGRATION.md#01580-to-01590-postgresql-table-name-case).
+
+- Planning preserves current-schema isolation for bare paths and distinguishes
+  quoted tables from their folded counterparts. Duplicate physical table
+  declarations return `TableIdentifierConflict` before DDL, with or without
+  search. Dependent deletes use resolved catalog identities. The optional
+  backup adapter 0.23.0 fixes mixed-case target clearing and restore preflight;
+  see its [changelog](crates/graphql-orm-backup/CHANGELOG.md).
+
 ## Unreleased - AI 0.145.0
 
 - AI adds per-message structured entity references. Only the reference handle is stored; the provider-call executor resolves it for the current principal at every dispatch. **Breaking** for custom `AiProvider` implementations (the dispatch methods take `ModelDispatchRequest`) and for hosts that build `SendAiMessageInput` or `SendAiMessagePayload` literals; apply AI schema module `0.81.0`. Details are in the [AI changelog](crates/graphql-orm-ai/CHANGELOG.md#unreleased---01450).
+
 ## Unreleased - ORM/macros 0.158.0
 
 - ORM and macros 0.158.0 (placeholder): runtime response budget, relation statements, search helper names and request-path panics. One change is breaking for hosts whose searchable base table name is longer than 42 bytes or ends in `_` and 16 hexadecimal digits. See the [migration guide](MIGRATION.md#01570-to-01580-runtime-budget-search-helper-names-and-typed-refusals).

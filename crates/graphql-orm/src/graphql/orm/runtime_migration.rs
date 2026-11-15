@@ -1339,6 +1339,14 @@ impl<'db, B: RuntimeMigrationBackend> SchemaManager<'db, B> {
             return Err(rejection(RuntimeMigrationDiagnosticCode::PolicyDenied).into());
         }
         target.check_limits(target.limits)?;
+        if super::migrations::table_identifier_conflict(
+            B::DIALECT,
+            target.tables.iter().map(|table| table.table_name.as_str()),
+        )
+        .is_some()
+        {
+            return Err(rejection(RuntimeMigrationDiagnosticCode::TargetCollision).into());
+        }
         target
             .validate_physical_contract()
             .map_err(|_| rejection(RuntimeMigrationDiagnosticCode::InvalidPhysicalContract))?;
