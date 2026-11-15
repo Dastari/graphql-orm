@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-13
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -13,6 +13,10 @@ supersedes: []
 This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
+
+## Unreleased - AI 0.144.0
+
+- AI adds per-message structured entity references, a pinned Anthropic model-snapshot mapping, an exact OpenAI stored-response deletion adapter and smaller follow-ups. **Breaking** for hosts that build `SendAiMessageInput` or `SendAiMessagePayload` literals; apply AI schema module `0.81.0`. Details are in the [AI changelog](crates/graphql-orm-ai/CHANGELOG.md#unreleased---01440).
 
 ## Unreleased - ORM/macros 0.152.0, AI 0.143.0
 

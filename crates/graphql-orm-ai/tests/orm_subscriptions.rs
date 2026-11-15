@@ -237,6 +237,7 @@ async fn send(
                 text: text.to_owned(),
                 attachment_ids: vec![],
                 client_message_id: Uuid::new_v4(),
+                references: Vec::new(),
             },
         )
         .await

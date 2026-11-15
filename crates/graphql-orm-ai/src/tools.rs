@@ -1386,25 +1386,9 @@ impl AiToolAuthorizationPolicy for AiGeneratedGraphqlAuthorizationPolicy {
 }
 
 pub(crate) fn canonical_json_digest(value: &serde_json::Value) -> String {
-    fn canonical(value: &serde_json::Value) -> serde_json::Value {
-        match value {
-            serde_json::Value::Object(object) => serde_json::Value::Object(
-                object
-                    .iter()
-                    .map(|(key, value)| (key.clone(), canonical(value)))
-                    .collect::<BTreeMap<_, _>>()
-                    .into_iter()
-                    .collect(),
-            ),
-            serde_json::Value::Array(values) => {
-                serde_json::Value::Array(values.iter().map(canonical).collect())
-            }
-            _ => value.clone(),
-        }
-    }
-    serde_json::to_vec(&canonical(value))
-        .map(|encoded| hex::encode(Sha256::digest(encoded)))
-        .unwrap_or_default()
+    // One implementation, owned by the operation catalogue: approval bindings
+    // and receiver-purpose claims hash the same arguments and must agree.
+    crate::canonical_json_hash(value)
 }
 
 /// Scope tool policy. Absence always means disabled.
@@ -1449,6 +1433,42 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+
+    /// Approval bindings hash arguments with [`canonical_json_digest`], and
+    /// receiver-purpose claims hash the same arguments with the operation
+    /// catalogue's `canonical_json_hash`. The two must stay byte-identical or
+    /// an approved call stops matching its claim.
+    #[test]
+    fn canonical_digest_matches_the_catalogue_canonical_hash() {
+        let values = [
+            serde_json::json!(null),
+            serde_json::json!({}),
+            serde_json::json!([]),
+            serde_json::json!("plain"),
+            serde_json::json!({"b": 2, "a": 1}),
+            serde_json::json!({"z": {"y": [3, {"b": null, "a": true}], "x": "\u{e9}\u{1F600}"}}),
+            serde_json::json!({"float": 1.5, "negative": -7, "large": 18_446_744_073_709_551_615_u64}),
+            serde_json::json!({"": "", "a\"b": "line\nbreak", "A": 1, "a": 2}),
+            serde_json::json!([{"k": [[], {}]}, [1, [2, [3]]]]),
+        ];
+        for value in values {
+            assert_eq!(
+                canonical_json_digest(&value),
+                crate::canonical_json_hash(&value),
+                "canonical JSON diverged for {value}"
+            );
+        }
+        assert_eq!(
+            canonical_json_digest(&serde_json::json!({"b": [1, {"d": 4, "c": 3}], "a": 1})),
+            canonical_json_digest(&serde_json::json!({"a": 1, "b": [1, {"c": 3, "d": 4}]})),
+        );
+        // Compact encoding with no added whitespace.
+        assert_eq!(canonical_json_digest(&serde_json::json!({})), {
+            use sha2::Digest;
+            hex::encode(sha2::Sha256::digest(b"{}"))
+        });
+    }
+
     use crate::GraphqlOperationContract;
 
     const SCHEMA_FINGERPRINT: &str =

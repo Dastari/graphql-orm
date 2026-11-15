@@ -207,6 +207,7 @@ async fn active_run(fixture: &Fixture) -> (AiSessionView, AiRunLease) {
                 text: "Count my records".to_owned(),
                 attachment_ids: vec![],
                 client_message_id: Uuid::new_v4(),
+                references: Vec::new(),
             },
         )
         .await
@@ -322,6 +323,7 @@ async fn terminal_run_event_after_a_maximum_sized_page_is_replayed() {
                 text: "Queue the terminal-event regression run".to_owned(),
                 attachment_ids: vec![],
                 client_message_id: Uuid::new_v4(),
+                references: Vec::new(),
             },
         )
         .await
@@ -458,6 +460,7 @@ async fn bootstrap_survives_concurrent_session_event_churn() {
                     text: "Keep counting".to_owned(),
                     attachment_ids: vec![],
                     client_message_id: Uuid::new_v4(),
+                    references: Vec::new(),
                 },
             )
             .await

@@ -3,12 +3,57 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.143.0 to 0.144.0: entity references and AI follow-ups
+
+Apply AI schema module `0.81.0` before starting workers. It changes no table,
+column, index or constraint and needs no data backfill. It records a new value
+domain: a user message may now store `entity_reference`,
+`entity_reference_unavailable` and `entity_reference_too_large` blocks after
+its text block.
+
+### Breaking changes
+
+- `SendAiMessageInput` has a new `references` field and `SendAiMessagePayload`
+  a new `reference_notices` field. Add `references: Vec::new()` to struct
+  literals, and return `reference_notices: Vec::new()` from a custom
+  `AiSessionService::send_message`. GraphQL clients need no change: the input
+  field defaults to an empty list.
+- Code that reads message blocks directly must no longer assume a user message
+  has exactly one block. Block 0 is always the text. Clients that render
+  `AiMessageBlockView` should handle, or ignore, the three reference block
+  kinds.
+- Publishing a skill version now rejects an input or output schema nested more
+  than 32 levels deep, or with a `pattern` value or `patternProperties` key
+  longer than 256 bytes. Stored versions are unaffected.
+
+### Optional adoption
+
+- **Entity references** are off until a host installs
+  `OrmAiSessionService::with_entity_references`. Until then a message that
+  carries a reference is rejected with `InvalidInput`. The host worker that
+  builds provider requests adds resolved references with
+  `entity_reference_model_input` and authorizes their egress like any other
+  block. See [entity references](docs/entity-references.md).
+- **Anthropic model aliases:** call `AnthropicProvider::with_model_snapshot`
+  for each alias a deployment requests, naming the dated snapshot it resolves
+  to. Pricing stays keyed by the requested identifier. Without a mapping,
+  behaviour is unchanged.
+- **Stored OpenAI responses:** deployments that set `store_responses = true`
+  and must remove stored responses can use
+  `OpenAiStoredResponseDeletionService`. The crate still deletes none on its
+  own; see [session retention](docs/session-retention.md#stored-provider-responses-are-not-deleted).
+- **Lease clocks:** no behaviour changed. Review
+  [lease clocks](docs/worker-provider-turn.md#lease-clocks) and set
+  `AiRunServiceLimits::with_lease_recovery_grace` if worker clocks can drift.
+
+No other configuration, authorization or data migration change.
 
 ## 0.142.0 to 0.143.0: runtime and provider bug batch
 

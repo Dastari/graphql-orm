@@ -35,6 +35,7 @@ mod control_plane;
 mod custody_field_policy;
 mod domain;
 mod egress;
+mod entity_references;
 mod execution;
 mod execution_rejection;
 mod inbox;
@@ -172,6 +173,13 @@ pub use content_protection::*;
 pub use control_plane::ai_control_plane_root_fields;
 pub use domain::*;
 pub use egress::*;
+pub use entity_references::{
+    AI_ENTITY_REFERENCE_BLOCK_KIND, AI_ENTITY_REFERENCE_PROVENANCE,
+    AI_ENTITY_REFERENCE_TOO_LARGE_BLOCK_KIND, AI_ENTITY_REFERENCE_UNAVAILABLE_BLOCK_KIND,
+    AiEntityReferenceInput, AiEntityReferenceLimits, AiEntityReferenceNotice,
+    AiEntityReferenceNoticeCode, AiEntityReferenceRegistry, AiEntityReferenceResolver,
+    AiResolvedEntityReference, entity_reference_model_input, is_entity_reference_block_kind,
+};
 pub use execution::*;
 pub use graphql_orm_ai_tool_profiles::*;
 // Disambiguate the public helper from the crate-private ORM wrapper.

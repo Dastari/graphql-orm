@@ -3,7 +3,7 @@ title: "Durable Worker and Provider Turn"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-12
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -129,6 +129,33 @@ only a format marker and the matching closed state. The event type and private
 run state already disclose that classification, so no prompt, result, provider
 reference, authorization detail, or error text is copied into protected event
 content. `AiRunTerminalEvent` is the canonical public event-name mapping.
+
+### Lease clocks
+
+Lease time is wall-clock time taken from each process's own clock; the crate
+has no database-time source. A worker stamps `lease_expires_at` from its clock
+when it claims or heartbeats, and `OrmAiRunService::recover_expired_leases`
+compares that stamp with the clock of the process that runs recovery.
+
+- **What skew can and cannot do.** Ownership never depends on a clock: every
+  worker write is fenced by attempt, lease generation and row version, so a
+  recovered run cannot be written by its old worker. Skew affects availability
+  only. A recovering process whose clock is ahead of the lease holder's by more
+  than the time left on the lease treats a live lease as expired and closes or
+  requeues the run early; one whose clock is behind recovers a dead lease late.
+- **Host requirement.** Run every process that claims, heartbeats or recovers
+  runs with synchronized clocks (NTP or equivalent), and keep the lease TTL
+  well above the worst skew the deployment tolerates.
+- **Skew grace.** `AiRunServiceLimits::with_lease_recovery_grace(grace)` makes
+  recovery wait until a lease is `grace` past its stamped expiry. It is bounded
+  by the lease TTL and delays recovery of every genuinely dead lease by the
+  same amount. The default is zero: no margin is applied unless the host sets
+  one, so with the default a fast recovery clock can still close a live lease
+  early.
+
+Set the grace to the clock skew the deployment is prepared to tolerate. Whether
+the crate should ship a non-zero default, or read time from the database, is an
+open maintainer decision (#536).
 
 ## Current bounded-output behavior
 

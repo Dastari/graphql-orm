@@ -214,6 +214,7 @@ async fn the_crate_persists_its_own_records_under_a_host_policy_that_denies_ever
                 text: "Find records containing the example term".to_owned(),
                 attachment_ids: vec![],
                 client_message_id: Uuid::new_v4(),
+                references: Vec::new(),
             },
         )
         .await
