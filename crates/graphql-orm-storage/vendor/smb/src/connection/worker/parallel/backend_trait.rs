@@ -24,6 +24,11 @@ pub trait MultiWorkerBackend {
         Self::AwaitingNotifier: std::fmt::Debug;
     async fn stop(&self) -> crate::Result<()>;
 
+    /// Local patch (graphql-orm-storage): ends the worker's loops at once,
+    /// without waiting and without a current runtime, so a destructor can
+    /// always release the transport.
+    fn abort(&self);
+
     fn wrap_msg_to_send(msg: IoVec) -> Self::SendMessage;
     fn make_notifier_awaiter_pair() -> (Self::AwaitingNotifier, Self::AwaitingWaiter);
     // TODO: Consider typing the tx/rx in the trait, like the notifier/awaiter.

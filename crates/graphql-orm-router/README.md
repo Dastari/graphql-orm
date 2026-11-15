@@ -10,6 +10,10 @@ supersedes: []
 
 # graphql-orm-router
 
+Version 0.15.4 changes only the wire tests, which now complete the WebSocket
+closing handshake before reconnecting. Router behavior, configuration and
+public APIs are unchanged.
+
 Version 0.15.3 releases the plugin context read lock before the router-hosted
 Node subgraph executes a lookup, so it cannot contend with authority renewal.
 Configuration and public APIs are unchanged.

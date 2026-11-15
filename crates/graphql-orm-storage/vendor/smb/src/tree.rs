@@ -370,26 +370,468 @@ impl Drop for TreeMessageHandler {
             return;
         }
 
-        // Local patch (graphql-orm-storage): a destructor never requires a
-        // current runtime. Without one, the server disconnects the tree when
-        // the session ends.
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        // Local patch (graphql-orm-storage): the TREE_DISCONNECT goes to the
+        // connection's bounded cleanup queue, which needs no current runtime
+        // and runs it on the connection's runtime within a deadline. The
+        // queued step holds only a weak reference to the session, so it never
+        // keeps the session, connection or socket alive. If the session is
+        // gone by then, its logoff disconnects the tree.
+        let Some(cleanup) = self.upstream.cleanup_queue() else {
             log::debug!(
-                "Tree {} dropped outside a runtime; it is disconnected when the session ends.",
+                "Tree {} dropped before negotiation completed; nothing to disconnect.",
                 self.tree_name
             );
             return;
         };
-        let upstream = self.upstream.clone();
+        let session = self.upstream.weak();
         let tree_name = self.tree_name.clone();
         let encrypt = self.info.share_flags.encrypt_data();
-        runtime.spawn(async move {
-            Self::_disconnect(upstream, tree_id, encrypt)
-                .await
-                .map_err(|e| {
-                    log::error!("Failed to disconnect from tree {}: {e}", tree_name);
-                })
-                .ok();
-        });
+        let deferred = cleanup.defer(Box::new(move || {
+            let upstream = HandlerReference {
+                handler: session.upgrade()?,
+            };
+            Some(Box::pin(async move {
+                Self::_disconnect(upstream, tree_id, encrypt)
+                    .await
+                    .map_err(|e| {
+                        log::error!("Failed to disconnect from tree {}: {e}", tree_name);
+                    })
+                    .ok();
+            }))
+        }));
+        if !deferred {
+            log::debug!(
+                "Disconnect of tree {} not deferred; it ends with its session.",
+                self.tree_name
+            );
+        }
+    }
+}
+
+/// Local patch (graphql-orm-storage): cleanup that destructors start never
+/// keeps the session, connection or socket alive, and never waits forever.
+#[cfg(all(test, feature = "async"))]
+mod destructor_cleanup_tests {
+    use super::*;
+    use crate::connection::ConnectionMessageHandler;
+    use crate::connection::config::ConnectionConfig;
+    use crate::connection::connection_info::{
+        CleanupQueue, CleanupStats, ConnectionInfo, NegotiatedProperties,
+    };
+    use crate::connection::worker::Worker;
+    use crate::dialects::DialectImpl;
+    use crate::resource::ResourceHandle;
+    use crate::session::{ChannelMessageHandler, SessionAndChannel, SessionInfo};
+    use crate::sync_helpers::RwLock;
+    use futures_core::future::BoxFuture;
+    use futures_util::FutureExt;
+    use smb_dtyp::Guid;
+    use smb_msg::{Dialect, GlobalCapabilities, SessionFlags};
+    use smb_transport::{SmbTransport, SmbTransportRead, SmbTransportWrite, TransportError};
+    use std::net::SocketAddr;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    const SESSION_ID: u64 = 0x0000_4000_0000_0021;
+    const SESSION_KEY: [u8; 16] = [0x3c; 16];
+    const TREE_ID: u32 = 5;
+    /// Each deferred cleanup step's deadline.
+    const DEADLINE: Duration = Duration::from_millis(200);
+
+    /// A server that accepts every write and never sends anything, so it
+    /// never grants a credit.
+    struct IdleServer;
+
+    impl SmbTransport for IdleServer {
+        fn connect<'a>(
+            &'a mut self,
+            _server_name: &'a str,
+            _address: SocketAddr,
+        ) -> BoxFuture<'a, smb_transport::error::Result<()>> {
+            async { Ok(()) }.boxed()
+        }
+
+        fn default_port(&self) -> u16 {
+            445
+        }
+
+        fn split(
+            self: Box<Self>,
+        ) -> smb_transport::error::Result<(Box<dyn SmbTransportRead>, Box<dyn SmbTransportWrite>)>
+        {
+            Ok((self, Box::new(IdleServer)))
+        }
+
+        fn remote_address(&self) -> smb_transport::error::Result<SocketAddr> {
+            Ok(SocketAddr::from(([127, 0, 0, 1], 445)))
+        }
+    }
+
+    impl SmbTransportRead for IdleServer {
+        fn receive_exact<'a>(
+            &'a mut self,
+            _out_buf: &'a mut [u8],
+        ) -> BoxFuture<'a, smb_transport::error::Result<()>> {
+            async {
+                std::future::pending::<()>().await;
+                Err(TransportError::NotConnected)
+            }
+            .boxed()
+        }
+    }
+
+    impl SmbTransportWrite for IdleServer {
+        fn send_raw<'a>(
+            &'a mut self,
+            _buf: &'a [u8],
+        ) -> BoxFuture<'a, smb_transport::error::Result<()>> {
+            async { Ok(()) }.boxed()
+        }
+    }
+
+    /// A server that never sends anything and never accepts a write; its
+    /// write half reports when it is dropped.
+    struct StuckWriteServer {
+        write_dropped: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    struct StuckWrite {
+        dropped: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Drop for StuckWrite {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    impl SmbTransport for StuckWriteServer {
+        fn connect<'a>(
+            &'a mut self,
+            _server_name: &'a str,
+            _address: SocketAddr,
+        ) -> BoxFuture<'a, smb_transport::error::Result<()>> {
+            async { Ok(()) }.boxed()
+        }
+
+        fn default_port(&self) -> u16 {
+            445
+        }
+
+        fn split(
+            self: Box<Self>,
+        ) -> smb_transport::error::Result<(Box<dyn SmbTransportRead>, Box<dyn SmbTransportWrite>)>
+        {
+            let write = StuckWrite {
+                dropped: self.write_dropped.clone(),
+            };
+            Ok((Box::new(IdleServer), Box::new(write)))
+        }
+
+        fn remote_address(&self) -> smb_transport::error::Result<SocketAddr> {
+            Ok(SocketAddr::from(([127, 0, 0, 1], 445)))
+        }
+    }
+
+    impl SmbTransportRead for StuckWriteServer {
+        fn receive_exact<'a>(
+            &'a mut self,
+            _out_buf: &'a mut [u8],
+        ) -> BoxFuture<'a, smb_transport::error::Result<()>> {
+            async {
+                std::future::pending::<()>().await;
+                Err(TransportError::NotConnected)
+            }
+            .boxed()
+        }
+    }
+
+    impl SmbTransportWrite for StuckWriteServer {
+        fn send_raw<'a>(
+            &'a mut self,
+            _buf: &'a [u8],
+        ) -> BoxFuture<'a, smb_transport::error::Result<()>> {
+            async {
+                std::future::pending::<()>().await;
+                Ok(())
+            }
+            .boxed()
+        }
+    }
+
+    impl SmbTransportWrite for StuckWrite {
+        fn send_raw<'a>(
+            &'a mut self,
+            _buf: &'a [u8],
+        ) -> BoxFuture<'a, smb_transport::error::Result<()>> {
+            async {
+                std::future::pending::<()>().await;
+                Ok(())
+            }
+            .boxed()
+        }
+    }
+
+    fn connection_info() -> ConnectionInfo {
+        let dialect = Dialect::Smb0302;
+        ConnectionInfo {
+            server_name: "server".to_string(),
+            server_address: SocketAddr::from(([127, 0, 0, 1], 445)),
+            negotiation: NegotiatedProperties {
+                server_guid: Guid::generate(),
+                caps: GlobalCapabilities::new(),
+                max_transact_size: 65536,
+                max_read_size: 65536,
+                max_write_size: 65536,
+                auth_buffer: vec![],
+                signing_algo: None,
+                encryption_cipher: None,
+                compression: None,
+                dialect_rev: dialect,
+            },
+            dialect: DialectImpl::new(dialect),
+            config: ConnectionConfig::default(),
+            preauth_hash: crate::connection::preauth_hash::PreauthHashState::Unsupported,
+            client_guid: Guid::generate(),
+            cleanup: CleanupQueue::start(DEADLINE),
+        }
+    }
+
+    fn alive_tasks() -> usize {
+        tokio::runtime::Handle::current()
+            .metrics()
+            .num_alive_tasks()
+    }
+
+    struct Chain {
+        connection: HandlerReference<ConnectionMessageHandler>,
+        info: Arc<ConnectionInfo>,
+        stats: Arc<CleanupStats>,
+        session: HandlerReference<SessionMessageHandler>,
+        tree: HandlerReference<TreeMessageHandler>,
+    }
+
+    /// Real connection, channel, session and tree handlers over a server
+    /// that never grants a credit. The connection's only credit is already
+    /// spent, so every request waits for a credit forever.
+    async fn chain() -> Chain {
+        let (connection, info) = ConnectionMessageHandler::with_test_transport_negotiated(
+            Box::new(IdleServer),
+            connection_info(),
+        )
+        .await
+        .unwrap();
+        let stats = info.cleanup.stats_handle();
+        let mut session = SessionInfo::new(SESSION_ID);
+        session.setup(&SESSION_KEY, &None, &info).unwrap();
+        session.ready(SessionFlags::new(), &info).unwrap();
+        let state = Arc::new(RwLock::new(SessionAndChannel::new(
+            SESSION_ID,
+            Arc::new(RwLock::new(session)),
+        )));
+        connection
+            .worker()
+            .unwrap()
+            .session_started(&state)
+            .await
+            .unwrap();
+        let channel = ChannelMessageHandler::new(SESSION_ID, 1, &connection, &state);
+        let session = HandlerReference::new(SessionMessageHandler::new(channel));
+        let tree = TreeMessageHandler::new(
+            &session,
+            TREE_ID,
+            "share".to_string(),
+            TreeConnectInfo {
+                share_type: ShareType::Disk,
+                share_flags: ShareFlags::new(),
+            },
+        );
+        assert_eq!(
+            connection.available_credits(),
+            0,
+            "precondition: credits are exhausted, and the server grants none"
+        );
+        Chain {
+            connection,
+            info,
+            stats,
+            session,
+            tree,
+        }
+    }
+
+    async fn settle() {
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Waits up to `limit` for `done`.
+    async fn eventually(limit: Duration, mut done: impl FnMut() -> bool) -> bool {
+        tokio::time::timeout(limit, async {
+            while !done() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    /// #717: a handle CLOSE that times out waiting for a credit drops the last
+    /// reference to its tree. The tree's TREE_DISCONNECT, the session's
+    /// LOGOFF and the connection's worker stop that follow must not keep the
+    /// session or connection alive, or leave a task waiting for a credit.
+    #[tokio::test]
+    async fn a_timed_out_close_that_drops_the_last_tree_frees_the_session_and_connection() {
+        let Chain {
+            connection,
+            info,
+            stats,
+            session,
+            tree,
+        } = chain().await;
+        let (session_weak, connection_weak) = (session.weak(), connection.weak());
+
+        // A handle dropped while open defers its CLOSE; it starts at once and
+        // waits for a credit while holding its tree.
+        assert!(info.cleanup.defer(ResourceHandle::deferred_close(
+            tree.weak(),
+            FileId {
+                persistent: 1,
+                volatile: 2,
+            },
+        )));
+        settle().await;
+        // Every other owner lets go: the waiting CLOSE holds the last tree
+        // reference, which holds the session, channel and connection.
+        drop((tree, session, connection, info));
+        assert!(
+            session_weak.upgrade().is_some(),
+            "precondition: the running CLOSE holds the session"
+        );
+
+        // At its deadline the CLOSE is abandoned and drops the last tree
+        // reference. Within one more deadline the session and connection are
+        // freed and no task is left.
+        let freed = eventually(DEADLINE * 3, || {
+            session_weak.upgrade().is_none()
+                && connection_weak.upgrade().is_none()
+                && stats.finished.load(Ordering::SeqCst)
+                && alive_tasks() == 0
+        })
+        .await;
+        assert!(
+            freed,
+            "after the CLOSE timed out: session alive {}, connection alive {}, \
+             cleanup finished {}, {} tasks alive",
+            session_weak.upgrade().is_some(),
+            connection_weak.upgrade().is_some(),
+            stats.finished.load(Ordering::SeqCst),
+            alive_tasks()
+        );
+        assert_eq!(stats.timed_out.load(Ordering::SeqCst), 1, "{stats:?}");
+        // The TREE_DISCONNECT and LOGOFF were still queued when the last
+        // connection owner dropped, which shut the queue down.
+        assert_eq!(stats.abandoned.load(Ordering::SeqCst), 2, "{stats:?}");
+        // The worker stop finished within its deadline.
+        assert_eq!(stats.completed.load(Ordering::SeqCst), 1, "{stats:?}");
+    }
+
+    /// #717: while the connection stays open, the TREE_DISCONNECT and LOGOFF
+    /// that destructors defer each wait for a credit that never comes. Each
+    /// is abandoned at its deadline, and neither keeps the session alive
+    /// afterwards or holds the connection.
+    #[tokio::test]
+    async fn deferred_disconnect_and_logoff_each_time_out_and_release_what_they_hold() {
+        let Chain {
+            connection,
+            info,
+            stats,
+            session,
+            tree,
+        } = chain().await;
+        drop(info);
+        let session_weak = session.weak();
+
+        // The tree's destructor defers its TREE_DISCONNECT, which holds the
+        // session while it waits for a credit.
+        drop(tree);
+        settle().await;
+        assert!(
+            Arc::strong_count(&session.handler) > 1,
+            "precondition: the waiting TREE_DISCONNECT holds the session"
+        );
+        assert!(
+            eventually(DEADLINE * 3, || Arc::strong_count(&session.handler) == 1).await,
+            "the TREE_DISCONNECT still holds the session"
+        );
+        assert_eq!(stats.timed_out.load(Ordering::SeqCst), 1, "{stats:?}");
+
+        // The session's destructor defers its LOGOFF, which holds the
+        // connection only while it waits.
+        drop(session);
+        assert!(session_weak.upgrade().is_none(), "the session is freed");
+        settle().await;
+        assert!(
+            Arc::strong_count(&connection.handler) > 1,
+            "precondition: the waiting LOGOFF holds the connection"
+        );
+        assert!(
+            eventually(DEADLINE * 3, || Arc::strong_count(&connection.handler) == 1).await,
+            "the LOGOFF still holds the connection"
+        );
+        assert_eq!(stats.timed_out.load(Ordering::SeqCst), 2, "{stats:?}");
+
+        // Dropping the connection ends the drain task and the worker.
+        drop(connection);
+        assert!(
+            eventually(DEADLINE * 3, || stats.finished.load(Ordering::SeqCst)
+                && alive_tasks() == 0)
+            .await,
+            "{} tasks alive",
+            alive_tasks()
+        );
+        assert_eq!(stats.abandoned.load(Ordering::SeqCst), 0, "{stats:?}");
+    }
+
+    /// #717: the worker stop that the connection's destructor starts has a
+    /// deadline. A send loop inside a socket write that never completes does
+    /// not see the stop; at the deadline it is aborted, which drops the
+    /// socket, and no task is left.
+    #[tokio::test]
+    async fn a_worker_stop_blocked_in_a_socket_write_is_abandoned_and_releases_the_socket() {
+        let write_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (connection, info) = ConnectionMessageHandler::with_test_transport_negotiated(
+            Box::new(StuckWriteServer {
+                write_dropped: write_dropped.clone(),
+            }),
+            connection_info(),
+        )
+        .await
+        .unwrap();
+        let stats = info.cleanup.stats_handle();
+        drop(info);
+        // The worker hands the request to its send loop, which then waits
+        // in the socket write forever.
+        connection
+            .worker()
+            .unwrap()
+            .send(OutgoingMessage::new(
+                TreeDisconnectRequest::default().into(),
+            ))
+            .await
+            .unwrap();
+        settle().await;
+
+        drop(connection);
+        assert!(
+            eventually(DEADLINE * 3, || write_dropped.load(Ordering::SeqCst)
+                && alive_tasks() == 0)
+            .await,
+            "socket released {}, {} tasks alive",
+            write_dropped.load(Ordering::SeqCst),
+            alive_tasks()
+        );
+        assert_eq!(stats.timed_out.load(Ordering::SeqCst), 1, "{stats:?}");
     }
 }

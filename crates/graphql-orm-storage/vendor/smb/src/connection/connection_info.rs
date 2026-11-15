@@ -119,6 +119,11 @@ pub(crate) struct CleanupStats {
 /// runtime that negotiated the connection (the one that runs its worker),
 /// runs the steps one at a time, each within a deadline.
 ///
+/// The destructors of handles (CLOSE), trees (TREE_DISCONNECT) and sessions
+/// (LOGOFF) defer their cleanup here. The connection handler's destructor,
+/// which shuts the queue down, runs its worker stop with
+/// [`Self::spawn_bounded`] under the same deadline instead.
+///
 /// The queue holds at most [`CLEANUP_QUEUE_CAPACITY`] steps; a step offered
 /// to a full or shut-down queue is refused, counted and logged at debug level.
 /// The drain task holds no sender and steps hold only weak references, so the
@@ -132,6 +137,10 @@ pub(crate) struct CleanupQueue {
     sender: tokio::sync::mpsc::Sender<CleanupStep>,
     shutdown: tokio_util::sync::CancellationToken,
     stats: Arc<CleanupStats>,
+    /// The connection's runtime, which runs the drain task.
+    runtime: Option<tokio::runtime::Handle>,
+    /// Each step's deadline.
+    deadline: std::time::Duration,
 }
 
 #[cfg(feature = "async")]
@@ -152,8 +161,9 @@ impl CleanupQueue {
         let (sender, receiver) = tokio::sync::mpsc::channel::<CleanupStep>(capacity);
         let shutdown = tokio_util::sync::CancellationToken::new();
         let stats = Arc::new(CleanupStats::default());
-        match tokio::runtime::Handle::try_current() {
-            Ok(runtime) => {
+        let runtime = tokio::runtime::Handle::try_current().ok();
+        match &runtime {
+            Some(runtime) => {
                 runtime.spawn(Self::drain(
                     receiver,
                     shutdown.clone(),
@@ -161,7 +171,7 @@ impl CleanupQueue {
                     deadline,
                 ));
             }
-            Err(_) => {
+            None => {
                 drop(receiver);
                 stats
                     .finished
@@ -172,6 +182,8 @@ impl CleanupQueue {
             sender,
             shutdown,
             stats,
+            runtime,
+            deadline,
         }
     }
 
@@ -257,9 +269,45 @@ impl CleanupQueue {
         self.shutdown.cancel();
     }
 
+    /// Runs `task`, which must not need the queue (for example, stopping
+    /// the connection's worker as the connection drops), as its own task on
+    /// the connection's runtime within the queue's deadline. Needs no
+    /// current runtime. A task that reaches its deadline is dropped, counted
+    /// as timed out and logged at debug level; without a runtime it is
+    /// dropped on this thread, counted as refused and logged at debug level.
+    /// Returns whether the task was handed to the runtime.
+    pub(crate) fn spawn_bounded(&self, what: &'static str, task: CleanupTask) -> bool {
+        use std::sync::atomic::Ordering;
+        let Some(runtime) = &self.runtime else {
+            self.stats.refused.fetch_add(1, Ordering::SeqCst);
+            log::debug!("No runtime for connection cleanup; {what} is skipped.");
+            return false;
+        };
+        let stats = self.stats.clone();
+        let deadline = self.deadline;
+        // A runtime that has shut down drops the task without running it.
+        runtime.spawn(async move {
+            match tokio::time::timeout(deadline, task).await {
+                Ok(()) => {
+                    stats.completed.fetch_add(1, Ordering::SeqCst);
+                }
+                Err(_) => {
+                    stats.timed_out.fetch_add(1, Ordering::SeqCst);
+                    log::debug!("Connection cleanup: {what} abandoned after {deadline:?}.");
+                }
+            }
+        });
+        true
+    }
+
     #[cfg(test)]
     pub(crate) fn stats(&self) -> &CleanupStats {
         &self.stats
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stats_handle(&self) -> Arc<CleanupStats> {
+        self.stats.clone()
     }
 }
 

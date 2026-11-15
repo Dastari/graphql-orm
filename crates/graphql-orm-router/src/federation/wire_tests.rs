@@ -2970,7 +2970,6 @@ fn authenticated_public_websocket_enforces_lifecycle_and_routes_upstream_websock
 
     first.close();
     second.close();
-    thread::sleep(Duration::from_millis(50));
 
     let mut reconnected = TestWebSocket::connect_at(router.address, "/api/graphql");
     reconnected.connection_init_bearer("product-events");
@@ -2983,7 +2982,6 @@ fn authenticated_public_websocket_enforces_lifecycle_and_routes_upstream_websock
         "fresh"
     );
     reconnected.close();
-    thread::sleep(Duration::from_millis(50));
 
     let mut idle_first = TestWebSocket::connect_at(router.address, "/api/graphql");
     let mut idle_second = TestWebSocket::connect_at(router.address, "/api/graphql");
@@ -2994,7 +2992,6 @@ fn authenticated_public_websocket_enforces_lifecycle_and_routes_upstream_websock
     );
     idle_first.close();
     idle_second.close();
-    thread::sleep(Duration::from_millis(50));
 
     for index in 0..8 {
         let mut churned = TestWebSocket::connect_at(router.address, "/api/graphql");
@@ -3003,7 +3000,6 @@ fn authenticated_public_websocket_enforces_lifecycle_and_routes_upstream_websock
         churned.subscribe(&id, "subscription { productChanged(id: \"p1\") { id } }");
         assert_eq!(churned.wait_for_operation_message(&id, "next")["id"], id);
         churned.close();
-        thread::sleep(Duration::from_millis(10));
     }
 
     let mut oversized = TestWebSocket::connect_at(router.address, "/api/graphql");
@@ -4022,6 +4018,7 @@ impl TestWebSocket {
         Self::connect_at(address, "/ws")
     }
 
+    #[track_caller]
     fn connect_at(address: SocketAddr, path: &str) -> Self {
         let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))
             .expect("router WebSocket should accept a loopback connection");
@@ -4170,8 +4167,33 @@ impl TestWebSocket {
         }
     }
 
+    /// Completes the closing handshake: sends a Close frame, then waits for
+    /// the router's Close reply or the end of the stream. The router releases
+    /// the connection's admission capacity before it replies, so an upgrade
+    /// sent after this returns never races the router's handling of this
+    /// close. Without the wait, a reconnect at the connection limit could
+    /// reach the router first and be refused with `503` (#713).
     fn close(&mut self) {
-        let _ = write_websocket_frame(&mut self.stream, 0x8, &[]);
+        if write_websocket_frame(&mut self.stream, 0x8, &[]).is_err() {
+            // The router has already closed the stream.
+            return;
+        }
+        let deadline = Instant::now() + TEST_TIMEOUT;
+        loop {
+            match read_websocket_frame_before(&mut self.stream, deadline) {
+                Ok((0x8, _)) => return,
+                Ok(_) => {}
+                Err(error) => {
+                    assert_ne!(
+                        error.kind(),
+                        io::ErrorKind::TimedOut,
+                        "router did not answer the WebSocket close"
+                    );
+                    // The router ended the stream.
+                    return;
+                }
+            }
+        }
     }
 
     fn send_json(&mut self, value: &Value) {

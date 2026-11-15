@@ -10,6 +10,11 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.15.3 to 0.15.4
+
+No consumer migration is required. Only the wire tests change; router
+behavior, configuration and public APIs are unchanged.
+
 ## 0.15.2 to 0.15.3
 
 No consumer migration is required. Node lookups no longer hold a plugin

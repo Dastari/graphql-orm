@@ -936,6 +936,30 @@ impl Drop for ResourceHandle {
 }
 
 #[cfg(feature = "async")]
+impl ResourceHandle {
+    /// Local patch (graphql-orm-storage): the deferred CLOSE of `file_id` on
+    /// `tree`. It holds only a weak reference to the tree and upgrades it when
+    /// it runs; if the tree is gone by then, so is the session that held the
+    /// handle, and the step is skipped.
+    pub(crate) fn deferred_close(
+        tree: std::sync::Weak<TreeMessageHandler>,
+        file_id: FileId,
+    ) -> crate::connection::connection_info::CleanupStep {
+        Box::new(move || {
+            let upstream = HandlerReference {
+                handler: tree.upgrade()?,
+            };
+            Some(Box::pin(async move {
+                let handler = ResourceMessageHandle::new(&upstream);
+                if let Err(e) = Self::send_close(file_id, &handler).await {
+                    log::error!("Error closing file: {e}");
+                }
+            }))
+        })
+    }
+}
+
+#[cfg(feature = "async")]
 impl Drop for ResourceHandle {
     fn drop(&mut self) {
         if !self.state.take_for_drop() {
@@ -953,19 +977,11 @@ impl Drop for ResourceHandle {
         // within a deadline. The queued step holds only a weak reference to
         // the tree, so it never keeps the connection alive; if the tree is
         // gone by then, so is the session that held the handle.
-        let tree = self.handler.upstream.weak();
         log::debug!("Deferring close of file with ID: {file_id:?}");
-        let deferred = self.conn_info.cleanup.defer(Box::new(move || {
-            let upstream = HandlerReference {
-                handler: tree.upgrade()?,
-            };
-            Some(Box::pin(async move {
-                let handler = ResourceMessageHandle::new(&upstream);
-                if let Err(e) = Self::send_close(file_id, &handler).await {
-                    log::error!("Error closing file: {e}");
-                }
-            }))
-        }));
+        let deferred = self
+            .conn_info
+            .cleanup
+            .defer(Self::deferred_close(self.handler.upstream.weak(), file_id));
         if !deferred {
             // Refused (full or shut down) and counted by the queue: the
             // server releases the handle when the session ends.
