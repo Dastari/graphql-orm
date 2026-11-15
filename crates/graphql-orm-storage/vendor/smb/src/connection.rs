@@ -783,7 +783,10 @@ impl ConnectionMessageHandler {
         let (tx, mut rx) = tokio::sync::mpsc::channel(CHANNEL_BUFFER_SIZE);
         worker.start_notify_channel(tx)?;
         let stop_notification = self.stop_notifications.clone();
-        let self_clone = self.clone();
+        // Local patch (graphql-orm-storage): the task holds the handler weakly,
+        // so it never keeps the connection alive; the handler's destructor
+        // cancels it.
+        let handler = Arc::downgrade(self);
         tokio::spawn(async move {
             loop {
                 select! {
@@ -793,7 +796,10 @@ impl ConnectionMessageHandler {
                     }
                     else => {
                         while let Some(msg) = rx.recv().await {
-                            self_clone.notify(msg).await.unwrap_or_else(|e| {
+                            let Some(handler) = handler.upgrade() else {
+                                break;
+                            };
+                            handler.notify(msg).await.unwrap_or_else(|e| {
                                 log::error!("Error handling notification: {e:?}");
                             });
                         }
@@ -829,6 +835,14 @@ impl ConnectionMessageHandler {
             log::info!("Notification handler thread stopped.");
         });
         Ok(())
+    }
+
+    /// Local patch (graphql-orm-storage): the queue for cleanup that the
+    /// destructors of this connection's sessions, trees and handles defer.
+    /// `None` until negotiation completes.
+    #[cfg(feature = "async")]
+    pub(crate) fn cleanup_queue(&self) -> Option<&connection_info::CleanupQueue> {
+        self.conn_info.get().map(|info| &info.cleanup)
     }
 
     #[cfg(not(feature = "single_threaded"))]
@@ -937,19 +951,33 @@ impl Drop for ConnectionMessageHandler {
             Some(worker) => worker,
             None => return,
         };
+        let stop: connection_info::CleanupTask = Box::pin(async move {
+            worker.stop().await.ok();
+        });
 
         // Local patch (graphql-orm-storage): a destructor never requires a
-        // current runtime. Without one, the worker's tasks stop with the
-        // runtime that runs them.
-        match tokio::runtime::Handle::try_current() {
-            Ok(runtime) => {
-                runtime.spawn(async move {
-                    worker.stop().await.ok();
-                });
-            }
-            Err(_) => log::debug!(
-                "Connection dropped outside a runtime; its worker stops with its runtime."
-            ),
+        // current runtime, and the worker stop it starts has a deadline. A
+        // stop abandoned at its deadline aborts the worker's loops, which
+        // releases the socket.
+        match self.conn_info.get() {
+            Some(info) => info.cleanup.spawn_bounded("worker stop", stop),
+            // Negotiation did not complete: stop on the current runtime, if
+            // any, within the default timeout.
+            None => match tokio::runtime::Handle::try_current() {
+                Ok(runtime) => {
+                    runtime.spawn(async move {
+                        if tokio::time::timeout(ConnectionConfig::DEFAULT_TIMEOUT, stop)
+                            .await
+                            .is_err()
+                        {
+                            log::debug!("Connection cleanup: worker stop abandoned.");
+                        }
+                    });
+                }
+                Err(_) => log::debug!(
+                    "Connection dropped outside a runtime; its worker stops with its runtime."
+                ),
+            },
         }
     }
 }
@@ -974,6 +1002,31 @@ impl ConnectionMessageHandler {
             .set(worker)
             .map_err(|_| Error::InvalidState("Worker is already set".into()))?;
         Ok(handler)
+    }
+
+    /// Test-only: as [`Self::with_test_transport`] with no scripted
+    /// responses, negotiated as `info` (local patch).
+    pub(crate) async fn with_test_transport_negotiated(
+        transport: Box<dyn SmbTransport>,
+        info: ConnectionInfo,
+    ) -> crate::Result<(HandlerReference<Self>, Arc<ConnectionInfo>)> {
+        let handler = Self::with_test_transport(transport, &[]).await?;
+        let info = Arc::new(info);
+        handler
+            .worker()
+            .ok_or_else(|| Error::InvalidState("Worker is not set".into()))?
+            .negotaite_complete(&info)
+            .await;
+        handler
+            .conn_info
+            .set(info.clone())
+            .map_err(|_| Error::InvalidState("Already negotiated".into()))?;
+        Ok((handler, info))
+    }
+
+    /// Test-only: credits available for the next request (local patch).
+    pub(crate) fn available_credits(&self) -> usize {
+        self.curr_credits.available_permits()
     }
 }
 

@@ -22,6 +22,11 @@ The local backend requires a trusted, exclusively managed filesystem root and
 restrictive permissions. See the [local filesystem trust boundary](docs/blob-store.md#local-filesystem-trust-boundary)
 before using local directories or OS-mounted shares.
 
+Version 0.15.0 bounds the SMB cleanup that dropped trees, sessions and
+connections start: each step finishes or is abandoned within the connection's
+timeout and never keeps the session, connection or socket alive. The public
+API is unchanged. See [MIGRATION.md](MIGRATION.md).
+
 Version 0.14.0 makes SMB handle close cancel-safe: a close that times out or
 is cancelled before its request is sent no longer leaks the server handle for
 the rest of the session. The public API is unchanged. See
@@ -108,13 +113,13 @@ resolved dependency graph.
 
 ```toml
 [dependencies]
-graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.14.0" }
+graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.15.0" }
 ```
 
 For S3-compatible storage without the default local backend:
 
 ```toml
-graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.14.0", default-features = false, features = ["s3"] }
+graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.15.0", default-features = false, features = ["s3"] }
 ```
 
 ## Five-minute local start

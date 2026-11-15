@@ -283,6 +283,15 @@ impl SessionMessageHandler {
         Ok(())
     }
 
+    /// Local patch (graphql-orm-storage): the connection's queue for cleanup
+    /// deferred by destructors; `None` before negotiation completes.
+    #[cfg(feature = "async")]
+    pub(crate) fn cleanup_queue(
+        &self,
+    ) -> Option<&crate::connection::connection_info::CleanupQueue> {
+        self.primary_channel.cleanup_queue()
+    }
+
     /// Logs off the session and invalidates it.
     ///
     /// # Notes
@@ -381,26 +390,42 @@ impl Drop for SessionMessageHandler {
             return;
         }
 
-        // Local patch (graphql-orm-storage): a destructor never requires a
-        // current runtime. Without one, the server ends the session when the
-        // connection closes.
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            log::debug!("Session dropped outside a runtime; it ends when its connection closes.");
+        // Local patch (graphql-orm-storage): the LOGOFF goes to the
+        // connection's bounded cleanup queue, which needs no current runtime
+        // and runs it on the connection's runtime within a deadline. The
+        // queued step holds only a weak reference to the connection and the
+        // session's signing state, never the channel or connection, so it
+        // never keeps the session, connection or socket alive. If the
+        // connection is gone by then, the server has ended the session.
+        let Some(cleanup) = self.primary_channel.cleanup_queue() else {
+            log::debug!("Session dropped before negotiation completed; nothing to log off.");
             return;
         };
         let session_id = self.session_id;
         let primary_channel_id = self.primary_channel_id;
-        let primary_channel = self.primary_channel.clone();
-
-        runtime.spawn(async move {
-            let temp_handler = SessionMessageHandler {
-                session_id,
-                dropping: AtomicBool::new(false),
-                primary_channel_id,
-                primary_channel,
-                channel_handlers: Default::default(),
+        let connection = self.primary_channel.connection_weak();
+        let session_state = self.primary_channel.session_state().clone();
+        let deferred = cleanup.defer(Box::new(move || {
+            let connection = HandlerReference {
+                handler: connection.upgrade()?,
             };
-            temp_handler.logoff_async().await;
-        });
+            Some(Box::pin(async move {
+                let primary_channel = ChannelMessageHandler::new(
+                    session_id,
+                    primary_channel_id,
+                    &connection,
+                    &session_state,
+                );
+                // Logging off marks it dropping, so its own destructor is a
+                // no-op.
+                let temp_handler = SessionMessageHandler::new(primary_channel);
+                temp_handler.logoff_async().await;
+            }))
+        }));
+        if !deferred {
+            log::debug!(
+                "Logoff of session {session_id:#x} not deferred; it ends with its connection."
+            );
+        }
     }
 }

@@ -10,6 +10,16 @@ supersedes: []
 
 # Changelog
 
+## 0.15.4 (unreleased)
+
+- Tests: the wire-test WebSocket client completes the closing handshake,
+  waiting for the router's Close reply or the end of the stream, before a
+  test continues. The router releases a closed connection's admission
+  capacity before it replies, so a test that reconnects at the connection
+  limit no longer races the router's handling of the close and intermittently
+  gets `503` on the upgrade. Fixed sleeps after closes are removed. No router
+  behavior changes. ([#713](https://github.com/Dastari/graphql-orm/issues/713))
+
 ## 0.15.3 (unreleased)
 
 - The router-hosted Node subgraph hook clones the request's selected Node

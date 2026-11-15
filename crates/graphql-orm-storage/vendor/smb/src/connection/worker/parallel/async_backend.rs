@@ -147,6 +147,16 @@ impl AsyncBackend {
     }
 }
 
+/// Local patch (graphql-orm-storage): aborts a worker loop when dropped.
+/// Aborting a loop that has finished has no effect.
+struct AbortOnDrop(JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 impl MultiWorkerBackend for AsyncBackend {
     type SendMessage = IoVec;
 
@@ -191,8 +201,14 @@ impl MultiWorkerBackend for AsyncBackend {
             .await?
             .take()
             .ok_or(Error::ConnectionStopped)?;
-        loop_handles.0.await?;
-        loop_handles.1.await?;
+        // Local patch (graphql-orm-storage): a loop can be inside a transport
+        // write that never completes, where it does not see the cancellation.
+        // If this wait is abandoned, for example at a cleanup deadline, the
+        // loops are aborted, which drops their halves of the socket.
+        let mut receive = AbortOnDrop(loop_handles.0);
+        let mut send = AbortOnDrop(loop_handles.1);
+        (&mut receive.0).await?;
+        (&mut send.0).await?;
         Ok(())
     }
     fn wrap_msg_to_send(msg: IoVec) -> Self::SendMessage {

@@ -10,6 +10,21 @@ supersedes: []
 
 # Migration Guide
 
+## 0.14.0 to 0.15.0: bounded SMB destructor cleanup
+
+Update the storage requirement to 0.15.0 and refresh the consumer lockfile. No
+code changes are needed: the public API is unchanged.
+
+Dropping the last reference to an SMB tree, session or connection no longer
+starts cleanup that can wait forever. The TREE_DISCONNECT and LOGOFF that
+those destructors send, and the connection's worker stop, each finish or are
+abandoned within the connection's timeout, and never keep the session,
+connection or socket alive. Cleanup that is abandoned, or refused because the
+connection's cleanup queue is full or has shut down, is left to the server,
+which releases it when the session or socket ends. A tree or session dropped
+on a thread with no current Tokio runtime is now cleaned up on the
+connection's runtime instead of being left to the server.
+
 ## 0.13.0 to 0.14.0: cancel-safe SMB handle close
 
 Update the storage requirement to 0.14.0 and refresh the consumer lockfile. No

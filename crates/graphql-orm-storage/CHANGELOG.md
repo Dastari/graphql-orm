@@ -10,6 +10,29 @@ supersedes: []
 
 # Changelog
 
+## 0.15.0 (unreleased)
+
+No public API changes.
+
+- SMB: cleanup that the vendored client's destructors start can no longer
+  wait forever or keep a session, connection or socket alive. A dropped
+  tree's TREE_DISCONNECT and a dropped session's LOGOFF ran as detached tasks
+  with no deadline that held the session (and through it the connection)
+  strongly; with the connection's credits exhausted they waited forever, so a
+  handle CLOSE abandoned at its deadline that dropped the last tree
+  reference kept the session, connection and socket alive. Both now go
+  through the connection's bounded cleanup queue, holding only weak
+  references, each within the connection's timeout; a step whose session or
+  connection is already gone is skipped. A dropped connection's worker stop
+  has the same deadline, and a stop that reaches it aborts the worker's loops,
+  so a socket write that never completes no longer keeps the socket open. An
+  abandoned step is counted and logged at debug level, and the server
+  releases what it would have cleaned up when the session or socket ends.
+  The vendored client's notification task, which storage does not enable, no
+  longer keeps its connection alive. A seventh owner-local vendor patch,
+  `bounded-destructor-cleanup`, carries the fix and its in-crate regression
+  tests. ([#717](https://github.com/Dastari/graphql-orm/issues/717))
+
 ## 0.14.0 (unreleased)
 
 No public API changes.

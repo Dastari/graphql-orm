@@ -62,7 +62,7 @@ pub struct ChannelMessageHandler {
 
 #[maybe_async(AFIT)]
 impl ChannelMessageHandler {
-    fn new(
+    pub(crate) fn new(
         session_id: u64,
         channel_id: u32,
         upstream: &ChannelUpstream,
@@ -242,6 +242,22 @@ impl ChannelMessageHandler {
 
     pub fn session_state(&self) -> &Arc<RwLock<SessionAndChannel>> {
         &self.session_state
+    }
+
+    /// Local patch (graphql-orm-storage): the connection's queue for cleanup
+    /// deferred by destructors; `None` before negotiation completes.
+    #[cfg(feature = "async")]
+    pub(crate) fn cleanup_queue(
+        &self,
+    ) -> Option<&crate::connection::connection_info::CleanupQueue> {
+        self.upstream.cleanup_queue()
+    }
+
+    /// Local patch (graphql-orm-storage): a weak reference to the
+    /// connection, for deferred cleanup that must not keep it alive.
+    #[cfg(feature = "async")]
+    pub(crate) fn connection_weak(&self) -> std::sync::Weak<ConnectionMessageHandler> {
+        self.upstream.weak()
     }
 }
 

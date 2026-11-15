@@ -86,6 +86,33 @@ on a thread with no runtime, then checks that an exclusive open succeeds on
 the same session and that drops after the session closed, or after the
 runtime shut down, do not panic. A third checks that `Client::close` reports
 a failed logoff and connection close.
+
+Storage 0.15.0 adds `PATCHES/bounded-destructor-cleanup.patch`, applied last.
+The tree and session destructors spawned TREE_DISCONNECT and LOGOFF as
+detached tasks with no deadline that held the session, and through it the
+connection, strongly. With the connection's credits exhausted they waited
+forever, so a CLOSE that the cleanup queue abandoned at its deadline, and
+that dropped the last tree reference, kept the session, connection and socket
+alive. Both now go through the same per-connection cleanup queue as handle
+CLOSE: offered without blocking and without a runtime, run one at a time on
+the connection's runtime, each within the connection's timeout. A queued
+TREE_DISCONNECT holds only a weak reference to the session, and a queued
+LOGOFF only a weak reference to the connection and the session's signing
+state, so neither keeps the session, connection or socket alive; one whose
+session or connection is gone by the time it runs is skipped, because the
+logoff or the end of the connection releases it on the server. The connection
+handler's destructor, which shuts the queue down, stops its worker on the
+connection's runtime within the same deadline, and a stop that reaches it
+aborts the worker's receive and send loops, which releases the socket even
+when a write never completes. Every abandoned, refused or skipped step is
+counted and logged at debug level. The vendored notification task, which
+storage disables, holds its connection weakly. In-crate regression tests use
+real connection, channel, session and tree handlers over a server that
+grants no credits: a CLOSE that times out and drops the last tree reference
+leaves the session and connection freed within the deadline with no task
+left; a deferred TREE_DISCONNECT and LOGOFF each time out and release what
+they hold; and a worker stop blocked in a socket write is abandoned at its
+deadline and drops the socket.
 The protocol/authentication companions, cryptographic versions and feature
 selection remain pinned to the existing 0.10.2 family; this is not an adoption
 of the newer SDK's crypto graph.

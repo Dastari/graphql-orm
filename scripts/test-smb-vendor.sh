@@ -3,8 +3,8 @@
 # verify-before-status regression tests, the resource-bound and
 # server-identity regression tests, the server-response error regression
 # tests, the share-access override test, the cancel-safe close, cleanup-queue
-# and close-failure reporting tests, and the server-selected dialect-minimum
-# regression test) with
+# and close-failure reporting tests, the bounded destructor cleanup tests, and
+# the server-selected dialect-minimum regression test) with
 # storage's selected features.
 #
 # The vendored package is an isolated, excluded workspace. Tests run on a
