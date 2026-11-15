@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm-storage"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Dastari/graphql-orm"
@@ -26,6 +26,9 @@ smb = [
     "dep:tracing",
 ]
 azure = []
+# Test infrastructure only: barriers and handles for the managed Samba sweep
+# tests. Never enable it in an application.
+smb-sweep-test-hooks = ["smb"]
 
 [dependencies]
 async-trait = "0.1"

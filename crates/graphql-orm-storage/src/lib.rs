@@ -61,7 +61,7 @@ pub use blob::{
     validate_portable_blob_key,
 };
 pub use checksum::sha256_hex;
-pub use error::{StorageError, StorageProviderErrorKind};
+pub use error::{StorageError, StorageProviderErrorKind, io_error_is_retryable};
 pub use key::{build_storage_key, file_extension};
 #[cfg(feature = "local")]
 pub use local::LocalStorageBackend;
@@ -79,8 +79,13 @@ pub use s3::{S3StorageBackend, S3StorageConfig};
 pub use service::{ObjectStorage, StorageService};
 #[cfg(feature = "smb")]
 pub use smb::{
-    SmbBackendDiagnostics, SmbDialect, SmbProbeOptions, SmbProbeResult, SmbStorageBackend,
-    SmbStorageConfig,
+    SmbBackendDiagnostics, SmbDialect, SmbProbeOptions, SmbProbeResult, SmbRepositoryQuiesced,
+    SmbStorageBackend, SmbStorageConfig, SmbTempSweepError, SmbTempSweepReport,
+};
+#[cfg(feature = "smb-sweep-test-hooks")]
+pub use smb::{
+    SmbHeldDirectory, SmbSweepBarrier, SmbSweepCandidate, SmbSweepClose, SmbSweepCloseBarrier,
+    SmbSweepCloseOutcome, SmbSweepSessionSeverer,
 };
 pub use streaming_object::{
     BoxedMultipartWriter, MultipartWriter, ObjectContentRange, ObjectInfo, ObjectMetadata,

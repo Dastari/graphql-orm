@@ -377,8 +377,17 @@ pub fn validate_manifest_entries(manifest: &BackupSnapshotManifest) -> Result<()
         ),
         (&manifest.database.changes, crate::database_changes_key),
     ] {
+        let mut tables = std::collections::HashSet::with_capacity(entries.len());
         for entry in entries {
             validate_table_name(&entry.table_name).map_err(invalid)?;
+            // Each table has one payload key, so a second entry would name
+            // the same blob and one of them could never verify.
+            if !tables.insert(entry.table_name.as_str()) {
+                return Err(invalid(format!(
+                    "table {} has more than one payload entry",
+                    entry.table_name
+                )));
+            }
             validate_sha256_hex(&entry.sha256_hex).map_err(invalid)?;
             let expected = expected_key(manifest.snapshot_id, &entry.table_name);
             if entry.content_key != expected {
@@ -388,6 +397,31 @@ pub fn validate_manifest_entries(manifest: &BackupSnapshotManifest) -> Result<()
                 )));
             }
         }
+    }
+    // The totals cover the payload entries of this snapshot's kind: full
+    // tables for a full snapshot, changes for an incremental one, which
+    // records no tables.
+    let (payloads, table_count) = match manifest.backup_kind {
+        BackupKind::Incremental => (&manifest.database.changes, 0),
+        BackupKind::Full | BackupKind::SyntheticFull => (
+            &manifest.database.tables,
+            manifest.database.tables.len() as u64,
+        ),
+    };
+    if manifest.database.table_count != table_count {
+        return Err(invalid(format!(
+            "table count {} does not match the {table_count} table entries",
+            manifest.database.table_count
+        )));
+    }
+    let row_count = payloads
+        .iter()
+        .try_fold(0_u64, |total, entry| total.checked_add(entry.row_count));
+    if row_count != Some(manifest.database.row_count) {
+        return Err(invalid(format!(
+            "row count {} does not match the sum of its payload entries",
+            manifest.database.row_count
+        )));
     }
     for object in &manifest.objects {
         validate_sha256_hex(&object.sha256_hex).map_err(invalid)?;
