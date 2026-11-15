@@ -3,8 +3,8 @@ title: "Postgres Test Coverage"
 kind: runbook
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-11
-review_by: 2026-12-02
+last_reviewed: 2026-11-15
+review_by: 2027-02-15
 supersedes: []
 ---
 
