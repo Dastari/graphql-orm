@@ -770,11 +770,13 @@ pub(crate) mod tests {
             Ok(bytes)
         }
     }
+    #[cfg(feature = "sqlite")]
     pub(crate) struct ExecutorWireFactory {
         pub stationarity: bool,
         pub invalid_first: bool,
     }
     #[async_trait]
+    #[cfg(feature = "sqlite")]
     impl super::super::grok_acp_provider::AiGrokAcpProcessFactory for ExecutorWireFactory {
         fn admits(&self, _: &AiGrokAcpRegistration) -> bool {
             true

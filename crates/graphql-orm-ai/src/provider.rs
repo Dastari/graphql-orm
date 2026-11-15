@@ -1998,7 +1998,7 @@ impl ProviderRequestContext {
 
     /// Whether every model/tool transfer for this provider and model names
     /// `destination`, with at least one model-inference transfer.
-    #[cfg(feature = "provider-anthropic-core")]
+    #[cfg(any(feature = "provider-anthropic-core", feature = "provider-ollama-core"))]
     pub(crate) fn permits_destination(
         &self,
         provider_kind: &ProviderKind,

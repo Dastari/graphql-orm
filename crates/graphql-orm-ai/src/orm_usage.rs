@@ -8,7 +8,7 @@ use agql_auth::AuthPrincipal;
 use async_trait::async_trait;
 use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::OrmPublicError;
-use graphql_orm::graphql::filters::{IntFilter, StringFilter};
+use graphql_orm::graphql::filters::{Int64Filter, StringFilter};
 use graphql_orm::graphql::orm::DefaultWriteBackend;
 use graphql_orm::graphql::pagination::{
     KeysetConnectionInput, KeysetWindowDirection, ValidatedKeysetConnection,
@@ -65,19 +65,14 @@ impl AiUsageService for OrmAiUsageService {
             return Err(AiError::Forbidden);
         }
         let (principal_kind, principal_subject) = principal_identity(principal);
-        let created_at =
-            match (filter.created_from(), filter.created_to()) {
-                (None, None) => None,
-                (from, to) => Some(IntFilter {
-                    gte: from.map(i32::try_from).transpose().map_err(|_| {
-                        AiError::InvalidInput("invalid AI usage time bound".to_owned())
-                    })?,
-                    lt: to.map(i32::try_from).transpose().map_err(|_| {
-                        AiError::InvalidInput("invalid AI usage time bound".to_owned())
-                    })?,
-                    ..Default::default()
-                }),
-            };
+        let created_at = match (filter.created_from(), filter.created_to()) {
+            (None, None) => None,
+            (from, to) => Some(Int64Filter {
+                gte: from,
+                lt: to,
+                ..Default::default()
+            }),
+        };
         let connection = AiUsageEntryRecord::keyset_connection_page(
             &self.database,
             AiUsageEntryRecordWhereInput {
@@ -423,6 +418,32 @@ mod tests {
                 .await,
             Err(AiError::Forbidden)
         ));
+    }
+
+    #[tokio::test]
+    async fn usage_time_filters_accept_post_2038_bounds() {
+        let database = database().await;
+        let service = OrmAiUsageService::new(
+            database,
+            Arc::new(FixedAccess(AiUsageReadAccess::WholeScope)),
+        );
+        let filter = AiUsageFilter::try_from(crate::AiUsageFilterInput {
+            created_from: Some(2_200_000_000),
+            created_to: Some(2_200_000_100),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(
+            service
+                .usage(
+                    &principal("alice"),
+                    AiScope::new("tenant", "tenant-a").with_tenant_id("tenant-a"),
+                    filter,
+                    page(10, None)
+                )
+                .await
+                .is_ok()
+        );
     }
 
     #[test]

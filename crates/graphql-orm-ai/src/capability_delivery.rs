@@ -912,7 +912,7 @@ struct CapabilityDiscoveryCache {
 /// Discovery and loaded-capability broker with fresh authority checks.
 #[derive(Clone)]
 pub struct AiCapabilityDiscoveryBroker {
-    principal_resolver: Arc<dyn CurrentPrincipalResolver>,
+    principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver,
     current_indexes: Arc<dyn AiCurrentCapabilityIndexSet>,
     authority: Arc<dyn AiCapabilityAuthorityPolicy>,
     clock: Arc<dyn Clock>,
@@ -940,7 +940,10 @@ impl AiCapabilityDiscoveryBroker {
             ));
         }
         Ok(Self {
-            principal_resolver,
+            principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver::from(
+                principal_resolver,
+            )
+            .with_clock(clock.clone()),
             current_indexes,
             authority,
             clock,

@@ -21,7 +21,7 @@ use crate::{
 /// This is routing metadata only; ordinary per-egress/tool authorization remains mandatory.
 pub struct OrmAiRunExecutionSelectionReader {
     database: Database<DefaultWriteBackend>,
-    principal_resolver: Arc<dyn CurrentPrincipalResolver>,
+    principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver,
     access_policy: Arc<dyn AiAccessPolicy>,
     clock: Arc<dyn Clock>,
 }
@@ -38,7 +38,10 @@ impl OrmAiRunExecutionSelectionReader {
         let database = crate::custody_field_policy::custody_database(database);
         Self {
             database,
-            principal_resolver,
+            principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver::from(
+                principal_resolver,
+            )
+            .with_clock(clock.clone()),
             access_policy,
             clock,
         }

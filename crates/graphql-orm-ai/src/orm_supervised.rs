@@ -115,23 +115,20 @@ impl OrmAiSupervisedResumeService {
         &self,
         claim: &AiApprovedRunClaim,
     ) -> Result<AiSupervisedResumeOutcome, AiError> {
-        let adopted = self
-            .checkpoints
-            .adopt_supervised_provider_turn(claim)
-            .await?;
+        // Each phase contains generated ORM writes. Heap-pin the phases so
+        // their mutually exclusive state does not inflate the resume frame.
+        let adopted = Box::pin(self.checkpoints.adopt_supervised_provider_turn(claim)).await?;
         let provider_response_id = adopted.provider_response_id().map(str::to_owned);
         let tool_call_id = adopted.tool_call_id();
         let provider_turns = adopted.provider_turns();
         let total_tool_calls = adopted.total_tool_calls();
-        let outcome = self
-            .consequential_tools
-            .execute_approved(
-                claim.lease(),
-                adopted.approval_id(),
-                tool_call_id,
-                adopted.result_egress_route().clone(),
-            )
-            .await?;
+        let outcome = Box::pin(self.consequential_tools.execute_approved(
+            claim.lease(),
+            adopted.approval_id(),
+            tool_call_id,
+            adopted.result_egress_route().clone(),
+        ))
+        .await?;
         let AiConsequentialToolCallOutcome::Persisted(persisted) = outcome else {
             return Ok(AiSupervisedResumeOutcome::RecoveryRequired {
                 tool_call_id,
@@ -153,21 +150,22 @@ impl OrmAiSupervisedResumeService {
                     .await
                 {
                     Ok((continuation, decision_id)) => {
-                        self.checkpoints
-                            .persist_native_approved_outcome(
-                                adopted,
-                                persisted.as_ref(),
-                                continuation,
-                                decision_id,
-                            )
-                            .await
+                        Box::pin(self.checkpoints.persist_native_approved_outcome(
+                            adopted,
+                            persisted.as_ref(),
+                            continuation,
+                            decision_id,
+                        ))
+                        .await
                     }
                     Err(error) => Err(error),
                 }
             } else {
-                self.checkpoints
-                    .persist_supervised_tool_batch(adopted, persisted.as_ref())
-                    .await
+                Box::pin(
+                    self.checkpoints
+                        .persist_supervised_tool_batch(adopted, persisted.as_ref()),
+                )
+                .await
             };
         match checkpoint {
             Ok(checkpoint) => Ok(AiSupervisedResumeOutcome::Checkpointed(Box::new(

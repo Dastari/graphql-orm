@@ -217,7 +217,27 @@ fn runtime() -> AiRuntime {
 }
 
 fn runtime_with_policy(policy: Arc<dyn AiToolAuthorizationPolicy>) -> AiRuntime {
-    let document = "query Current { current { scopes } }";
+    runtime_with_operation(
+        policy,
+        AiToolOperationKind::Query,
+        ToolMaturity::ReadOnly,
+        AiToolRisk::ReadOnly,
+        AiApprovalRule::None,
+    )
+}
+
+fn runtime_with_operation(
+    policy: Arc<dyn AiToolAuthorizationPolicy>,
+    kind: AiToolOperationKind,
+    maturity: ToolMaturity,
+    risk: AiToolRisk,
+    approval: AiApprovalRule,
+) -> AiRuntime {
+    let document = match kind {
+        AiToolOperationKind::Query => "query Current { current { scopes } }",
+        AiToolOperationKind::Mutation => "mutation Current { current { scopes } }",
+        _ => unreachable!("this fixture supports queries and mutations"),
+    };
     let disclosure = AiDisclosureSchema::new(
         "current-v1",
         AiDisclosureShape::object(
@@ -247,7 +267,7 @@ fn runtime_with_policy(policy: Arc<dyn AiToolAuthorizationPolicy>) -> AiRuntime 
     let descriptor = AiToolDescriptor::new(
         "records.current",
         "Read the current principal's visible records",
-        AiToolOperationKind::Query,
+        kind,
         document,
         json!({
             "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -265,6 +285,8 @@ fn runtime_with_policy(policy: Arc<dyn AiToolAuthorizationPolicy>) -> AiRuntime 
         }),
     )
     .expect("descriptor should validate")
+    .with_maturity(maturity)
+    .with_risk(risk, approval)
     .with_result_projection("projection-v1")
     .with_graphql_contract(contract);
     let mut tool_catalog = AiToolCatalog::new();
@@ -297,7 +319,11 @@ fn runtime_with_policy(policy: Arc<dyn AiToolAuthorizationPolicy>) -> AiRuntime 
             maximum_bytes: 1_000,
             maximum_attachments: 0,
         })
-        .maximum_tool_maturity(ToolMaturity::ProposalOnly)
+        .maximum_tool_maturity(if kind == AiToolOperationKind::Mutation {
+            ToolMaturity::AutonomousWrite
+        } else {
+            ToolMaturity::ProposalOnly
+        })
         .tool_catalog(tool_catalog)
         .secret_store(Arc::new(EnvironmentSecretStore::new()))
         .content_protection_policy_resolver(Arc::new(ProtectionPolicy))
@@ -307,7 +333,11 @@ fn runtime_with_policy(policy: Arc<dyn AiToolAuthorizationPolicy>) -> AiRuntime 
 }
 
 fn current_request(runtime: &AiRuntime, variables: serde_json::Value) -> ToolGraphqlRequest {
-    let document = "query Current { current { scopes } }";
+    let descriptor = runtime
+        .tool_catalog()
+        .descriptor(&AiToolId::parse("records.current").unwrap())
+        .unwrap();
+    let document = descriptor.document.as_str();
     ToolGraphqlRequest {
         document: document.to_owned(),
         operation_name: "Current".to_owned(),
@@ -600,4 +630,55 @@ async fn current_invocation_policy_receives_exact_request_and_cannot_authorize_a
         Err(AiError::Forbidden)
     ));
     assert_eq!(*policy.observed.lock().unwrap(), vec![request, other]);
+}
+
+#[tokio::test]
+async fn unapproved_dispatch_refuses_incoherent_mutations() {
+    for (maturity, risk) in [
+        (ToolMaturity::ReadOnly, AiToolRisk::ReadOnly),
+        (ToolMaturity::SupervisedWrite, AiToolRisk::HighImpact),
+        (ToolMaturity::AutonomousWrite, AiToolRisk::HighImpact),
+        (ToolMaturity::AutonomousWrite, AiToolRisk::ReadOnly),
+        (ToolMaturity::ProposalOnly, AiToolRisk::NonIdempotentWrite),
+    ] {
+        let runtime = runtime_with_operation(
+            Arc::new(AllowTools),
+            AiToolOperationKind::Mutation,
+            maturity,
+            risk,
+            AiApprovalRule::None,
+        );
+        let _store = open_runtime(&runtime).await;
+        let result = runtime
+            .execute_tool(
+                &principal(&["stale:scope"]).reference(),
+                &AiToolId::parse("records.current").unwrap(),
+                current_request(&runtime, json!({})),
+            )
+            .await;
+        assert!(
+            matches!(result, Err(AiError::Forbidden)),
+            "incoherent mutation reached dispatch: {result:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn unapproved_dispatch_preserves_classified_automatic_mutations() {
+    let runtime = runtime_with_operation(
+        Arc::new(AllowTools),
+        AiToolOperationKind::Mutation,
+        ToolMaturity::AutonomousWrite,
+        AiToolRisk::LowRiskWrite,
+        AiApprovalRule::None,
+    );
+    let _store = open_runtime(&runtime).await;
+    runtime
+        .execute_tool(
+            &principal(&["stale:scope"]).reference(),
+            &AiToolId::parse("records.current").unwrap(),
+            current_request(&runtime, json!({})),
+        )
+        .await
+        .expect("classified automatic mutations retain the current host authorization path");
 }

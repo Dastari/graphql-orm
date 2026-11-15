@@ -88,6 +88,7 @@ pub(crate) struct AiProviderProfileRecord {
     pub base_url: Option<String>,
     /// Non-secret reference only; credential plaintext never enters this row.
     #[backup(redact)]
+    #[filterable(type = "string")]
     pub credential_reference: Option<String>,
     pub enabled: bool,
     #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
@@ -1085,6 +1086,10 @@ pub(crate) struct AiAttachmentArtifactRecord {
     #[backup(redact)]
     pub provider_reference: Option<String>,
     pub provider_expires_at: Option<i64>,
+    /// Persisted intent written before an exact provider deletion request.
+    pub provider_delete_requested_at: Option<i64>,
+    /// Number of durable provider deletion intents, including interrupted calls.
+    pub provider_delete_attempts: Option<i64>,
     /// Private retention state; absent means the artifact remains active.
     #[filterable(type = "string")]
     pub cleanup_state: Option<String>,
@@ -1107,7 +1112,8 @@ pub(crate) struct AiAttachmentArtifactRecord {
 #[backend_selected_graphql_entity(
     table = "graphql_orm_ai_runs",
     plural = "GraphqlOrmAiRuns",
-    default_sort = "created_at ASC"
+    default_sort = "created_at ASC",
+    keyset = "recovery_examined_at asc, created_at asc, id asc"
 )]
 #[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
 #[cfg_attr(
@@ -1162,11 +1168,10 @@ pub(crate) struct AiRunRecord {
     pub cancellation_request_id: Option<graphql_orm::uuid::Uuid>,
     /// Server timestamp at which cancellation became terminal.
     pub cancellation_requested_at: Option<i64>,
-    /// When lease recovery last examined this expired run and left it
-    /// unchanged after an operational failure (a host policy refusal, a
-    /// refused read, a database error). Recovery scans in this order, so such
-    /// a run rotates behind the rest across passes and restarts without its
-    /// own state changing. Zero for a run never left behind.
+    /// Durable maintenance progress for recovery, queued claims and approval
+    /// waits. Examined or operationally skipped rows rotate behind unexamined
+    /// rows across passes and restarts without gaining execution authority.
+    /// Zero for a run maintenance has never left behind.
     #[sortable]
     #[graphql_orm(default = "0")]
     pub recovery_examined_at: i64,
@@ -2215,7 +2220,7 @@ pub(crate) struct AiUsageEntryRecord {
     pub tool_units: i64,
     pub image_units: i64,
     pub cost_microunits: Option<i64>,
-    #[filterable(type = "number")]
+    #[filterable(type = "int64")]
     #[sortable]
     pub created_at: i64,
 }
@@ -2406,7 +2411,8 @@ pub(crate) struct AiAuditEventRecord {
 #[backend_selected_graphql_entity(
     table = "graphql_orm_ai_secret_cleanup",
     plural = "GraphqlOrmAiSecretCleanup",
-    default_sort = "created_at ASC"
+    default_sort = "created_at ASC",
+    keyset = "created_at asc, id asc"
 )]
 #[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
 #[cfg_attr(
@@ -2419,9 +2425,13 @@ pub(crate) struct AiSecretCleanupRecord {
     #[graphql_orm(auto_generated = false)]
     #[filterable(type = "uuid")]
     pub id: graphql_orm::uuid::Uuid,
-    /// Opaque reference only. It is redacted from backups and never exposed.
+    /// Opaque reference only; redacted from backups and disclosed only to an
+    /// authorized host cleanup caller, never to models or clients.
     #[backup(redact)]
     pub secret_reference: String,
+    /// Exact configuration scope; legacy unscoped commands require operator review.
+    #[filterable(type = "string")]
+    pub scope_key: Option<String>,
     pub reason_code: String,
     #[filterable(type = "string")]
     pub state: String,
@@ -2559,7 +2569,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.78.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.80.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 

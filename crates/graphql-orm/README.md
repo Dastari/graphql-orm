@@ -10,6 +10,8 @@ supersedes: []
 
 # `graphql-orm`
 
+ORM 0.152.0 adds a conservative batched row-security probe for recovery and maintenance callers. Upgrade macros to the matching version; no data migration is needed.
+
 Version 0.151.0 corrects SQL Server behaviour, with two breaking changes
 for hosts (the error variant and the date text): server errors keep their
 number and class (`MssqlServerError`), so constraint violations and deadlocks
@@ -21,6 +23,7 @@ composite-unique DDL and a bare multi-column `default_sort` render correctly;
 and connections follow an Azure SQL redirect. Upgrade ORM/macros together;
 see the
 [root migration guide](../../MIGRATION.md#01490-to-01510-sql-server-correctness).
+
 
 Version 0.149.0 emits host-only generated input member contracts for AI
 capability compilation. Readable members remain available; undisclosed members

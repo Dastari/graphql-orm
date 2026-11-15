@@ -267,9 +267,16 @@ impl AiProviderCallExecutor {
         {
             return Err(AiError::Conflict);
         }
-        let (fresh_claim, cursor) = self
-            .reset_static_offering(&current, &mut safe, planned, sessions, Some(claim))
-            .await?;
+        // Reset includes generated fenced writes. Keep its state machine out of
+        // this retained-provider polling frame, which can already be deeply nested.
+        let (fresh_claim, cursor) = Box::pin(self.reset_static_offering(
+            &current,
+            &mut safe,
+            planned,
+            sessions,
+            Some(claim),
+        ))
+        .await?;
         let binding = crate::AiProviderRunBinding::from_lease(&current)?;
         let opened = sessions
             .open_for_run(&current, &fresh_claim)

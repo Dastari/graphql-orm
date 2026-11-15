@@ -87,6 +87,13 @@ DNS rebinding, private-address, container-boundary, and network-zone rules. The
 adapter does not discover servers or models and never accepts a model-authored
 URL.
 
+Response streams are bounded to 16 MiB total, 2 MiB per NDJSON line, 64 tool
+calls and the configured request timeout. The transport chunk allowance is four
+chunks per maximum output token plus 1,024 framing chunks, capped by
+`OllamaProviderConfig.maximum_stream_chunks` (default 1,048,576; range
+1..=4,194,304). A request without a token maximum uses that ceiling. This permits
+long token-flushed generations while retaining finite byte, chunk and time bounds.
+
 Ollama normally requires no API key. If a deployment puts an authenticating
 gateway in front of it, that gateway needs a separately reviewed fixed
 transport/credential boundary; credentials must not be placed in the URL.

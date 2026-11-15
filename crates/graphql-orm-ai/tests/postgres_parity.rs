@@ -1640,6 +1640,13 @@ async fn owned_postgres_row_security_hiding_a_session_skips_instead_of_quarantin
         .apply_migration(&migration, ApplyOptions::default())
         .await
         .expect("AI schema should apply to the owned PostgreSQL database");
+    let paths = vec![
+        "graphql_orm_ai_sessions".to_owned(),
+        "__missing_security_probe".to_owned(),
+        "graphql_orm_ai_sessions".to_owned(),
+    ];
+    let states = <PostgresBackend as graphql_orm::graphql::orm::RlsIntrospectionBackend>::probe_row_security(database.pool(), &paths).await.unwrap();
+    assert_eq!(states, vec![Some(false), None, Some(false)]);
     graphql_orm_ai::OrmAiRuntimeRecoveryService::new(
         database.clone(),
         std::sync::Arc::new(agql_auth::SystemClock),
@@ -1700,6 +1707,12 @@ async fn owned_postgres_row_security_hiding_a_session_skips_instead_of_quarantin
         "GRANT USAGE ON SCHEMA public TO ai_recovery_role".to_owned(),
         "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ai_recovery_role"
             .to_owned(),
+        "CREATE SCHEMA ai_operator_shadow AUTHORIZATION ai_recovery_role".to_owned(),
+        "CREATE FUNCTION ai_operator_shadow.false_oid(oid, oid) RETURNS boolean LANGUAGE SQL IMMUTABLE AS 'SELECT false'".to_owned(),
+        "CREATE FUNCTION ai_operator_shadow.false_char(\"char\", \"char\") RETURNS boolean LANGUAGE SQL IMMUTABLE AS 'SELECT false'".to_owned(),
+        "CREATE OPERATOR ai_operator_shadow.= (FUNCTION = ai_operator_shadow.false_oid, LEFTARG = oid, RIGHTARG = oid)".to_owned(),
+        "CREATE OPERATOR ai_operator_shadow.= (FUNCTION = ai_operator_shadow.false_char, LEFTARG = \"char\", RIGHTARG = \"char\")".to_owned(),
+        "ALTER ROLE ai_recovery_role SET search_path = ai_operator_shadow, pg_catalog, public".to_owned(),
         "ALTER TABLE graphql_orm_ai_sessions ENABLE ROW LEVEL SECURITY".to_owned(),
         "CREATE POLICY hide_every_session ON graphql_orm_ai_sessions USING (false)".to_owned(),
     ] {
@@ -1716,6 +1729,21 @@ async fn owned_postgres_row_security_hiding_a_session_skips_instead_of_quarantin
     let role_database = Database::<PostgresBackend>::connect_postgres(role_url)
         .await
         .expect("the recovery role should connect");
+    let shadowed: bool =
+        graphql_orm::sqlx::query_scalar("SELECT 1::pg_catalog.oid = 1::pg_catalog.oid")
+            .fetch_one(role_database.pool())
+            .await
+            .unwrap();
+    assert!(
+        !shadowed,
+        "the hostile operator really is first on this role's search path"
+    );
+    let states = <PostgresBackend as graphql_orm::graphql::orm::RlsIntrospectionBackend>::probe_row_security(role_database.pool(), &paths).await.unwrap();
+    assert_eq!(
+        states,
+        vec![Some(true), None, Some(true)],
+        "probe must use catalog operators despite search_path shadowing"
+    );
     let role_runs = OrmAiRunService::new(role_database.clone(), Arc::new(SystemClock), limits);
     for _ in 0..2 {
         let report = role_runs

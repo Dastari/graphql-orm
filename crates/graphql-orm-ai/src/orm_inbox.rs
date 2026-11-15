@@ -468,7 +468,7 @@ enum PruneStreamOutcome {
 /// refuses the same credentials before any read, so both agree.
 pub struct OrmAiInboxService {
     database: Database<DefaultWriteBackend>,
-    principal_resolver: Arc<dyn CurrentPrincipalResolver>,
+    principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver,
     access_policy: Arc<dyn AiAccessPolicy>,
     protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
     content_protector: Arc<dyn AiContentProtector>,
@@ -490,7 +490,7 @@ impl OrmAiInboxService {
         let database = crate::custody_field_policy::custody_database(database);
         Self {
             database,
-            principal_resolver,
+            principal_resolver: principal_resolver.into(),
             access_policy,
             protection_policy,
             content_protector,
