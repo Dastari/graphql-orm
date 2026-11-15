@@ -10,7 +10,20 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.150.0 stays aligned with ORM 0.150.0 and its batched row-security probe. Generated operations are unchanged; no data migration is needed.
+Version 0.152.0 stays aligned with ORM 0.152.0 and its batched row-security probe. Generated operations are unchanged; no data migration is needed.
+
+Version 0.151.0 corrects SQL Server behaviour, with two breaking changes
+for hosts (the error variant and the date text): server errors keep their
+number and class (`MssqlServerError`), so constraint violations and deadlocks
+are classified and a failed rollback no longer hides the real error; dates
+read as RFC 3339; out-of-range `DECIMAL` values are decode errors; wide
+relation batches stay under the 2,100-parameter limit; `limit: 0`, bracket
+`LIKE` patterns, float and date keys, the upsert batch, foreign-key and
+composite-unique DDL and a bare multi-column `default_sort` render correctly;
+and connections follow an Azure SQL redirect. Upgrade ORM/macros together;
+see the
+[root migration guide](../../MIGRATION.md#01490-to-01510-sql-server-correctness).
+
 
 Version 0.149.0 emits host-only generated input member contracts for AI
 capability compilation. Readable members remain available; undisclosed members

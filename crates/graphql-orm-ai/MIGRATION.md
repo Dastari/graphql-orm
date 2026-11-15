@@ -24,7 +24,7 @@ after the first pass drops, retaining the existing single-retry limit and all
 authorization/fencing checks. The quota lifecycle tests enforce 1 MiB thread
 stacks. This future-layout change needs no configuration or data migration.
 
-Upgrade with ORM/macros 0.150.0 and apply AI schema module `0.80.0` before
+Upgrade with ORM/macros 0.152.0 and apply AI schema module `0.80.0` before
 starting workers. It adds nullable `scope_key` to secret cleanup commands and
 nullable `provider_delete_requested_at` / `provider_delete_attempts` to attachment
 artifacts. Existing rows need no data backfill; legacy unscoped secret commands
