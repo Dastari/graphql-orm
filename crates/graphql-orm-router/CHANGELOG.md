@@ -3,12 +3,18 @@ title: graphql-orm-router changelog
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-11-14
+last_reviewed: 2026-11-15
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # Changelog
+
+## 0.15.1 (unreleased)
+
+- Tests: publish authority snapshots atomically, observe role re-expansion with a
+  controlled monotonic clock, retain partial WebSocket frames across read polls,
+  and keep the failing byte upstream bound throughout each fixture.
 
 ## 0.15.0 (unreleased)
 

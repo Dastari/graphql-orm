@@ -91,6 +91,7 @@ struct Fixture {
     router: TestRouter,
     admin: SocketAddr,
     upstream: ByteUpstream,
+    _down: ByteUpstream,
     _subgraphs: (LoopbackSubgraph, LoopbackSubgraph),
     _schemas: (LoopbackSdl, LoopbackSdl),
     _protocols: (LoopbackProtocol, LoopbackProtocol),
@@ -115,10 +116,10 @@ impl Fixture {
             Vec::new(),
         ));
         let upstream = ByteUpstream::start();
-        let down = {
-            let listener = TcpListener::bind(("127.0.0.1", 0)).expect("closed port probe");
-            format!("http://{}/files", listener.local_addr().unwrap())
-        };
+        // Own the listener for the entire fixture; a released port can be
+        // rebound by another concurrent test. This upstream closes requests
+        // without sending HTTP headers, deterministically reporting unavailable.
+        let down = ByteUpstream::start_unavailable();
         let child = Command::new(env::current_exe().expect("test executable path"))
             .arg("--exact")
             .arg("federation::wire_tests::router_child_entrypoint")
@@ -131,7 +132,7 @@ impl Fixture {
             .env(PRODUCTS_PROTOCOL_ENDPOINT_ENV, products_protocol.endpoint())
             .env(REVIEWS_PROTOCOL_ENDPOINT_ENV, reviews_protocol.endpoint())
             .env(BYTES_ENDPOINT_ENV, upstream.origin())
-            .env(DOWN_ENDPOINT_ENV, down)
+            .env(DOWN_ENDPOINT_ENV, down.origin())
             .env("RUST_TEST_THREADS", "1")
             .env("RUST_LOG", "error")
             .stdout(Stdio::piped())
@@ -144,6 +145,7 @@ impl Fixture {
             router,
             admin: admin.expect("bound admin address"),
             upstream,
+            _down: down,
             _subgraphs: (products, reviews),
             _schemas: (products_sdl, reviews_sdl),
             _protocols: (products_protocol, reviews_protocol),
@@ -374,6 +376,14 @@ struct ByteUpstream {
 
 impl ByteUpstream {
     fn start() -> Self {
+        Self::start_mode(false)
+    }
+
+    fn start_unavailable() -> Self {
+        Self::start_mode(true)
+    }
+
+    fn start_mode(unavailable: bool) -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("byte upstream bind");
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
@@ -387,7 +397,13 @@ impl ByteUpstream {
                 match listener.accept() {
                     Ok((stream, _)) => {
                         let (requests, gate) = (thread_requests.clone(), thread_gate.clone());
-                        thread::spawn(move || serve_bytes(stream, &requests, &gate));
+                        thread::spawn(move || {
+                            if unavailable {
+                                let _ = stream.shutdown(std::net::Shutdown::Both);
+                            } else {
+                                serve_bytes(stream, &requests, &gate);
+                            }
+                        });
                     }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(5));
