@@ -1816,6 +1816,103 @@ async fn samba_sweep_reports_progress_and_cleanup_failures_after_a_lost_session(
     }
 }
 
+/// Range reads start at the range's offset on the server instead of reading
+/// and discarding the bytes before it, clamp to the blob's size, and every
+/// read reports the server's last-write time (#540).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the managed Samba container harness"]
+async fn samba_range_reads_start_at_the_offset_and_report_metadata() {
+    use graphql_orm_storage::StorageError;
+    use time::OffsetDateTime;
+
+    let root = format!("graphql-orm-storage-range/{}", Uuid::new_v4());
+    let store = SmbStorageBackend::connect(test_config(root))
+        .await
+        .expect("connect");
+    let bytes: Vec<u8> = (0..(3 * 256 * 1024 + 17))
+        .map(|index| u8::try_from(index % 251).expect("byte"))
+        .collect();
+    let size = u64::try_from(bytes.len()).expect("size");
+    store
+        .put_blob(
+            "range/blob.bin",
+            StorageByteStream::from_bytes(Bytes::from(bytes.clone())),
+            BlobPutOptions::default(),
+        )
+        .await
+        .expect("put");
+
+    let head = store
+        .head_blob("range/blob.bin")
+        .await
+        .expect("head")
+        .expect("present");
+    assert_eq!(head.size_bytes, Some(size));
+    let modified = head.last_modified.expect("a last-write time");
+    let age = OffsetDateTime::now_utc() - modified;
+    assert!(age.abs() < time::Duration::minutes(10), "{modified}");
+    let whole = store.get_blob("range/blob.bin").await.expect("get");
+    assert_eq!(
+        whole.metadata.expect("metadata").last_modified,
+        Some(modified)
+    );
+    drop(whole);
+
+    // Only the requested bytes cross the wire: one READ of 50 bytes.
+    let before = store.diagnostics().await;
+    let start = size - 100;
+    let range = store
+        .get_blob_range("range/blob.bin", start..start + 50)
+        .await
+        .expect("range");
+    let metadata = range.metadata.clone().expect("metadata");
+    assert_eq!(metadata.size_bytes, Some(size));
+    assert_eq!(metadata.last_modified, Some(modified));
+    assert_eq!(range.body.size_hint(), Some(50));
+    let tail_start = usize::try_from(start).expect("offset");
+    assert_eq!(
+        collect_storage_stream(range.body).await.expect("collect"),
+        bytes[tail_start..tail_start + 50]
+    );
+    let after = store.diagnostics().await;
+    assert_eq!(after.bytes_downloaded - before.bytes_downloaded, 50);
+    assert_eq!(after.read_requests - before.read_requests, 1);
+
+    // A range past the end is clamped; one starting past it is empty.
+    let clamped = store
+        .get_blob_range("range/blob.bin", start + 50..size + 1000)
+        .await
+        .expect("clamped range");
+    assert_eq!(
+        collect_storage_stream(clamped.body).await.expect("collect"),
+        bytes[tail_start + 50..]
+    );
+    let beyond = store
+        .get_blob_range("range/blob.bin", size + 10..size + 20)
+        .await
+        .expect("range beyond the end");
+    assert!(
+        collect_storage_stream(beyond.body)
+            .await
+            .expect("collect")
+            .is_empty()
+    );
+    #[allow(clippy::reversed_empty_ranges)]
+    let reversed = store.get_blob_range("range/blob.bin", 20..10).await;
+    assert!(matches!(
+        reversed,
+        Err(StorageError::PreconditionFailed { .. })
+    ));
+    assert!(
+        store
+            .get_blob_range("range/missing.bin", 0..10)
+            .await
+            .is_err()
+    );
+
+    store.delete_blob("range/blob.bin").await.expect("delete");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires a managed Samba server limited to SMB 3.0"]
 async fn samba_refuses_a_dialect_below_the_minimum() {

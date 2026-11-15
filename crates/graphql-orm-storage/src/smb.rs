@@ -23,6 +23,7 @@ use smb::{
     connection::EncryptionMode,
 };
 use smb_dtyp::binrw_util::sized_wide_string::SizedWideString;
+use time::OffsetDateTime;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
 use uuid::Uuid;
 
@@ -404,7 +405,7 @@ impl SmbTempSweepError {
 
     /// Whether retrying the sweep may succeed.
     #[must_use]
-    pub const fn is_retryable(&self) -> bool {
+    pub fn is_retryable(&self) -> bool {
         self.error.is_retryable()
     }
 }
@@ -492,6 +493,10 @@ pub struct SmbBackendDiagnostics {
     pub write_requests: u64,
     /// SMB WRITE responses that acknowledged only part of the request.
     pub partial_write_responses: u64,
+    /// Bytes returned by SMB READ responses for blob reads.
+    pub bytes_downloaded: u64,
+    /// SMB READ requests that returned data for blob reads.
+    pub read_requests: u64,
     /// Successful reconnects.
     pub reconnects: u64,
     /// Current number of cached directories known to exist.
@@ -515,6 +520,8 @@ struct SmbDiagnosticCounters {
     bytes_uploaded: AtomicU64,
     write_requests: AtomicU64,
     partial_write_responses: AtomicU64,
+    bytes_downloaded: AtomicU64,
+    read_requests: AtomicU64,
     reconnects: AtomicU64,
     directory_cache_hits: AtomicU64,
     directory_cache_misses: AtomicU64,
@@ -718,6 +725,16 @@ impl SmbStorageBackend {
                 .inner
                 .diagnostics
                 .partial_write_responses
+                .load(Ordering::Relaxed),
+            bytes_downloaded: self
+                .inner
+                .diagnostics
+                .bytes_downloaded
+                .load(Ordering::Relaxed),
+            read_requests: self
+                .inner
+                .diagnostics
+                .read_requests
                 .load(Ordering::Relaxed),
             reconnects: self.inner.diagnostics.reconnects.load(Ordering::Relaxed),
             directory_cache_entries: self.inner.directories.len().await,
@@ -1388,6 +1405,156 @@ impl SmbStorageBackend {
             },
         ))
     }
+
+    /// Streams the blob at `key`, or the part of it in `range`, clamped to
+    /// its size, reading from the range's start offset on the server.
+    async fn read_blob(
+        &self,
+        key: &str,
+        range: Option<std::ops::Range<u64>>,
+    ) -> Result<BlobBody, StorageError> {
+        validate_blob_key(key)?;
+        let file = self
+            .open_file(key, FileAccessMask::new().with_generic_read(true))
+            .await?;
+        let generation = self.client_snapshot().await.generation;
+        let (size, last_modified) = match self.query_file_facts(&file).await {
+            Ok(facts) => facts,
+            Err(error) => {
+                if error.is_retryable() {
+                    let _ = self.reconnect_after(generation).await;
+                }
+                return Err(error);
+            }
+        };
+        let (start, end) = range.map_or((0, size), |range| {
+            (range.start.min(size), range.end.min(size))
+        });
+        let operation_timeout = self.inner.config.operation_timeout;
+        let stream_key = key.to_string();
+        let backend = self.clone();
+        let body = stream::try_unfold(
+            (Some(file), start, end, stream_key.clone()),
+            move |(file, offset, size, key)| {
+                let backend = backend.clone();
+                async move {
+                    let Some(file) = file else {
+                        return Ok(None);
+                    };
+                    if offset >= size {
+                        let close =
+                            match tokio::time::timeout(operation_timeout, file.close()).await {
+                                Ok(result) => result.map_err(|error| map_smb_error("close", error)),
+                                Err(_) => Err(remote_error(
+                                    StorageProviderErrorKind::Timeout,
+                                    "close",
+                                    "operation timed out",
+                                    true,
+                                )),
+                            };
+                        if let Err(error) = &close
+                            && error.is_retryable()
+                        {
+                            let _ = backend.reconnect_after(generation).await;
+                        }
+                        close?;
+                        return Ok(None);
+                    }
+                    let chunk_len = usize::try_from((size - offset).min(READ_CHUNK_SIZE as u64))
+                        .unwrap_or(READ_CHUNK_SIZE);
+                    let mut buffer = vec![0_u8; chunk_len];
+                    // Held for this READ only: a consumer that stops polling
+                    // the stream holds the open handle but no permit.
+                    let permit = backend.transfer_permit().await?;
+                    let read = match tokio::time::timeout(
+                        operation_timeout,
+                        file.read_block(&mut buffer, offset, None, false),
+                    )
+                    .await
+                    {
+                        Ok(result) => result.map_err(|error| map_io_error("read", error)),
+                        Err(_) => Err(remote_error(
+                            StorageProviderErrorKind::Timeout,
+                            "read",
+                            "operation timed out",
+                            true,
+                        )),
+                    };
+                    drop(permit);
+                    let read = match read {
+                        Ok(read) => read,
+                        Err(error) => {
+                            if error.is_retryable() {
+                                let _ = backend.reconnect_after(generation).await;
+                            }
+                            return Err(error);
+                        }
+                    };
+                    if read > 0 {
+                        let diagnostics = &backend.inner.diagnostics;
+                        diagnostics.read_requests.fetch_add(1, Ordering::Relaxed);
+                        diagnostics.bytes_downloaded.fetch_add(
+                            u64::try_from(read).unwrap_or(u64::MAX),
+                            Ordering::Relaxed,
+                        );
+                    }
+                    if read == 0 {
+                        return Err(remote_error(
+                            StorageProviderErrorKind::Protocol,
+                            "read",
+                            "unexpected end of remote file",
+                            false,
+                        ));
+                    }
+                    buffer.truncate(read);
+                    let next = offset
+                        .checked_add(u64::try_from(read).map_err(|_| {
+                            remote_error(
+                                StorageProviderErrorKind::Protocol,
+                                "read",
+                                "read count exceeded the supported range",
+                                false,
+                            )
+                        })?)
+                        .ok_or_else(|| {
+                            remote_error(
+                                StorageProviderErrorKind::Protocol,
+                                "read",
+                                "remote file offset overflowed",
+                                false,
+                            )
+                        })?;
+                    Ok(Some((Bytes::from(buffer), (Some(file), next, size, key))))
+                }
+            },
+        );
+        Ok(BlobBody {
+            key: stream_key.clone(),
+            metadata: Some(BlobMetadata {
+                key: stream_key,
+                size_bytes: Some(size),
+                sha256_hex: None,
+                etag: None,
+                last_modified,
+            }),
+            body: StorageByteStream::with_size_hint(Box::pin(body), end - start),
+        })
+    }
+
+    /// The size and last-write time an open handle reports.
+    async fn query_file_facts(
+        &self,
+        file: &File,
+    ) -> Result<(u64, Option<OffsetDateTime>), StorageError> {
+        let standard: FileStandardInformation =
+            self.with_timeout("head", file.query_info()).await?;
+        let basic: FileBasicInformation = self.with_timeout("head", file.query_info()).await?;
+        Ok((
+            standard.end_of_file,
+            file_time(basic.last_write_time.since_epoch()).map(OffsetDateTime::from),
+        ))
+    }
+
 
     async fn client_snapshot(&self) -> ConnectedClient {
         let client = self.inner.client.read().await;
@@ -3451,123 +3618,21 @@ impl BlobStore for SmbStorageBackend {
     }
 
     async fn get_blob(&self, key: &str) -> Result<BlobBody, StorageError> {
-        validate_blob_key(key)?;
-        let file = self
-            .open_file(key, FileAccessMask::new().with_generic_read(true))
-            .await?;
-        let generation = self.client_snapshot().await.generation;
-        let standard: FileStandardInformation =
-            match self.with_timeout("head", file.query_info()).await {
-                Ok(standard) => standard,
-                Err(error) => {
-                    if error.is_retryable() {
-                        let _ = self.reconnect_after(generation).await;
-                    }
-                    return Err(error);
-                }
-            };
-        let size = standard.end_of_file;
-        let operation_timeout = self.inner.config.operation_timeout;
-        let stream_key = key.to_string();
-        let backend = self.clone();
-        let body = stream::try_unfold(
-            (Some(file), 0_u64, size, stream_key.clone()),
-            move |(file, offset, size, key)| {
-                let backend = backend.clone();
-                async move {
-                    let Some(file) = file else {
-                        return Ok(None);
-                    };
-                    if offset >= size {
-                        let close =
-                            match tokio::time::timeout(operation_timeout, file.close()).await {
-                                Ok(result) => result.map_err(|error| map_smb_error("close", error)),
-                                Err(_) => Err(remote_error(
-                                    StorageProviderErrorKind::Timeout,
-                                    "close",
-                                    "operation timed out",
-                                    true,
-                                )),
-                            };
-                        if let Err(error) = &close
-                            && error.is_retryable()
-                        {
-                            let _ = backend.reconnect_after(generation).await;
-                        }
-                        close?;
-                        return Ok(None);
-                    }
-                    let chunk_len = usize::try_from((size - offset).min(READ_CHUNK_SIZE as u64))
-                        .unwrap_or(READ_CHUNK_SIZE);
-                    let mut buffer = vec![0_u8; chunk_len];
-                    // Held for this READ only: a consumer that stops polling
-                    // the stream holds the open handle but no permit.
-                    let permit = backend.transfer_permit().await?;
-                    let read = match tokio::time::timeout(
-                        operation_timeout,
-                        file.read_block(&mut buffer, offset, None, false),
-                    )
-                    .await
-                    {
-                        Ok(result) => result.map_err(|error| map_io_error("read", error)),
-                        Err(_) => Err(remote_error(
-                            StorageProviderErrorKind::Timeout,
-                            "read",
-                            "operation timed out",
-                            true,
-                        )),
-                    };
-                    drop(permit);
-                    let read = match read {
-                        Ok(read) => read,
-                        Err(error) => {
-                            if error.is_retryable() {
-                                let _ = backend.reconnect_after(generation).await;
-                            }
-                            return Err(error);
-                        }
-                    };
-                    if read == 0 {
-                        return Err(remote_error(
-                            StorageProviderErrorKind::Protocol,
-                            "read",
-                            "unexpected end of remote file",
-                            false,
-                        ));
-                    }
-                    buffer.truncate(read);
-                    let next = offset
-                        .checked_add(u64::try_from(read).map_err(|_| {
-                            remote_error(
-                                StorageProviderErrorKind::Protocol,
-                                "read",
-                                "read count exceeded the supported range",
-                                false,
-                            )
-                        })?)
-                        .ok_or_else(|| {
-                            remote_error(
-                                StorageProviderErrorKind::Protocol,
-                                "read",
-                                "remote file offset overflowed",
-                                false,
-                            )
-                        })?;
-                    Ok(Some((Bytes::from(buffer), (Some(file), next, size, key))))
-                }
-            },
-        );
-        Ok(BlobBody {
-            key: stream_key.clone(),
-            metadata: Some(BlobMetadata {
-                key: stream_key,
-                size_bytes: Some(size),
-                sha256_hex: None,
-                etag: None,
-                last_modified: None,
-            }),
-            body: StorageByteStream::with_size_hint(Box::pin(body), size),
-        })
+        self.read_blob(key, None).await
+    }
+
+    async fn get_blob_range(
+        &self,
+        key: &str,
+        range: std::ops::Range<u64>,
+    ) -> Result<BlobBody, StorageError> {
+        if range.end < range.start {
+            return Err(StorageError::PreconditionFailed {
+                key: key.to_string(),
+                condition: "range end is before range start".to_string(),
+            });
+        }
+        self.read_blob(key, Some(range)).await
     }
 
     async fn blob_exists(&self, key: &str) -> Result<bool, StorageError> {
@@ -3603,16 +3668,15 @@ impl BlobStore for SmbStorageBackend {
             Err(error) => return Err(error),
         };
         let generation = self.client_snapshot().await.generation;
-        let standard: FileStandardInformation =
-            match self.with_timeout("head", file.query_info()).await {
-                Ok(standard) => standard,
-                Err(error) => {
-                    if error.is_retryable() {
-                        let _ = self.reconnect_after(generation).await;
-                    }
-                    return Err(error);
+        let (size, last_modified) = match self.query_file_facts(&file).await {
+            Ok(facts) => facts,
+            Err(error) => {
+                if error.is_retryable() {
+                    let _ = self.reconnect_after(generation).await;
                 }
-            };
+                return Err(error);
+            }
+        };
         match self.with_timeout("close", file.close()).await {
             Ok(()) => {}
             Err(error) if error.is_retryable() => {
@@ -3622,10 +3686,10 @@ impl BlobStore for SmbStorageBackend {
         }
         Ok(Some(BlobMetadata {
             key: key.to_string(),
-            size_bytes: Some(standard.end_of_file),
+            size_bytes: Some(size),
             sha256_hex: None,
             etag: None,
-            last_modified: None,
+            last_modified,
         }))
     }
 

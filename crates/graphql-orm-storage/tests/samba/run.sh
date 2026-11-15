@@ -249,6 +249,12 @@ for case in samba_sweep_releases_its_handles_without_the_callers_runtime samba_s
     "$case" -- --ignored --exact --nocapture
 done
 
+# Range reads start at their offset and report the server's write time.
+SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
+SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
+  run_test samba_range_reads_start_at_the_offset_and_report_metadata "$SMB_TEST_CARGO" test --locked --features smb --test smb_integration \
+  samba_range_reads_start_at_the_offset_and_report_metadata -- --ignored --exact --nocapture
+
 # The constrained server offers at most SMB 3.0, below the default minimum.
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$CONSTRAINED_PORT" SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \

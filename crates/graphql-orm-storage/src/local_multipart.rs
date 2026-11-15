@@ -103,13 +103,10 @@ pub(crate) fn join_error(error: tokio::task::JoinError) -> StorageError {
     }
 }
 
-fn json_error(path: &Path, error: serde_json::Error) -> StorageError {
+fn json_error(error: serde_json::Error) -> StorageError {
     StorageError::Provider {
         backend: StorageBackend::Local.as_str().to_string(),
-        message: format!(
-            "local multipart record {} is invalid: {error}",
-            path.display()
-        ),
+        message: format!("local multipart record is invalid: {error}"),
         retryable: false,
     }
 }
@@ -159,7 +156,7 @@ fn read_manifest(dir: &Path) -> Result<Option<Manifest>, StorageError> {
     match std::fs::read(&path) {
         Ok(bytes) => serde_json::from_slice(&bytes)
             .map(Some)
-            .map_err(|error| json_error(&path, error)),
+            .map_err(json_error),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(source) => Err(StorageError::io(path, source)),
     }
@@ -186,7 +183,7 @@ fn read_stored_parts(dir: &Path) -> Result<Vec<StoredPart>, StorageError> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(source) => return Err(StorageError::io(path, source)),
         };
-        parts.push(serde_json::from_slice(&bytes).map_err(|error| json_error(&path, error))?);
+        parts.push(serde_json::from_slice(&bytes).map_err(json_error)?);
     }
     parts.sort_by_key(|part: &StoredPart| part.receipt.part_number);
     Ok(parts)
@@ -257,7 +254,7 @@ impl MultipartBlobStore for LocalStorageBackend {
             if_not_exists: options.if_not_exists,
             started_at_unix: OffsetDateTime::now_utc().unix_timestamp(),
         };
-        let bytes = serde_json::to_vec(&manifest).map_err(|error| json_error(&dir, error))?;
+        let bytes = serde_json::to_vec(&manifest).map_err(json_error)?;
         let backend = self.clone();
         tokio::task::spawn_blocking(move || {
             backend.create_dir_durably(&uploads)?;
@@ -332,7 +329,7 @@ impl MultipartBlobStore for LocalStorageBackend {
                 .and_then(|bytes| serde_json::from_slice::<StoredPart>(&bytes).ok());
             sync_dir(&dir)?;
             let bytes =
-                serde_json::to_vec(&stored).map_err(|error| json_error(&receipt_path, error))?;
+                serde_json::to_vec(&stored).map_err(json_error)?;
             write_durably(&receipt_path, &bytes)?;
             if let Some(previous) = previous
                 && previous.data_file != stored.data_file

@@ -705,19 +705,24 @@ impl MultipartWriter for LocalMultipartWriter {
 
         write_object_metadata(&self.metadata_temp, &object).await?;
 
-        // A failure or cancellation before each rename removes the staged
-        // files that remain.
-        if let Err(source) = tokio::fs::rename(self.temp.path(), &self.object_path).await {
-            return Err(StorageError::io(&self.object_path, source));
-        }
-        self.temp.mark_published();
-        trace_published(Some(self.temp.path()), &self.object_path);
+        // The metadata is published before the object, so the object never
+        // appears without it: listings read the object tree and skip an
+        // object that has no metadata. A failure or crash between the two
+        // renames leaves metadata for an object that is not there, which
+        // reads report as missing and the next completion for the key
+        // replaces. A failure or cancellation before each rename removes the
+        // staged files that remain.
         if let Err(source) = tokio::fs::rename(self.metadata_temp.path(), &self.metadata_path).await
         {
             return Err(StorageError::io(&self.metadata_path, source));
         }
         self.metadata_temp.mark_published();
         trace_published(Some(self.metadata_temp.path()), &self.metadata_path);
+        if let Err(source) = tokio::fs::rename(self.temp.path(), &self.object_path).await {
+            return Err(StorageError::io(&self.object_path, source));
+        }
+        self.temp.mark_published();
+        trace_published(Some(self.temp.path()), &self.object_path);
         sync_entry(&self.object_path).await?;
         sync_entry(&self.metadata_path).await?;
 

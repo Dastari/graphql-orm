@@ -61,7 +61,7 @@ pub use blob::{
     validate_portable_blob_key,
 };
 pub use checksum::sha256_hex;
-pub use error::{StorageError, StorageProviderErrorKind};
+pub use error::{StorageError, StorageProviderErrorKind, io_error_is_retryable};
 pub use key::{build_storage_key, file_extension};
 #[cfg(feature = "local")]
 pub use local::LocalStorageBackend;

@@ -98,41 +98,60 @@ pub enum StorageError {
     },
 
     /// A requested blob is missing from the storage backend.
-    #[error("storage blob is missing: {key}")]
+    ///
+    /// The message never contains the key; the `key` field, and so `Debug`,
+    /// holds it for host diagnostics only.
+    #[error("storage blob is missing")]
     MissingBlob {
-        /// Requested storage key.
+        /// Requested storage key. Host diagnostics only.
         key: String,
     },
 
     /// A conditional storage operation could not be applied.
-    #[error("storage precondition failed for {key}: {condition}")]
+    ///
+    /// The message names the condition but never the key; the `key` field,
+    /// and so `Debug`, holds it for host diagnostics only.
+    #[error("storage precondition failed: {condition}")]
     PreconditionFailed {
-        /// Storage key involved in the failed precondition.
+        /// Storage key involved in the failed precondition. Host diagnostics
+        /// only.
         key: String,
         /// Human-readable precondition description.
         condition: String,
     },
 
     /// A multipart upload operation was refused.
-    #[error("multipart upload refused for {key}: {kind}")]
+    ///
+    /// The message never contains the key; the `key` field, and so `Debug`,
+    /// holds it for host diagnostics only.
+    #[error("multipart upload refused: {kind}")]
     Multipart {
-        /// Blob key of the upload.
+        /// Blob key of the upload. Host diagnostics only.
         key: String,
         /// Why the operation was refused.
         kind: crate::MultipartErrorKind,
     },
 
     /// A local filesystem object path did not have a writable parent directory.
-    #[error("local storage path has no parent: {path:?}")]
+    ///
+    /// The message never contains the path; the `path` field, and so
+    /// `Debug`, holds it for host diagnostics only.
+    #[error("local storage path has no parent")]
     MissingParent {
-        /// Local path that had no usable parent directory.
+        /// Local path that had no usable parent directory. Host diagnostics
+        /// only.
         path: PathBuf,
     },
 
     /// A filesystem operation failed.
-    #[error("storage io error at {path:?}")]
+    ///
+    /// The message names the error kind but never the path; the `path`
+    /// field, and so `Debug`, holds it for host diagnostics only. Whether it
+    /// is retryable depends on that kind; see [`StorageError::is_retryable`].
+    #[error("storage io error: {}", source.kind())]
     Io {
-        /// Local path involved in the failed filesystem operation.
+        /// Local path involved in the failed filesystem operation. Host
+        /// diagnostics only.
         path: PathBuf,
         /// Original filesystem error.
         #[source]
@@ -140,14 +159,52 @@ pub enum StorageError {
     },
 }
 
+/// Whether a filesystem error of `kind` may succeed when retried.
+///
+/// Kinds that name a condition a retry cannot change are not retryable:
+/// denied permission, a read-only or full file system, an exceeded quota or
+/// file size, invalid input, data or names, an unsupported operation, an
+/// entry that already exists or is of the wrong type, and links or seeks the
+/// file system refuses. Every other kind, including interrupted and timed-out
+/// operations and kinds the standard library does not categorize, stays
+/// retryable.
+#[must_use]
+pub fn io_error_is_retryable(kind: std::io::ErrorKind) -> bool {
+    use std::io::ErrorKind;
+    !matches!(
+        kind,
+        ErrorKind::PermissionDenied
+            | ErrorKind::ReadOnlyFilesystem
+            | ErrorKind::StorageFull
+            | ErrorKind::QuotaExceeded
+            | ErrorKind::FileTooLarge
+            | ErrorKind::InvalidInput
+            | ErrorKind::InvalidData
+            | ErrorKind::InvalidFilename
+            | ErrorKind::Unsupported
+            | ErrorKind::AlreadyExists
+            | ErrorKind::IsADirectory
+            | ErrorKind::NotADirectory
+            | ErrorKind::DirectoryNotEmpty
+            | ErrorKind::CrossesDevices
+            | ErrorKind::TooManyLinks
+            | ErrorKind::NotSeekable
+    )
+}
+
 impl StorageError {
     /// Returns whether this failure permits retrying the operation.
+    ///
+    /// A filesystem error is retryable unless its kind names a condition a
+    /// retry cannot change, such as denied permission, a full or read-only
+    /// file system, an exceeded quota, or an invalid name or argument; see
+    /// [`io_error_is_retryable`].
     #[must_use]
-    pub const fn is_retryable(&self) -> bool {
+    pub fn is_retryable(&self) -> bool {
         match self {
             Self::Provider { retryable, .. } => *retryable,
             Self::RemoteProvider { retryable, .. } => *retryable,
-            Self::Io { .. } => true,
+            Self::Io { source, .. } => io_error_is_retryable(source.kind()),
             Self::SingleAttemptFailed { .. }
             | Self::UnsupportedOperation { .. }
             | Self::UnsupportedBackend { .. }
@@ -172,5 +229,79 @@ impl StorageError {
             path: path.into(),
             source,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Error, ErrorKind};
+
+    fn io(kind: ErrorKind) -> StorageError {
+        StorageError::Io {
+            path: PathBuf::from("/repository/secret-root/objects/key.bin"),
+            source: Error::from(kind),
+        }
+    }
+
+    /// Permission and capacity failures are not retried; transient ones are
+    /// (#540).
+    #[test]
+    fn io_errors_are_retryable_only_for_transient_kinds() {
+        for kind in [
+            ErrorKind::PermissionDenied,
+            ErrorKind::StorageFull,
+            ErrorKind::QuotaExceeded,
+            ErrorKind::ReadOnlyFilesystem,
+            ErrorKind::InvalidInput,
+            ErrorKind::InvalidFilename,
+            ErrorKind::IsADirectory,
+            ErrorKind::NotADirectory,
+        ] {
+            assert!(!io(kind).is_retryable(), "{kind:?}");
+        }
+        for kind in [
+            ErrorKind::Interrupted,
+            ErrorKind::TimedOut,
+            ErrorKind::WouldBlock,
+            ErrorKind::ConnectionReset,
+            ErrorKind::ResourceBusy,
+            ErrorKind::Other,
+        ] {
+            assert!(io(kind).is_retryable(), "{kind:?}");
+        }
+    }
+
+    /// No message repeats a key or path, which can reveal a repository path
+    /// or configured root prefix; `Debug` keeps them for hosts (#540).
+    #[test]
+    fn messages_never_repeat_keys_or_paths() {
+        let key = "secret-root/objects/key.bin".to_string();
+        let errors = [
+            StorageError::MissingBlob { key: key.clone() },
+            StorageError::PreconditionFailed {
+                key: key.clone(),
+                condition: "object already exists".to_string(),
+            },
+            StorageError::Multipart {
+                key: key.clone(),
+                kind: crate::MultipartErrorKind::UnknownUpload,
+            },
+            StorageError::MissingParent {
+                path: PathBuf::from("/repository/secret-root"),
+            },
+            io(ErrorKind::PermissionDenied),
+            StorageError::InvalidStorageKey { key: key.clone() },
+        ];
+        for error in &errors {
+            let message = error.to_string();
+            assert!(!message.contains("secret-root"), "{message}");
+            assert!(format!("{error:?}").contains("secret-root"), "{error:?}");
+        }
+        assert_eq!(
+            errors[1].to_string(),
+            "storage precondition failed: object already exists"
+        );
+        assert_eq!(errors[4].to_string(), "storage io error: permission denied");
     }
 }
