@@ -423,6 +423,11 @@ async fn a_helper_table_name_taken_by_something_else_is_refused_before_any_ddl()
     };
     // Planned while the name is free; taken before it is applied.
     let planned = plan().await.unwrap();
+    // SQLite compares table names without regard to ASCII case, so the
+    // upper-case form of the helper name is the same table to it.
+    #[cfg(feature = "sqlite")]
+    let taken = helper(&table('b')).to_ascii_uppercase();
+    #[cfg(feature = "postgres")]
     let taken = helper(&table('b'));
     Backend::fetch_rows(
         db.pool(),
@@ -438,7 +443,7 @@ async fn a_helper_table_name_taken_by_something_else_is_refused_before_any_ddl()
     )
     .await
     .unwrap();
-    let expected = vec![(Some(table('b')), Some(taken.clone()))];
+    let expected = vec![(Some(table('b')), Some(helper(&table('b'))))];
     let refused = db
         .schema()
         .apply_runtime_migration(
@@ -475,7 +480,7 @@ async fn a_helper_table_name_taken_by_something_else_is_refused_before_any_ddl()
         )
         .await
         .unwrap();
-    assert!(table_exists(&db, &taken).await);
+    assert!(table_exists(&db, &helper(&table('b'))).await);
     assert!(plan().await.unwrap().steps().is_empty());
     db.pool().close().await;
     #[cfg(feature = "postgres")]

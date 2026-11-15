@@ -205,8 +205,13 @@ helper name.
 
 Planning or applying a migration refuses, before any statement runs, a search
 index whose helper table name is already taken: by another base table of the
-same plan, or by a table that exists without a `__graphql_orm_search_metadata`
-row for this base table. Runtime migrations report `TargetCollision` with the
+same target or plan, or by a table that exists without a
+`__graphql_orm_search_metadata` row for this base table. The mapping is not
+injective once names are sanitized (`a-b` and `a_b` share a helper name), so
+this refusal is what keeps two such base tables apart. Names are compared as
+the backend compares the identifiers the ORM writes: without regard to ASCII
+case on SQLite, and on PostgreSQL as unquoted identifiers, which fold to lower
+case. Runtime migrations report `TargetCollision` with the
 helper table as the subject; static plans return `SearchHelperTableConflict`.
 The metadata row is the ownership record, so a base table that already has
 its index plans and applies again without a refusal.

@@ -989,6 +989,14 @@ fn plan_migration_for_backend<B: OrmBackend>(
     current: &SchemaModel,
     target: &SchemaModel,
 ) -> crate::Result<PlannedMigration> {
+    // Two entities of the target that need one search helper table, whether
+    // or not this plan creates both.
+    if let Some(conflict) = super::migrations::search_helper_collision_among(
+        B::DIALECT,
+        target.tables.iter().flat_map(|table| &table.search_indexes),
+    ) {
+        return Err(conflict.into_error());
+    }
     let plan = build_migration_plan(B::DIALECT, current, target);
     validate_migration_step_capabilities(B::DIALECT, plan.steps.iter().map(StepRef::from))?;
     let steps = classify_migration_steps(&plan.steps);

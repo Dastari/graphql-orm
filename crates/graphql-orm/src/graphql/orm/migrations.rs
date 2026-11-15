@@ -193,6 +193,50 @@ mod search_helper_conflict_tests {
                 Some(&expected)
             );
         }
+        // Names that differ only in the case the backend ignores are one
+        // helper table as well.
+        for (backend, strategy) in [
+            (
+                DatabaseBackend::Postgres,
+                SearchIndexStrategy::PostgresTsvector,
+            ),
+            (DatabaseBackend::Sqlite, SearchIndexStrategy::SqliteFts5),
+        ] {
+            let steps = [
+                create("Audit-Logs", strategy),
+                create("audit_logs", strategy),
+            ];
+            let refs = steps.iter().map(StepRef::from).collect::<Vec<_>>();
+            let conflict = search_helper_collision(backend, &refs).expect("one helper table");
+            assert_eq!(conflict.table, "audit_logs", "{backend:?}");
+            assert_eq!(conflict.other_table.as_deref(), Some("Audit-Logs"));
+        }
+        // On SQLite one base table spelled in two cases is one table, not two
+        // owners; on PostgreSQL the two spellings are two quoted tables whose
+        // unquoted helper names fold to one.
+        let steps = [
+            create("Notes", SearchIndexStrategy::SqliteFts5),
+            create("notes", SearchIndexStrategy::SqliteFts5),
+        ];
+        let refs = steps.iter().map(StepRef::from).collect::<Vec<_>>();
+        assert_eq!(
+            search_helper_collision(DatabaseBackend::Sqlite, &refs),
+            None
+        );
+        assert!(search_helper_collision(DatabaseBackend::Postgres, &refs).is_some());
+        // A whole target is checked the same way as a plan's steps.
+        let indexes =
+            ["a-b", "a_b"].map(
+                |table| match create(table, SearchIndexStrategy::SqliteFts5) {
+                    MigrationStep::CreateSearchIndex { index, .. } => index,
+                    _ => unreachable!(),
+                },
+            );
+        assert_eq!(
+            search_helper_collision_among(DatabaseBackend::Sqlite, &indexes)
+                .map(|conflict| conflict.helper_table),
+            Some("__graphql_orm_fts_a_b".to_owned())
+        );
         // Distinct helper names, and one base table named twice, are fine.
         let steps = [
             create("audit_logs", SearchIndexStrategy::PostgresTsvector),
@@ -1157,6 +1201,29 @@ fn search_helper_tables(backend: DatabaseBackend, index: &SearchIndexModel) -> V
     }
 }
 
+/// Whether two helper table names are one table on `backend`.
+///
+/// SQLite compares table names without regard to ASCII case. PostgreSQL
+/// folds an unquoted identifier to lower case, and the ORM writes helper
+/// table names unquoted, so there too names that differ only in ASCII case
+/// are one table.
+fn same_helper_table(backend: DatabaseBackend, left: &str, right: &str) -> bool {
+    match backend {
+        DatabaseBackend::Sqlite | DatabaseBackend::Postgres => left.eq_ignore_ascii_case(right),
+        DatabaseBackend::Mysql | DatabaseBackend::Mssql => left == right,
+    }
+}
+
+/// Whether two declared base table names are one table on `backend`.
+/// PostgreSQL base tables are written as declared, quoted where needed, so
+/// they compare exactly.
+fn same_base_table(backend: DatabaseBackend, left: &str, right: &str) -> bool {
+    match backend {
+        DatabaseBackend::Sqlite => left.eq_ignore_ascii_case(right),
+        _ => left == right,
+    }
+}
+
 /// Each `(base table, helper table)` the steps would create. An altered
 /// index keeps its base table's own helper table and is not listed.
 fn created_search_helpers(
@@ -1182,31 +1249,55 @@ fn created_search_helpers(
     created
 }
 
-/// Two base tables whose search indexes the steps would create under one
-/// helper table name.
+/// Two different base tables among `indexes` whose search helper tables are
+/// one table on `backend`: base names whose sanitized forms are equal
+/// (`a-b` and `a_b`), or that differ only in the case the backend ignores.
+pub(super) fn search_helper_collision_among<'a>(
+    backend: DatabaseBackend,
+    indexes: impl IntoIterator<Item = &'a SearchIndexModel>,
+) -> Option<super::SearchHelperTableConflict> {
+    let mut seen: Vec<(&str, String)> = Vec::new();
+    for index in indexes {
+        for helper in search_helper_tables(backend, index) {
+            if let Some((other, _)) = seen.iter().find(|(other, taken)| {
+                same_helper_table(backend, taken, &helper)
+                    && !same_base_table(backend, other, &index.table_name)
+            }) {
+                return Some(super::SearchHelperTableConflict {
+                    helper_table: helper,
+                    table: index.table_name.clone(),
+                    other_table: Some((*other).to_owned()),
+                });
+            }
+            seen.push((index.table_name.as_str(), helper));
+        }
+    }
+    None
+}
+
+/// [`search_helper_collision_among`] for the search indexes the steps create.
 pub(super) fn search_helper_collision(
     backend: DatabaseBackend,
     steps: &[StepRef<'_>],
 ) -> Option<super::SearchHelperTableConflict> {
-    let created = created_search_helpers(backend, steps);
-    created
-        .iter()
-        .enumerate()
-        .find_map(|(position, (table, helper))| {
-            created[..position]
-                .iter()
-                .find(|(other, taken)| taken == helper && other != table)
-                .map(|(other, _)| super::SearchHelperTableConflict {
-                    helper_table: helper.clone(),
-                    table: table.clone(),
-                    other_table: Some(other.clone()),
-                })
-        })
+    let mut created = Vec::new();
+    for step in steps {
+        match step {
+            StepRef::CreateTable(table) => created.extend(table.search_indexes.iter()),
+            StepRef::CreateSearchIndex { index, .. } => created.push(*index),
+            _ => {}
+        }
+    }
+    search_helper_collision_among(backend, created)
 }
 
 /// A helper table the steps would create that already exists in the database
 /// without a search metadata row for its base table: it belongs to another
 /// base table, to an earlier release's truncated name, or to the host.
+///
+/// Names are compared as the backend compares the identifiers the ORM
+/// writes: without regard to ASCII case on SQLite, and on PostgreSQL as an
+/// unquoted identifier, which the server folds to lower case.
 ///
 /// Read-only. A base table that already has its metadata row owns its helper
 /// tables, so planning or applying the same plan again reports nothing.
@@ -1216,22 +1307,24 @@ pub(super) async fn search_helper_taken<B: super::OrmBackend>(
 ) -> crate::Result<Option<super::SearchHelperTableConflict>> {
     let backend = B::DIALECT;
     let placeholder = backend.placeholder(1);
-    let exists_sql = match backend {
-        DatabaseBackend::Postgres => {
-            format!("SELECT 1 AS present WHERE pg_catalog.to_regclass({placeholder}) IS NOT NULL")
-        }
-        DatabaseBackend::Sqlite => {
-            format!("SELECT 1 AS present FROM sqlite_master WHERE name = {placeholder}")
-        }
+    let (exists_sql, recorded_predicate) = match backend {
+        // `to_regclass` reads its argument as SQL does: an unquoted name is
+        // folded, exactly as the unquoted name in the ORM's `CREATE TABLE`.
+        DatabaseBackend::Postgres => (
+            format!("SELECT 1 AS present WHERE pg_catalog.to_regclass({placeholder}) IS NOT NULL"),
+            format!("table_name = {placeholder}"),
+        ),
+        DatabaseBackend::Sqlite => (
+            format!(
+                "SELECT 1 AS present FROM sqlite_master WHERE name = {placeholder} COLLATE NOCASE"
+            ),
+            format!("table_name = {placeholder} COLLATE NOCASE"),
+        ),
         DatabaseBackend::Mysql | DatabaseBackend::Mssql => return Ok(None),
     };
     let exists = |name: String| {
         let exists_sql = &exists_sql;
         async move {
-            let name = match backend {
-                DatabaseBackend::Postgres => backend.quote_identifier(&name),
-                _ => name,
-            };
             B::fetch_rows(pool, exists_sql, &[super::SqlValue::String(name)])
                 .await
                 .map(|rows| !rows.is_empty())
@@ -1250,9 +1343,7 @@ pub(super) async fn search_helper_taken<B: super::OrmBackend>(
         let recorded = has_metadata
             && !B::fetch_rows(
                 pool,
-                &format!(
-                    "SELECT 1 AS present FROM {metadata_table} WHERE table_name = {placeholder}"
-                ),
+                &format!("SELECT 1 AS present FROM {metadata_table} WHERE {recorded_predicate}"),
                 &[super::SqlValue::String(table.clone())],
             )
             .await?

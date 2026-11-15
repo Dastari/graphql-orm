@@ -179,9 +179,12 @@ fn ends_like_a_digest(name: &str) -> bool {
 ///
 /// A plain name therefore never ends like a digest name, so a short base
 /// table can never be given the helper name of a long one, and the result is
-/// always at most 63 bytes. Two base table names whose sanitized forms are
-/// equal (`a-b` and `a_b`) still share a plain name; planning or applying a
-/// search index refuses that with [`SearchHelperTableConflict`].
+/// always at most 63 bytes. The mapping is not injective past that: two base
+/// table names whose sanitized forms are equal (`a-b` and `a_b`), or that
+/// differ only in a case the backend ignores, still share a helper name.
+/// Planning a schema that holds both, or creating one while the other's
+/// helper table exists, is refused with [`SearchHelperTableConflict`]
+/// (`TargetCollision` for runtime migrations) before any statement runs.
 pub fn search_table_name(table_name: &str) -> String {
     let base = sanitize_search_name(table_name);
     let name = format!("__graphql_orm_search_{base}");
@@ -204,10 +207,12 @@ pub fn search_table_name(table_name: &str) -> String {
 /// A search index was not created because the helper table it needs already
 /// belongs to something else.
 ///
-/// Either two base tables of one plan map to the same helper table name
+/// Either two base tables of one target or plan map to the same helper table
 /// (`other_table` names the second), or a table of that name already exists
 /// in the database and the search metadata does not record it for this base
-/// table (`other_table` is `None`). The refusal comes before any statement of
+/// table (`other_table` is `None`). Names are compared as the backend
+/// compares the identifiers the ORM writes: without regard to ASCII case on
+/// SQLite and for PostgreSQL's unquoted helper names. The refusal comes before any statement of
 /// the plan runs; nothing was changed. Read it from a planning or apply error
 /// with [`SearchHelperTableConflict::from_error`]; runtime (owned) migrations
 /// report it as `TargetCollision` with the helper table as the subject.

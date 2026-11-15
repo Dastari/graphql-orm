@@ -1381,7 +1381,17 @@ impl<'db, B: RuntimeMigrationBackend> SchemaManager<'db, B> {
             // A search helper table name that two base tables of the plan
             // share, or that something else in the database already has.
             let steps = physical.steps.iter().map(StepRef::from).collect::<Vec<_>>();
-            let conflict = match super::migrations::search_helper_collision(B::DIALECT, &steps) {
+            // The whole target first: two collections that need one helper
+            // table, whether or not this plan creates both.
+            let conflict = match super::migrations::search_helper_collision_among(
+                B::DIALECT,
+                target
+                    .tables()
+                    .iter()
+                    .flat_map(|table| &table.search_indexes),
+            )
+            .or_else(|| super::migrations::search_helper_collision(B::DIALECT, &steps))
+            {
                 Some(conflict) => Some(conflict),
                 None => super::migrations::search_helper_taken::<B>(self.database.pool(), &steps)
                     .await

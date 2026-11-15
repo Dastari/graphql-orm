@@ -54,9 +54,13 @@ lowercase hexadecimal digits.
     indexed on PostgreSQL before; both can be now.
 - **Search helper table conflicts are refused up front.** Planning or applying
   a migration that creates a search index now fails before any statement when
-  the helper table name is taken: by another base table of the same plan, or
-  by an existing table that the search metadata does not record for this base
-  table. Static planning and apply return `SearchHelperTableConflict`
+  the helper table name is taken: by another base table of the same target
+  or plan (two base tables whose sanitized names are equal, such as
+  `alias-notes` and `alias_notes`, still share a helper name), or by an
+  existing table that the search metadata does not record for this base
+  table. An existing table whose name differs only in case counts: SQLite
+  ignores ASCII case in table names, and PostgreSQL folds the unquoted helper
+  name to lower case. Static planning and apply return `SearchHelperTableConflict`
   (`SearchHelperTableConflict::from_error(&error)`); runtime migrations report
   `TargetCollision` with the helper table as the diagnostic's subject. These
   migrations failed before as well, part-way, with the database's own error.
