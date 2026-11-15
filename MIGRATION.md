@@ -3,13 +3,78 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-13
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
 
+## 0.152.0 to 0.154.0: migrations, change journal and retention
+
+Upgrade runtime and macros together. Generated SDL, operation catalogues and
+fingerprints are unchanged. The first entry is breaking for hosts that export
+the change journal and needs one schema step.
+
+- **Change journal export (breaking).** Journal entries are now ordered by a
+  `seq` column that the database assigns; ids are random and never ordered
+  entries, so an incremental export could skip or repeat them.
+  - Replace `ChangeWindow { after_snapshot_id, until }` with
+    `ChangeWindow { after_sequence, until }`, and store the `sequence` of the
+    last `BackupChange` an export returns as the next `after_sequence`.
+    `BackupChange` has the new `sequence` field; update struct literals.
+  - Add the column once, as the role that owns the journal: call
+    `ensure_change_journal_recorder` (or `ensure_change_journal_table`), or on
+    PostgreSQL apply the schema target. Existing entries are numbered by
+    `changed_at` and then by storage order. SQLite rebuilds the journal table
+    in one transaction; PostgreSQL adds an identity column under an `ACCESS
+    EXCLUSIVE` lock, which rewrites the journal. Until this has run,
+    `export_changes` fails rather than ordering by id. A PostgreSQL role that
+    does not own the journal cannot add the column, and the call then leaves
+    the journal unchanged.
+  - A position saved from an earlier export is an entry id and cannot be
+    converted. Take a full backup after upgrading and start incremental exports
+    from the position the first new export returns.
+  - A `BackupChange` serialized by an earlier release deserializes with
+    `sequence: 0`, which is never a journal position. A serialized
+    `ChangeWindow` from an earlier release deserializes with
+    `after_sequence: None`, which exports from the beginning of the journal.
+  - Run PostgreSQL exports on the primary. A standby cannot see the primary's
+    open write transactions, so `export_changes` refuses to run on one.
+  - `until` now ends the export at the first entry recorded later. It used to
+    leave such entries out while returning later-positioned ones.
+  - On PostgreSQL an export waits for journaled write transactions that were
+    open when it started, for up to 30 seconds, and otherwise fails with an
+    error `ChangeExportTimedOut::from_error` recognises, having exported
+    nothing. Retry it; use `export_changes_with_wait` to choose the limit. A
+    long-open write transaction, or an unresolved prepared transaction that
+    journaled a write, delays exports. The export role still needs only
+    `SELECT` on the journal.
+- **PostgreSQL type aliases.** No action. A model that declares `varchar(50)`,
+  `int`, `decimal(10,2)`, `timestamptz` or another alias no longer plans an
+  `AlterColumn` against the name PostgreSQL reports. Hosts that worked around
+  this by declaring `character varying(n)` can keep doing so. A stored plan
+  that contains such spurious steps should be planned again.
+- **PostgreSQL foreign keys across a paired widening.** No action. When both
+  members of a foreign key widen within one base type, the plan now holds two
+  `AlterColumn` steps and no `DropForeignKey`/`AddForeignKey` pair.
+- **Schema-qualified PostgreSQL tables.** No action for hosts that could not
+  re-plan such targets. The `source_schema_hash` of a plan for a target with
+  schema-qualified tables now covers those tables, so
+  `ApplyOptions::expected_current_schema_hash` values recorded for such
+  targets change once. A schema-qualified table that leaves the target is not
+  dropped by a plan; drop it with explicit SQL. A custom
+  `IntrospectionBackend` needs no change: `introspect_schema_including` has a
+  default implementation.
+- **SQLite key removal.** No action. A plan that removes a child's foreign key
+  together with the parent's composite UNIQUE key it referenced now applies in
+  one step; the two-plan workaround still works.
+- **PostgreSQL inserts and retention under row-level security.** No action.
+  Inserts into entities whose row-level security has no `UPDATE` policy, and
+  `RetentionContext::purge`, work again. Their reads no longer lock rows:
+  the created row is already locked by its own transaction, and a retention
+  transaction is serializable and refuses a purge whose deleted row count
+  differs from the count it selected.
 ## 0.151.0 to 0.152.0: batched row-security probe
 
 Upgrade ORM and macros together. No data migration is needed. The new optional

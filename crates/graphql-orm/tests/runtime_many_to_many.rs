@@ -1013,12 +1013,17 @@ async fn removing_a_join_relation_is_a_destructive_plan_and_adding_it_is_additiv
             )
             .await
             .unwrap();
-    let step = removed
+    // PostgreSQL first drops the join table's own foreign keys, a `Risky`
+    // step for the same table, so the table's risk is the highest of its
+    // steps rather than that of the first one.
+    let risk = removed
         .steps()
         .iter()
-        .find(|s| s.table_name() == Some("mm_post_tags"))
+        .filter(|s| s.table_name() == Some("mm_post_tags"))
+        .map(|s| s.risk())
+        .max()
         .unwrap();
-    assert_eq!(step.risk(), MigrationRisk::Destructive);
+    assert_eq!(risk, MigrationRisk::Destructive);
     assert!(
         f.db.schema()
             .apply_owned_migration(&removed, ApplyOptions::default())

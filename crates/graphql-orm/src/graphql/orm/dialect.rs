@@ -907,6 +907,15 @@ fn identifier_path_parts(identifier: &str) -> impl Iterator<Item = &str> {
     })
 }
 
+/// Whether a declared table path names a schema as well as a table.
+#[cfg(feature = "postgres")]
+pub(crate) fn identifier_path_is_qualified(identifier: &str) -> bool {
+    identifier_path_parts(identifier)
+        .filter(|part| !part.is_empty())
+        .count()
+        > 1
+}
+
 /// The names PostgreSQL resolves each part of a declared path to when the
 /// ORM's SQL renders it with [`DatabaseBackend::render_identifier_path`]:
 /// a delimited part keeps its case, a part rendered bare folds to lower case,

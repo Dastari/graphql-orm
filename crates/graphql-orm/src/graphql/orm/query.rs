@@ -5255,6 +5255,43 @@ where
     where
         B: WriteBackend,
     {
+        self.fetch_bounded_sentinel_in_transaction(context, limit, true)
+            .await
+    }
+
+    /// The bounded selection of a retention purge.
+    ///
+    /// It takes no row locks. PostgreSQL returns a row from
+    /// `SELECT ... FOR UPDATE` only when it passes the table's `UPDATE`
+    /// policy, and an append-only entity under row-level security declares
+    /// none, so a locking selection would see no rows. The purge does not need
+    /// the lock: an append-only row cannot be updated, only another retention
+    /// purge can delete it, a retention transaction is serializable on
+    /// PostgreSQL, and the purge refuses when the number of deleted rows
+    /// differs from the number selected.
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    pub(crate) async fn fetch_retention_sentinel_in_transaction(
+        &self,
+        context: &mut MutationContext<'_, B>,
+        limit: MutationLimit,
+    ) -> crate::Result<Vec<T>>
+    where
+        B: WriteBackend,
+    {
+        self.fetch_bounded_sentinel_in_transaction(context, limit, false)
+            .await
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    async fn fetch_bounded_sentinel_in_transaction(
+        &self,
+        context: &mut MutationContext<'_, B>,
+        limit: MutationLimit,
+        lock_rows: bool,
+    ) -> crate::Result<Vec<T>>
+    where
+        B: WriteBackend,
+    {
         if self.requires_in_memory_filtering() {
             return Err(crate::graphql::errors::sqlx_error_from_public(
                 crate::graphql::errors::OrmPublicError::new(
@@ -5287,9 +5324,10 @@ where
             offset: Some(0),
         });
         let pagination = PaginationConfig::unbounded();
-        let rendered = render_write_decision_select_query(
+        let rendered = render_select_query_inner(
             B::DIALECT,
             &query.build_select_query_with_config(pagination, false)?,
+            lock_rows,
         );
         let rows = context.fetch_rows(&rendered.sql, &rendered.values).await?;
         query.apply_in_memory_filtering(rows, pagination, false)

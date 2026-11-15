@@ -907,28 +907,147 @@ fn render_constraint_comments(backend: DatabaseBackend, table: &TableRef<'_>) ->
         .collect()
 }
 
-// PostgreSQL format_type deparses the canonical runtime TIMESTAMPTZ spelling.
-// Compare that exact built-in alias without rewriting physical metadata or hashes.
-// Precision modifiers, arrays, domains and timestamp WITHOUT time zone remain
-// distinct; this is not a parser or general SQL type-name normalization rule.
-fn postgres_timestamptz_alias(sql_type: &str) -> bool {
-    sql_type.eq_ignore_ascii_case("TIMESTAMPTZ")
-        || sql_type.eq_ignore_ascii_case("timestamp with time zone")
+// PostgreSQL `format_type` reports one spelling for each built-in type, and
+// models may declare any alias of it (`varchar(50)` for
+// `character varying(50)`, `int` for `integer`). The spelling below is the
+// one `format_type` reports. Only a closed set of built-in names is
+// recognised; every other name, including domains, extension types and
+// quoted identifiers, is compared case-insensitively as before. This compares
+// types only: it never rewrites physical metadata or hashes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct PostgresTypeName {
+    /// Canonical base name, without modifiers or a time zone suffix.
+    base: &'static str,
+    /// Type modifiers, in the form `format_type` reports them.
+    modifiers: Vec<u32>,
+    /// Whether the type is an array of the base type.
+    array: bool,
+}
+
+pub(super) fn postgres_type_name(sql_type: &str) -> Option<PostgresTypeName> {
+    let mut text = sql_type.trim();
+    if text.contains('"') {
+        return None;
+    }
+    let mut array = false;
+    while let Some(element) = text.strip_suffix(']') {
+        let element = element.trim_end().strip_suffix('[')?;
+        text = element.trim_end();
+        array = true;
+    }
+    let (name, modifiers) = match text.find('(') {
+        Some(open) => {
+            let close = text.rfind(')')?;
+            if close < open {
+                return None;
+            }
+            let modifiers = text[open + 1..close]
+                .split(',')
+                .map(|modifier| modifier.trim().parse::<u32>().ok())
+                .collect::<Option<Vec<_>>>()?;
+            (
+                format!("{} {}", &text[..open], &text[close + 1..]),
+                modifiers,
+            )
+        }
+        None => (text.to_string(), Vec::new()),
+    };
+    let name = name
+        .split_ascii_whitespace()
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let count = modifiers.len();
+    let (base, modifiers) = match name.as_str() {
+        "varchar" | "character varying" | "char varying" if count <= 1 => {
+            ("character varying", modifiers)
+        }
+        // `character` without a length is `character(1)`.
+        "char" | "character" if count == 0 => ("character", vec![1]),
+        "char" | "character" | "bpchar" if count == 1 => ("character", modifiers),
+        "int2" | "smallint" if count == 0 => ("smallint", modifiers),
+        "int" | "int4" | "integer" if count == 0 => ("integer", modifiers),
+        "int8" | "bigint" if count == 0 => ("bigint", modifiers),
+        "bool" | "boolean" if count == 0 => ("boolean", modifiers),
+        "float4" | "real" if count == 0 => ("real", modifiers),
+        "float" | "float8" | "double precision" if count == 0 => ("double precision", modifiers),
+        // `float(p)` selects a binary precision: up to 24 bits is `real`.
+        "float" if count == 1 && (1..=24).contains(&modifiers[0]) => ("real", Vec::new()),
+        "float" if count == 1 && (25..=53).contains(&modifiers[0]) => {
+            ("double precision", Vec::new())
+        }
+        "decimal" | "numeric" | "dec" if count == 0 || count == 2 => ("numeric", modifiers),
+        // `numeric(p)` has scale zero.
+        "decimal" | "numeric" | "dec" if count == 1 => ("numeric", vec![modifiers[0], 0]),
+        "timestamptz" | "timestamp with time zone" if count <= 1 => {
+            ("timestamp with time zone", modifiers)
+        }
+        "timestamp" | "timestamp without time zone" if count <= 1 => {
+            ("timestamp without time zone", modifiers)
+        }
+        "timetz" | "time with time zone" if count <= 1 => ("time with time zone", modifiers),
+        "time" | "time without time zone" if count <= 1 => ("time without time zone", modifiers),
+        "varbit" | "bit varying" if count <= 1 => ("bit varying", modifiers),
+        // `bit` without a length is `bit(1)`.
+        "bit" if count == 0 => ("bit", vec![1]),
+        "bit" if count == 1 => ("bit", modifiers),
+        _ => return None,
+    };
+    Some(PostgresTypeName {
+        base,
+        modifiers,
+        array,
+    })
+}
+
+/// Whether two PostgreSQL type spellings name the same type.
+pub(super) fn postgres_types_equivalent(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
+        || matches!(
+            (postgres_type_name(left), postgres_type_name(right)),
+            (Some(left), Some(right)) if left == right
+        )
+}
+
+/// Whether PostgreSQL changes `before` to `after` without rewriting the table
+/// or rechecking its rows: the same base type with a length or precision that
+/// only grows. A foreign key whose members both change this way stays valid
+/// throughout, so it does not have to be dropped and re-added.
+fn postgres_binary_compatible_widening(before: &str, after: &str) -> bool {
+    let (Some(before), Some(after)) = (postgres_type_name(before), postgres_type_name(after))
+    else {
+        return false;
+    };
+    if before.base != after.base || before.array || after.array {
+        return false;
+    }
+    match (
+        before.base,
+        before.modifiers.as_slice(),
+        after.modifiers.as_slice(),
+    ) {
+        // A longer limit, or no limit at all.
+        ("character varying" | "bit varying", [_], []) => true,
+        ("character varying" | "bit varying", [before], [after]) => after >= before,
+        // More digits before the decimal point at the same scale, or an
+        // unconstrained numeric.
+        ("numeric", [_, _], []) => true,
+        ("numeric", [before_precision, before_scale], [after_precision, after_scale]) => {
+            before_scale == after_scale && after_precision >= before_precision
+        }
+        _ => false,
+    }
 }
 
 /// Whether a PostgreSQL `AlterColumn` renders `ALTER COLUMN ... TYPE`.
 fn postgres_type_changed(before: &ColumnModel, after: &ColumnModel) -> bool {
-    !before.sql_type.eq_ignore_ascii_case(&after.sql_type)
-        && !(postgres_timestamptz_alias(&before.sql_type)
-            && postgres_timestamptz_alias(&after.sql_type))
+    !postgres_types_equivalent(&before.sql_type, &after.sql_type)
 }
 
 // Constraint-backed column flags are not implemented by ALTER TYPE/nullability.
 // A standalone unique index is separate metadata and never repairs these flags.
 pub(super) fn postgres_alter_metadata_supported(before: &ColumnModel, after: &ColumnModel) -> bool {
-    let same_type = before.sql_type.eq_ignore_ascii_case(&after.sql_type)
-        || (postgres_timestamptz_alias(&before.sql_type)
-            && postgres_timestamptz_alias(&after.sql_type));
+    let same_type = postgres_types_equivalent(&before.sql_type, &after.sql_type);
     before.is_primary_key == after.is_primary_key
         && before.is_unique == after.is_unique
         && (before.spatial == after.spatial || !same_type)
@@ -1068,10 +1187,11 @@ pub(super) fn column_changed_with(
 
     let sql_type_changed = if matches!(backend, DatabaseBackend::Postgres | DatabaseBackend::Mssql)
     {
-        !before.sql_type.eq_ignore_ascii_case(&after.sql_type)
-            && !(backend == DatabaseBackend::Postgres
-                && postgres_timestamptz_alias(&before.sql_type)
-                && postgres_timestamptz_alias(&after.sql_type))
+        if backend == DatabaseBackend::Postgres {
+            !postgres_types_equivalent(&before.sql_type, &after.sql_type)
+        } else {
+            !before.sql_type.eq_ignore_ascii_case(&after.sql_type)
+        }
     } else {
         before.sql_type != after.sql_type
     };
@@ -1614,6 +1734,10 @@ struct KeyChanges {
     /// of its source columns and the corresponding referenced column both
     /// change type.
     retyped_columns: std::collections::BTreeSet<String>,
+    /// PostgreSQL: the subset of `retyped_columns` whose change is a
+    /// binary-compatible widening (see
+    /// [`postgres_binary_compatible_widening`]).
+    widened_columns: std::collections::BTreeSet<String>,
 }
 
 impl KeyChanges {
@@ -1638,7 +1762,10 @@ impl KeyChanges {
 ///    columns and the corresponding referenced column both change type (for
 ///    example uuid to text). `ALTER COLUMN TYPE` re-adds an attached FK at
 ///    once, so the first ALTER would fail on mismatched member types. The
-///    re-add in phase 3 revalidates every referencing row. Every other
+///    re-add in phase 3 revalidates every referencing row. A pair whose
+///    members both only widen within one base type (a longer `varchar` or
+///    `varbit`, or a `numeric` with more precision at the same scale) keeps
+///    its FK attached, because the members stay comparable throughout. Every other
 ///    PostgreSQL column change keeps FKs attached: defaults and nullability do
 ///    not interact with FKs, a binary-coercible one-sided widening (such as
 ///    `varchar(50)` to `varchar(100)` or to `text`) stays metadata-only, and an
@@ -1719,6 +1846,13 @@ fn order_foreign_key_phases(
                     entry
                         .retyped_columns
                         .insert(dependency_column(&before.name));
+                    if backend == DatabaseBackend::Postgres
+                        && postgres_binary_compatible_widening(&before.sql_type, &after.sql_type)
+                    {
+                        entry
+                            .widened_columns
+                            .insert(dependency_column(&before.name));
+                    }
                 }
             }
             OwnedMigrationStep::DropColumn {
@@ -1766,14 +1900,18 @@ fn order_foreign_key_phases(
             // retyping both members of a pair fails on the first ALTER (42804).
             // A one-sided change keeps the FK attached: a binary-coercible
             // widening stays metadata-only, and an incompatible one fails
-            // either way.
+            // either way. A pair whose members both only widen within one
+            // base type (`varchar(50)` to `varchar(100)`, `numeric(10,2)` to
+            // `numeric(12,2)`) also keeps the FK: the members stay comparable
+            // at every step and PostgreSQL rewrites neither table, so
+            // re-adding the FK would only rescan every referencing row.
             let paired_retype = foreign_key.column_pairs.iter().any(|pair| {
-                source_changes
-                    .retyped_columns
-                    .contains(&dependency_column(&pair.source_column))
-                    && target_changes
-                        .retyped_columns
-                        .contains(&dependency_column(&pair.target_column))
+                let source = dependency_column(&pair.source_column);
+                let target = dependency_column(&pair.target_column);
+                source_changes.retyped_columns.contains(&source)
+                    && target_changes.retyped_columns.contains(&target)
+                    && !(source_changes.widened_columns.contains(&source)
+                        && target_changes.widened_columns.contains(&target))
             });
             let disturbed = target_changes.disturbs(&referenced)
                 || paired_retype
@@ -3970,6 +4108,24 @@ pub(super) async fn introspect_owned_postgres_connection_with_internal(
     connection: &mut sqlx::PgConnection,
     include_internal: bool,
 ) -> crate::Result<OwnedSchemaModel> {
+    introspect_owned_postgres_connection_including(connection, include_internal, &[]).await
+}
+
+/// Reads the owned catalog of the session's current schema, and of each
+/// schema-qualified table in `declared_tables` wherever it lives.
+///
+/// A table declared with a schema (`audit.logs`) is not in the current
+/// schema, so a read of that schema alone never reports it and a planner
+/// would create it again. Each schema-qualified path is resolved as the ORM's
+/// own SQL resolves it and, when the table exists, reported under the declared
+/// path. Tables of other schemas that no path names are never reported, so a
+/// strict plan cannot drop them.
+#[cfg(feature = "postgres")]
+pub(super) async fn introspect_owned_postgres_connection_including(
+    connection: &mut sqlx::PgConnection,
+    include_internal: bool,
+    declared_tables: &[&str],
+) -> crate::Result<OwnedSchemaModel> {
     let session = sqlx::query(
         "SELECT pg_catalog.current_schema() AS schema_name,
                 pg_catalog.current_setting('standard_conforming_strings') AS standard_strings",
@@ -4001,10 +4157,57 @@ pub(super) async fn introspect_owned_postgres_connection_with_internal(
     .fetch_all(&mut *connection)
     .await?;
 
-    let mut tables = Vec::new();
+    // (reported name, schema, relation name) of each table to read.
+    let mut relations = Vec::<(String, String, String)>::new();
     for row in table_rows {
         let table_name: String = row.try_get("table_name")?;
-        if !include_internal && is_internal_graphql_orm_table(&table_name) {
+        relations.push((table_name.clone(), schema_name.clone(), table_name));
+    }
+    for declared in declared_tables {
+        if !super::dialect::identifier_path_is_qualified(declared)
+            || relations
+                .iter()
+                .any(|(reported, _, _)| reported == declared)
+        {
+            continue;
+        }
+        let resolved = sqlx::query(
+            "SELECT n.nspname::pg_catalog.text AS schema_name, c.relname::pg_catalog.text AS table_name
+             FROM pg_catalog.pg_class c
+             JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+             WHERE c.oid OPERATOR(pg_catalog.=) pg_catalog.to_regclass($1)::pg_catalog.oid
+               AND c.relkind OPERATOR(pg_catalog.=) ANY (ARRAY['r', 'p']::pg_catalog.\"char\"[])",
+        )
+        .bind(DatabaseBackend::Postgres.render_identifier_path(declared).as_ref())
+        .fetch_optional(&mut *connection)
+        .await?;
+        let Some(resolved) = resolved else {
+            continue;
+        };
+        let relation_schema: String = resolved.try_get("schema_name")?;
+        let relation_name: String = resolved.try_get("table_name")?;
+        if let Some(existing) = relations
+            .iter_mut()
+            .find(|(_, schema, name)| *schema == relation_schema && *name == relation_name)
+        {
+            // A path that names a table of the current schema: report that
+            // table under the declared path. A second path to one table
+            // keeps the first name.
+            if existing.0 == relation_name {
+                existing.0 = (*declared).to_string();
+            }
+        } else {
+            relations.push(((*declared).to_string(), relation_schema, relation_name));
+        }
+    }
+    let reported_names = relations
+        .iter()
+        .map(|(reported, schema, name)| ((schema.clone(), name.clone()), reported.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    let mut tables = Vec::new();
+    for (table_name, relation_schema, relation_name) in relations {
+        if !include_internal && is_internal_graphql_orm_table(&relation_name) {
             continue;
         }
         let column_rows = sqlx::query(
@@ -4024,8 +4227,8 @@ pub(super) async fn introspect_owned_postgres_connection_with_internal(
                AND NOT a.attisdropped
              ORDER BY a.attnum",
         )
-        .bind(&table_name)
-        .bind(&schema_name)
+        .bind(&relation_name)
+        .bind(&relation_schema)
         .fetch_all(&mut *connection)
         .await?;
 
@@ -4040,8 +4243,8 @@ pub(super) async fn introspect_owned_postgres_connection_with_internal(
                AND tc.constraint_type OPERATOR(pg_catalog.=) 'PRIMARY KEY'
              ORDER BY kcu.ordinal_position",
         )
-        .bind(&table_name)
-        .bind(&schema_name)
+        .bind(&relation_name)
+        .bind(&relation_schema)
         .fetch_all(&mut *connection)
         .await?;
         let primary_key_columns = primary_key_rows
@@ -4066,8 +4269,8 @@ pub(super) async fn introspect_owned_postgres_connection_with_internal(
                AND con.contype OPERATOR(pg_catalog.=) 'u'
              ORDER BY con.conname, keys.ordinality",
         )
-        .bind(&table_name)
-        .bind(&schema_name)
+        .bind(&relation_name)
+        .bind(&relation_schema)
         .fetch_all(&mut *connection)
         .await?;
         let unique_members = unique_rows
@@ -4147,8 +4350,8 @@ pub(super) async fn introspect_owned_postgres_connection_with_internal(
                       ix.indpred, ix.indrelid
              ORDER BY i.relname"
         ))
-        .bind(&table_name)
-        .bind(&schema_name)
+        .bind(&relation_name)
+        .bind(&relation_schema)
         .fetch_all(&mut *connection)
         .await?;
         // A predicate is accepted as a closed set only when the index binds
@@ -4213,6 +4416,7 @@ pub(super) async fn introspect_owned_postgres_connection_with_internal(
             "SELECT
                 con.conname AS constraint_name,
                 target.relname AS target_table,
+                target_namespace.nspname AS target_schema,
                 CASE WHEN con.confdeltype OPERATOR(pg_catalog.=) 'c'::pg_catalog.\"char\" THEN 'CASCADE'
                     WHEN con.confdeltype OPERATOR(pg_catalog.=) 'n'::pg_catalog.\"char\" THEN 'SET NULL'
                     ELSE 'RESTRICT'
@@ -4223,6 +4427,7 @@ pub(super) async fn introspect_owned_postgres_connection_with_internal(
              JOIN pg_catalog.pg_class source ON source.oid OPERATOR(pg_catalog.=) con.conrelid
              JOIN pg_catalog.pg_namespace source_namespace ON source_namespace.oid OPERATOR(pg_catalog.=) source.relnamespace
              JOIN pg_catalog.pg_class target ON target.oid OPERATOR(pg_catalog.=) con.confrelid
+             JOIN pg_catalog.pg_namespace target_namespace ON target_namespace.oid OPERATOR(pg_catalog.=) target.relnamespace
              JOIN LATERAL pg_catalog.unnest(con.conkey) WITH ORDINALITY
                AS source_key(attnum, ordinality) ON true
              JOIN LATERAL pg_catalog.unnest(con.confkey) WITH ORDINALITY
@@ -4237,11 +4442,11 @@ pub(super) async fn introspect_owned_postgres_connection_with_internal(
              WHERE source_namespace.nspname OPERATOR(pg_catalog.=) $2
                AND source.relname OPERATOR(pg_catalog.=) $1
                AND con.contype OPERATOR(pg_catalog.=) 'f'
-             GROUP BY con.oid, con.conname, target.relname, con.confdeltype
+             GROUP BY con.oid, con.conname, target.relname, target_namespace.nspname, con.confdeltype
              ORDER BY con.conname",
         )
-        .bind(&table_name)
-        .bind(&schema_name)
+        .bind(&relation_name)
+        .bind(&relation_schema)
         .fetch_all(&mut *connection)
         .await?;
         let foreign_keys = foreign_key_rows
@@ -4264,7 +4469,23 @@ pub(super) async fn introspect_owned_postgres_connection_with_internal(
                             target_column,
                         })
                         .collect(),
-                    target_table: row.try_get("target_table")?,
+                    target_table: {
+                        let target_table: String = row.try_get("target_table")?;
+                        let target_schema: String = row.try_get("target_schema")?;
+                        // The name the referenced table is reported under. A
+                        // table of another schema that no declared path names
+                        // is qualified, so it cannot be mistaken for a table
+                        // of the current schema with the same name.
+                        match reported_names.get(&(target_schema.clone(), target_table.clone())) {
+                            Some(reported) => reported.clone(),
+                            None if target_schema == schema_name => target_table,
+                            None => format!(
+                                "{}.{}",
+                                DatabaseBackend::Postgres.render_identifier(&target_schema),
+                                DatabaseBackend::Postgres.render_identifier(&target_table)
+                            ),
+                        }
+                    },
                     is_multiple: false,
                     on_delete: match row.try_get::<String, _>("delete_rule")?.as_str() {
                         "CASCADE" => super::core::DeletePolicy::Cascade,
@@ -4291,7 +4512,7 @@ pub(super) async fn introspect_owned_postgres_connection_with_internal(
                   AND tr.tgconstraint OPERATOR(pg_catalog.=) 0::pg_catalog.oid
                   AND NOT tr.tgdeferrable
                   AND p.proname OPERATOR(pg_catalog.=) $3
-                  AND pn.nspname OPERATOR(pg_catalog.=) $2
+                  AND pn.nspname OPERATOR(pg_catalog.=) $4
                   AND lang.lanname OPERATOR(pg_catalog.=) 'plpgsql'
                   AND p.prorettype OPERATOR(pg_catalog.=) 'pg_catalog.trigger'::pg_catalog.regtype
                   AND p.pronargs OPERATOR(pg_catalog.=) 0
@@ -4310,9 +4531,12 @@ pub(super) async fn introspect_owned_postgres_connection_with_internal(
                         AND acl.grantee OPERATOR(pg_catalog.<>) p.proowner
                   )",
         )
-        .bind(&table_name)
-        .bind(&schema_name)
+        .bind(&relation_name)
+        .bind(&relation_schema)
         .bind(&append_trigger_name)
+        // Plans create the function without a schema, so it lives in the
+        // session's schema even when the table does not.
+        .bind(&schema_name)
         .fetch_optional(&mut *connection)
         .await?;
         let append_only = append_function_body.as_deref().is_some_and(|body| {
@@ -4332,8 +4556,8 @@ pub(super) async fn introspect_owned_postgres_connection_with_internal(
                AND con.contype OPERATOR(pg_catalog.=) 'c'
              ORDER BY con.conname",
         )
-        .bind(&table_name)
-        .bind(&schema_name)
+        .bind(&relation_name)
+        .bind(&relation_schema)
         .fetch_all(&mut *connection)
         .await?;
         let check_constraints = check_rows
@@ -4422,6 +4646,16 @@ pub(super) async fn introspect_owned_postgres_connection_with_internal(
 impl IntrospectionBackend for super::PostgresBackend {
     async fn introspect_schema(pool: &Self::Pool) -> crate::Result<SchemaModel> {
         introspect_postgres_schema(pool).await
+    }
+
+    async fn introspect_schema_including(
+        pool: &Self::Pool,
+        declared_tables: &[&str],
+    ) -> crate::Result<SchemaModel> {
+        let mut connection = pool.acquire().await?;
+        introspect_owned_postgres_connection_including(&mut connection, false, declared_tables)
+            .await
+            .map(OwnedSchemaModel::into_legacy)
     }
 }
 

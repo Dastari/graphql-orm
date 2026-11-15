@@ -905,7 +905,7 @@ async fn runtime_role_cannot_reach_other_tenant_search_documents_or_change_log()
     // Incremental export needs a privileged role: the owner reads every entry and the
     // runtime role is refused instead of silently exporting nothing.
     let window = ChangeWindow {
-        after_snapshot_id: None,
+        after_sequence: None,
         until: i64::MAX,
     };
     let exported = owner_database.export_changes(window.clone()).await?;

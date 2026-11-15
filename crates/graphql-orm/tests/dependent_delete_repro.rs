@@ -1942,7 +1942,7 @@ async fn dependent_deletes_are_journaled() {
     assert!(response.errors.is_empty(), "{:?}", response.errors);
     let mut entries = db
         .export_changes(ChangeWindow {
-            after_snapshot_id: None,
+            after_sequence: None,
             until: i64::MAX,
         })
         .await

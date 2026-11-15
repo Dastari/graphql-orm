@@ -217,7 +217,11 @@ async fn plan_pending_schema_stages<B: MigrationBackend>(
     let applied_versions = applied_version_set::<B>(pool).await?;
     ensure_applied_stages_form_prefix(stages, &applied_versions)?;
 
-    let mut current_schema = B::introspect_schema(pool).await?;
+    let mut current_schema = B::introspect_schema_including(
+        pool,
+        &super::schema_manager::declared_tables(stages.iter().map(|stage| &stage.target_schema)),
+    )
+    .await?;
     let live_schema_hash = current_schema.stable_hash();
     let mut planned = Vec::new();
 
@@ -966,12 +970,8 @@ where
             }
         }
 
-        let mut unique_rebuilds = std::collections::BTreeMap::new();
-        for (index, statement) in statements.iter().enumerate() {
-            if let Some(input) = super::migrations::sqlite_unique_rebuild::directive(statement.as_ref()) {
-                unique_rebuilds.insert(index, super::migrations::sqlite_unique_rebuild::prepare(&mut tx, input?).await.map_err(|_| super::migrations::sqlite_unique_rebuild::unsupported())?);
-            }
-        }
+        let mut unique_rebuilds =
+            super::migrations::sqlite_unique_rebuild::prepare_all(&mut tx, statements).await?;
 
         // A legacy rebuild must retain host triggers as well as modeled indexes.
         // Owned plans continue to reject unmodeled triggers before this point.

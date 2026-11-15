@@ -3,7 +3,7 @@ title: "Backup Runtime API"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -150,6 +150,50 @@ PostgreSQL and from the application clock on SQLite. Composite-key entities are 
 Restore imports do not use generated mutation paths and switch PostgreSQL recording off in their
 own transactions, even when a role or database default turns it on, so restore does not pollute the
 journal.
+
+### Incremental export
+
+Every entry has a `seq` column, its position in the journal, which the database assigns in
+increasing order. `export_changes` returns entries in that order and each `BackupChange` carries its
+position in `sequence`. Entry ids are random UUIDs and do not order entries.
+
+```rust
+let mut position = None; // persist this with the backup it belongs to
+let changes = database
+    .export_changes(ChangeWindow { after_sequence: position, until })
+    .await?;
+if let Some(last) = changes.last() {
+    position = Some(last.sequence);
+}
+```
+
+Consecutive exports that each continue from the last returned position return every entry exactly
+once. An export returns a contiguous run of positions: `until` (Unix seconds) ends the run at the
+first entry recorded later rather than leaving it out, so a later export still returns it. Positions
+can have gaps (a rolled-back write uses one) and are never reused.
+
+On PostgreSQL a position is assigned when an entry is written, which can be before its transaction
+commits. So that no entry appears later behind a position already exported, `export_changes` waits
+for the journaled write transactions that were open when it started, by watching the lock the
+recorder holds on the journal, and then returns the entries up to the highest position it saw
+committed. It waits for up to 30 seconds (`CHANGE_EXPORT_DEFAULT_WAIT`);
+`export_changes_with_wait` takes another limit. When the limit passes it returns nothing and fails
+with an error that `ChangeExportTimedOut::from_error` recognises; retry with the same window. A
+write transaction left open for a long time therefore delays exports, and a prepared (two-phase)
+transaction that journaled a write blocks them until it is resolved. Export from the primary: a
+standby cannot see the primary's open transactions, so `export_changes` refuses to run on one.
+SQLite has one writer at a time and never waits.
+
+A journal created by a release before 0.154.0 has no `seq` column, and `export_changes` refuses it
+instead of ordering by id. Run `ensure_change_journal_recorder` (or `ensure_change_journal_table`,
+or on PostgreSQL apply the schema target) as the journal's owner: existing entries are numbered by
+`changed_at` and then by the order they were stored in, and new entries continue after them. On
+PostgreSQL only the owner can add the column; for any other role the call leaves the journal
+unchanged. Positions kept from an export made before the upgrade are entry ids and cannot be
+converted: take a full backup, then start incremental exports from the position it returns.
+
+The journal does not record `TRUNCATE`, or rows that a foreign-key cascade deletes from a table
+without a recorder (a composite-key table, for example). Take a full backup after either.
 
 On PostgreSQL only privileged roles can read or write the journal. It has RLS enabled and no
 policies, so a role subject to RLS can neither read nor write entries; the recorder runs as the

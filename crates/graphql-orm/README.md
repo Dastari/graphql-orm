@@ -10,6 +10,19 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.154.0 fixes data-safety defects in migrations, the change journal
+and retention. One change is breaking: `export_changes` pages the change
+journal by a new monotonic `seq` column (`ChangeWindow::after_sequence`,
+`BackupChange::sequence`) instead of comparing random ids, which skipped and
+repeated entries, and an existing journal needs its sequence added once.
+PostgreSQL type aliases (`varchar(50)`, `int`, `timestamptz`) no longer plan
+spurious column changes; a foreign key stays attached across a paired
+widening; schema-qualified PostgreSQL entity tables re-plan; a SQLite plan may
+remove a child foreign key together with the parent key it referenced; and
+PostgreSQL inserts and retention purges work again for row-level security
+without an `UPDATE` policy. See the
+[migration guide](../../MIGRATION.md#01520-to-01540-migrations-change-journal-and-retention).
+
 ORM 0.152.0 adds a conservative batched row-security probe for recovery and maintenance callers. Upgrade macros to the matching version; no data migration is needed.
 
 Version 0.151.0 corrects SQL Server behaviour, with two breaking changes
