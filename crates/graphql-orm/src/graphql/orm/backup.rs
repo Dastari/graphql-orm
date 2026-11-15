@@ -166,6 +166,41 @@ impl std::fmt::Display for ChangeExportTimedOut {
 
 impl std::error::Error for ChangeExportTimedOut {}
 
+/// The change journal could not be given its sequence because a database
+/// object already has the name the upgrade needs for the rebuilt journal.
+///
+/// Nothing was changed: the journal, the conflicting object and their rows are
+/// as they were. Rename or remove the conflicting object, then prepare the
+/// journal again. Read it from the error with
+/// [`ChangeJournalUpgradeConflict::from_error`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChangeJournalUpgradeConflict {
+    /// Name of the existing database object.
+    pub name: String,
+}
+
+impl std::fmt::Display for ChangeJournalUpgradeConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the change journal upgrade needs the name {} but a database object already has it; nothing was changed",
+            self.name
+        )
+    }
+}
+
+impl std::error::Error for ChangeJournalUpgradeConflict {}
+
+impl ChangeJournalUpgradeConflict {
+    /// The conflict carried by `error`, if that is what it reports.
+    pub fn from_error(error: &crate::Error) -> Option<&Self> {
+        match error {
+            sqlx::Error::Decode(source) => source.downcast_ref::<Self>(),
+            _ => None,
+        }
+    }
+}
+
 impl ChangeExportTimedOut {
     /// The timeout carried by `error`, if that is what it reports.
     pub fn from_error(error: &crate::Error) -> Option<&Self> {
@@ -589,61 +624,94 @@ fn sqlite_change_journal_table_sql(table: &str) -> String {
 ///
 /// SQLite cannot add an `AUTOINCREMENT` key to an existing table, so the
 /// journal is rebuilt in one immediate transaction: existing entries are
-/// copied in `changed_at` and then insertion (`rowid`) order.
+/// copied in `changed_at` and then insertion (`rowid`) order. The transaction
+/// guard rolls the rebuild back when a statement or the commit fails, and a
+/// cancelled call closes its connection, which also rolls back, so the pool
+/// never hands out a connection that is still inside the upgrade.
+///
+/// The rebuild needs the name `__graphql_orm_change_log_sequenced` for a
+/// moment. Anything that already has that name was not created by this
+/// rebuild, which never commits it, so the upgrade refuses with
+/// [`ChangeJournalUpgradeConflict`] before it changes anything rather than
+/// drop an object it does not own.
 #[cfg(feature = "sqlite")]
 async fn ensure_change_journal_table(pool: &DbPool) -> crate::Result<()> {
-    let mut connection = pool.acquire().await?;
-    sqlx::query("BEGIN IMMEDIATE")
-        .execute(&mut *connection)
+    // A caller that drops this future while `BEGIN IMMEDIATE` is in flight
+    // leaves SQLx no transaction guard to roll back, and the connection would
+    // return to the pool inside that transaction. Until the upgrade has run
+    // to an end, the lease is marked to be closed instead, which rolls back.
+    struct Lease {
+        connection: sqlx::pool::PoolConnection<sqlx::Sqlite>,
+        finished: bool,
+    }
+    impl Drop for Lease {
+        fn drop(&mut self) {
+            if !self.finished {
+                self.connection.close_on_drop();
+            }
+        }
+    }
+    let mut lease = Lease {
+        connection: pool.acquire().await?,
+        finished: false,
+    };
+    let result = upgrade_sqlite_change_journal(&mut lease.connection).await;
+    // Reached only when the upgrade was not cancelled: it committed, or its
+    // transaction guard has rolled it back.
+    lease.finished = true;
+    result
+}
+
+#[cfg(feature = "sqlite")]
+async fn upgrade_sqlite_change_journal(
+    connection: &mut sqlx::SqliteConnection,
+) -> crate::Result<()> {
+    use sqlx::Connection;
+    let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
+    let table = quote_identifier(CHANGE_JOURNAL_TABLE);
+    let columns: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info(?, 'main')")
+        .bind(CHANGE_JOURNAL_TABLE)
+        .fetch_all(&mut *tx)
         .await?;
-    let result = async {
-        let table = quote_identifier(CHANGE_JOURNAL_TABLE);
-        let columns: Vec<String> =
-            sqlx::query_scalar("SELECT name FROM pragma_table_info(?, 'main')")
-                .bind(CHANGE_JOURNAL_TABLE)
-                .fetch_all(&mut *connection)
-                .await?;
-        if columns.is_empty() {
-            sqlx::query(&sqlite_change_journal_table_sql(CHANGE_JOURNAL_TABLE))
-                .execute(&mut *connection)
-                .await?;
-        } else if !columns
-            .iter()
-            .any(|column| column == CHANGE_JOURNAL_SEQUENCE_COLUMN)
-        {
-            let upgraded_name = format!("{CHANGE_JOURNAL_TABLE}_sequenced");
-            let upgraded = quote_identifier(&upgraded_name);
-            sqlx::query(&format!("DROP TABLE IF EXISTS {upgraded}"))
-                .execute(&mut *connection)
-                .await?;
-            sqlx::query(&sqlite_change_journal_table_sql(&upgraded_name))
-                .execute(&mut *connection)
-                .await?;
-            sqlx::query(&format!(
-                "INSERT INTO {upgraded} ({CHANGE_JOURNAL_ENTRY_COLUMNS}) SELECT {CHANGE_JOURNAL_ENTRY_COLUMNS} FROM {table} ORDER BY changed_at, rowid"
-            ))
-            .execute(&mut *connection)
+    if columns.is_empty() {
+        sqlx::query(&sqlite_change_journal_table_sql(CHANGE_JOURNAL_TABLE))
+            .execute(&mut *tx)
             .await?;
-            sqlx::query(&format!("DROP TABLE {table}"))
-                .execute(&mut *connection)
-                .await?;
-            sqlx::query(&format!("ALTER TABLE {upgraded} RENAME TO {table}"))
-                .execute(&mut *connection)
-                .await?;
+    } else if !columns
+        .iter()
+        .any(|column| column == CHANGE_JOURNAL_SEQUENCE_COLUMN)
+    {
+        let upgraded_name = format!("{CHANGE_JOURNAL_TABLE}_sequenced");
+        let taken: i64 = sqlx::query_scalar(
+            "SELECT (SELECT COUNT(*) FROM main.sqlite_master WHERE name = ?1 COLLATE NOCASE) + (SELECT COUNT(*) FROM temp.sqlite_master WHERE name = ?1 COLLATE NOCASE)",
+        )
+        .bind(&upgraded_name)
+        .fetch_one(&mut *tx)
+        .await?;
+        if taken != 0 {
+            return Err(sqlx::Error::Decode(Box::new(
+                ChangeJournalUpgradeConflict {
+                    name: upgraded_name,
+                },
+            )));
         }
-        Ok::<_, sqlx::Error>(())
+        let upgraded = quote_identifier(&upgraded_name);
+        sqlx::query(&sqlite_change_journal_table_sql(&upgraded_name))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(&format!(
+            "INSERT INTO {upgraded} ({CHANGE_JOURNAL_ENTRY_COLUMNS}) SELECT {CHANGE_JOURNAL_ENTRY_COLUMNS} FROM {table} ORDER BY changed_at, rowid"
+        ))
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(&format!("DROP TABLE {table}"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(&format!("ALTER TABLE {upgraded} RENAME TO {table}"))
+            .execute(&mut *tx)
+            .await?;
     }
-    .await;
-    match result {
-        Ok(()) => {
-            sqlx::query("COMMIT").execute(&mut *connection).await?;
-            Ok(())
-        }
-        Err(error) => {
-            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
-            Err(error)
-        }
-    }
+    tx.commit().await
 }
 
 #[cfg(feature = "postgres")]

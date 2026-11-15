@@ -187,7 +187,11 @@ SQLite has one writer at a time and never waits.
 A journal created by a release before 0.154.0 has no `seq` column, and `export_changes` refuses it
 instead of ordering by id. Run `ensure_change_journal_recorder` (or `ensure_change_journal_table`,
 or on PostgreSQL apply the schema target) as the journal's owner: existing entries are numbered by
-`changed_at` and then by the order they were stored in, and new entries continue after them. On
+`changed_at` and then by the order they were stored in, and new entries continue after them. The
+upgrade is all or nothing on both backends. On SQLite it rebuilds the journal in one transaction
+under the temporary name `__graphql_orm_change_log_sequenced`; when an object with that name already
+exists it changes nothing and fails with an error `ChangeJournalUpgradeConflict::from_error`
+recognises, because that object is not the upgrade's to drop. On
 PostgreSQL only the owner can add the column; for any other role the call leaves the journal
 unchanged. Positions kept from an export made before the upgrade are entry ids and cannot be
 converted: take a full backup, then start incremental exports from the position it returns.

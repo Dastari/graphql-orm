@@ -27,7 +27,11 @@ the change journal and needs one schema step.
     `ensure_change_journal_recorder` (or `ensure_change_journal_table`), or on
     PostgreSQL apply the schema target. Existing entries are numbered by
     `changed_at` and then by storage order. SQLite rebuilds the journal table
-    in one transaction; PostgreSQL adds an identity column under an `ACCESS
+    in one transaction, which a failure or a cancelled call rolls back. The
+    rebuild needs the table name `__graphql_orm_change_log_sequenced` for its
+    duration; if any object already has that name the call changes nothing and
+    fails with an error `ChangeJournalUpgradeConflict::from_error` recognises
+    (rename or remove that object, then call again); PostgreSQL adds an identity column under an `ACCESS
     EXCLUSIVE` lock, which rewrites the journal. Until this has run,
     `export_changes` fails rather than ordering by id. A PostgreSQL role that
     does not own the journal cannot add the column, and the call then leaves
