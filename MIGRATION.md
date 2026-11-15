@@ -58,6 +58,12 @@ turn on one of the new settings.
   `RuntimeGraphqlOptions::with_int64_identity_strings()` types runtime
   `RecordVersion` and integer live keys as `RuntimeInt64` strings. It changes
   the SDL and fingerprints. The next breaking release makes it the default.
+- **Router nested directives (changelog correction). No action** in code. The
+  router has never enforced SDL `@authenticated` or `@requiresScopes` on
+  nested fields, contrary to how the 0.18.0 changelog read. Keep
+  `auth = "required"` and policies on every entity a join can reach; do not
+  rely on a router rule on the parent query. Enforcement is tracked in
+  [#729](https://github.com/Dastari/graphql-orm/issues/729).
 - **Keyset cursor documentation. No action.** Static keyset cursors were never
   tamper-evident; the documentation now says so. Do not treat a cursor as
   proof of anything: authorization is applied to every page.
