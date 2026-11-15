@@ -537,7 +537,7 @@ impl OrmAiContextCompactionService {
                 prompt_blocks.push(PromptBlock {
                     block_id: block.id,
                     kind: block.block_kind.clone(),
-                    content,
+                    content: compaction_block_content(&block.block_kind, content)?,
                 });
                 block_ids.push(block.id);
                 egress_sources.push(AiDataSourceRef {
@@ -1104,6 +1104,26 @@ struct StoredParent {
     source_hash: String,
 }
 
+/// Content of one source block as the summarizer sees it.
+///
+/// An entity-reference block contributes its handle and nothing else. A
+/// summary is stored and reused across turns, so it must never contain what a
+/// reference resolved to for some principal at some earlier time; whoever
+/// uses the conversation later resolves the handle again under their current
+/// authority. The handle is rebuilt from the stored kind and identifier, so
+/// no other member of a stored block can reach the prompt.
+fn compaction_block_content(
+    block_kind: &str,
+    content: serde_json::Value,
+) -> Result<serde_json::Value, AiError> {
+    if !crate::is_entity_reference_block_kind(block_kind) {
+        return Ok(content);
+    }
+    crate::entity_references::stored_handle(&content)
+        .map(|handle| crate::entity_references::stored_handle_content(&handle))
+        .ok_or(AiError::Conflict)
+}
+
 fn validate_result(
     prepared: &AiPreparedContextCompaction,
     result: &AiProviderCallResult,
@@ -1611,6 +1631,45 @@ mod tests {
             policy_version: "context-egress-v1".to_owned(),
             consent_reference: None,
         }
+    }
+
+    /// A summary outlives the access of whoever could read a referenced
+    /// entity. Whatever a reference block holds, only its handle may reach
+    /// the summarizer.
+    #[test]
+    fn entity_reference_blocks_reach_the_summarizer_as_handles_only() {
+        let handle = serde_json::json!({"reference": {"kind": "record", "id": "r-1"}});
+        assert_eq!(
+            compaction_block_content(crate::AI_ENTITY_REFERENCE_BLOCK_KIND, handle.clone())
+                .unwrap(),
+            handle
+        );
+        // Even a stored block that carried a resolved payload contributes
+        // the handle alone.
+        let with_payload = serde_json::json!({
+            "reference": {"kind": "record", "id": "r-1", "label": "private label"},
+            "status": "resolved",
+            "data": {"salary": 1}
+        });
+        let prompt =
+            compaction_block_content(crate::AI_ENTITY_REFERENCE_BLOCK_KIND, with_payload).unwrap();
+        assert_eq!(prompt, handle);
+        assert!(!prompt.to_string().contains("salary"));
+        assert!(!prompt.to_string().contains("private label"));
+        // A malformed reference block stops compaction instead of leaking.
+        assert!(matches!(
+            compaction_block_content(
+                crate::AI_ENTITY_REFERENCE_BLOCK_KIND,
+                serde_json::json!({"data": {"salary": 1}})
+            ),
+            Err(AiError::Conflict)
+        ));
+        // Other blocks are untouched.
+        let text = serde_json::json!({"text": "hello"});
+        assert_eq!(
+            compaction_block_content("text", text.clone()).unwrap(),
+            text
+        );
     }
 
     #[tokio::test]

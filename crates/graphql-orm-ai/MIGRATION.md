@@ -14,9 +14,9 @@ supersedes: []
 
 Apply AI schema module `0.81.0` before starting workers. It changes no table,
 column, index or constraint and needs no data backfill. It records a new value
-domain: a user message may now store `entity_reference`,
-`entity_reference_unavailable` and `entity_reference_too_large` blocks after
-its text block.
+domain: a user message may now store `entity_reference` blocks after its text
+block. Such a block holds a reference handle (kind and identifier) and never
+resolved data.
 
 ### Breaking changes
 
@@ -27,8 +27,9 @@ its text block.
   field defaults to an empty list.
 - Code that reads message blocks directly must no longer assume a user message
   has exactly one block. Block 0 is always the text. Clients that render
-  `AiMessageBlockView` should handle, or ignore, the three reference block
-  kinds.
+  `AiMessageBlockView` should handle, or ignore, the `entity_reference` block
+  kind, whose content is resolved for the reader on every read and is either
+  resolved data or a fixed unavailable marker.
 - Publishing a skill version now rejects an input or output schema nested more
   than 32 levels deep, or with a `pattern` value or `patternProperties` key
   longer than 256 bytes. Stored versions are unaffected.
@@ -37,10 +38,14 @@ its text block.
 
 - **Entity references** are off until a host installs
   `OrmAiSessionService::with_entity_references`. Until then a message that
-  carries a reference is rejected with `InvalidInput`. The host worker that
-  builds provider requests adds resolved references with
-  `entity_reference_model_input` and authorizes their egress like any other
-  block. See [entity references](docs/entity-references.md).
+  carries a reference is rejected with `InvalidInput`. Only reference
+  handles are stored. The host hook must evaluate current row, field and
+  scope policy on every call, because it is called again at every use. The
+  host worker that builds provider requests calls
+  `OrmAiSessionService::entity_reference_model_input` with the run's current
+  principal for each turn, uses the result for that request only, and
+  authorizes its egress like any other block. See
+  [entity references](docs/entity-references.md).
 - **Anthropic model aliases:** call `AnthropicProvider::with_model_snapshot`
   for each alias a deployment requests, naming the dated snapshot it resolves
   to. Pricing stays keyed by the requested identifier. Without a mapping,

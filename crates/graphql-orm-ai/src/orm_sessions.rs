@@ -842,6 +842,7 @@ impl AiSessionService for OrmAiSessionService {
             .map_err(map_transaction)?;
 
         let mut views = Vec::with_capacity(rows.len());
+        let mut reference_views = Vec::new();
         for row in rows {
             let content = self
                 .open_value(
@@ -855,6 +856,13 @@ impl AiSessionService for OrmAiSessionService {
                     &row.protected_content,
                 )
                 .await?;
+            if crate::is_entity_reference_block_kind(&row.block_kind) {
+                // The stored content is a handle. What the reader sees is
+                // resolved below, for this reader, now.
+                let handle = crate::entity_references::stored_handle(&content)
+                    .ok_or(AiError::PersistenceFailed)?;
+                reference_views.push((views.len(), handle));
+            }
             views.push(AiMessageBlockView {
                 id: row.id,
                 message_id: row.message_id,
@@ -864,6 +872,16 @@ impl AiSessionService for OrmAiSessionService {
                 byte_count: row.byte_count,
                 line_count: row.line_count,
             });
+        }
+        let handles = reference_views
+            .iter()
+            .map(|(_, handle)| handle.clone())
+            .collect::<Vec<_>>();
+        let resolved = self
+            .resolve_entity_references_for_use(principal, &scope, handles)
+            .await;
+        for ((position, _), used) in reference_views.into_iter().zip(resolved) {
+            views[position].content = async_graphql::Json(used.view_content());
         }
         Ok(views)
     }
@@ -1656,18 +1674,34 @@ impl AiSessionService for OrmAiSessionService {
         let content_hash =
             message_content_hash(&input.text, &deduplicated_attachments, &input.references);
         // Resolved only now: the sender is an established writer of this
-        // session, and the hook runs as that sender.
-        let reference_outcomes = match &self.entity_references {
-            Some(registry) if !input.references.is_empty() => {
-                registry
-                    .resolve_all(principal, &scope, &input.references)
-                    .await
-            }
+        // session, and the hook runs as that sender. The answer is used for
+        // the notices alone. Nothing it returned is stored: every later use
+        // resolves the handle again for whoever is acting then.
+        let reference_notices = match &self.entity_references {
+            Some(registry) if !input.references.is_empty() => registry
+                .resolve_outcomes(principal, &scope, &input.references)
+                .await
+                .iter()
+                .zip(&input.references)
+                .enumerate()
+                .filter_map(|(position, (outcome, reference))| {
+                    Some(crate::AiEntityReferenceNotice {
+                        reference_index: i32::try_from(position).ok()?,
+                        kind: reference.kind.clone(),
+                        id: reference.id.clone(),
+                        code: outcome.notice_code()?,
+                    })
+                })
+                .collect(),
             _ => Vec::new(),
         };
-        let mut reference_blocks = Vec::with_capacity(reference_outcomes.len());
-        for (reference, outcome) in input.references.iter().zip(&reference_outcomes) {
+        let mut reference_blocks = Vec::with_capacity(input.references.len());
+        for reference in &input.references {
             let reference_block_id = Uuid::new_v4();
+            let handle = crate::entity_references::stored_handle_content(reference);
+            let handle_bytes = serde_json::to_vec(&handle)
+                .map_err(|_| AiError::PersistenceFailed)?
+                .len();
             let protected = self
                 .protect_value(
                     &policy,
@@ -1677,17 +1711,15 @@ impl AiSessionService for OrmAiSessionService {
                         "protected_content",
                         &scope,
                     ),
-                    outcome.block_content(reference),
+                    handle,
                 )
                 .await?;
             reference_blocks.push((
                 reference_block_id,
-                outcome.block_kind(),
                 protected,
-                i64::try_from(outcome.byte_count()).map_err(|_| AiError::PersistenceFailed)?,
+                i64::try_from(handle_bytes).map_err(|_| AiError::PersistenceFailed)?,
             ));
         }
-        let references = input.references.clone();
         let preview = bounded_prefix(&input.text, self.limits.maximum_preview_bytes);
         let protected_preview = self
             .protect_value(
@@ -1790,33 +1822,14 @@ impl AiSessionService for OrmAiSessionService {
                         let Some(run_id) = existing.run_id else {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         };
-                        // A replay reports what the accepted message stored,
-                        // not what the references would resolve to now.
-                        let stored = if references.is_empty() {
-                            Vec::new()
-                        } else {
-                            tx.query::<AiMessageBlockRecord>()
-                                .filter(AiMessageBlockRecordWhereInput {
-                                    message_id: Some(UuidFilter {
-                                        eq: Some(existing.id),
-                                        ..Default::default()
-                                    }),
-                                    ..Default::default()
-                                })
-                                .internal_limit(references.len().saturating_add(1) as i64)
-                                .fetch_all()
-                                .await
-                                .map_err(OrmPublicError::from)?
-                        };
+                        // The stored message is unchanged. The notices are
+                        // the caller's current ones: a notice describes what a
+                        // reference resolves to now, and nothing resolved is
+                        // stored to replay.
                         return Ok(SendAiMessagePayload {
                             message_id: existing.id,
                             run_id,
-                            reference_notices: reference_notices(
-                                &references,
-                                stored
-                                    .iter()
-                                    .map(|block| (block.block_index, block.block_kind.as_str())),
-                            ),
+                            reference_notices,
                         });
                     }
 
@@ -1905,8 +1918,7 @@ impl AiSessionService for OrmAiSessionService {
                     })
                     .await
                     .map_err(OrmPublicError::from)?;
-                    let mut stored_kinds = Vec::with_capacity(reference_blocks.len());
-                    for (position, (id, kind, protected_content, byte_count)) in
+                    for (position, (id, protected_content, byte_count)) in
                         reference_blocks.into_iter().enumerate()
                     {
                         let block_index = i64::try_from(position)
@@ -1916,14 +1928,13 @@ impl AiSessionService for OrmAiSessionService {
                             id,
                             message_id,
                             block_index,
-                            block_kind: kind.to_owned(),
+                            block_kind: crate::AI_ENTITY_REFERENCE_BLOCK_KIND.to_owned(),
                             protected_content,
                             byte_count,
                             line_count: 1,
                         })
                         .await
                         .map_err(OrmPublicError::from)?;
-                        stored_kinds.push((block_index, kind));
                     }
                     tx.insert::<AiRunRecord>(CreateAiRunRecordInput {
                         recovery_epoch_id: None,
@@ -2018,7 +2029,7 @@ impl AiSessionService for OrmAiSessionService {
                     Ok(SendAiMessagePayload {
                         message_id,
                         run_id,
-                        reference_notices: reference_notices(&references, stored_kinds),
+                        reference_notices,
                     })
                 })
             })
@@ -2028,6 +2039,147 @@ impl AiSessionService for OrmAiSessionService {
 }
 
 impl OrmAiSessionService {
+    /// Resolves stored handles for one use by `principal`. Without a registry
+    /// every handle is unavailable.
+    async fn resolve_entity_references_for_use(
+        &self,
+        principal: &AuthPrincipal,
+        scope: &AiScope,
+        handles: Vec<crate::AiEntityReferenceInput>,
+    ) -> Vec<crate::AiEntityReferenceUse> {
+        match &self.entity_references {
+            Some(registry) if !handles.is_empty() => {
+                registry.resolve_for_use(principal, scope, &handles).await
+            }
+            _ => handles
+                .into_iter()
+                .map(crate::AiEntityReferenceUse::unavailable)
+                .collect(),
+        }
+    }
+
+    /// Builds the entity-reference model input of one turn.
+    ///
+    /// Call this each time a provider request is assembled, with the
+    /// principal that is current for the run (rehydrated, not captured at
+    /// submission). For every listed message of the session that carries
+    /// references, each stored handle is resolved again through the host hook
+    /// for that principal. A reference the principal can no longer read, one
+    /// that no longer exists, a failed resolution, and every reference beyond
+    /// [`crate::AiEntityReferenceLimits::maximum_resolutions_per_use`] across
+    /// the whole call become the fixed unavailable marker. Messages without
+    /// references and purged messages are omitted.
+    ///
+    /// The result must be used for that one request and not stored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidInput`] for more than 256 or repeated
+    /// message identifiers, and [`AiError::NotFound`] when a message does not
+    /// exist, is not in `session_id`, or the session is not readable by
+    /// `principal` under current policy.
+    pub async fn entity_reference_model_input(
+        &self,
+        principal: &AuthPrincipal,
+        session_id: AiSessionId,
+        message_ids: &[Uuid],
+    ) -> Result<Vec<crate::AiMessageEntityReferenceInput>, AiError> {
+        crate::principal_projection::refuse_delegated_request(principal)?;
+        let mut distinct = message_ids.to_vec();
+        distinct.sort_unstable();
+        distinct.dedup();
+        if message_ids.len() > 256 || distinct.len() != message_ids.len() {
+            return Err(AiError::InvalidInput(
+                "invalid entity reference message list".to_owned(),
+            ));
+        }
+        self.require_session_policy(principal, session_id, AiSessionAction::Read)
+            .await?;
+        let session = self
+            .visible_session(principal, session_id, AiSessionAction::Read)
+            .await?
+            .ok_or(AiError::NotFound)?;
+        let scope = record_scope(&session);
+        let policy = self.protection_policy(principal, &scope).await?;
+        let mut per_message = Vec::new();
+        let mut handles = Vec::new();
+        for message_id in message_ids {
+            let message = AiMessageRecord::find_by_id(&self.database, message_id)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
+            if message.session_id != session.id {
+                return Err(AiError::NotFound);
+            }
+            if message.content_purged_at.is_some() || message.block_count <= 1 {
+                continue;
+            }
+            let message_id = *message_id;
+            let rows = self
+                .database
+                .transaction(TransactionMode::Default, move |tx| {
+                    Box::pin(async move {
+                        tx.query::<AiMessageBlockRecord>()
+                            .filter(AiMessageBlockRecordWhereInput {
+                                message_id: Some(UuidFilter {
+                                    eq: Some(message_id),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .default_order()
+                            .internal_limit(
+                                crate::entity_references::MAXIMUM_USER_MESSAGE_BLOCKS + 1,
+                            )
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)
+                    })
+                })
+                .await
+                .map_err(map_transaction)?;
+            let first = handles.len();
+            for row in rows {
+                if !crate::is_entity_reference_block_kind(&row.block_kind) {
+                    continue;
+                }
+                let content = self
+                    .open_value(
+                        &policy,
+                        content_context(
+                            "graphql_orm_ai_message_blocks",
+                            row.id,
+                            "protected_content",
+                            &scope,
+                        ),
+                        &row.protected_content,
+                    )
+                    .await?;
+                handles.push(
+                    crate::entity_references::stored_handle(&content)
+                        .ok_or(AiError::PersistenceFailed)?,
+                );
+            }
+            if handles.len() > first {
+                per_message.push((message_id, first..handles.len()));
+            }
+        }
+        // One resolution pass for the whole turn, so the cap is per turn.
+        let resolved = self
+            .resolve_entity_references_for_use(principal, &scope, handles)
+            .await;
+        Ok(per_message
+            .into_iter()
+            .map(|(message_id, range)| crate::AiMessageEntityReferenceInput {
+                message_id,
+                blocks: resolved[range]
+                    .iter()
+                    .map(crate::AiEntityReferenceUse::model_input_block)
+                    .collect(),
+            })
+            .collect())
+    }
+
     async fn transition_session(
         &self,
         principal: &AuthPrincipal,
@@ -2342,30 +2494,6 @@ fn message_content_hash(
         }
     }
     hex::encode(hash.finalize())
-}
-
-/// Builds the notices for the dropped references of one stored message.
-/// Reference `n` is stored as block `n + 1`, after the text block.
-fn reference_notices<'a>(
-    references: &[crate::AiEntityReferenceInput],
-    stored: impl IntoIterator<Item = (i64, &'a str)>,
-) -> Vec<crate::AiEntityReferenceNotice> {
-    let mut notices = stored
-        .into_iter()
-        .filter_map(|(block_index, kind)| {
-            let code = crate::entity_references::notice_code_for_block_kind(kind)?;
-            let position = usize::try_from(block_index.checked_sub(1)?).ok()?;
-            let reference = references.get(position)?;
-            Some(crate::AiEntityReferenceNotice {
-                reference_index: i32::try_from(position).ok()?,
-                kind: reference.kind.clone(),
-                id: reference.id.clone(),
-                code,
-            })
-        })
-        .collect::<Vec<_>>();
-    notices.sort_by_key(|notice| notice.reference_index);
-    notices
 }
 
 fn unix_seconds() -> i64 {

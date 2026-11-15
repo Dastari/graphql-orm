@@ -1,8 +1,11 @@
 #![cfg(feature = "sqlite")]
 
 //! Per-message structured entity references: a reference never grants
-//! access, never reveals whether an entity exists, and stays bounded.
+//! access, never reveals whether an entity exists, stays bounded, and is
+//! resolved again for the current principal at every use. Only the handle is
+//! stored.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use agql_auth::{AccessTokenMetadata, AuthPrincipal, AuthUser, SessionContext};
@@ -56,14 +59,35 @@ impl AiContentProtectionPolicyResolver for ProtectionPolicy {
     }
 }
 
-/// Host read policy for the fixture: `widget:visible` and `widget:large`
-/// exist and are readable, `widget:hidden` exists but is denied,
-/// `widget:broken` fails, and nothing else exists.
-#[derive(Default)]
+/// Host read policy for the fixture. `widget:visible` and `widget:large`
+/// exist, `widget:hidden` exists but is denied, `widget:broken` fails and
+/// nothing else exists. Access is evaluated on every call: `row_access`
+/// stands for a row policy and `field_scope` for a field-level scope that
+/// gates the `owner_note` field.
 struct Widgets {
     calls: Mutex<Vec<(String, String, String)>>,
-    reveal_hidden: std::sync::atomic::AtomicBool,
+    row_access: AtomicBool,
+    field_scope: AtomicBool,
 }
+
+impl Default for Widgets {
+    fn default() -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            row_access: AtomicBool::new(true),
+            field_scope: AtomicBool::new(true),
+        }
+    }
+}
+
+impl Widgets {
+    fn call_count(&self) -> usize {
+        self.calls.lock().unwrap().len()
+    }
+}
+
+const PAYLOAD_MARKER: &str = "Visible widget";
+const FIELD_MARKER: &str = "field-scoped note";
 
 #[async_trait]
 impl AiEntityReferenceResolver for Widgets {
@@ -81,19 +105,55 @@ impl AiEntityReferenceResolver for Widgets {
             reference.kind.clone(),
             reference.id.clone(),
         ));
+        if !self.row_access.load(Ordering::SeqCst) {
+            return Ok(None);
+        }
         match reference.id.as_str() {
-            "visible" => Ok(Some(AiResolvedEntityReference::new(
-                json!({"name": "Visible widget", "state": "active"}),
-            ))),
-            "hidden" if self.reveal_hidden.load(std::sync::atomic::Ordering::SeqCst) => Ok(Some(
-                AiResolvedEntityReference::new(json!({"name": "Hidden widget"})),
-            )),
             "large" => Ok(Some(AiResolvedEntityReference::new(
                 json!({"notes": "x".repeat(4096)}),
             ))),
             "broken" => Err(AiError::PersistenceFailed),
-            _ => Ok(None),
+            "hidden" | "absent" => Ok(None),
+            _ => {
+                let mut data = json!({"name": PAYLOAD_MARKER, "state": "active"});
+                if self.field_scope.load(Ordering::SeqCst) {
+                    data["owner_note"] = json!(FIELD_MARKER);
+                }
+                Ok(Some(AiResolvedEntityReference::new(data)))
+            }
         }
+    }
+}
+
+/// Database-managed protection that records everything it is asked to store.
+#[derive(Default)]
+struct RecordingProtector {
+    stored: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl AiContentProtector for RecordingProtector {
+    async fn protect(
+        &self,
+        policy: &AiContentProtectionPolicy,
+        context: &ContentProtectionContext,
+        value: serde_json::Value,
+    ) -> Result<ProtectedContentEnvelope, ContentProtectionError> {
+        self.stored.lock().unwrap().push(value.to_string());
+        DatabaseManagedContentProtector
+            .protect(policy, context, value)
+            .await
+    }
+
+    async fn open(
+        &self,
+        policy: &AiContentProtectionPolicy,
+        context: &ContentProtectionContext,
+        envelope: &ProtectedContentEnvelope,
+    ) -> Result<serde_json::Value, ContentProtectionError> {
+        DatabaseManagedContentProtector
+            .open(policy, context, envelope)
+            .await
     }
 }
 
@@ -111,7 +171,7 @@ fn principal(subject: &str) -> AuthPrincipal {
     })
 }
 
-async fn base_service() -> OrmAiSessionService {
+async fn database() -> Database<SqliteBackend> {
     let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
         .await
         .expect("in-memory SQLite should open")
@@ -137,19 +197,35 @@ async fn base_service() -> OrmAiSessionService {
         .readiness_proof()
         .await
         .expect("a test store should record its first live epoch");
+    database
+}
+
+fn service_on(
+    database: Database<SqliteBackend>,
+    protector: Arc<dyn AiContentProtector>,
+) -> OrmAiSessionService {
     OrmAiSessionService::new(
         database,
         Arc::new(OwnerOnly),
         Arc::new(ProtectionPolicy),
-        Arc::new(DatabaseManagedContentProtector),
+        protector,
     )
 }
 
-async fn service_with(widgets: Arc<Widgets>) -> OrmAiSessionService {
-    let registry = AiEntityReferenceRegistry::new(["widget"], widgets)
+fn registry(widgets: Arc<Widgets>) -> AiEntityReferenceRegistry {
+    AiEntityReferenceRegistry::new(["widget"], widgets)
         .expect("registry is valid")
-        .with_limits(AiEntityReferenceLimits::new(4, 32, 1024, 2048).expect("limits are valid"));
-    base_service().await.with_entity_references(registry)
+        .with_limits(AiEntityReferenceLimits::new(4, 32, 1024, 2048).expect("limits are valid"))
+}
+
+async fn base_service() -> OrmAiSessionService {
+    service_on(database().await, Arc::new(DatabaseManagedContentProtector))
+}
+
+async fn service_with(widgets: Arc<Widgets>) -> OrmAiSessionService {
+    base_service()
+        .await
+        .with_entity_references(registry(widgets))
 }
 
 async fn session(service: &OrmAiSessionService, owner: &AuthPrincipal) -> Uuid {
@@ -207,6 +283,35 @@ async fn message_count(service: &OrmAiSessionService, owner: &AuthPrincipal, id:
         .len()
 }
 
+fn unavailable(id: &str) -> serde_json::Value {
+    json!({"reference": {"kind": "widget", "id": id}, "status": "unavailable"})
+}
+
+/// The model blocks of one message for one turn, as JSON values.
+async fn turn_input(
+    service: &OrmAiSessionService,
+    principal: &AuthPrincipal,
+    session_id: Uuid,
+    message_ids: &[Uuid],
+) -> Vec<Vec<serde_json::Value>> {
+    service
+        .entity_reference_model_input(principal, AiSessionId(session_id), message_ids)
+        .await
+        .expect("turn input builds")
+        .into_iter()
+        .map(|message| {
+            message
+                .blocks
+                .into_iter()
+                .map(|block| match block {
+                    ModelInputBlock::Json { value } => value,
+                    other => panic!("a reference is a JSON block, got {other:?}"),
+                })
+                .collect()
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn references_are_rejected_without_a_registry_and_for_unknown_kinds() {
     let owner = principal("owner");
@@ -244,16 +349,19 @@ async fn references_are_rejected_without_a_registry_and_for_unknown_kinds() {
         ));
     }
     assert_eq!(message_count(&service, &owner, id).await, 0);
-    assert!(
-        widgets.calls.lock().unwrap().is_empty(),
+    assert_eq!(
+        widgets.call_count(),
+        0,
         "a rejected message must not reach the host resolver"
     );
 }
 
 #[tokio::test]
-async fn denied_missing_and_failed_references_are_indistinguishable_and_carry_no_data() {
+async fn only_handles_are_stored_and_unavailable_references_are_indistinguishable() {
     let widgets = Arc::new(Widgets::default());
-    let service = service_with(widgets.clone()).await;
+    let protector = Arc::new(RecordingProtector::default());
+    let service = service_on(database().await, protector.clone())
+        .with_entity_references(registry(widgets.clone()));
     let owner = principal("owner");
     let id = session(&service, &owner).await;
     let sent = service
@@ -261,17 +369,14 @@ async fn denied_missing_and_failed_references_are_indistinguishable_and_carry_no
             &owner,
             message(
                 id,
-                vec![
-                    reference("visible"),
-                    reference("hidden"),
-                    reference("absent"),
-                    reference("broken"),
-                ],
+                ["visible", "hidden", "absent", "broken"]
+                    .map(reference)
+                    .to_vec(),
                 Uuid::new_v4(),
             ),
         )
         .await
-        .expect("a message with dropped references is still accepted");
+        .expect("a message with unavailable references is still accepted");
 
     assert_eq!(
         sent.reference_notices
@@ -294,44 +399,60 @@ async fn denied_missing_and_failed_references_are_indistinguishable_and_carry_no
         "every reference is resolved once, as the sending principal"
     );
 
+    // Nothing the hook returned was handed to persistence.
+    {
+        let stored = protector.stored.lock().unwrap();
+        assert!(stored.iter().any(|value| value.contains("\"visible\"")));
+        for value in stored.iter() {
+            assert!(
+                !value.contains(PAYLOAD_MARKER),
+                "resolved data was stored: {value}"
+            );
+            assert!(
+                !value.contains(FIELD_MARKER),
+                "resolved data was stored: {value}"
+            );
+        }
+    }
+
     let blocks = service
         .message_blocks(&owner, sent.message_id, None, 20)
         .await
         .expect("owner reads the transcript");
     assert_eq!(blocks.len(), 5);
     assert_eq!(blocks[0].kind, "text");
-    assert_eq!(blocks[1].kind, AI_ENTITY_REFERENCE_BLOCK_KIND);
+    assert!(
+        blocks[1..]
+            .iter()
+            .all(|block| block.kind == AI_ENTITY_REFERENCE_BLOCK_KIND)
+    );
     assert_eq!(
         blocks[1].content.0["provenance"],
         AI_ENTITY_REFERENCE_PROVENANCE
     );
     assert_eq!(blocks[1].content.0["data"]["state"], "active");
-    let model_input = entity_reference_model_input(&blocks[1].kind, &blocks[1].content.0)
-        .expect("a resolved reference reaches the model as tagged data");
-    let ModelInputBlock::Json { value } = model_input else {
-        panic!("a reference is a JSON block");
-    };
-    assert_eq!(value["provenance"], AI_ENTITY_REFERENCE_PROVENANCE);
+    // Denied, missing and failed read identically apart from the identifier
+    // the sender supplied.
+    for (block, id) in blocks[2..].iter().zip(["hidden", "absent", "broken"]) {
+        assert_eq!(block.content.0, unavailable(id));
+    }
+
+    let turn = turn_input(&service, &owner, id, &[sent.message_id]).await;
+    assert_eq!(turn.len(), 1);
+    assert_eq!(turn[0][0]["status"], "resolved");
+    assert_eq!(turn[0][0]["provenance"], AI_ENTITY_REFERENCE_PROVENANCE);
     assert_eq!(
-        value["reference"],
+        turn[0][0]["reference"],
         json!({"kind": "widget", "id": "visible"})
     );
-
-    // Denied, missing and failed are stored and reported identically apart
-    // from the identifier the sender supplied.
-    for (block, id) in blocks[2..].iter().zip(["hidden", "absent", "broken"]) {
-        assert_eq!(block.kind, AI_ENTITY_REFERENCE_UNAVAILABLE_BLOCK_KIND);
-        assert_eq!(
-            block.content.0,
-            json!({"reference": {"kind": "widget", "id": id}, "status": "unavailable"})
-        );
-        assert_eq!(block.byte_count, 0);
-        assert!(entity_reference_model_input(&block.kind, &block.content.0).is_none());
+    for block in &turn[0][1..] {
+        assert_eq!(block["status"], "unavailable");
+        assert!(block.get("data").is_none());
     }
 }
 
 #[tokio::test]
-async fn oversized_resolved_data_is_dropped_with_a_typed_notice() {
+async fn oversized_resolved_data_is_never_delivered() {
     let widgets = Arc::new(Widgets::default());
     let service = service_with(widgets).await;
     let owner = principal("owner");
@@ -357,46 +478,220 @@ async fn oversized_resolved_data_is_dropped_with_a_typed_notice() {
         .message_blocks(&owner, sent.message_id, None, 20)
         .await
         .expect("owner reads the transcript");
-    assert_eq!(blocks[1].kind, AI_ENTITY_REFERENCE_TOO_LARGE_BLOCK_KIND);
-    assert!(blocks[1].content.0.get("data").is_none());
-    assert_eq!(blocks[2].kind, AI_ENTITY_REFERENCE_BLOCK_KIND);
-    assert!(blocks[2].byte_count > 0 && blocks[2].byte_count <= 1024);
+    assert_eq!(blocks[1].content.0, unavailable("large"));
+    assert_eq!(blocks[2].content.0["status"], "resolved");
+}
+
+/// The reviewed defect: data resolved when a message was sent kept being
+/// disclosed after the sender lost access. A field scope is revoked first,
+/// then the row; the next turn and the transcript follow current authority
+/// each time, while the user keeps access to the session itself.
+#[tokio::test]
+async fn revocation_between_turns_reaches_the_next_turn_and_the_transcript() {
+    let widgets = Arc::new(Widgets::default());
+    let service = service_with(widgets.clone()).await;
+    let owner = principal("owner");
+    let id = session(&service, &owner).await;
+    let sent = service
+        .send_message(
+            &owner,
+            message(id, vec![reference("visible")], Uuid::new_v4()),
+        )
+        .await
+        .expect("message is accepted");
+    assert!(sent.reference_notices.is_empty());
+
+    let first_turn = turn_input(&service, &owner, id, &[sent.message_id]).await;
+    assert_eq!(first_turn[0][0]["data"]["owner_note"], FIELD_MARKER);
+    assert_eq!(first_turn[0][0]["data"]["name"], PAYLOAD_MARKER);
+
+    // The field scope is revoked. The row is still readable.
+    widgets.field_scope.store(false, Ordering::SeqCst);
+    let second_turn = turn_input(&service, &owner, id, &[sent.message_id]).await;
+    assert_eq!(second_turn[0][0]["data"]["name"], PAYLOAD_MARKER);
+    assert!(!second_turn[0][0].to_string().contains(FIELD_MARKER));
+    let transcript = service
+        .message_blocks(&owner, sent.message_id, None, 20)
+        .await
+        .expect("owner still reads the session");
+    assert_eq!(transcript[1].content.0["data"]["name"], PAYLOAD_MARKER);
+    assert!(!transcript[1].content.0.to_string().contains(FIELD_MARKER));
+
+    // Row access is revoked. Session access is unchanged.
+    widgets.row_access.store(false, Ordering::SeqCst);
+    let third_turn = turn_input(&service, &owner, id, &[sent.message_id]).await;
+    assert_eq!(third_turn[0].len(), 1);
+    assert_eq!(third_turn[0][0]["status"], "unavailable");
+    assert!(!third_turn[0][0].to_string().contains(PAYLOAD_MARKER));
+    let transcript = service
+        .message_blocks(&owner, sent.message_id, None, 20)
+        .await
+        .expect("owner still reads the session");
+    assert_eq!(transcript.len(), 2);
+    assert_eq!(
+        transcript[0].content.0["text"],
+        "What is the state of this widget?"
+    );
+    assert_eq!(transcript[1].content.0, unavailable("visible"));
+
+    // Access granted again is honoured again: nothing was cached either way.
+    widgets.row_access.store(true, Ordering::SeqCst);
+    let fourth_turn = turn_input(&service, &owner, id, &[sent.message_id]).await;
+    assert_eq!(fourth_turn[0][0]["status"], "resolved");
+}
+
+/// A restored store holds handles only. Opened by a deployment whose host
+/// policy gives the principal no access, or by one with no registry at all,
+/// it discloses nothing that the original sender could read.
+#[tokio::test]
+async fn a_restored_store_reauthorizes_on_use_and_holds_no_resolved_data() {
+    let widgets = Arc::new(Widgets::default());
+    let shared = database().await;
+    let protector = Arc::new(RecordingProtector::default());
+    let original = service_on(shared.clone(), protector.clone())
+        .with_entity_references(registry(widgets.clone()));
+    let owner = principal("owner");
+    let id = session(&original, &owner).await;
+    let sent = original
+        .send_message(
+            &owner,
+            message(id, vec![reference("visible")], Uuid::new_v4()),
+        )
+        .await
+        .expect("message is accepted");
+    assert_eq!(
+        turn_input(&original, &owner, id, &[sent.message_id]).await[0][0]["status"],
+        "resolved"
+    );
+    // The rows a backup would copy never contained the resolved payload.
+    assert!(
+        protector
+            .stored
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|value| !value.contains(PAYLOAD_MARKER) && !value.contains(FIELD_MARKER))
+    );
+
+    // The same rows, served after a restore where the principal has no
+    // access to the entity.
+    let denied = Arc::new(Widgets::default());
+    denied.row_access.store(false, Ordering::SeqCst);
+    let restored = service_on(shared.clone(), Arc::new(DatabaseManagedContentProtector))
+        .with_entity_references(registry(denied.clone()));
+    let turn = turn_input(&restored, &owner, id, &[sent.message_id]).await;
+    assert_eq!(turn[0][0]["status"], "unavailable");
+    assert!(!turn[0][0].to_string().contains(PAYLOAD_MARKER));
+    assert_eq!(
+        restored
+            .message_blocks(&owner, sent.message_id, None, 20)
+            .await
+            .expect("owner reads the restored transcript")[1]
+            .content
+            .0,
+        unavailable("visible")
+    );
+    assert_eq!(
+        denied.call_count(),
+        2,
+        "each use asked the restored host again"
+    );
+
+    // A restored deployment with no registry resolves nothing.
+    let bare = service_on(shared, Arc::new(DatabaseManagedContentProtector));
+    assert_eq!(
+        turn_input(&bare, &owner, id, &[sent.message_id]).await[0][0]["status"],
+        "unavailable"
+    );
+    assert_eq!(
+        bare.message_blocks(&owner, sent.message_id, None, 20)
+            .await
+            .expect("owner reads the restored transcript")[1]
+            .content
+            .0,
+        unavailable("visible")
+    );
 }
 
 #[tokio::test]
-async fn a_replay_reports_the_stored_outcome_and_a_changed_reference_list_conflicts() {
+async fn one_turn_resolves_at_most_the_configured_number_of_references() {
+    let widgets = Arc::new(Widgets::default());
+    let service = base_service().await.with_entity_references(
+        registry(widgets.clone()).with_limits(
+            AiEntityReferenceLimits::new(4, 32, 1024, 4096)
+                .expect("limits are valid")
+                .with_maximum_resolutions_per_use(3)
+                .expect("cap is valid"),
+        ),
+    );
+    let owner = principal("owner");
+    let id = session(&service, &owner).await;
+    let mut message_ids = Vec::new();
+    for group in [["a", "b"], ["c", "d"]] {
+        message_ids.push(
+            service
+                .send_message(
+                    &owner,
+                    message(id, group.map(reference).to_vec(), Uuid::new_v4()),
+                )
+                .await
+                .expect("message is accepted")
+                .message_id,
+        );
+    }
+    let before = widgets.call_count();
+    let turn = turn_input(&service, &owner, id, &message_ids).await;
+    assert_eq!(
+        turn.iter()
+            .flatten()
+            .map(|block| block["status"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>(),
+        ["resolved", "resolved", "resolved", "unavailable"]
+    );
+    assert_eq!(
+        turn[1][1]["reference"],
+        json!({"kind": "widget", "id": "d"})
+    );
+    assert_eq!(
+        widgets.call_count() - before,
+        3,
+        "the host hook is called at most the cap per turn"
+    );
+
+    assert!(matches!(
+        service
+            .entity_reference_model_input(
+                &owner,
+                AiSessionId(id),
+                &[message_ids[0], message_ids[0]]
+            )
+            .await,
+        Err(AiError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        service
+            .entity_reference_model_input(&owner, AiSessionId(id), &[Uuid::new_v4()])
+            .await,
+        Err(AiError::NotFound)
+    ));
+}
+
+#[tokio::test]
+async fn a_replay_stores_nothing_new_and_a_changed_reference_list_conflicts() {
     let widgets = Arc::new(Widgets::default());
     let service = service_with(widgets.clone()).await;
     let owner = principal("owner");
     let id = session(&service, &owner).await;
     let client_message_id = Uuid::new_v4();
+    let references = vec![reference("visible"), reference("hidden")];
     let first = service
-        .send_message(
-            &owner,
-            message(
-                id,
-                vec![reference("visible"), reference("hidden")],
-                client_message_id,
-            ),
-        )
+        .send_message(&owner, message(id, references.clone(), client_message_id))
         .await
         .expect("message is accepted");
     assert_eq!(first.reference_notices.len(), 1);
 
-    // The host would now resolve the dropped reference. The accepted message
-    // is immutable, so the replay still reports what was stored.
-    widgets
-        .reveal_hidden
-        .store(true, std::sync::atomic::Ordering::SeqCst);
     let replay = service
-        .send_message(
-            &owner,
-            message(
-                id,
-                vec![reference("visible"), reference("hidden")],
-                client_message_id,
-            ),
-        )
+        .send_message(&owner, message(id, references, client_message_id))
         .await
         .expect("an identical retry is idempotent");
     assert_eq!(replay.message_id, first.message_id);
@@ -442,6 +737,28 @@ async fn a_reference_gives_a_stranger_no_access_and_never_reaches_the_resolver()
             .await,
         Err(AiError::NotFound)
     ));
-    assert!(widgets.calls.lock().unwrap().is_empty());
+    assert_eq!(widgets.call_count(), 0);
     assert_eq!(message_count(&service, &owner, id).await, 0);
+
+    let sent = service
+        .send_message(
+            &owner,
+            message(id, vec![reference("visible")], Uuid::new_v4()),
+        )
+        .await
+        .expect("owner sends");
+    let after_send = widgets.call_count();
+    assert!(matches!(
+        service
+            .entity_reference_model_input(&stranger, AiSessionId(id), &[sent.message_id])
+            .await,
+        Err(AiError::NotFound)
+    ));
+    assert!(matches!(
+        service
+            .message_blocks(&stranger, sent.message_id, None, 20)
+            .await,
+        Err(AiError::NotFound)
+    ));
+    assert_eq!(widgets.call_count(), after_send);
 }
