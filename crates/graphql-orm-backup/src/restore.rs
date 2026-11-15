@@ -850,10 +850,10 @@ enum DigestOutcome {
 
 /// Wraps a body so it yields an error instead of ending when its SHA-256 does
 /// not match `expected`. Every bundled `BlobStore` discards a write whose body
-/// fails before the end: local writes to a temporary file, S3 drains the body
-/// before its committing request, and SMB arms delete-on-close until the whole
-/// body is flushed. It also fails, before yielding the chunk, once the body
-/// passes `limit`.
+/// fails before the end, without making it readable at its key: local storage
+/// and SMB write a temporary file and publish it only after the whole body,
+/// and S3 drains the body before its committing request. It also fails,
+/// before yielding the chunk, once the body passes `limit`.
 fn digest_checked_stream(
     source: StorageByteStream,
     key: String,

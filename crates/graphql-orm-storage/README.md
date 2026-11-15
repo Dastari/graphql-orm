@@ -22,6 +22,15 @@ The local backend requires a trusted, exclusively managed filesystem root and
 restrictive permissions. See the [local filesystem trust boundary](docs/blob-store.md#local-filesystem-trust-boundary)
 before using local directories or OS-mounted shares.
 
+Version 0.12.0 sends S3 conditional creates as one attempt, so a lost
+response is reported as an unknown outcome instead of the writer's own object
+appearing taken, and makes S3 conditional creates, and so repository locks,
+fail closed until a per-instance probe shows that the provider enforces
+`If-None-Match`. It adds an opt-in portable key mode for new writes to SMB
+shares on Windows servers (`validate_portable_blob_key`,
+`SmbStorageConfig::portable_keys`), and a fixed `InvalidStorageKey` message
+that never reveals the key. See [MIGRATION.md](MIGRATION.md).
+
 Version 0.11.0 makes SMB conditional creates publish only complete objects,
 holds SMB transfer permits only while a request is in flight, lists only the
 SMB directories a prefix can reach, refuses the ineffective
@@ -86,13 +95,13 @@ resolved dependency graph.
 
 ```toml
 [dependencies]
-graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.11.0" }
+graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.12.0" }
 ```
 
 For S3-compatible storage without the default local backend:
 
 ```toml
-graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.11.0", default-features = false, features = ["s3"] }
+graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.12.0", default-features = false, features = ["s3"] }
 ```
 
 ## Five-minute local start

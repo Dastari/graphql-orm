@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 use async_trait::async_trait;
 use aws_credential_types::Credentials;
@@ -12,6 +12,7 @@ use aws_sdk_s3::{
 use bytes::{Bytes, BytesMut};
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
+use tokio::sync::OnceCell;
 use tokio_util::io::ReaderStream;
 
 use crate::{
@@ -66,6 +67,18 @@ pub struct S3StorageBackend {
     pub(crate) config: S3StorageConfig,
     pub(crate) client: Client,
     pub(crate) multipart_max_part_size: u64,
+    /// Whether this instance may send conditional creates. Shared only by
+    /// clones, which have the same immutable configuration.
+    conditional_create: Arc<ConditionalCreateCapability>,
+}
+
+/// The conditional-create capability of one backend instance.
+#[derive(Debug, Default)]
+struct ConditionalCreateCapability {
+    /// The host asserted that the provider enforces `If-None-Match: *`.
+    verified_by_host: bool,
+    /// Set once a probe passed. A failed probe is never cached.
+    probed: OnceCell<()>,
 }
 
 impl S3StorageBackend {
@@ -90,7 +103,44 @@ impl S3StorageBackend {
             config,
             client: Client::from_conf(s3_config),
             multipart_max_part_size: crate::s3_multipart::DEFAULT_MAX_PART_SIZE,
+            conditional_create: Arc::default(),
         }
+    }
+
+    /// Asserts, as the host's responsibility, that the provider enforces
+    /// `If-None-Match: *` on `PutObject` and `CompleteMultipartUpload`, so
+    /// conditional creates skip [`Self::probe_conditional_create`].
+    ///
+    /// Use it only where the probe's writes are not permitted and the
+    /// provider's enforcement was verified another way. If the assertion is
+    /// wrong, `put_blob_if_not_exists` can report success to two writers of
+    /// the same key, so two holders can acquire one repository lock and
+    /// concurrent writers can replace each other's objects.
+    #[must_use]
+    pub fn with_conditional_writes_verified_by_host(mut self) -> Self {
+        self.conditional_create = Arc::new(ConditionalCreateCapability {
+            verified_by_host: true,
+            probed: OnceCell::new(),
+        });
+        self
+    }
+
+    /// Fails closed unless this instance's provider is known to enforce
+    /// conditional creates: the host asserted it, or a probe on this instance
+    /// passed. Runs the probe on first use; only a pass is cached.
+    pub(crate) async fn require_conditional_create(&self) -> Result<(), StorageError> {
+        if self.conditional_create.verified_by_host {
+            return Ok(());
+        }
+        self.conditional_create
+            .probed
+            .get_or_try_init(|| async {
+                self.probe_conditional_create()
+                    .await
+                    .map_err(conditional_create_unverified)
+            })
+            .await
+            .map(|_| ())
     }
 
     /// Sets the largest accepted multipart part, between 5 MiB and 5 GiB.
@@ -111,6 +161,121 @@ impl S3StorageBackend {
     #[must_use]
     pub const fn config(&self) -> &S3StorageConfig {
         &self.config
+    }
+
+    /// Checks that the provider enforces `If-None-Match: *`, which
+    /// [`BlobStore::put_blob_if_not_exists`], and so repository locks and
+    /// content deduplication, rely on.
+    ///
+    /// Some S3-compatible providers accept the header but ignore it; on them
+    /// a conditional create silently replaces an existing object and a lock
+    /// is not exclusive. Every instance runs this probe before its first
+    /// conditional create, unless the host called
+    /// [`Self::with_conditional_writes_verified_by_host`], and fails the
+    /// create when it does not pass; hosts may also call it directly at
+    /// startup.
+    ///
+    /// The probe creates a random object, `.graphql-orm-probe-<uuid>` below
+    /// the key prefix, and then tries to create the same key again with a
+    /// conditional `PutObject` and with a conditional one-part multipart
+    /// completion. Both must be refused, and the object must keep its first
+    /// content. The probe then deletes its object, also after a failure. It
+    /// needs permission to write, read and delete below the key prefix.
+    ///
+    /// Its limits: it sends only a tiny `PutObject` and a one-part
+    /// completion, so it cannot certify enforcement that depends on object
+    /// size, part count, or a proxy or gateway that treats other requests
+    /// differently. If it is cancelled, or its cleanup fails, its
+    /// `.graphql-orm-probe-<uuid>` object, and possibly an incomplete
+    /// multipart upload for that key, can remain below the key prefix; both
+    /// are safe to delete.
+    ///
+    /// # Errors
+    ///
+    /// Returns non-retryable [`StorageError::UnsupportedOperation`] when the
+    /// provider ignores the condition, and the request's error when a request
+    /// fails.
+    pub async fn probe_conditional_create(&self) -> Result<(), StorageError> {
+        let key = format!(".graphql-orm-probe-{}", uuid::Uuid::new_v4());
+        let provider_key = self.provider_key(&key)?;
+        let probed = self.probe_conditional_create_at(&provider_key).await;
+        // The key is unique and random, so an ordinary, retried delete is safe.
+        let deleted = self.delete_blob(&key).await;
+        probed?;
+        deleted
+    }
+
+    async fn probe_conditional_create_at(&self, provider_key: &str) -> Result<(), StorageError> {
+        let ignored = |request: &str| StorageError::UnsupportedOperation {
+            operation: format!(
+                "S3 conditional create: the provider ignored If-None-Match: * on {request}, \
+                 so put_blob_if_not_exists and repository locks would not be exclusive"
+            ),
+        };
+        let first = Bytes::from(uuid::Uuid::new_v4().simple().to_string());
+        let second = Bytes::from(uuid::Uuid::new_v4().simple().to_string());
+        let options = BlobPutOptions::default();
+        if !self
+            .put_single_blob(provider_key, first.clone(), options.clone(), true)
+            .await?
+        {
+            return Err(StorageError::Provider {
+                backend: StorageBackend::S3.as_str().to_string(),
+                message: "the random conditional-create probe key already existed".to_string(),
+                retryable: false,
+            });
+        }
+        if self
+            .put_single_blob(provider_key, second.clone(), options.clone(), true)
+            .await?
+        {
+            return Err(ignored("PutObject"));
+        }
+
+        let mut state = self.create_multipart_upload(provider_key, &options).await?;
+        let guard = MultipartAbortGuard::new(self, provider_key, &state);
+        if let Err(error) = self.upload_part(provider_key, &mut state, second).await {
+            guard.abort().await;
+            return Err(error);
+        }
+        // Completion aborts the upload itself unless it creates the object.
+        let completed = self
+            .complete_multipart_upload(provider_key, state, true)
+            .await;
+        guard.disarm();
+        if completed? {
+            return Err(ignored("CompleteMultipartUpload"));
+        }
+
+        // A refusal must also have left the first content in place.
+        let output = self
+            .client
+            .get_object()
+            .bucket(&self.config.bucket)
+            .key(provider_key)
+            .send()
+            .await
+            .map_err(map_s3_error)?;
+        let mut body = output.body;
+        let mut stored = BytesMut::new();
+        while let Some(chunk) = body.next().await {
+            let chunk = chunk.map_err(|error| StorageError::Provider {
+                backend: StorageBackend::S3.as_str().to_string(),
+                message: format!(
+                    "S3 response could not be read: {}",
+                    bounded_text(&DisplayErrorContext(&error).to_string())
+                ),
+                retryable: true,
+            })?;
+            stored.extend_from_slice(&chunk);
+            if stored.len() > first.len() {
+                break;
+            }
+        }
+        if stored != first {
+            return Err(ignored("a refused request that still replaced the object"));
+        }
+        Ok(())
     }
 
     pub(crate) fn provider_key(&self, key: &str) -> Result<String, StorageError> {
@@ -267,14 +432,21 @@ impl S3StorageBackend {
         if let Some(content_type) = options.content_type {
             request = request.content_type(content_type);
         }
-        if if_not_exists {
-            request = request.if_none_match("*");
+        if !if_not_exists {
+            return request.send().await.map(|_| true).map_err(map_s3_error);
         }
-
-        match request.send().await {
+        // One attempt: a retry after a lost success would fail the condition
+        // against this writer's own object and report the key as taken.
+        match request
+            .if_none_match("*")
+            .customize()
+            .config_override(single_attempt_config())
+            .send()
+            .await
+        {
             Ok(_) => Ok(true),
-            Err(err) if if_not_exists && is_precondition_failed(&err) => Ok(false),
-            Err(err) => Err(map_s3_error(err)),
+            Err(err) if is_precondition_failed(&err) => Ok(false),
+            Err(err) => Err(conditional_create_error(err)),
         }
     }
 
@@ -347,7 +519,7 @@ impl S3StorageBackend {
         let completed = CompletedMultipartUpload::builder()
             .set_parts(Some(state.completed_parts))
             .build();
-        let mut request = self
+        let request = self
             .client
             .complete_multipart_upload()
             .bucket(&self.config.bucket)
@@ -355,14 +527,26 @@ impl S3StorageBackend {
             .upload_id(&upload_id)
             .multipart_upload(completed);
 
-        if if_not_exists {
-            request = request.if_none_match("*");
-        }
-
-        let completed = match request.send().await {
-            Ok(_) => return Ok(true),
-            Err(err) if if_not_exists && is_precondition_failed(&err) => Ok(false),
-            Err(err) => Err(map_s3_error(err)),
+        let completed = if if_not_exists {
+            // The completion commits a conditional create: one attempt, as
+            // for a single conditional put. An abort after an unknown outcome
+            // cannot remove an object the completion already made.
+            match request
+                .if_none_match("*")
+                .customize()
+                .config_override(single_attempt_config())
+                .send()
+                .await
+            {
+                Ok(_) => return Ok(true),
+                Err(err) if is_precondition_failed(&err) => Ok(false),
+                Err(err) => Err(conditional_create_error(err)),
+            }
+        } else {
+            match request.send().await {
+                Ok(_) => return Ok(true),
+                Err(err) => Err(map_s3_error(err)),
+            }
         };
         let _ = self
             .client
@@ -442,7 +626,7 @@ impl BlobStore for S3StorageBackend {
             .bucket(&self.config.bucket)
             .key(provider_key)
             .customize()
-            .config_override(S3ConfigBuilder::new().retry_config(RetryConfig::disabled()))
+            .config_override(single_attempt_config())
             .send()
             .await
             .map_err(|error| StorageError::single_attempt(map_s3_error(error)))?;
@@ -477,6 +661,8 @@ impl BlobStore for S3StorageBackend {
         body: StorageByteStream,
         options: BlobPutOptions,
     ) -> Result<Option<BlobWriteOutcome>, StorageError> {
+        self.provider_key(key)?;
+        self.require_conditional_create().await?;
         self.put_blob_inner(key, body, options, true).await
     }
 
@@ -754,6 +940,54 @@ fn is_missing_error<E: ProvideErrorMetadata>(err: &SdkError<E, HttpResponse>) ->
     match service_error_code(err) {
         Some(code) => matches!(code, "NoSuchKey" | "NotFound"),
         None => service_error_status(err) == Some(404),
+    }
+}
+
+/// The typed, non-retryable failure of a conditional create whose
+/// capability could not be verified. The message is fixed: the probe's own
+/// error stays in the backend's diagnostics, not in this error.
+fn conditional_create_unverified(error: StorageError) -> StorageError {
+    let message = match error {
+        StorageError::UnsupportedOperation { .. } => {
+            "the provider ignored If-None-Match: *, so conditional creates are not exclusive"
+        }
+        _ => "the conditional-create probe did not complete, so exclusivity is unverified",
+    };
+    StorageError::RemoteProvider {
+        backend: StorageBackend::S3.as_str().to_string(),
+        kind: crate::StorageProviderErrorKind::ConditionalCreateUnverified,
+        operation: "conditional_create_probe".to_string(),
+        message: message.to_string(),
+        retryable: false,
+    }
+}
+
+/// A configuration override that disables the SDK's automatic retries, for
+/// requests that must not be replayed once they may have reached the server.
+pub(crate) fn single_attempt_config() -> S3ConfigBuilder {
+    S3ConfigBuilder::new().retry_config(RetryConfig::disabled())
+}
+
+/// Maps the failure of a single-attempt conditional create (`If-None-Match:
+/// *`) other than a failed condition.
+///
+/// Only a request that was never sent, or that the server answered with a
+/// client error (HTTP 4xx), certainly created nothing; it keeps the ordinary
+/// classification. Any other failure, such as a lost or unreadable response,
+/// a timeout, a transport failure after sending, or a server error, may have
+/// created the object, so it is a non-retryable
+/// [`StorageError::SingleAttemptFailed`].
+fn conditional_create_error<E>(err: SdkError<E, HttpResponse>) -> StorageError
+where
+    E: ProvideErrorMetadata + std::error::Error + 'static,
+{
+    let refused = matches!(err, SdkError::ConstructionFailure(_))
+        || service_error_status(&err).is_some_and(|status| (400..500).contains(&status));
+    let error = map_s3_error(err);
+    if refused {
+        error
+    } else {
+        StorageError::single_attempt(error)
     }
 }
 

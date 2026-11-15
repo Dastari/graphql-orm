@@ -44,7 +44,13 @@ key and an independently retained repository identity:
   through a digest check that fails at the end of the stream on a mismatch, so
   a conditional create aborts before committing: local storage writes to a
   temporary file, S3 drains the body before its committing request, and SMB
-  keeps delete-on-close armed until the whole body is flushed.
+  writes a hidden temporary file that it links at the key only after the
+  whole body is flushed. No bundled store makes a refused object readable at
+  its key. Before `graphql-orm-storage` 0.11.0, SMB created the object at its
+  final key with delete-on-close set, so a concurrent reader of the live
+  store could read the complete object until the delete took effect
+  ([#475](https://github.com/Dastari/graphql-orm/issues/475)); this crate
+  requires 0.11.0 or later.
 - A manifest must name the snapshot id of the path it was read from, use a
   supported format version and contain no unknown fields, so a sealed
   manifest cannot be replayed under another snapshot id or extended with

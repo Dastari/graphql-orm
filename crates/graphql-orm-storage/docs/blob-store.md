@@ -84,6 +84,16 @@ Implementations must make this operation atomic across all writers. The default
 returns non-retryable `StorageError::UnsupportedOperation` without provider I/O;
 custom providers must override it using a native atomic primitive. A separate
 existence check followed by a write is unsafe for deduplication and backup locks.
+The committing request must not be replayed either: a replay after a lost
+success fails the condition against the writer's own object. A create whose
+outcome is unknown therefore fails with non-retryable
+`StorageError::SingleAttemptFailed` on every native provider. Native S3 sends
+its conditional `PutObject` or `CompleteMultipartUpload` once, with SDK
+retries disabled; only a request that was never sent, or that the server
+refused with HTTP 4xx, keeps an ordinary error. Native S3 also fails closed
+when the provider's enforcement is unverified: each backend instance probes
+the provider before its first conditional create (see
+[backup integration](backup-integration.md#provider-ownership)).
 
 `delete_blob_once` is the release capability for lock keys that another writer
 can immediately reuse. Its default returns `UnsupportedOperation` without I/O.
@@ -232,6 +242,23 @@ separator:
 | Local elsewhere | Allowed: `:` is an ordinary filename character, so keys such as ISO timestamps work and are listed. |
 | SMB | Refused everywhere, and listed names with `:` are skipped: Windows servers, and Samba with `streams_xattr`, open stream `b` of file `a` for `a:b`. |
 | S3 | Allowed. |
+
+`validate_portable_blob_key` applies `validate_blob_key` and also refuses
+what SMB servers and Windows file systems cannot store under the name as
+written: `:` and `< > " | ? *`, control characters, a component ending in
+`.` or a space (Windows strips them, so `report.` aliases `report`), and
+reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `CONIN$`, `CONOUT$`,
+`COM0`-`COM9`, `LPT0`-`LPT9` and their superscript-digit forms) in any ASCII
+case and with any extension. Hosts can call it for any provider whose keys
+may later move to such a target; the SMB backend applies it to new writes
+when `SmbStorageConfig::portable_keys` is set, never to reads, deletes or
+listings of existing keys. It does not resolve case-folding or Unicode
+normalisation, so keys that differ only in case or normalisation still alias
+on such a target.
+
+`StorageError::InvalidStorageKey` displays the fixed message `invalid storage
+key` and never the key, which can reveal a repository path or root prefix.
+The `key` field and `Debug` output hold it for host diagnostics only.
 
 `list_blobs("")` is allowed and lists all blobs.
 

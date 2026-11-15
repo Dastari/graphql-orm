@@ -144,6 +144,7 @@ fn decoder_rejects_oversized_history_window_before_reading_output() {
     );
 }
 
+#[cfg(feature = "local")]
 fn test_manifest_authenticator() -> graphql_orm_backup::ManifestAuthenticator {
     graphql_orm_backup::ManifestAuthenticator::new(
         graphql_orm_backup::ManifestKey::from_bytes(&[7; 32]).expect("test manifest key"),
