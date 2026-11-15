@@ -218,8 +218,11 @@ Exhaustion produces `cleanup_unconfirmed` and increments the host cleanup report
 
 After confirming local blob absence, cleanup releases protected derivatives but
 retains `provider_kind`, `provider_profile_id` and `provider_reference`. Retention
-keeps those rows for operator follow-up; file IDs are not credentials and remain
-in backups. Ordinary attachment GraphQL views still exclude provider references.
+keeps those rows for operator follow-up. Backups keep the provider kind and
+profile, but `provider_reference` is a redacted backup column, so a restored row
+no longer carries the file ID and the restore audit rejects such a row, keeping
+the restore closed. Reconcile unconfirmed provider files on the live store before
+relying on a backup. Ordinary attachment GraphQL views still exclude provider references.
 An authorized operator can inventory them on the AI store with this read-only
 query (apply the deployment's schema qualification):
 

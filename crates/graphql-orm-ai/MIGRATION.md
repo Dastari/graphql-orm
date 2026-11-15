@@ -102,8 +102,10 @@ sets an intent bound in 1..=1024 (default 24); interrupted calls count. On exhau
 `cleanup_unconfirmed` releases protected derivatives and local blob references,
 retains minimal audit evidence with `provider_cleanup_attempts_exhausted`, and
 increments `AiAttachmentCleanupReport.artifacts_unconfirmed`, never
-`artifacts_cleaned`. Provider kind, profile and file reference remain on the row
-for operator follow-up, including in backups. Metadata retention keeps these
+`artifacts_cleaned`. Provider kind, profile and file reference remain on the
+live row for operator follow-up. Backups redact the file reference (kind and
+profile are kept), so reconcile these rows on the live store before relying on
+a backup. Metadata retention keeps these
 unconfirmed rows until the provider references are explicitly reconciled; the
 [attachment operator query](docs/attachments.md#unconfirmed-provider-file-cleanup)
 locates them even though their local `deleted_at` is set. Local blob deletion must be confirmed before this
