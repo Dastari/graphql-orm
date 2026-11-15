@@ -15,7 +15,7 @@ supersedes: []
 Upgrade runtime and macros together. No schema or data migration is needed.
 Generated SDL, operation catalogues and fingerprints are unchanged. Every
 change applies to the `mssql` backend only, except where it says "all
-backends". The first two entries are breaking for hosts.
+backends". The entries marked "breaking" need host changes.
 
 - **Errors (breaking).** An error SQL Server reports is now `sqlx::Error::Database`
   holding `graphql_orm::db::mssql::MssqlServerError`; it was
@@ -84,7 +84,7 @@ backends". The first two entries are breaking for hosts.
   and PostgreSQL results are unchanged.
 - **Connections.** The pool and the notification connection follow one
   routing redirect (Azure SQL's Redirect connection policy).
-- **Notifications.** `MssqlQueryNotificationConnection::receive` is
+- **Notifications (breaking).** `MssqlQueryNotificationConnection::receive` is
   at-least-once and hosts must be idempotent. It returns a message while the
   transaction that received it is still open; the receive is committed at the
   start of the next `receive` or `register`, by the new `acknowledge()`, or

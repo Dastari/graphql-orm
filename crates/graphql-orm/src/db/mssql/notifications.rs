@@ -212,9 +212,14 @@ impl MssqlQueryNotificationConnection {
         // Whatever happens next, the message is no longer pending here: the
         // commit lands, or the session is disposed of and it is redelivered.
         self.unacknowledged = false;
+        // Counted as uncertain until the commit is known to have landed, so a
+        // future dropped while the commit runs is counted as well.
+        self.uncertain_acknowledgements = self.uncertain_acknowledgements.saturating_add(1);
         let result = self.commit().await;
+        if result.is_ok() {
+            self.uncertain_acknowledgements = self.uncertain_acknowledgements.saturating_sub(1);
+        }
         if let Err(error) = &result {
-            self.uncertain_acknowledgements = self.uncertain_acknowledgements.saturating_add(1);
             // The message is never part of the log line.
             tracing::debug!(
                 %error,
@@ -319,8 +324,8 @@ impl MssqlQueryNotificationConnection {
     ///
     /// The message is returned while the transaction that received it is
     /// still open. Nothing is committed until the caller, who now holds the
-    /// message, calls `receive` again, [`acknowledge`](Self::acknowledge) or
-    /// [`close`](Self::close). So a message is never committed before it has
+    /// message, calls `receive` again, [`register`](Self::register),
+    /// [`acknowledge`](Self::acknowledge) or [`close`](Self::close). So a message is never committed before it has
     /// been delivered, and may be delivered more than once:
     ///
     /// - Until it is acknowledged, the message's transaction stays open and
@@ -706,6 +711,11 @@ mod tests {
         cancelled(tokio::time::timeout(Duration::from_secs(3), listener.receive(5000)).await);
         assert!(listener.client.is_none(), "the session is disposed of");
         assert!(!listener.has_unacknowledged_message());
+        assert_eq!(
+            listener.uncertain_acknowledgements(),
+            1,
+            "an interrupted acknowledgement is counted"
+        );
         assert!(listener.receive(200).await?.is_none(), "no redelivery");
 
         // (2) Cancelled before the deferred commit is sent: redelivered once.
@@ -714,6 +724,7 @@ mod tests {
         listener.acknowledgement_fault = Some(AcknowledgementFault::BeforeCommit);
         cancelled(tokio::time::timeout(Duration::from_secs(1), listener.receive(5000)).await);
         assert!(listener.client.is_none());
+        assert_eq!(listener.uncertain_acknowledgements(), 2);
         assert!(listener.receive(5000).await?.is_some(), "redelivered");
         assert!(listener.receive(200).await?.is_none(), "and only once");
 
@@ -722,13 +733,13 @@ mod tests {
         execute_batch(&connection, &send).await?;
         assert!(listener.receive(5000).await?.is_some());
         listener.acknowledgement_fault = Some(AcknowledgementFault::Error);
-        assert_eq!(listener.uncertain_acknowledgements(), 0);
+        assert_eq!(listener.uncertain_acknowledgements(), 2);
         assert!(listener.receive(5000).await?.is_some(), "redelivered");
-        assert_eq!(listener.uncertain_acknowledgements(), 1);
+        assert_eq!(listener.uncertain_acknowledgements(), 3);
         // An explicit acknowledgement reports the same failure to its caller.
         listener.acknowledgement_fault = Some(AcknowledgementFault::Error);
         assert!(listener.acknowledge().await.is_err());
-        assert_eq!(listener.uncertain_acknowledgements(), 2);
+        assert_eq!(listener.uncertain_acknowledgements(), 4);
         assert!(listener.receive(5000).await?.is_some(), "redelivered again");
         listener.acknowledge().await?;
 
