@@ -10,7 +10,7 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.154.0 fixes data-safety defects in migrations, the change journal
+Version 0.157.0 fixes data-safety defects in migrations, the change journal
 and retention. One change is breaking: `export_changes` pages the change
 journal by a new monotonic `seq` column (`ChangeWindow::after_sequence`,
 `BackupChange::sequence`) instead of comparing random ids, which skipped and
@@ -21,7 +21,7 @@ widening; schema-qualified PostgreSQL entity tables re-plan; a SQLite plan may
 remove a child foreign key together with the parent key it referenced; and
 PostgreSQL inserts and retention purges work again for row-level security
 without an `UPDATE` policy. See the
-[migration guide](../../MIGRATION.md#01520-to-01540-migrations-change-journal-and-retention).
+[migration guide](../../MIGRATION.md#01560-to-01570-migrations-change-journal-and-retention).
 
 ORM 0.152.0 adds a conservative batched row-security probe for recovery and maintenance callers. Upgrade macros to the matching version; no data migration is needed.
 

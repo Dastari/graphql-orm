@@ -184,7 +184,7 @@ transaction that journaled a write blocks them until it is resolved. Export from
 standby cannot see the primary's open transactions, so `export_changes` refuses to run on one.
 SQLite has one writer at a time and never waits.
 
-A journal created by a release before 0.154.0 has no `seq` column, and `export_changes` refuses it
+A journal created by a release before 0.157.0 has no `seq` column, and `export_changes` refuses it
 instead of ordering by id. Run `ensure_change_journal_recorder` (or `ensure_change_journal_table`,
 or on PostgreSQL apply the schema target) as the journal's owner: existing entries are numbered by
 `changed_at` and then by the order they were stored in, and new entries continue after them. The

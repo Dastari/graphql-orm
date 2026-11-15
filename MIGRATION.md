@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.152.0 to 0.154.0: migrations, change journal and retention
+## 0.156.0 to 0.157.0: migrations, change journal and retention
 
 Upgrade runtime and macros together. Generated SDL, operation catalogues and
 fingerprints are unchanged. The first entry is breaking for hosts that export

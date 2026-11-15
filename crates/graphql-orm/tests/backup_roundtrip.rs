@@ -616,7 +616,7 @@ async fn a_journal_without_a_sequence_is_refused_then_upgraded()
     let pool = setup_pool().await?;
     let database = graphql_orm::db::Database::new(pool.clone()).with_change_journal();
     apply_schema(&database, "2026111502_backup_journal_upgrade").await?;
-    // The journal as releases before 0.154.0 created it.
+    // The journal as releases before 0.157.0 created it.
     let (id_type, integer) = if cfg!(feature = "postgres") {
         ("UUID", "BIGINT")
     } else {

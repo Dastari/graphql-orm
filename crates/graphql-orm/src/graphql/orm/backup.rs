@@ -111,7 +111,7 @@ pub struct BackupChange {
     /// ascending order; pass the last one's value as
     /// [`ChangeWindow::after_sequence`] to continue from it.
     ///
-    /// An entry serialized by a release before 0.154.0 has no position and
+    /// An entry serialized by a release before 0.157.0 has no position and
     /// deserializes with `0`, which is never a journal position.
     #[serde(default)]
     pub sequence: i64,
@@ -413,7 +413,7 @@ impl crate::db::Database {
     /// # Errors
     ///
     /// Fails when the journal has no sequence column (a journal created by a
-    /// release before 0.154.0: run [`Self::ensure_change_journal_table`], or
+    /// release before 0.157.0: run [`Self::ensure_change_journal_table`], or
     /// on PostgreSQL apply the schema target, as the journal's owner), when a
     /// PostgreSQL role subject to row security reads the journal, when the
     /// PostgreSQL server is a standby (it cannot see the primary's open
