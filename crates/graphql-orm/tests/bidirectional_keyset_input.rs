@@ -84,4 +84,21 @@ fn before_predicate_reverses_order_and_preserves_null_semantics() {
     assert!(sql.contains("created_at > $1"));
     assert!(sql.contains("id < $3"));
     assert_eq!(values.len(), 3);
+
+    // Both directions render one parenthesized condition, so the `OR` between
+    // their branches cannot bind to a neighbouring `AND` (#541).
+    let (after, _) = graphql_orm::graphql::orm::render_keyset_after(
+        DatabaseBackend::Postgres,
+        &columns,
+        &[KeysetValue::Int(10), KeysetValue::String("id-5".to_owned())],
+        1,
+    )
+    .expect("after predicate should render");
+    for predicate in [&sql, &after] {
+        assert!(predicate.contains(" OR "), "{predicate}");
+        assert!(
+            predicate.starts_with("((") && predicate.ends_with("))"),
+            "{predicate}"
+        );
+    }
 }

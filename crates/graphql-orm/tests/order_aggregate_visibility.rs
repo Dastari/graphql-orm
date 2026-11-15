@@ -64,11 +64,17 @@ struct CountGroup {
     plural = "CountParents",
     default_sort = "id ASC"
 )]
+#[graphql_orm(projection(
+    name = "CountParentIdProjection",
+    fields = [id, group_id],
+    private = true
+))]
 struct CountParent {
     #[primary_key]
     #[graphql_orm(auto_generated = false)]
     #[sortable]
     id: String,
+    #[filterable(type = "string")]
     group_id: String,
     #[relation(
         target = "CountChild",
@@ -97,6 +103,32 @@ struct CountParent {
         order_aggregate(name = "BlockedCount", aggregate = "count")
     )]
     blocked: Vec<CountBlocked>,
+    #[relation(
+        target = "CountPartial",
+        from = "id",
+        to = "parent_id",
+        multiple,
+        emit_fk = false,
+        order_aggregate(name = "PartialCount", aggregate = "count")
+    )]
+    partials: Vec<CountPartial>,
+}
+
+/// Prefilter visibility: the SQL predicate narrows the rows and a callback
+/// still decides each one, so a count in SQL would not be authoritative.
+#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[graphql_entity(
+    table = "count_partials",
+    plural = "CountPartials",
+    default_sort = "id ASC"
+)]
+struct CountPartial {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[sortable]
+    id: String,
+    #[filterable(type = "string")]
+    parent_id: String,
 }
 
 /// SQL visibility: only `visible` children may be read.
@@ -158,7 +190,7 @@ impl BatchLoadEntity for CountParent {
 
 schema_roots! {
     query_custom_ops: [],
-    entities: [CountGroup, CountParent, CountChild, CountSecret, CountBlocked],
+    entities: [CountGroup, CountParent, CountChild, CountSecret, CountBlocked, CountPartial],
 }
 
 struct Policy;
@@ -183,6 +215,17 @@ impl RowPolicy<Backend> for Policy {
                     },
                 )?),
                 "CountSecret" => ReadVisibility::CallbackOnly,
+                "CountPartial" => {
+                    ReadVisibility::Prefilter(ReadPredicate::from_filter::<Backend, _>(
+                        &CountPartialWhereInput {
+                            parent_id: Some(StringFilter {
+                                ne: Some("a".into()),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        },
+                    )?)
+                }
                 _ => ReadVisibility::Unrestricted,
             })
         })
@@ -262,7 +305,13 @@ fn seed_statements() -> Vec<String> {
         format!(
             "CREATE TABLE count_blocked (id {TEXT} NOT NULL PRIMARY KEY, parent_id {TEXT} NOT NULL)"
         ),
-        "INSERT INTO count_groups (id, label) VALUES ('g', 'g')".to_owned(),
+        format!(
+            "CREATE TABLE count_partials (id {TEXT} NOT NULL PRIMARY KEY, parent_id {TEXT} NOT NULL)"
+        ),
+        "INSERT INTO count_partials (id, parent_id) VALUES ('p1', 'a'), ('p2', 'b')".to_owned(),
+        "INSERT INTO count_groups (id, label) VALUES ('g', 'g'), ('other', 'other')".to_owned(),
+        "INSERT INTO count_parents (id, group_id) VALUES ('z', 'other')".to_owned(),
+        format!("INSERT INTO count_children (id, parent_id, visible) VALUES ('z1', 'z', {yes})"),
         "INSERT INTO count_parents (id, group_id) VALUES ('a', 'g'), ('b', 'g'), ('c', 'g')"
             .to_owned(),
         // `a` has the most children, but none of them are readable.
@@ -360,8 +409,9 @@ async fn list_count_ordering_counts_only_readable_children() {
     let response = schema.execute(list_query("VisibleChildCount")).await;
     assert!(response.errors.is_empty(), "{:?}", response.errors);
     let data = response.data.into_json().unwrap();
-    // Unfiltered counts would rank `a` (three hidden children) first.
-    assert_eq!(ids(&data["rows"]), ["c", "b", "a"]);
+    // Unfiltered counts would rank `a` (three hidden children) first. `b` and
+    // `z` tie on one readable child and fall back to the default order.
+    assert_eq!(ids(&data["rows"]), ["c", "b", "z", "a"]);
 }
 
 #[tokio::test]
@@ -451,4 +501,144 @@ async fn unauthorized_count_order_is_refused_by_query_builders() {
         .fetch_all(&db)
         .await;
     assert!(result.is_err());
+}
+
+/// A root list that combines a filter with its own bound value and a count
+/// order whose visibility predicate binds another: the placeholders of both
+/// are numbered in one statement (#563).
+#[tokio::test]
+#[cfg_attr(
+    any(feature = "postgres", feature = "mssql"),
+    ignore = "requires owned database"
+)]
+async fn list_count_ordering_composes_with_a_bound_filter() {
+    let schema = schema().await;
+    let query = format!(
+        "query {{ rows: {}({}: {{ {}: {{ eq: \"g\" }} }}, {}: [{{ VisibleChildCount: DESC }}]) {{ edges {{ node {{ {} }} }} }} }}",
+        r("countParents"),
+        a("where"),
+        f("groupId"),
+        a("orderBy"),
+        f("id"),
+    );
+    let response = schema.execute(query).await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let data = response.data.into_json().unwrap();
+    // `z` has one readable child and is excluded by the filter.
+    assert_eq!(ids(&data["rows"]), ["c", "b", "a"]);
+}
+
+/// The generated schema registers a `DataLoader<RelationLoader<..>>` for every
+/// entity. A count order needs the request, so the relation reads directly
+/// and still counts only readable children.
+#[tokio::test]
+#[cfg_attr(
+    any(feature = "postgres", feature = "mssql"),
+    ignore = "requires owned database"
+)]
+async fn relation_count_ordering_holds_with_relation_loaders_registered() {
+    let (mut db, owned) = database().await;
+    db.set_row_policy(Policy);
+    db.set_entity_policy(Policy);
+    let schema = schema_builder(db)
+        .data(owned)
+        .data(AuthSubject::builder("reader").build())
+        .finish();
+    let query = format!(
+        "query {{ groups: {} {{ edges {{ node {{ {} ordered: {}({}: {{ VisibleChildCount: DESC }}) {{ edges {{ node {{ {} }} }} }} plain: {} {{ edges {{ node {{ {} }} }} }} }} }} }} }}",
+        r("countGroups"),
+        f("id"),
+        f("parents"),
+        a("orderBy"),
+        f("id"),
+        f("parents"),
+        f("id"),
+    );
+    let response = schema.execute(query).await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let data = response.data.into_json().unwrap();
+    let group = data["groups"]["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|edge| edge["node"][f("id")] == "g")
+        .expect("group g");
+    assert_eq!(ids(&group["node"]["ordered"]), ["c", "b", "a"]);
+    // The same relation without an order batches and uses the default order.
+    assert_eq!(ids(&group["node"]["plain"]), ["a", "b", "c"]);
+}
+
+#[tokio::test]
+#[cfg_attr(
+    any(feature = "postgres", feature = "mssql"),
+    ignore = "requires owned database"
+)]
+async fn prefilter_target_visibility_fails_closed() {
+    let schema = schema().await;
+    let response = schema.execute(list_query("PartialCount")).await;
+    assert_eq!(response.data, async_graphql::Value::Null);
+    let codes = error_codes(&response);
+    assert_eq!(codes.len(), 1, "{:?}", response.errors);
+    assert!(
+        codes[0].contains("AUTHORIZATION_MISCONFIGURED"),
+        "{:?}",
+        response.errors
+    );
+}
+
+/// A resolver that hands a prepared count order to a projection query.
+struct ProjectionProbe;
+#[async_graphql::Object]
+impl ProjectionProbe {
+    async fn parents_by_visible_children(
+        &self,
+        ctx: &async_graphql::Context<'_>,
+    ) -> async_graphql::Result<Vec<String>> {
+        let db = ctx.data_unchecked::<Database<Backend>>();
+        let mut order = CountParentOrderByInput {
+            visible_child_count: Some(OrderDirection::Desc),
+            ..Default::default()
+        };
+        order.__gom_prepare_read(ctx).await?;
+        let rows = CountParentIdProjection::query(db)
+            .filter(CountParentWhereInput {
+                group_id: Some(StringFilter {
+                    eq: Some("g".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .order_by(order)
+            .fetch_all()
+            .await?;
+        Ok(rows.into_iter().map(|row| row.id).collect())
+    }
+}
+
+/// A projection query carries the values a prepared count order binds (#563).
+#[tokio::test]
+#[cfg_attr(
+    any(feature = "postgres", feature = "mssql"),
+    ignore = "requires owned database"
+)]
+async fn projection_queries_bind_prepared_count_order_values() {
+    let (mut db, owned) = database().await;
+    db.set_row_policy(Policy);
+    db.set_entity_policy(Policy);
+    let schema = async_graphql::Schema::build(
+        ProjectionProbe,
+        async_graphql::EmptyMutation,
+        async_graphql::EmptySubscription,
+    )
+    .data(db)
+    .data(owned)
+    .data(AuthSubject::builder("reader").build())
+    .finish();
+    let response = schema.execute("{ parentsByVisibleChildren }").await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let data = response.data.into_json().unwrap();
+    assert_eq!(
+        data["parentsByVisibleChildren"],
+        serde_json::json!(["c", "b", "a"])
+    );
 }

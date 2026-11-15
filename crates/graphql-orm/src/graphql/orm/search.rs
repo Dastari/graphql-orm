@@ -2,7 +2,7 @@ use super::core::{SearchIndexDef, SearchWeight, SqlValue};
 use super::dialect::{DatabaseBackend, SqlDialect};
 use super::query::{
     DatabaseEntity, DatabaseFilter, DatabaseOrderBy, DatabaseSearchSchema, EntityQuery, FromSqlRow,
-    PageInput, PaginationConfig, PoolProvider, count_placeholders,
+    PageInput, PaginationConfig, PoolProvider, count_placeholders_for,
 };
 use super::{DbAuthContext, OrmBackend, WriteBackend};
 use crate::graphql::filters::{SearchInput, SearchMode};
@@ -108,6 +108,13 @@ impl Default for SearchRebuildOptions {
 
 /// Trait implemented by generated entities that have full-text search metadata.
 pub trait SearchableEntity: DatabaseSearchSchema {
+    /// Whether [`Self::search_key`] is the binary-key encoding
+    /// ([`super::binary_key_id`], `bin:<lowercase hex>`) rather than the key's
+    /// text. Native search joins documents to their rows by rendering the key
+    /// the same way in SQL, so this must agree with `search_key`.
+    #[doc(hidden)]
+    const SEARCH_KEY_IS_BINARY: bool = false;
+
     /// Stable text key used in denormalized search tables.
     fn search_key(&self) -> String;
     /// JSON representation of the entity key for rebuild and diagnostics.
@@ -1076,13 +1083,13 @@ where
                    CAST(ts_rank_cd(document_vector, q.query) AS DOUBLE PRECISION) AS __gom_search_score \
                    FROM {} CROSS JOIN {}('{}', ?) q(query) \
                    WHERE document_vector @@ q.query) s \
-             ON s.__gom_search_pk = {}::text WHERE 1 = 1",
+             ON s.__gom_search_pk = {} WHERE 1 = 1",
             projection,
             B::DIALECT.render_identifier_path(T::TABLE_NAME),
             search_table,
             function,
             index.language.replace('\'', "''"),
-            self.entity_column(T::PRIMARY_KEY),
+            self.document_key_sql(),
         );
         let mut values = vec![SqlValue::String(query_text)];
         self.append_filter_sql(&mut sql, &mut values);
@@ -1126,13 +1133,13 @@ where
              JOIN (SELECT entity_pk AS __gom_search_pk, \
                    bm25({}, 1.0, 0.7, 0.4, 0.1, 0.1) * -1.0 AS __gom_search_score \
                    FROM {} WHERE {} MATCH ?) s \
-             ON s.__gom_search_pk = CAST({} AS TEXT) WHERE 1 = 1",
+             ON s.__gom_search_pk = {} WHERE 1 = 1",
             projection,
             B::DIALECT.render_identifier_path(T::TABLE_NAME),
             fts_table,
             fts_table,
             fts_table,
-            self.entity_column(T::PRIMARY_KEY),
+            self.document_key_sql(),
         );
         let mut values = vec![SqlValue::String(sqlite_fts_query(
             &self.search,
@@ -1168,18 +1175,37 @@ where
         )
     }
 
+    /// The entity's primary key in the form its search document stores as
+    /// `entity_pk`: a binary key as [`super::binary_key_id`] writes it
+    /// (`bin:<lowercase hex>`), every other key as its text.
+    fn document_key_sql(&self) -> String {
+        let column = self.entity_column(T::PRIMARY_KEY);
+        match (T::SEARCH_KEY_IS_BINARY, B::DIALECT) {
+            (true, DatabaseBackend::Postgres) => format!("'bin:' || encode({column}, 'hex')"),
+            (true, _) => format!("'bin:' || lower(hex({column}))"),
+            (false, DatabaseBackend::Postgres) => format!("{column}::text"),
+            (false, _) => format!("CAST({column} AS TEXT)"),
+        }
+    }
+
     fn append_filter_sql(&self, sql: &mut String, values: &mut Vec<SqlValue>) {
         let mut value_index = 0usize;
         for clause in &self.query.where_clauses {
-            let placeholder_count = count_placeholders(clause);
+            let placeholder_count = count_placeholders_for(B::DIALECT, clause);
             let start_index = values.len() + 1;
             let rendered = B::DIALECT.normalize_sql(clause, start_index);
             sql.push_str(" AND (");
             sql.push_str(&rendered);
             sql.push(')');
+            // A clause that names more placeholders than it was given values
+            // takes the values there are. The statement then fails at the
+            // driver with a bind-count error instead of panicking here.
             values.extend(
-                self.query.values[value_index..value_index + placeholder_count]
+                self.query
+                    .values
                     .iter()
+                    .skip(value_index)
+                    .take(placeholder_count)
                     .cloned(),
             );
             value_index += placeholder_count;

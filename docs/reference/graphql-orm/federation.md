@@ -138,6 +138,10 @@ Server suite.
 Representations that match no row cost nothing extra; they are simply absent
 from the one result set.
 
+The loader is shared by every request on the schema. Keys are grouped by
+declared key and database auth context, each group is one statement, and a
+statement that fails gives its error only to the representations it carried.
+
 Batching happens within the `DataLoader`'s dispatch window. A host that
 installs an entity policy performing slow, variable-duration I/O before the
 database read can push some representations outside that window and observe

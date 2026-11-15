@@ -245,8 +245,8 @@ behalf of RLS entities, and `validate_target` reports drift on them:
   LEVEL SECURITY`, plus `SELECT`, `INSERT`, `UPDATE` and `DELETE` policies that expose a document
   only while its base row is visible:
   `EXISTS (SELECT 1 FROM <base> b WHERE b.<pk> = (<search>.entity_pk)::<pk type>)`. Binary
-  (`Vec<u8>`) keys compare against the ORM's `bin:<hex>` document key (search itself does not yet
-  match binary keys: [#560](https://github.com/Dastari/graphql-orm/issues/560)). A
+  (`Vec<u8>`) keys compare against the ORM's `bin:<hex>` document key, and the search query joins
+  documents to their rows with the same encoding. A
   `graphql_orm_search_delete` `BEFORE DELETE` trigger on the base table removes the document while
   the base row is still visible, including for bulk, cascaded and raw SQL deletes. The plan
   resolves the search table when it creates the trigger and records its schema and name in the
