@@ -376,9 +376,12 @@ before output is built: each layer first reserves its structure (connection
 objects, edges, cursors, page fields, every parent's relation key and the null
 of a missing to-one relation), then each record's ordinary fields, measured
 from the stored values, and only then encodes them or copies projected
-objects. A response over the budget is refused with `cost_exceeded` without
-base64-encoding, serializing or cloning a large stored value. Such a value is
-also a valid cursor position, so pages resume across it, including PostgreSQL
+objects. A response over the budget is refused with `cost_exceeded` before its
+ordinary stored values are base64-encoded or serialized. Known limits (#704):
+records are cloned before reservation, a child relation's structure is reserved
+after its parent layer's projections are copied, and host projector output is
+encoded before it is charged; such a response is still refused. A stored value
+outside the input limits is also a valid cursor position, so pages resume across it, including PostgreSQL
 ` BC` years, which read back as year 0000 and below. Clients cannot send an
 out-of-range date-time back as input, and runtime mutations refuse to write one
 from host code.
