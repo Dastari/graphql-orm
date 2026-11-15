@@ -216,9 +216,13 @@ impl BlobStoreBackupRepository {
         }
     }
 
+    /// The store prefix that lists `prefix` inside the repository. Listing
+    /// the whole repository lists `<prefix>/`, never the bare prefix, which
+    /// as a string prefix would also list sibling repositories such as
+    /// `<prefix>-other/` and spend listing limits on them.
     fn apply_prefix_to_list(&self, prefix: &str) -> String {
         match (&self.prefix, prefix.is_empty()) {
-            (Some(repository_prefix), true) => repository_prefix.clone(),
+            (Some(repository_prefix), true) => format!("{repository_prefix}/"),
             (Some(repository_prefix), false) => format!("{repository_prefix}/{prefix}"),
             (None, _) => prefix.to_string(),
         }
@@ -347,6 +351,44 @@ impl BackupRepository for BlobStoreBackupRepository {
 
     async fn delete_blob(&self, key: &str) -> Result<(), BackupError> {
         Ok(self.store.delete_blob(&self.apply_prefix(key)).await?)
+    }
+}
+
+#[cfg(all(test, feature = "local"))]
+mod prefix_tests {
+    use super::*;
+
+    /// Listing a prefixed repository never asks the store for sibling
+    /// repositories' keys, and keys outside the prefix are never returned
+    /// (#540).
+    #[tokio::test]
+    async fn a_prefixed_repository_lists_only_below_its_prefix() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let store: Arc<dyn BlobStore> =
+            Arc::new(graphql_orm_storage::LocalStorageBackend::new(root.path()));
+        for key in ["repo/a", "repo-other/b", "repository"] {
+            store
+                .put_blob(
+                    key,
+                    StorageByteStream::from_bytes(Bytes::from_static(b"x")),
+                    graphql_orm_storage::BlobPutOptions::default(),
+                )
+                .await
+                .expect("seed");
+        }
+        let repository = BlobStoreBackupRepository::with_prefix(store, "repo").expect("prefix");
+        assert_eq!(repository.apply_prefix_to_list(""), "repo/");
+        assert_eq!(
+            repository.apply_prefix_to_list("snapshots/"),
+            "repo/snapshots/"
+        );
+        assert_eq!(repository.strip_prefix("repo-other/b".to_string()), None);
+        assert_eq!(
+            BackupRepository::list_blobs(&repository, "")
+                .await
+                .expect("list"),
+            vec!["a".to_string()]
+        );
     }
 }
 

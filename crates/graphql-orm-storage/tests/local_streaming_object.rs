@@ -332,3 +332,52 @@ async fn local_streaming_object_listing_prefixes_are_string_prefixes() {
     assert_eq!(keys("sessions/gamut").await, ["sessions/gamut"]);
     assert!(keys("sessions/gamut/").await.is_empty());
 }
+
+/// A multipart completion publishes the object's metadata before the object,
+/// so a failure or crash between the two never leaves an object that
+/// `list_objects` silently skips: either neither is published, or the
+/// object appears with its metadata (#540).
+#[tokio::test]
+async fn local_streaming_object_completion_never_publishes_an_object_without_metadata() {
+    let temp = TempDir::new().expect("temp dir");
+    let backend = LocalStorageBackend::new(temp.path());
+    let mut writer = backend
+        .create_multipart_object(
+            "recordings",
+            "sessions/epsilon/video.webm",
+            Some("video/webm".to_string()),
+            recording_metadata(),
+        )
+        .await
+        .expect("create writer");
+    writer
+        .write_chunk(Bytes::from_static(b"payload"))
+        .await
+        .expect("write chunk");
+    // Make publishing the metadata fail: a non-empty directory holds its
+    // final name, so the rename onto it fails.
+    let metadata_path = temp.path().join(
+        ".graphql-orm-storage/object-metadata/recordings/sessions/epsilon/video.webm.metadata.json",
+    );
+    std::fs::create_dir_all(metadata_path.join("occupied")).expect("occupy the metadata name");
+
+    writer
+        .complete()
+        .await
+        .expect_err("the metadata cannot be published");
+
+    assert!(
+        !temp
+            .path()
+            .join("recordings/sessions/epsilon/video.webm")
+            .exists(),
+        "the object was published without its metadata"
+    );
+    assert!(
+        backend
+            .list_objects("recordings", "sessions/epsilon")
+            .await
+            .expect("list")
+            .is_empty()
+    );
+}

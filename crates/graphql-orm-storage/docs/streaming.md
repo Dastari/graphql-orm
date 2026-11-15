@@ -98,8 +98,9 @@ let bytes = collect_storage_stream(loaded.body).await?;
 # }
 ```
 
-Range reads delegate to the configured provider when it has a native ranged read
-path.
+Range reads delegate to the configured provider's native ranged read: the
+local backend seeks, S3 sends a `Range` request, and SMB reads from the
+range's start offset and clamps the range to the blob's size.
 
 ## Buffered Compatibility
 
