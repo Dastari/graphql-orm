@@ -467,9 +467,44 @@ pub(crate) fn postgres_change_journal_table_sql() -> String {
             transaction_id TEXT NULL,
             row_hash TEXT NULL,
             actor_id TEXT NULL,
-            correlation_id TEXT NULL
+            correlation_id TEXT NULL,
+            seq BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE
         )",
         DatabaseBackend::Postgres.quote_identifier(CHANGE_LOG_TABLE)
+    )
+}
+
+/// Name of the journal column that orders entries.
+pub(crate) const CHANGE_LOG_SEQUENCE_COLUMN: &str = "seq";
+
+/// Give a change journal created by an earlier release its sequence column.
+///
+/// Journal ids are random UUIDs, so they cannot order entries or mark a
+/// position. `seq` is an identity column: the database assigns each new entry
+/// the next value, and the recorder's `INSERT` needs no change. Existing
+/// entries are numbered by `changed_at` and then by physical position, which
+/// for an append-only table is the order they were written in.
+///
+/// The statement does nothing when the column exists. Only the journal's
+/// owner can add it, so for any other role it leaves the journal unchanged;
+/// [`Database::export_changes`](crate::db::Database::export_changes) then
+/// refuses until the owner applies the schema target.
+pub(crate) fn postgres_change_journal_sequence_sql() -> String {
+    let table = DatabaseBackend::Postgres.quote_identifier(CHANGE_LOG_TABLE);
+    format!(
+        "DO $graphql_orm$ DECLARE journal pg_catalog.oid := pg_catalog.to_regclass({regclass})::pg_catalog.oid; next_seq pg_catalog.int8; BEGIN \
+         IF journal IS NULL OR EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a WHERE a.attrelid OPERATOR(pg_catalog.=) journal AND a.attname OPERATOR(pg_catalog.=) '{column}'::pg_catalog.name AND NOT a.attisdropped) \
+         OR NOT (SELECT pg_catalog.pg_has_role(c.relowner, 'USAGE') FROM pg_catalog.pg_class c WHERE c.oid OPERATOR(pg_catalog.=) journal) THEN RETURN; END IF; \
+         LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE; \
+         ALTER TABLE {table} ADD COLUMN {column} pg_catalog.int8; \
+         UPDATE {table} j SET {column} = numbered.position FROM (SELECT o.ctid AS row_id, pg_catalog.row_number() OVER (ORDER BY o.changed_at, o.ctid) AS position FROM {table} o) numbered WHERE j.ctid OPERATOR(pg_catalog.=) numbered.row_id; \
+         SELECT pg_catalog.count(*) OPERATOR(pg_catalog.+) 1 INTO next_seq FROM {table}; \
+         ALTER TABLE {table} ALTER COLUMN {column} SET NOT NULL; \
+         EXECUTE pg_catalog.format('ALTER TABLE {table} ALTER COLUMN {column} ADD GENERATED ALWAYS AS IDENTITY (START WITH %s)', next_seq); \
+         ALTER TABLE {table} ADD UNIQUE ({column}); \
+         END $graphql_orm$",
+        regclass = sql_string_literal(&table),
+        column = CHANGE_LOG_SEQUENCE_COLUMN,
     )
 }
 
@@ -697,6 +732,7 @@ pub(crate) fn postgres_change_journal_recorder_sql(tables: &[ChangeJournalTable]
         // enforced separately.
         "GRANT USAGE ON SCHEMA graphql_orm TO PUBLIC".to_string(),
         postgres_change_journal_table_sql(),
+        postgres_change_journal_sequence_sql(),
         postgres_change_log_rls_sql(),
         format!(
             "CREATE TABLE IF NOT EXISTS {CHANGE_JOURNAL_REGISTRY} (journal_schema pg_catalog.text NOT NULL, declared_table pg_catalog.text NOT NULL, entity_name pg_catalog.text NOT NULL, key_column pg_catalog.text NOT NULL, relid pg_catalog.regclass NOT NULL, PRIMARY KEY (journal_schema, declared_table))"

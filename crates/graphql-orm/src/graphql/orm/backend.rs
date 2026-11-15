@@ -267,6 +267,24 @@ pub trait TransactionBackend: WriteBackend {
 pub trait IntrospectionBackend: OrmBackend {
     /// Return a structured schema model for the live database.
     async fn introspect_schema(pool: &Self::Pool) -> crate::Result<SchemaModel>;
+
+    /// Return the live schema as [`introspect_schema`](Self::introspect_schema)
+    /// does, and also every table in `declared_tables` that the backend's
+    /// default read does not cover.
+    ///
+    /// PostgreSQL reads the tables of the session's current schema. A table
+    /// an entity declares with a schema (`table = "audit.logs"`) lives
+    /// elsewhere, so planning and validation pass the target's table paths
+    /// here and each existing schema-qualified table is reported under its
+    /// declared path. Tables of other schemas that no path names are never
+    /// reported. The default implementation ignores `declared_tables`.
+    async fn introspect_schema_including(
+        pool: &Self::Pool,
+        declared_tables: &[&str],
+    ) -> crate::Result<SchemaModel> {
+        let _ = declared_tables;
+        Self::introspect_schema(pool).await
+    }
 }
 
 #[allow(async_fn_in_trait)]

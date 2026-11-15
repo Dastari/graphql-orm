@@ -71,8 +71,10 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
     where
         B: IntrospectionBackend,
     {
-        let current = B::introspect_schema(self.database.pool()).await?;
         let target = SchemaModel::from_entities(entities);
+        let current =
+            B::introspect_schema_including(self.database.pool(), &declared_tables([&target]))
+                .await?;
         self.validate(&current, &target)
     }
 
@@ -105,7 +107,11 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
     where
         B: IntrospectionBackend + RlsIntrospectionBackend,
     {
-        let current = B::introspect_schema(self.database.pool()).await?;
+        let current = B::introspect_schema_including(
+            self.database.pool(),
+            &declared_tables([&target.schema]),
+        )
+        .await?;
         let schema = self.validate(&current, &target.schema)?;
         let live = if target.rls.entities.is_empty() && !cfg!(feature = "change-journal") {
             None
@@ -270,8 +276,10 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
     where
         B: IntrospectionBackend,
     {
-        let current = B::introspect_schema(self.database.pool()).await?;
         let target = SchemaModel::from_entities(entities);
+        let current =
+            B::introspect_schema_including(self.database.pool(), &declared_tables([&target]))
+                .await?;
         self.plan_migration_with_options(version, description, &current, &target, options)
     }
 
@@ -306,7 +314,11 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         target.schema.validate_physical_contract()?;
         let version = version.into();
         let description = description.into();
-        let current = B::introspect_schema(self.database.pool()).await?;
+        let current = B::introspect_schema_including(
+            self.database.pool(),
+            &declared_tables([&target.schema]),
+        )
+        .await?;
         let planned_current = schema_current_for_plan(&current, &target.schema, options);
         let migration = plan_migration_for_backend::<B>(
             version.clone(),
@@ -512,7 +524,11 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         ensure_planning_policy(self.policy(), "plan schema ABI upgrade")?;
         let current_version = self.current_version().await?;
         let path = abi.path(current_version.as_deref(), target_version)?;
-        let mut current_schema = B::introspect_schema(self.database.pool()).await?;
+        let mut current_schema = B::introspect_schema_including(
+            self.database.pool(),
+            &declared_tables(path.iter().map(|stage| &stage.target_schema)),
+        )
+        .await?;
         let mut stages = Vec::new();
 
         for stage in path {
@@ -588,7 +604,11 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
                 "Current schema ABI version {current_version} is not present in the ABI"
             )));
         };
-        let current_schema = B::introspect_schema(self.database.pool()).await?;
+        let current_schema = B::introspect_schema_including(
+            self.database.pool(),
+            &declared_tables([&current_stage.target_schema]),
+        )
+        .await?;
         let report = self.validate(&current_schema, &current_stage.target_schema)?;
         if report.has_errors() {
             return Err(sqlx::Error::Protocol(format!(
@@ -816,6 +836,18 @@ fn diagnostic(
         column,
         message,
     }
+}
+
+/// Every table path the given targets declare, for
+/// [`IntrospectionBackend::introspect_schema_including`].
+pub(super) fn declared_tables<'a>(
+    targets: impl IntoIterator<Item = &'a SchemaModel>,
+) -> Vec<&'a str> {
+    targets
+        .into_iter()
+        .flat_map(|target| target.tables.iter())
+        .map(|table| table.table_name.as_str())
+        .collect()
 }
 
 fn schema_current_for_plan(

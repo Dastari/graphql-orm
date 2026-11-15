@@ -2608,9 +2608,8 @@ where
             ));
         }
         let query = EntityQuery::<T, B>::new().filter_with_entity_matching(&filter);
-        let rows = self
-            .mutation
-            .__fetch_bounded_mutation_sentinel(query, limit)
+        let rows = query
+            .fetch_retention_sentinel_in_transaction(&mut self.mutation, limit)
             .await?;
         let maximum = usize::try_from(limit.get()).map_err(|_| {
             sqlx::Error::Protocol("retention purge limit conversion overflow".to_string())

@@ -44,6 +44,7 @@ run_sqlite() {
     --test runtime_compat_goldens --test runtime_typed_defaults --test runtime_field_formats \
     --test runtime_graphql_formats \
     --test runtime_search_graphql --test runtime_search_writes --test runtime_search_ir \
+    --test runtime_many_to_many \
     -- --test-threads=1
   cargo test -p graphql-orm --no-default-features --features sqlite \
     --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial --locked
@@ -56,7 +57,10 @@ run_sqlite() {
 
 run_postgres() {
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
-    --test migration_composite_uniques -- --include-ignored --test-threads=1
+    --test migration_composite_uniques --test postgres_qualified_tables --test retention_purge_postgres \
+    -- --include-ignored --test-threads=1
+  cargo test -p graphql-orm --locked --no-default-features --features postgres,runtime-graphql \
+    --test runtime_many_to_many -- --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
     --test static_related_filter -- --ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features postgres --test read_predicate --test visible_row_pages --test like_escape_matrix --test loader_chunks_postgres --test query_loader_batch --test order_aggregate_visibility -- --include-ignored --test-threads=1

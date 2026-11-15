@@ -549,7 +549,12 @@ impl SchemaRef<'_> {
                                 table.table_name, target_table.table_name, pair.target_column
                             ))
                         })?;
-                    if !source.sql_type.eq_ignore_ascii_case(&target.sql_type) {
+                    // Aliases of one type (`varchar(50)` and
+                    // `character varying(50)`) are the same member type.
+                    if !super::migrations::postgres_types_equivalent(
+                        &source.sql_type,
+                        &target.sql_type,
+                    ) {
                         return Err(sqlx::Error::Protocol(format!(
                             "foreign key type mismatch between {}.{} ({}) and {}.{} ({})",
                             table.table_name,

@@ -6314,7 +6314,7 @@ fn generate_graphql_operations_unfiltered(
                     .await
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
 
-                let entity = #struct_name::__gom_fetch_by_id_on(&mut hook_ctx, &created_pk)
+                let entity = #struct_name::__gom_fetch_created_by_id_on(&mut hook_ctx, &created_pk)
                     .await
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?
                     .ok_or_else(|| ::graphql_orm::async_graphql::Error::new("Entity not found after creation"))?;
@@ -6675,7 +6675,7 @@ fn generate_graphql_operations_unfiltered(
                         after_state: None,
                     }).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     hook_ctx.execute(&sql, &bind_values).await?;
-                    let entity = Self::__gom_fetch_by_id_on(hook_ctx, &created_pk).await?
+                    let entity = Self::__gom_fetch_created_by_id_on(hook_ctx, &created_pk).await?
                         .ok_or(::graphql_orm::sqlx::Error::RowNotFound)?;
                     #repository_post_image_check
                     hook_ctx.run_mutation_hook(None, &::graphql_orm::graphql::orm::MutationEvent {
@@ -6706,6 +6706,29 @@ fn generate_graphql_operations_unfiltered(
                     hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                     id: &#key_type,
                 ) -> ::graphql_orm::Result<Option<Self>> {
+                    Self::__gom_fetch_by_id_locking(hook_ctx, id, #write_read_lock_suffix).await
+                }
+
+                // PostgreSQL `SELECT ... FOR UPDATE` returns a row only when it also passes
+                // the table's UPDATE policy. A transaction already holds the lock on a row it
+                // has just inserted, so the read-back of a created row takes no lock: it then
+                // needs the SELECT policy alone, as an append-only entity declares.
+                #[doc(hidden)]
+                #[allow(clippy::ptr_arg)]
+                async fn __gom_fetch_created_by_id_on(
+                    hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                    id: &#key_type,
+                ) -> ::graphql_orm::Result<Option<Self>> {
+                    Self::__gom_fetch_by_id_locking(hook_ctx, id, "").await
+                }
+
+                #[doc(hidden)]
+                #[allow(clippy::ptr_arg)]
+                async fn __gom_fetch_by_id_locking(
+                    hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                    id: &#key_type,
+                    lock_suffix: &str,
+                ) -> ::graphql_orm::Result<Option<Self>> {
                     use ::graphql_orm::graphql::orm::{DatabaseEntity, FromSqlRow};
                     let sql = Self::__gom_rebind_sql(&format!(
                         "SELECT {} FROM {}{} WHERE {}{}",
@@ -6713,7 +6736,7 @@ fn generate_graphql_operations_unfiltered(
                         #sql_table_name,
                         #upsert_read_lock_hint,
                         Self::__gom_key_where_clause(),
-                        #write_read_lock_suffix,
+                        lock_suffix,
                     ), 1);
                     let rows = hook_ctx.fetch_rows(&sql, &Self::__gom_key_values(id)).await?;
                     rows.first().map(<Self as FromSqlRow<#backend_marker>>::from_row).transpose()
@@ -6847,6 +6870,27 @@ fn generate_graphql_operations_unfiltered(
                     hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                     key: &#key_type,
                 ) -> ::graphql_orm::Result<Option<Self>> {
+                    Self::__gom_fetch_by_key_locking(hook_ctx, key, #write_read_lock_suffix).await
+                }
+
+                // PostgreSQL `SELECT ... FOR UPDATE` returns a row only when it also passes
+                // the table's UPDATE policy. A transaction already holds the lock on a row it
+                // has just inserted, so the read-back of a created row takes no lock: it then
+                // needs the SELECT policy alone, as an append-only entity declares.
+                #[doc(hidden)]
+                async fn __gom_fetch_created_by_key_on(
+                    hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                    key: &#key_type,
+                ) -> ::graphql_orm::Result<Option<Self>> {
+                    Self::__gom_fetch_by_key_locking(hook_ctx, key, "").await
+                }
+
+                #[doc(hidden)]
+                async fn __gom_fetch_by_key_locking(
+                    hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                    key: &#key_type,
+                    lock_suffix: &str,
+                ) -> ::graphql_orm::Result<Option<Self>> {
                     use ::graphql_orm::graphql::orm::{DatabaseEntity, FromSqlRow, OrmBackend, SqlDialect};
                     let dialect = <#backend_marker as OrmBackend>::DIALECT;
                     let columns = Self::column_names().iter()
@@ -6863,7 +6907,7 @@ fn generate_graphql_operations_unfiltered(
                         dialect.quote_identifier_path(#table_name),
                         #upsert_read_lock_hint,
                         Self::__gom_key_where_clause_at(1),
-                        #write_read_lock_suffix,
+                        lock_suffix,
                     );
                     let rows = hook_ctx.fetch_rows(&sql, &Self::__gom_key_values(key)).await?;
                     if rows.len() > 1 {
@@ -6942,7 +6986,7 @@ fn generate_graphql_operations_unfiltered(
                     if <#backend_marker as ::graphql_orm::graphql::orm::WriteBackend>::rows_affected(&result) != 1 {
                         return Err(Self::__gom_runtime_error("composite-key insert did not affect exactly one row"));
                     }
-                    let entity = Self::__gom_fetch_by_key_on(hook_ctx, &key).await?
+                    let entity = Self::__gom_fetch_created_by_key_on(hook_ctx, &key).await?
                         .ok_or(::graphql_orm::sqlx::Error::RowNotFound)?;
                     hook_ctx.__ensure_written_row(None, #entity_name_lit,
                         <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
@@ -7017,7 +7061,7 @@ fn generate_graphql_operations_unfiltered(
                         1 => {}
                         _ => return Err(Self::__gom_runtime_error("insert-if-absent affected more than one row")),
                     }
-                    let entity = Self::__gom_fetch_by_key_on(hook_ctx, &key).await?
+                    let entity = Self::__gom_fetch_created_by_key_on(hook_ctx, &key).await?
                         .ok_or(::graphql_orm::sqlx::Error::RowNotFound)?;
                     hook_ctx.__ensure_written_row(None, #entity_name_lit,
                         <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
@@ -9778,6 +9822,29 @@ fn generate_graphql_operations_unfiltered(
                 hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                 id: &#pk_type_ty,
             ) -> ::graphql_orm::Result<Option<Self>> {
+                Self::__gom_fetch_by_id_locking(hook_ctx, id, #write_read_lock_suffix).await
+            }
+
+            // PostgreSQL `SELECT ... FOR UPDATE` returns a row only when it also passes the
+            // table's UPDATE policy. A transaction already holds the lock on a row it has just
+            // inserted, so the read-back of a created row takes no lock: it then needs the
+            // SELECT policy alone, as an append-only entity declares.
+            #[doc(hidden)]
+            #[allow(clippy::ptr_arg)]
+            pub(crate) async fn __gom_fetch_created_by_id_on(
+                hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                id: &#pk_type_ty,
+            ) -> ::graphql_orm::Result<Option<Self>> {
+                Self::__gom_fetch_by_id_locking(hook_ctx, id, "").await
+            }
+
+            #[doc(hidden)]
+            #[allow(clippy::ptr_arg)]
+            async fn __gom_fetch_by_id_locking(
+                hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                id: &#pk_type_ty,
+                lock_suffix: &str,
+            ) -> ::graphql_orm::Result<Option<Self>> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, FromSqlRow, SqlValue};
 
                 let sql = Self::__gom_rebind_sql(
@@ -9787,7 +9854,7 @@ fn generate_graphql_operations_unfiltered(
                         #sql_table_name,
                         #upsert_read_lock_hint,
                         #sql_dialect.render_identifier_path(Self::PRIMARY_KEY),
-                        #write_read_lock_suffix,
+                        lock_suffix,
                     ),
                     1,
                 );
@@ -9848,7 +9915,7 @@ fn generate_graphql_operations_unfiltered(
                     .map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
 
                 hook_ctx.execute(&sql, &bind_values).await?;
-                let entity = Self::__gom_fetch_by_id_on(hook_ctx, &created_pk).await?
+                let entity = Self::__gom_fetch_created_by_id_on(hook_ctx, &created_pk).await?
                     .ok_or(::graphql_orm::sqlx::Error::RowNotFound)?;
                 #repository_post_image_check
                 let after_state = Some(Self::__gom_capture_entity_state(&entity)?);
