@@ -3,12 +3,39 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.143.0 to 0.144.0: AI follow-ups
+
+No GraphQL SDL, public struct, persistent schema or data migration change.
+`AI_SCHEMA_MODULE_VERSION` stays `0.80.0`.
+
+### Breaking changes
+
+- Publishing a skill version now rejects an input or output schema nested more
+  than 32 levels deep, or with a `pattern` value or `patternProperties` key
+  longer than 256 bytes. Stored versions are unaffected.
+
+### Optional adoption
+
+- **Anthropic model aliases:** call `AnthropicProvider::with_model_snapshot`
+  for each alias a deployment requests, naming the dated snapshot it resolves
+  to. Pricing stays keyed by the requested identifier. Without a mapping,
+  behaviour is unchanged.
+- **Stored OpenAI responses:** deployments that set `store_responses = true`
+  and must remove stored responses can use
+  `OpenAiStoredResponseDeletionService`. The crate still deletes none on its
+  own; see [session retention](docs/session-retention.md#stored-provider-responses-are-not-deleted).
+- **Lease clocks:** no behaviour changed. Review
+  [lease clocks](docs/worker-provider-turn.md#lease-clocks) and set
+  `AiRunServiceLimits::with_lease_recovery_grace` if worker clocks can drift.
+
+No other configuration, authorization or data migration change.
 
 ## 0.142.0 to 0.143.0: runtime and provider bug batch
 

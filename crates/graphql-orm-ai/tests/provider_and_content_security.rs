@@ -574,6 +574,67 @@ async fn database_managed_protection_refuses_wrong_mode_and_unready_policy() {
     );
 }
 
+/// The only protector the crate ships performs no encryption: the stored
+/// envelope is the plaintext JSON, and it refuses the encrypted mode rather
+/// than pretend to provide it.
+#[tokio::test]
+async fn the_built_in_protector_stores_plaintext_and_offers_no_encryption() {
+    let protector = DatabaseManagedContentProtector;
+    let context = ContentProtectionContext {
+        entity: "message_block".to_owned(),
+        row_id: "row-1".to_owned(),
+        field: "content".to_owned(),
+        scope: AiScope::new("test", "scope"),
+    };
+    let mut policy = AiContentProtectionPolicy {
+        scope: context.scope.clone(),
+        mode: AiContentProtectionMode::DatabaseManaged,
+        key_policy_reference: None,
+        version: 1,
+        ready: true,
+    };
+    let plaintext = json!({"text": "plaintext-marker"});
+    let envelope = protector
+        .protect(&policy, &context, plaintext.clone())
+        .await
+        .expect("database-managed policy should protect");
+    assert_eq!(
+        envelope,
+        ProtectedContentEnvelope::DatabaseManaged {
+            value: plaintext.clone()
+        }
+    );
+    assert!(
+        serde_json::to_string(&envelope)
+            .expect("envelope serializes")
+            .contains("plaintext-marker"),
+        "what reaches the database is the plaintext"
+    );
+
+    policy.mode = AiContentProtectionMode::ApplicationEncrypted;
+    assert_eq!(
+        protector.protect(&policy, &context, plaintext).await,
+        Err(ContentProtectionError::Unsupported)
+    );
+    let encrypted = ProtectedContentEnvelope::ApplicationEncrypted {
+        version: 1,
+        key_id: "key-1".to_owned(),
+        algorithm: "example".to_owned(),
+        nonce: "nonce".to_owned(),
+        ciphertext: "ciphertext".to_owned(),
+    };
+    for mode in [
+        AiContentProtectionMode::DatabaseManaged,
+        AiContentProtectionMode::ApplicationEncrypted,
+    ] {
+        policy.mode = mode;
+        assert_eq!(
+            protector.open(&policy, &context, &encrypted).await,
+            Err(ContentProtectionError::ValidationFailed)
+        );
+    }
+}
+
 #[tokio::test]
 async fn bootstrap_secret_store_is_explicitly_mapped_and_read_only() {
     let reference = SecretRef::parse("provider/openai/test").expect("reference should parse");

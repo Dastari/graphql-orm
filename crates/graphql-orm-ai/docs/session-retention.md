@@ -3,7 +3,7 @@ title: "Bounded Session Retention"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-09-25
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -425,3 +425,29 @@ fatal and keeps runtime readiness closed. A finalized `deleted` shell is valid
 only with an empty title, its original deletion timestamp, no protected or
 external session dependency, complete message tombstones, terminal runs,
 absent current/retained checkpoints, and its redacted finalization audit.
+
+### Stored provider responses are not deleted
+
+With `OpenAiProviderConfig::store_responses = true` (or the xAI equivalent)
+the provider keeps each response so a later turn can continue from it. No
+workflow in this crate deletes those stored responses: not run completion, not
+session deletion and not retention. They stay at the provider under the
+provider's own retention. The secure default, `store_responses = false`,
+stores nothing.
+
+A host that enables stored responses and needs them removed owns that job:
+
+- The response identifiers are in `provider_response_id` on run checkpoints,
+  tool calls and provider-session rows. Collect them before retention removes
+  the rows that hold them.
+- `OpenAiStoredResponseDeletionService::delete_and_confirm_absent` deletes one
+  response by its exact identifier. It reports `DeletedAndConfirmedAbsent`
+  only after OpenAI acknowledged that identifier as deleted and a following
+  retrieval returned not-found.
+- A not-found answer to the delete request is reported as
+  `NotFoundUnconfirmed`. It is not proof of absence: a credential that now
+  belongs to a different project receives the same answer while the response
+  still exists. Keep the identifier and follow up.
+
+Durable tracking of which stored responses a deployment still owes a deletion
+is not implemented.
