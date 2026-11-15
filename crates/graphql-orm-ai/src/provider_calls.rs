@@ -420,12 +420,17 @@ impl AiProviderCallPlan {
 
     fn new_internal(
         provider_kind: ProviderKind,
-        request: ModelRequest,
+        mut request: ModelRequest,
         budget: AiBudgetReservationRequest,
         mut transfers: Vec<AiEgressManifest>,
         correlation_id: String,
         allow_bound_tools: bool,
     ) -> Result<Self, AiError> {
+        // A plan is cloned, retried and stored, so it holds entity-reference
+        // handles only, whatever the caller supplied. The byte estimate
+        // sealed below reserves room for what each handle may resolve to at
+        // dispatch.
+        crate::withhold_request_entity_references(&mut request);
         request
             .validate()
             .map_err(|_| AiError::InvalidInput("invalid provider call plan".to_owned()))?;
@@ -3208,7 +3213,20 @@ impl AiProviderCallResult {
         Ok(ModelContinuation::ProviderResponse { response_id })
     }
 
+    /// The continuation for the next provider turn.
+    ///
+    /// Its replayed history holds entity-reference handles only. The request
+    /// snapshot it is built from never held resolved data; the reduction is
+    /// applied again here, at the one place history is built, so nothing but
+    /// a handle can be checkpointed, parked or replayed. The next dispatch
+    /// resolves the handles again.
     pub(crate) fn next_continuation(&self) -> Result<ModelContinuation, AiError> {
+        let mut continuation = self.next_unredacted_continuation()?;
+        crate::entity_references::redact_model_continuation(&mut continuation);
+        Ok(continuation)
+    }
+
+    fn next_unredacted_continuation(&self) -> Result<ModelContinuation, AiError> {
         if self.tool_calls.is_empty() {
             return Err(AiError::ProviderFailed);
         }
@@ -4489,6 +4507,10 @@ impl AiProviderCallExecutor {
                 .validate()
                 .map_err(classify_unstarted_provider_error)?;
         }
+        // Everything this call clones, snapshots, hashes or returns is built
+        // from handles. Resolved reference data exists only in the dispatch
+        // value built immediately before transport, below.
+        crate::withhold_request_entity_references(&mut plan.request);
         // Without a bound retained session the whole surface may travel with this turn, so a
         // per-turn-share admission is refused here, before any reservation or transport.
         if plan.frozen_tool_surface_admission
@@ -4865,19 +4887,30 @@ impl AiProviderCallExecutor {
                 schema_rejections: Mutex::new(BTreeSet::new()),
             })
         });
+        // The single dispatch step. Every path that sends a provider request
+        // from this executor passes here: a first call, a retry, a tool
+        // continuation, a resumed or recovered run, streaming, dynamic tools
+        // and provider sessions. The plan holds handles; each one is resolved
+        // now, through the host hook, for the principal rehydrated above. The
+        // resolved value is not `Clone`, is moved into the adapter and is
+        // dropped when the call ends, so no earlier resolution can be sent.
+        let dispatch_request = self
+            .runtime
+            .resolve_dispatch_request(current.principal(), &plan.budget.scope, plan.request)
+            .await;
         let dispatch = if let Some(responder) = &dynamic_responder {
             let responder: Arc<dyn ProviderDynamicToolResponder> = responder.clone();
             self.runtime
-                .dispatch_provider_with_dynamic_tools(
+                .dispatch_provider_request_with_dynamic_tools(
                     &plan.provider_kind,
-                    plan.request,
+                    dispatch_request,
                     context,
                     responder,
                 )
                 .await
         } else {
             self.runtime
-                .dispatch_provider(&plan.provider_kind, plan.request, context)
+                .dispatch_provider_request(&plan.provider_kind, dispatch_request, context)
                 .await
         };
         let mut stream = match dispatch {
@@ -5805,6 +5838,7 @@ fn valid_provider_call_id(value: &str) -> bool {
 
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
+    mod entity_reference_tests;
     mod native_coordinator_tests;
     mod tool_media_tests;
 

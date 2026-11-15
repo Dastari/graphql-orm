@@ -330,6 +330,7 @@ impl AiSessionService for RecordingSessionService {
         Ok(SendAiMessagePayload {
             message_id: Uuid::new_v4(),
             run_id: Uuid::new_v4(),
+            reference_notices: Vec::new(),
         })
     }
 }

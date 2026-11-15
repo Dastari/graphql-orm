@@ -827,6 +827,19 @@ impl OpenAiProvider {
         request: &ModelRequest,
         context: &ProviderRequestContext,
     ) -> Result<Value, ProviderError> {
+        self.dispatch_body(
+            request,
+            context,
+            &crate::ModelDispatchReferences::withheld(),
+        )
+    }
+
+    fn dispatch_body(
+        &self,
+        request: &ModelRequest,
+        context: &ProviderRequestContext,
+        references: &crate::ModelDispatchReferences,
+    ) -> Result<Value, ProviderError> {
         self.capabilities
             .validate_reasoning_effort(&request.model, request.reasoning_effort)?;
         // Stateless replay is available only where the declared capability
@@ -870,7 +883,7 @@ impl OpenAiProvider {
                 ModelInputBlock::Json { value } => {
                     content.push(json!({
                         "type": "input_text",
-                        "text": value.to_string()
+                        "text": references.wire_json(value).to_string()
                     }));
                 }
                 ModelInputBlock::Attachment { mime, .. } => {
@@ -983,7 +996,7 @@ impl OpenAiProvider {
                 .map(|tool| (tool.tool_id.as_str(), tool))
                 .collect::<BTreeMap<_, _>>();
             for message in messages {
-                stateless_input_items(message, &definitions, &mut input)?;
+                stateless_input_items(message, &definitions, references, &mut input)?;
             }
             instructions = replayed;
         }
@@ -1086,10 +1099,12 @@ impl AiProvider for OpenAiProvider {
     #[cfg(feature = "provider-openai-core")]
     async fn submit_background(
         &self,
-        request: ModelRequest,
+        dispatch: crate::ModelDispatchRequest,
         context: ProviderRequestContext,
         binding: ProviderBackgroundBinding,
     ) -> Result<ProviderBackgroundSubmission, ProviderError> {
+        let (request, references) = dispatch.into_parts();
+
         if self.flavor != ResponsesFlavor::OpenAi || !self.capabilities.background {
             return Err(ProviderError::Unsupported);
         }
@@ -1110,7 +1125,7 @@ impl AiProvider for OpenAiProvider {
         {
             return Err(ProviderError::EgressDenied);
         }
-        let mut body = self.request_body(&request, &context)?;
+        let mut body = self.dispatch_body(&request, &context, &references)?;
         body["stream"] = Value::Bool(false);
         body["background"] = Value::Bool(true);
         body["metadata"] = json!({
@@ -1249,9 +1264,10 @@ impl AiProvider for OpenAiProvider {
 
     async fn stream(
         &self,
-        request: ModelRequest,
+        dispatch: crate::ModelDispatchRequest,
         context: ProviderRequestContext,
     ) -> Result<ProviderEventStream, ProviderError> {
+        let (request, references) = dispatch.into_parts();
         context.validate_request(&self.provider_kind, &request)?;
         #[cfg(feature = "provider-openai-compatible-core")]
         if let Some(binding) = &self.compatible_binding
@@ -1271,7 +1287,7 @@ impl AiProvider for OpenAiProvider {
         {
             return Err(ProviderError::EgressDenied);
         }
-        let body = self.request_body(&request, &context)?;
+        let body = self.dispatch_body(&request, &context, &references)?;
         let secret = self
             .secrets
             .resolve(&self.config.credential)
@@ -1376,6 +1392,7 @@ impl AiProvider for OpenAiProvider {
 fn stateless_input_items(
     message: &crate::ModelConversationMessage,
     definitions: &BTreeMap<&str, &crate::ModelToolDefinition>,
+    references: &crate::ModelDispatchReferences,
     input: &mut Vec<Value>,
 ) -> Result<(), ProviderError> {
     match message {
@@ -1386,9 +1403,10 @@ fn stateless_input_items(
                     ModelInputBlock::Text { text } => {
                         Ok(json!({"type": "input_text", "text": text}))
                     }
-                    ModelInputBlock::Json { value } => {
-                        Ok(json!({"type": "input_text", "text": value.to_string()}))
-                    }
+                    ModelInputBlock::Json { value } => Ok(json!({
+                        "type": "input_text",
+                        "text": references.wire_json(value).to_string()
+                    })),
                     ModelInputBlock::Attachment { .. } | ModelInputBlock::ToolResult { .. } => {
                         Err(ProviderError::InvalidRequest)
                     }
@@ -2910,7 +2928,7 @@ mod tests {
         let estimated_bytes = request.conservative_egress_bytes();
         let acknowledgement = provider
             .submit_background(
-                request,
+                request.into(),
                 background_context("test-model", estimated_bytes),
                 binding,
             )
@@ -2970,7 +2988,7 @@ mod tests {
         assert!(matches!(
             provider
                 .submit_background(
-                    request,
+                    request.into(),
                     background_context("test-model", estimated_bytes),
                     binding,
                 )
@@ -4254,7 +4272,7 @@ mod tests {
         let estimated_bytes = request.conservative_egress_bytes();
         assert!(matches!(
             provider
-                .stream(request, context("test-model", estimated_bytes))
+                .stream(request.into(), context("test-model", estimated_bytes))
                 .await,
             Err(ProviderError::EgressDenied)
         ));
@@ -4296,7 +4314,7 @@ mod tests {
         };
         let estimated_bytes = request.conservative_egress_bytes();
         let events = provider
-            .stream(request, context("test-model", estimated_bytes))
+            .stream(request.into(), context("test-model", estimated_bytes))
             .await
             .expect("stream should start")
             .try_collect::<Vec<_>>()
@@ -4349,7 +4367,7 @@ mod tests {
         };
         let estimated_bytes = request.conservative_egress_bytes();
         let events = provider
-            .stream(request, context("test-model", estimated_bytes))
+            .stream(request.into(), context("test-model", estimated_bytes))
             .await
             .expect("stream should start")
             .try_collect::<Vec<_>>()
@@ -4410,7 +4428,7 @@ mod tests {
         };
         let estimated_bytes = request.conservative_egress_bytes();
         let events = provider
-            .stream(request, context(&model, estimated_bytes))
+            .stream(request.into(), context(&model, estimated_bytes))
             .await
             .expect("live stream should start")
             .try_collect::<Vec<_>>()

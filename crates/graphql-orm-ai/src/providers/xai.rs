@@ -7,8 +7,8 @@ use async_trait::async_trait;
 
 use super::openai::{OpenAiProvider, OpenAiProviderConfig};
 use crate::{
-    AiProvider, AiSecretStore, ModelRequest, ProviderCapabilities, ProviderError,
-    ProviderEventStream, ProviderKind, ProviderRequestContext, SecretRef,
+    AiProvider, AiSecretStore, ProviderCapabilities, ProviderError, ProviderEventStream,
+    ProviderKind, ProviderRequestContext, SecretRef,
 };
 
 /// Native xAI adapter configuration.
@@ -143,7 +143,7 @@ impl AiProvider for XAiProvider {
 
     async fn stream(
         &self,
-        request: ModelRequest,
+        request: crate::ModelDispatchRequest,
         context: ProviderRequestContext,
     ) -> Result<ProviderEventStream, ProviderError> {
         self.inner.stream(request, context).await
@@ -163,6 +163,7 @@ mod tests {
     use tokio::sync::oneshot;
 
     use super::*;
+    use crate::ModelRequest;
     use crate::{
         AiBudgetAmounts, AiBudgetReservation, AiBudgetReservationId, AiDataSourceRef,
         AiDestinationTrust, AiEgressCapability, AiEgressDecision, AiEgressManifest, AiRunId,
@@ -347,7 +348,7 @@ mod tests {
         .expect("loopback xAI provider should build");
         let model_request = request();
         let result = provider
-            .stream(model_request.clone(), context(&model_request))
+            .stream(model_request.clone().into(), context(&model_request))
             .await?
             .try_collect::<Vec<_>>()
             .await;
@@ -375,7 +376,7 @@ mod tests {
         .expect("loopback xAI provider should build");
         let model_request = request();
         let events = provider
-            .stream(model_request.clone(), context(&model_request))
+            .stream(model_request.clone().into(), context(&model_request))
             .await
             .expect("xAI stream should start")
             .try_collect::<Vec<_>>()
@@ -431,7 +432,10 @@ mod tests {
         let missing_zdr_request = request();
         assert!(matches!(
             provider
-                .stream(missing_zdr_request.clone(), context(&missing_zdr_request))
+                .stream(
+                    missing_zdr_request.clone().into(),
+                    context(&missing_zdr_request)
+                )
                 .await,
             Err(ProviderError::Rejected)
         ));
@@ -484,7 +488,7 @@ mod tests {
         stateless.continuation_mode = crate::ModelContinuationMode::StatelessReplay;
         assert!(matches!(
             provider
-                .stream(stateless.clone(), context(&stateless))
+                .stream(stateless.clone().into(), context(&stateless))
                 .await,
             Err(ProviderError::Unsupported)
         ));

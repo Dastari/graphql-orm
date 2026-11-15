@@ -1061,11 +1061,22 @@ impl OrmAiOpenAiBackgroundSubmissionService {
             return Err(error);
         }
 
+        // Background submission is a dispatch path of its own. The plan holds
+        // entity-reference handles; resolve them here, for the principal
+        // rehydrated above, into the one value that is sent and then dropped.
+        let dispatch_request = self
+            .runtime
+            .resolve_dispatch_request(
+                current.principal(),
+                &plan.budget_request().scope,
+                plan.request_ref().clone(),
+            )
+            .await;
         let acknowledgement = match self
             .submit_with_heartbeats(
                 &mut renewed,
                 &ProviderKind::OpenAi,
-                plan.request_ref().clone(),
+                dispatch_request,
                 context,
                 ProviderBackgroundBinding::new(
                     submission_id,
@@ -1103,13 +1114,16 @@ impl OrmAiOpenAiBackgroundSubmissionService {
         &self,
         lease: &mut AiRunLease,
         provider_kind: &ProviderKind,
-        request: crate::ModelRequest,
+        request: crate::ModelDispatchRequest,
         context: ProviderRequestContext,
         binding: ProviderBackgroundBinding,
     ) -> Result<ProviderBackgroundSubmission, AiError> {
-        let submission =
-            self.runtime
-                .submit_provider_background(provider_kind, request, context, binding);
+        let submission = self.runtime.submit_provider_background_request(
+            provider_kind,
+            request,
+            context,
+            binding,
+        );
         tokio::pin!(submission);
         let heartbeat_delay = std::cmp::max(
             self.run_service.lease_ttl().unsigned_abs() / 3,
