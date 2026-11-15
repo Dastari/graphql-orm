@@ -597,7 +597,19 @@ struct StaticGraphPlugin {
     runtime: PluginRuntime,
 }
 
+#[derive(Clone)]
 struct SelectedRouterPolicy(Option<Arc<crate::auth::AuthorizationCatalog>>);
+
+// PluginContext read guards lock a DashMap shard. Keep only an owned snapshot:
+// authority renewal writes the principal into this same context, and its key
+// may share the policy's shard.
+fn selected_policy(
+    context: &hive_router::plugins::plugin_context::PluginContext,
+) -> Option<SelectedRouterPolicy> {
+    context
+        .get_ref::<SelectedRouterPolicy>()
+        .map(|selected| (*selected).clone())
+}
 
 /// The `Node` implementations of the graph this request is pinned to.
 struct SelectedNodeLookup(Option<Arc<crate::node_lookup::NodeLookup>>);
@@ -1021,11 +1033,8 @@ impl RouterPlugin for StaticGraphPlugin {
                 ),
             );
         }
-        let selected = payload.context.get_ref::<SelectedRouterPolicy>();
-        let Some(catalog) = selected
-            .as_deref()
-            .and_then(|selected| selected.0.as_deref())
-        else {
+        let selected = selected_policy(payload.context);
+        let Some(catalog) = selected.as_ref().and_then(|selected| selected.0.as_ref()) else {
             if self.runtime.authentication.is_some() {
                 return OnGraphqlAnalysisHookResult::EndWithResponse(
                     PlanExecutionOutput::from_graphql_errors_to_response(
@@ -1113,11 +1122,8 @@ impl RouterPlugin for StaticGraphPlugin {
         &'execution self,
         payload: OnExecuteStartHookPayload<'execution>,
     ) -> OnExecuteStartHookResult<'execution> {
-        let selected = payload.context.get_ref::<SelectedRouterPolicy>();
-        let Some(catalog) = selected
-            .as_deref()
-            .and_then(|selected| selected.0.as_deref())
-        else {
+        let selected = selected_policy(payload.context);
+        let Some(catalog) = selected.as_ref().and_then(|selected| selected.0.as_ref()) else {
             if self.runtime.authentication.is_some() {
                 return payload.end_with_graphql_error(
                     GraphQLError::from_message_and_code(
@@ -1618,6 +1624,28 @@ mod tests {
         ) -> Result<AuthenticatedPrincipal, crate::AuthenticationError> {
             Err(crate::AuthenticationError::invalid_credential("rejected"))
         }
+    }
+
+    #[test]
+    fn selected_policy_snapshot_releases_the_context_shard_before_renewal() {
+        let context = Arc::new(hive_router::plugins::plugin_context::PluginContext::default());
+        context.insert(SelectedRouterPolicy(None));
+        let selected = selected_policy(&context).expect("selected policy snapshot");
+        let (sent, received) = std::sync::mpsc::channel();
+        let writer = context.clone();
+        let renewal = std::thread::spawn(move || {
+            // Write the same key to force a shard collision, independent of
+            // DashMap's random hashing of the principal and policy type IDs.
+            writer.insert(SelectedRouterPolicy(None));
+            sent.send(()).unwrap();
+        });
+        let result = received.recv_timeout(std::time::Duration::from_secs(5));
+        // Keep the snapshot alive through the write, just as both hooks do
+        // while operation_principal replaces the connection's principal.
+        assert!(selected.0.is_none());
+        drop(selected);
+        renewal.join().unwrap();
+        result.expect("policy snapshot must not retain a context shard read lock");
     }
 
     #[test]

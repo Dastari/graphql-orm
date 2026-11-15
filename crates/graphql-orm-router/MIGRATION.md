@@ -10,6 +10,12 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.15.1 to 0.15.2
+
+No consumer migration is required. Established WebSocket operations can resume
+following role-authority refresh without an intermittent policy-context lock
+stall. Authority deadlines and fail-closed refusal behavior are unchanged.
+
 ## 0.15.0 to 0.15.1
 
 Test fixture stability only; no consumer migration is required.
