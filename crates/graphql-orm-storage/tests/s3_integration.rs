@@ -1074,3 +1074,49 @@ async fn conditional_creates_require_a_verified_provider() {
     done.store(true, Ordering::SeqCst);
     fixture.server.join().expect("fixture thread");
 }
+
+/// `head_blob`, `get_blob` and `get_blob_range` report the provider's
+/// `Last-Modified` time (#540).
+#[tokio::test]
+async fn s3_metadata_reports_the_last_modified_time() {
+    use std::sync::{Arc, atomic::AtomicBool};
+    use time::OffsetDateTime;
+
+    let done = Arc::new(AtomicBool::new(false));
+    let (endpoint, server) = serve_scripted_s3(
+        |request| {
+            assert_eq!(request.path, "/fixture/dated.bin");
+            let ranged = request.headers.contains("\r\nrange:");
+            let (status, body) = if ranged {
+                ("206 Partial Content", "at")
+            } else {
+                ("200 OK", "dated")
+            };
+            ScriptedReply::Respond(
+                status,
+                "Last-Modified: Wed, 01 Jan 2020 00:00:00 GMT\r\nETag: \"fixture\"\r\n".to_string(),
+                body.to_string(),
+            )
+        },
+        Arc::clone(&done),
+    );
+    let backend = fixture_backend(endpoint);
+    let expected = Some(OffsetDateTime::from_unix_timestamp(1_577_836_800).expect("2020"));
+
+    let head = backend
+        .head_blob("dated.bin")
+        .await
+        .expect("head")
+        .expect("present");
+    assert_eq!(head.last_modified, expected);
+    let body = backend.get_blob("dated.bin").await.expect("get");
+    assert_eq!(body.metadata.expect("metadata").last_modified, expected);
+    let range = backend
+        .get_blob_range("dated.bin", 1..3)
+        .await
+        .expect("range");
+    assert_eq!(range.metadata.expect("metadata").last_modified, expected);
+
+    done.store(true, std::sync::atomic::Ordering::SeqCst);
+    server.join().expect("fixture thread");
+}

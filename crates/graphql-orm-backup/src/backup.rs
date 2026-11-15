@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     io::Write,
 };
 
@@ -270,8 +270,17 @@ async fn create_full_backup_inner(
     options.cancellation.check()?;
     let limits = repository.capacity_limits();
     let plan = plan_full_backup(database, objects).await?;
+    let mut exported = HashSet::with_capacity(plan.tables.len());
     for table in &plan.tables {
         ensure_table_name(request.snapshot_id, &table.table_name)?;
+        // Refused before any write: both exports would share one payload
+        // key.
+        if !exported.insert(table.table_name.as_str()) {
+            return Err(BackupError::InvalidManifestEntry {
+                snapshot_id: request.snapshot_id,
+                reason: format!("table {} is exported more than once", table.table_name),
+            });
+        }
     }
     validate_object_refs(request.snapshot_id, &plan.objects)?;
     check_declared_object_sizes(limits, &plan.objects)?;
@@ -1280,19 +1289,21 @@ struct ChangeGroup {
     changes: Vec<BackupChangeExport>,
 }
 
+/// Groups changes by table in one pass, keeping the tables in the order they
+/// first appear and each table's changes in their original order.
 fn group_changes_by_table(changes: Vec<BackupChangeExport>) -> Vec<ChangeGroup> {
     let mut groups = Vec::<ChangeGroup>::new();
+    let mut index = HashMap::<String, usize>::new();
     for change in changes {
-        if let Some(group) = groups
-            .iter_mut()
-            .find(|group| group.table_name == change.table_name)
-        {
-            group.changes.push(change);
-        } else {
-            groups.push(ChangeGroup {
-                table_name: change.table_name.clone(),
-                changes: vec![change],
-            });
+        match index.get(&change.table_name) {
+            Some(&position) => groups[position].changes.push(change),
+            None => {
+                index.insert(change.table_name.clone(), groups.len());
+                groups.push(ChangeGroup {
+                    table_name: change.table_name.clone(),
+                    changes: vec![change],
+                });
+            }
         }
     }
     groups
@@ -1330,4 +1341,53 @@ fn compact_object_entries(chain: &[BackupSnapshotManifest]) -> Vec<ObjectBackupE
     let mut objects = objects_by_id.into_values().collect::<Vec<_>>();
     objects.sort_by_key(|object| object.object_id);
     objects
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn change(table_name: &str, primary_key: &str) -> BackupChangeExport {
+        BackupChangeExport {
+            table_name: table_name.to_string(),
+            primary_key: primary_key.to_string(),
+            action: BackupChangeAction::Delete,
+            row: None,
+            changed_at: 0,
+        }
+    }
+
+    /// Changes are grouped in one pass, keeping the tables in first-seen
+    /// order and each table's changes in their original order (#540).
+    #[test]
+    fn changes_are_grouped_by_table_in_first_seen_order() {
+        let groups = group_changes_by_table(vec![
+            change("b", "1"),
+            change("a", "1"),
+            change("b", "2"),
+            change("c", "1"),
+            change("a", "2"),
+        ]);
+        let grouped: Vec<(String, Vec<String>)> = groups
+            .into_iter()
+            .map(|group| {
+                (
+                    group.table_name,
+                    group
+                        .changes
+                        .into_iter()
+                        .map(|change| change.primary_key)
+                        .collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            grouped,
+            vec![
+                ("b".to_string(), vec!["1".to_string(), "2".to_string()]),
+                ("a".to_string(), vec!["1".to_string(), "2".to_string()]),
+                ("c".to_string(), vec!["1".to_string()]),
+            ]
+        );
+    }
 }

@@ -12,6 +12,7 @@ use aws_sdk_s3::{
 use bytes::{Bytes, BytesMut};
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
+use time::OffsetDateTime;
 use tokio::sync::OnceCell;
 use tokio_util::io::ReaderStream;
 
@@ -692,13 +693,12 @@ impl BlobStore for S3StorageBackend {
                 .and_then(|size| u64::try_from(size).ok()),
             sha256_hex: None,
             etag: output.e_tag().map(ToString::to_string),
-            last_modified: None,
+            last_modified: s3_time(output.last_modified()),
         };
-        let stream_key = key.to_string();
         let stream = ReaderStream::new(output.body.into_async_read()).map(move |chunk| {
             chunk.map_err(|source| StorageError::Provider {
                 backend: StorageBackend::S3.as_str().to_string(),
-                message: format!("S3 object stream failed for {stream_key}: {source}"),
+                message: format!("S3 object stream failed: {source}"),
                 retryable: true,
             })
         });
@@ -756,13 +756,12 @@ impl BlobStore for S3StorageBackend {
                 .and_then(|size| u64::try_from(size).ok()),
             sha256_hex: None,
             etag: output.e_tag().map(ToString::to_string),
-            last_modified: None,
+            last_modified: s3_time(output.last_modified()),
         };
-        let stream_key = key.to_string();
         let stream = ReaderStream::new(output.body.into_async_read()).map(move |chunk| {
             chunk.map_err(|source| StorageError::Provider {
                 backend: StorageBackend::S3.as_str().to_string(),
-                message: format!("S3 object range stream failed for {stream_key}: {source}"),
+                message: format!("S3 object range stream failed: {source}"),
                 retryable: true,
             })
         });
@@ -800,7 +799,7 @@ impl BlobStore for S3StorageBackend {
                 .and_then(|size| u64::try_from(size).ok()),
             sha256_hex: None,
             etag: output.e_tag().map(ToString::to_string),
-            last_modified: None,
+            last_modified: s3_time(output.last_modified()),
         }))
     }
 
@@ -994,6 +993,12 @@ where
 /// Whether `err` reports a failed `If-None-Match` condition.
 fn is_precondition_failed<E: ProvideErrorMetadata>(err: &SdkError<E, HttpResponse>) -> bool {
     service_error_code(err) == Some("PreconditionFailed") || service_error_status(err) == Some(412)
+}
+
+/// Converts an S3 `Last-Modified` time; a time outside the supported range
+/// is reported as unknown.
+fn s3_time(time: Option<&aws_sdk_s3::primitives::DateTime>) -> Option<OffsetDateTime> {
+    time.and_then(|time| OffsetDateTime::from_unix_timestamp_nanos(time.as_nanos()).ok())
 }
 
 /// Maps an SDK error to a provider error. Retryability comes from the error

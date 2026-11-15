@@ -7,7 +7,7 @@ use std::{
         Arc, Weak,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use async_trait::async_trait;
@@ -17,11 +17,13 @@ use secrecy::{ExposeSecret, SecretString};
 use sha2::{Digest, Sha256};
 use smb::{
     Client, ClientConfig, ConnectionConfig, CreateOptions, Dialect, DirAccessMask, Directory, File,
-    FileAccessMask, FileAttributes, FileCreateArgs, FileDispositionInformation,
-    FileFullDirectoryInformation, FileLinkInformation, FileRenameInformation,
-    FileStandardInformation, Resource, Status, UncPath, connection::EncryptionMode,
+    FileAccessMask, FileAttributes, FileBasicInformation, FileCreateArgs,
+    FileDispositionInformation, FileFullDirectoryInformation, FileLinkInformation,
+    FileRenameInformation, FileStandardInformation, Resource, ShareAccessFlags, Status, UncPath,
+    connection::EncryptionMode,
 };
 use smb_dtyp::binrw_util::sized_wide_string::SizedWideString;
+use time::OffsetDateTime;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
 use uuid::Uuid;
 
@@ -56,6 +58,10 @@ const LISTED_PATH_OVERHEAD: usize = 64;
 /// Most pages one continuation chain of `list_blobs_page` may return. Each
 /// page re-lists the whole tree; `list_blobs` lists it once.
 const MAX_LISTING_PAGES: u64 = 1_024;
+/// Shortest age [`SmbStorageBackend::sweep_temp_files`] accepts, so that a
+/// small clock difference with the server cannot make an upload in progress
+/// look stale.
+const MIN_TEMP_SWEEP_AGE: Duration = Duration::from_secs(60 * 60);
 /// Prefix of this backend's continuation tokens.
 const CONTINUATION_PREFIX: &str = "smb1:";
 const READ_CHUNK_SIZE: usize = 256 * 1024;
@@ -317,6 +323,115 @@ impl fmt::Debug for SmbStorageConfig {
     }
 }
 
+/// The host's statement that nothing else modifies the repository tree while
+/// [`SmbStorageBackend::sweep_temp_files`] runs.
+///
+/// The sweep is a maintenance-window operation on a repository tree the host
+/// controls. Construct this only when, for the whole sweep, no other party
+/// modifies the tree below this backend's root prefix at all: no uploads, no
+/// renames or deletions, and no directory or reparse-point changes, from any
+/// host or process, through SMB or on the server itself. Never sweep a share
+/// where an untrusted party has write access to the repository tree. The
+/// sweep's own checks are defence in depth, not a replacement for this: age
+/// cannot protect an upload that pauses and resumes, and an SMB client with
+/// write access can empty a directory the sweep holds and turn it into a
+/// junction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SmbRepositoryQuiesced(());
+
+impl SmbRepositoryQuiesced {
+    /// States that, for the whole sweep, no other party modifies the
+    /// repository tree: no uploads, renames, deletions, or directory or
+    /// reparse-point changes.
+    #[must_use]
+    pub const fn confirmed_by_host() -> Self {
+        Self(())
+    }
+}
+
+/// What one [`SmbStorageBackend::sweep_temp_files`] call removed and skipped.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct SmbTempSweepReport {
+    /// Stale temporary files removed.
+    pub removed: usize,
+    /// Entries and handles skipped because they are reparse points
+    /// (junctions, symbolic links and other links the server reports);
+    /// nothing behind them is entered or removed.
+    pub skipped_reparse_points: usize,
+    /// Stale temporary files skipped because another handle had them open.
+    pub skipped_in_use: usize,
+    /// Stale temporary files skipped because their size, last-write time or
+    /// type changed after enumeration.
+    pub skipped_changed: usize,
+    /// Directories skipped with everything below them because they could
+    /// not be held open as a plain directory without delete sharing: a link
+    /// the server refuses to follow, a reparse point, a directory another
+    /// client holds with delete access, or one that vanished.
+    pub skipped_directories: usize,
+    /// Cleanup steps that failed: closing a handle the sweep opened, and
+    /// disconnecting the tree, logging off, closing the connection or
+    /// stopping the session's runtime at the end. The sweep's dedicated
+    /// connection is closed regardless, which makes the server release every
+    /// handle it held.
+    pub cleanup_failures: usize,
+}
+
+/// A failed [`SmbStorageBackend::sweep_temp_files`] call: the first error,
+/// and what the sweep had done by then.
+///
+/// The sweep removes files as it goes, so `report.removed` files stay
+/// removed, and `report.cleanup_failures` counts every cleanup step that
+/// failed, on the error path too. Converting it into a [`StorageError`]
+/// keeps only the error.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct SmbTempSweepError {
+    /// The first failure.
+    pub error: StorageError,
+    /// What the sweep removed, skipped and failed to clean up before it
+    /// stopped.
+    pub report: SmbTempSweepReport,
+}
+
+impl SmbTempSweepError {
+    /// A failure before the sweep touched the share.
+    fn before_start(error: StorageError) -> Self {
+        Self {
+            error,
+            report: SmbTempSweepReport::default(),
+        }
+    }
+
+    /// Whether retrying the sweep may succeed.
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        self.error.is_retryable()
+    }
+}
+
+impl fmt::Display for SmbTempSweepError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "SMB temporary-file sweep failed after removing {} files, with {} cleanup failures: {}",
+            self.report.removed, self.report.cleanup_failures, self.error
+        )
+    }
+}
+
+impl std::error::Error for SmbTempSweepError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+impl From<SmbTempSweepError> for StorageError {
+    fn from(error: SmbTempSweepError) -> Self {
+        error.error
+    }
+}
+
 /// Options controlling whether a probe may create the configured root prefix.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SmbProbeOptions {
@@ -378,6 +493,10 @@ pub struct SmbBackendDiagnostics {
     pub write_requests: u64,
     /// SMB WRITE responses that acknowledged only part of the request.
     pub partial_write_responses: u64,
+    /// Bytes returned by SMB READ responses for blob reads.
+    pub bytes_downloaded: u64,
+    /// SMB READ requests that returned data for blob reads.
+    pub read_requests: u64,
     /// Successful reconnects.
     pub reconnects: u64,
     /// Current number of cached directories known to exist.
@@ -401,6 +520,8 @@ struct SmbDiagnosticCounters {
     bytes_uploaded: AtomicU64,
     write_requests: AtomicU64,
     partial_write_responses: AtomicU64,
+    bytes_downloaded: AtomicU64,
+    read_requests: AtomicU64,
     reconnects: AtomicU64,
     directory_cache_hits: AtomicU64,
     directory_cache_misses: AtomicU64,
@@ -605,6 +726,12 @@ impl SmbStorageBackend {
                 .diagnostics
                 .partial_write_responses
                 .load(Ordering::Relaxed),
+            bytes_downloaded: self
+                .inner
+                .diagnostics
+                .bytes_downloaded
+                .load(Ordering::Relaxed),
+            read_requests: self.inner.diagnostics.read_requests.load(Ordering::Relaxed),
             reconnects: self.inner.diagnostics.reconnects.load(Ordering::Relaxed),
             directory_cache_entries: self.inner.directories.len().await,
             directory_cache_hits: self
@@ -691,6 +818,783 @@ impl SmbStorageBackend {
             write_request_payload_limit: info.write_request_payload_limit,
             server_guid: info.server_guid,
         })
+    }
+
+    /// Removes this backend's stale temporary upload files below the root
+    /// prefix and reports what it removed and skipped.
+    ///
+    /// A write whose process or connection is lost between creating its
+    /// temporary file and publishing it leaves the file on the share, hidden
+    /// from listings but counting against the share's quota. The sweep walks
+    /// the root prefix depth-first within the configured listing limits and
+    /// deadline, and removes only files named exactly as this backend names
+    /// temporary files, `.<uuid>.uploading` or the `.<name>.<uuid>.uploading`
+    /// form of versions before 0.9.0, whose last-write time is at least
+    /// `older_than` before the server's current time. Every other name,
+    /// including a caller's key that merely ends in `.uploading`, is kept, as
+    /// is a file whose server reports no last-write time.
+    ///
+    /// `quiesced` is the host's statement that, for the whole sweep, no other
+    /// party modifies the repository tree; see [`SmbRepositoryQuiesced`].
+    /// Never run it on a share where an untrusted party has write access to
+    /// the repository tree. Age is measured against the server's clock, read
+    /// from a file the sweep creates and removes, never against this host's
+    /// clock. The sweep runs on its own SMB connection, owned by a runtime
+    /// on a thread of its own. At the end it disconnects the tree, logs off
+    /// and closes the connection, counting each step that fails; if it is
+    /// cancelled, times out or fails, dropping it stops that runtime, which
+    /// closes the socket without needing the caller's runtime to make
+    /// progress, so the server releases every handle it held.
+    ///
+    /// Defence in depth behind that precondition: every directory from the
+    /// share root down to the one being processed, root prefix included, is
+    /// held open while the sweep works below it, opened as itself with
+    /// `FILE_OPEN_REPARSE_POINT`, checked on the handle not to be a reparse
+    /// point, and opened without delete sharing. A directory that cannot be
+    /// held that way is skipped with everything below it and counted; it is
+    /// never opened by path alone. Entries reported as reparse points are
+    /// skipped and counted. Immediately before each candidate is opened, the
+    /// held parent's handle is asked again whether it has become a reparse
+    /// point, and its remaining candidates are skipped if so. Each candidate
+    /// is opened exclusively, without following a reparse point, and removed
+    /// through that handle, once, only if it is still a plain file with the
+    /// size and last-write time enumeration saw.
+    ///
+    /// What these checks stop: on a server that enforces share modes, other
+    /// SMB clients cannot rename, delete or replace a held directory, a file
+    /// another handle has open is not removed, and a reported reparse point
+    /// is never followed. What they do not stop: an SMB client with write
+    /// access can empty a held directory and set a reparse point on it,
+    /// after which a candidate path can resolve outside the root (the parent
+    /// re-check narrows that window but does not close it), and changes made
+    /// on the server's file system outside SMB bypass share modes. A server
+    /// that resolves links itself, as Samba does for symbolic links by
+    /// default, gives the client nothing to detect.
+    ///
+    /// Removing the temporary name of a conditional create whose link
+    /// outcome was unknown leaves any object linked at its key in place; no
+    /// published object is ever removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`SmbTempSweepError`] holding a non-retryable
+    /// configuration error when `older_than` is less than one hour, a
+    /// listing-limit or deadline error when the walk reaches a limit, or the
+    /// first failed request's error, with the report of what the sweep had
+    /// done by then. The sweep removes files as it goes: files removed before
+    /// an error remain removed and are counted in that report, as are cleanup
+    /// failures. An error after a removal request may have reached the
+    /// server is a non-retryable single-attempt error. The sweep is never
+    /// retried internally.
+    pub async fn sweep_temp_files(
+        &self,
+        quiesced: SmbRepositoryQuiesced,
+        older_than: Duration,
+    ) -> Result<SmbTempSweepReport, SmbTempSweepError> {
+        self.sweep_with(quiesced, older_than, SweepHooks::none())
+            .await
+    }
+
+    /// Runs [`Self::sweep_temp_files`], awaiting `barrier` for each
+    /// candidate after its directory chain is held and before the candidate
+    /// is opened. Test infrastructure only: the barrier lets a test change
+    /// the share between enumeration and removal.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Self::sweep_temp_files`].
+    #[cfg(feature = "smb-sweep-test-hooks")]
+    pub async fn sweep_temp_files_with_barrier(
+        &self,
+        quiesced: SmbRepositoryQuiesced,
+        older_than: Duration,
+        barrier: &SmbSweepBarrier,
+    ) -> Result<SmbTempSweepReport, SmbTempSweepError> {
+        self.sweep_with(
+            quiesced,
+            older_than,
+            SweepHooks {
+                barrier,
+                close_barrier: None,
+            },
+        )
+        .await
+    }
+
+    /// Runs [`Self::sweep_temp_files_with_barrier`], also awaiting
+    /// `close_barrier` before each close the sweep sends, after counting it
+    /// as unconfirmed. Test infrastructure only: the close barrier can stall
+    /// a close past the deadline or fail it.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Self::sweep_temp_files`].
+    #[cfg(feature = "smb-sweep-test-hooks")]
+    pub async fn sweep_temp_files_with_hooks(
+        &self,
+        quiesced: SmbRepositoryQuiesced,
+        older_than: Duration,
+        barrier: &SmbSweepBarrier,
+        close_barrier: &SmbSweepCloseBarrier,
+    ) -> Result<SmbTempSweepReport, SmbTempSweepError> {
+        self.sweep_with(
+            quiesced,
+            older_than,
+            SweepHooks {
+                barrier,
+                close_barrier: Some(close_barrier),
+            },
+        )
+        .await
+    }
+
+    /// Opens the directory at the root-relative `key` with delete access and
+    /// holds it until [`SmbHeldDirectory::release`], as another client could.
+    /// Test infrastructure only.
+    ///
+    /// # Errors
+    ///
+    /// Returns the open's error.
+    #[cfg(feature = "smb-sweep-test-hooks")]
+    pub async fn hold_directory_open_for_delete(
+        &self,
+        key: &str,
+    ) -> Result<SmbHeldDirectory, StorageError> {
+        let path = self.share_path()?.with_path(&self.mapped_key(key)?);
+        let snapshot = self.client_snapshot().await;
+        let resource = self
+            .with_timeout(
+                "hold",
+                snapshot.client.create_file(
+                    &path,
+                    &FileCreateArgs::make_open_existing(
+                        DirAccessMask::new()
+                            .with_list_directory(true)
+                            .with_delete(true)
+                            .with_synchronize(true)
+                            .into(),
+                    ),
+                ),
+            )
+            .await?;
+        match resource {
+            Resource::Directory(directory) => Ok(SmbHeldDirectory {
+                directory,
+                timeout: self.inner.config.operation_timeout,
+            }),
+            other => {
+                let _ = close_resource(other).await;
+                Err(probe_mismatch())
+            }
+        }
+    }
+
+    async fn sweep_with(
+        &self,
+        quiesced: SmbRepositoryQuiesced,
+        older_than: Duration,
+        hooks: SweepHooks<'_>,
+    ) -> Result<SmbTempSweepReport, SmbTempSweepError> {
+        let SmbRepositoryQuiesced(()) = quiesced;
+        if older_than < MIN_TEMP_SWEEP_AGE {
+            return Err(SmbTempSweepError::before_start(invalid_config(
+                "the temporary-file sweep age must be at least one hour",
+            )));
+        }
+        let limits = ListingLimits::from_config(&self.inner.config);
+        // A dedicated session on its own runtime thread: if this future is
+        // dropped, times out or fails part-way, dropping the session stops
+        // that runtime, which closes the socket, and the server releases
+        // every handle the sweep held, whatever state individual closes
+        // reached and whether or not the caller's runtime makes progress.
+        // The backend's shared connection never holds them.
+        let session = SweepSession::connect(self)
+            .await
+            .map_err(SmbTempSweepError::before_start)?;
+        let tally = hooks.tally();
+        let mut progress = SweepProgress::default();
+        // Boxed so the walk's large state machine lives on the heap, not on
+        // the stack of the task that polls the sweep.
+        let walked = within_listing_deadline(
+            limits.timeout,
+            Box::pin(self.sweep_walk(&session, limits, older_than, &hooks, &tally, &mut progress)),
+        )
+        .await;
+        // Release every held directory, innermost first, whatever happened,
+        // and count closes that failed; stopping the session releases them
+        // anyway.
+        while let Some(held) = progress.chain.pop() {
+            let _ = tally
+                .confirm_close(
+                    &held.share_relative,
+                    self.with_timeout("close", held.directory.close()),
+                )
+                .await;
+        }
+        let shutdown_failures = session.shutdown().await;
+        let mut report = progress.report;
+        tally.add_to(&mut report);
+        report.cleanup_failures = report.cleanup_failures.saturating_add(shutdown_failures);
+        match walked {
+            Ok(()) => Ok(report),
+            Err(error) => Err(SmbTempSweepError { error, report }),
+        }
+    }
+
+    /// Walks the root prefix depth-first, holding in `progress.chain` every
+    /// directory from the share root to the one being processed, and counts
+    /// what it does in `progress.report` as it goes, so the counts survive
+    /// an error or the deadline.
+    async fn sweep_walk(
+        &self,
+        session: &SweepSession,
+        limits: ListingLimits,
+        older_than: Duration,
+        hooks: &SweepHooks<'_>,
+        tally: &SweepTally<'_>,
+        progress: &mut SweepProgress,
+    ) -> Result<(), StorageError> {
+        let client = session.client();
+        let SweepProgress { chain, report } = progress;
+        let root = self.inner.config.root_prefix.clone().unwrap_or_default();
+        // Hold the share root and every root-prefix component.
+        let mut path = String::new();
+        let components = root.split('/').filter(|component| !component.is_empty());
+        for component in std::iter::once("").chain(components) {
+            if !component.is_empty() {
+                if !path.is_empty() {
+                    path.push('/');
+                }
+                path.push_str(component);
+            }
+            match self.hold_directory(client, &path, tally).await? {
+                DirectoryHold::Held(directory) => chain.push(HeldDirectory {
+                    directory,
+                    relative: String::new(),
+                    share_relative: path.clone(),
+                    entries: Vec::new().into_iter(),
+                    depth: 0,
+                }),
+                // Nothing to sweep below a missing root.
+                DirectoryHold::Missing => return Ok(()),
+                DirectoryHold::Refused => {
+                    report.skipped_directories += 1;
+                    return Ok(());
+                }
+            }
+        }
+        let server_now = self.server_time(client, tally).await?;
+        let source = SmbListingSource {
+            backend: self,
+            client,
+            base: self.share_path()?,
+            sweep: Some(tally),
+        };
+        let mut budget = ListingBudget::new(limits);
+        let base_depth = chain.len();
+        {
+            let top = chain.last_mut().expect("the root is held");
+            top.entries = source
+                .enumerate(&top.directory, &mut budget)
+                .await?
+                .into_iter();
+        }
+        while chain.len() >= base_depth {
+            let top = chain.last_mut().expect("the chain is not empty");
+            let Some(entry) = top.entries.next() else {
+                if chain.len() == base_depth {
+                    break;
+                }
+                let done = chain.pop().expect("a held directory");
+                // Counted until confirmed, so a close the deadline cancels
+                // stays counted; stopping the session releases the handle.
+                let _ = tally
+                    .confirm_close(
+                        &done.share_relative,
+                        self.with_timeout("close", done.directory.close()),
+                    )
+                    .await;
+                continue;
+            };
+            let name_len = entry.name.len();
+            let child = if top.relative.is_empty() {
+                entry.name
+            } else {
+                format!("{}/{}", top.relative, entry.name)
+            };
+            let depth = top.depth;
+            budget.charge(child.len() - name_len)?;
+            if validate_blob_key(&child).is_err() || child.contains(':') {
+                continue;
+            }
+            if child.len() > key_byte_limit(&child) {
+                return Err(listing_limit_exceeded(format!(
+                    "listing reached a path longer than {MAX_KEY_BYTES} bytes"
+                )));
+            }
+            if entry.directory {
+                if depth >= limits.max_depth {
+                    return Err(listing_limit_exceeded(format!(
+                        "listing exceeded the maximum directory depth of {} at {child:?}",
+                        limits.max_depth
+                    )));
+                }
+                let share_relative = match root.is_empty() {
+                    true => child.clone(),
+                    false => format!("{root}/{child}"),
+                };
+                match self.hold_directory(client, &share_relative, tally).await? {
+                    DirectoryHold::Held(directory) => {
+                        let entries = match source.enumerate(&directory, &mut budget).await {
+                            Ok(entries) => entries,
+                            Err(error) => {
+                                let _ = tally
+                                    .confirm_close(
+                                        &share_relative,
+                                        self.with_timeout("close", directory.close()),
+                                    )
+                                    .await;
+                                return Err(error);
+                            }
+                        };
+                        chain.push(HeldDirectory {
+                            directory,
+                            relative: child,
+                            share_relative,
+                            entries: entries.into_iter(),
+                            depth: depth + 1,
+                        });
+                    }
+                    DirectoryHold::Missing | DirectoryHold::Refused => {
+                        report.skipped_directories += 1;
+                    }
+                }
+                continue;
+            }
+            if !is_stale_temp(&child, entry.last_write, server_now, older_than) {
+                continue;
+            }
+            let file = ListedFile {
+                key: child,
+                last_write: entry.last_write,
+                size: entry.size,
+            };
+            hooks.before_candidate(&file.key, server_now, session).await;
+            // Ask the held directory itself, not its path, whether it has
+            // become a reparse point since it was opened. This narrows, but
+            // does not close, the window in which another client with write
+            // access could empty it and turn it into a junction.
+            let parent = chain.last_mut().expect("the chain is not empty");
+            let basic: FileBasicInformation = self
+                .with_timeout("sweep", parent.directory.query_info())
+                .await?;
+            if basic.file_attributes.reparse_point() {
+                parent.entries = Vec::new().into_iter();
+                report.skipped_directories += 1;
+                continue;
+            }
+            match self.remove_stale_temp_file(client, &file, tally).await? {
+                StaleRemoval::Removed => report.removed += 1,
+                StaleRemoval::Gone => {}
+                StaleRemoval::InUse => report.skipped_in_use += 1,
+                StaleRemoval::Changed => report.skipped_changed += 1,
+                StaleRemoval::ReparsePoint => report.skipped_reparse_points += 1,
+            }
+        }
+        Ok(())
+    }
+
+    /// Opens the share-relative directory `path` so that it stays the same
+    /// directory while held: as itself, never through a reparse point, and
+    /// without delete sharing, so a server enforcing share modes refuses to
+    /// rename, delete or replace it. The handle is checked not to be a
+    /// reparse point. Any directory it cannot hold that way is refused.
+    async fn hold_directory(
+        &self,
+        client: &Client,
+        path: &str,
+        tally: &SweepTally<'_>,
+    ) -> Result<DirectoryHold, StorageError> {
+        let target = self.share_path()?.with_path(path);
+        let mut args = FileCreateArgs::make_open_existing(
+            DirAccessMask::new()
+                .with_list_directory(true)
+                .with_read_attributes(true)
+                .with_synchronize(true)
+                .into(),
+        );
+        args.options = CreateOptions::new()
+            .with_directory_file(true)
+            .with_open_reparse_point(true);
+        args.share_access = Some(ShareAccessFlags::new().with_read(true).with_write(true));
+        let opened = tokio::time::timeout(
+            self.inner.config.operation_timeout,
+            client.create_file(&target, &args),
+        )
+        .await
+        .map_err(|_| {
+            remote_error(
+                StorageProviderErrorKind::Timeout,
+                "sweep",
+                "operation timed out",
+                true,
+            )
+        })?;
+        let resource = match opened {
+            Ok(resource) => resource,
+            Err(error) => {
+                let mapped = map_smb_error("sweep", error);
+                return if is_not_found(&mapped) {
+                    Ok(DirectoryHold::Missing)
+                } else if mapped.is_retryable() {
+                    Err(mapped)
+                } else {
+                    // A sharing violation, access denial, a link the server
+                    // refuses or a name that is not a directory.
+                    Ok(DirectoryHold::Refused)
+                };
+            }
+        };
+        let Resource::Directory(directory) = resource else {
+            let _ = tally
+                .confirm_close(path, self.with_timeout("close", close_resource(resource)))
+                .await;
+            return Ok(DirectoryHold::Refused);
+        };
+        let directory = Arc::new(directory);
+        let basic: Result<FileBasicInformation, _> =
+            self.with_timeout("sweep", directory.query_info()).await;
+        match basic {
+            Ok(basic)
+                if holdable_directory(
+                    basic.file_attributes.directory(),
+                    basic.file_attributes.reparse_point(),
+                ) =>
+            {
+                Ok(DirectoryHold::Held(directory))
+            }
+            Ok(_) => {
+                let _ = tally
+                    .confirm_close(path, self.with_timeout("close", directory.close()))
+                    .await;
+                Ok(DirectoryHold::Refused)
+            }
+            Err(error) => {
+                let _ = tally
+                    .confirm_close(path, self.with_timeout("close", directory.close()))
+                    .await;
+                Err(error)
+            }
+        }
+    }
+
+    /// The server's current time: the last-write time the server gives a
+    /// file the sweep creates under the root prefix, with a temporary name
+    /// listings hide, and removes through the same handle.
+    async fn server_time(
+        &self,
+        client: &Client,
+        tally: &SweepTally<'_>,
+    ) -> Result<SystemTime, StorageError> {
+        let key = temp_file_name();
+        let path = self.remote_path(&key)?;
+        let resource = self
+            .with_timeout(
+                "server_time",
+                client.create_file(
+                    &path,
+                    &FileCreateArgs::make_create_new(
+                        FileAttributes::new(),
+                        CreateOptions::new().with_non_directory_file(true),
+                    ),
+                ),
+            )
+            .await?;
+        let label = self.mapped_key(&key)?;
+        let Resource::File(file) = resource else {
+            let _ = tally
+                .confirm_close(&label, self.with_timeout("close", close_resource(resource)))
+                .await;
+            return Err(probe_mismatch());
+        };
+        let basic: Result<FileBasicInformation, _> =
+            self.with_timeout("server_time", file.query_info()).await;
+        let disposed = self
+            .with_timeout(
+                "server_time",
+                file.set_info(FileDispositionInformation::default()),
+            )
+            .await;
+        // A close that fails is counted, and returned when nothing failed
+        // before it.
+        let closed = tally
+            .confirm_close(&label, self.with_timeout("close", file.close()))
+            .await;
+        let basic = basic?;
+        disposed?;
+        closed?;
+        file_time(basic.last_write_time.since_epoch()).ok_or_else(|| {
+            remote_error(
+                StorageProviderErrorKind::Protocol,
+                "server_time",
+                "the server reported no time for a new file",
+                false,
+            )
+        })
+    }
+
+    /// Removes one stale temporary file through a handle it validated: an
+    /// exclusive open of the name itself, never a reparse point's target,
+    /// that still shows the size and last-write time enumeration saw. The
+    /// removal is never replayed.
+    async fn remove_stale_temp_file(
+        &self,
+        client: &Client,
+        file: &ListedFile,
+        tally: &SweepTally<'_>,
+    ) -> Result<StaleRemoval, StorageError> {
+        let path = self.remote_path(&file.key)?;
+        let mut args = FileCreateArgs::make_open_existing(
+            FileAccessMask::new()
+                .with_delete(true)
+                .with_file_read_attributes(true),
+        );
+        args.options = CreateOptions::new()
+            .with_open_reparse_point(true)
+            .with_non_directory_file(true);
+        args.share_access = Some(ShareAccessFlags::new());
+        let opened = tokio::time::timeout(
+            self.inner.config.operation_timeout,
+            client.create_file(&path, &args),
+        )
+        .await
+        .map_err(|_| {
+            remote_error(
+                StorageProviderErrorKind::Timeout,
+                "sweep",
+                "operation timed out",
+                true,
+            )
+        })?;
+        let resource = match opened {
+            Ok(resource) => resource,
+            Err(error) => {
+                return match smb_status(&error) {
+                    Some(status) if status == Status::SharingViolation as u32 => {
+                        Ok(StaleRemoval::InUse)
+                    }
+                    Some(status)
+                        if status == Status::ObjectNameNotFound as u32
+                            || status == Status::ObjectPathNotFound as u32
+                            || status == STATUS_DELETE_PENDING =>
+                    {
+                        Ok(StaleRemoval::Gone)
+                    }
+                    Some(STATUS_FILE_IS_A_DIRECTORY) => Ok(StaleRemoval::Changed),
+                    _ => Err(map_smb_error("sweep", error)),
+                };
+            }
+        };
+        let label = self.mapped_key(&file.key)?;
+        let Resource::File(handle) = resource else {
+            let _ = tally
+                .confirm_close(&label, self.with_timeout("close", close_resource(resource)))
+                .await;
+            return Ok(StaleRemoval::Changed);
+        };
+        let checked = self.check_stale_handle(&handle, file).await;
+        let decision = match checked {
+            Ok(StaleRemoval::Removed) => self
+                .with_timeout(
+                    "sweep",
+                    handle.set_info(FileDispositionInformation::default()),
+                )
+                .await
+                .map(|()| StaleRemoval::Removed)
+                .map_err(StorageError::single_attempt),
+            other => other,
+        };
+        // Every failed close is counted. The file is removed when this handle
+        // closes, so after a removal a failed close also leaves the outcome
+        // unknown.
+        let closed = tally
+            .confirm_close(&label, self.with_timeout("close", handle.close()))
+            .await;
+        match decision {
+            Ok(StaleRemoval::Removed) => closed
+                .map(|()| StaleRemoval::Removed)
+                .map_err(StorageError::single_attempt),
+            other => other,
+        }
+    }
+
+    /// Decides from an open handle whether the file is still the stale
+    /// temporary file enumeration saw.
+    async fn check_stale_handle(
+        &self,
+        handle: &File,
+        file: &ListedFile,
+    ) -> Result<StaleRemoval, StorageError> {
+        let basic: FileBasicInformation = self.with_timeout("sweep", handle.query_info()).await?;
+        let standard: FileStandardInformation =
+            self.with_timeout("sweep", handle.query_info()).await?;
+        Ok(stale_handle_decision(
+            file,
+            &HandleFacts {
+                reparse_point: basic.file_attributes.reparse_point(),
+                directory: bool::from(standard.directory) || basic.file_attributes.directory(),
+                size: standard.end_of_file,
+                last_write: file_time(basic.last_write_time.since_epoch()),
+            },
+        ))
+    }
+
+    /// Streams the blob at `key`, or the part of it in `range`, clamped to
+    /// its size, reading from the range's start offset on the server.
+    async fn read_blob(
+        &self,
+        key: &str,
+        range: Option<std::ops::Range<u64>>,
+    ) -> Result<BlobBody, StorageError> {
+        validate_blob_key(key)?;
+        let file = self
+            .open_file(key, FileAccessMask::new().with_generic_read(true))
+            .await?;
+        let generation = self.client_snapshot().await.generation;
+        let (size, last_modified) = match self.query_file_facts(&file).await {
+            Ok(facts) => facts,
+            Err(error) => {
+                if error.is_retryable() {
+                    let _ = self.reconnect_after(generation).await;
+                }
+                return Err(error);
+            }
+        };
+        let (start, end) = range.map_or((0, size), |range| {
+            (range.start.min(size), range.end.min(size))
+        });
+        let operation_timeout = self.inner.config.operation_timeout;
+        let stream_key = key.to_string();
+        let backend = self.clone();
+        let body = stream::try_unfold(
+            (Some(file), start, end, stream_key.clone()),
+            move |(file, offset, size, key)| {
+                let backend = backend.clone();
+                async move {
+                    let Some(file) = file else {
+                        return Ok(None);
+                    };
+                    if offset >= size {
+                        let close =
+                            match tokio::time::timeout(operation_timeout, file.close()).await {
+                                Ok(result) => result.map_err(|error| map_smb_error("close", error)),
+                                Err(_) => Err(remote_error(
+                                    StorageProviderErrorKind::Timeout,
+                                    "close",
+                                    "operation timed out",
+                                    true,
+                                )),
+                            };
+                        if let Err(error) = &close
+                            && error.is_retryable()
+                        {
+                            let _ = backend.reconnect_after(generation).await;
+                        }
+                        close?;
+                        return Ok(None);
+                    }
+                    let chunk_len = usize::try_from((size - offset).min(READ_CHUNK_SIZE as u64))
+                        .unwrap_or(READ_CHUNK_SIZE);
+                    let mut buffer = vec![0_u8; chunk_len];
+                    // Held for this READ only: a consumer that stops polling
+                    // the stream holds the open handle but no permit.
+                    let permit = backend.transfer_permit().await?;
+                    let read = match tokio::time::timeout(
+                        operation_timeout,
+                        file.read_block(&mut buffer, offset, None, false),
+                    )
+                    .await
+                    {
+                        Ok(result) => result.map_err(|error| map_io_error("read", error)),
+                        Err(_) => Err(remote_error(
+                            StorageProviderErrorKind::Timeout,
+                            "read",
+                            "operation timed out",
+                            true,
+                        )),
+                    };
+                    drop(permit);
+                    let read = match read {
+                        Ok(read) => read,
+                        Err(error) => {
+                            if error.is_retryable() {
+                                let _ = backend.reconnect_after(generation).await;
+                            }
+                            return Err(error);
+                        }
+                    };
+                    if read > 0 {
+                        let diagnostics = &backend.inner.diagnostics;
+                        diagnostics.read_requests.fetch_add(1, Ordering::Relaxed);
+                        diagnostics
+                            .bytes_downloaded
+                            .fetch_add(u64::try_from(read).unwrap_or(u64::MAX), Ordering::Relaxed);
+                    }
+                    if read == 0 {
+                        return Err(remote_error(
+                            StorageProviderErrorKind::Protocol,
+                            "read",
+                            "unexpected end of remote file",
+                            false,
+                        ));
+                    }
+                    buffer.truncate(read);
+                    let next = offset
+                        .checked_add(u64::try_from(read).map_err(|_| {
+                            remote_error(
+                                StorageProviderErrorKind::Protocol,
+                                "read",
+                                "read count exceeded the supported range",
+                                false,
+                            )
+                        })?)
+                        .ok_or_else(|| {
+                            remote_error(
+                                StorageProviderErrorKind::Protocol,
+                                "read",
+                                "remote file offset overflowed",
+                                false,
+                            )
+                        })?;
+                    Ok(Some((Bytes::from(buffer), (Some(file), next, size, key))))
+                }
+            },
+        );
+        Ok(BlobBody {
+            key: stream_key.clone(),
+            metadata: Some(BlobMetadata {
+                key: stream_key,
+                size_bytes: Some(size),
+                sha256_hex: None,
+                etag: None,
+                last_modified,
+            }),
+            body: StorageByteStream::with_size_hint(Box::pin(body), end - start),
+        })
+    }
+
+    /// The size and last-write time an open handle reports.
+    async fn query_file_facts(
+        &self,
+        file: &File,
+    ) -> Result<(u64, Option<OffsetDateTime>), StorageError> {
+        let standard: FileStandardInformation =
+            self.with_timeout("head", file.query_info()).await?;
+        let basic: FileBasicInformation = self.with_timeout("head", file.query_info()).await?;
+        Ok((
+            standard.end_of_file,
+            file_time(basic.last_write_time.since_epoch()).map(OffsetDateTime::from),
+        ))
     }
 
     async fn client_snapshot(&self) -> ConnectedClient {
@@ -886,6 +1790,7 @@ impl SmbStorageBackend {
                 .with_list_directory(true)
                 .with_synchronize(true)
                 .into(),
+            share_access: None,
         };
         for attempt in 0..2 {
             let snapshot = self.client_snapshot().await;
@@ -1305,22 +2210,36 @@ impl SmbStorageBackend {
     /// Lists every key once. One `listing_timeout` deadline covers both
     /// attempts and the reconnect between them.
     async fn collect_keys(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
+        let mut keys: Vec<String> = self
+            .collect_files(prefix)
+            .await?
+            .into_iter()
+            .map(|file| file.key)
+            .filter(|key| !is_temp_key(key))
+            .collect();
+        keys.sort();
+        Ok(keys)
+    }
+
+    /// Lists every file once, temporary files included, within one
+    /// `listing_timeout` deadline.
+    async fn collect_files(&self, prefix: &str) -> Result<Vec<ListedFile>, StorageError> {
         let limits = ListingLimits::from_config(&self.inner.config);
         within_listing_deadline(
             limits.timeout,
-            retry_listing_once(|| self.collect_keys_attempt(limits, prefix)),
+            retry_listing_once(|| self.collect_files_attempt(limits, prefix)),
         )
         .await
     }
 
-    async fn collect_keys_attempt(
+    async fn collect_files_attempt(
         &self,
         limits: ListingLimits,
         prefix: &str,
-    ) -> Result<Vec<String>, StorageError> {
+    ) -> Result<Vec<ListedFile>, StorageError> {
         let snapshot = self.client_snapshot().await;
         match self
-            .collect_keys_once(&snapshot.client, limits, prefix)
+            .collect_files_once(&snapshot.client, limits, prefix)
             .await
         {
             Err(error) if error.is_retryable() => {
@@ -1331,22 +2250,20 @@ impl SmbStorageBackend {
         }
     }
 
-    async fn collect_keys_once(
+    async fn collect_files_once(
         &self,
         client: &Client,
         limits: ListingLimits,
         prefix: &str,
-    ) -> Result<Vec<String>, StorageError> {
+    ) -> Result<Vec<ListedFile>, StorageError> {
         let source = SmbListingSource {
             backend: self,
             client,
             base: self.share_path()?,
+            sweep: None,
         };
         let root = self.inner.config.root_prefix.clone().unwrap_or_default();
-        let mut keys = walk_listing(&source, root, prefix, limits).await?;
-        keys.retain(|key| !is_temp_key(key));
-        keys.sort();
-        Ok(keys)
+        walk_listing_files(&source, root, prefix, limits).await
     }
 }
 
@@ -1427,6 +2344,546 @@ impl ListingBudget {
 struct ListedEntry {
     name: String,
     directory: bool,
+    /// The server's last-write time, when it reported one.
+    last_write: Option<SystemTime>,
+    /// The file's size as enumerated.
+    size: u64,
+}
+
+/// One file a listing walk returned, with its root-relative key.
+#[derive(Clone, Debug)]
+struct ListedFile {
+    key: String,
+    last_write: Option<SystemTime>,
+    size: u64,
+}
+
+/// What one sweep walk skipped and failed to clean up, counted while the
+/// walk runs, from shared references. It outlives the walk, so its counts
+/// survive an error, the deadline or cancellation of the walk.
+#[derive(Default)]
+struct SweepTally<'h> {
+    reparse_points: AtomicU64,
+    cleanup_failures: AtomicU64,
+    /// Test-only fault injection for closes.
+    #[cfg(feature = "smb-sweep-test-hooks")]
+    close_barrier: Option<&'h SmbSweepCloseBarrier>,
+    #[cfg(not(feature = "smb-sweep-test-hooks"))]
+    _hooks: std::marker::PhantomData<&'h ()>,
+}
+
+impl SweepTally<'_> {
+    fn cleanup_failed(&self) {
+        self.cleanup_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Awaits `close` of the share-relative `path`, counting it as a cleanup
+    /// failure until it is confirmed. The count is taken before the close is
+    /// awaited and cleared only when it succeeds, so a close that fails, times
+    /// out, or is cancelled while awaited, as when the sweep's deadline
+    /// expires, stays counted.
+    async fn confirm_close<E>(
+        &self,
+        path: &str,
+        close: impl std::future::Future<Output = Result<(), E>>,
+    ) -> Result<(), E>
+    where
+        E: From<StorageError>,
+    {
+        self.cleanup_failed();
+        #[cfg(feature = "smb-sweep-test-hooks")]
+        if let Some(barrier) = self.close_barrier {
+            let outcome = barrier(SmbSweepClose {
+                path: path.to_string(),
+            })
+            .await;
+            if outcome == SmbSweepCloseOutcome::Fail {
+                return Err(E::from(remote_error(
+                    StorageProviderErrorKind::ConnectionLost,
+                    "close",
+                    "close failed by the test barrier",
+                    true,
+                )));
+            }
+        }
+        #[cfg(not(feature = "smb-sweep-test-hooks"))]
+        let _ = path;
+        // Boxed: a close future is large, and the sweep awaits one at many
+        // depths of its state machine.
+        let closed = Box::pin(close).await;
+        if closed.is_ok() {
+            self.cleanup_failures.fetch_sub(1, Ordering::Relaxed);
+        }
+        closed
+    }
+
+    fn add_to(&self, report: &mut SmbTempSweepReport) {
+        let count = |counter: &AtomicU64| {
+            usize::try_from(counter.load(Ordering::Relaxed)).unwrap_or(usize::MAX)
+        };
+        report.skipped_reparse_points = report
+            .skipped_reparse_points
+            .saturating_add(count(&self.reparse_points));
+        report.cleanup_failures = report
+            .cleanup_failures
+            .saturating_add(count(&self.cleanup_failures));
+    }
+}
+
+/// What a sweep holds and has done so far; it outlives the walk, so an
+/// error or the deadline keeps both.
+#[derive(Default)]
+struct SweepProgress {
+    chain: Vec<HeldDirectory>,
+    report: SmbTempSweepReport,
+}
+
+/// One directory the sweep holds while it works below it.
+struct HeldDirectory {
+    directory: Arc<Directory>,
+    /// Root-relative path; empty for the root and its ancestors.
+    relative: String,
+    /// Share-relative path, as held.
+    share_relative: String,
+    /// Entries not yet processed.
+    entries: std::vec::IntoIter<ListedEntry>,
+    depth: usize,
+}
+
+/// The outcome of holding one directory for the sweep.
+enum DirectoryHold {
+    Held(Arc<Directory>),
+    Missing,
+    /// It could not be held as a plain directory without delete sharing.
+    Refused,
+}
+
+/// Whether a handle may be held as a sweep directory: a directory, and not a
+/// reparse point such as a junction or symbolic link.
+fn holdable_directory(directory: bool, reparse_point: bool) -> bool {
+    directory && !reparse_point
+}
+
+/// A sweep candidate, handed to the test-only barrier before it is opened.
+#[cfg(feature = "smb-sweep-test-hooks")]
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct SmbSweepCandidate {
+    /// Root-relative key of the temporary file.
+    pub key: String,
+    /// The server's current time the sweep measures age against.
+    pub server_now: SystemTime,
+    /// Stops the sweep's dedicated session, as a lost connection would.
+    pub session: SmbSweepSessionSeverer,
+}
+
+/// A close the sweep is about to send, handed to the test-only close
+/// barrier after it is counted as unconfirmed.
+#[cfg(feature = "smb-sweep-test-hooks")]
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct SmbSweepClose {
+    /// Share-relative path of the handle being closed.
+    pub path: String,
+}
+
+/// What the test-only close barrier lets a close do.
+#[cfg(feature = "smb-sweep-test-hooks")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SmbSweepCloseOutcome {
+    /// Send the close.
+    Proceed,
+    /// Fail the close without sending it, as a lost response would.
+    Fail,
+}
+
+/// A test-only barrier the sweep awaits before each close it sends.
+#[cfg(feature = "smb-sweep-test-hooks")]
+pub type SmbSweepCloseBarrier = dyn Fn(
+        SmbSweepClose,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = SmbSweepCloseOutcome> + Send>>
+    + Send
+    + Sync;
+
+/// A test-only barrier the sweep awaits for each candidate.
+#[cfg(feature = "smb-sweep-test-hooks")]
+pub type SmbSweepBarrier = dyn Fn(SmbSweepCandidate) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+    + Send
+    + Sync;
+
+/// Observation points of one sweep: a barrier with the test-only feature,
+/// nothing otherwise.
+#[cfg(feature = "smb-sweep-test-hooks")]
+struct SweepHooks<'a> {
+    barrier: &'a SmbSweepBarrier,
+    close_barrier: Option<&'a SmbSweepCloseBarrier>,
+}
+
+#[cfg(not(feature = "smb-sweep-test-hooks"))]
+struct SweepHooks<'a> {
+    _none: std::marker::PhantomData<&'a ()>,
+}
+
+impl SweepHooks<'_> {
+    #[cfg(not(feature = "smb-sweep-test-hooks"))]
+    fn none() -> Self {
+        Self {
+            _none: std::marker::PhantomData,
+        }
+    }
+
+    #[cfg(feature = "smb-sweep-test-hooks")]
+    fn none() -> Self {
+        static NONE: fn(
+            SmbSweepCandidate,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+            |_| Box::pin(async {});
+        Self {
+            barrier: &NONE,
+            close_barrier: None,
+        }
+    }
+
+    /// A tally that applies this sweep's close barrier.
+    #[cfg(feature = "smb-sweep-test-hooks")]
+    fn tally(&self) -> SweepTally<'_> {
+        SweepTally {
+            close_barrier: self.close_barrier,
+            ..SweepTally::default()
+        }
+    }
+
+    #[cfg(not(feature = "smb-sweep-test-hooks"))]
+    fn tally(&self) -> SweepTally<'_> {
+        SweepTally::default()
+    }
+
+    /// Runs before a candidate is opened.
+    #[cfg(feature = "smb-sweep-test-hooks")]
+    async fn before_candidate(&self, key: &str, server_now: SystemTime, session: &SweepSession) {
+        (self.barrier)(SmbSweepCandidate {
+            key: key.to_string(),
+            server_now,
+            session: session.severer(),
+        })
+        .await;
+    }
+
+    #[cfg(not(feature = "smb-sweep-test-hooks"))]
+    #[allow(clippy::unused_async)]
+    async fn before_candidate(&self, _key: &str, _server_now: SystemTime, _session: &SweepSession) {
+    }
+}
+
+/// Locks a mutex, ignoring poisoning: the guarded values stay valid.
+fn lock_ignoring_poison<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The stop control shared by a [`SessionRuntime`] and the test-only sever
+/// hook. The runtime thread never holds it, so dropping every holder, as a
+/// cancelled [`SessionRuntime::start`] does, also stops the thread.
+struct SessionControl {
+    /// Sending, or dropping, this ends the runtime thread.
+    stop: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+impl SessionControl {
+    /// Asks the runtime thread to stop. It never waits.
+    fn stop(&self) {
+        if let Some(stop) = lock_ignoring_poison(&self.stop).take() {
+            let _ = stop.send(());
+        }
+    }
+}
+
+/// The session's client, which the runtime thread drops inside the runtime
+/// before stopping it, because the vendored client's drop handlers spawn
+/// tasks on the current runtime.
+type SessionClientSlot = Arc<std::sync::Mutex<Option<Arc<Client>>>>;
+
+/// A current-thread Tokio runtime on a thread of its own, which owns the
+/// sweep session's socket.
+///
+/// The vendored client spawns the tasks that own its socket on the runtime
+/// it connects from, so the session connects from this runtime. Stopping it
+/// drops those tasks, which closes the socket, and the server then releases
+/// every handle the session held. It stops when [`SessionRuntime::stop`] is
+/// called or the guard is dropped; that happens on its own thread and needs
+/// no progress from the caller's runtime, nor a caller runtime at all.
+struct SessionRuntime {
+    handle: tokio::runtime::Handle,
+    control: Arc<SessionControl>,
+    client: SessionClientSlot,
+    /// Completes once the runtime has been dropped and the socket closed.
+    stopped: Option<tokio::sync::oneshot::Receiver<()>>,
+}
+
+impl SessionRuntime {
+    async fn start() -> Result<Self, StorageError> {
+        let unavailable = || {
+            remote_error(
+                StorageProviderErrorKind::Connectivity,
+                "connect",
+                "the sweep's session runtime could not start",
+                true,
+            )
+        };
+        let (stop, stop_requested) = tokio::sync::oneshot::channel::<()>();
+        let control = Arc::new(SessionControl {
+            stop: std::sync::Mutex::new(Some(stop)),
+        });
+        let client = SessionClientSlot::default();
+        let (started, handle) = tokio::sync::oneshot::channel();
+        let (stopped_tx, stopped) = tokio::sync::oneshot::channel();
+        let thread_client = Arc::clone(&client);
+        // The runtime is built and dropped on its own thread: dropping a
+        // runtime inside an asynchronous context panics.
+        std::thread::Builder::new()
+            .name("graphql-orm-storage-smb-sweep".to_string())
+            .spawn(move || {
+                let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                else {
+                    return;
+                };
+                if started.send(runtime.handle().clone()).is_err() {
+                    return;
+                }
+                runtime.block_on(async {
+                    let _ = stop_requested.await;
+                });
+                {
+                    let _entered = runtime.enter();
+                    drop(lock_ignoring_poison(&thread_client).take());
+                }
+                drop(runtime);
+                let _ = stopped_tx.send(());
+            })
+            .map_err(|_| unavailable())?;
+        let handle = handle.await.map_err(|_| unavailable())?;
+        Ok(Self {
+            handle,
+            control,
+            client,
+            stopped: Some(stopped),
+        })
+    }
+
+    /// Lets the runtime thread drop the client, inside the runtime, when it
+    /// stops.
+    fn adopt(&self, client: Arc<Client>) {
+        *lock_ignoring_poison(&self.client) = Some(client);
+    }
+
+    fn stop(&self) {
+        self.control.stop();
+    }
+
+    /// Stops the runtime and waits, at most `timeout`, until its socket is
+    /// closed. Returns whether it was.
+    async fn stop_and_wait(&mut self, timeout: Duration) -> bool {
+        self.stop();
+        match self.stopped.take() {
+            Some(stopped) => matches!(tokio::time::timeout(timeout, stopped).await, Ok(Ok(()))),
+            None => false,
+        }
+    }
+}
+
+impl Drop for SessionRuntime {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// The sweep's own SMB session, on its own connection and
+/// [`SessionRuntime`].
+///
+/// [`SweepSession::shutdown`] disconnects the tree, logs off and closes the
+/// connection in order and counts every step that fails. Dropping the
+/// session, including dropping a `shutdown` that has not finished, as when
+/// the sweep is cancelled, times out or fails, stops its runtime, which
+/// closes the socket without waiting for the caller's runtime.
+struct SweepSession {
+    // Declared before `runtime`, so it is dropped first and the runtime
+    // thread drops the last reference.
+    client: Option<Arc<Client>>,
+    share: UncPath,
+    server: String,
+    timeout: Duration,
+    runtime: SessionRuntime,
+}
+
+impl SweepSession {
+    async fn connect(backend: &SmbStorageBackend) -> Result<Self, StorageError> {
+        let runtime = SessionRuntime::start().await?;
+        let config = Arc::clone(&backend.inner.config);
+        let server_guid = backend.inner.server_guid;
+        let connected = runtime
+            .handle
+            .spawn(async move { connect_client(&config, 0, Some(server_guid)).await })
+            .await
+            .map_err(|_| {
+                remote_error(
+                    StorageProviderErrorKind::ConnectionLost,
+                    "connect",
+                    "the sweep's session stopped while connecting",
+                    true,
+                )
+            })??;
+        runtime.adopt(Arc::clone(&connected.client));
+        Ok(Self {
+            client: Some(connected.client),
+            share: backend.share_path()?,
+            server: backend.inner.config.server.clone(),
+            timeout: backend.inner.config.operation_timeout,
+            runtime,
+        })
+    }
+
+    fn client(&self) -> &Client {
+        self.client
+            .as_deref()
+            .expect("the client is present until shutdown")
+    }
+
+    /// Disconnects the tree, logs off, closes the connection and stops the
+    /// runtime, each bounded by the operation timeout. Returns how many of
+    /// those steps failed; the runtime is stopped whatever happened.
+    async fn shutdown(mut self) -> usize {
+        let timeout = self.timeout;
+        let succeeded = |outcome: Result<Result<(), smb::Error>, tokio::time::error::Elapsed>| {
+            matches!(outcome, Ok(Ok(())))
+        };
+        let mut failures = 0;
+        if let Some(client) = self.client.take() {
+            let tree = match tokio::time::timeout(timeout, client.get_tree(&self.share)).await {
+                Ok(Ok(tree)) => succeeded(tokio::time::timeout(timeout, tree.disconnect()).await),
+                _ => false,
+            };
+            let session = match tokio::time::timeout(timeout, client.get_session(&self.share)).await
+            {
+                Ok(Ok(session)) => succeeded(tokio::time::timeout(timeout, session.logoff()).await),
+                _ => false,
+            };
+            let connection =
+                match tokio::time::timeout(timeout, client.get_connection(&self.server)).await {
+                    Ok(Ok(connection)) => {
+                        succeeded(tokio::time::timeout(timeout, connection.close()).await)
+                    }
+                    _ => false,
+                };
+            failures += [tree, session, connection]
+                .into_iter()
+                .filter(|ok| !ok)
+                .count();
+        }
+        if !self.runtime.stop_and_wait(timeout).await {
+            failures += 1;
+        }
+        failures
+    }
+
+    /// Test-only: a handle that stops this session's runtime, as a lost
+    /// connection would.
+    #[cfg(feature = "smb-sweep-test-hooks")]
+    fn severer(&self) -> SmbSweepSessionSeverer {
+        SmbSweepSessionSeverer {
+            control: Arc::clone(&self.runtime.control),
+        }
+    }
+}
+
+/// Stops a running sweep's dedicated session, as a lost connection would.
+/// Test infrastructure only.
+#[cfg(feature = "smb-sweep-test-hooks")]
+#[derive(Clone)]
+pub struct SmbSweepSessionSeverer {
+    control: Arc<SessionControl>,
+}
+
+#[cfg(feature = "smb-sweep-test-hooks")]
+impl SmbSweepSessionSeverer {
+    /// Stops the sweep session's runtime, which closes its socket. Requests
+    /// the sweep sends afterwards fail.
+    pub fn sever(&self) {
+        self.control.stop();
+    }
+}
+
+#[cfg(feature = "smb-sweep-test-hooks")]
+impl fmt::Debug for SmbSweepSessionSeverer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SmbSweepSessionSeverer")
+    }
+}
+
+/// A directory held open with delete access by test infrastructure.
+#[cfg(feature = "smb-sweep-test-hooks")]
+pub struct SmbHeldDirectory {
+    directory: Directory,
+    timeout: Duration,
+}
+
+#[cfg(feature = "smb-sweep-test-hooks")]
+impl SmbHeldDirectory {
+    /// Closes the handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns the close's error, or a timeout.
+    pub async fn release(self) -> Result<(), StorageError> {
+        match tokio::time::timeout(self.timeout, self.directory.close()).await {
+            Ok(result) => result.map_err(|error| map_smb_error("close", error)),
+            Err(_) => Err(remote_error(
+                StorageProviderErrorKind::Timeout,
+                "close",
+                "operation timed out",
+                true,
+            )),
+        }
+    }
+}
+
+/// What the sweep did with one candidate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StaleRemoval {
+    Removed,
+    /// Already gone when opened.
+    Gone,
+    InUse,
+    Changed,
+    ReparsePoint,
+}
+
+/// What an open handle reports about a sweep candidate.
+#[derive(Debug)]
+struct HandleFacts {
+    reparse_point: bool,
+    directory: bool,
+    size: u64,
+    last_write: Option<SystemTime>,
+}
+
+/// Removes a candidate only if its handle still shows the plain file, size
+/// and last-write time that enumeration saw.
+fn stale_handle_decision(file: &ListedFile, facts: &HandleFacts) -> StaleRemoval {
+    if facts.reparse_point {
+        StaleRemoval::ReparsePoint
+    } else if facts.directory
+        || facts.size != file.size
+        || facts.last_write.is_none()
+        || facts.last_write != file.last_write
+    {
+        StaleRemoval::Changed
+    } else {
+        StaleRemoval::Removed
+    }
 }
 
 /// Enumerates single directories for [`walk_listing`].
@@ -1477,12 +2934,27 @@ where
 /// Walks the tree under the share-relative `root` within `limits`, returning
 /// file keys relative to `root`. Only directories that can hold a key
 /// starting with `prefix` are entered, and only such files are returned.
+#[cfg(test)]
 async fn walk_listing<S: ListingSource>(
     source: &S,
     root: String,
     prefix: &str,
     limits: ListingLimits,
 ) -> Result<Vec<String>, StorageError> {
+    Ok(walk_listing_files(source, root, prefix, limits)
+        .await?
+        .into_iter()
+        .map(|file| file.key)
+        .collect())
+}
+
+/// Walks as [`walk_listing`] does, returning each file's last-write time too.
+async fn walk_listing_files<S: ListingSource>(
+    source: &S,
+    root: String,
+    prefix: &str,
+    limits: ListingLimits,
+) -> Result<Vec<ListedFile>, StorageError> {
     let mut budget = ListingBudget::new(limits);
     // Each entry is a root-relative directory path, whether enumeration
     // discovered it, and its depth below the root.
@@ -1537,7 +3009,11 @@ async fn walk_listing<S: ListingSource>(
                 }
                 stack.push((child, true, depth + 1));
             } else {
-                files.push(child);
+                files.push(ListedFile {
+                    key: child,
+                    last_write: entry.last_write,
+                    size: entry.size,
+                });
             }
         }
     }
@@ -1720,6 +3196,9 @@ struct SmbListingSource<'a> {
     backend: &'a SmbStorageBackend,
     client: &'a Client,
     base: UncPath,
+    /// Set for a temporary-file sweep: enumeration skips and counts entries
+    /// the server reports as reparse points.
+    sweep: Option<&'a SweepTally<'a>>,
 }
 
 #[async_trait]
@@ -1811,7 +3290,19 @@ impl SmbListingSource<'_> {
                 continue;
             }
             budget.record_entry(&name)?;
-            listed.push(ListedEntry { name, directory });
+            if let Some(skips) = self.sweep
+                && entry.file_attributes.reparse_point()
+            {
+                // Never enter or remove anything through a reparse point.
+                skips.reparse_points.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+            listed.push(ListedEntry {
+                name,
+                directory,
+                last_write: file_time(entry.last_write_time.since_epoch()),
+                size: entry.end_of_file,
+            });
         }
         Ok(listed)
     }
@@ -2253,123 +3744,21 @@ impl BlobStore for SmbStorageBackend {
     }
 
     async fn get_blob(&self, key: &str) -> Result<BlobBody, StorageError> {
-        validate_blob_key(key)?;
-        let file = self
-            .open_file(key, FileAccessMask::new().with_generic_read(true))
-            .await?;
-        let generation = self.client_snapshot().await.generation;
-        let standard: FileStandardInformation =
-            match self.with_timeout("head", file.query_info()).await {
-                Ok(standard) => standard,
-                Err(error) => {
-                    if error.is_retryable() {
-                        let _ = self.reconnect_after(generation).await;
-                    }
-                    return Err(error);
-                }
-            };
-        let size = standard.end_of_file;
-        let operation_timeout = self.inner.config.operation_timeout;
-        let stream_key = key.to_string();
-        let backend = self.clone();
-        let body = stream::try_unfold(
-            (Some(file), 0_u64, size, stream_key.clone()),
-            move |(file, offset, size, key)| {
-                let backend = backend.clone();
-                async move {
-                    let Some(file) = file else {
-                        return Ok(None);
-                    };
-                    if offset >= size {
-                        let close =
-                            match tokio::time::timeout(operation_timeout, file.close()).await {
-                                Ok(result) => result.map_err(|error| map_smb_error("close", error)),
-                                Err(_) => Err(remote_error(
-                                    StorageProviderErrorKind::Timeout,
-                                    "close",
-                                    "operation timed out",
-                                    true,
-                                )),
-                            };
-                        if let Err(error) = &close
-                            && error.is_retryable()
-                        {
-                            let _ = backend.reconnect_after(generation).await;
-                        }
-                        close?;
-                        return Ok(None);
-                    }
-                    let chunk_len = usize::try_from((size - offset).min(READ_CHUNK_SIZE as u64))
-                        .unwrap_or(READ_CHUNK_SIZE);
-                    let mut buffer = vec![0_u8; chunk_len];
-                    // Held for this READ only: a consumer that stops polling
-                    // the stream holds the open handle but no permit.
-                    let permit = backend.transfer_permit().await?;
-                    let read = match tokio::time::timeout(
-                        operation_timeout,
-                        file.read_block(&mut buffer, offset, None, false),
-                    )
-                    .await
-                    {
-                        Ok(result) => result.map_err(|error| map_io_error("read", error)),
-                        Err(_) => Err(remote_error(
-                            StorageProviderErrorKind::Timeout,
-                            "read",
-                            "operation timed out",
-                            true,
-                        )),
-                    };
-                    drop(permit);
-                    let read = match read {
-                        Ok(read) => read,
-                        Err(error) => {
-                            if error.is_retryable() {
-                                let _ = backend.reconnect_after(generation).await;
-                            }
-                            return Err(error);
-                        }
-                    };
-                    if read == 0 {
-                        return Err(remote_error(
-                            StorageProviderErrorKind::Protocol,
-                            "read",
-                            "unexpected end of remote file",
-                            false,
-                        ));
-                    }
-                    buffer.truncate(read);
-                    let next = offset
-                        .checked_add(u64::try_from(read).map_err(|_| {
-                            remote_error(
-                                StorageProviderErrorKind::Protocol,
-                                "read",
-                                "read count exceeded the supported range",
-                                false,
-                            )
-                        })?)
-                        .ok_or_else(|| {
-                            remote_error(
-                                StorageProviderErrorKind::Protocol,
-                                "read",
-                                "remote file offset overflowed",
-                                false,
-                            )
-                        })?;
-                    Ok(Some((Bytes::from(buffer), (Some(file), next, size, key))))
-                }
-            },
-        );
-        Ok(BlobBody {
-            key: stream_key.clone(),
-            metadata: Some(BlobMetadata {
-                key: stream_key,
-                size_bytes: Some(size),
-                sha256_hex: None,
-                etag: None,
-                last_modified: None,
-            }),
-            body: StorageByteStream::with_size_hint(Box::pin(body), size),
-        })
+        self.read_blob(key, None).await
+    }
+
+    async fn get_blob_range(
+        &self,
+        key: &str,
+        range: std::ops::Range<u64>,
+    ) -> Result<BlobBody, StorageError> {
+        if range.end < range.start {
+            return Err(StorageError::PreconditionFailed {
+                key: key.to_string(),
+                condition: "range end is before range start".to_string(),
+            });
+        }
+        self.read_blob(key, Some(range)).await
     }
 
     async fn blob_exists(&self, key: &str) -> Result<bool, StorageError> {
@@ -2405,16 +3794,15 @@ impl BlobStore for SmbStorageBackend {
             Err(error) => return Err(error),
         };
         let generation = self.client_snapshot().await.generation;
-        let standard: FileStandardInformation =
-            match self.with_timeout("head", file.query_info()).await {
-                Ok(standard) => standard,
-                Err(error) => {
-                    if error.is_retryable() {
-                        let _ = self.reconnect_after(generation).await;
-                    }
-                    return Err(error);
+        let (size, last_modified) = match self.query_file_facts(&file).await {
+            Ok(facts) => facts,
+            Err(error) => {
+                if error.is_retryable() {
+                    let _ = self.reconnect_after(generation).await;
                 }
-            };
+                return Err(error);
+            }
+        };
         match self.with_timeout("close", file.close()).await {
             Ok(()) => {}
             Err(error) if error.is_retryable() => {
@@ -2424,10 +3812,10 @@ impl BlobStore for SmbStorageBackend {
         }
         Ok(Some(BlobMetadata {
             key: key.to_string(),
-            size_bytes: Some(standard.end_of_file),
+            size_bytes: Some(size),
             sha256_hex: None,
             etag: None,
-            last_modified: None,
+            last_modified,
         }))
     }
 
@@ -2860,6 +4248,64 @@ fn temp_key(key: &str) -> Result<String, StorageError> {
     validate_blob_key(&temp)?;
     Ok(temp)
 }
+
+/// Seconds from the FILETIME epoch, 1601-01-01, to the Unix epoch.
+const FILETIME_UNIX_OFFSET: Duration = Duration::from_secs(11_644_473_600);
+
+/// Converts a FILETIME, as a duration since 1601-01-01 UTC, to a system time.
+/// Zero means the server reported no time, and a time before 1970 is not
+/// plausible for a file this backend wrote; both are `None`.
+fn file_time(since_1601: Duration) -> Option<SystemTime> {
+    if since_1601.is_zero() {
+        return None;
+    }
+    since_1601
+        .checked_sub(FILETIME_UNIX_OFFSET)
+        .and_then(|since_unix| SystemTime::UNIX_EPOCH.checked_add(since_unix))
+}
+
+#[cfg(test)]
+/// This backend's temporary upload files whose last-write time is at least
+/// `older_than` before the server's current time `server_now`. A file
+/// without a last-write time, or one after `server_now`, is never stale.
+fn stale_temp_files(
+    files: Vec<ListedFile>,
+    server_now: SystemTime,
+    older_than: Duration,
+) -> Vec<ListedFile> {
+    let mut stale: Vec<ListedFile> = files
+        .into_iter()
+        .filter(|file| is_stale_temp(&file.key, file.last_write, server_now, older_than))
+        .collect();
+    stale.sort_by(|a, b| a.key.cmp(&b.key));
+    stale
+}
+
+/// Whether `key` names one of this backend's temporary files whose
+/// last-write time is at least `older_than` before `server_now`.
+fn is_stale_temp(
+    key: &str,
+    last_write: Option<SystemTime>,
+    server_now: SystemTime,
+    older_than: Duration,
+) -> bool {
+    is_temp_key(key)
+        && last_write
+            .and_then(|written| server_now.duration_since(written).ok())
+            .is_some_and(|age| age >= older_than)
+}
+
+/// The NT status of a server's error response, if it is one.
+fn smb_status(error: &smb::Error) -> Option<u32> {
+    match error {
+        smb::Error::UnexpectedMessageStatus(status)
+        | smb::Error::ReceivedErrorMessage(status, _) => Some(*status),
+        _ => None,
+    }
+}
+
+/// `STATUS_FILE_IS_A_DIRECTORY`: a non-directory open named a directory.
+const STATUS_FILE_IS_A_DIRECTORY: u32 = 0xC000_00BA;
 
 /// Whether `key` names a temporary upload file this backend writes: exactly
 /// `.<uuid>.uploading`, or `.<name>.<uuid>.uploading` as versions before 0.9.0
@@ -3303,7 +4749,12 @@ mod tests {
             let mut listed = Vec::new();
             for (name, directory) in (self.entries)(path) {
                 budget.record_entry(&name)?;
-                listed.push(ListedEntry { name, directory });
+                listed.push(ListedEntry {
+                    name,
+                    directory,
+                    last_write: None,
+                    size: 0,
+                });
             }
             Ok(Some(listed))
         }
@@ -4562,6 +6013,257 @@ mod tests {
         assert!(check_listing_prefix("").is_ok());
         assert!(check_listing_prefix("dir/").is_ok());
         assert!(check_key("dir/2026-11-12T10-00-00Z.json").is_ok());
+    }
+
+    /// The sweep selects only exact temporary names whose last-write time is
+    /// old enough by the server's clock; a caller's key ending in
+    /// `.uploading`, a fresh or future temporary file and one without a time
+    /// are kept (#593).
+    #[test]
+    fn stale_temp_selection_keeps_every_other_name() {
+        let server_now = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000_000);
+        let day = Duration::from_secs(24 * 60 * 60);
+        let uuid = |n: u128| Uuid::from_u128(n).hyphenated().to_string();
+        let file = |key: String, last_write: Option<SystemTime>| ListedFile {
+            key,
+            last_write,
+            size: 7,
+        };
+        let aged = |age: Duration| Some(server_now - age);
+        let files = vec![
+            file(format!("a/.{}.uploading", uuid(1)), aged(2 * day)),
+            file(format!(".{}.uploading", uuid(2)), aged(day)),
+            file(format!("a/.blob.bin.{}.uploading", uuid(3)), aged(3 * day)),
+            // Too recent, no time, or after the server's current time.
+            file(
+                format!("a/.{}.uploading", uuid(4)),
+                aged(Duration::from_secs(60)),
+            ),
+            file(format!("a/.{}.uploading", uuid(5)), None),
+            file(format!("a/.{}.uploading", uuid(6)), Some(server_now + day)),
+            // Callers' keys, however old.
+            file("a/report.uploading".to_string(), aged(9 * day)),
+            file(format!("a/x.{}.uploading", uuid(7)), aged(9 * day)),
+            file(
+                format!("a/.{}.uploading", uuid(0xabcd).to_uppercase()),
+                aged(9 * day),
+            ),
+            file("a/kept.bin".to_string(), aged(9 * day)),
+        ];
+        let keys: Vec<String> = stale_temp_files(files.clone(), server_now, day)
+            .into_iter()
+            .map(|file| file.key)
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                format!(".{}.uploading", uuid(2)),
+                format!("a/.{}.uploading", uuid(1)),
+                format!("a/.blob.bin.{}.uploading", uuid(3)),
+            ]
+        );
+        // A client clock that runs ahead cannot make a fresh file stale: only
+        // the server's time is compared.
+        assert!(
+            stale_temp_files(files, server_now - 2 * day, day)
+                .iter()
+                .all(|file| file.key != format!("a/.{}.uploading", uuid(4)))
+        );
+    }
+
+    /// Immediately before removal, the validated handle must still show the
+    /// plain file, size and last-write time enumeration saw (#593).
+    #[test]
+    fn a_candidate_that_changed_after_enumeration_is_kept() {
+        let written = SystemTime::UNIX_EPOCH + Duration::from_secs(1_600_000_000);
+        let file = ListedFile {
+            key: format!("a/.{}.uploading", Uuid::new_v4()),
+            last_write: Some(written),
+            size: 7,
+        };
+        let facts = |reparse_point, directory, size, last_write| HandleFacts {
+            reparse_point,
+            directory,
+            size,
+            last_write,
+        };
+        assert_eq!(
+            stale_handle_decision(&file, &facts(false, false, 7, Some(written))),
+            StaleRemoval::Removed
+        );
+        for (changed, expected) in [
+            (
+                facts(true, false, 7, Some(written)),
+                StaleRemoval::ReparsePoint,
+            ),
+            (facts(false, true, 7, Some(written)), StaleRemoval::Changed),
+            (facts(false, false, 8, Some(written)), StaleRemoval::Changed),
+            (
+                facts(false, false, 7, Some(written + Duration::from_secs(1))),
+                StaleRemoval::Changed,
+            ),
+            (facts(false, false, 7, None), StaleRemoval::Changed),
+        ] {
+            assert_eq!(
+                stale_handle_decision(&file, &changed),
+                expected,
+                "{changed:?}"
+            );
+        }
+    }
+
+    /// Every directory the sweep holds, ancestors included, must be a plain
+    /// directory: a junction, symbolic link or other reparse point is never
+    /// held or entered (#593).
+    #[test]
+    fn only_plain_directories_are_held_as_ancestors() {
+        assert!(holdable_directory(true, false));
+        assert!(!holdable_directory(true, true), "a junction");
+        assert!(!holdable_directory(false, true), "a file symbolic link");
+        assert!(!holdable_directory(false, false), "a file");
+    }
+
+    /// Accepts one connection on a loopback listener, from a task spawned on
+    /// a sweep session runtime started by a caller runtime that is then
+    /// dropped. Returns the session runtime and the accepted socket.
+    fn session_runtime_holding_a_socket() -> (SessionRuntime, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("address");
+        let caller = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("caller runtime");
+        let session = caller.block_on(async {
+            let session = SessionRuntime::start().await.expect("start");
+            // As the vendored worker's tasks do, this task owns the socket.
+            session.handle.spawn(async move {
+                let stream = tokio::net::TcpStream::connect(address)
+                    .await
+                    .expect("connect");
+                std::future::pending::<()>().await;
+                drop(stream);
+            });
+            session
+        });
+        let (accepted, _) = listener.accept().expect("accept");
+        accepted
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("read timeout");
+        // The caller's runtime is gone before the session stops.
+        drop(caller);
+        (session, accepted)
+    }
+
+    fn assert_closed(mut accepted: std::net::TcpStream) {
+        use std::io::Read;
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            accepted
+                .read(&mut byte)
+                .expect("the peer closed, not timed out"),
+            0
+        );
+    }
+
+    /// Dropping a sweep session closes its socket on the session's own
+    /// thread, with no caller runtime at all, so a sweep dropped while its
+    /// caller's runtime makes no progress still releases its handles (#593).
+    #[test]
+    fn dropping_a_session_runtime_closes_its_socket_without_a_caller_runtime() {
+        let (session, accepted) = session_runtime_holding_a_socket();
+        drop(session);
+        assert_closed(accepted);
+    }
+
+    /// The test-only sever hook and `stop` stop the same runtime, and a
+    /// later wait reports it stopped.
+    #[test]
+    fn stopping_a_session_runtime_closes_its_socket_and_reports_it() {
+        let (mut session, accepted) = session_runtime_holding_a_socket();
+        session.stop();
+        assert_closed(accepted);
+        let waiter = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("waiter runtime");
+        assert!(waiter.block_on(session.stop_and_wait(Duration::from_secs(10))));
+        assert!(
+            !waiter.block_on(session.stop_and_wait(Duration::from_secs(1))),
+            "a second wait has nothing to wait for"
+        );
+    }
+
+    /// A failed sweep keeps what it did: the error carries the report, its
+    /// message counts removals and cleanup failures without naming keys,
+    /// and converting it keeps only the storage error.
+    #[test]
+    fn a_failed_sweep_keeps_its_report() {
+        let failure = SmbTempSweepError {
+            error: listing_limit_exceeded("listing reached its entry limit".to_string()),
+            report: SmbTempSweepReport {
+                removed: 2,
+                cleanup_failures: 3,
+                ..SmbTempSweepReport::default()
+            },
+        };
+        assert!(!failure.is_retryable());
+        let message = failure.to_string();
+        assert!(
+            message.contains("after removing 2 files, with 3 cleanup failures"),
+            "{message}"
+        );
+        assert!(std::error::Error::source(&failure).is_some());
+        let storage: StorageError = failure.into();
+        assert!(!storage.is_retryable());
+
+        let tally = SweepTally::default();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            // A confirmed close is not counted, a failed one is, and so is
+            // one cancelled while awaited, as when the deadline expires.
+            assert!(
+                tally
+                    .confirm_close("a", async { Ok::<(), StorageError>(()) })
+                    .await
+                    .is_ok()
+            );
+            assert!(
+                tally
+                    .confirm_close("b", async { Err::<(), StorageError>(probe_mismatch()) })
+                    .await
+                    .is_err()
+            );
+            let stalled = tokio::time::timeout(
+                Duration::from_millis(10),
+                tally.confirm_close("c", std::future::pending::<Result<(), StorageError>>()),
+            )
+            .await;
+            assert!(stalled.is_err(), "the close was cancelled");
+        });
+        tally.reparse_points.fetch_add(1, Ordering::Relaxed);
+        let mut report = SmbTempSweepReport {
+            cleanup_failures: 1,
+            ..SmbTempSweepReport::default()
+        };
+        tally.add_to(&mut report);
+        assert_eq!(
+            report.cleanup_failures, 3,
+            "one earlier, one failed, one cancelled"
+        );
+        assert_eq!(report.skipped_reparse_points, 1);
+    }
+
+    #[test]
+    fn file_times_convert_from_the_1601_epoch() {
+        assert_eq!(file_time(Duration::ZERO), None);
+        assert_eq!(file_time(Duration::from_secs(1)), None, "before 1970");
+        assert_eq!(
+            file_time(FILETIME_UNIX_OFFSET + Duration::from_secs(5)),
+            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(5))
+        );
     }
 
     /// `portable_keys` is opt-in and governs new writes only: it never makes

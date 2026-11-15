@@ -292,9 +292,15 @@ separate storage provider.
 
 `StorageError::Provider` includes a `retryable` flag for future network
 providers. Callers can use `StorageError::is_retryable()` to decide whether a
-failed operation is worth retrying. Local filesystem IO errors are treated as
-retryable; invalid keys, missing blobs, unsupported backends, and failed
-preconditions are permanent.
+failed operation is worth retrying. A local filesystem IO error is retryable
+only when its kind may be transient (`io_error_is_retryable`): denied
+permission, a full or read-only file system, an exceeded quota and invalid
+names are permanent, as are invalid keys, missing blobs, unsupported
+backends, and failed preconditions.
+
+Error messages never contain keys or paths, which can reveal a repository
+path or configured root prefix. The variants' fields, and so `Debug`, keep
+them for host diagnostics; never return either to an untrusted client.
 
 `StorageError::Multipart { key, kind }` reports a refused multipart operation
 (unknown upload, backend mismatch, part number, part size or receipt mismatch).
