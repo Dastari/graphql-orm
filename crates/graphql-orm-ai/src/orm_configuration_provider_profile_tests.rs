@@ -637,6 +637,68 @@ async fn local_harness_conversion_of_a_credentialed_profile_is_refused() {
 }
 
 #[tokio::test]
+async fn rotation_immediately_deletes_an_unshared_old_secret() {
+    let database = database().await;
+    let mut host = database.clone();
+    host.set_field_policy(crate::custody_field_policy::tests::DenyEverything);
+    let secrets = Arc::new(CountingSecretStore::default());
+    let mut admin = service(
+        &host,
+        GrantedActions::new(&[
+            AiConfigurationAction::ManageProviderProfiles,
+            AiConfigurationAction::ManageProviderCredentials,
+        ]),
+    );
+    admin.secret_store = secrets.clone();
+    let profile = admin
+        .upsert_provider_profile(
+            &principal(),
+            input(None, None, AiProviderKindInput::OpenAi, None),
+        )
+        .await
+        .unwrap();
+    let first = admin
+        .set_provider_credential(
+            &principal(),
+            profile.id,
+            SecretString::from("first".to_owned()),
+            profile.row_version,
+        )
+        .await
+        .unwrap();
+    let old = stored(&database, first.id)
+        .await
+        .credential_reference
+        .unwrap();
+    let rotated = admin
+        .set_provider_credential(
+            &principal(),
+            first.id,
+            SecretString::from("second".to_owned()),
+            first.row_version,
+        )
+        .await
+        .unwrap();
+    assert_ne!(
+        stored(&database, rotated.id)
+            .await
+            .credential_reference
+            .as_deref(),
+        Some(old.as_str())
+    );
+    assert_eq!(*secrets.deleted.lock().unwrap(), vec![old]);
+    let scope: AiScope = scope_input().into();
+    assert!(
+        admin
+            .pending_secret_cleanups(&principal(), &scope, None)
+            .await
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn secret_cleanup_is_scoped_retryable_and_preserves_shared_references() {
     for shared in [false, true] {
         let database = database().await;
