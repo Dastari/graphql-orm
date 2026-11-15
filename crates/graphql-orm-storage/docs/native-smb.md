@@ -47,7 +47,7 @@ dropping the handle closes it), and a session key shorter than 16 bytes
 (`InvalidState`). MS-SMB2 would right-pad a short session key with zeros; the
 client fails closed instead of deriving signing and encryption keys from it.
 
-Storage 0.12.0 adds `PATCHES/share-access-override.patch`, applied after the
+Storage 0.13.0 adds `PATCHES/share-access-override.patch`, applied after the
 test-only `PATCHES/test-image-digest.patch`. `FileCreateArgs` gains an optional
 share-access override; without one, a create keeps the share type's default.
 The temporary-file sweep uses it to open a candidate exclusively, so a file
@@ -501,10 +501,15 @@ replacement for it:
   differs from what enumeration saw is skipped. A candidate that passes is
   removed through that same handle, once; an error after the removal request
   may have reached the server is a non-retryable single-attempt error.
-- If the sweep is cancelled, times out or fails part-way, dropping it
-  disconnects its connection, so the server releases every handle it held
-  even when an individual close was interrupted. Closes that fail on a
-  normal finish are counted in `cleanup_failures`.
+- The sweep's connection belongs to a current-thread runtime on a thread of
+  its own, which owns its socket. If the sweep is cancelled, times out or
+  fails part-way, dropping it stops that runtime, which closes the socket,
+  so the server releases every handle it held even when an individual close
+  was interrupted, and whether or not the caller's runtime still makes
+  progress. At the end the sweep disconnects the tree, logs off and closes
+  the connection itself. Every cleanup step that fails, closing a handle or
+  any of those teardown steps, on a normal finish or an error path, is
+  counted in `cleanup_failures`.
 
 What these checks stop: on a server that enforces share modes for every
 client of the share, another SMB client cannot rename, delete or replace a
@@ -522,14 +527,19 @@ leave the share (`wide links = no`), and the sweep skips those.
 
 The sweep removes files as it goes. When a later subtree fails, a request
 fails or a listing limit or the deadline is reached, the sweep returns an
-error and files it removed before that remain removed.
+`SmbTempSweepError` holding the first error and the report of what it had
+done by then: files it removed remain removed and are counted, as are
+cleanup failures. It converts into the `StorageError` alone.
 
 The managed Samba suite holds a candidate's directory at a barrier between
 enumeration and removal and checks that a second SMB session cannot rename
 it, that a file whose size changes at the barrier is kept, that a directory
 another client holds with delete access is skipped, that the sweep's
 reference time is the server's, and that cancelling a sweep at the barrier
-releases its held directories. Samba 4.12 reports no reparse points to SMB2
+releases its held directories, also when the cancelled sweep's runtime is
+never driven again. A second case severs the sweep's session at the barrier
+and checks that the error reports the file removed before it and the failed
+cleanup steps, and that a later sweep removes the rest. Samba 4.12 reports no reparse points to SMB2
 clients, so junctions and reparse handles are covered by decision-level unit
 tests, and the shared host clock means a skewed client clock is covered by a
 unit test only. The barrier is available only with the test-only

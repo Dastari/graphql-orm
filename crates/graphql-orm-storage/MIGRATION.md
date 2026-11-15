@@ -10,6 +10,44 @@ supersedes: []
 
 # Migration Guide
 
+## 0.12.0 to 0.13.0: SMB sweep, error retryability and messages
+
+Update the storage requirement to 0.13.0 and refresh the consumer lockfile.
+
+1. **Filesystem error retryability.** `StorageError::Io` used to be
+   retryable whatever its cause. It is now retryable only when
+   `io_error_is_retryable(source.kind())` is true: denied permission, a full
+   or read-only file system, an exceeded quota or file size, invalid input,
+   data or names, an unsupported operation, and entries that already exist
+   or have the wrong type are not. Retry loops that relied on
+   `is_retryable()` stop retrying those; handle them as configuration or
+   capacity problems. `is_retryable` is no longer a `const fn`.
+2. **Error messages without keys or paths.** `MissingBlob`,
+   `PreconditionFailed`, `Multipart`, `MissingParent` and `Io` no longer put
+   the key or path in their `Display` text. Match on the variant and its
+   fields, which still hold them for host diagnostics, instead of parsing the
+   message, and never return the fields or `Debug` output to an untrusted
+   client.
+3. **SMB temporary-file sweep precondition.** The new
+   `SmbStorageBackend::sweep_temp_files(quiesced, older_than)` requires an
+   `SmbRepositoryQuiesced` witness, built with
+   `SmbRepositoryQuiesced::confirmed_by_host()`. The sweep is a
+   maintenance-window operation: construct the witness only when, for the
+   whole sweep, no other party modifies the tree below the backend's root
+   prefix at all, from any host or process, through SMB or on the server
+   itself: no uploads, no renames or deletions, and no directory or
+   reparse-point changes. Keep that true until the sweep returns. Never run it
+   on a share where an untrusted party has write access to the repository
+   tree: its directory holds, reparse checks and exclusive opens are defence
+   in depth and cannot stop a client with write access from emptying a held
+   directory and turning it into a junction. The sweep removes files as it
+   goes; files removed before an error stay removed and are counted in the
+   `SmbTempSweepError::report` it returns. See
+   [native SMB](docs/native-smb.md#atomicity-and-streaming).
+4. **New metadata.** S3 and SMB `head_blob` and `get_blob` now fill
+   `BlobMetadata::last_modified`; code that treated it as always `None` for
+   those providers can use it. No action is needed otherwise.
+
 ## 0.11.0 to 0.12.0: S3 conditional creates, key errors, SMB configuration
 
 Update the storage requirement to 0.12.0 and refresh the consumer lockfile.
@@ -47,21 +85,6 @@ Update the storage requirement to 0.12.0 and refresh the consumer lockfile.
    assigns fields is unaffected. Set it to `true` for a share on a Windows
    server, or one Windows clients use; it refuses new writes of keys that
    are not portable, and existing objects stay addressable.
-5. **SMB temporary-file sweep precondition.** The new
-   `SmbStorageBackend::sweep_temp_files(quiesced, older_than)` requires an
-   `SmbRepositoryQuiesced` witness, built with
-   `SmbRepositoryQuiesced::confirmed_by_host()`. The sweep is a
-   maintenance-window operation: construct the witness only when, for the
-   whole sweep, no other party modifies the tree below the backend's root
-   prefix at all, from any host or process, through SMB or on the server
-   itself: no uploads, no renames or deletions, and no directory or
-   reparse-point changes. Keep that true until the sweep returns. Never run it
-   on a share where an untrusted party has write access to the repository
-   tree: its directory holds, reparse checks and exclusive opens are defence
-   in depth and cannot stop a client with write access from emptying a held
-   directory and turning it into a junction. The sweep removes files as it
-   goes; files removed before an error stay removed. See
-   [native SMB](docs/native-smb.md#atomicity-and-streaming).
 
 ## 0.10.0 to 0.11.0: SMB signing, conditional-create outcomes, S3 messages
 

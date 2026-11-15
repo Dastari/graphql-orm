@@ -10,6 +10,12 @@ supersedes: []
 
 # graphql-orm-backup
 
+Version 0.21.0 requires storage 0.13.0. It refuses manifests whose table and
+row counts do not match their payload entries, manifests and exports that
+list a table twice, and payloads whose row count differs from their entry;
+a prefixed blob-store repository lists only below its prefix. See
+[MIGRATION.md](MIGRATION.md).
+
 Version 0.19.0 requires storage 0.12.0, whose S3 conditional creates, and so
 repository locks, run as one attempt and fail closed until a per-instance
 probe shows that the provider enforces `If-None-Match`. It adds restore tests
@@ -76,7 +82,7 @@ restore before replacing a production pin.
 
 ```toml
 [dependencies]
-graphql-orm-backup = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.19.0" }
+graphql-orm-backup = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.21.0" }
 ```
 
 The default `local` feature provides `LocalBackupRepository`. To supply only a

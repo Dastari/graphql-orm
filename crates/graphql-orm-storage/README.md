@@ -22,16 +22,22 @@ The local backend requires a trusted, exclusively managed filesystem root and
 restrictive permissions. See the [local filesystem trust boundary](docs/blob-store.md#local-filesystem-trust-boundary)
 before using local directories or OS-mounted shares.
 
+Version 0.13.0 adds `SmbStorageBackend::sweep_temp_files`, which removes
+stale SMB temporary upload files during a quiesced maintenance window on its
+own connection and reports what it removed, skipped and failed to clean up,
+also when it fails (`SmbTempSweepError`). It reads SMB ranges from their
+offset, reports last-modified times on S3 and SMB, makes filesystem errors
+retryable only for transient kinds, and keeps keys and paths out of every
+error message. See [MIGRATION.md](MIGRATION.md).
+
 Version 0.12.0 sends S3 conditional creates as one attempt, so a lost
 response is reported as an unknown outcome instead of the writer's own object
 appearing taken, and makes S3 conditional creates, and so repository locks,
 fail closed until a per-instance probe shows that the provider enforces
 `If-None-Match`. It adds an opt-in portable key mode for new writes to SMB
 shares on Windows servers (`validate_portable_blob_key`,
-`SmbStorageConfig::portable_keys`), a fixed `InvalidStorageKey` message that
-never reveals the key, and `SmbStorageBackend::sweep_temp_files` for stale SMB
-temporary files during a quiesced maintenance window. See
-[MIGRATION.md](MIGRATION.md).
+`SmbStorageConfig::portable_keys`), and a fixed `InvalidStorageKey` message
+that never reveals the key. See [MIGRATION.md](MIGRATION.md).
 
 Version 0.11.0 makes SMB conditional creates publish only complete objects,
 holds SMB transfer permits only while a request is in flight, lists only the

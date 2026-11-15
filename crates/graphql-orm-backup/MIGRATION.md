@@ -10,6 +10,25 @@ supersedes: []
 
 # Migration Guide
 
+## To 0.21.0: storage 0.13.0
+
+1. Move `graphql-orm-backup` and `graphql-orm-storage` together to one
+   reviewed revision and refresh the lockfile. Storage 0.13.0 is required.
+2. Manifests are now refused, as `BackupError::InvalidManifestEntry`, when
+   their `table_count` or `row_count` does not match their payload entries
+   or they list a table twice, and restore refuses a payload whose entry
+   count differs from its entry. Every release has written consistent
+   counts, so existing repositories are unaffected; a manifest refused for
+   this reason was not written by this crate.
+3. A database adapter whose `export_full` returns the same table twice now
+   fails `create_full_backup` before anything is written. Merge such
+   exports in the adapter.
+4. Storage's filesystem errors are retryable only for transient kinds, and
+   storage error messages no longer contain keys or paths. Retry and
+   reporting logic that used `BackupError` messages or `is_retryable` on
+   wrapped storage errors sees those changes; see the storage
+   [migration guide](../graphql-orm-storage/MIGRATION.md).
+
 ## 0.18.0 to 0.19.0: storage 0.12.0
 
 1. Move `graphql-orm-backup` and `graphql-orm-storage` together to one

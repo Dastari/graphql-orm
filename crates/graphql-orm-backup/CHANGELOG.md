@@ -10,6 +10,41 @@ supersedes: []
 
 # Changelog
 
+## 0.21.0 (unreleased)
+
+Requires `graphql-orm-storage` 0.13.0. Breaking: manifests whose counts do
+not match their entries, and exports that list a table twice, are refused.
+See [MIGRATION.md](MIGRATION.md).
+
+- `validate_manifest_entries`, and so every manifest read and seal, refuses
+  a manifest whose `table_count` is not its number of full table entries
+  (zero for an incremental snapshot), whose `row_count` is not the sum of
+  its payload entries' row counts, or that lists a table more than once
+  among its tables or its changes. Every writer since the first release
+  writes consistent counts.
+  ([#540](https://github.com/Dastari/graphql-orm/issues/540))
+- Restore refuses a table or change payload whose decoded entry count
+  differs from its manifest entry's `row_count`, before anything is applied.
+  ([#540](https://github.com/Dastari/graphql-orm/issues/540))
+- `create_full_backup` refuses an adapter export that lists a table twice
+  before writing anything, and the ORM adapter's `restore_full` refuses such
+  an export instead of keeping only the last.
+  ([#540](https://github.com/Dastari/graphql-orm/issues/540))
+- A `BlobStoreBackupRepository` with a prefix lists `<prefix>/`, never the
+  bare prefix, which as a string prefix also listed sibling repositories
+  such as `<prefix>-other/` and spent the store's listing limits on them.
+  ([#540](https://github.com/Dastari/graphql-orm/issues/540))
+- `group_changes_by_table` groups incremental changes in one pass instead of
+  scanning the groups for each change.
+  ([#540](https://github.com/Dastari/graphql-orm/issues/540))
+- `LocalBackupRepository::open_existing` checks its root without blocking
+  the runtime. The `local` feature now enables `tokio`'s `fs` support, which
+  `graphql-orm-storage`'s `local` feature already required.
+  ([#540](https://github.com/Dastari/graphql-orm/issues/540))
+- Storage 0.13.0 errors no longer put keys or paths in their messages, and
+  its filesystem errors are retryable only for transient kinds; backup
+  errors that wrap them inherit both.
+
 ## 0.19.0 (unreleased)
 
 Requires `graphql-orm-storage` 0.12.0. See [MIGRATION.md](MIGRATION.md).
