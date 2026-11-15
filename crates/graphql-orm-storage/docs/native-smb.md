@@ -62,12 +62,18 @@ A handle is now marked closed only once CLOSE has been handed to the
 connection; until then it stays open, and dropping it sends CLOSE in the
 background on the same session. A second close while one is in progress is
 refused. Destructors never need a current Tokio runtime: a dropped handle
-hands its CLOSE to a per-connection cleanup queue that a task on the
-connection's runtime drains, so a handle dropped after `Runtime::block_on`
-returned is closed once that runtime runs again. If the connection's runtime
-has shut down, the CLOSE is dropped and logged at debug level; the socket
-closed with the runtime, so the server releases the handle when the session
-ends. Tree, session and connection destructors spawn their disconnect, logoff
+offers its CLOSE, without blocking, to a per-connection cleanup queue that one
+task on the connection's runtime drains, so a handle dropped after
+`Runtime::block_on` returned is closed once that runtime runs again. The
+queue is bounded: it holds at most 256 pending closes, runs them one at a
+time, and abandons a close that has not finished within the connection's
+timeout, for example one whose credits are never granted. A queued close
+holds only a weak reference, so it never keeps the connection, session or
+socket alive, and the queue ends, dropping pending closes, when the
+connection is closed or its last owner drops. A close refused because the
+queue is full or shut down, abandoned at its deadline, or dropped at shutdown
+is counted and logged at debug level; the server releases that handle when
+the session ends. Tree, session and connection destructors spawn their disconnect, logoff
 and worker stop only on a current runtime, and otherwise log and leave them
 to the server, instead of panicking. `Client::close` now attempts every tree disconnect, channel close,
 logoff and connection close, returns the first failure and logs the others,

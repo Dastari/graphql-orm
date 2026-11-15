@@ -20,10 +20,14 @@ No public API changes.
   session. The vendored client marked the handle closed before sending CLOSE,
   so its destructor skipped it; a handle is now marked closed only once CLOSE
   has been handed to the connection, and otherwise dropping it sends CLOSE in
-  the background. The destructor needs no current Tokio runtime: it hands the
-  CLOSE to a per-connection cleanup queue drained on the connection's
+  the background. The destructor needs no current Tokio runtime: it offers
+  the CLOSE to a bounded per-connection cleanup queue (256 pending closes,
+  run one at a time within the connection's timeout, holding only weak
+  references, ended with the connection) drained on the connection's
   runtime, so dropping a handle on any thread, for example after
-  `Runtime::block_on` returned, neither panics nor leaks it. Tree, session and
+  `Runtime::block_on` returned, never panics, blocks or keeps the connection
+  alive. A close the queue refuses or abandons is released by the server
+  when the session ends. Tree, session and
   connection destructors no longer panic without a runtime either. A sixth
   owner-local vendor patch, `cancel-safe-close`,
   carries the fix. The vendored `Client::close` also attempts every tree
