@@ -282,7 +282,6 @@ async fn owner_isolation_atomic_send_idempotency_and_windowed_reads() {
                 text: "Find records containing the example term".to_owned(),
                 attachment_ids: vec![],
                 client_message_id,
-                references: Vec::new(),
             },
         )
         .await
@@ -316,7 +315,6 @@ async fn owner_isolation_atomic_send_idempotency_and_windowed_reads() {
                 text: "Find records containing the example term".to_owned(),
                 attachment_ids: vec![],
                 client_message_id,
-                references: Vec::new(),
             },
         )
         .await
@@ -332,7 +330,6 @@ async fn owner_isolation_atomic_send_idempotency_and_windowed_reads() {
                     text: "Different content".to_owned(),
                     attachment_ids: vec![],
                     client_message_id,
-                    references: Vec::new(),
                 },
             )
             .await,
@@ -537,7 +534,6 @@ async fn terminal_event_at_sequence_101_replays_across_session_and_inbox_pages()
                 text: "Run a bounded operation".to_owned(),
                 attachment_ids: vec![],
                 client_message_id: Uuid::new_v4(),
-                references: Vec::new(),
             },
         )
         .await
@@ -644,7 +640,6 @@ async fn reconnect_replays_terminal_then_switches_live_without_duplication() {
                 text: "Start work before disconnect".to_owned(),
                 attachment_ids: vec![],
                 client_message_id: Uuid::new_v4(),
-                references: Vec::new(),
             },
         )
         .await
@@ -735,7 +730,6 @@ async fn messages_read_exact_legacy_object_previews() {
                 text: "legacy protected preview".to_owned(),
                 attachment_ids: vec![],
                 client_message_id: Uuid::new_v4(),
-                references: Vec::new(),
             },
         )
         .await
@@ -951,7 +945,6 @@ async fn archive_restore_and_session_keyset_are_bounded() {
                     text: "cannot send while archived".to_owned(),
                     attachment_ids: vec![],
                     client_message_id: Uuid::new_v4(),
-                    references: Vec::new(),
                 },
             )
             .await,
@@ -1103,7 +1096,6 @@ async fn immutable_selections_route_concurrent_owned_runs_and_reject_stale_lease
         text: "Synthetic selection test".to_owned(),
         attachment_ids: vec![],
         client_message_id: Uuid::new_v4(),
-        references: Vec::new(),
     };
     assert!(matches!(
         sessions.send_message(&bob, send(first.id)).await,
@@ -1201,8 +1193,7 @@ async fn selection_admission_cannot_be_bypassed_and_legacy_history_remains_reada
                     session_id: legacy.id,
                     text: "Synthetic".to_owned(),
                     attachment_ids: vec![],
-                    client_message_id: Uuid::new_v4(),
-                    references: Vec::new(),
+                    client_message_id: Uuid::new_v4()
                 }
             )
             .await,
@@ -1527,7 +1518,6 @@ async fn run_session_lookup_rechecks_policy_and_preserves_archive_delete_visibil
                 text: "Inspect without effects".into(),
                 attachment_ids: vec![],
                 client_message_id: Uuid::new_v4(),
-                references: Vec::new(),
             },
         )
         .await
@@ -1757,7 +1747,6 @@ async fn delegated_request_principals_are_refused_on_every_session_root() {
                 text: "Find records containing the example term".to_owned(),
                 attachment_ids: vec![],
                 client_message_id: Uuid::new_v4(),
-                references: Vec::new(),
             },
         )
         .await
@@ -1781,7 +1770,6 @@ async fn delegated_request_principals_are_refused_on_every_session_root() {
                         text: "Delete every record".to_owned(),
                         attachment_ids: vec![],
                         client_message_id: Uuid::new_v4(),
-                        references: Vec::new(),
                     },
                 )
                 .await

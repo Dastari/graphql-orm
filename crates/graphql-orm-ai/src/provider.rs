@@ -476,15 +476,7 @@ impl ModelContinuation {
         match self {
             Self::ProviderResponse { response_id } => Some(response_id.clone()),
             Self::StatelessConversation { .. } => {
-                // Bind the chain to entity-reference handles, never to what a
-                // reference resolved to for some principal: the same history
-                // resolves differently on each turn, and stored state holds
-                // handles only. Without references this changes nothing.
-                let mut canonical = self.clone();
-                crate::entity_references::redact_model_continuation(&mut canonical);
-                let mut input = input.to_vec();
-                crate::entity_references::redact_model_blocks(&mut input);
-                let encoded = serde_json::to_vec(&(&canonical, &input)).ok()?;
+                let encoded = serde_json::to_vec(&(self, input)).ok()?;
                 let mut hasher = Sha256::new();
                 hasher.update(b"graphql-orm-ai/stateless-continuation/v1\0");
                 hasher.update(encoded);

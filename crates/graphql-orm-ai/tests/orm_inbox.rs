@@ -409,7 +409,6 @@ async fn owner_pages_atomic_cross_session_events_without_cross_principal_leakage
                 text: "bounded message".to_owned(),
                 attachment_ids: vec![],
                 client_message_id: Uuid::new_v4(),
-                references: Vec::new(),
             },
         )
         .await
@@ -685,7 +684,6 @@ async fn pruning_deletes_only_an_expired_prefix_and_requires_cursor_reset() {
                     text: text.to_owned(),
                     attachment_ids: vec![],
                     client_message_id: Uuid::new_v4(),
-                    references: Vec::new(),
                 },
             )
             .await
@@ -854,7 +852,6 @@ async fn delegated_request_principal_cannot_read_an_inbox_page() {
                 text: "bounded message".to_owned(),
                 attachment_ids: vec![],
                 client_message_id: Uuid::new_v4(),
-                references: Vec::new(),
             },
         )
         .await

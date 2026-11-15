@@ -521,8 +521,7 @@ impl AiSessionTitleWorkService for OrmAiSessionTitleWorkService {
             || message.sequence != 1
             || message.message_role != "user"
             || message.content_purged_at.is_some()
-            || !(1..=crate::entity_references::MAXIMUM_USER_MESSAGE_BLOCKS)
-                .contains(&message.block_count)
+            || message.block_count != 1
             || message.completion_state != "complete"
         {
             return Err(AiError::PersistenceFailed);
@@ -545,7 +544,7 @@ impl AiSessionTitleWorkService for OrmAiSessionTitleWorkService {
                             }),
                             ..Default::default()
                         })
-                        .internal_limit(crate::entity_references::MAXIMUM_USER_MESSAGE_BLOCKS + 1)
+                        .internal_limit(2)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)
@@ -553,22 +552,13 @@ impl AiSessionTitleWorkService for OrmAiSessionTitleWorkService {
             })
             .await
             .map_err(map_transaction)?;
-        // The title is generated from the text alone; reference blocks that
-        // follow it are never shown to the title generator.
-        let stored_blocks = block;
-        let block = match crate::entity_references::user_message_text_block(
-            &stored_blocks,
-            message.block_count,
-        ) {
-            Some(text)
-                if stored_blocks
-                    .iter()
-                    .all(|stored| stored.message_id == message.id) =>
-            {
-                [text.clone()]
-            }
-            _ => return Err(AiError::PersistenceFailed),
-        };
+        if block.len() != 1
+            || block[0].block_index != 0
+            || block[0].block_kind != "text"
+            || block[0].message_id != message.id
+        {
+            return Err(AiError::PersistenceFailed);
+        }
         let scope = record_scope(&session);
         let policy = self.protection_policy(first.principal(), &scope).await?;
         let opened = self
@@ -625,7 +615,6 @@ impl AiSessionTitleWorkService for OrmAiSessionTitleWorkService {
         }
         let message_id = message.id;
         let message_row_version = message.row_version;
-        let message_block_count = message.block_count;
         let block_id = block[0].id;
         let protected_content = block[0].protected_content.clone();
         self.database
@@ -643,7 +632,7 @@ impl AiSessionTitleWorkService for OrmAiSessionTitleWorkService {
                         .ok_or_else(OrmPublicError::not_found)?;
                     if current_message.row_version != message_row_version
                         || current_message.content_purged_at.is_some()
-                        || current_message.block_count != message_block_count
+                        || current_message.block_count != 1
                         || current_block.message_id != message_id
                         || current_block.protected_content != protected_content
                     {

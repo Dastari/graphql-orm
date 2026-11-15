@@ -277,7 +277,6 @@ async fn default_session_with_message(fixture: &Fixture, text: &str) -> AiSessio
                 text: text.to_owned(),
                 attachment_ids: vec![],
                 client_message_id: Uuid::new_v4(),
-                references: Vec::new(),
             },
         )
         .await
@@ -368,77 +367,6 @@ async fn schema_upgrade_conservatively_fences_preexisting_titles_and_converges()
     assert!(stable.statements.is_empty());
 }
 
-struct NoEntityData;
-
-#[async_trait]
-impl AiEntityReferenceResolver for NoEntityData {
-    async fn resolve(
-        &self,
-        _principal: &AuthPrincipal,
-        _scope: &AiScope,
-        reference: &AiEntityReferenceInput,
-    ) -> Result<Option<AiResolvedEntityReference>, AiError> {
-        Ok((reference.id == "known").then(|| {
-            AiResolvedEntityReference::new(serde_json::json!({"secret": "reference data"}))
-        }))
-    }
-}
-
-/// A first message that carries entity references still gets a title, and the
-/// title generator is shown the user's text only.
-#[tokio::test]
-async fn first_message_with_entity_references_titles_from_its_text_alone() {
-    let mut fixture = fixture().await;
-    fixture.sessions = fixture.sessions.with_entity_references(
-        AiEntityReferenceRegistry::new(["record"], Arc::new(NoEntityData))
-            .expect("registry is valid"),
-    );
-    let session = fixture
-        .sessions
-        .create_session(
-            &fixture.owner,
-            CreateAiSessionInput {
-                execution_selection: None,
-                scope: scope_input(),
-                title: None,
-            },
-        )
-        .await
-        .expect("session should be created");
-    let sent = fixture
-        .sessions
-        .send_message(
-            &fixture.owner,
-            SendAiMessageInput {
-                session_id: session.id,
-                text: "Summarise this record".to_owned(),
-                attachment_ids: vec![],
-                client_message_id: Uuid::new_v4(),
-                references: ["known", "unknown"]
-                    .map(|id| AiEntityReferenceInput {
-                        kind: "record".to_owned(),
-                        id: id.to_owned(),
-                    })
-                    .to_vec(),
-            },
-        )
-        .await
-        .expect("message should be accepted");
-    assert_eq!(sent.reference_notices.len(), 1);
-    let claim = fixture
-        .title_work
-        .claim_next("title-worker-references")
-        .await
-        .expect("claim should succeed")
-        .expect("first message should create one title job");
-    let input = fixture
-        .title_work
-        .open_first_message(&claim)
-        .await
-        .expect("a message with reference blocks should still open");
-    assert_eq!(input.text(), "Summarise this record");
-}
-
 #[tokio::test]
 async fn first_message_work_opens_under_current_authority_and_completes_once() {
     let fixture = fixture().await;
@@ -500,7 +428,6 @@ async fn first_message_work_opens_under_current_authority_and_completes_once() {
                 text: "Follow-up question".to_owned(),
                 attachment_ids: vec![],
                 client_message_id: Uuid::new_v4(),
-                references: Vec::new(),
             },
         )
         .await

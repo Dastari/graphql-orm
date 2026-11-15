@@ -387,14 +387,6 @@ pub struct SendAiMessageInput {
     pub attachment_ids: Vec<Uuid>,
     /// Client idempotency ID.
     pub client_message_id: Uuid,
-    /// Structured references to host entities, bound to this message.
-    ///
-    /// A reference confers no authority. The host resolves each one as the
-    /// sending principal; a reference that yields no data is dropped and
-    /// reported in [`SendAiMessagePayload::reference_notices`]. A service with
-    /// no [`crate::AiEntityReferenceRegistry`] rejects a non-empty list.
-    #[graphql(default)]
-    pub references: Vec<crate::AiEntityReferenceInput>,
 }
 
 /// Accepted message/run references.
@@ -405,9 +397,6 @@ pub struct SendAiMessagePayload {
     pub message_id: Uuid,
     /// Queued run.
     pub run_id: Uuid,
-    /// One typed notice per submitted reference that produced no data, in
-    /// submission order. A notice never says whether the entity exists.
-    pub reference_notices: Vec<crate::AiEntityReferenceNotice>,
 }
 
 /// Owner/scope-aware session backend. Implementations must use keyset-bounded
@@ -860,10 +849,7 @@ impl AiMutationRoot {
         input: SendAiMessageInput,
     ) -> async_graphql::Result<SendAiMessagePayload> {
         let principal = agql_auth::principal_from_ctx(context)?;
-        if input.text.is_empty()
-            || input.text.len() > 256 * 1024
-            || input.attachment_ids.len() > 10
-            || input.references.len() > crate::entity_references::MAXIMUM_ENTITY_REFERENCES
+        if input.text.is_empty() || input.text.len() > 256 * 1024 || input.attachment_ids.len() > 10
         {
             return Err(
                 AiError::InvalidInput("message exceeds configured limits".to_owned()).extend(),

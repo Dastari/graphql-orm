@@ -253,7 +253,6 @@ async fn active_run(
                 text: "Start a retained provider turn".to_owned(),
                 attachment_ids: vec![],
                 client_message_id: Uuid::new_v4(),
-                references: Vec::new(),
             },
         )
         .await
@@ -285,7 +284,6 @@ async fn next_active_run(
                 text: "Continue from authoritative durable history".to_owned(),
                 attachment_ids: vec![],
                 client_message_id: Uuid::new_v4(),
-                references: Vec::new(),
             },
         )
         .await

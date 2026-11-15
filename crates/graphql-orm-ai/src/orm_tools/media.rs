@@ -296,8 +296,7 @@ impl OrmAiApplicationToolCallService {
             || message.message_role != "user"
             || message.content_purged_at.is_some()
             || message.completion_state != "complete"
-            || !(1..=crate::entity_references::MAXIMUM_USER_MESSAGE_BLOCKS)
-                .contains(&message.block_count)
+            || message.block_count != 1
             || message.author_subject.as_deref()
                 != Some(lease.principal_reference().subject.as_str())
             || !policy.ready
@@ -313,18 +312,16 @@ impl OrmAiApplicationToolCallService {
                 }),
                 ..Default::default()
             })
-            .limit(crate::entity_references::MAXIMUM_USER_MESSAGE_BLOCKS + 1)
+            .limit(2)
             .fetch_all()
             .await
             .map_err(|_| AiError::PersistenceFailed)?;
-        // Only the text is the user's instruction. Reference blocks that
-        // follow it are server-resolved data and are not returned here.
-        let Some(block) =
-            crate::entity_references::user_message_text_block(&blocks, message.block_count)
-        else {
+        if blocks.len() != 1 {
             return Err(AiError::Conflict);
-        };
-        if block.message_id != message.id
+        }
+        let block = &blocks[0];
+        if block.block_index != 0
+            || block.block_kind != "text"
             || block.byte_count < 0
             || usize::try_from(block.byte_count)
                 .map_or(true, |bytes| bytes > self.limits.maximum_model_output_bytes)

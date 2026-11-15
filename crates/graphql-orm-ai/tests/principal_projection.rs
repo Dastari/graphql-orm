@@ -351,7 +351,6 @@ impl Fixture {
                     text: "Count the active customer records".to_owned(),
                     attachment_ids: vec![],
                     client_message_id,
-                    references: Vec::new(),
                 },
             )
             .await
@@ -1052,7 +1051,6 @@ async fn api_tokens_flow_through_the_services_only_with_their_own_audience() {
                         text: "Summarize".to_owned(),
                         attachment_ids: vec![],
                         client_message_id: Uuid::new_v4(),
-                        references: Vec::new(),
                     },
                 )
                 .await
@@ -1209,7 +1207,6 @@ async fn delegated_submissions_are_refused_without_run_authorization() {
                         text: "Delete every customer record".to_owned(),
                         attachment_ids: vec![],
                         client_message_id: Uuid::new_v4(),
-                        references: Vec::new(),
                     },
                 )
                 .await,

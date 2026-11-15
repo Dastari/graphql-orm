@@ -2072,7 +2072,6 @@ async fn prepared_original_task_survives_a_later_queued_message_without_new_huma
                 text: "Complete this exact original task".into(),
                 attachment_ids: Vec::new(),
                 client_message_id: original_client_id,
-                references: Vec::new(),
             },
         )
         .await
@@ -2097,7 +2096,6 @@ async fn prepared_original_task_survives_a_later_queued_message_without_new_huma
                 text: "A separate later task must not replace the active task".into(),
                 attachment_ids: Vec::new(),
                 client_message_id: Uuid::new_v4(),
-                references: Vec::new(),
             },
         )
         .await
@@ -2458,7 +2456,6 @@ async fn exercise_owned_static_reset(
                         .into(),
                     attachment_ids: Vec::new(),
                     client_message_id: Uuid::new_v4(),
-                    references: Vec::new(),
                 },
             )
             .await

@@ -351,17 +351,11 @@ impl AiAgentContinuation {
     }
 
     pub(crate) fn checkpoint_value(&self) -> serde_json::Value {
-        // Whatever this continuation holds in memory, its stored form carries
-        // entity-reference handles only.
-        let mut continuation = self.continuation.clone();
-        crate::entity_references::redact_model_continuation(&mut continuation);
-        let mut input = self.input.clone();
-        crate::entity_references::redact_model_blocks(&mut input);
         serde_json::json!({
             "formatVersion": if self.native_outcome { 4 } else { 3 },
-            "continuation": continuation,
+            "continuation": self.continuation,
             "reasoningEffort": self.reasoning_effort,
-            "input": input,
+            "input": self.input,
             "transfers": self.transfers,
             "replayTransfers": self.replay_transfers,
         })
@@ -381,12 +375,8 @@ impl AiAgentContinuation {
             replay_transfers: Vec<AiEgressManifest>,
         }
 
-        let mut snapshot: Snapshot =
+        let snapshot: Snapshot =
             serde_json::from_value(value).map_err(|_| AiError::PersistenceFailed)?;
-        // Stored history holds entity-reference handles only. Enforce that on
-        // load too, so nothing a stored value carried beside a handle can be
-        // replayed.
-        crate::entity_references::redact_model_continuation(&mut snapshot.continuation);
         if !matches!(snapshot.format_version, 1..=4)
             || snapshot.input.is_empty()
             || snapshot.input.len() > 256
@@ -652,38 +642,6 @@ impl AiAgentContinuation {
             current_tool_count,
             tools,
         }))
-    }
-
-    /// Resolves the entity references in this continuation's replayed
-    /// history for the principal that is current now.
-    ///
-    /// A continuation, whether it comes straight from the loop guard or from
-    /// an adopted checkpoint, holds reference handles only. Call this with
-    /// the run's freshly rehydrated principal immediately before building the
-    /// next provider plan from it: for a tool-result continuation and equally
-    /// for a resumed, recovered or reclaimed run and a retry. Each handle is
-    /// resolved again through the host hook; one the principal can no longer
-    /// read becomes the unavailable marker.
-    ///
-    /// Without this call the next request replays the handles with no data.
-    /// The returned value is for building that one plan. If it is stored, it
-    /// is stored as handles again.
-    #[must_use]
-    pub async fn resolve_entity_references(
-        mut self,
-        registry: &crate::AiEntityReferenceRegistry,
-        principal: &agql_auth::AuthPrincipal,
-        scope: &crate::AiScope,
-    ) -> Self {
-        registry
-            .resolve_parts_for_use(
-                principal,
-                scope,
-                Some(&mut self.continuation),
-                &mut self.input,
-            )
-            .await;
-        self
     }
 
     pub(crate) fn apply_with_transfers(

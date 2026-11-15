@@ -16,7 +16,7 @@ for historical context.
 
 ## Unreleased - AI 0.144.0
 
-- AI adds per-message structured entity references, a pinned Anthropic model-snapshot mapping, an exact OpenAI stored-response deletion adapter and smaller follow-ups. **Breaking** for hosts that build `SendAiMessageInput` or `SendAiMessagePayload` literals; apply AI schema module `0.81.0`. Details are in the [AI changelog](crates/graphql-orm-ai/CHANGELOG.md#unreleased---01440).
+- AI adds a pinned Anthropic model-snapshot mapping and an exact OpenAI stored-response deletion adapter, fixes a missed cancellation wake-up and bounds published skill schemas (a hardening that can reject a schema accepted before). No schema module change. Details are in the [AI changelog](crates/graphql-orm-ai/CHANGELOG.md#unreleased---01440).
 
 ## Unreleased - ORM/macros 0.157.0
 

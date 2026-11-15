@@ -646,7 +646,6 @@ async fn ticket_is_owner_bound_scanned_promoted_released_and_message_linked() {
                 text: "Please inspect the attached image".to_owned(),
                 attachment_ids: vec![released.id],
                 client_message_id: Uuid::new_v4(),
-                references: Vec::new(),
             },
         )
         .await
@@ -1121,7 +1120,6 @@ async fn deleting_session_retention_waits_for_confirmed_attachment_cleanup() {
                 text: "Retain metadata until object deletion is proven".to_owned(),
                 attachment_ids: vec![released.id],
                 client_message_id: Uuid::new_v4(),
-                references: Vec::new(),
             },
         )
         .await

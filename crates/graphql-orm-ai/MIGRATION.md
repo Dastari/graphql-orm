@@ -10,49 +10,19 @@ supersedes: []
 
 # Migration Guide
 
-## 0.143.0 to 0.144.0: entity references and AI follow-ups
+## 0.143.0 to 0.144.0: AI follow-ups
 
-Apply AI schema module `0.81.0` before starting workers. It changes no table,
-column, index or constraint and needs no data backfill. It records a new value
-domain: a user message may now store `entity_reference` blocks after its text
-block. Such a block holds a reference handle (kind and identifier) and never
-resolved data.
+No GraphQL SDL, public struct, persistent schema or data migration change.
+`AI_SCHEMA_MODULE_VERSION` stays `0.80.0`.
 
 ### Breaking changes
 
-- `SendAiMessageInput` has a new `references` field and `SendAiMessagePayload`
-  a new `reference_notices` field. Add `references: Vec::new()` to struct
-  literals, and return `reference_notices: Vec::new()` from a custom
-  `AiSessionService::send_message`. GraphQL clients need no change: the input
-  field defaults to an empty list.
-- Code that reads message blocks directly must no longer assume a user message
-  has exactly one block. Block 0 is always the text. Clients that render
-  `AiMessageBlockView` should handle, or ignore, the `entity_reference` block
-  kind, whose content is resolved for the reader on every read and is either
-  resolved data or a fixed unavailable marker.
 - Publishing a skill version now rejects an input or output schema nested more
   than 32 levels deep, or with a `pattern` value or `patternProperties` key
   longer than 256 bytes. Stored versions are unaffected.
 
 ### Optional adoption
 
-- **Entity references** are off until a host installs
-  `OrmAiSessionService::with_entity_references`. Until then a message that
-  carries a reference is rejected with `InvalidInput`. Only reference
-  handles are stored. The host hook must evaluate current row, field and
-  scope policy on every call, because it is called again at every use. The
-  host worker that builds provider requests calls
-  `OrmAiSessionService::entity_reference_model_input` with the run's current
-  principal for the first request of a run, and before every later provider
-  request (tool-result continuation, resumed or recovered run, retry) calls
-  `AiAgentContinuation::resolve_entity_references` or
-  `AiEntityReferenceRegistry::resolve_request_for_use` with the then-current
-  principal. Stored continuations and checkpoints hold handles only, so a
-  skipped call sends no reference data. Egress for the resolved request is
-  authorized like any other block. Data already sent to a provider cannot be
-  recalled: with provider-retained continuation or a retained provider
-  session the provider keeps the first request of a run. See
-  [entity references](docs/entity-references.md).
 - **Anthropic model aliases:** call `AnthropicProvider::with_model_snapshot`
   for each alias a deployment requests, naming the dated snapshot it resolves
   to. Pricing stays keyed by the requested identifier. Without a mapping,
