@@ -211,99 +211,163 @@ mod default_canonicalization_tests {
     }
 }
 
+/// Byte ranges of the bind placeholders in a SQL fragment, in order.
+///
+/// This is the one lexical pass every placeholder consumer shares: counting a
+/// fragment's binds and rebasing them must agree, or values are attached to
+/// the wrong clause.
+///
+/// A placeholder is `?` (with optional trailing digits), `$<digits>` or
+/// `@p<digits>` (either case). None is recognised inside a string literal, a
+/// quoted identifier, a line or block comment, or a PostgreSQL dollar-quoted
+/// string, and `$`/`@p` followed by no digits, or attached to an identifier
+/// (`col$1`, `@page`, `@@p1`), is ordinary text. `[...]` quotes an identifier
+/// on SQL Server and SQLite and is an array subscript on PostgreSQL.
+pub(crate) fn placeholder_spans(backend: DatabaseBackend, sql: &str) -> Vec<(usize, usize)> {
+    let bytes = sql.as_bytes();
+    let postgres = backend == DatabaseBackend::Postgres;
+    let mut spans = Vec::new();
+    let mut i = 0usize;
+    // Skip to just after the closing delimiter; a doubled one is an escape.
+    let skip_quoted = |mut i: usize, close: u8, backslash_escapes: bool| {
+        while i < bytes.len() {
+            if backslash_escapes && bytes[i] == b'\\' {
+                i = (i + 2).min(bytes.len());
+            } else if bytes[i] == close {
+                i += 1;
+                if bytes.get(i) == Some(&close) {
+                    i += 1;
+                } else {
+                    break;
+                }
+            } else {
+                i += 1;
+            }
+        }
+        i
+    };
+    let digits_end = |mut i: usize| {
+        while bytes.get(i).is_some_and(u8::is_ascii_digit) {
+            i += 1;
+        }
+        i
+    };
+    while i < bytes.len() {
+        let attached = i > 0 && postgres_identifier_byte(bytes[i - 1]);
+        match bytes[i] {
+            b'\'' => {
+                let escaped = postgres
+                    && i > 0
+                    && matches!(bytes[i - 1], b'e' | b'E')
+                    && (i == 1 || !postgres_identifier_byte(bytes[i - 2]));
+                i = skip_quoted(i + 1, b'\'', escaped);
+            }
+            b'"' => i = skip_quoted(i + 1, b'"', false),
+            b'`' if matches!(backend, DatabaseBackend::Sqlite | DatabaseBackend::Mysql) => {
+                i = skip_quoted(i + 1, b'`', false);
+            }
+            b'[' if matches!(backend, DatabaseBackend::Mssql | DatabaseBackend::Sqlite) => {
+                i = skip_quoted(i + 1, b']', false);
+            }
+            b'-' if bytes.get(i + 1) == Some(&b'-') => {
+                i += 2;
+                while i < bytes.len() && !matches!(bytes[i], b'\n' | b'\r') {
+                    i += 1;
+                }
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                // PostgreSQL and SQL Server nest block comments; SQLite ends
+                // one at the first `*/`.
+                let nests = backend != DatabaseBackend::Sqlite;
+                i += 2;
+                let mut depth = 1usize;
+                while i < bytes.len() && depth > 0 {
+                    if nests && bytes.get(i..i + 2) == Some(b"/*") {
+                        depth += 1;
+                        i += 2;
+                    } else if bytes.get(i..i + 2) == Some(b"*/") {
+                        depth -= 1;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            b'?' => {
+                let end = digits_end(i + 1);
+                spans.push((i, end));
+                i = end;
+            }
+            b'$' if !attached => {
+                let end = digits_end(i + 1);
+                if end > i + 1 {
+                    spans.push((i, end));
+                    i = end;
+                    continue;
+                }
+                i += 1;
+                if !postgres {
+                    continue;
+                }
+                // A dollar-quoted string: `$$ ... $$` or `$tag$ ... $tag$`.
+                let mut tag_end = i;
+                if bytes
+                    .get(tag_end)
+                    .is_some_and(|ch| ch.is_ascii_alphabetic() || *ch == b'_' || *ch >= 0x80)
+                {
+                    tag_end += 1;
+                    while bytes
+                        .get(tag_end)
+                        .is_some_and(|ch| ch.is_ascii_alphanumeric() || *ch == b'_' || *ch >= 0x80)
+                    {
+                        tag_end += 1;
+                    }
+                }
+                if bytes.get(tag_end) == Some(&b'$') {
+                    let delimiter = &sql[i - 1..=tag_end];
+                    let body = tag_end + 1;
+                    i = sql[body..]
+                        .find(delimiter)
+                        .map_or(bytes.len(), |offset| body + offset + delimiter.len());
+                }
+            }
+            b'@' if !attached
+                && (i == 0 || bytes[i - 1] != b'@')
+                && bytes
+                    .get(i + 1)
+                    .is_some_and(|ch| ch.eq_ignore_ascii_case(&b'p')) =>
+            {
+                let end = digits_end(i + 2);
+                if end > i + 2
+                    && !bytes
+                        .get(end)
+                        .is_some_and(|ch| postgres_identifier_byte(*ch))
+                {
+                    spans.push((i, end));
+                    i = end;
+                } else {
+                    i += 1;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    spans
+}
+
 fn normalize_sql_placeholders(backend: DatabaseBackend, sql: &str, start_index: usize) -> String {
     if !matches!(backend, DatabaseBackend::Postgres | DatabaseBackend::Mssql) {
         return sql.to_string();
     }
 
-    let chars: Vec<char> = sql.chars().collect();
     let mut out = String::with_capacity(sql.len() + 16);
-    let mut i = 0usize;
-    let mut next = start_index;
-    let mut in_single_quote = false;
-    let mut in_double_quote = false;
-    let mut in_bracket_quote = false;
-
-    while i < chars.len() {
-        let ch = chars[i];
-
-        if in_single_quote {
-            out.push(ch);
-            if ch == '\'' {
-                if i + 1 < chars.len() && chars[i + 1] == '\'' {
-                    out.push(chars[i + 1]);
-                    i += 2;
-                    continue;
-                }
-                in_single_quote = false;
-            }
-            i += 1;
-            continue;
-        }
-
-        if in_double_quote {
-            out.push(ch);
-            if ch == '"' {
-                if i + 1 < chars.len() && chars[i + 1] == '"' {
-                    out.push(chars[i + 1]);
-                    i += 2;
-                    continue;
-                }
-                in_double_quote = false;
-            }
-            i += 1;
-            continue;
-        }
-
-        if in_bracket_quote {
-            out.push(ch);
-            if ch == ']' {
-                if i + 1 < chars.len() && chars[i + 1] == ']' {
-                    out.push(chars[i + 1]);
-                    i += 2;
-                    continue;
-                }
-                in_bracket_quote = false;
-            }
-            i += 1;
-            continue;
-        }
-
-        if ch == '\'' {
-            in_single_quote = true;
-            out.push(ch);
-            i += 1;
-            continue;
-        }
-        if ch == '"' {
-            in_double_quote = true;
-            out.push(ch);
-            i += 1;
-            continue;
-        }
-        if backend == DatabaseBackend::Mssql && ch == '[' {
-            in_bracket_quote = true;
-            out.push(ch);
-            i += 1;
-            continue;
-        }
-
-        if ch == '?'
-            || ch == '$'
-            || (ch == '@' && i + 1 < chars.len() && chars[i + 1].eq_ignore_ascii_case(&'p'))
-        {
-            out.push_str(&backend.placeholder(next));
-            next += 1;
-            i += if ch == '@' { 2 } else { 1 };
-            while i < chars.len() && chars[i].is_ascii_digit() {
-                i += 1;
-            }
-        } else {
-            out.push(ch);
-            i += 1;
-        }
+    let mut previous = 0usize;
+    for (offset, (start, end)) in placeholder_spans(backend, sql).into_iter().enumerate() {
+        out.push_str(&sql[previous..start]);
+        out.push_str(&backend.placeholder(start_index + offset));
+        previous = end;
     }
-
+    out.push_str(&sql[previous..]);
     out
 }
 
@@ -467,6 +531,79 @@ mod postgres_statement_tests {
             normalize_sql_placeholders(DatabaseBackend::Postgres, "value = $9", 2),
             "value = $2"
         );
+    }
+
+    /// Counting a fragment's binds and rebasing them read the same tokens
+    /// (#458): each fragment here has exactly the stated number of
+    /// placeholders for both, on every backend that rewrites them.
+    #[test]
+    fn counting_and_rebasing_agree_on_every_fragment() {
+        use super::placeholder_spans;
+        use DatabaseBackend::{Mssql, Postgres, Sqlite};
+        let all = [Sqlite, Postgres, Mssql];
+        let cases: &[(&str, &[DatabaseBackend], usize)] = &[
+            ("a = ? AND b = ?", &all, 2),
+            (
+                "a = $1 AND b = $2 AND c = @P3 AND d = @p4 AND e = ?5",
+                &all,
+                5,
+            ),
+            ("a = '?' AND b = 'it''s $1 @p2' AND c = ?", &all, 1),
+            ("\"odd?\"\"$1\" = ?", &all, 1),
+            ("a = ? -- trailing ? $1 @p1\n AND b = ?", &all, 2),
+            ("a = ? /* ? $1 @p1 */ AND b = ?", &all, 2),
+            // A bare `$` or `@p`, a variable and a system variable are text.
+            (
+                "a = $ AND b = @p AND c = @page AND d = @@p1 AND e = @p1x",
+                &all,
+                0,
+            ),
+            ("col$1 = ? AND col@p1 = ?", &all, 2),
+            // Brackets quote a name here ...
+            ("[what?] = ? AND [a]]$1] = ?", &[Sqlite, Mssql], 2),
+            // ... and subscript an array here.
+            ("tags[?] = ? AND tags[$1] = $2", &[Postgres], 4),
+            (
+                "a = $$ ? $1 $$ AND b = $q$ ? $q$ AND c = E'\\'?' AND d = ?",
+                &[Postgres],
+                1,
+            ),
+            (
+                "a = ? /* outer /* inner ? */ still ? */ AND b = ?",
+                &[Postgres, Mssql],
+                2,
+            ),
+            // A dollar sign before a non-tag is not a quote on other backends.
+            ("a = $x$ AND b = ?", &[Sqlite, Mssql], 1),
+            ("ünïcode = '?' AND b = ?", &all, 1),
+        ];
+        for (sql, backends, expected) in cases {
+            for backend in *backends {
+                let spans = placeholder_spans(*backend, sql);
+                assert_eq!(spans.len(), *expected, "{backend:?}: {sql}");
+                assert_eq!(
+                    crate::graphql::orm::count_placeholders_for(*backend, sql),
+                    *expected,
+                    "{backend:?}: {sql}"
+                );
+                if *backend == Sqlite {
+                    assert_eq!(normalize_sql_placeholders(*backend, sql, 7), *sql);
+                    continue;
+                }
+                // Rebasing rewrites exactly the counted tokens, in order, and
+                // its output counts the same.
+                let rebased = normalize_sql_placeholders(*backend, sql, 7);
+                let rewritten = placeholder_spans(*backend, &rebased);
+                assert_eq!(rewritten.len(), *expected, "{backend:?}: {rebased}");
+                for (offset, (start, end)) in rewritten.into_iter().enumerate() {
+                    assert_eq!(
+                        &rebased[start..end],
+                        super::SqlDialect::placeholder(backend, 7 + offset),
+                        "{backend:?}: {rebased}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

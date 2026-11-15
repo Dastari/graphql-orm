@@ -10,6 +10,86 @@ supersedes: []
 
 # Changelog
 
+## 0.13.0 (unreleased)
+
+Breaking: `StorageError::is_retryable` is no longer a `const fn`, and
+permanent filesystem errors are no longer retryable; `MissingBlob`,
+`PreconditionFailed`, `Multipart`, `MissingParent` and `Io` messages no longer
+contain keys or paths. See [MIGRATION.md](MIGRATION.md).
+
+- SMB: `SmbStorageBackend::sweep_temp_files(quiesced, older_than)` removes
+  temporary upload files that a lost process or connection left on the
+  share, as `LocalStorageBackend::sweep_temp_files` does for local roots,
+  and returns an `SmbTempSweepReport`. It is a maintenance-window operation:
+  it requires an `SmbRepositoryQuiesced`, the host's statement that, for the
+  whole sweep, no other party modifies the repository tree (no uploads,
+  renames, deletions, or directory or reparse-point changes), and must not
+  run on a share where an untrusted party has write access to that tree. It
+  considers only exact backend temporary names (`.<uuid>.uploading`, and the
+  pre-0.9.0 `.<name>.<uuid>.uploading`) whose last-write time is at least
+  `older_than` before the server's current time, read from a file the sweep
+  creates and removes; callers' keys ending in `.uploading` are kept, and
+  `older_than` below one hour is refused. It never follows a reparse point
+  and removes only through handles it validated. As defence in depth it
+  holds every directory from the share root down to the one it works in
+  (opened with `FILE_OPEN_REPARSE_POINT`, checked not to be a reparse point,
+  without delete sharing), skips and counts directories it cannot hold that
+  way and reparse entries, re-checks the held parent handle before each
+  candidate, and removes each candidate through an exclusive handle only if
+  its size and last-write time are unchanged. These stop other SMB clients
+  from renaming, deleting or replacing held directories on servers that
+  enforce share modes; they do not stop a client with write access from
+  emptying a held directory and turning it into a junction, nor changes
+  outside SMB. A fifth owner-local vendor patch, `share-access-override`,
+  adds the share-access option the exclusive and hold opens need. The
+  test-only `smb-sweep-test-hooks` feature adds a barrier between
+  enumeration and removal, a barrier before each close that can stall or
+  fail it, and a handle that severs the sweep's session, for the managed
+  Samba suite; applications must not enable it.
+  ([#593](https://github.com/Dastari/graphql-orm/issues/593))
+- SMB sweep teardown: the sweep runs on its own SMB session, connected from
+  a current-thread runtime on a thread of its own, which owns the session's
+  socket. If the sweep is cancelled, times out or fails, dropping it stops
+  that runtime and closes the socket without any progress from the caller's
+  runtime, so the server releases every handle it held. At the end it
+  disconnects the tree, logs off and closes the connection itself; every
+  cleanup step that fails, on success and error paths alike, is counted in
+  `SmbTempSweepReport::cleanup_failures` rather than dropped. Each close is
+  counted before it is awaited and cleared only once it is confirmed, so a
+  close that fails, times out, or is cancelled by the sweep's deadline stays
+  counted. A failed sweep
+  returns `SmbTempSweepError` with the first error and the report of what it
+  had removed and failed to clean up; it converts into `StorageError`.
+  ([#593](https://github.com/Dastari/graphql-orm/issues/593))
+- Errors: `StorageError::Io` is retryable only when its kind may be
+  transient; denied permission, a full or read-only file system, an
+  exceeded quota or file size, invalid input, data or names, an unsupported
+  operation, and entries that already exist or have the wrong type are not.
+  The rule is public as `io_error_is_retryable`. `MissingBlob`,
+  `PreconditionFailed`, `Multipart`, `MissingParent` and `Io` display fixed
+  messages (the condition, multipart kind and I/O error kind still appear);
+  the fields, and so `Debug`, keep the key or path for host diagnostics. Two
+  S3 stream messages and the local multipart record message no longer
+  include the key or path.
+  ([#540](https://github.com/Dastari/graphql-orm/issues/540))
+- S3 `head_blob`, `get_blob` and `get_blob_range`, and SMB `head_blob` and
+  `get_blob`, report `BlobMetadata::last_modified` from the provider's
+  `Last-Modified` time or the file's last-write time.
+  ([#540](https://github.com/Dastari/graphql-orm/issues/540))
+- SMB `get_blob_range` reads from the range's start offset instead of
+  reading and discarding the bytes before it, and clamps the range to the
+  blob's size. `SmbBackendDiagnostics` gains `bytes_downloaded` and
+  `read_requests`.
+  ([#540](https://github.com/Dastari/graphql-orm/issues/540))
+- Local: `LocalMultipartWriter::complete` makes the object's metadata
+  durable before the object can appear: the metadata file is synced,
+  renamed into place and its directory synced, and only then is the object
+  renamed and its directory synced. A failure, crash or power loss at any
+  step never leaves an object that `list_objects` skips; it can leave
+  metadata for an object that is not there, which reads report as missing
+  and the next completion for the key replaces.
+  ([#540](https://github.com/Dastari/graphql-orm/issues/540))
+
 ## 0.12.0 (unreleased)
 
 Breaking: S3 conditional creates whose outcome is unknown fail as

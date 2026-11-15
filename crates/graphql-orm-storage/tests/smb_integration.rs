@@ -1093,6 +1093,974 @@ async fn samba_portable_keys_refuse_windows_unsafe_names() {
     assert!(posix.list_blobs("").await.expect("list").is_empty());
 }
 
+/// The sweep removes only this backend's stale temporary upload names, by
+/// the server's clock, through validated handles, while it holds every
+/// directory above each candidate (#593):
+///
+/// - fresh, future-dated and callers' look-alike names are kept, and a file
+///   30 minutes old by the server's clock is kept by a one-hour sweep;
+/// - a stale temporary file another handle still has open is skipped, and an
+///   upload in progress keeps its temporary file and still publishes;
+/// - between enumeration and removal (the barrier), a second SMB session
+///   (`smbclient` in the server container) cannot rename the candidate's
+///   directory, so it cannot be replaced by a link to the identically named
+///   file outside the root, which survives; once the sweep ends the rename
+///   succeeds;
+/// - a candidate whose size and last-write time change after enumeration is
+///   kept;
+/// - a directory another client holds open with delete access cannot be
+///   held, so it is skipped with its subtree and counted, and a link out of
+///   the share is skipped and counted, its target untouched.
+///
+/// What this server cannot model: Samba 4.12 resolves symbolic links itself
+/// and reports no reparse points to SMB2 clients, so Windows junctions and
+/// reparse handles are covered by the decision-level unit tests, and a link
+/// that stays inside the share looks like an ordinary directory. The test
+/// process and the container share one real-time clock, so a skewed client
+/// clock cannot be staged; the barrier checks that the sweep's reference
+/// time is the server's, and the unit test covers a skewed client time.
+#[cfg(feature = "smb-sweep-test-hooks")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the managed Samba container harness"]
+async fn samba_sweep_removes_only_stale_temporary_files() {
+    use graphql_orm_storage::{SmbRepositoryQuiesced, SmbSweepBarrier, SmbSweepCandidate};
+    use std::sync::Mutex;
+
+    let fixture = owned_fixture();
+    let container = fixture.container.clone();
+    let root = format!("graphql-orm-storage-sweep/{}", Uuid::new_v4());
+    let store = SmbStorageBackend::connect(test_config(root.clone()))
+        .await
+        .expect("connect");
+    let quiesced = SmbRepositoryQuiesced::confirmed_by_host();
+    let hour = Duration::from_secs(60 * 60);
+    let caller_lookalike = format!("sweep/x.{}.uploading", Uuid::new_v4());
+    let callers = [
+        "sweep/kept.bin".to_string(),
+        "sweep/report.uploading".to_string(),
+        caller_lookalike.clone(),
+        "sweep/pinned/kept.bin".to_string(),
+        "sweep/changing/kept.bin".to_string(),
+        "sweep/held-dir/kept.bin".to_string(),
+    ];
+    for key in &callers {
+        store
+            .put_blob(
+                key,
+                StorageByteStream::from_bytes(Bytes::from_static(b"caller")),
+                BlobPutOptions::default(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{key}: {error}"));
+    }
+    let stale = [
+        format!("sweep/.{}.uploading", Uuid::new_v4()),
+        format!(".{}.uploading", Uuid::new_v4()),
+        format!("sweep/.blob.bin.{}.uploading", Uuid::new_v4()),
+    ];
+    let pinned_name = format!(".{}.uploading", Uuid::new_v4());
+    let pinned = format!("sweep/pinned/{pinned_name}");
+    let changing = format!("sweep/changing/.{}.uploading", Uuid::new_v4());
+    let held_dir_temp = format!("sweep/held-dir/.{}.uploading", Uuid::new_v4());
+    let fresh = format!("sweep/.{}.uploading", Uuid::new_v4());
+    let half_hour = format!("sweep/.{}.uploading", Uuid::new_v4());
+    let future = format!("sweep/.{}.uploading", Uuid::new_v4());
+    let open_elsewhere = format!("sweep/.{}.uploading", Uuid::new_v4());
+    let outside_temp = format!(".{}.uploading", Uuid::new_v4());
+    let outside = format!("/outside-{}", Uuid::new_v4());
+    let share = format!("/share/{root}");
+    let shell = |script: String| {
+        fixture.run_with(|container| {
+            let status = std::process::Command::new("docker")
+                .args(["exec", container, "sh", "-c", &script])
+                .status()
+                .map_err(|_| "cannot run in owned fixture".to_string())?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err("owned fixture command failed".to_string())
+            }
+        })
+    };
+    // Interrupted uploads, owned like the share's files. The stale ones and
+    // the callers' keys were last written in 2020, one in 2100, one half an
+    // hour ago by the server's clock. Outside the share, a directory holds
+    // a file with the pinned candidate's name, size and time, and a link
+    // from the root leads to another stale temporary file. BusyBox.
+    let mut script = format!("set -e\nowner=$(stat -c %u:%g '{share}/sweep')\nnow=$(date +%s)\n");
+    let seeded = stale.iter().chain([
+        &pinned,
+        &changing,
+        &held_dir_temp,
+        &fresh,
+        &half_hour,
+        &future,
+        &open_elsewhere,
+    ]);
+    for name in seeded {
+        script.push_str(&format!(
+            "printf partial > '{share}/{name}'\nchown \"$owner\" '{share}/{name}'\n"
+        ));
+    }
+    let dated =
+        stale
+            .iter()
+            .chain(&callers)
+            .chain([&pinned, &changing, &held_dir_temp, &open_elsewhere]);
+    for name in dated {
+        script.push_str(&format!("touch -t 202001010000 '{share}/{name}'\n"));
+    }
+    script.push_str(&format!(
+        "touch -t 210001010000 '{share}/{future}'\n\
+         touch -d @$((now - 1800)) '{share}/{half_hour}'\n\
+         mkdir -p '{outside}/pinned'\n\
+         printf partial > '{outside}/pinned/{pinned_name}'\n\
+         printf partial > '{outside}/{outside_temp}'\n\
+         chown -R \"$owner\" '{outside}'\n\
+         touch -t 202001010000 '{outside}/pinned/{pinned_name}' '{outside}/{outside_temp}'\n\
+         ln -s '{outside}' '{share}/sweep/linked'\n"
+    ));
+    shell(script).expect("seed temporary files");
+
+    // Another connection holds a stale temporary file open, as an upload
+    // between writes would; the read stream is never consumed. It also
+    // holds a directory open with delete access.
+    let other = SmbStorageBackend::connect(test_config(root.clone()))
+        .await
+        .expect("connect");
+    let holder = other
+        .get_blob(&open_elsewhere)
+        .await
+        .expect("open the stale temporary file elsewhere");
+    let held_dir = other
+        .hold_directory_open_for_delete("sweep/held-dir")
+        .await
+        .expect("hold a directory with delete access");
+
+    // An upload in progress: its temporary file is open, then dated 2020.
+    // Samba reports an open file's write time from its own state, so this
+    // file need not look stale; it must survive either way.
+    let (release, released) = tokio::sync::oneshot::channel();
+    let writer = store.clone();
+    let upload = tokio::spawn(async move {
+        writer
+            .put_blob(
+                "held/in-progress.bin",
+                held_body(
+                    Bytes::from_static(b"head-"),
+                    Bytes::from_static(b"tail"),
+                    released,
+                ),
+                BlobPutOptions::default(),
+            )
+            .await
+    });
+    let mut held_temp = None;
+    for _ in 0..200 {
+        let mut found = String::new();
+        fixture
+            .run_with(|container| {
+                let output = std::process::Command::new("docker")
+                    .args(["exec", container, "sh", "-c"])
+                    .arg(format!(
+                        "ls -a '{share}/held' 2>/dev/null | grep uploading || true"
+                    ))
+                    .output()
+                    .map_err(|_| "cannot run in owned fixture".to_string())?;
+                found = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                Ok(())
+            })
+            .expect("inspect the upload");
+        if !found.is_empty() {
+            held_temp = Some(found);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let held_temp = held_temp.expect("the upload created its temporary file");
+    // Let any delayed write-time update land before dating the file.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    shell(format!("touch -t 202001010000 '{share}/held/{held_temp}'"))
+        .expect("date the held upload");
+
+    let too_short = store
+        .sweep_temp_files(quiesced, Duration::from_secs(30 * 60))
+        .await
+        .expect_err("an age below one hour is refused");
+    assert_refused(&too_short.error, StorageProviderErrorKind::Protocol);
+
+    // A second SMB session renames a directory; its output and exit status.
+    let smb_rename = {
+        let container = container.clone();
+        move |from: String, to: String| {
+            let output = std::process::Command::new("docker")
+                .args(["exec", &container, "smbclient", "//127.0.0.1/backups"])
+                .args([
+                    "-U",
+                    "backup%BackupTest-42!",
+                    "-W",
+                    "WORKGROUP",
+                    "-m",
+                    "SMB3",
+                ])
+                .args(["-c", &format!("rename \"{from}\" \"{to}\"")])
+                .output()
+                .expect("run smbclient in the owned fixture");
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            (
+                output.status.success() && !text.contains("NT_STATUS_"),
+                text,
+            )
+        }
+    };
+    let seen: Arc<Mutex<Vec<SmbSweepCandidate>>> = Arc::default();
+    let attempts: Arc<Mutex<Vec<(bool, String)>>> = Arc::default();
+    let barrier: Box<SmbSweepBarrier> = {
+        let seen = Arc::clone(&seen);
+        let attempts = Arc::clone(&attempts);
+        let container = container.clone();
+        let (pinned, changing, root, share) = (
+            pinned.clone(),
+            changing.clone(),
+            root.clone(),
+            share.clone(),
+        );
+        let smb_rename = smb_rename.clone();
+        Box::new(move |candidate: SmbSweepCandidate| {
+            seen.lock().expect("seen").push(candidate.clone());
+            let attempts = Arc::clone(&attempts);
+            let container = container.clone();
+            let (pinned, changing, root, share) = (
+                pinned.clone(),
+                changing.clone(),
+                root.clone(),
+                share.clone(),
+            );
+            let smb_rename = smb_rename.clone();
+            Box::pin(async move {
+                if candidate.key == pinned {
+                    // Try to move the held directory aside, so a link to the
+                    // outside directory could take its name.
+                    let outcome = tokio::task::spawn_blocking(move || {
+                        smb_rename(
+                            format!("{root}/sweep/pinned"),
+                            format!("{root}/sweep/pinned-moved"),
+                        )
+                    })
+                    .await
+                    .expect("rename attempt");
+                    attempts.lock().expect("attempts").push(outcome);
+                } else if candidate.key == changing {
+                    // The file grows after enumeration.
+                    let status = tokio::task::spawn_blocking(move || {
+                        std::process::Command::new("docker")
+                            .args(["exec", &container, "sh", "-c"])
+                            .arg(format!("printf more >> '{share}/{changing}'"))
+                            .status()
+                            .expect("modify the candidate")
+                    })
+                    .await
+                    .expect("modify task");
+                    assert!(status.success());
+                }
+            })
+        })
+    };
+
+    let report = store
+        .sweep_temp_files_with_barrier(quiesced, hour, &barrier)
+        .await
+        .expect("sweep");
+    assert_eq!(report.removed, stale.len() + 1, "{report:?}");
+    assert_eq!(report.skipped_in_use, 1, "{report:?}");
+    assert_eq!(report.skipped_changed, 1, "{report:?}");
+    // The directory held with delete access and the link out of the share.
+    assert_eq!(report.skipped_directories, 2, "{report:?}");
+    assert_eq!(report.cleanup_failures, 0, "{report:?}");
+
+    // The held directory could not be renamed while the sweep held it.
+    let attempts = attempts.lock().expect("attempts").clone();
+    assert_eq!(attempts.len(), 1, "{attempts:?}");
+    assert!(
+        !attempts[0].0,
+        "the rename must be refused: {}",
+        attempts[0].1
+    );
+    assert!(
+        attempts[0].1.contains("NT_STATUS_SHARING_VIOLATION"),
+        "{}",
+        attempts[0].1
+    );
+    // The reference time is the server's.
+    let server_seconds: u64 = {
+        let output = std::process::Command::new("docker")
+            .args(["exec", &container, "date", "+%s"])
+            .output()
+            .expect("server date");
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .expect("seconds")
+    };
+    for candidate in seen.lock().expect("seen").iter() {
+        let reference = candidate
+            .server_now
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after 1970")
+            .as_secs();
+        assert!(
+            server_seconds.abs_diff(reference) < 300,
+            "{reference} vs {server_seconds}"
+        );
+    }
+
+    let mut check = String::from("set -e\n");
+    for name in stale.iter().chain([&pinned]) {
+        check.push_str(&format!("test ! -e '{share}/{name}'\n"));
+    }
+    for name in [
+        &fresh,
+        &half_hour,
+        &future,
+        &open_elsewhere,
+        &changing,
+        &held_dir_temp,
+    ] {
+        check.push_str(&format!("test -f '{share}/{name}'\n"));
+    }
+    check.push_str(&format!("test -f '{share}/held/{held_temp}'\n"));
+    check.push_str(&format!("test -f '{outside}/{outside_temp}'\n"));
+    check.push_str(&format!("test -f '{outside}/pinned/{pinned_name}'\n"));
+    shell(check).expect("only stale temporary files inside the root were removed");
+
+    // Without the sweep's hold, the same rename succeeds; move it back.
+    let (renamed, text) = smb_rename(
+        format!("{root}/sweep/pinned"),
+        format!("{root}/sweep/pinned-moved"),
+    );
+    assert!(renamed, "{text}");
+    let (restored, text) = smb_rename(
+        format!("{root}/sweep/pinned-moved"),
+        format!("{root}/sweep/pinned"),
+    );
+    assert!(restored, "{text}");
+
+    // An ordinary listing fails closed on the refused link, so remove it.
+    shell(format!("rm '{share}/sweep/linked'")).expect("remove the link");
+    let mut expected = callers.to_vec();
+    expected.sort();
+    assert_eq!(store.list_blobs("sweep/").await.expect("list"), expected);
+
+    drop(holder);
+    held_dir
+        .release()
+        .await
+        .expect("release the held directory");
+    // The upload that was in progress still publishes.
+    release.send(()).expect("release the upload");
+    upload
+        .await
+        .expect("upload task")
+        .expect("the held upload publishes");
+    let published = store.get_blob("held/in-progress.bin").await.expect("read");
+    assert_eq!(
+        collect_storage_stream(published.body).await.expect("body"),
+        Bytes::from_static(b"head-tail")
+    );
+
+    // Once released, the file held open and the held directory's file go.
+    let again = store
+        .sweep_temp_files(quiesced, hour)
+        .await
+        .expect("second sweep");
+    assert_eq!(again.removed, 2, "{again:?}");
+    assert_eq!(again.skipped_in_use, 0, "{again:?}");
+    assert_eq!(again.skipped_directories, 0, "{again:?}");
+    shell(format!(
+        "test ! -e '{share}/{open_elsewhere}'\ntest ! -e '{share}/{held_dir_temp}'"
+    ))
+    .expect("removed once released");
+
+    // Cancelling a sweep while it holds directories releases them: its own
+    // connection is disconnected, so another client can rename them.
+    let cancel_temp = format!("sweep/cancel/.{}.uploading", Uuid::new_v4());
+    store
+        .put_blob(
+            "sweep/cancel/kept.bin",
+            StorageByteStream::from_bytes(Bytes::from_static(b"caller")),
+            BlobPutOptions::default(),
+        )
+        .await
+        .expect("create the directory");
+    shell(format!(
+        "set -e\nowner=$(stat -c %u:%g '{share}/sweep')\n\
+         printf partial > '{share}/{cancel_temp}'\nchown \"$owner\" '{share}/{cancel_temp}'\n\
+         touch -t 202001010000 '{share}/{cancel_temp}'"
+    ))
+    .expect("seed the cancelled sweep's candidate");
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let stalling: Box<SmbSweepBarrier> = {
+        let reached = Arc::clone(&reached);
+        let cancel_temp = cancel_temp.clone();
+        Box::new(move |candidate: SmbSweepCandidate| {
+            let reached = Arc::clone(&reached);
+            let stall = candidate.key == cancel_temp;
+            Box::pin(async move {
+                if stall {
+                    reached.notify_one();
+                    std::future::pending::<()>().await;
+                }
+            })
+        })
+    };
+    {
+        let sweep = store.sweep_temp_files_with_barrier(quiesced, hour, &stalling);
+        tokio::select! {
+            result = sweep => panic!("the stalled sweep finished: {result:?}"),
+            () = reached.notified() => {}
+        }
+        // The sweep future is dropped here, with `sweep/cancel` held.
+    }
+    let mut released = None;
+    for _ in 0..40 {
+        let (renamed, text) = smb_rename(
+            format!("{root}/sweep/cancel"),
+            format!("{root}/sweep/cancel-moved"),
+        );
+        if renamed {
+            released = Some(text);
+            break;
+        }
+        assert!(text.contains("NT_STATUS_SHARING_VIOLATION"), "{text}");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    released.expect("the cancelled sweep's held directory was released");
+    let (restored, text) = smb_rename(
+        format!("{root}/sweep/cancel-moved"),
+        format!("{root}/sweep/cancel"),
+    );
+    assert!(restored, "{text}");
+
+    shell(format!(
+        "rm -f '{share}/{fresh}' '{share}/{half_hour}' '{share}/{future}' '{share}/{changing}' \
+         '{share}/{cancel_temp}'\n\
+         rm -rf '{outside}'"
+    ))
+    .expect("remove the seeded files");
+    for key in store.list_blobs("").await.expect("list") {
+        store.delete_blob(&key).await.expect("delete");
+    }
+}
+
+/// Runs `script` with `sh` in the owned Samba container.
+#[cfg(feature = "smb-sweep-test-hooks")]
+fn fixture_shell(fixture: &VerifiedSambaFixture, script: &str) {
+    fixture
+        .run_with(|container| {
+            let status = std::process::Command::new("docker")
+                .args(["exec", container, "sh", "-c", script])
+                .status()
+                .map_err(|_| "cannot run in owned fixture".to_string())?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err("owned fixture command failed".to_string())
+            }
+        })
+        .expect("owned fixture command");
+}
+
+/// Renames a share-relative path through a second SMB session (`smbclient`
+/// in the container); returns whether it succeeded and its output.
+#[cfg(feature = "smb-sweep-test-hooks")]
+fn smbclient_rename(container: &str, from: &str, to: &str) -> (bool, String) {
+    let output = std::process::Command::new("docker")
+        .args(["exec", container, "smbclient", "//127.0.0.1/backups"])
+        .args([
+            "-U",
+            "backup%BackupTest-42!",
+            "-W",
+            "WORKGROUP",
+            "-m",
+            "SMB3",
+        ])
+        .args(["-c", &format!("rename \"{from}\" \"{to}\"")])
+        .output()
+        .expect("run smbclient in the owned fixture");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (
+        output.status.success() && !text.contains("NT_STATUS_"),
+        text,
+    )
+}
+
+/// Seeds stale temporary files, owned like the share's files and last
+/// written in 2020.
+#[cfg(feature = "smb-sweep-test-hooks")]
+fn seed_stale_temp_files(fixture: &VerifiedSambaFixture, share: &str, names: &[&String]) {
+    let mut script = format!("set -e\nowner=$(stat -c %u:%g '{share}')\n");
+    for name in names {
+        script.push_str(&format!(
+            "printf partial > '{share}/{name}'\nchown \"$owner\" '{share}/{name}'\n\
+             touch -t 202001010000 '{share}/{name}'\n"
+        ));
+    }
+    fixture_shell(fixture, &script);
+}
+
+/// A sweep dropped while its caller's runtime stops making progress still
+/// releases every handle it held (#593): its session's socket belongs to a
+/// runtime on its own thread, which dropping the sweep stops.
+///
+/// The sweep runs on a current-thread runtime and stalls in the barrier,
+/// holding `stalled`; a second SMB session then cannot rename it. The sweep
+/// future is dropped inside that runtime, which is never driven again. A
+/// disconnect spawned onto the caller's runtime would never run, and the
+/// server would keep the handle; here the rename succeeds.
+#[cfg(feature = "smb-sweep-test-hooks")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the managed Samba container harness"]
+async fn samba_sweep_releases_its_handles_without_the_callers_runtime() {
+    use graphql_orm_storage::{SmbRepositoryQuiesced, SmbSweepBarrier, SmbSweepCandidate};
+    use std::sync::Mutex;
+
+    let fixture = owned_fixture();
+    let container = fixture.container.clone();
+    let root = format!("graphql-orm-storage-sweep/{}", Uuid::new_v4());
+    let share = format!("/share/{root}");
+    let store = SmbStorageBackend::connect(test_config(root.clone()))
+        .await
+        .expect("connect");
+    store
+        .put_blob(
+            "stalled/kept.bin",
+            StorageByteStream::from_bytes(Bytes::from_static(b"caller")),
+            BlobPutOptions::default(),
+        )
+        .await
+        .expect("create the directory");
+    let temp = format!("stalled/.{}.uploading", Uuid::new_v4());
+    seed_stale_temp_files(&fixture, &share, &[&temp]);
+
+    let held: Arc<Mutex<Option<(bool, String)>>> = Arc::default();
+    let (reached, reached_rx) = std::sync::mpsc::channel::<()>();
+    let (finish, finish_rx) = std::sync::mpsc::channel::<()>();
+    let sweeper = store.clone();
+    let stalled = {
+        let held = Arc::clone(&held);
+        let container = container.clone();
+        let root = root.clone();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("caller runtime");
+            runtime.block_on(async {
+                let (paused, paused_rx) = tokio::sync::oneshot::channel::<()>();
+                let paused = Mutex::new(Some(paused));
+                let barrier: Box<SmbSweepBarrier> =
+                    Box::new(move |_candidate: SmbSweepCandidate| {
+                        if let Some(paused) = paused.lock().expect("paused").take() {
+                            // While the sweep holds the directory, another
+                            // session cannot rename it.
+                            *held.lock().expect("held") = Some(smbclient_rename(
+                                &container,
+                                &format!("{root}/stalled"),
+                                &format!("{root}/stalled-moved"),
+                            ));
+                            let _ = paused.send(());
+                        }
+                        Box::pin(std::future::pending::<()>())
+                    });
+                let sweep = sweeper.sweep_temp_files_with_barrier(
+                    SmbRepositoryQuiesced::confirmed_by_host(),
+                    Duration::from_secs(60 * 60),
+                    &barrier,
+                );
+                tokio::select! {
+                    result = sweep => panic!("the stalled sweep finished: {result:?}"),
+                    _ = paused_rx => {}
+                }
+                // The sweep future is dropped here, inside this runtime.
+            });
+            reached.send(()).expect("report the stall");
+            // This runtime is never driven again until the test ends.
+            let _ = finish_rx.recv();
+            drop(runtime);
+        })
+    };
+    tokio::task::spawn_blocking(move || reached_rx.recv_timeout(Duration::from_secs(120)))
+        .await
+        .expect("wait task")
+        .expect("the sweep reached its barrier");
+    let (renamed, text) = held.lock().expect("held").clone().expect("held rename");
+    assert!(!renamed, "the sweep did not hold the directory: {text}");
+    assert!(text.contains("NT_STATUS_SHARING_VIOLATION"), "{text}");
+
+    let mut released = None;
+    for _ in 0..40 {
+        let (renamed, text) = smbclient_rename(
+            &container,
+            &format!("{root}/stalled"),
+            &format!("{root}/stalled-moved"),
+        );
+        if renamed {
+            released = Some(text);
+            break;
+        }
+        assert!(text.contains("NT_STATUS_SHARING_VIOLATION"), "{text}");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    released.expect("the dropped sweep's held directory was released");
+    let (restored, text) = smbclient_rename(
+        &container,
+        &format!("{root}/stalled-moved"),
+        &format!("{root}/stalled"),
+    );
+    assert!(restored, "{text}");
+    finish.send(()).expect("finish the stalled runtime");
+    stalled.join().expect("stalled runtime thread");
+
+    fixture_shell(&fixture, &format!("rm -f '{share}/{temp}'"));
+    for key in store.list_blobs("").await.expect("list") {
+        store.delete_blob(&key).await.expect("delete");
+    }
+}
+
+/// A sweep whose session is lost part-way returns its first error with the
+/// report of what it had done (#593): the file it removed before the loss
+/// is counted, and every cleanup step that then failed (closing the held
+/// directories, the tree disconnect, logoff and connection close) is
+/// counted instead of dropped. A later sweep removes what remains.
+#[cfg(feature = "smb-sweep-test-hooks")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the managed Samba container harness"]
+async fn samba_sweep_reports_progress_and_cleanup_failures_after_a_lost_session() {
+    use graphql_orm_storage::{SmbRepositoryQuiesced, SmbSweepBarrier, SmbSweepCandidate};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let fixture = owned_fixture();
+    let root = format!("graphql-orm-storage-sweep/{}", Uuid::new_v4());
+    let share = format!("/share/{root}");
+    let store = SmbStorageBackend::connect(test_config(root.clone()))
+        .await
+        .expect("connect");
+    store
+        .put_blob(
+            "severed/kept.bin",
+            StorageByteStream::from_bytes(Bytes::from_static(b"caller")),
+            BlobPutOptions::default(),
+        )
+        .await
+        .expect("create the directory");
+    let temps = [
+        format!("severed/.{}.uploading", Uuid::new_v4()),
+        format!("severed/.{}.uploading", Uuid::new_v4()),
+    ];
+    seed_stale_temp_files(&fixture, &share, &[&temps[0], &temps[1]]);
+    let quiesced = SmbRepositoryQuiesced::confirmed_by_host();
+    let hour = Duration::from_secs(60 * 60);
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let severing: Box<SmbSweepBarrier> = {
+        let calls = Arc::clone(&calls);
+        Box::new(move |candidate: SmbSweepCandidate| {
+            // The first candidate is removed; the session is lost before
+            // the second.
+            if calls.fetch_add(1, Ordering::SeqCst) == 1 {
+                candidate.session.sever();
+            }
+            Box::pin(async {})
+        })
+    };
+    let failure = store
+        .sweep_temp_files_with_barrier(quiesced, hour, &severing)
+        .await
+        .expect_err("a sweep that loses its session fails");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(failure.report.removed, 1, "{failure:?}");
+    // At least the held directories and the three shutdown steps.
+    assert!(failure.report.cleanup_failures >= 4, "{failure:?}");
+    assert!(
+        failure.to_string().contains("after removing 1 files"),
+        "{failure}"
+    );
+    let remaining: Vec<_> = temps
+        .iter()
+        .filter(|name| {
+            let mut exists = false;
+            fixture
+                .run_with(|container| {
+                    exists = std::process::Command::new("docker")
+                        .args(["exec", container, "test", "-e"])
+                        .arg(format!("{share}/{name}"))
+                        .status()
+                        .map_err(|_| "cannot run in owned fixture".to_string())?
+                        .success();
+                    Ok(())
+                })
+                .expect("inspect");
+            exists
+        })
+        .collect();
+    assert_eq!(remaining.len(), 1, "{remaining:?}");
+
+    // The shared connection is unaffected, and a new sweep has its own.
+    let report = store
+        .sweep_temp_files(quiesced, hour)
+        .await
+        .expect("a later sweep");
+    assert_eq!(report.removed, 1, "{report:?}");
+    assert_eq!(report.cleanup_failures, 0, "{report:?}");
+
+    for key in store.list_blobs("").await.expect("list") {
+        store.delete_blob(&key).await.expect("delete");
+    }
+}
+
+/// A close cancelled by the sweep's deadline is reported as a cleanup
+/// failure (#593): the sweep counts each close before awaiting it and
+/// clears the count only when the close is confirmed. Here the close of a
+/// finished directory stalls until the listing deadline expires.
+#[cfg(feature = "smb-sweep-test-hooks")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the managed Samba container harness"]
+async fn samba_sweep_reports_a_close_the_deadline_cancelled() {
+    use graphql_orm_storage::{
+        SmbRepositoryQuiesced, SmbSweepBarrier, SmbSweepCandidate, SmbSweepClose,
+        SmbSweepCloseBarrier, SmbSweepCloseOutcome,
+    };
+
+    let root = format!("graphql-orm-storage-sweep/{}", Uuid::new_v4());
+    let mut config = test_config(root.clone());
+    config.listing_timeout = Duration::from_secs(8);
+    let store = SmbStorageBackend::connect(config).await.expect("connect");
+    store
+        .put_blob(
+            "deadline/sub/kept.bin",
+            StorageByteStream::from_bytes(Bytes::from_static(b"caller")),
+            BlobPutOptions::default(),
+        )
+        .await
+        .expect("create the tree");
+    let stalled = format!("{root}/deadline/sub");
+    let close_barrier: Box<SmbSweepCloseBarrier> = Box::new(move |close: SmbSweepClose| {
+        let stall = close.path == stalled;
+        Box::pin(async move {
+            if stall {
+                std::future::pending::<()>().await;
+            }
+            SmbSweepCloseOutcome::Proceed
+        })
+    });
+    let barrier: Box<SmbSweepBarrier> = Box::new(|_: SmbSweepCandidate| Box::pin(async {}));
+    let failure = store
+        .sweep_temp_files_with_hooks(
+            SmbRepositoryQuiesced::confirmed_by_host(),
+            Duration::from_secs(60 * 60),
+            &barrier,
+            &close_barrier,
+        )
+        .await
+        .expect_err("the deadline expires during the close");
+    assert!(!failure.is_retryable(), "{failure:?}");
+    assert_eq!(failure.report.cleanup_failures, 1, "{failure:?}");
+    assert_eq!(failure.report.removed, 0, "{failure:?}");
+
+    for key in store.list_blobs("").await.expect("list") {
+        store.delete_blob(&key).await.expect("delete");
+    }
+}
+
+/// A primary close that fails after a removal is counted as a cleanup
+/// failure as well as returned as a single-attempt error (#593). The close
+/// barrier fails the candidate's close as a lost response would; the
+/// server still removes the file once the session releases its handle.
+#[cfg(feature = "smb-sweep-test-hooks")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the managed Samba container harness"]
+async fn samba_sweep_counts_a_failed_candidate_close() {
+    use graphql_orm_storage::{
+        SmbRepositoryQuiesced, SmbSweepBarrier, SmbSweepCandidate, SmbSweepClose,
+        SmbSweepCloseBarrier, SmbSweepCloseOutcome, StorageError,
+    };
+
+    let fixture = owned_fixture();
+    let root = format!("graphql-orm-storage-sweep/{}", Uuid::new_v4());
+    let share = format!("/share/{root}");
+    let store = SmbStorageBackend::connect(test_config(root.clone()))
+        .await
+        .expect("connect");
+    store
+        .put_blob(
+            "failing/kept.bin",
+            StorageByteStream::from_bytes(Bytes::from_static(b"caller")),
+            BlobPutOptions::default(),
+        )
+        .await
+        .expect("create the directory");
+    let temp = format!("failing/.{}.uploading", Uuid::new_v4());
+    seed_stale_temp_files(&fixture, &share, &[&temp]);
+
+    let failing = format!("{root}/{temp}");
+    let close_barrier: Box<SmbSweepCloseBarrier> = Box::new(move |close: SmbSweepClose| {
+        let outcome = if close.path == failing {
+            SmbSweepCloseOutcome::Fail
+        } else {
+            SmbSweepCloseOutcome::Proceed
+        };
+        Box::pin(async move { outcome })
+    });
+    let barrier: Box<SmbSweepBarrier> = Box::new(|_: SmbSweepCandidate| Box::pin(async {}));
+    let failure = store
+        .sweep_temp_files_with_hooks(
+            SmbRepositoryQuiesced::confirmed_by_host(),
+            Duration::from_secs(60 * 60),
+            &barrier,
+            &close_barrier,
+        )
+        .await
+        .expect_err("a failed close after a removal has an unknown outcome");
+    assert!(
+        matches!(failure.error, StorageError::SingleAttemptFailed { .. }),
+        "{failure:?}"
+    );
+    assert_eq!(failure.report.cleanup_failures, 1, "{failure:?}");
+
+    // The removal was requested before the close; the server completes it
+    // when the sweep's session releases the handle.
+    let mut gone = false;
+    for _ in 0..40 {
+        let mut exists = true;
+        fixture
+            .run_with(|container| {
+                exists = std::process::Command::new("docker")
+                    .args(["exec", container, "test", "-e"])
+                    .arg(format!("{share}/{temp}"))
+                    .status()
+                    .map_err(|_| "cannot run in owned fixture".to_string())?
+                    .success();
+                Ok(())
+            })
+            .expect("inspect");
+        if !exists {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert!(gone, "the removal completed when the handle was released");
+
+    for key in store.list_blobs("").await.expect("list") {
+        store.delete_blob(&key).await.expect("delete");
+    }
+}
+
+/// Range reads start at the range's offset on the server instead of reading
+/// and discarding the bytes before it, clamp to the blob's size, and every
+/// read reports the server's last-write time (#540).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the managed Samba container harness"]
+async fn samba_range_reads_start_at_the_offset_and_report_metadata() {
+    use graphql_orm_storage::StorageError;
+    use time::OffsetDateTime;
+
+    let root = format!("graphql-orm-storage-range/{}", Uuid::new_v4());
+    let store = SmbStorageBackend::connect(test_config(root))
+        .await
+        .expect("connect");
+    let bytes: Vec<u8> = (0..(3 * 256 * 1024 + 17))
+        .map(|index| u8::try_from(index % 251).expect("byte"))
+        .collect();
+    let size = u64::try_from(bytes.len()).expect("size");
+    store
+        .put_blob(
+            "range/blob.bin",
+            StorageByteStream::from_bytes(Bytes::from(bytes.clone())),
+            BlobPutOptions::default(),
+        )
+        .await
+        .expect("put");
+
+    let head = store
+        .head_blob("range/blob.bin")
+        .await
+        .expect("head")
+        .expect("present");
+    assert_eq!(head.size_bytes, Some(size));
+    let modified = head.last_modified.expect("a last-write time");
+    let age = OffsetDateTime::now_utc() - modified;
+    assert!(age.abs() < time::Duration::minutes(10), "{modified}");
+    let whole = store.get_blob("range/blob.bin").await.expect("get");
+    assert_eq!(
+        whole.metadata.as_ref().expect("metadata").last_modified,
+        Some(modified)
+    );
+    drop(whole);
+
+    // Only the requested bytes cross the wire: one READ of 50 bytes.
+    let before = store.diagnostics().await;
+    let start = size - 100;
+    let range = store
+        .get_blob_range("range/blob.bin", start..start + 50)
+        .await
+        .expect("range");
+    let metadata = range.metadata.clone().expect("metadata");
+    assert_eq!(metadata.size_bytes, Some(size));
+    assert_eq!(metadata.last_modified, Some(modified));
+    assert_eq!(range.body.size_hint(), Some(50));
+    let tail_start = usize::try_from(start).expect("offset");
+    assert_eq!(
+        collect_storage_stream(range.body).await.expect("collect"),
+        bytes[tail_start..tail_start + 50]
+    );
+    let after = store.diagnostics().await;
+    assert_eq!(after.bytes_downloaded - before.bytes_downloaded, 50);
+    assert_eq!(after.read_requests - before.read_requests, 1);
+
+    // A range past the end is clamped; one starting past it is empty.
+    let clamped = store
+        .get_blob_range("range/blob.bin", start + 50..size + 1000)
+        .await
+        .expect("clamped range");
+    assert_eq!(
+        collect_storage_stream(clamped.body).await.expect("collect"),
+        bytes[tail_start + 50..]
+    );
+    let beyond = store
+        .get_blob_range("range/blob.bin", size + 10..size + 20)
+        .await
+        .expect("range beyond the end");
+    assert!(
+        collect_storage_stream(beyond.body)
+            .await
+            .expect("collect")
+            .is_empty()
+    );
+    #[allow(clippy::reversed_empty_ranges)]
+    let reversed = store.get_blob_range("range/blob.bin", 20..10).await;
+    assert!(matches!(
+        reversed,
+        Err(StorageError::PreconditionFailed { .. })
+    ));
+    assert!(
+        store
+            .get_blob_range("range/missing.bin", 0..10)
+            .await
+            .is_err()
+    );
+
+    store.delete_blob("range/blob.bin").await.expect("delete");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires a managed Samba server limited to SMB 3.0"]
 async fn samba_refuses_a_dialect_below_the_minimum() {

@@ -992,7 +992,21 @@ where
                 limit_bytes: u64::MAX,
             })?;
     limits.stage_bytes.check(*stage_bytes)?;
-    parse_jsonl(&payload)
+    let entries: Vec<T> = parse_jsonl(&payload)?;
+    // The sealed manifest states how many rows or changes this payload
+    // holds; a payload with another count is not the one it describes.
+    if entries.len() as u64 != entry.row_count {
+        return Err(BackupError::InvalidManifestEntry {
+            snapshot_id: manifest.snapshot_id,
+            reason: format!(
+                "payload for table {} holds {} entries, not the {} its entry states",
+                entry.table_name,
+                entries.len(),
+                entry.row_count
+            ),
+        });
+    }
+    Ok(entries)
 }
 
 fn decode_payload(

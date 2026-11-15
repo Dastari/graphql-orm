@@ -153,6 +153,35 @@ pub trait BatchLoadEntity<B: OrmBackend = DefaultBackend>:
     }
 }
 
+/// What a relation target needs to be batch loaded: its generated entity
+/// contract and row decoding. Implemented for every such type, so a relation
+/// target needs no hand-written loader trait.
+///
+/// [`BatchLoadEntity`] is needed only by the single-column
+/// `Loader<String>` form of [`RelationLoader`], which generated relations do
+/// not use.
+pub trait RelationTarget<B: OrmBackend = DefaultBackend>:
+    crate::graphql::orm::DatabaseEntity
+    + crate::graphql::orm::FromSqlRow<B>
+    + Clone
+    + Send
+    + Sync
+    + 'static
+{
+}
+
+impl<T, B> RelationTarget<B> for T
+where
+    B: OrmBackend,
+    T: crate::graphql::orm::DatabaseEntity
+        + crate::graphql::orm::FromSqlRow<B>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+{
+}
+
 #[derive(Clone, Debug)]
 pub struct RelationQueryKey {
     pub relation: &'static str,
@@ -184,9 +213,23 @@ pub struct CompositeRelationQueryKey {
     pub auth_context: Option<DbAuthContext>,
 }
 
+/// Structural equality that stays reflexive for a bound `NaN`: values that
+/// compare unequal are the same when they print the same. Keys are `Eq`, and
+/// a key that did not equal itself would never find its own result.
+fn same_structure<T: PartialEq + std::fmt::Debug>(left: &T, right: &T) -> bool {
+    left == right || format!("{left:?}") == format!("{right:?}")
+}
+
 impl PartialEq for RelationQueryKey {
+    /// The signatures are the hashed identity. The structured filter, sorts
+    /// and page are what a statement is built from, so two keys are the same
+    /// only when those agree too: a key is never answered with the result of
+    /// a different query that happens to carry the same signature strings.
     fn eq(&self, other: &Self) -> bool {
         self.relation == other.relation
+            && same_structure(&self.filter, &other.filter)
+            && same_structure(&self.sorts, &other.sorts)
+            && same_structure(&self.pagination, &other.pagination)
             && RelationKey::from_sql_values(std::slice::from_ref(&self.parent_value))
                 == RelationKey::from_sql_values(std::slice::from_ref(&other.parent_value))
             && self.parent_key == other.parent_key
@@ -221,8 +264,15 @@ impl Hash for RelationQueryKey {
 }
 
 impl PartialEq for CompositeRelationQueryKey {
+    /// The signatures are the hashed identity. The structured filter, sorts
+    /// and page are what a statement is built from, so two keys are the same
+    /// only when those agree too: a key is never answered with the result of
+    /// a different query that happens to carry the same signature strings.
     fn eq(&self, other: &Self) -> bool {
         self.relation == other.relation
+            && same_structure(&self.filter, &other.filter)
+            && same_structure(&self.sorts, &other.sorts)
+            && same_structure(&self.pagination, &other.pagination)
             && RelationKey::from_sql_values(&self.parent_values)
                 == RelationKey::from_sql_values(&other.parent_values)
             && self.parent_key == other.parent_key
@@ -448,7 +498,7 @@ pub async fn scan_authorized_relation<T, B>(
 ) -> async_graphql::Result<RelationLoadResult<T>>
 where
     B: OrmBackend,
-    T: BatchLoadEntity<B> + crate::graphql::orm::Entity,
+    T: RelationTarget<B> + crate::graphql::orm::Entity,
 {
     scan_authorized_query(
         db,
@@ -681,13 +731,7 @@ fn bind_limited_groups<K>(
     if group.is_empty() {
         return Ok(Vec::new());
     }
-    let key_arity = key_arity.max(1);
-    let budget =
-        crate::graphql::orm::SqlDialect::max_statement_binds(&dialect).saturating_sub(other_binds);
-    let per_statement = budget / key_arity;
-    if per_statement == 0 {
-        return Err(bind_limit_exceeded());
-    }
+    let per_statement = statement_key_capacity(dialect, key_arity, other_binds)?;
     if group.len() <= per_statement {
         return Ok(vec![group]);
     }
@@ -697,6 +741,21 @@ fn bind_limited_groups<K>(
         groups.push(keys.by_ref().take(per_statement).collect());
     }
     Ok(groups)
+}
+
+/// How many keys of `key_arity` values fit one statement that binds
+/// `other_binds` more values; an error when not even one does.
+fn statement_key_capacity(
+    dialect: DatabaseBackend,
+    key_arity: usize,
+    other_binds: usize,
+) -> Result<usize, String> {
+    let budget =
+        crate::graphql::orm::SqlDialect::max_statement_binds(&dialect).saturating_sub(other_binds);
+    match budget / key_arity.max(1) {
+        0 => Err(bind_limit_exceeded()),
+        capacity => Ok(capacity),
+    }
 }
 
 /// The one check every batched statement passes before it is sent: its
@@ -832,9 +891,11 @@ fn render_relation_page(
         "SELECT * FROM (SELECT {entity_columns}, {key_aliases}, __gom_relation_page.__gom_relation_row_number FROM ({row_sql}) __gom_relation_page INNER JOIN {} __gom_relation_entity ON {join}) __gom_relation_rows",
         dialect.render_identifier_path(query.table),
     );
-    row_sql.push_str(" ORDER BY ");
-    row_sql.push_str(sort_sql);
-    row_sql.push_str(", __gom_relation_row_number ASC");
+    // The rank already holds the complete order within each parent, and rows
+    // are regrouped by parent key. Ordering by it alone keeps the sort text,
+    // which may be the entity's trusted `default_sort`, inside the one scope
+    // it is written for: the entity table.
+    row_sql.push_str(" ORDER BY __gom_relation_row_number ASC");
 
     crate::graphql::orm::RenderedQuery {
         sql: row_sql,
@@ -842,26 +903,24 @@ fn render_relation_page(
     }
 }
 
-async fn load_composite_relation_keys<T, B>(
+/// Load relation keys with one outcome per key.
+///
+/// Keys are grouped by relation, filter, order, page and database auth
+/// context, and each group runs as its own statement (or statements, at the
+/// backend's bind limit). A statement that fails gives its error to the keys
+/// it carried and to no other: a `DataLoader` shared by a whole schema batches
+/// concurrent requests into one call, and one caller's failing group must not
+/// fail the others.
+async fn load_composite_relation_groups<T, B>(
     db: crate::db::Database<B>,
     keys: Vec<CompositeRelationQueryKey>,
     selection: crate::graphql::pagination::ConnectionSelection,
-) -> Result<HashMap<CompositeRelationQueryKey, RelationLoadResult<T>>, String>
+) -> HashMap<CompositeRelationQueryKey, Result<RelationLoadResult<T>, String>>
 where
     B: OrmBackend,
-    T: BatchLoadEntity<B>,
+    T: RelationTarget<B>,
 {
-    use crate::graphql::orm::{
-        FilterExpression, PaginationRequest, SelectQuery, SortExpression, render_filter_expression,
-        render_select_query,
-    };
-
-    if keys.is_empty() {
-        return Ok(HashMap::new());
-    }
-    // Results are keyed, so a repeated key needs loading once. Assembly below
-    // moves each parent's rows out of the statement's result; a second
-    // occurrence in the same statement would find them gone.
+    // Results are keyed, so a repeated key needs loading once.
     let mut seen = std::collections::HashSet::with_capacity(keys.len());
     let keys = keys
         .into_iter()
@@ -884,145 +943,260 @@ where
     }
 
     let mut results = HashMap::new();
-
-    let mut groups = Vec::new();
-    for group in grouped_keys.into_values() {
+    let groups = grouped_keys
+        .into_values()
+        .flat_map(structurally_uniform_groups);
+    for group in groups {
         let (arity, other_binds) = group.first().map_or((1, 0), |sample| {
             (
                 sample.fk_columns.len(),
                 relation_statement_binds(B::DIALECT, sample),
             )
         });
-        groups.extend(bind_limited_groups(B::DIALECT, group, arity, other_binds)?);
+        // Checked first so a refused group still holds its keys.
+        if let Err(error) = statement_key_capacity(B::DIALECT, arity, other_binds) {
+            results.extend(group.into_iter().map(|key| (key, Err(error.clone()))));
+            continue;
+        }
+        let statements =
+            bind_limited_groups(B::DIALECT, group, arity, other_binds).unwrap_or_default();
+        for statement in statements {
+            match load_relation_statement::<T, B>(&db, &statement, selection).await {
+                Ok(loaded) => {
+                    results.extend(statement.into_iter().zip(loaded.into_iter().map(Ok)));
+                }
+                Err(error) => {
+                    results.extend(statement.into_iter().map(|key| (key, Err(error.clone()))));
+                }
+            }
+        }
+    }
+    results
+}
+
+/// Split keys that share their signature strings into groups that also share
+/// the structured filter, sorts and page a statement is built from.
+///
+/// Generated keys derive the signatures from those structures, so this is one
+/// group. A handwritten key whose signature does not cover its structure is
+/// run with its own filter, order and page rather than the first key's.
+fn structurally_uniform_groups(
+    keys: Vec<CompositeRelationQueryKey>,
+) -> Vec<Vec<CompositeRelationQueryKey>> {
+    let mut groups: Vec<Vec<CompositeRelationQueryKey>> = Vec::new();
+    for key in keys {
+        let group = groups.iter_mut().find(|group| {
+            group.first().is_some_and(|sample| {
+                same_structure(&sample.filter, &key.filter)
+                    && same_structure(&sample.sorts, &key.sorts)
+                    && same_structure(&sample.pagination, &key.pagination)
+            })
+        });
+        match group {
+            Some(group) => group.push(key),
+            None => groups.push(vec![key]),
+        }
+    }
+    groups
+}
+
+/// All-or-nothing form for the loader keys whose value type has no room for a
+/// per-key error: the first failed statement fails the call.
+async fn load_composite_relation_keys<T, B>(
+    db: crate::db::Database<B>,
+    keys: Vec<CompositeRelationQueryKey>,
+    selection: crate::graphql::pagination::ConnectionSelection,
+) -> Result<HashMap<CompositeRelationQueryKey, RelationLoadResult<T>>, String>
+where
+    B: OrmBackend,
+    T: RelationTarget<B>,
+{
+    load_composite_relation_groups::<T, B>(db, keys, selection)
+        .await
+        .into_iter()
+        .map(|(key, result)| result.map(|value| (key, value)))
+        .collect()
+}
+
+/// Run one statement's worth of keys, which share everything but the parent
+/// key, and return their results in key order.
+async fn load_relation_statement<T, B>(
+    db: &crate::db::Database<B>,
+    group: &[CompositeRelationQueryKey],
+    selection: crate::graphql::pagination::ConnectionSelection,
+) -> Result<Vec<RelationLoadResult<T>>, String>
+where
+    B: OrmBackend,
+    T: RelationTarget<B>,
+{
+    use crate::graphql::orm::{
+        FilterExpression, PaginationRequest, SelectQuery, SortExpression, render_filter_expression,
+        render_select_query,
+    };
+
+    let mut results = Vec::with_capacity(group.len());
+    let sample = group
+        .first()
+        .ok_or_else(|| "relation batch group should not be empty".to_string())?;
+
+    let mut parent_values = Vec::with_capacity(group.len());
+    let mut parent_key_order = Vec::with_capacity(group.len());
+    for key in group {
+        parent_values.push(key.parent_values.clone());
+        parent_key_order.push(key.parent_key.clone());
     }
 
-    for group in groups {
-        let sample = group
-            .first()
-            .ok_or_else(|| "relation batch group should not be empty".to_string())?;
+    let parent_filter = relation_key_filter(&sample.fk_columns, &parent_values);
+    let filter = match sample.filter.clone() {
+        Some(filter) => FilterExpression::And(vec![parent_filter, filter]),
+        None => parent_filter,
+    };
 
-        let mut parent_values = Vec::with_capacity(group.len());
-        let mut parent_key_order = Vec::with_capacity(group.len());
-        for key in &group {
-            parent_values.push(key.parent_values.clone());
-            parent_key_order.push(key.parent_key.clone());
-        }
-
-        let parent_filter = relation_key_filter(&sample.fk_columns, &parent_values);
-        let filter = match sample.filter.clone() {
-            Some(filter) => FilterExpression::And(vec![parent_filter, filter]),
-            None => parent_filter,
-        };
-
-        let mut sorts = sample
-            .fk_columns
-            .iter()
-            .map(|column| SortExpression {
-                clause: format!("{column} ASC"),
-                values: Vec::new(),
-            })
-            .collect::<Vec<_>>();
-        sorts.extend(sample.sorts.clone());
-        for primary_key in T::PRIMARY_KEYS {
-            if !sorts.iter().any(|sort| {
-                crate::graphql::orm::sort_clause_orders_by_column(&sort.clause, primary_key)
-            }) {
-                sorts.push(SortExpression::unbound(format!(
-                    "{} ASC",
-                    B::DIALECT.render_identifier_path(primary_key)
-                )));
-            }
-        }
-        let sort_sql = sorts
-            .iter()
-            .map(|sort| sort.clause.clone())
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let relation_key_columns = sample
-            .fk_columns
-            .iter()
-            .zip(sample.key_part_kinds.iter())
-            .enumerate()
-            .map(|(index, (column, kind))| {
-                format!(
-                    "{} AS {}",
-                    relation_key_projection(B::DIALECT, column, *kind),
-                    relation_key_alias(index)
-                )
-            })
-            .collect::<Vec<_>>();
-
-        if sample.pagination.is_some()
-            || selection != crate::graphql::pagination::ConnectionSelection::ALL
+    let mut sorts = sample
+        .fk_columns
+        .iter()
+        .map(|column| SortExpression {
+            clause: format!("{column} ASC"),
+            values: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    if sample.sorts.is_empty() {
+        // No caller order: the target's declared default order applies,
+        // as on the direct (non-batched) relation path and on root lists.
+        // It is the entity's own trusted `default_sort` text, so it binds
+        // nothing and needs no further authorization. A term that orders by
+        // a grouping key column adds nothing within one parent and is left
+        // out: SQL Server refuses an `ORDER BY` that names a column twice.
+        if let Some(default_sort) =
+            crate::graphql::orm::sort_terms_not_ordered_by(T::DEFAULT_SORT, &sorts)
         {
-            let PaginationRequest { limit, offset } =
-                sample.pagination.clone().unwrap_or(PaginationRequest {
-                    limit: None,
-                    offset: 0,
-                });
-            let partition_columns = sample.fk_columns.join(", ");
-            let rendered = render_relation_page(
-                B::DIALECT,
-                SelectQuery {
-                    table: T::TABLE_NAME,
-                    columns: T::column_names()
-                        .iter()
-                        .map(|column| (*column).to_string())
-                        .collect(),
-                    filter: Some(filter.clone()),
-                    sorts: Vec::new(),
-                    pagination: None,
-                    count_only: false,
-                },
-                T::PRIMARY_KEYS,
-                &partition_columns,
-                &sort_sql,
-                &relation_key_columns,
-                &PaginationRequest {
-                    limit: if !selection.count && selection.has_next_page {
-                        limit.map(|n| n.saturating_add(1))
-                    } else {
-                        limit
-                    },
-                    offset,
-                },
-            );
-            let start = offset.max(0);
-            let row_sql = rendered.sql;
-            let row_values = rendered.values;
-            ensure_within_bind_limit(B::DIALECT, row_values.len())?;
+            sorts.push(SortExpression::unbound(default_sort));
+        }
+    } else {
+        sorts.extend(sample.sorts.clone());
+    }
+    for primary_key in T::PRIMARY_KEYS {
+        if !sorts.iter().any(|sort| {
+            crate::graphql::orm::sort_clause_orders_by_column(&sort.clause, primary_key)
+        }) {
+            sorts.push(SortExpression::unbound(format!(
+                "{} ASC",
+                B::DIALECT.render_identifier_path(primary_key)
+            )));
+        }
+    }
+    let sort_sql = sorts
+        .iter()
+        .map(|sort| sort.clause.clone())
+        .collect::<Vec<_>>()
+        .join(", ");
 
-            let mut count_values = Vec::new();
-            let mut next_index = 1usize;
-            let where_sql =
-                render_filter_expression(B::DIALECT, &filter, &mut next_index, &mut count_values);
-            let count_columns = relation_key_columns
-                .iter()
-                .cloned()
-                .chain(std::iter::once(
-                    "COUNT(*) AS __gom_relation_total_count".to_string(),
-                ))
-                .collect::<Vec<_>>();
-            let mut count_sql = format!(
-                "SELECT {} FROM {}",
-                count_columns.join(", "),
-                B::DIALECT.render_identifier_path(T::TABLE_NAME)
-            );
-            if !where_sql.is_empty() {
-                count_sql.push_str(" WHERE ");
-                count_sql.push_str(&where_sql);
-            }
-            count_sql.push_str(" GROUP BY ");
-            count_sql.push_str(&partition_columns);
-            ensure_within_bind_limit(B::DIALECT, count_values.len())?;
+    let relation_key_columns = sample
+        .fk_columns
+        .iter()
+        .zip(sample.key_part_kinds.iter())
+        .enumerate()
+        .map(|(index, (column, kind))| {
+            format!(
+                "{} AS {}",
+                relation_key_projection(B::DIALECT, column, *kind),
+                relation_key_alias(index)
+            )
+        })
+        .collect::<Vec<_>>();
 
-            let needs_rows = selection.rows || (selection.has_next_page && !selection.count);
-            let (count_rows, rows) = if selection.count && needs_rows {
-                crate::graphql::orm::fetch_rows_pair_with_auth::<B>(
+    if sample.pagination.is_some()
+        || selection != crate::graphql::pagination::ConnectionSelection::ALL
+    {
+        let PaginationRequest { limit, offset } =
+            sample.pagination.clone().unwrap_or(PaginationRequest {
+                limit: None,
+                offset: 0,
+            });
+        let partition_columns = sample.fk_columns.join(", ");
+        let rendered = render_relation_page(
+            B::DIALECT,
+            SelectQuery {
+                table: T::TABLE_NAME,
+                columns: T::column_names()
+                    .iter()
+                    .map(|column| (*column).to_string())
+                    .collect(),
+                filter: Some(filter.clone()),
+                sorts: Vec::new(),
+                pagination: None,
+                count_only: false,
+            },
+            T::PRIMARY_KEYS,
+            &partition_columns,
+            &sort_sql,
+            &relation_key_columns,
+            &PaginationRequest {
+                limit: if !selection.count && selection.has_next_page {
+                    limit.map(|n| n.saturating_add(1))
+                } else {
+                    limit
+                },
+                offset,
+            },
+        );
+        let start = offset.max(0);
+        let row_sql = rendered.sql;
+        let row_values = rendered.values;
+        ensure_within_bind_limit(B::DIALECT, row_values.len())?;
+
+        let mut count_values = Vec::new();
+        let mut next_index = 1usize;
+        let where_sql =
+            render_filter_expression(B::DIALECT, &filter, &mut next_index, &mut count_values);
+        let count_columns = relation_key_columns
+            .iter()
+            .cloned()
+            .chain(std::iter::once(
+                "COUNT(*) AS __gom_relation_total_count".to_string(),
+            ))
+            .collect::<Vec<_>>();
+        let mut count_sql = format!(
+            "SELECT {} FROM {}",
+            count_columns.join(", "),
+            B::DIALECT.render_identifier_path(T::TABLE_NAME)
+        );
+        if !where_sql.is_empty() {
+            count_sql.push_str(" WHERE ");
+            count_sql.push_str(&where_sql);
+        }
+        count_sql.push_str(" GROUP BY ");
+        count_sql.push_str(&partition_columns);
+        ensure_within_bind_limit(B::DIALECT, count_values.len())?;
+
+        let needs_rows = selection.rows || (selection.has_next_page && !selection.count);
+        let (count_rows, rows) = if selection.count && needs_rows {
+            crate::graphql::orm::fetch_rows_pair_with_auth::<B>(
+                db.pool(),
+                &count_sql,
+                &count_values,
+                &row_sql,
+                &row_values,
+                sample.auth_context.as_ref(),
+            )
+            .await
+            .map_err(crate::graphql::errors::loader_error_from_sqlx)?
+        } else {
+            let count_rows = if selection.count {
+                crate::graphql::orm::fetch_rows_with_auth::<B>(
                     db.pool(),
                     &count_sql,
                     &count_values,
+                    sample.auth_context.as_ref(),
+                )
+                .await
+                .map_err(crate::graphql::errors::loader_error_from_sqlx)?
+            } else {
+                Vec::new()
+            };
+            let rows = if needs_rows {
+                crate::graphql::orm::fetch_rows_with_auth::<B>(
+                    db.pool(),
                     &row_sql,
                     &row_values,
                     sample.auth_context.as_ref(),
@@ -1030,141 +1204,35 @@ where
                 .await
                 .map_err(crate::graphql::errors::loader_error_from_sqlx)?
             } else {
-                let count_rows = if selection.count {
-                    crate::graphql::orm::fetch_rows_with_auth::<B>(
-                        db.pool(),
-                        &count_sql,
-                        &count_values,
-                        sample.auth_context.as_ref(),
-                    )
-                    .await
-                    .map_err(crate::graphql::errors::loader_error_from_sqlx)?
-                } else {
-                    Vec::new()
-                };
-                let rows = if needs_rows {
-                    crate::graphql::orm::fetch_rows_with_auth::<B>(
-                        db.pool(),
-                        &row_sql,
-                        &row_values,
-                        sample.auth_context.as_ref(),
-                    )
-                    .await
-                    .map_err(crate::graphql::errors::loader_error_from_sqlx)?
-                } else {
-                    Vec::new()
-                };
-                (count_rows, rows)
+                Vec::new()
             };
+            (count_rows, rows)
+        };
 
-            let mut total_counts: HashMap<RelationKey, i64> = parent_key_order
-                .iter()
-                .cloned()
-                .map(|parent_key| (parent_key, 0))
-                .collect();
-            for row in count_rows {
-                let mut key_parts = Vec::with_capacity(sample.fk_columns.len());
-                for index in 0..sample.fk_columns.len() {
-                    let alias = relation_key_alias(index);
-                    let part = B::try_get_string(&row, &alias)
-                        .map_err(crate::graphql::errors::loader_error_from_sqlx)?;
-                    key_parts.push(part);
-                }
-                let parent_key =
-                    RelationKey::from_projected_parts(key_parts, &sample.key_part_kinds);
-                let total = B::try_get_i64(&row, "__gom_relation_total_count")
+        let mut total_counts: HashMap<RelationKey, i64> = parent_key_order
+            .iter()
+            .cloned()
+            .map(|parent_key| (parent_key, 0))
+            .collect();
+        for row in count_rows {
+            let mut key_parts = Vec::with_capacity(sample.fk_columns.len());
+            for index in 0..sample.fk_columns.len() {
+                let alias = relation_key_alias(index);
+                let part = B::try_get_string(&row, &alias)
                     .map_err(crate::graphql::errors::loader_error_from_sqlx)?;
-                total_counts.insert(parent_key, total);
+                key_parts.push(part);
             }
-
-            let mut grouped_entities: HashMap<RelationKey, Vec<T>> = parent_key_order
-                .iter()
-                .cloned()
-                .map(|parent_key| (parent_key, Vec::new()))
-                .collect();
-            for row in rows {
-                let mut key_parts = Vec::with_capacity(sample.fk_columns.len());
-                for index in 0..sample.fk_columns.len() {
-                    let alias = relation_key_alias(index);
-                    let part = B::try_get_string(&row, &alias)
-                        .map_err(crate::graphql::errors::loader_error_from_sqlx)?;
-                    key_parts.push(part);
-                }
-                let parent_key =
-                    RelationKey::from_projected_parts(key_parts, &sample.key_part_kinds);
-                let entity =
-                    T::from_row(&row).map_err(crate::graphql::errors::loader_error_from_sqlx)?;
-                grouped_entities.entry(parent_key).or_default().push(entity);
-            }
-
-            for key in group {
-                let mut entities = grouped_entities.remove(&key.parent_key).unwrap_or_default();
-                let total_count = *total_counts.get(&key.parent_key).unwrap_or(&0);
-                let has_previous_page = start > 0;
-                let has_next_page = if selection.count {
-                    let page_len = if selection.rows {
-                        entities.len() as i64
-                    } else {
-                        limit.map_or((total_count - start).max(0), |n| {
-                            n.max(0).min((total_count - start).max(0))
-                        })
-                    };
-                    start.saturating_add(page_len) < total_count
-                } else {
-                    limit.is_some_and(|n| entities.len() as i64 > n)
-                };
-                if let Some(limit) = limit {
-                    entities.truncate(limit.max(0) as usize);
-                }
-                results.insert(
-                    key,
-                    RelationLoadResult {
-                        entities,
-                        total_count,
-                        has_next_page,
-                        has_previous_page,
-                        offset: start,
-                    },
-                );
-            }
-
-            continue;
+            let parent_key = RelationKey::from_projected_parts(key_parts, &sample.key_part_kinds);
+            let total = B::try_get_i64(&row, "__gom_relation_total_count")
+                .map_err(crate::graphql::errors::loader_error_from_sqlx)?;
+            total_counts.insert(parent_key, total);
         }
-
-        let rendered = render_select_query(
-            B::DIALECT,
-            &SelectQuery {
-                table: T::TABLE_NAME,
-                columns: T::column_names()
-                    .iter()
-                    .map(|column| (*column).to_string())
-                    .chain(relation_key_columns)
-                    .collect(),
-                filter: Some(filter),
-                sorts,
-                pagination: None,
-                count_only: false,
-            },
-        );
-
-        ensure_within_bind_limit(B::DIALECT, rendered.values.len())?;
-        // Count relation batches alongside federation batches so their bounded
-        // statement count can be verified through the public ORM counter.
-        let rows = crate::graphql::orm::fetch_rows_with_auth::<B>(
-            db.pool(),
-            &rendered.sql,
-            &rendered.values,
-            sample.auth_context.as_ref(),
-        )
-        .await
-        .map_err(crate::graphql::errors::loader_error_from_sqlx)?;
 
         let mut grouped_entities: HashMap<RelationKey, Vec<T>> = parent_key_order
             .iter()
             .cloned()
             .map(|parent_key| (parent_key, Vec::new()))
             .collect();
-
         for row in rows {
             let mut key_parts = Vec::with_capacity(sample.fk_columns.len());
             for index in 0..sample.fk_columns.len() {
@@ -1180,37 +1248,111 @@ where
         }
 
         for key in group {
-            let all_entities = grouped_entities.remove(&key.parent_key).unwrap_or_default();
-            let total_count = all_entities.len() as i64;
-            let PaginationRequest { limit, offset } =
-                key.pagination.clone().unwrap_or(PaginationRequest {
-                    limit: None,
-                    offset: 0,
-                });
-            let start = offset.max(0) as usize;
-            let end = match limit {
-                Some(limit) if limit >= 0 => start.saturating_add(limit as usize),
-                _ => all_entities.len(),
-            };
+            let mut entities = grouped_entities.remove(&key.parent_key).unwrap_or_default();
+            let total_count = *total_counts.get(&key.parent_key).unwrap_or(&0);
             let has_previous_page = start > 0;
-            let has_next_page = end < all_entities.len();
-            let entities = all_entities
-                .into_iter()
-                .skip(start)
-                .take(end.saturating_sub(start))
-                .collect();
-
-            results.insert(
-                key,
-                RelationLoadResult {
-                    entities,
-                    total_count,
-                    has_next_page,
-                    has_previous_page,
-                    offset,
-                },
-            );
+            let has_next_page = if selection.count {
+                let page_len = if selection.rows {
+                    entities.len() as i64
+                } else {
+                    limit.map_or((total_count - start).max(0), |n| {
+                        n.max(0).min((total_count - start).max(0))
+                    })
+                };
+                start.saturating_add(page_len) < total_count
+            } else {
+                limit.is_some_and(|n| entities.len() as i64 > n)
+            };
+            if let Some(limit) = limit {
+                entities.truncate(limit.max(0) as usize);
+            }
+            results.push(RelationLoadResult {
+                entities,
+                total_count,
+                has_next_page,
+                has_previous_page,
+                offset: start,
+            });
         }
+
+        return Ok(results);
+    }
+
+    let rendered = render_select_query(
+        B::DIALECT,
+        &SelectQuery {
+            table: T::TABLE_NAME,
+            columns: T::column_names()
+                .iter()
+                .map(|column| (*column).to_string())
+                .chain(relation_key_columns)
+                .collect(),
+            filter: Some(filter),
+            sorts,
+            pagination: None,
+            count_only: false,
+        },
+    );
+
+    ensure_within_bind_limit(B::DIALECT, rendered.values.len())?;
+    // Count relation batches alongside federation batches so their bounded
+    // statement count can be verified through the public ORM counter.
+    let rows = crate::graphql::orm::fetch_rows_with_auth::<B>(
+        db.pool(),
+        &rendered.sql,
+        &rendered.values,
+        sample.auth_context.as_ref(),
+    )
+    .await
+    .map_err(crate::graphql::errors::loader_error_from_sqlx)?;
+
+    let mut grouped_entities: HashMap<RelationKey, Vec<T>> = parent_key_order
+        .iter()
+        .cloned()
+        .map(|parent_key| (parent_key, Vec::new()))
+        .collect();
+
+    for row in rows {
+        let mut key_parts = Vec::with_capacity(sample.fk_columns.len());
+        for index in 0..sample.fk_columns.len() {
+            let alias = relation_key_alias(index);
+            let part = B::try_get_string(&row, &alias)
+                .map_err(crate::graphql::errors::loader_error_from_sqlx)?;
+            key_parts.push(part);
+        }
+        let parent_key = RelationKey::from_projected_parts(key_parts, &sample.key_part_kinds);
+        let entity = T::from_row(&row).map_err(crate::graphql::errors::loader_error_from_sqlx)?;
+        grouped_entities.entry(parent_key).or_default().push(entity);
+    }
+
+    for key in group {
+        let all_entities = grouped_entities.remove(&key.parent_key).unwrap_or_default();
+        let total_count = all_entities.len() as i64;
+        let PaginationRequest { limit, offset } =
+            key.pagination.clone().unwrap_or(PaginationRequest {
+                limit: None,
+                offset: 0,
+            });
+        let start = offset.max(0) as usize;
+        let end = match limit {
+            Some(limit) if limit >= 0 => start.saturating_add(limit as usize),
+            _ => all_entities.len(),
+        };
+        let has_previous_page = start > 0;
+        let has_next_page = end < all_entities.len();
+        let entities = all_entities
+            .into_iter()
+            .skip(start)
+            .take(end.saturating_sub(start))
+            .collect();
+
+        results.push(RelationLoadResult {
+            entities,
+            total_count,
+            has_next_page,
+            has_previous_page,
+            offset,
+        });
     }
 
     Ok(results)
@@ -1292,7 +1434,7 @@ where
 impl<T, B> Loader<RelationQueryKey> for RelationLoader<T, B>
 where
     B: OrmBackend,
-    T: BatchLoadEntity<B>,
+    T: RelationTarget<B>,
 {
     type Value = RelationLoadResult<T>;
     type Error = String;
@@ -1368,7 +1510,7 @@ where
 impl<T, B> Loader<CompositeRelationQueryKey> for RelationLoader<T, B>
 where
     B: OrmBackend,
-    T: BatchLoadEntity<B>,
+    T: RelationTarget<B>,
 {
     type Value = RelationLoadResult<T>;
     type Error = String;
@@ -1474,12 +1616,7 @@ impl<T, B: OrmBackend> FederationKeyLoader<T, B> {
 impl<T, B> Loader<FederationEntityKey> for FederationKeyLoader<T, B>
 where
     B: OrmBackend,
-    T: crate::graphql::orm::DatabaseEntity
-        + crate::graphql::orm::FromSqlRow<B>
-        + Clone
-        + Send
-        + Sync
-        + 'static,
+    T: RelationTarget<B>,
 {
     type Value = Option<T>;
     type Error = String;
@@ -1494,115 +1631,247 @@ where
         let db = self.db.clone();
 
         async move {
-            use crate::graphql::orm::{SelectQuery, render_select_query};
-
-            if keys.is_empty() {
-                return Ok(HashMap::new());
-            }
-
-            let mut grouped_keys: HashMap<FederationGroupKey, Vec<FederationEntityKey>> =
-                HashMap::new();
-            for key in keys {
-                let group_key = FederationGroupKey {
-                    key: key.key,
-                    columns: key.columns.clone(),
-                    key_part_kinds: key.key_part_kinds.clone(),
-                    auth_context_key: key.auth_context.as_ref().map(DbAuthContext::partition_key),
-                };
-                grouped_keys.entry(group_key).or_default().push(key);
-            }
-
-            let mut results = HashMap::new();
-
-            let mut groups = Vec::new();
-            for group in grouped_keys.into_values() {
-                let arity = group.first().map_or(1, |sample| sample.columns.len());
-                groups.extend(bind_limited_groups(B::DIALECT, group, arity, 0)?);
-            }
-
-            for group in groups {
-                let sample = group
-                    .first()
-                    .ok_or_else(|| "federation key batch group should not be empty".to_string())?;
-
-                let representation_values = group
-                    .iter()
-                    .map(|key| key.values.clone())
-                    .collect::<Vec<_>>();
-                let filter = relation_key_filter(&sample.columns, &representation_values);
-
-                let key_columns = sample
-                    .columns
-                    .iter()
-                    .zip(sample.key_part_kinds.iter())
-                    .enumerate()
-                    .map(|(index, (column, kind))| {
-                        format!(
-                            "{} AS {}",
-                            relation_key_projection(B::DIALECT, column, *kind),
-                            relation_key_alias(index)
-                        )
-                    })
-                    .collect::<Vec<_>>();
-
-                let rendered = render_select_query(
-                    B::DIALECT,
-                    &SelectQuery {
-                        table: T::TABLE_NAME,
-                        columns: T::column_names()
-                            .iter()
-                            .map(|column| (*column).to_string())
-                            .chain(key_columns)
-                            .collect(),
-                        filter: Some(filter),
-                        sorts: Vec::new(),
-                        pagination: None,
-                        count_only: false,
-                    },
-                );
-
-                ensure_within_bind_limit(B::DIALECT, rendered.values.len())?;
-                // Routed through the counted helper rather than the backend
-                // method so the one-statement-per-batch guarantee is
-                // observable through `query_count`.
-                let rows = crate::graphql::orm::fetch_rows_with_auth::<B>(
-                    db.pool(),
-                    &rendered.sql,
-                    &rendered.values,
-                    sample.auth_context.as_ref(),
-                )
+            load_federation_groups::<T, B>(db, keys)
                 .await
-                .map_err(crate::graphql::errors::loader_error_from_sqlx)?;
+                .into_iter()
+                .map(|(key, result)| result.map(|value| (key, value)))
+                .collect()
+        }
+    }
+}
 
-                let mut resolved: HashMap<RelationKey, T> = HashMap::new();
-                for row in rows {
-                    let mut key_parts = Vec::with_capacity(sample.columns.len());
-                    for index in 0..sample.columns.len() {
-                        let alias = relation_key_alias(index);
-                        let part = B::try_get_string(&row, &alias)
-                            .map_err(crate::graphql::errors::loader_error_from_sqlx)?;
-                        key_parts.push(part);
-                    }
-                    let entity = T::from_row(&row)
-                        .map_err(crate::graphql::errors::loader_error_from_sqlx)?;
-                    // A `@key` is validated to be unique, so a second row for the
-                    // same representation cannot be distinguished; keep the first.
-                    resolved
-                        .entry(RelationKey::from_projected_parts(
-                            key_parts,
-                            &sample.key_part_kinds,
-                        ))
-                        .or_insert(entity);
+/// Load Federation keys with one outcome per key: a failed statement fails
+/// the keys it carried and no other, as for relation groups.
+async fn load_federation_groups<T, B>(
+    db: crate::db::Database<B>,
+    keys: Vec<FederationEntityKey>,
+) -> HashMap<FederationEntityKey, Result<Option<T>, String>>
+where
+    B: OrmBackend,
+    T: RelationTarget<B>,
+{
+    let mut grouped_keys: HashMap<FederationGroupKey, Vec<FederationEntityKey>> = HashMap::new();
+    for key in keys {
+        let group_key = FederationGroupKey {
+            key: key.key,
+            columns: key.columns.clone(),
+            key_part_kinds: key.key_part_kinds.clone(),
+            auth_context_key: key.auth_context.as_ref().map(DbAuthContext::partition_key),
+        };
+        grouped_keys.entry(group_key).or_default().push(key);
+    }
+
+    let mut results = HashMap::new();
+    for group in grouped_keys.into_values() {
+        let arity = group.first().map_or(1, |sample| sample.columns.len());
+        // Checked first so a refused group still holds its keys.
+        if let Err(error) = statement_key_capacity(B::DIALECT, arity, 0) {
+            results.extend(group.into_iter().map(|key| (key, Err(error.clone()))));
+            continue;
+        }
+        for statement in bind_limited_groups(B::DIALECT, group, arity, 0).unwrap_or_default() {
+            match load_federation_statement::<T, B>(&db, &statement).await {
+                Ok(loaded) => {
+                    results.extend(statement.into_iter().zip(loaded.into_iter().map(Ok)));
                 }
-
-                for key in group {
-                    let entity = resolved.get(&key.representation).cloned();
-                    results.insert(key, entity);
+                Err(error) => {
+                    results.extend(statement.into_iter().map(|key| (key, Err(error.clone()))));
                 }
             }
-
-            Ok(results)
         }
+    }
+    results
+}
+
+/// Run one statement's worth of Federation keys and return their entities in
+/// key order.
+async fn load_federation_statement<T, B>(
+    db: &crate::db::Database<B>,
+    group: &[FederationEntityKey],
+) -> Result<Vec<Option<T>>, String>
+where
+    B: OrmBackend,
+    T: RelationTarget<B>,
+{
+    use crate::graphql::orm::{SelectQuery, render_select_query};
+
+    let sample = group
+        .first()
+        .ok_or_else(|| "federation key batch group should not be empty".to_string())?;
+
+    let representation_values = group
+        .iter()
+        .map(|key| key.values.clone())
+        .collect::<Vec<_>>();
+    let filter = relation_key_filter(&sample.columns, &representation_values);
+
+    let key_columns = sample
+        .columns
+        .iter()
+        .zip(sample.key_part_kinds.iter())
+        .enumerate()
+        .map(|(index, (column, kind))| {
+            format!(
+                "{} AS {}",
+                relation_key_projection(B::DIALECT, column, *kind),
+                relation_key_alias(index)
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let rendered = render_select_query(
+        B::DIALECT,
+        &SelectQuery {
+            table: T::TABLE_NAME,
+            columns: T::column_names()
+                .iter()
+                .map(|column| (*column).to_string())
+                .chain(key_columns)
+                .collect(),
+            filter: Some(filter),
+            sorts: Vec::new(),
+            pagination: None,
+            count_only: false,
+        },
+    );
+
+    ensure_within_bind_limit(B::DIALECT, rendered.values.len())?;
+    // Routed through the counted helper rather than the backend method so the
+    // one-statement-per-batch guarantee is observable through `query_count`.
+    let rows = crate::graphql::orm::fetch_rows_with_auth::<B>(
+        db.pool(),
+        &rendered.sql,
+        &rendered.values,
+        sample.auth_context.as_ref(),
+    )
+    .await
+    .map_err(crate::graphql::errors::loader_error_from_sqlx)?;
+
+    let mut resolved: HashMap<RelationKey, T> = HashMap::new();
+    for row in rows {
+        let mut key_parts = Vec::with_capacity(sample.columns.len());
+        for index in 0..sample.columns.len() {
+            let alias = relation_key_alias(index);
+            let part = B::try_get_string(&row, &alias)
+                .map_err(crate::graphql::errors::loader_error_from_sqlx)?;
+            key_parts.push(part);
+        }
+        let entity = T::from_row(&row).map_err(crate::graphql::errors::loader_error_from_sqlx)?;
+        // A `@key` is validated to be unique, so a second row for the same
+        // representation cannot be distinguished; keep the first.
+        resolved
+            .entry(RelationKey::from_projected_parts(
+                key_parts,
+                &sample.key_part_kinds,
+            ))
+            .or_insert(entity);
+    }
+
+    Ok(group
+        .iter()
+        .map(|key| resolved.get(&key.representation).cloned())
+        .collect())
+}
+
+/// A loader key whose value carries its own outcome.
+///
+/// `async-graphql` gives one `DataLoader` call a single error for every key in
+/// it, and a loader registered on the schema batches the keys of concurrent
+/// requests together. Loading `IsolatedLoad(key)` instead yields
+/// `Result<Value, String>` per key, so a statement that fails for one group of
+/// keys (one relation, filter, order, page and database auth context) fails
+/// those keys only. Generated relation and Federation resolvers load this way.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub struct IsolatedLoad<K>(pub K);
+
+/// Flatten an [`IsolatedLoad`] result into the shape of a plain load.
+#[doc(hidden)]
+pub fn isolated_load_result<V>(
+    loaded: Result<Option<Result<V, String>>, String>,
+) -> Result<Option<V>, String> {
+    loaded?.transpose()
+}
+
+impl<T, B> Loader<IsolatedLoad<CompositeRelationQueryKey>> for RelationLoader<T, B>
+where
+    B: OrmBackend,
+    T: RelationTarget<B>,
+{
+    type Value = Result<RelationLoadResult<T>, String>;
+    type Error = String;
+
+    async fn load(
+        &self,
+        keys: &[IsolatedLoad<CompositeRelationQueryKey>],
+    ) -> Result<HashMap<IsolatedLoad<CompositeRelationQueryKey>, Self::Value>, Self::Error> {
+        let keys = keys.iter().map(|key| key.0.clone()).collect();
+        Ok(load_composite_relation_groups::<T, B>(
+            self.db.clone(),
+            keys,
+            crate::graphql::pagination::ConnectionSelection::ALL,
+        )
+        .await
+        .into_iter()
+        .map(|(key, result)| (IsolatedLoad(key), result))
+        .collect())
+    }
+}
+
+impl<T, B> Loader<IsolatedLoad<SelectedRelationQueryKey>> for RelationLoader<T, B>
+where
+    B: OrmBackend,
+    T: RelationTarget<B>,
+{
+    type Value = Result<RelationLoadResult<T>, String>;
+    type Error = String;
+
+    async fn load(
+        &self,
+        keys: &[IsolatedLoad<SelectedRelationQueryKey>],
+    ) -> Result<HashMap<IsolatedLoad<SelectedRelationQueryKey>, Self::Value>, Self::Error> {
+        let mut groups: HashMap<
+            crate::graphql::pagination::ConnectionSelection,
+            Vec<CompositeRelationQueryKey>,
+        > = HashMap::new();
+        for key in keys {
+            groups
+                .entry(key.0.selection)
+                .or_default()
+                .push(key.0.query.clone());
+        }
+        let mut results = HashMap::new();
+        for (selection, queries) in groups {
+            for (query, result) in
+                load_composite_relation_groups::<T, B>(self.db.clone(), queries, selection).await
+            {
+                results.insert(
+                    IsolatedLoad(SelectedRelationQueryKey { query, selection }),
+                    result,
+                );
+            }
+        }
+        Ok(results)
+    }
+}
+
+impl<T, B> Loader<IsolatedLoad<FederationEntityKey>> for FederationKeyLoader<T, B>
+where
+    B: OrmBackend,
+    T: RelationTarget<B>,
+{
+    type Value = Result<Option<T>, String>;
+    type Error = String;
+
+    async fn load(
+        &self,
+        keys: &[IsolatedLoad<FederationEntityKey>],
+    ) -> Result<HashMap<IsolatedLoad<FederationEntityKey>, Self::Value>, Self::Error> {
+        let keys = keys.iter().map(|key| key.0.clone()).collect();
+        Ok(load_federation_groups::<T, B>(self.db.clone(), keys)
+            .await
+            .into_iter()
+            .map(|(key, result)| (IsolatedLoad(key), result))
+            .collect())
     }
 }
 
@@ -1934,7 +2203,7 @@ pub struct SelectedRelationQueryKey {
 impl<T, B> Loader<SelectedRelationQueryKey> for RelationLoader<T, B>
 where
     B: OrmBackend,
-    T: BatchLoadEntity<B>,
+    T: RelationTarget<B>,
 {
     type Value = RelationLoadResult<T>;
     type Error = String;

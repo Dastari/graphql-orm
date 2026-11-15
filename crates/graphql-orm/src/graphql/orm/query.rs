@@ -317,7 +317,7 @@ pub trait DatabaseFilter {
 
     fn to_filter_expression(&self) -> Option<FilterExpression> {
         let (conditions, values) = self.to_sql_conditions();
-        filter_expression_from_raw_parts(&conditions, &values)
+        filter_expression_from_raw_parts(current_backend(), &conditions, &values)
     }
 
     /// Validate and convert this filter to the backend-neutral query IR.
@@ -944,6 +944,30 @@ pub(crate) fn sort_clause_orders_by_column(clause: &str, column: &str) -> bool {
     split_sort_terms(clause)
         .into_iter()
         .any(|term| sort_term_column(term).is_some_and(|name| name == expected))
+}
+
+/// The terms of `clause` that do not order directly by a column one of
+/// `ordered` already orders by, or `None` when no term is left.
+///
+/// SQL Server refuses an `ORDER BY` list that names a column twice, so a
+/// default order is appended to existing terms through this.
+pub(crate) fn sort_terms_not_ordered_by(
+    clause: &str,
+    ordered: &[SortExpression],
+) -> Option<String> {
+    let terms = split_sort_terms(clause)
+        .into_iter()
+        .map(str::trim)
+        .filter(|term| !term.is_empty())
+        .filter(|term| {
+            sort_term_column(term).is_none_or(|column| {
+                !ordered
+                    .iter()
+                    .any(|sort| sort_clause_orders_by_column(&sort.clause, &column))
+            })
+        })
+        .collect::<Vec<_>>();
+    (!terms.is_empty()).then(|| terms.join(", "))
 }
 
 fn unquote_identifier(identifier: &str) -> &str {
@@ -2313,7 +2337,9 @@ pub fn render_keyset_after(
         terms.push(comparison);
         branches.push(format!("({})", terms.join(" AND ")));
     }
-    Ok((branches.join(" OR "), values))
+    // Parenthesized as a whole, like the `before` form: the predicate stays
+    // one condition wherever a caller places it.
+    Ok((format!("({})", branches.join(" OR ")), values))
 }
 
 /// Render the lexicographic `before` predicate with explicit nullable ordering.
@@ -2609,6 +2635,7 @@ pub fn generate_candidate_pattern(value: &str) -> String {
 }
 
 fn filter_expression_from_raw_parts(
+    dialect: DatabaseBackend,
     conditions: &[String],
     values: &[SqlValue],
 ) -> Option<FilterExpression> {
@@ -2620,7 +2647,7 @@ fn filter_expression_from_raw_parts(
     let filters = conditions
         .iter()
         .map(|clause| {
-            let placeholder_count = count_placeholders(clause);
+            let placeholder_count = count_placeholders_for(dialect, clause);
             let clause_values = value_iter
                 .by_ref()
                 .take(placeholder_count)
@@ -2639,97 +2666,22 @@ fn filter_expression_from_raw_parts(
     }
 }
 
+/// Count the bind placeholders of a SQL fragment for the default backend.
+///
+/// See [`count_placeholders_for`] when the fragment belongs to another
+/// backend's entity.
 pub fn count_placeholders(clause: &str) -> usize {
-    let chars: Vec<char> = clause.chars().collect();
-    let mut count = 0usize;
-    let mut i = 0usize;
-    let mut in_single_quote = false;
-    let mut in_double_quote = false;
-    let mut in_bracket_quote = false;
-    while i < chars.len() {
-        let ch = chars[i];
-        if in_single_quote {
-            if ch == '\'' {
-                if i + 1 < chars.len() && chars[i + 1] == '\'' {
-                    i += 2;
-                    continue;
-                }
-                in_single_quote = false;
-            }
-            i += 1;
-            continue;
-        }
-        if in_double_quote {
-            if ch == '"' {
-                if i + 1 < chars.len() && chars[i + 1] == '"' {
-                    i += 2;
-                    continue;
-                }
-                in_double_quote = false;
-            }
-            i += 1;
-            continue;
-        }
-        if in_bracket_quote {
-            if ch == ']' {
-                if i + 1 < chars.len() && chars[i + 1] == ']' {
-                    i += 2;
-                    continue;
-                }
-                in_bracket_quote = false;
-            }
-            i += 1;
-            continue;
-        }
-        match ch {
-            '\'' => {
-                in_single_quote = true;
-                i += 1;
-            }
-            '"' => {
-                in_double_quote = true;
-                i += 1;
-            }
-            '[' => {
-                in_bracket_quote = true;
-                i += 1;
-            }
-            '?' => {
-                count += 1;
-                i += 1;
-            }
-            '$' => {
-                let mut j = i + 1;
-                let mut saw_digit = false;
-                while j < chars.len() && chars[j].is_ascii_digit() {
-                    saw_digit = true;
-                    j += 1;
-                }
-                if saw_digit {
-                    count += 1;
-                    i = j;
-                } else {
-                    i += 1;
-                }
-            }
-            '@' if i + 1 < chars.len() && chars[i + 1].eq_ignore_ascii_case(&'p') => {
-                let mut j = i + 2;
-                let mut saw_digit = false;
-                while j < chars.len() && chars[j].is_ascii_digit() {
-                    saw_digit = true;
-                    j += 1;
-                }
-                if saw_digit {
-                    count += 1;
-                    i = j;
-                } else {
-                    i += 1;
-                }
-            }
-            _ => i += 1,
-        }
-    }
-    count
+    count_placeholders_for(current_backend(), clause)
+}
+
+/// Count the bind placeholders of a SQL fragment written for `backend`.
+///
+/// It reads the fragment exactly as [`SqlDialect::normalize_sql`] does when it
+/// rebases those placeholders, so the two always agree: `?`, `$<digits>` and
+/// `@p<digits>` count, and nothing inside a string literal, a quoted
+/// identifier, a comment or a PostgreSQL dollar-quoted string does.
+pub fn count_placeholders_for(backend: DatabaseBackend, clause: &str) -> usize {
+    super::dialect::placeholder_spans(backend, clause).len()
 }
 
 pub fn render_filter_expression(
@@ -4159,7 +4111,9 @@ where
 {
     where_clauses: Vec<String>,
     values: Vec<SqlValue>,
-    order_clauses: Vec<String>,
+    /// Each ordering term with the values its clause binds: a prepared
+    /// relation-count term carries the target's visibility predicate values.
+    order_sorts: Vec<SortExpression>,
     limit: Option<i64>,
     max_limit: Option<i64>,
     requires_in_memory_filtering: bool,
@@ -4184,7 +4138,7 @@ where
         Self {
             where_clauses: Vec::new(),
             values: Vec::new(),
-            order_clauses: Vec::new(),
+            order_sorts: Vec::new(),
             limit: None,
             max_limit: None,
             requires_in_memory_filtering: false,
@@ -4208,7 +4162,7 @@ where
     fn order_by(mut self, order: P::Order) -> Self {
         self.filter_is_valid &= order.validate_order().is_ok();
         if let Some(sort) = order.to_sort_expression() {
-            self.order_clauses.push(sort.clause);
+            self.order_sorts.push(sort);
         }
         self
     }
@@ -4260,17 +4214,13 @@ where
         visibility: Option<&FilterExpression>,
     ) -> RenderedQuery {
         let entity_default = <P::Entity as DatabaseEntity>::DEFAULT_SORT;
-        let mut sorts = if self.order_clauses.is_empty() {
+        let mut sorts = if self.order_sorts.is_empty() {
             vec![SortExpression {
                 clause: entity_default.to_string(),
                 values: Vec::new(),
             }]
         } else {
-            self.order_clauses
-                .iter()
-                .cloned()
-                .map(SortExpression::unbound)
-                .collect::<Vec<_>>()
+            self.order_sorts.clone()
         };
         for primary_key in <P::Entity as DatabaseEntity>::PRIMARY_KEYS {
             if !sorts
@@ -4296,7 +4246,7 @@ where
                     .map(|column| (*column).to_string())
                     .collect(),
                 filter: match (
-                    filter_expression_from_raw_parts(&self.where_clauses, &self.values),
+                    filter_expression_from_raw_parts(B::DIALECT, &self.where_clauses, &self.values),
                     visibility,
                 ) {
                     (Some(filter), Some(policy)) => {
@@ -4870,7 +4820,7 @@ where
                 .iter()
                 .map(|column| (*column).to_string())
                 .collect(),
-            filter: filter_expression_from_raw_parts(&self.where_clauses, &self.values),
+            filter: filter_expression_from_raw_parts(B::DIALECT, &self.where_clauses, &self.values),
             sorts,
             pagination: if self.requires_in_memory_filtering() {
                 None
@@ -4925,7 +4875,7 @@ where
             table: T::TABLE_NAME,
             function,
             column,
-            filter: filter_expression_from_raw_parts(&self.where_clauses, &self.values),
+            filter: filter_expression_from_raw_parts(B::DIALECT, &self.where_clauses, &self.values),
         })
     }
 
@@ -5671,7 +5621,11 @@ where
             B::DIALECT,
             &DeleteQuery {
                 table: T::TABLE_NAME,
-                filter: filter_expression_from_raw_parts(&self.where_clauses, &self.values),
+                filter: filter_expression_from_raw_parts(
+                    B::DIALECT,
+                    &self.where_clauses,
+                    &self.values,
+                ),
             },
         );
         Ok((rendered.sql, rendered.values))
@@ -6293,7 +6247,7 @@ where
             &SelectQuery {
                 table: self.table,
                 columns: Vec::new(),
-                filter: filter_expression_from_raw_parts(&self.filters, &self.values),
+                filter: filter_expression_from_raw_parts(B::DIALECT, &self.filters, &self.values),
                 sorts: Vec::new(),
                 pagination: None,
                 count_only: true,
@@ -6317,7 +6271,7 @@ where
             &SelectQuery {
                 table: self.table,
                 columns: Vec::new(),
-                filter: filter_expression_from_raw_parts(&self.filters, &self.values),
+                filter: filter_expression_from_raw_parts(B::DIALECT, &self.filters, &self.values),
                 sorts: Vec::new(),
                 pagination: None,
                 count_only: true,

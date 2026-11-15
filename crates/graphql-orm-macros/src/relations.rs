@@ -935,12 +935,14 @@ pub(crate) fn generate_graphql_relations(
                         use ::graphql_orm::async_graphql::dataloader::DataLoader;
 
                         let loader = ctx.data_unchecked::<DataLoader<RelationLoader<#target_type, #backend_marker>>>();
-                        loader
-                            .load_one(::graphql_orm::graphql::loaders::SelectedRelationQueryKey {
+                        // Loaded with its own outcome: another caller's
+                        // failing group in the same batch does not fail this one.
+                        ::graphql_orm::graphql::loaders::isolated_load_result(loader
+                            .load_one(::graphql_orm::graphql::loaders::IsolatedLoad(::graphql_orm::graphql::loaders::SelectedRelationQueryKey {
                                 query: ::graphql_orm::graphql::loaders::with_relation_visibility::<#target_type, #backend_marker>(#relation_query_key, &visibility)?,
                                 selection: ::graphql_orm::graphql::pagination::ConnectionSelection::from_context(ctx),
-                            })
-                            .await
+                            }))
+                            .await)
                             .map_err(::graphql_orm::graphql::errors::graphql_error_from_loader)?
                             .unwrap_or(::graphql_orm::graphql::loaders::RelationLoadResult {
                                 entities: Vec::new(),
@@ -1063,11 +1065,11 @@ pub(crate) fn generate_graphql_relations(
                         use ::graphql_orm::async_graphql::dataloader::DataLoader;
 
                         let loader = ctx.data_unchecked::<DataLoader<RelationLoader<#target_type, #backend_marker>>>();
-                        loader
-                            .load_one(::graphql_orm::graphql::loaders::with_relation_visibility::<#target_type, #backend_marker>(
+                        ::graphql_orm::graphql::loaders::isolated_load_result(loader
+                            .load_one(::graphql_orm::graphql::loaders::IsolatedLoad(::graphql_orm::graphql::loaders::with_relation_visibility::<#target_type, #backend_marker>(
                                 #single_relation_query_key, &visibility,
-                            )?)
-                            .await
+                            )?))
+                            .await)
                             .map_err(::graphql_orm::graphql::errors::graphql_error_from_loader)?
                             .and_then(|mut result| result.entities.drain(..).next())
                     } else {
