@@ -142,7 +142,200 @@ struct List {
     steps: Vec<Step>,
 }
 
-schema_roots! { auth: "none", query_custom_ops: [], entities: [List, Step], }
+/// A parent with a composite key. The same `id` exists under two tenants.
+#[derive(
+    GraphQLEntity,
+    GraphQLOperations,
+    GraphQLRelations,
+    SimpleObject,
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[cfg_attr(
+    feature = "sqlite",
+    graphql_entity(
+        backend = "sqlite",
+        table = "batch_boards",
+        plural = "BatchBoards",
+        auth = "none",
+        schema_policy = "external_read_only"
+    )
+)]
+#[cfg_attr(
+    feature = "postgres",
+    graphql_entity(
+        backend = "postgres",
+        table = "batch_boards",
+        plural = "BatchBoards",
+        auth = "none",
+        schema_policy = "external_read_only"
+    )
+)]
+#[cfg_attr(
+    feature = "mssql",
+    graphql_entity(
+        backend = "mssql",
+        table = "batch_boards",
+        plural = "BatchBoards",
+        auth = "none",
+        schema_policy = "external_read_only"
+    )
+)]
+#[graphql(complex)]
+struct Board {
+    #[primary_key]
+    #[sortable]
+    #[filterable(type = "string")]
+    tenant: String,
+    #[primary_key]
+    #[sortable]
+    #[filterable(type = "string")]
+    id: String,
+    #[graphql(skip)]
+    #[relation(
+        target = "Card",
+        from = ["tenant", "id"],
+        to = ["tenant", "board_id"],
+        multiple,
+        emit_fk = false
+    )]
+    cards: Vec<Card>,
+}
+
+/// A composite-keyed relation target ordered by a numeric position by
+/// default. Card ids repeat across tenants, and positions run in opposite
+/// directions in the two tenants, so a result that mixed tenants or fell back
+/// to key order would not match.
+#[derive(
+    GraphQLEntity,
+    GraphQLOperations,
+    GraphQLRelations,
+    SimpleObject,
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[cfg_attr(
+    feature = "sqlite",
+    graphql_entity(
+        backend = "sqlite",
+        table = "batch_cards",
+        plural = "BatchCards",
+        auth = "none",
+        schema_policy = "external_read_only",
+        default_sort = "position ASC"
+    )
+)]
+#[cfg_attr(
+    feature = "postgres",
+    graphql_entity(
+        backend = "postgres",
+        table = "batch_cards",
+        plural = "BatchCards",
+        auth = "none",
+        schema_policy = "external_read_only",
+        default_sort = "position ASC"
+    )
+)]
+#[cfg_attr(
+    feature = "mssql",
+    graphql_entity(
+        backend = "mssql",
+        table = "batch_cards",
+        plural = "BatchCards",
+        auth = "none",
+        schema_policy = "external_read_only",
+        default_sort = "[position] ASC"
+    )
+)]
+#[graphql(complex)]
+struct Card {
+    #[primary_key]
+    #[sortable]
+    #[filterable(type = "string")]
+    tenant: String,
+    #[primary_key]
+    #[sortable]
+    #[filterable(type = "string")]
+    id: String,
+    board_id: String,
+    /// `tenant/id`, the single-column key the notes relation uses.
+    uid: String,
+    #[sortable]
+    #[filterable(type = "number")]
+    position: i32,
+    #[filterable(type = "string")]
+    label: String,
+    /// Ordering by this count needs the request, so it is never batched.
+    #[graphql(skip)]
+    #[relation(
+        target = "Note",
+        from = "uid",
+        to = "card_uid",
+        multiple,
+        emit_fk = false,
+        order_aggregate(name = "NoteCount", aggregate = "count")
+    )]
+    notes: Vec<Note>,
+}
+
+#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(
+    feature = "sqlite",
+    graphql_entity(
+        backend = "sqlite",
+        table = "batch_notes",
+        plural = "BatchNotes",
+        auth = "none",
+        schema_policy = "external_read_only"
+    )
+)]
+#[cfg_attr(
+    feature = "postgres",
+    graphql_entity(
+        backend = "postgres",
+        table = "batch_notes",
+        plural = "BatchNotes",
+        auth = "none",
+        schema_policy = "external_read_only"
+    )
+)]
+#[cfg_attr(
+    feature = "mssql",
+    graphql_entity(
+        backend = "mssql",
+        table = "batch_notes",
+        plural = "BatchNotes",
+        auth = "none",
+        schema_policy = "external_read_only"
+    )
+)]
+struct Note {
+    #[primary_key]
+    #[sortable]
+    id: String,
+    card_uid: String,
+}
+
+/// Who a request acts for. Requests without one follow the fixture's mode.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Role {
+    /// Reads every card.
+    Admin,
+    /// Hidden cards are excluded in SQL.
+    Member,
+    /// Hidden cards are excluded by a callback, so the relation is not batched.
+    Auditor,
+    /// Reads the visible cards of tenant `t1` only.
+    TenantOne,
+    /// May not read cards at all.
+    Outsider,
+}
+
+schema_roots! { auth: "none", query_custom_ops: [], entities: [List, Step, Board, Card, Note], }
 
 // One test measures a process-global ORM counter; the tests take turns so
 // another test's statements are not attributed to it.
@@ -158,43 +351,82 @@ enum Mode {
     Callback,
 }
 
+/// How one entity's rows are exposed to one request.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Exposure {
+    All,
+    /// Hidden rows excluded by a SQL predicate; `Some(tenant)` adds a tenant.
+    Predicate(Option<&'static str>),
+    Callback,
+    Denied,
+}
+
 #[derive(Clone)]
 struct Policy(Arc<Mutex<Mode>>);
+impl Policy {
+    /// Steps follow the fixture's mode. Cards follow the request's role, or
+    /// the mode when the request carries none.
+    fn exposure(&self, ctx: Option<&Context<'_>>, entity: &str) -> Exposure {
+        let by_mode = match *self.0.lock().unwrap() {
+            Mode::Open => Exposure::All,
+            Mode::Predicate => Exposure::Predicate(None),
+            Mode::Callback => Exposure::Callback,
+        };
+        match entity {
+            "Step" => by_mode,
+            "Card" => match ctx.and_then(|ctx| ctx.data_opt::<Role>()) {
+                None => by_mode,
+                Some(Role::Admin) => Exposure::All,
+                Some(Role::Member) => Exposure::Predicate(None),
+                Some(Role::Auditor) => Exposure::Callback,
+                Some(Role::TenantOne) => Exposure::Predicate(Some("t1")),
+                Some(Role::Outsider) => Exposure::Denied,
+            },
+            _ => Exposure::All,
+        }
+    }
+}
 impl RowPolicy for Policy {
     fn read_visibility<'a>(
         &'a self,
-        _: Option<&'a Context<'_>>,
+        ctx: Option<&'a Context<'_>>,
         _: &'a Database,
         entity: &'static str,
         _: Option<&'static str>,
         _: EntityAccessSurface,
     ) -> BoxFuture<'a, async_graphql::Result<ReadVisibility>> {
         Box::pin(async move {
-            let mode = *self.0.lock().unwrap();
-            if entity != "Step" {
-                return Ok(ReadVisibility::Unrestricted);
-            }
-            Ok(match mode {
-                Mode::Open => ReadVisibility::Unrestricted,
-                Mode::Predicate => {
-                    let filter = StepWhereInput {
-                        label: Some(StringFilter {
-                            ne: Some("hidden".into()),
+            let shown = || {
+                Some(StringFilter {
+                    ne: Some("hidden".into()),
+                    ..Default::default()
+                })
+            };
+            Ok(match (self.exposure(ctx, entity), entity) {
+                (Exposure::Predicate(_), "Step") => ReadVisibility::Complete(
+                    ReadPredicate::from_filter::<DefaultBackend, _>(&StepWhereInput {
+                        label: shown(),
+                        ..Default::default()
+                    })?,
+                ),
+                (Exposure::Predicate(tenant), "Card") => ReadVisibility::Complete(
+                    ReadPredicate::from_filter::<DefaultBackend, _>(&CardWhereInput {
+                        label: shown(),
+                        tenant: tenant.map(|tenant| StringFilter {
+                            eq: Some(tenant.into()),
                             ..Default::default()
                         }),
                         ..Default::default()
-                    };
-                    ReadVisibility::Complete(ReadPredicate::from_filter::<DefaultBackend, _>(
-                        &filter,
-                    )?)
-                }
-                Mode::Callback => ReadVisibility::CallbackOnly,
+                    })?,
+                ),
+                (Exposure::Callback, _) => ReadVisibility::CallbackOnly,
+                _ => ReadVisibility::Unrestricted,
             })
         })
     }
     fn can_read_row<'a>(
         &'a self,
-        _: Option<&'a Context<'_>>,
+        ctx: Option<&'a Context<'_>>,
         _: &'a Database,
         entity: &'static str,
         _: Option<&'static str>,
@@ -202,12 +434,14 @@ impl RowPolicy for Policy {
         row: &'a (dyn Any + Send + Sync),
     ) -> BoxFuture<'a, async_graphql::Result<bool>> {
         Box::pin(async move {
-            if entity != "Step" || *self.0.lock().unwrap() != Mode::Callback {
+            if self.exposure(ctx, entity) != Exposure::Callback {
                 return Ok(true);
             }
-            Ok(row
+            let label = row
                 .downcast_ref::<Step>()
-                .is_some_and(|step| step.label != "hidden"))
+                .map(|step| step.label.as_str())
+                .or_else(|| row.downcast_ref::<Card>().map(|card| card.label.as_str()));
+            Ok(label.is_some_and(|label| label != "hidden"))
         })
     }
     fn can_write_row<'a>(
@@ -225,15 +459,114 @@ impl RowPolicy for Policy {
 impl EntityPolicy for Policy {
     fn can_access_entity<'a>(
         &'a self,
-        _: Option<&'a Context<'_>>,
+        ctx: Option<&'a Context<'_>>,
         _: &'a Database,
-        _: &'static str,
+        entity: &'static str,
         _: Option<&'static str>,
         _: EntityAccessKind,
         _: EntityAccessSurface,
     ) -> BoxFuture<'a, async_graphql::Result<bool>> {
-        Box::pin(async { Ok(true) })
+        Box::pin(async move { Ok(self.exposure(ctx, entity) != Exposure::Denied) })
     }
+}
+
+const TENANTS: [&str; 2] = ["t1", "t2"];
+const BOARDS: [&str; 2] = ["b1", "b2"];
+
+/// One card: its key, parent, position, label and how many notes it has.
+#[derive(Clone, Debug)]
+struct CardRow {
+    tenant: &'static str,
+    id: String,
+    board: &'static str,
+    position: i32,
+    label: &'static str,
+    notes: usize,
+}
+
+/// Every board has twelve cards whose ids repeat in both tenants. Positions
+/// ascend with the id in `t1` and descend in `t2`. Each board also has a
+/// hidden card in the middle, and `t1/b1` has two more cards that tie on a
+/// position. Note counts are distinct within a board, unrelated to position.
+fn cards() -> Vec<CardRow> {
+    let mut cards = Vec::new();
+    for tenant in TENANTS {
+        for board in BOARDS {
+            for n in 0..POSITIONS {
+                cards.push(CardRow {
+                    tenant,
+                    id: format!("{board}-{n}"),
+                    board,
+                    position: if tenant == "t1" { n } else { POSITIONS - 1 - n },
+                    label: "shown",
+                    notes: ((n * 5) % POSITIONS) as usize + 1,
+                });
+            }
+            cards.push(CardRow {
+                tenant,
+                id: format!("{board}-hidden"),
+                board,
+                position: 3,
+                label: "hidden",
+                notes: 20,
+            });
+        }
+    }
+    for (id, notes) in [("b1-5-tie", 13), ("b1-05-tie", 14)] {
+        cards.push(CardRow {
+            tenant: "t1",
+            id: id.into(),
+            board: "b1",
+            position: 5,
+            label: "shown",
+            notes,
+        });
+    }
+    cards
+}
+
+/// How a `cards` selection is ordered.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CardOrder {
+    /// No `orderBy`: the target's declared default order.
+    Default,
+    PositionDescending,
+    /// Context-dependent: counts only the notes the request may read.
+    NoteCountDescending,
+}
+
+impl CardOrder {
+    fn argument(self) -> &'static str {
+        match self {
+            Self::Default => "",
+            Self::PositionDescending => "orderBy: { position: DESC }",
+            Self::NoteCountDescending => "orderBy: { NoteCount: DESC }",
+        }
+    }
+}
+
+/// The card ids one role reads under one board, in the requested order with
+/// the complete primary key as the final tie-break.
+fn expected_cards(role: Role, tenant: &str, board: &str, order: CardOrder) -> Vec<String> {
+    let mut cards = cards()
+        .into_iter()
+        .filter(|card| card.tenant == tenant && card.board == board)
+        .filter(|card| match role {
+            Role::Admin => true,
+            Role::Member | Role::Auditor => card.label != "hidden",
+            Role::TenantOne => card.label != "hidden" && card.tenant == "t1",
+            Role::Outsider => false,
+        })
+        .collect::<Vec<_>>();
+    cards.sort_by(|left, right| {
+        let primary = match order {
+            CardOrder::Default => left.position.cmp(&right.position),
+            CardOrder::PositionDescending => right.position.cmp(&left.position),
+            CardOrder::NoteCountDescending => right.notes.cmp(&left.notes),
+        };
+        primary.then_with(|| left.id.cmp(&right.id))
+    });
+    cards.into_iter().map(|card| card.id).collect()
 }
 
 const PARENTS: [&str; 3] = ["a", "b", "c"];
@@ -325,6 +658,58 @@ impl Fixture {
                 &format!(
                     "INSERT INTO batch_steps VALUES ('{id}', '{list}', {position}, '{label}', 'n')"
                 ),
+            )
+            .await?;
+        }
+        for statement in [
+            "CREATE TABLE batch_boards (tenant VARCHAR(64) NOT NULL, id VARCHAR(64) NOT NULL, \
+             PRIMARY KEY (tenant, id))",
+            "CREATE TABLE batch_cards (tenant VARCHAR(64) NOT NULL, id VARCHAR(64) NOT NULL, \
+             board_id VARCHAR(64) NOT NULL, uid VARCHAR(64) NOT NULL, position INTEGER NOT NULL, \
+             label VARCHAR(64) NOT NULL, PRIMARY KEY (tenant, id))",
+            "CREATE TABLE batch_notes (id VARCHAR(64) PRIMARY KEY, card_uid VARCHAR(64) NOT NULL)",
+            "INSERT INTO batch_boards VALUES ('t1', 'b1'), ('t1', 'b2'), ('t2', 'b1'), ('t2', 'b2'), \
+             ('t1', 'empty')",
+        ] {
+            sql(&db, statement).await?;
+        }
+        let cards = cards();
+        let card_values = cards
+            .iter()
+            .map(|card| {
+                format!(
+                    "('{}', '{}', '{}', '{}/{}', {}, '{}')",
+                    card.tenant,
+                    card.id,
+                    card.board,
+                    card.tenant,
+                    card.id,
+                    card.position,
+                    card.label
+                )
+            })
+            .collect::<Vec<_>>();
+        sql(
+            &db,
+            &format!("INSERT INTO batch_cards VALUES {}", card_values.join(", ")),
+        )
+        .await?;
+        let note_values = cards
+            .iter()
+            .flat_map(|card| {
+                (0..card.notes).map(move |n| {
+                    format!(
+                        "('{}/{}#{n}', '{}/{}')",
+                        card.tenant, card.id, card.tenant, card.id
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        // SQL Server accepts 1,000 rows in one `VALUES` list.
+        for chunk in note_values.chunks(500) {
+            sql(
+                &db,
+                &format!("INSERT INTO batch_notes VALUES {}", chunk.join(", ")),
             )
             .await?;
         }
@@ -807,5 +1192,232 @@ async fn filter_lists_and_patterns_are_bounded() -> Result<(), Box<dyn std::erro
         ..Default::default()
     };
     assert!(beyond.validate().is_err());
+    fixture.finish()
+}
+
+fn cards_query(order: CardOrder, window: Option<(usize, usize)>) -> String {
+    let page =
+        window.map(|(limit, offset)| format!("page: {{ limit: {limit}, offset: {offset} }}"));
+    let arguments = [Some(order.argument().to_string()), page]
+        .into_iter()
+        .flatten()
+        .filter(|argument| !argument.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let arguments = if arguments.is_empty() {
+        String::new()
+    } else {
+        format!("({arguments})")
+    };
+    format!(
+        "{{ batchBoards {{ edges {{ node {{ tenant id cards{arguments} \
+         {{ edges {{ node {{ id tenant position }} }} \
+         pageInfo {{ totalCount hasNextPage hasPreviousPage }} }} }} }} }} }}"
+    )
+}
+
+/// Per `tenant/board`: card ids, total count and page flags. Every returned
+/// card must belong to the tenant of the board it is listed under.
+fn card_pages(
+    response: async_graphql::Response,
+) -> std::collections::BTreeMap<String, (Vec<String>, i64, bool, bool)> {
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let data = response.data.into_json().unwrap();
+    data["batchBoards"]["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|edge| {
+            let node = &edge["node"];
+            let cards = &node["cards"];
+            let ids = cards["edges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|edge| {
+                    assert_eq!(edge["node"]["tenant"], node["tenant"], "cross-tenant row");
+                    edge["node"]["id"].as_str().unwrap().to_string()
+                })
+                .collect();
+            (
+                format!(
+                    "{}/{}",
+                    node["tenant"].as_str().unwrap(),
+                    node["id"].as_str().unwrap()
+                ),
+                (
+                    ids,
+                    cards["pageInfo"]["totalCount"].as_i64().unwrap(),
+                    cards["pageInfo"]["hasNextPage"].as_bool().unwrap(),
+                    cards["pageInfo"]["hasPreviousPage"].as_bool().unwrap(),
+                ),
+            )
+        })
+        .collect()
+}
+
+/// What one role must read for one order and window, per `tenant/board`.
+fn expected_card_pages(
+    role: Role,
+    order: CardOrder,
+    window: Option<(usize, usize)>,
+) -> std::collections::BTreeMap<String, (Vec<String>, i64, bool, bool)> {
+    let mut boards = TENANTS
+        .into_iter()
+        .flat_map(|tenant| BOARDS.into_iter().map(move |board| (tenant, board)))
+        .collect::<Vec<_>>();
+    boards.push(("t1", "empty"));
+    boards
+        .into_iter()
+        .map(|(tenant, board)| {
+            let all = expected_cards(role, tenant, board, order);
+            let (limit, offset) = window.unwrap_or((usize::MAX, 0));
+            let page = all
+                .iter()
+                .skip(offset)
+                .take(limit)
+                .cloned()
+                .collect::<Vec<_>>();
+            let has_next = offset.saturating_add(page.len()) < all.len();
+            (
+                format!("{tenant}/{board}"),
+                (page, all.len() as i64, has_next, offset > 0),
+            )
+        })
+        .collect()
+}
+
+/// The #245 contract as one table: every role, order and window, on a
+/// composite-keyed relation whose keys collide across tenants, with and
+/// without batching.
+#[tokio::test]
+#[cfg_attr(
+    any(feature = "postgres", feature = "mssql"),
+    ignore = "requires owned disposable database"
+)]
+async fn default_order_holds_for_every_role_key_shape_and_authority()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _turn = QUERY_COUNT_LOCK.lock().await;
+    let fixture = Fixture::start("relation-order-matrix").await?;
+    let batched = schema_builder(fixture.db.clone()).finish();
+    let unbatched = unbatched_schema(&fixture.db);
+    let request = |order, window, role: Role| {
+        async_graphql::Request::new(cards_query(order, window)).data(role)
+    };
+
+    let roles = [Role::Admin, Role::Member, Role::Auditor, Role::TenantOne];
+    let orders = [
+        CardOrder::Default,
+        CardOrder::PositionDescending,
+        CardOrder::NoteCountDescending,
+    ];
+    // Unpaged, then three pages of five; the last is partial or empty.
+    let windows = [
+        None,
+        Some((5, 0)),
+        Some((5, 5)),
+        Some((5, 10)),
+        Some((5, 15)),
+    ];
+    for role in roles {
+        for order in orders {
+            for window in windows {
+                let case = format!("{role:?} {order:?} {window:?}");
+                let expected = expected_card_pages(role, order, window);
+                reset_query_count();
+                let from_loader = card_pages(batched.execute(request(order, window, role)).await);
+                let statements = query_count();
+                assert_eq!(from_loader, expected, "{case}: batched");
+                let direct = card_pages(unbatched.execute(request(order, window, role)).await);
+                assert_eq!(direct, expected, "{case}: direct");
+                // Batching eligibility: a SQL-complete visibility with an
+                // order that needs no request context. Five boards then cost
+                // the board list plus one count and one row statement.
+                let eligible = role != Role::Auditor && order != CardOrder::NoteCountDescending;
+                if eligible {
+                    assert!(statements <= 3, "{case}: {statements} statements");
+                }
+            }
+        }
+    }
+
+    // Colliding keys stay apart: `b1-0` is first in `t1` and last in `t2`.
+    let first = card_pages(
+        batched
+            .execute(request(CardOrder::Default, Some((2, 0)), Role::Admin))
+            .await,
+    );
+    assert_eq!(first["t1/b1"].0, ["b1-0", "b1-1"]);
+    assert_eq!(first["t2/b1"].0, ["b1-11", "b1-10"]);
+
+    // A role that may not read cards is refused, with no rows or counts.
+    let denied = batched
+        .execute(request(CardOrder::Default, Some((5, 0)), Role::Outsider))
+        .await;
+    let code = denied.errors.first().and_then(|error| {
+        error
+            .extensions
+            .as_ref()
+            .and_then(|extensions| extensions.get("code"))
+            .map(|code| code.to_string())
+    });
+    assert_eq!(code.as_deref(), Some("\"FORBIDDEN\""), "{denied:?}");
+
+    // Mixed roles in one batch: concurrent requests share the schema-wide
+    // loader, whose long delay puts them in one dispatch. Each reads its own
+    // rows in the declared order, and the refused one fails alone.
+    let shared = schema_builder(fixture.db.clone())
+        .data(
+            DataLoader::new(
+                RelationLoader::<Card, DefaultBackend>::new(fixture.db.clone()),
+                tokio::spawn,
+            )
+            .delay(Duration::from_millis(250)),
+        )
+        .finish();
+    for (order, window) in [
+        (CardOrder::Default, Some((5, 5))),
+        (CardOrder::Default, None),
+        (CardOrder::PositionDescending, Some((5, 0))),
+    ] {
+        let run = |role| shared.execute(request(order, window, role));
+        let (admin, member, tenant_one, outsider) = tokio::join!(
+            run(Role::Admin),
+            run(Role::Member),
+            run(Role::TenantOne),
+            run(Role::Outsider)
+        );
+        for (role, response) in [
+            (Role::Admin, admin),
+            (Role::Member, member),
+            (Role::TenantOne, tenant_one),
+        ] {
+            assert_eq!(
+                card_pages(response),
+                expected_card_pages(role, order, window),
+                "mixed batch, {role:?} {order:?} {window:?}"
+            );
+        }
+        assert!(!outsider.errors.is_empty(), "{outsider:?}");
+    }
+
+    // Current authority: the same schema follows a change of what the
+    // request may read on its next execution; nothing is reused.
+    let by_mode = |window| async_graphql::Request::new(cards_query(CardOrder::Default, window));
+    for (mode, role) in [
+        (Mode::Open, Role::Admin),
+        (Mode::Predicate, Role::Member),
+        (Mode::Callback, Role::Auditor),
+        (Mode::Open, Role::Admin),
+    ] {
+        *fixture.mode.lock().unwrap() = mode;
+        for window in [None, Some((5, 0))] {
+            assert_eq!(
+                card_pages(batched.execute(by_mode(window)).await),
+                expected_card_pages(role, CardOrder::Default, window),
+                "authority {mode:?} {window:?}"
+            );
+        }
+    }
     fixture.finish()
 }

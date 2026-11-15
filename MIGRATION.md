@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.152.0 to 0.153.0: queries, filters and relation loading
+## 0.155.0 to 0.156.0: queries, filters and relation loading
 
 Upgrade runtime and macros together. No schema or data migration is needed.
 Generated SDL, operation catalogues and fingerprints are unchanged.
