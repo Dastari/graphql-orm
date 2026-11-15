@@ -1,10 +1,10 @@
 ---
 title: Bounded runtime platform capability contract
 kind: plan
-status: accepted
+status: archived
 owner: graphql-orm-maintainers
 last_reviewed: 2026-10-12
-review_by: 2026-12-31
+review_by: none
 supersedes: []
 ---
 
