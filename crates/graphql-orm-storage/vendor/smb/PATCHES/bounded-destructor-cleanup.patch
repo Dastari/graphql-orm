@@ -1,5 +1,5 @@
 diff --git a/src/connection.rs b/src/connection.rs
-index 70e43ebc..5ff3c2be 100644
+index 70e43ebc..c0d09fd2 100644
 --- a/src/connection.rs
 +++ b/src/connection.rs
 @@ -783,7 +783,10 @@ impl ConnectionMessageHandler {
@@ -41,14 +41,11 @@ index 70e43ebc..5ff3c2be 100644
      #[cfg(not(feature = "single_threaded"))]
      pub fn stop_notify(&self) {
          #[cfg(feature = "async")]
-@@ -937,19 +951,33 @@ impl Drop for ConnectionMessageHandler {
+@@ -937,19 +951,28 @@ impl Drop for ConnectionMessageHandler {
              Some(worker) => worker,
              None => return,
          };
-+        let stop: connection_info::CleanupTask = Box::pin(async move {
-+            worker.stop().await.ok();
-+        });
- 
+-
          // Local patch (graphql-orm-storage): a destructor never requires a
 -        // current runtime. Without one, the worker's tasks stop with the
 -        // runtime that runs them.
@@ -57,36 +54,34 @@ index 70e43ebc..5ff3c2be 100644
 -                runtime.spawn(async move {
 -                    worker.stop().await.ok();
 -                });
--            }
++        // current runtime, and always ends the worker's loops, which own the
++        // socket. Once negotiated, the worker stops on the connection's
++        // runtime within the cleanup deadline, and a stop abandoned there
++        // aborts the loops. Before or during negotiation (for example when
++        // it was cancelled after the worker started), or when the stop
++        // cannot be handed to a runtime, the loops are aborted at once.
++        let spawned = match self.conn_info.get() {
++            Some(info) => {
++                let stopping = worker.clone();
++                info.cleanup.spawn_bounded(
++                    "worker stop",
++                    Box::pin(async move {
++                        stopping.stop().await.ok();
++                    }),
++                )
+             }
 -            Err(_) => log::debug!(
 -                "Connection dropped outside a runtime; its worker stops with its runtime."
 -            ),
-+        // current runtime, and the worker stop it starts has a deadline. A
-+        // stop abandoned at its deadline aborts the worker's loops, which
-+        // releases the socket.
-+        match self.conn_info.get() {
-+            Some(info) => info.cleanup.spawn_bounded("worker stop", stop),
-+            // Negotiation did not complete: stop on the current runtime, if
-+            // any, within the default timeout.
-+            None => match tokio::runtime::Handle::try_current() {
-+                Ok(runtime) => {
-+                    runtime.spawn(async move {
-+                        if tokio::time::timeout(ConnectionConfig::DEFAULT_TIMEOUT, stop)
-+                            .await
-+                            .is_err()
-+                        {
-+                            log::debug!("Connection cleanup: worker stop abandoned.");
-+                        }
-+                    });
-+                }
-+                Err(_) => log::debug!(
-+                    "Connection dropped outside a runtime; its worker stops with its runtime."
-+                ),
-+            },
++            None => false,
++        };
++        if !spawned {
++            log::debug!("Connection dropped; aborting its worker.");
++            worker.abort();
          }
      }
  }
-@@ -975,6 +1003,31 @@ impl ConnectionMessageHandler {
+@@ -975,6 +998,31 @@ impl ConnectionMessageHandler {
              .map_err(|_| Error::InvalidState("Worker is already set".into()))?;
          Ok(handler)
      }
@@ -118,8 +113,228 @@ index 70e43ebc..5ff3c2be 100644
  }
  
  /// Local patch (graphql-orm-storage): a pinned server identity is enforced
+@@ -1203,3 +1251,219 @@ mod server_identity_tests {
+         );
+     }
+ }
++
++/// Local patch (graphql-orm-storage): dropping a connection needs no current
++/// runtime, never panics and always ends the worker loops that own its
++/// socket, whatever its negotiation state.
++#[cfg(all(test, feature = "async"))]
++mod destructor_runtime_tests {
++    use super::{Connection, ConnectionConfig};
++    use futures_core::future::BoxFuture;
++    use futures_util::FutureExt;
++    use smb_dtyp::Guid;
++    use smb_transport::{SmbTransport, SmbTransportRead, SmbTransportWrite, TransportError};
++    use std::net::SocketAddr;
++    use std::sync::Arc;
++    use std::sync::atomic::{AtomicUsize, Ordering};
++    use std::time::Duration;
++
++    /// A server that accepts every write and never answers. Each transport
++    /// half counts itself when it is dropped.
++    struct SilentServer {
++        dropped: Arc<AtomicUsize>,
++    }
++
++    impl Drop for SilentServer {
++        fn drop(&mut self) {
++            self.dropped.fetch_add(1, Ordering::SeqCst);
++        }
++    }
++
++    impl SmbTransport for SilentServer {
++        fn connect<'a>(
++            &'a mut self,
++            _server_name: &'a str,
++            _address: SocketAddr,
++        ) -> BoxFuture<'a, smb_transport::error::Result<()>> {
++            async { Ok(()) }.boxed()
++        }
++
++        fn default_port(&self) -> u16 {
++            445
++        }
++
++        fn split(
++            self: Box<Self>,
++        ) -> smb_transport::error::Result<(Box<dyn SmbTransportRead>, Box<dyn SmbTransportWrite>)>
++        {
++            let write = SilentServer {
++                dropped: self.dropped.clone(),
++            };
++            Ok((self, Box::new(write)))
++        }
++
++        fn remote_address(&self) -> smb_transport::error::Result<SocketAddr> {
++            Ok(SocketAddr::from(([127, 0, 0, 1], 445)))
++        }
++    }
++
++    impl SmbTransportRead for SilentServer {
++        fn receive_exact<'a>(
++            &'a mut self,
++            _out_buf: &'a mut [u8],
++        ) -> BoxFuture<'a, smb_transport::error::Result<()>> {
++            async {
++                std::future::pending::<()>().await;
++                Err(TransportError::NotConnected)
++            }
++            .boxed()
++        }
++    }
++
++    impl SmbTransportWrite for SilentServer {
++        fn send_raw<'a>(
++            &'a mut self,
++            _buf: &'a [u8],
++        ) -> BoxFuture<'a, smb_transport::error::Result<()>> {
++            async { Ok(()) }.boxed()
++        }
++    }
++
++    fn runtime() -> tokio::runtime::Runtime {
++        tokio::runtime::Builder::new_current_thread()
++            .enable_all()
++            .build()
++            .unwrap()
++    }
++
++    fn connection() -> Connection {
++        Connection::build(
++            "server",
++            SocketAddr::from(([127, 0, 0, 1], 445)),
++            Guid::generate(),
++            ConnectionConfig {
++                smb2_only_negotiate: true,
++                ..ConnectionConfig::default()
++            },
++        )
++        .unwrap()
++    }
++
++    /// Drops `value` on this thread, which must have no current runtime, and
++    /// fails if its destructor panics.
++    fn drop_outside_any_runtime<T>(value: T) {
++        assert!(
++            tokio::runtime::Handle::try_current().is_err(),
++            "precondition: no runtime is current"
++        );
++        std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(value)))
++            .expect("dropping a connection outside any runtime must not panic");
++    }
++
++    /// #718 review: negotiation is cancelled after the worker started, and
++    /// the connection is dropped after `block_on` returned while its runtime
++    /// is still alive. The worker's loops must end and the socket close
++    /// within the cleanup deadline.
++    #[test]
++    fn a_connection_dropped_outside_a_runtime_after_cancelled_negotiation_closes_its_socket() {
++        let runtime = runtime();
++        let dropped = Arc::new(AtomicUsize::new(0));
++        let connection = connection();
++        let cancelled = runtime.block_on(async {
++            tokio::time::timeout(
++                Duration::from_millis(100),
++                connection._negotiate(
++                    Box::new(SilentServer {
++                        dropped: dropped.clone(),
++                    }),
++                    true,
++                ),
++            )
++            .await
++            .is_err()
++        });
++        assert!(
++            cancelled,
++            "precondition: the server never answers NEGOTIATE"
++        );
++        assert!(
++            connection.handler.worker().is_some(),
++            "precondition: the worker started"
++        );
++        assert!(connection.handler.conn_info.get().is_none());
++        assert_eq!(
++            runtime.metrics().num_alive_tasks(),
++            2,
++            "precondition: the worker's receive and send loops are running"
++        );
++        assert_eq!(dropped.load(Ordering::SeqCst), 0);
++
++        drop_outside_any_runtime(connection);
++
++        let closed = runtime.block_on(async {
++            tokio::time::timeout(ConnectionConfig::DEFAULT_TIMEOUT, async {
++                while dropped.load(Ordering::SeqCst) < 2
++                    || tokio::runtime::Handle::current()
++                        .metrics()
++                        .num_alive_tasks()
++                        != 0
++                {
++                    tokio::time::sleep(Duration::from_millis(10)).await;
++                }
++            })
++            .await
++            .is_ok()
++        });
++        assert!(
++            closed,
++            "socket halves dropped {}, {} tasks alive",
++            dropped.load(Ordering::SeqCst),
++            runtime.metrics().num_alive_tasks()
++        );
++    }
++
++    /// The same drop, inside a runtime, during a negotiation still waiting
++    /// for its response.
++    #[tokio::test]
++    async fn a_connection_dropped_while_negotiating_closes_its_socket() {
++        let dropped = Arc::new(AtomicUsize::new(0));
++        let connection = Arc::new(connection());
++        let negotiating = tokio::spawn({
++            let connection = connection.clone();
++            let transport = SilentServer {
++                dropped: dropped.clone(),
++            };
++            async move {
++                let _ = connection._negotiate(Box::new(transport), true).await;
++            }
++        });
++        tokio::time::timeout(Duration::from_secs(5), async {
++            while connection.handler.worker().is_none() {
++                tokio::task::yield_now().await;
++            }
++        })
++        .await
++        .expect("precondition: the worker started");
++        negotiating.abort();
++        let _ = negotiating.await;
++        drop(Arc::into_inner(connection).expect("the negotiation released the connection"));
++        tokio::time::timeout(ConnectionConfig::DEFAULT_TIMEOUT, async {
++            while dropped.load(Ordering::SeqCst) < 2
++                || tokio::runtime::Handle::current()
++                    .metrics()
++                    .num_alive_tasks()
++                    != 0
++            {
++                tokio::time::sleep(Duration::from_millis(10)).await;
++            }
++        })
++        .await
++        .expect("the worker's loops end and the socket closes");
++    }
++
++    /// A connection that never started a worker drops without a runtime.
++    #[test]
++    fn an_unnegotiated_connection_drops_outside_any_runtime() {
++        drop_outside_any_runtime(connection());
++    }
++}
 diff --git a/src/connection/connection_info.rs b/src/connection/connection_info.rs
-index 6adb6689..6dc2032b 100644
+index 6adb6689..917c47be 100644
 --- a/src/connection/connection_info.rs
 +++ b/src/connection/connection_info.rs
 @@ -119,6 +119,11 @@ pub(crate) struct CleanupStats {
@@ -175,7 +390,7 @@ index 6adb6689..6dc2032b 100644
          }
      }
  
-@@ -257,10 +269,44 @@ impl CleanupQueue {
+@@ -257,10 +269,46 @@ impl CleanupQueue {
          self.shutdown.cancel();
      }
  
@@ -185,12 +400,13 @@ index 6adb6689..6dc2032b 100644
 +    /// current runtime. A task that reaches its deadline is dropped, counted
 +    /// as timed out and logged at debug level; without a runtime it is
 +    /// dropped on this thread, counted as refused and logged at debug level.
-+    pub(crate) fn spawn_bounded(&self, what: &'static str, task: CleanupTask) {
++    /// Returns whether the task was handed to the runtime.
++    pub(crate) fn spawn_bounded(&self, what: &'static str, task: CleanupTask) -> bool {
 +        use std::sync::atomic::Ordering;
 +        let Some(runtime) = &self.runtime else {
 +            self.stats.refused.fetch_add(1, Ordering::SeqCst);
 +            log::debug!("No runtime for connection cleanup; {what} is skipped.");
-+            return;
++            return false;
 +        };
 +        let stats = self.stats.clone();
 +        let deadline = self.deadline;
@@ -206,6 +422,7 @@ index 6adb6689..6dc2032b 100644
 +                }
 +            }
 +        });
++        true
 +    }
 +
      #[cfg(test)]
@@ -221,10 +438,21 @@ index 6adb6689..6dc2032b 100644
  
  #[cfg(feature = "async")]
 diff --git a/src/connection/worker/parallel/async_backend.rs b/src/connection/worker/parallel/async_backend.rs
-index faf4bf59..6b904914 100644
+index faf4bf59..9f690999 100644
 --- a/src/connection/worker/parallel/async_backend.rs
 +++ b/src/connection/worker/parallel/async_backend.rs
-@@ -147,6 +147,16 @@ impl AsyncBackend {
+@@ -13,6 +13,10 @@ pub struct AsyncBackend {
+     /// The loop handles for the workers.
+     loop_handles: Mutex<Option<(JoinHandle<()>, JoinHandle<()>)>>,
+ 
++    /// Local patch (graphql-orm-storage): handles that abort the loops, which
++    /// own the transport, from any thread and without a runtime.
++    loop_aborts: std::sync::OnceLock<[tokio::task::AbortHandle; 2]>,
++
+     token: CancellationToken,
+ }
+ 
+@@ -147,6 +151,16 @@ impl AsyncBackend {
      }
  }
  
@@ -241,7 +469,17 @@ index faf4bf59..6b904914 100644
  impl MultiWorkerBackend for AsyncBackend {
      type SendMessage = IoVec;
  
-@@ -191,8 +201,14 @@ impl MultiWorkerBackend for AsyncBackend {
+@@ -173,6 +187,9 @@ impl MultiWorkerBackend for AsyncBackend {
+                 .loop_send(wtransport, send_channel_recv, worker)
+                 .await
+         });
++        let _ = backend
++            .loop_aborts
++            .set([recv_task.abort_handle(), send_task.abort_handle()]);
+         backend
+             .loop_handles
+             .lock()
+@@ -191,10 +208,25 @@ impl MultiWorkerBackend for AsyncBackend {
              .await?
              .take()
              .ok_or(Error::ConnectionStopped)?;
@@ -257,7 +495,103 @@ index faf4bf59..6b904914 100644
 +        (&mut send.0).await?;
          Ok(())
      }
++    fn abort(&self) {
++        self.token.cancel();
++        if let Some(loops) = self.loop_aborts.get() {
++            for task in loops {
++                task.abort();
++            }
++        }
++    }
++
      fn wrap_msg_to_send(msg: IoVec) -> Self::SendMessage {
+         msg
+     }
+diff --git a/src/connection/worker/parallel/backend_trait.rs b/src/connection/worker/parallel/backend_trait.rs
+index e07bba19..46e4b0a1 100644
+--- a/src/connection/worker/parallel/backend_trait.rs
++++ b/src/connection/worker/parallel/backend_trait.rs
+@@ -24,6 +24,11 @@ pub trait MultiWorkerBackend {
+         Self::AwaitingNotifier: std::fmt::Debug;
+     async fn stop(&self) -> crate::Result<()>;
+ 
++    /// Local patch (graphql-orm-storage): ends the worker's loops at once,
++    /// without waiting and without a current runtime, so a destructor can
++    /// always release the transport.
++    fn abort(&self);
++
+     fn wrap_msg_to_send(msg: IoVec) -> Self::SendMessage;
+     fn make_notifier_awaiter_pair() -> (Self::AwaitingNotifier, Self::AwaitingWaiter);
+     // TODO: Consider typing the tx/rx in the trait, like the notifier/awaiter.
+diff --git a/src/connection/worker/parallel/base.rs b/src/connection/worker/parallel/base.rs
+index cfbde99e..4b9f71f2 100644
+--- a/src/connection/worker/parallel/base.rs
++++ b/src/connection/worker/parallel/base.rs
+@@ -38,6 +38,10 @@ where
+     /// multi-threaded or async, depending on the crate configuration.
+     backend_impl: Mutex<Option<Arc<BackendImplT>>>,
+ 
++    /// Local patch (graphql-orm-storage): the backend, kept for
++    /// [`Self::abort`], which must not wait for a lock or a runtime.
++    aborter: std::sync::OnceLock<Arc<BackendImplT>>,
++
+     transformer: Transformer,
+ 
+     /// A channel that is being used to pass on messages that are being received from the server with
+@@ -168,6 +172,7 @@ where
+         let worker = Arc::new(ParallelWorker::<T> {
+             state: Mutex::new(state),
+             backend_impl: Default::default(),
++            aborter: Default::default(),
+             transformer: Transformer::default(),
+             notify_messages_channel: Default::default(),
+             sender: tx,
+@@ -175,15 +180,23 @@ where
+             timeout: AtomicU64::new(u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX)),
+         });
+ 
+-        worker
+-            .backend_impl
+-            .lock()
+-            .await?
+-            .replace(T::start(transport, worker.clone(), rx).await?);
++        let backend = T::start(transport, worker.clone(), rx).await?;
++        let _ = worker.aborter.set(backend.clone());
++        worker.backend_impl.lock().await?.replace(backend);
+ 
+         Ok(worker)
+     }
+ 
++    /// Local patch (graphql-orm-storage): marks the worker stopped and ends
++    /// its loops at once, which releases the transport. Needs no current
++    /// runtime and never blocks, so any destructor may call it.
++    pub(crate) fn abort(&self) {
++        self.stopped.store(true, Ordering::SeqCst);
++        if let Some(backend) = self.aborter.get() {
++            backend.abort();
++        }
++    }
++
+     /// Local patch (graphql-orm-storage): marks the worker stopped after its
+     /// receive loop ended, and fails every awaiting task, so later receives
+     /// fail immediately instead of waiting for a response that cannot arrive.
+diff --git a/src/connection/worker/parallel/threading_backend.rs b/src/connection/worker/parallel/threading_backend.rs
+index 39fdc27e..d42b5341 100644
+--- a/src/connection/worker/parallel/threading_backend.rs
++++ b/src/connection/worker/parallel/threading_backend.rs
+@@ -165,6 +165,12 @@ impl MultiWorkerBackend for ThreadingBackend {
+         Ok(())
+     }
+ 
++    fn abort(&self) {
++        // Threads cannot be aborted; they stop at their next poll.
++        self.stopped
++            .store(true, std::sync::atomic::Ordering::SeqCst);
++    }
++
+     fn wrap_msg_to_send(msg: IoVec) -> Self::SendMessage {
+         Some(msg)
+     }
 diff --git a/src/resource.rs b/src/resource.rs
 index 1a5279b7..09f55efe 100644
 --- a/src/resource.rs

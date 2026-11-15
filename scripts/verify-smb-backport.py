@@ -26,7 +26,7 @@ LOCAL_PATCHES = (
     ('cancel-safe-close', 'PATCHES/cancel-safe-close.patch',
      '5b162f47b1b1a5c038b7025a41e2154815ed069c81120b651da6cb2223474b41'),
     ('bounded-destructor-cleanup', 'PATCHES/bounded-destructor-cleanup.patch',
-     '5493f45febd90fb7a6c5543e08811cbe80f643655b7161c2cd1e6eedf9fa26cb'),
+     'd3d5425c9e11919179ceede1c3069912aa2f31ed6379539fc61fe0cd50f7166d'),
 )
 LICENSE = '59889992272e339d6af995962dca57cb4565c364255f9a453b0f6f20b0365816'
 ROOT = Path(__file__).resolve().parents[1]

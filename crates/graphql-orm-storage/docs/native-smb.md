@@ -104,15 +104,22 @@ logoff or the end of the connection releases it on the server. The connection
 handler's destructor, which shuts the queue down, stops its worker on the
 connection's runtime within the same deadline, and a stop that reaches it
 aborts the worker's receive and send loops, which releases the socket even
-when a write never completes. Every abandoned, refused or skipped step is
+when a write never completes. Before or during negotiation, for example after
+a cancelled negotiation, or when the stop cannot be handed to a runtime, the
+destructor aborts both loops at once through task abort handles, which work on
+any thread without a current runtime, so dropping a connection in any state
+never panics and always closes its socket. Every abandoned, refused or skipped step is
 counted and logged at debug level. The vendored notification task, which
 storage disables, holds its connection weakly. In-crate regression tests use
 real connection, channel, session and tree handlers over a server that
 grants no credits: a CLOSE that times out and drops the last tree reference
 leaves the session and connection freed within the deadline with no task
 left; a deferred TREE_DISCONNECT and LOGOFF each time out and release what
-they hold; and a worker stop blocked in a socket write is abandoned at its
-deadline and drops the socket.
+they hold; a worker stop blocked in a socket write is abandoned at its
+deadline and drops the socket; and a connection whose negotiation was
+cancelled after its worker started, dropped outside any runtime while that
+runtime lives, or inside it while negotiating, ends both loops and drops the
+socket.
 The protocol/authentication companions, cryptographic versions and feature
 selection remain pinned to the existing 0.10.2 family; this is not an adoption
 of the newer SDK's crypto graph.

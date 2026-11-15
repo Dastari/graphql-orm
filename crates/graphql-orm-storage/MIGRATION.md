@@ -23,7 +23,10 @@ connection or socket alive. Cleanup that is abandoned, or refused because the
 connection's cleanup queue is full or has shut down, is left to the server,
 which releases it when the session or socket ends. A tree or session dropped
 on a thread with no current Tokio runtime is now cleaned up on the
-connection's runtime instead of being left to the server.
+connection's runtime instead of being left to the server. A connection dropped
+before or during negotiation, for example after a negotiation timeout or
+cancellation, now closes its socket at once on any thread, instead of leaving
+it open while its runtime lived when no runtime was current.
 
 ## 0.13.0 to 0.14.0: cancel-safe SMB handle close
 

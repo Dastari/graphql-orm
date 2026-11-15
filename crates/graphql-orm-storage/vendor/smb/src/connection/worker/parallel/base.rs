@@ -38,6 +38,10 @@ where
     /// multi-threaded or async, depending on the crate configuration.
     backend_impl: Mutex<Option<Arc<BackendImplT>>>,
 
+    /// Local patch (graphql-orm-storage): the backend, kept for
+    /// [`Self::abort`], which must not wait for a lock or a runtime.
+    aborter: std::sync::OnceLock<Arc<BackendImplT>>,
+
     transformer: Transformer,
 
     /// A channel that is being used to pass on messages that are being received from the server with
@@ -168,6 +172,7 @@ where
         let worker = Arc::new(ParallelWorker::<T> {
             state: Mutex::new(state),
             backend_impl: Default::default(),
+            aborter: Default::default(),
             transformer: Transformer::default(),
             notify_messages_channel: Default::default(),
             sender: tx,
@@ -175,13 +180,21 @@ where
             timeout: AtomicU64::new(u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX)),
         });
 
-        worker
-            .backend_impl
-            .lock()
-            .await?
-            .replace(T::start(transport, worker.clone(), rx).await?);
+        let backend = T::start(transport, worker.clone(), rx).await?;
+        let _ = worker.aborter.set(backend.clone());
+        worker.backend_impl.lock().await?.replace(backend);
 
         Ok(worker)
+    }
+
+    /// Local patch (graphql-orm-storage): marks the worker stopped and ends
+    /// its loops at once, which releases the transport. Needs no current
+    /// runtime and never blocks, so any destructor may call it.
+    pub(crate) fn abort(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        if let Some(backend) = self.aborter.get() {
+            backend.abort();
+        }
     }
 
     /// Local patch (graphql-orm-storage): marks the worker stopped after its

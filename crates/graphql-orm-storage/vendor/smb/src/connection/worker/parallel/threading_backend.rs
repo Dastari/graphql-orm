@@ -165,6 +165,12 @@ impl MultiWorkerBackend for ThreadingBackend {
         Ok(())
     }
 
+    fn abort(&self) {
+        // Threads cannot be aborted; they stop at their next poll.
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     fn wrap_msg_to_send(msg: IoVec) -> Self::SendMessage {
         Some(msg)
     }

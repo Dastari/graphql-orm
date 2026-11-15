@@ -25,7 +25,11 @@ No public API changes.
   references, each within the connection's timeout; a step whose session or
   connection is already gone is skipped. A dropped connection's worker stop
   has the same deadline, and a stop that reaches it aborts the worker's loops,
-  so a socket write that never completes no longer keeps the socket open. An
+  so a socket write that never completes no longer keeps the socket open.
+  Dropping a connection never needs a current runtime and always ends the
+  loops that own its socket: before or during negotiation, for example after
+  a cancelled negotiation, it aborts them at once instead of skipping the
+  stop, which left the socket open while the runtime lived. An
   abandoned step is counted and logged at debug level, and the server
   releases what it would have cleaned up when the session or socket ends.
   The vendored client's notification task, which storage does not enable, no

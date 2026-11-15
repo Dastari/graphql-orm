@@ -951,33 +951,28 @@ impl Drop for ConnectionMessageHandler {
             Some(worker) => worker,
             None => return,
         };
-        let stop: connection_info::CleanupTask = Box::pin(async move {
-            worker.stop().await.ok();
-        });
-
         // Local patch (graphql-orm-storage): a destructor never requires a
-        // current runtime, and the worker stop it starts has a deadline. A
-        // stop abandoned at its deadline aborts the worker's loops, which
-        // releases the socket.
-        match self.conn_info.get() {
-            Some(info) => info.cleanup.spawn_bounded("worker stop", stop),
-            // Negotiation did not complete: stop on the current runtime, if
-            // any, within the default timeout.
-            None => match tokio::runtime::Handle::try_current() {
-                Ok(runtime) => {
-                    runtime.spawn(async move {
-                        if tokio::time::timeout(ConnectionConfig::DEFAULT_TIMEOUT, stop)
-                            .await
-                            .is_err()
-                        {
-                            log::debug!("Connection cleanup: worker stop abandoned.");
-                        }
-                    });
-                }
-                Err(_) => log::debug!(
-                    "Connection dropped outside a runtime; its worker stops with its runtime."
-                ),
-            },
+        // current runtime, and always ends the worker's loops, which own the
+        // socket. Once negotiated, the worker stops on the connection's
+        // runtime within the cleanup deadline, and a stop abandoned there
+        // aborts the loops. Before or during negotiation (for example when
+        // it was cancelled after the worker started), or when the stop
+        // cannot be handed to a runtime, the loops are aborted at once.
+        let spawned = match self.conn_info.get() {
+            Some(info) => {
+                let stopping = worker.clone();
+                info.cleanup.spawn_bounded(
+                    "worker stop",
+                    Box::pin(async move {
+                        stopping.stop().await.ok();
+                    }),
+                )
+            }
+            None => false,
+        };
+        if !spawned {
+            log::debug!("Connection dropped; aborting its worker.");
+            worker.abort();
         }
     }
 }
@@ -1254,5 +1249,221 @@ mod server_identity_tests {
             "{:?}",
             result.err()
         );
+    }
+}
+
+/// Local patch (graphql-orm-storage): dropping a connection needs no current
+/// runtime, never panics and always ends the worker loops that own its
+/// socket, whatever its negotiation state.
+#[cfg(all(test, feature = "async"))]
+mod destructor_runtime_tests {
+    use super::{Connection, ConnectionConfig};
+    use futures_core::future::BoxFuture;
+    use futures_util::FutureExt;
+    use smb_dtyp::Guid;
+    use smb_transport::{SmbTransport, SmbTransportRead, SmbTransportWrite, TransportError};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    /// A server that accepts every write and never answers. Each transport
+    /// half counts itself when it is dropped.
+    struct SilentServer {
+        dropped: Arc<AtomicUsize>,
+    }
+
+    impl Drop for SilentServer {
+        fn drop(&mut self) {
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl SmbTransport for SilentServer {
+        fn connect<'a>(
+            &'a mut self,
+            _server_name: &'a str,
+            _address: SocketAddr,
+        ) -> BoxFuture<'a, smb_transport::error::Result<()>> {
+            async { Ok(()) }.boxed()
+        }
+
+        fn default_port(&self) -> u16 {
+            445
+        }
+
+        fn split(
+            self: Box<Self>,
+        ) -> smb_transport::error::Result<(Box<dyn SmbTransportRead>, Box<dyn SmbTransportWrite>)>
+        {
+            let write = SilentServer {
+                dropped: self.dropped.clone(),
+            };
+            Ok((self, Box::new(write)))
+        }
+
+        fn remote_address(&self) -> smb_transport::error::Result<SocketAddr> {
+            Ok(SocketAddr::from(([127, 0, 0, 1], 445)))
+        }
+    }
+
+    impl SmbTransportRead for SilentServer {
+        fn receive_exact<'a>(
+            &'a mut self,
+            _out_buf: &'a mut [u8],
+        ) -> BoxFuture<'a, smb_transport::error::Result<()>> {
+            async {
+                std::future::pending::<()>().await;
+                Err(TransportError::NotConnected)
+            }
+            .boxed()
+        }
+    }
+
+    impl SmbTransportWrite for SilentServer {
+        fn send_raw<'a>(
+            &'a mut self,
+            _buf: &'a [u8],
+        ) -> BoxFuture<'a, smb_transport::error::Result<()>> {
+            async { Ok(()) }.boxed()
+        }
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    fn connection() -> Connection {
+        Connection::build(
+            "server",
+            SocketAddr::from(([127, 0, 0, 1], 445)),
+            Guid::generate(),
+            ConnectionConfig {
+                smb2_only_negotiate: true,
+                ..ConnectionConfig::default()
+            },
+        )
+        .unwrap()
+    }
+
+    /// Drops `value` on this thread, which must have no current runtime, and
+    /// fails if its destructor panics.
+    fn drop_outside_any_runtime<T>(value: T) {
+        assert!(
+            tokio::runtime::Handle::try_current().is_err(),
+            "precondition: no runtime is current"
+        );
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(value)))
+            .expect("dropping a connection outside any runtime must not panic");
+    }
+
+    /// #718 review: negotiation is cancelled after the worker started, and
+    /// the connection is dropped after `block_on` returned while its runtime
+    /// is still alive. The worker's loops must end and the socket close
+    /// within the cleanup deadline.
+    #[test]
+    fn a_connection_dropped_outside_a_runtime_after_cancelled_negotiation_closes_its_socket() {
+        let runtime = runtime();
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let connection = connection();
+        let cancelled = runtime.block_on(async {
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                connection._negotiate(
+                    Box::new(SilentServer {
+                        dropped: dropped.clone(),
+                    }),
+                    true,
+                ),
+            )
+            .await
+            .is_err()
+        });
+        assert!(
+            cancelled,
+            "precondition: the server never answers NEGOTIATE"
+        );
+        assert!(
+            connection.handler.worker().is_some(),
+            "precondition: the worker started"
+        );
+        assert!(connection.handler.conn_info.get().is_none());
+        assert_eq!(
+            runtime.metrics().num_alive_tasks(),
+            2,
+            "precondition: the worker's receive and send loops are running"
+        );
+        assert_eq!(dropped.load(Ordering::SeqCst), 0);
+
+        drop_outside_any_runtime(connection);
+
+        let closed = runtime.block_on(async {
+            tokio::time::timeout(ConnectionConfig::DEFAULT_TIMEOUT, async {
+                while dropped.load(Ordering::SeqCst) < 2
+                    || tokio::runtime::Handle::current()
+                        .metrics()
+                        .num_alive_tasks()
+                        != 0
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .is_ok()
+        });
+        assert!(
+            closed,
+            "socket halves dropped {}, {} tasks alive",
+            dropped.load(Ordering::SeqCst),
+            runtime.metrics().num_alive_tasks()
+        );
+    }
+
+    /// The same drop, inside a runtime, during a negotiation still waiting
+    /// for its response.
+    #[tokio::test]
+    async fn a_connection_dropped_while_negotiating_closes_its_socket() {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let connection = Arc::new(connection());
+        let negotiating = tokio::spawn({
+            let connection = connection.clone();
+            let transport = SilentServer {
+                dropped: dropped.clone(),
+            };
+            async move {
+                let _ = connection._negotiate(Box::new(transport), true).await;
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while connection.handler.worker().is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("precondition: the worker started");
+        negotiating.abort();
+        let _ = negotiating.await;
+        drop(Arc::into_inner(connection).expect("the negotiation released the connection"));
+        tokio::time::timeout(ConnectionConfig::DEFAULT_TIMEOUT, async {
+            while dropped.load(Ordering::SeqCst) < 2
+                || tokio::runtime::Handle::current()
+                    .metrics()
+                    .num_alive_tasks()
+                    != 0
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the worker's loops end and the socket closes");
+    }
+
+    /// A connection that never started a worker drops without a runtime.
+    #[test]
+    fn an_unnegotiated_connection_drops_outside_any_runtime() {
+        drop_outside_any_runtime(connection());
     }
 }

@@ -13,6 +13,10 @@ pub struct AsyncBackend {
     /// The loop handles for the workers.
     loop_handles: Mutex<Option<(JoinHandle<()>, JoinHandle<()>)>>,
 
+    /// Local patch (graphql-orm-storage): handles that abort the loops, which
+    /// own the transport, from any thread and without a runtime.
+    loop_aborts: std::sync::OnceLock<[tokio::task::AbortHandle; 2]>,
+
     token: CancellationToken,
 }
 
@@ -183,6 +187,9 @@ impl MultiWorkerBackend for AsyncBackend {
                 .loop_send(wtransport, send_channel_recv, worker)
                 .await
         });
+        let _ = backend
+            .loop_aborts
+            .set([recv_task.abort_handle(), send_task.abort_handle()]);
         backend
             .loop_handles
             .lock()
@@ -211,6 +218,15 @@ impl MultiWorkerBackend for AsyncBackend {
         (&mut send.0).await?;
         Ok(())
     }
+    fn abort(&self) {
+        self.token.cancel();
+        if let Some(loops) = self.loop_aborts.get() {
+            for task in loops {
+                task.abort();
+            }
+        }
+    }
+
     fn wrap_msg_to_send(msg: IoVec) -> Self::SendMessage {
         msg
     }

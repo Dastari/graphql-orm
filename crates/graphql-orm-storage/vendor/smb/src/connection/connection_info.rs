@@ -275,12 +275,13 @@ impl CleanupQueue {
     /// current runtime. A task that reaches its deadline is dropped, counted
     /// as timed out and logged at debug level; without a runtime it is
     /// dropped on this thread, counted as refused and logged at debug level.
-    pub(crate) fn spawn_bounded(&self, what: &'static str, task: CleanupTask) {
+    /// Returns whether the task was handed to the runtime.
+    pub(crate) fn spawn_bounded(&self, what: &'static str, task: CleanupTask) -> bool {
         use std::sync::atomic::Ordering;
         let Some(runtime) = &self.runtime else {
             self.stats.refused.fetch_add(1, Ordering::SeqCst);
             log::debug!("No runtime for connection cleanup; {what} is skipped.");
-            return;
+            return false;
         };
         let stats = self.stats.clone();
         let deadline = self.deadline;
@@ -296,6 +297,7 @@ impl CleanupQueue {
                 }
             }
         });
+        true
     }
 
     #[cfg(test)]
