@@ -2,7 +2,7 @@
 
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use async_trait::async_trait;
@@ -392,6 +392,167 @@ async fn restore_refuses_to_start_while_a_writer_holds_the_lock() {
         Err(BackupError::RepositoryLocked { .. })
     ));
     writer.release().await.expect("release");
+}
+
+#[tokio::test]
+async fn a_restore_started_while_a_prune_runs_is_refused_and_succeeds_after_it() {
+    let temp = TempDir::new().expect("temp dir");
+    let local = repository(&temp);
+    let database = Database::with_rows("users", 2);
+    full(&local, id(1), 1, &database).await;
+    full(&local, id(2), 2, &database).await;
+    let repository = Hooked::new(local);
+    repository.stall_next_snapshot_listing();
+
+    let keep = KeepPolicy::default();
+    let (pruned, refused) = tokio::join!(prune(&repository, &keep), async {
+        // The prune holds the lock and is stalled in its snapshot listing.
+        repository.wait_until_listing_stalled().await;
+        let refused = restore_snapshot(
+            &repository,
+            &database,
+            id(2),
+            RestoreContext::empty_database(),
+        )
+        .await;
+        repository.release_listing();
+        refused
+    });
+
+    let error = refused.expect_err("a restore must not start while a prune runs");
+    let BackupError::RestoreStageFailed { source, .. } = error else {
+        panic!("restore reports a validation-stage failure: {error:?}");
+    };
+    assert!(
+        matches!(*source, BackupError::RepositoryLocked { .. }),
+        "{source:?}"
+    );
+    assert_eq!(
+        database.full_applies(),
+        0,
+        "the refused restore applied nothing"
+    );
+    let pruned = pruned.expect("the prune finishes");
+    assert_eq!(pruned.deleted_snapshots, 1);
+    assert!(snapshot_blobs(&repository.inner, id(1)).await.is_empty());
+
+    restore_snapshot(
+        &repository,
+        &database,
+        id(2),
+        RestoreContext::empty_database(),
+    )
+    .await
+    .expect("the retained snapshot restores after the prune");
+    assert_eq!(database.full_applies(), 1);
+    assert_unlocked(&repository.inner).await;
+}
+
+#[tokio::test]
+async fn an_unlocked_restore_racing_a_prune_fails_before_applying_anything() {
+    let temp = TempDir::new().expect("temp dir");
+    let local = repository(&temp);
+    let database = Database::with_rows("users", 2);
+    full(&local, id(1), 1, &database).await;
+    full(&local, id(2), 2, &database).await;
+    let repository = Hooked::new(local);
+    // Without the lock nothing keeps the prune out: it expires the snapshot
+    // the moment restore first reads one of its payloads.
+    repository.prune_on_read(format!("snapshots/{}/database/", id(1)));
+
+    let error = restore_snapshot_with_options(
+        &repository,
+        &database,
+        id(1),
+        RestoreContext::empty_database(),
+        &RestoreOptions {
+            lock_mode: RepositoryLockMode::AssumeNoConcurrentWriters,
+            ..RestoreOptions::default()
+        },
+    )
+    .await
+    .expect_err("the pruned snapshot cannot be restored");
+
+    let pruned = repository
+        .prune_outcome
+        .lock()
+        .expect("outcome")
+        .take()
+        .expect("the hook ran a prune")
+        .expect("an unlocked restore does not keep the prune out");
+    assert_eq!(pruned.deleted_snapshots, 1);
+    let BackupError::RestoreStageFailed { progress, .. } = &error else {
+        panic!("restore reports its failed stage: {error:?}");
+    };
+    assert!(progress.completed_manifest_ids.is_empty(), "{error:?}");
+    assert_eq!(database.full_applies(), 0, "nothing was applied: {error:?}");
+}
+
+#[tokio::test]
+async fn duplicate_content_objects_written_concurrently_share_one_verified_blob() {
+    let temp = TempDir::new().expect("temp dir");
+    let repository = Hooked::new(repository(&temp));
+    let objects = Objects::with_object(b"the same bytes in three live objects")
+        .and_duplicate("media/copy-1")
+        .and_duplicate("media/copy-2");
+    repository.race_content_creates(3);
+
+    let result = create_full_backup_with_options(
+        &repository,
+        &Database::with_rows("users", 1),
+        &objects,
+        full_request(id(1), 1),
+        &BackupExecutionOptions {
+            object_concurrency: 3,
+            ..BackupExecutionOptions::default()
+        },
+    )
+    .await
+    .expect("concurrent writers of the same content all succeed");
+
+    assert_eq!(repository.content_creates_started.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        repository.content_creates_won.load(Ordering::SeqCst),
+        1,
+        "exactly one conditional create stores the content"
+    );
+    let manifest = result.manifest;
+    assert_eq!(manifest.objects.len(), 3);
+    let content_key =
+        object_content_key(&bytes_sha256_hex(b"the same bytes in three live objects"));
+    assert!(
+        manifest
+            .objects
+            .iter()
+            .all(|entry| entry.content_key == content_key)
+    );
+    assert_eq!(
+        repository.inner.list_blobs("objects/").await.expect("list"),
+        vec![content_key.clone()]
+    );
+    verify_manifest_and_objects(&repository, &manifest)
+        .await
+        .expect("every entry verifies against the one blob");
+
+    let sink = CollectingSink::default();
+    restore_objects(&repository, &manifest, &sink)
+        .await
+        .expect("every object restores");
+    let mut restored = sink
+        .restored
+        .lock()
+        .expect("sink")
+        .iter()
+        .map(|object| object.storage_key.clone())
+        .collect::<Vec<_>>();
+    restored.sort();
+    let mut expected = objects
+        .objects
+        .iter()
+        .map(|(object, _)| object.storage_key.clone())
+        .collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(restored, expected);
 }
 
 // ---------------------------------------------------------------------------
@@ -1499,6 +1660,7 @@ struct Database {
     changes: Vec<BackupChangeExport>,
     schema_hash: String,
     cancel_on_restore: Option<BackupCancellation>,
+    full_applies: Arc<AtomicUsize>,
     incremental_applies: Arc<std::sync::atomic::AtomicUsize>,
 }
 
@@ -1514,6 +1676,7 @@ impl Database {
             changes: Vec::new(),
             schema_hash: "schema-hash".to_string(),
             cancel_on_restore: None,
+            full_applies: Arc::default(),
             incremental_applies: Arc::default(),
         }
     }
@@ -1525,6 +1688,10 @@ impl Database {
 
     fn incremental_applies(&self) -> usize {
         self.incremental_applies.load(Ordering::SeqCst)
+    }
+
+    fn full_applies(&self) -> usize {
+        self.full_applies.load(Ordering::SeqCst)
     }
 
     fn with_incompressible_rows(table: &str, count: usize) -> Self {
@@ -1587,6 +1754,7 @@ impl GraphqlOrmBackupAdapter for Database {
         _export: Vec<BackupTableExport>,
         _context: RestoreContext,
     ) -> Result<(), BackupError> {
+        self.full_applies.fetch_add(1, Ordering::SeqCst);
         if let Some(cancellation) = &self.cancel_on_restore {
             cancellation.cancel();
         }
@@ -1629,6 +1797,20 @@ impl Objects {
                 mime_type: None,
             },
             Bytes::from_static(bytes),
+        ));
+        self
+    }
+
+    /// Another live object with the same content under its own key.
+    fn and_duplicate(mut self, storage_key: &str) -> Self {
+        let (object, bytes) = self.objects.last().expect("an object to duplicate").clone();
+        self.objects.push((
+            BackupObjectRef {
+                object_id: Uuid::new_v4(),
+                storage_key: storage_key.to_string(),
+                ..object
+            },
+            bytes,
         ));
         self
     }
@@ -1780,6 +1962,15 @@ struct Hooked {
     fail_lock_release: AtomicBool,
     /// Serves these bytes for a key from its second read on.
     grown: Mutex<Option<(String, Bytes, usize)>>,
+    /// Holds this many conditional object-content creates until all of them
+    /// have started, so they race on the same key.
+    content_race: AtomicUsize,
+    content_creates_started: AtomicUsize,
+    content_creates_won: AtomicUsize,
+    /// Stalls the next snapshot listing until released.
+    stall_listing: AtomicBool,
+    listing_stalled: AtomicBool,
+    release_listing: AtomicBool,
 }
 
 impl Hooked {
@@ -1791,7 +1982,31 @@ impl Hooked {
             hidden: Mutex::new(None),
             fail_lock_release: AtomicBool::new(false),
             grown: Mutex::new(None),
+            content_race: AtomicUsize::new(0),
+            content_creates_started: AtomicUsize::new(0),
+            content_creates_won: AtomicUsize::new(0),
+            stall_listing: AtomicBool::new(false),
+            listing_stalled: AtomicBool::new(false),
+            release_listing: AtomicBool::new(false),
         }
+    }
+
+    fn race_content_creates(&self, writers: usize) {
+        self.content_race.store(writers, Ordering::SeqCst);
+    }
+
+    fn stall_next_snapshot_listing(&self) {
+        self.stall_listing.store(true, Ordering::SeqCst);
+    }
+
+    async fn wait_until_listing_stalled(&self) {
+        while !self.listing_stalled.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    fn release_listing(&self) {
+        self.release_listing.store(true, Ordering::SeqCst);
     }
 
     fn grow_on_second_read(&self, key: String, bytes: Bytes) {
@@ -1849,7 +2064,19 @@ impl BackupRepository for Hooked {
         key: &str,
         body: StorageByteStream,
     ) -> Result<bool, BackupError> {
-        self.inner.put_blob_stream_if_absent(key, body).await
+        let racing = key.starts_with("objects/") && self.content_race.load(Ordering::SeqCst) > 0;
+        if racing {
+            let writers = self.content_race.load(Ordering::SeqCst);
+            self.content_creates_started.fetch_add(1, Ordering::SeqCst);
+            while self.content_creates_started.load(Ordering::SeqCst) < writers {
+                tokio::task::yield_now().await;
+            }
+        }
+        let created = self.inner.put_blob_stream_if_absent(key, body).await?;
+        if racing && created {
+            self.content_creates_won.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(created)
     }
 
     async fn get_blob(&self, key: &str) -> Result<Bytes, BackupError> {
@@ -1875,6 +2102,12 @@ impl BackupRepository for Hooked {
     }
 
     async fn list_blobs(&self, prefix: &str) -> Result<Vec<String>, BackupError> {
+        if prefix.starts_with("snapshots") && self.stall_listing.swap(false, Ordering::SeqCst) {
+            self.listing_stalled.store(true, Ordering::SeqCst);
+            while !self.release_listing.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        }
         let hidden = self.hidden.lock().expect("hook").clone();
         let mut keys = self.inner.list_blobs(prefix).await?;
         keys.retain(|key| Some(key) != hidden.as_ref());

@@ -3,7 +3,7 @@ title: graphql-orm-router agent guide
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-08-07
+last_reviewed: 2026-11-15
 review_by: 2027-02-07
 supersedes: []
 ---
@@ -28,6 +28,11 @@ supersedes: []
 - Do not replace the structural root-ownership compatibility adapter with SDL
   string rewriting. Its exact pinned-version regression tests must pass before
   dependency updates.
+- Never hold a `PluginContext` guard across `operation_principal`, an
+  `insert`, or an `.await`. Its read and write guards lock a `DashMap` shard,
+  and authority renewal writes the principal into the same context. Clone an
+  owned snapshot out of the guard (as `selected_policy` and
+  `selected_node_lookup` do) and drop the guard first.
 - Ordinary in-flight requests remain pinned to their selected graph. Retired
   subscriptions terminate with the documented reload signal and reconnect;
   they never migrate silently.

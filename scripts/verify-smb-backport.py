@@ -23,6 +23,8 @@ LOCAL_PATCHES = (
      '992de03f0d9acc89497c3bbbc0dd912f22811b4cd4046ab5a808007a09c2042a'),
     ('share-access-override', 'PATCHES/share-access-override.patch',
      '469867c4f7bb98502b73f9530fdb2a3b01e585cb07a374c3ee58ab47a4c4a392'),
+    ('cancel-safe-close', 'PATCHES/cancel-safe-close.patch',
+     '5b162f47b1b1a5c038b7025a41e2154815ed069c81120b651da6cb2223474b41'),
 )
 LICENSE = '59889992272e339d6af995962dca57cb4565c364255f9a453b0f6f20b0365816'
 ROOT = Path(__file__).resolve().parents[1]

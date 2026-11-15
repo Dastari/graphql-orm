@@ -3,12 +3,25 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-backup-maintainers
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Changelog
+
+## 0.22.0 (unreleased)
+
+Requires `graphql-orm-storage` 0.14.0, whose SMB handle close is
+cancel-safe: a close that times out before its request is sent no longer
+leaks the server handle. No backup API or behavior changes.
+
+- Tests: a restore started while a prune holds the repository lock is refused
+  and succeeds after it; a restore without the lock that races a prune fails
+  before applying anything; objects with the same content written
+  concurrently share one stored blob, with exactly one conditional create
+  storing it, and all of them verify and restore.
+  ([#540](https://github.com/Dastari/graphql-orm/issues/540))
 
 ## 0.21.0 (unreleased)
 

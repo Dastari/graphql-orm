@@ -3,12 +3,16 @@ title: "graphql-orm-backup"
 kind: reference
 status: active
 owner: graphql-orm-backup-maintainers
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # graphql-orm-backup
+
+Version 0.22.0 requires storage 0.14.0, whose SMB handle close no longer
+leaks a server handle when it times out; the backup API is unchanged. See
+[MIGRATION.md](MIGRATION.md).
 
 Version 0.21.0 requires storage 0.13.0. It refuses manifests whose table and
 row counts do not match their payload entries, manifests and exports that
@@ -82,7 +86,7 @@ restore before replacing a production pin.
 
 ```toml
 [dependencies]
-graphql-orm-backup = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.21.0" }
+graphql-orm-backup = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.22.0" }
 ```
 
 The default `local` feature provides `LocalBackupRepository`. To supply only a

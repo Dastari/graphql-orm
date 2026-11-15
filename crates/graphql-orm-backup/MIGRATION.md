@@ -3,12 +3,19 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-backup-maintainers
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## To 0.22.0: storage 0.14.0
+
+Move `graphql-orm-backup` and `graphql-orm-storage` together to one reviewed
+revision and refresh the lockfile. Storage 0.14.0 is required. No code changes
+are needed; see the storage
+[migration guide](../graphql-orm-storage/MIGRATION.md#0130-to-0140-cancel-safe-smb-handle-close).
 
 ## To 0.21.0: storage 0.13.0
 

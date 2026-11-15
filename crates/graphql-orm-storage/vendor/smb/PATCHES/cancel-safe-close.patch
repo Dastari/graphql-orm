@@ -1,0 +1,867 @@
+diff --git a/src/client/smb_client.rs b/src/client/smb_client.rs
+index 375b1875..a6d4e27d 100644
+--- a/src/client/smb_client.rs
++++ b/src/client/smb_client.rs
+@@ -96,6 +96,45 @@ pub struct AltChannelInfo {
+     connection: Arc<Connection>,
+ }
+ 
++/// Local patch (graphql-orm-storage): the outcome of each step of
++/// [`Client::close`]. The first failure is kept and returned; later ones are
++/// logged, so no failed step is silently ignored.
++#[derive(Default)]
++struct CloseFailures {
++    first: Option<Error>,
++    count: usize,
++}
++
++impl CloseFailures {
++    fn record(&mut self, step: &str, result: crate::Result<()>) {
++        let Err(error) = result else {
++            return;
++        };
++        self.count += 1;
++        if self.first.is_none() {
++            log::warn!("Client close: {step} failed: {error}");
++            self.first = Some(error);
++        } else {
++            log::warn!("Client close: {step} also failed: {error}");
++        }
++    }
++
++    fn into_result(self) -> crate::Result<()> {
++        match self.first {
++            None => Ok(()),
++            Some(error) => {
++                if self.count > 1 {
++                    log::warn!(
++                        "Client close: {} steps failed; returning the first",
++                        self.count
++                    );
++                }
++                Err(error)
++            }
++        }
++    }
++}
++
+ #[maybe_async(AFIT)]
+ impl Client {
+     /// Creates a new `Client` instance with the given configuration.
+@@ -117,11 +156,18 @@ impl Client {
+     /// directly or indirectly.
+     ///
+     /// See [Drop behavior][Client#drop-behavior] for more information.
++    ///
++    /// Local patch (graphql-orm-storage): every tree disconnect, alternate
++    /// channel close, session logoff and connection close is attempted, even
++    /// after an earlier one fails, and the client releases all of them. The
++    /// first failure is returned; later ones are logged.
+     pub async fn close(&self) -> crate::Result<()> {
++        let mut failures = CloseFailures::default();
++
+         // Close all opened shares
+         let mut trees = self.share_connects.lock().await?;
+         for (_unc, connected_tree) in trees.iter() {
+-            connected_tree.tree.disconnect().await?;
++            failures.record("tree disconnect", connected_tree.tree.disconnect().await);
+         }
+         trees.clear();
+ 
+@@ -132,21 +178,22 @@ impl Client {
+                 // First close alternate channels
+                 if let Some(alt_channels) = &mut session.session_alt_channels {
+                     for (_channel_id, alt_conn) in alt_channels.iter() {
+-                        alt_conn.connection.close().await.ok();
++                        failures
++                            .record("alternate channel close", alt_conn.connection.close().await);
+                     }
+                     alt_channels.clear();
+                 }
+                 // Close primary session
+-                session.session.logoff().await.ok();
++                failures.record("session logoff", session.session.logoff().await);
+             }
+         }
+         // Close connections
+         for (_ip, conn) in connections.iter() {
+-            conn.connection.close().await.ok();
++            failures.record("connection close", conn.connection.close().await);
+         }
+         connections.clear();
+ 
+-        Ok(())
++        failures.into_result()
+     }
+ 
+     /// Lists all shares on the specified server.
+@@ -921,3 +968,27 @@ impl MultiChannelUtils {
+         Ok(index_to_address)
+     }
+ }
++
++#[cfg(test)]
++mod close_failure_tests {
++    use super::CloseFailures;
++    use crate::Error;
++
++    #[test]
++    fn every_failed_close_step_is_reported_and_the_first_is_returned() {
++        let mut failures = CloseFailures::default();
++        failures.record("tree disconnect", Ok(()));
++        assert!(failures.first.is_none());
++        failures.record("session logoff", Err(Error::InvalidState("first".into())));
++        failures.record(
++            "connection close",
++            Err(Error::InvalidState("second".into())),
++        );
++        assert_eq!(failures.count, 2);
++        assert!(matches!(
++            failures.into_result(),
++            Err(Error::InvalidState(message)) if message == "first"
++        ));
++        assert!(CloseFailures::default().into_result().is_ok());
++    }
++}
+diff --git a/src/connection.rs b/src/connection.rs
+index 3fb24128..70e43ebc 100644
+--- a/src/connection.rs
++++ b/src/connection.rs
+@@ -176,6 +176,12 @@ impl Connection {
+     ///
+     /// See also [`Client::close`][`crate::Client::close`].
+     pub async fn close(&self) -> crate::Result<()> {
++        // Local patch (graphql-orm-storage): deferred cleanup ends with the
++        // connection.
++        #[cfg(feature = "async")]
++        if let Some(info) = self.handler.conn_info.get() {
++            info.cleanup.shutdown();
++        }
+         match self.handler.worker() {
+             Some(c) => c.stop().await,
+             None => Ok(()),
+@@ -356,6 +362,8 @@ impl Connection {
+             preauth_hash,
+             client_guid: self.handler.client_guid,
+             server_address,
++            #[cfg(feature = "async")]
++            cleanup: connection_info::CleanupQueue::start(self.config.timeout()),
+         })
+     }
+ 
+@@ -919,14 +927,30 @@ impl Drop for ConnectionMessageHandler {
+         #[cfg(not(feature = "single_threaded"))]
+         self.stop_notify();
+ 
++        // Local patch (graphql-orm-storage): deferred cleanup ends with the
++        // connection.
++        if let Some(info) = self.conn_info.get() {
++            info.cleanup.shutdown();
++        }
++
+         let worker = match self.worker.take() {
+             Some(worker) => worker,
+             None => return,
+         };
+ 
+-        tokio::task::spawn(async move {
+-            worker.stop().await.ok();
+-        });
++        // Local patch (graphql-orm-storage): a destructor never requires a
++        // current runtime. Without one, the worker's tasks stop with the
++        // runtime that runs them.
++        match tokio::runtime::Handle::try_current() {
++            Ok(runtime) => {
++                runtime.spawn(async move {
++                    worker.stop().await.ok();
++                });
++            }
++            Err(_) => log::debug!(
++                "Connection dropped outside a runtime; its worker stops with its runtime."
++            ),
++        }
+     }
+ }
+ 
+diff --git a/src/connection/connection_info.rs b/src/connection/connection_info.rs
+index 0c45c19c..6adb6689 100644
+--- a/src/connection/connection_info.rs
++++ b/src/connection/connection_info.rs
+@@ -65,4 +65,354 @@ pub struct ConnectionInfo {
+     pub preauth_hash: PreauthHashState,
+     /// The client GUID used for the connection.
+     pub client_guid: Guid,
++    /// Local patch (graphql-orm-storage): cleanup deferred by destructors,
++    /// run on the connection's runtime.
++    #[cfg(feature = "async")]
++    pub(crate) cleanup: CleanupQueue,
++}
++
++/// Local patch (graphql-orm-storage): the future a cleanup step runs, such as
++/// the CLOSE of a handle dropped while still open.
++#[cfg(feature = "async")]
++pub(crate) type CleanupTask = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
++
++/// Local patch (graphql-orm-storage): a deferred cleanup step. It captures
++/// only weak references and builds its future when it runs, returning `None`
++/// when what it would clean up is already gone, so a queued step never keeps
++/// a connection, session, tree or socket alive.
++#[cfg(feature = "async")]
++pub(crate) type CleanupStep = Box<dyn FnOnce() -> Option<CleanupTask> + Send>;
++
++/// Local patch (graphql-orm-storage): pending cleanup steps a connection
++/// holds at most. Further steps are refused and counted; the server releases
++/// what they would have cleaned up when the session ends.
++#[cfg(feature = "async")]
++pub(crate) const CLEANUP_QUEUE_CAPACITY: usize = 256;
++
++/// Local patch (graphql-orm-storage): what happened to a connection's
++/// deferred cleanup steps.
++#[cfg(feature = "async")]
++#[derive(Debug, Default)]
++pub(crate) struct CleanupStats {
++    /// Refused because the queue was full.
++    pub(crate) overflowed: std::sync::atomic::AtomicU64,
++    /// Refused because the queue had shut down.
++    pub(crate) refused: std::sync::atomic::AtomicU64,
++    /// Ran to completion.
++    pub(crate) completed: std::sync::atomic::AtomicU64,
++    /// Skipped because what they would clean up was already gone.
++    pub(crate) expired: std::sync::atomic::AtomicU64,
++    /// Abandoned at their deadline.
++    pub(crate) timed_out: std::sync::atomic::AtomicU64,
++    /// Dropped, pending or running, when the queue shut down.
++    pub(crate) abandoned: std::sync::atomic::AtomicU64,
++    /// Whether the drain task has ended.
++    pub(crate) finished: std::sync::atomic::AtomicBool,
++}
++
++/// Local patch (graphql-orm-storage): cleanup that destructors defer to the
++/// connection's runtime.
++///
++/// A destructor may run on any thread, with no current Tokio runtime, for
++/// example after `Runtime::block_on` has returned. It offers its step with a
++/// non-blocking `try_send`, which needs no runtime. One task, spawned on the
++/// runtime that negotiated the connection (the one that runs its worker),
++/// runs the steps one at a time, each within a deadline.
++///
++/// The queue holds at most [`CLEANUP_QUEUE_CAPACITY`] steps; a step offered
++/// to a full or shut-down queue is refused, counted and logged at debug level.
++/// The drain task holds no sender and steps hold only weak references, so the
++/// task ends when the last owner of the connection's state drops, or as soon
++/// as the connection is closed or dropped ([`Self::shutdown`]), dropping any
++/// pending steps. Whatever a refused, abandoned or timed-out step would have
++/// closed, the server releases when the session ends.
++#[cfg(feature = "async")]
++#[derive(Clone)]
++pub(crate) struct CleanupQueue {
++    sender: tokio::sync::mpsc::Sender<CleanupStep>,
++    shutdown: tokio_util::sync::CancellationToken,
++    stats: Arc<CleanupStats>,
++}
++
++#[cfg(feature = "async")]
++impl CleanupQueue {
++    /// A queue drained on the current runtime, each step within `deadline`
++    /// (the connection's default timeout when zero, which would mean
++    /// forever), or one that refuses every step when there is no runtime.
++    pub(crate) fn start(deadline: std::time::Duration) -> Self {
++        Self::with_capacity(CLEANUP_QUEUE_CAPACITY, deadline)
++    }
++
++    fn with_capacity(capacity: usize, deadline: std::time::Duration) -> Self {
++        let deadline = if deadline.is_zero() {
++            ConnectionConfig::DEFAULT_TIMEOUT
++        } else {
++            deadline
++        };
++        let (sender, receiver) = tokio::sync::mpsc::channel::<CleanupStep>(capacity);
++        let shutdown = tokio_util::sync::CancellationToken::new();
++        let stats = Arc::new(CleanupStats::default());
++        match tokio::runtime::Handle::try_current() {
++            Ok(runtime) => {
++                runtime.spawn(Self::drain(
++                    receiver,
++                    shutdown.clone(),
++                    stats.clone(),
++                    deadline,
++                ));
++            }
++            Err(_) => {
++                drop(receiver);
++                stats
++                    .finished
++                    .store(true, std::sync::atomic::Ordering::SeqCst);
++            }
++        }
++        Self {
++            sender,
++            shutdown,
++            stats,
++        }
++    }
++
++    async fn drain(
++        mut receiver: tokio::sync::mpsc::Receiver<CleanupStep>,
++        shutdown: tokio_util::sync::CancellationToken,
++        stats: Arc<CleanupStats>,
++        deadline: std::time::Duration,
++    ) {
++        use std::sync::atomic::Ordering;
++        loop {
++            let step = tokio::select! {
++                biased;
++                _ = shutdown.cancelled() => break,
++                step = receiver.recv() => match step {
++                    Some(step) => step,
++                    // Every owner of the connection's state is gone.
++                    None => break,
++                },
++            };
++            let Some(task) = step() else {
++                stats.expired.fetch_add(1, Ordering::SeqCst);
++                continue;
++            };
++            tokio::select! {
++                biased;
++                _ = shutdown.cancelled() => {
++                    stats.abandoned.fetch_add(1, Ordering::SeqCst);
++                    break;
++                }
++                outcome = tokio::time::timeout(deadline, task) => match outcome {
++                    Ok(()) => {
++                        stats.completed.fetch_add(1, Ordering::SeqCst);
++                    }
++                    Err(_) => {
++                        stats.timed_out.fetch_add(1, Ordering::SeqCst);
++                        log::debug!(
++                            "Deferred cleanup step abandoned after {deadline:?}; the server releases it when the session ends."
++                        );
++                    }
++                },
++            }
++        }
++        receiver.close();
++        let mut pending = 0;
++        while receiver.try_recv().is_ok() {
++            pending += 1;
++        }
++        if pending > 0 {
++            stats.abandoned.fetch_add(pending, Ordering::SeqCst);
++            log::debug!(
++                "Connection cleanup ended with {pending} pending steps; the server releases them when the session ends."
++            );
++        }
++        stats.finished.store(true, Ordering::SeqCst);
++    }
++
++    /// Offers `step` without blocking and without a runtime. Returns whether
++    /// it was queued; a refused step is counted and dropped on this thread.
++    pub(crate) fn defer(&self, step: CleanupStep) -> bool {
++        use std::sync::atomic::Ordering;
++        match self.sender.try_send(step) {
++            Ok(()) => true,
++            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
++                self.stats.overflowed.fetch_add(1, Ordering::SeqCst);
++                log::debug!(
++                    "Connection cleanup queue is full; the server releases the step's resource when the session ends."
++                );
++                false
++            }
++            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
++                self.stats.refused.fetch_add(1, Ordering::SeqCst);
++                log::debug!(
++                    "Connection cleanup has shut down; the server releases the step's resource when the session ends."
++                );
++                false
++            }
++        }
++    }
++
++    /// Ends the drain task and drops pending steps. Needs no runtime.
++    pub(crate) fn shutdown(&self) {
++        self.shutdown.cancel();
++    }
++
++    #[cfg(test)]
++    pub(crate) fn stats(&self) -> &CleanupStats {
++        &self.stats
++    }
++}
++
++#[cfg(feature = "async")]
++impl std::fmt::Debug for CleanupQueue {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("CleanupQueue")
++            .field("shut_down", &self.shutdown.is_cancelled())
++            .field("stats", &self.stats)
++            .finish()
++    }
++}
++
++#[cfg(all(test, feature = "async"))]
++mod cleanup_queue_tests {
++    use super::{CleanupQueue, CleanupStep};
++    use std::sync::{
++        Arc, Weak,
++        atomic::{AtomicBool, Ordering},
++    };
++    use std::time::Duration;
++
++    fn runtime() -> tokio::runtime::Runtime {
++        tokio::runtime::Builder::new_current_thread()
++            .enable_all()
++            .build()
++            .unwrap()
++    }
++
++    fn flag_step(flag: &Arc<AtomicBool>) -> CleanupStep {
++        let flag = flag.clone();
++        Box::new(move || Some(Box::pin(async move { flag.store(true, Ordering::SeqCst) })))
++    }
++
++    /// A step that, like a CLOSE waiting for credits that are never granted,
++    /// holds its upgraded owner and never finishes.
++    fn stuck_step(owner: Weak<()>) -> CleanupStep {
++        Box::new(move || {
++            let owner = owner.upgrade()?;
++            Some(Box::pin(async move {
++                let _owner = owner;
++                std::future::pending::<()>().await
++            }))
++        })
++    }
++
++    async fn settle() {
++        for _ in 0..200 {
++            tokio::task::yield_now().await;
++        }
++    }
++
++    #[test]
++    fn a_step_deferred_outside_any_runtime_runs_on_the_connections_runtime() {
++        let runtime = runtime();
++        let queue = runtime.block_on(async { CleanupQueue::start(Duration::from_secs(5)) });
++        let ran = Arc::new(AtomicBool::new(false));
++        assert!(tokio::runtime::Handle::try_current().is_err());
++        assert!(queue.defer(flag_step(&ran)));
++        runtime.block_on(settle());
++        assert!(ran.load(Ordering::SeqCst), "the deferred step ran");
++        assert_eq!(queue.stats().completed.load(Ordering::SeqCst), 1);
++    }
++
++    #[test]
++    fn steps_beyond_the_capacity_are_refused_and_counted_without_blocking() {
++        let runtime = runtime();
++        let queue =
++            runtime.block_on(async { CleanupQueue::with_capacity(4, Duration::from_secs(5)) });
++        // The drain task cannot run while the runtime is idle, so the queue fills.
++        let ran = Arc::new(AtomicBool::new(false));
++        let accepted = (0..10).filter(|_| queue.defer(flag_step(&ran))).count();
++        assert_eq!(accepted, 4);
++        assert_eq!(queue.stats().overflowed.load(Ordering::SeqCst), 6);
++        runtime.block_on(settle());
++        assert_eq!(queue.stats().completed.load(Ordering::SeqCst), 4);
++    }
++
++    #[test]
++    fn a_stuck_step_times_out_and_queued_steps_never_retain_their_owner() {
++        let runtime = runtime();
++        let queue = runtime.block_on(async { CleanupQueue::start(Duration::from_millis(100)) });
++        let running = Arc::new(());
++        let queued = Arc::new(());
++        let (running_weak, queued_weak) = (Arc::downgrade(&running), Arc::downgrade(&queued));
++        assert!(queue.defer(stuck_step(running_weak.clone())));
++        assert!(queue.defer(stuck_step(queued_weak.clone())));
++        // The first step holds its owner while it runs; the second waits
++        // behind it holding only a weak reference.
++        runtime.block_on(settle());
++        drop(queued);
++        assert!(
++            queued_weak.upgrade().is_none(),
++            "a queued step retained its owner"
++        );
++        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(150)).await });
++        assert_eq!(queue.stats().timed_out.load(Ordering::SeqCst), 1);
++        // The stuck step was abandoned, so dropping the last owner frees it.
++        drop(running);
++        assert!(
++            running_weak.upgrade().is_none(),
++            "a timed-out step retained its owner"
++        );
++        runtime.block_on(settle());
++        assert_eq!(queue.stats().expired.load(Ordering::SeqCst), 1);
++    }
++
++    #[test]
++    fn shutdown_ends_the_drain_task_and_drops_pending_steps() {
++        let runtime = runtime();
++        let queue = runtime.block_on(async { CleanupQueue::start(Duration::from_secs(5)) });
++        let owner = Arc::new(());
++        assert!(queue.defer(stuck_step(Arc::downgrade(&owner))));
++        let ran = Arc::new(AtomicBool::new(false));
++        assert!(queue.defer(flag_step(&ran)));
++        runtime.block_on(settle());
++        queue.shutdown();
++        runtime.block_on(settle());
++        let stats = queue.stats();
++        assert!(
++            stats.finished.load(Ordering::SeqCst),
++            "the drain task ended"
++        );
++        assert_eq!(stats.abandoned.load(Ordering::SeqCst), 2);
++        assert!(!ran.load(Ordering::SeqCst));
++        assert_eq!(
++            Arc::strong_count(&owner),
++            1,
++            "the abandoned step released its owner"
++        );
++        assert!(!queue.defer(flag_step(&ran)));
++        assert_eq!(stats.refused.load(Ordering::SeqCst), 1);
++    }
++
++    #[test]
++    fn the_drain_task_ends_when_the_last_owner_drops() {
++        let runtime = runtime();
++        let queue = runtime.block_on(async { CleanupQueue::start(Duration::from_secs(5)) });
++        let stats = queue.stats.clone();
++        drop(queue);
++        runtime.block_on(settle());
++        assert!(stats.finished.load(Ordering::SeqCst));
++    }
++
++    #[test]
++    fn a_step_deferred_after_the_runtime_shut_down_is_refused_without_panicking() {
++        let runtime = runtime();
++        let queue = runtime.block_on(async { CleanupQueue::start(Duration::from_secs(5)) });
++        drop(runtime);
++        let ran = Arc::new(AtomicBool::new(false));
++        assert!(!queue.defer(flag_step(&ran)));
++        assert!(!ran.load(Ordering::SeqCst));
++        // Without a runtime at all, the queue refuses every step.
++        assert!(!CleanupQueue::start(Duration::from_secs(5)).defer(flag_step(&ran)));
++    }
+ }
+diff --git a/src/resource.rs b/src/resource.rs
+index d80fb4c7..1a5279b7 100644
+--- a/src/resource.rs
++++ b/src/resource.rs
+@@ -1,6 +1,6 @@
+ use std::sync::{
+     Arc,
+-    atomic::{AtomicBool, Ordering},
++    atomic::{AtomicU8, Ordering},
+ };
+ 
+ use maybe_async::*;
+@@ -170,7 +170,7 @@ impl Resource {
+         let handle = ResourceHandle {
+             name: name.to_string(),
+             handler: ResourceMessageHandle::new(upstream),
+-            open: AtomicBool::new(true),
++            state: HandleState::open(),
+             _file_id: response.file_id,
+             created: response.creation_time.date_time(),
+             modified: response.last_write_time.date_time(),
+@@ -255,9 +255,8 @@ pub struct ResourceHandle {
+     name: String,
+     handler: HandlerReference<ResourceMessageHandle>,
+ 
+-    // Whether the resource is open or not.
+-    // TODO: Consider using RwLock here on FileId instead of AtomicBool+FileId.
+-    open: AtomicBool,
++    // Whether the resource is open, closing, or closed.
++    state: HandleState,
+ 
+     // Avoid accessing directly; use the `file_id()` getter,
+     // that makes sure the resource is still open.
+@@ -306,7 +305,7 @@ impl ResourceHandle {
+         // The current design here allows the race condition over a close after this validation occurs.
+         // therefore, this atomic load can be relaxed, and actual atomic compare and exchange are used
+         // to avoid double close somehow.
+-        if !self.open.load(std::sync::atomic::Ordering::Relaxed) {
++        if !self.state.is_open() {
+             return Err(Error::InvalidState("Resource is closed".into()));
+         }
+         Ok(self._file_id)
+@@ -793,15 +792,37 @@ impl ResourceHandle {
+     /// Closes the resource.
+     /// The resource may not be used after calling this method.
+     ///
++    /// Local patch (graphql-orm-storage): the handle is marked closed only
++    /// once the CLOSE request has been handed to the connection. A close that
++    /// fails or is cancelled before then, for example while it waits for a
++    /// credit, leaves the handle open, so dropping it still closes it on the
++    /// server. Once CLOSE is sent the server closes the handle whether or not
++    /// the response is awaited; an error response is returned.
++    ///
+     /// # Returns
+     /// A `Result` indicating success or failure.
+     pub async fn close(&self) -> crate::Result<()> {
+-        if !self.open.swap(false, std::sync::atomic::Ordering::Relaxed) {
+-            return Err(Error::InvalidState("Resource is already closed".into()));
+-        }
++        let closing = self.state.begin_close()?;
+ 
+         log::debug!("Closing handle for {} ({:?})", self.name, self._file_id);
+-        Self::send_close(self._file_id, &self.handler).await?;
++        let request = OutgoingMessage::new(
++            CloseRequest {
++                file_id: self._file_id,
++            }
++            .into(),
++        );
++        let channel_id = request.channel_id;
++        let sent = self.handler.sendo(request).await?;
++        closing.sent();
++
++        let mut options = ReceiveOptions::new().with_cmd(Some(Command::Close));
++        options.msg_id = sent.msg_id;
++        options.channel_id = channel_id;
++        let response = self.handler.recvo(options).await?;
++        log::debug!(
++            "Close response received for file ID: {:?}, {response:?}",
++            self._file_id
++        );
+ 
+         log::debug!("Closed file {}.", self.name);
+ 
+@@ -917,21 +938,103 @@ impl Drop for ResourceHandle {
+ #[cfg(feature = "async")]
+ impl Drop for ResourceHandle {
+     fn drop(&mut self) {
+-        if !self.open.swap(false, std::sync::atomic::Ordering::Relaxed) {
+-            // already closed, no problem
++        if !self.state.take_for_drop() {
++            // CLOSE was already sent, no problem
+             return;
+         }
+ 
+         let file_id = self._file_id;
+-        let handler = self.handler.clone();
+-        log::debug!("Spawning task to close file with ID: {file_id:?}");
+-        tokio::task::spawn(async move {
+-            if file_id != FileId::EMPTY {
++        if file_id == FileId::EMPTY {
++            return;
++        }
++        // Local patch (graphql-orm-storage): the destructor may run on any
++        // thread, with no current runtime. The CLOSE goes to the connection's
++        // bounded cleanup queue, which runs it on the connection's runtime
++        // within a deadline. The queued step holds only a weak reference to
++        // the tree, so it never keeps the connection alive; if the tree is
++        // gone by then, so is the session that held the handle.
++        let tree = self.handler.upstream.weak();
++        log::debug!("Deferring close of file with ID: {file_id:?}");
++        let deferred = self.conn_info.cleanup.defer(Box::new(move || {
++            let upstream = HandlerReference {
++                handler: tree.upgrade()?,
++            };
++            Some(Box::pin(async move {
++                let handler = ResourceMessageHandle::new(&upstream);
+                 if let Err(e) = Self::send_close(file_id, &handler).await {
+                     log::error!("Error closing file: {e}");
+                 }
+-            }
+-        });
++            }))
++        }));
++        if !deferred {
++            // Refused (full or shut down) and counted by the queue: the
++            // server releases the handle when the session ends.
++            log::debug!("Close of file with ID {file_id:?} not deferred.");
++        }
++    }
++}
++
++/// Local patch (graphql-orm-storage): whether a handle is open, has a close
++/// in progress, or has had CLOSE sent.
++///
++/// A close moves the handle from open to closing, and to closed only once the
++/// CLOSE request has been handed to the connection. If the close fails or is
++/// cancelled before then, its [`ClosingHandle`] returns the handle to open, so
++/// the destructor still closes it on the server instead of leaking it.
++struct HandleState(AtomicU8);
++
++impl HandleState {
++    const OPEN: u8 = 0;
++    const CLOSING: u8 = 1;
++    const CLOSED: u8 = 2;
++
++    fn open() -> Self {
++        Self(AtomicU8::new(Self::OPEN))
++    }
++
++    fn is_open(&self) -> bool {
++        self.0.load(Ordering::Acquire) == Self::OPEN
++    }
++
++    /// Starts a close, refusing a handle that is closed or already closing.
++    fn begin_close(&self) -> crate::Result<ClosingHandle<'_>> {
++        match self.0.compare_exchange(
++            Self::OPEN,
++            Self::CLOSING,
++            Ordering::AcqRel,
++            Ordering::Acquire,
++        ) {
++            Ok(_) => Ok(ClosingHandle { state: self }),
++            Err(Self::CLOSING) => Err(Error::InvalidState("Resource is already closing".into())),
++            Err(_) => Err(Error::InvalidState("Resource is already closed".into())),
++        }
++    }
++
++    /// Marks the handle closed for the destructor. Returns whether the handle
++    /// was still open, so the destructor must send CLOSE itself.
++    fn take_for_drop(&self) -> bool {
++        // No close can be in progress: a close borrows the handle.
++        self.0.swap(Self::CLOSED, Ordering::AcqRel) == Self::OPEN
++    }
++}
++
++/// Local patch (graphql-orm-storage): a close in progress. Dropping it before
++/// [`Self::sent`] returns the handle to open.
++struct ClosingHandle<'a> {
++    state: &'a HandleState,
++}
++
++impl ClosingHandle<'_> {
++    /// CLOSE has been handed to the connection: the server closes the handle.
++    fn sent(self) {
++        self.state.0.store(HandleState::CLOSED, Ordering::Release);
++        std::mem::forget(self);
++    }
++}
++
++impl Drop for ClosingHandle<'_> {
++    fn drop(&mut self) {
++        self.state.0.store(HandleState::OPEN, Ordering::Release);
+     }
+ }
+ 
+@@ -998,6 +1101,62 @@ mod share_access_tests {
+     }
+ }
+ 
++#[cfg(all(test, feature = "async"))]
++mod close_state_tests {
++    use super::HandleState;
++    use crate::Error;
++    use std::time::Duration;
++
++    #[test]
++    fn a_sent_close_leaves_nothing_for_the_destructor() {
++        let state = HandleState::open();
++        let closing = state.begin_close().unwrap();
++        assert!(!state.is_open(), "a closing handle is not usable");
++        closing.sent();
++        assert!(!state.is_open());
++        assert!(matches!(state.begin_close(), Err(Error::InvalidState(_))));
++        assert!(!state.take_for_drop(), "CLOSE was already sent");
++    }
++
++    #[test]
++    fn a_close_that_fails_before_sending_keeps_the_handle_open() {
++        let state = HandleState::open();
++        drop(state.begin_close().unwrap());
++        assert!(state.is_open());
++        assert!(state.take_for_drop(), "the destructor must send CLOSE");
++        assert!(!state.take_for_drop());
++    }
++
++    #[test]
++    fn a_concurrent_close_is_refused_while_one_is_in_progress() {
++        let state = HandleState::open();
++        let closing = state.begin_close().unwrap();
++        assert!(matches!(state.begin_close(), Err(Error::InvalidState(_))));
++        drop(closing);
++        state.begin_close().unwrap().sent();
++    }
++
++    #[tokio::test]
++    async fn a_close_cancelled_while_waiting_for_a_credit_stays_the_destructors() {
++        let state = HandleState::open();
++        let credits = tokio::sync::Semaphore::new(0);
++        let close = async {
++            let closing = state.begin_close()?;
++            // Waits for a credit that never arrives.
++            credits.acquire().await.unwrap().forget();
++            closing.sent();
++            Ok::<_, Error>(())
++        };
++        assert!(
++            tokio::time::timeout(Duration::from_millis(50), close)
++                .await
++                .is_err()
++        );
++        assert!(state.is_open(), "the unsent close is not confirmed");
++        assert!(state.take_for_drop(), "the destructor must send CLOSE");
++    }
++}
++
+ #[cfg(test)]
+ mod resource_kind_tests {
+     use super::{ResourceKind, resource_kind};
+diff --git a/src/session.rs b/src/session.rs
+index 7ca16239..c46797d7 100644
+--- a/src/session.rs
++++ b/src/session.rs
+@@ -381,11 +381,18 @@ impl Drop for SessionMessageHandler {
+             return;
+         }
+ 
++        // Local patch (graphql-orm-storage): a destructor never requires a
++        // current runtime. Without one, the server ends the session when the
++        // connection closes.
++        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
++            log::debug!("Session dropped outside a runtime; it ends when its connection closes.");
++            return;
++        };
+         let session_id = self.session_id;
+         let primary_channel_id = self.primary_channel_id;
+         let primary_channel = self.primary_channel.clone();
+ 
+-        tokio::task::spawn(async move {
++        runtime.spawn(async move {
+             let temp_handler = SessionMessageHandler {
+                 session_id,
+                 dropping: AtomicBool::new(false),
+diff --git a/src/session/channel.rs b/src/session/channel.rs
+index f21eedb4..07a56f69 100644
+--- a/src/session/channel.rs
++++ b/src/session/channel.rs
+@@ -483,6 +483,9 @@ mod tests {
+             },
+             preauth_hash: crate::connection::preauth_hash::PreauthHashState::Unsupported,
+             client_guid: Guid::generate(),
++            cleanup: crate::connection::connection_info::CleanupQueue::start(
++                std::time::Duration::from_secs(10),
++            ),
+         }
+     }
+ 
+diff --git a/src/tree.rs b/src/tree.rs
+index b09b2806..c2cb93c2 100644
+--- a/src/tree.rs
++++ b/src/tree.rs
+@@ -370,10 +370,20 @@ impl Drop for TreeMessageHandler {
+             return;
+         }
+ 
++        // Local patch (graphql-orm-storage): a destructor never requires a
++        // current runtime. Without one, the server disconnects the tree when
++        // the session ends.
++        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
++            log::debug!(
++                "Tree {} dropped outside a runtime; it is disconnected when the session ends.",
++                self.tree_name
++            );
++            return;
++        };
+         let upstream = self.upstream.clone();
+         let tree_name = self.tree_name.clone();
+         let encrypt = self.info.share_flags.encrypt_data();
+-        tokio::task::spawn(async move {
++        runtime.spawn(async move {
+             Self::_disconnect(upstream, tree_id, encrypt)
+                 .await
+                 .map_err(|e| {

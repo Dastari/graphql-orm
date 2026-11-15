@@ -3,12 +3,31 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.13.0 to 0.14.0: cancel-safe SMB handle close
+
+Update the storage requirement to 0.14.0 and refresh the consumer lockfile. No
+code changes are needed: the public API is unchanged.
+
+An SMB operation whose handle close times out or is cancelled before CLOSE is
+sent now leaves that handle to be closed in the background on the same
+session, instead of leaving it open on the server until the session ends.
+Paths such a close used to hold, for example a held directory or a file
+opened without delete sharing, become available again once the session can
+send the request.
+
+Dropping a vendored SMB handle, tree, session or connection on a thread with
+no current Tokio runtime, for example after `Runtime::block_on` returned, no
+longer panics. A handle dropped that way is closed when the connection's
+runtime next runs, if the connection's bounded cleanup queue accepts it
+within its 256 pending closes and the close finishes within the connection's
+timeout; otherwise the server releases it when the session ends.
 
 ## 0.12.0 to 0.13.0: SMB sweep, error retryability and messages
 

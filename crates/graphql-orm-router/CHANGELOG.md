@@ -10,6 +10,15 @@ supersedes: []
 
 # Changelog
 
+## 0.15.3 (unreleased)
+
+- The router-hosted Node subgraph hook clones the request's selected Node
+  lookup out of the plugin context before executing it, as the authorization
+  hooks do for the policy, so no context read lock is held while it runs and
+  it cannot contend with authority renewal writing the principal.
+- Agent guide: never hold a plugin context guard across principal
+  resolution, an insert or an await.
+
 ## 0.15.2 (unreleased)
 
 - Fix an intermittent established-WebSocket deadlock during role-authority

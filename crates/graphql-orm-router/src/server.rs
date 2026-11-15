@@ -612,7 +612,18 @@ fn selected_policy(
 }
 
 /// The `Node` implementations of the graph this request is pinned to.
+#[derive(Clone)]
 struct SelectedNodeLookup(Option<Arc<crate::node_lookup::NodeLookup>>);
+
+// As with the policy: clone the lookup out of the context so no shard read
+// lock is held while the Node subgraph request executes.
+fn selected_node_lookup(
+    context: &hive_router::plugins::plugin_context::PluginContext,
+) -> Option<SelectedNodeLookup> {
+    context
+        .get_ref::<SelectedNodeLookup>()
+        .map(|selected| (*selected).clone())
+}
 
 #[derive(Clone, Copy)]
 struct TrustedInternalSubscription;
@@ -1179,13 +1190,11 @@ impl RouterPlugin for StaticGraphPlugin {
         if payload.subgraph_name == crate::node_lookup::NODE_SUBGRAPH_NAME {
             // The router-hosted Node subgraph is never contacted over the
             // network; answer from the graph this request is pinned to.
-            let response = {
-                let selected = payload.context.get_ref::<SelectedNodeLookup>();
-                crate::node_lookup::execute(
-                    selected.as_deref().and_then(|selected| selected.0.as_ref()),
-                    &payload.body,
-                )
-            };
+            let selected = selected_node_lookup(payload.context);
+            let response = crate::node_lookup::execute(
+                selected.as_ref().and_then(|selected| selected.0.as_ref()),
+                &payload.body,
+            );
             let mut headers = hive_router::http::HeaderMap::new();
             headers.insert(
                 hive_router::http::header::CONTENT_TYPE,
@@ -1646,6 +1655,28 @@ mod tests {
         drop(selected);
         renewal.join().unwrap();
         result.expect("policy snapshot must not retain a context shard read lock");
+    }
+
+    #[test]
+    fn selected_node_lookup_snapshot_releases_the_context_shard_before_renewal() {
+        let context = Arc::new(hive_router::plugins::plugin_context::PluginContext::default());
+        context.insert(SelectedNodeLookup(None));
+        let selected = selected_node_lookup(&context).expect("selected node lookup snapshot");
+        let (sent, received) = std::sync::mpsc::channel();
+        let writer = context.clone();
+        let renewal = std::thread::spawn(move || {
+            // Write the same key to force a shard collision, independent of
+            // DashMap's random hashing of the principal and lookup type IDs.
+            writer.insert(SelectedNodeLookup(None));
+            sent.send(()).unwrap();
+        });
+        let result = received.recv_timeout(std::time::Duration::from_secs(5));
+        // Keep the snapshot alive through the write, just as the Node
+        // subgraph hook does while it executes the lookup.
+        assert!(selected.0.is_none());
+        drop(selected);
+        renewal.join().unwrap();
+        result.expect("node lookup snapshot must not retain a context shard read lock");
     }
 
     #[test]

@@ -176,6 +176,12 @@ impl Connection {
     ///
     /// See also [`Client::close`][`crate::Client::close`].
     pub async fn close(&self) -> crate::Result<()> {
+        // Local patch (graphql-orm-storage): deferred cleanup ends with the
+        // connection.
+        #[cfg(feature = "async")]
+        if let Some(info) = self.handler.conn_info.get() {
+            info.cleanup.shutdown();
+        }
         match self.handler.worker() {
             Some(c) => c.stop().await,
             None => Ok(()),
@@ -356,6 +362,8 @@ impl Connection {
             preauth_hash,
             client_guid: self.handler.client_guid,
             server_address,
+            #[cfg(feature = "async")]
+            cleanup: connection_info::CleanupQueue::start(self.config.timeout()),
         })
     }
 
@@ -919,14 +927,30 @@ impl Drop for ConnectionMessageHandler {
         #[cfg(not(feature = "single_threaded"))]
         self.stop_notify();
 
+        // Local patch (graphql-orm-storage): deferred cleanup ends with the
+        // connection.
+        if let Some(info) = self.conn_info.get() {
+            info.cleanup.shutdown();
+        }
+
         let worker = match self.worker.take() {
             Some(worker) => worker,
             None => return,
         };
 
-        tokio::task::spawn(async move {
-            worker.stop().await.ok();
-        });
+        // Local patch (graphql-orm-storage): a destructor never requires a
+        // current runtime. Without one, the worker's tasks stop with the
+        // runtime that runs them.
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(async move {
+                    worker.stop().await.ok();
+                });
+            }
+            Err(_) => log::debug!(
+                "Connection dropped outside a runtime; its worker stops with its runtime."
+            ),
+        }
     }
 }
 

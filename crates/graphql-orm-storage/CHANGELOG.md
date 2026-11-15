@@ -3,12 +3,39 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Changelog
+
+## 0.14.0 (unreleased)
+
+No public API changes.
+
+- SMB: a handle close that is cancelled or fails before the CLOSE request is
+  sent, for example when `operation_timeout` expires while the request waits
+  for a credit, no longer leaks the server handle for the rest of the
+  session. The vendored client marked the handle closed before sending CLOSE,
+  so its destructor skipped it; a handle is now marked closed only once CLOSE
+  has been handed to the connection, and otherwise dropping it sends CLOSE in
+  the background. The destructor needs no current Tokio runtime: it offers
+  the CLOSE to a bounded per-connection cleanup queue (256 pending closes,
+  run one at a time within the connection's timeout, holding only weak
+  references, ended with the connection) drained on the connection's
+  runtime, so dropping a handle on any thread, for example after
+  `Runtime::block_on` returned, never panics, blocks or keeps the connection
+  alive. A close the queue refuses or abandons is released by the server
+  when the session ends. Tree, session and
+  connection destructors no longer panic without a runtime either. A sixth
+  owner-local vendor patch, `cancel-safe-close`,
+  carries the fix. The vendored `Client::close` also attempts every tree
+  disconnect, channel close, logoff and connection close and reports the
+  first failure instead of ignoring them. The managed Samba suite gains a
+  credit-stalled cancelled-close case, a drop-outside-any-runtime case and a
+  `Client::close` failure case.
+  ([#710](https://github.com/Dastari/graphql-orm/issues/710))
 
 ## 0.13.0 (unreleased)
 
