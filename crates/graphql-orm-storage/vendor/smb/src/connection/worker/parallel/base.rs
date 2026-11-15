@@ -54,6 +54,12 @@ where
 
     /// A flag that indicates whether the worker is stopped.
     stopped: AtomicBool,
+    /// Local patch (graphql-orm-storage): cancelled once the worker is
+    /// aborted or stopped. Every receive races it, so a receive waiting when
+    /// the worker ends, or that registered just before, fails with
+    /// `Error::ConnectionStopped` instead of waiting forever.
+    #[cfg(feature = "async")]
+    closed: CancellationToken,
     /// The current timeout configured for the worker.
     timeout: AtomicU64,
 }
@@ -177,6 +183,8 @@ where
             notify_messages_channel: Default::default(),
             sender: tx,
             stopped: AtomicBool::new(false),
+            #[cfg(feature = "async")]
+            closed: CancellationToken::new(),
             timeout: AtomicU64::new(u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX)),
         });
 
@@ -187,11 +195,29 @@ where
         Ok(worker)
     }
 
-    /// Local patch (graphql-orm-storage): marks the worker stopped and ends
-    /// its loops at once, which releases the transport. Needs no current
-    /// runtime and never blocks, so any destructor may call it.
+    /// Local patch (graphql-orm-storage): marks the worker stopped, fails
+    /// every awaiting receive with `Error::ConnectionStopped`, and ends its
+    /// loops at once, which releases the transport. Needs no current runtime
+    /// and never blocks, so any destructor may call it.
+    ///
+    /// The stopped flag is set first, so a receive that takes the state lock
+    /// afterwards is refused. A receive that registered before the flag is
+    /// failed by the drain below when the lock is free, and in any case by
+    /// the closed token, which every receive races: no receive can register
+    /// in between and wait forever.
     pub(crate) fn abort(&self) {
         self.stopped.store(true, Ordering::SeqCst);
+        #[cfg(feature = "async")]
+        self.closed.cancel();
+        #[cfg(feature = "async")]
+        let state = self.state.try_lock();
+        #[cfg(not(feature = "async"))]
+        let state = self.state.try_lock().ok();
+        if let Some(mut state) = state {
+            for (_, tx) in state.awaiting.drain() {
+                let _notify_result = T::send_notify(tx, Err(Error::ConnectionStopped));
+            }
+        }
         if let Some(backend) = self.aborter.get() {
             backend.abort();
         }
@@ -350,6 +376,10 @@ where
     async fn stop(&self) -> crate::Result<()> {
         self.stopped
             .store(true, std::sync::atomic::Ordering::SeqCst);
+        // Local patch (graphql-orm-storage): receives fail once the stop ends,
+        // also when it is abandoned (its loops are then aborted).
+        #[cfg(feature = "async")]
+        let _closed = self.closed.clone().drop_guard();
         {
             self.backend_impl
                 .lock()
@@ -422,6 +452,16 @@ where
         let timeout = options
             .timeout
             .unwrap_or_else(|| Duration::from_millis(self.timeout.load(Ordering::Relaxed)));
+        // Local patch (graphql-orm-storage): a worker that is aborted or
+        // stopped while this waits fails the receive instead of leaving it
+        // waiting forever.
+        #[cfg(feature = "async")]
+        let result = tokio::select! {
+            biased;
+            result = T::wait_on_waiter(wait_for_receive, timeout) => result?,
+            _ = self.closed.cancelled() => return Err(Error::ConnectionStopped),
+        };
+        #[cfg(not(feature = "async"))]
         let result = T::wait_on_waiter(wait_for_receive, timeout).await?;
 
         log::trace!("Received message {result:?}");

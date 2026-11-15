@@ -108,7 +108,10 @@ when a write never completes. Before or during negotiation, for example after
 a cancelled negotiation, or when the stop cannot be handed to a runtime, the
 destructor aborts both loops at once through task abort handles, which work on
 any thread without a current runtime, so dropping a connection in any state
-never panics and always closes its socket. Every abandoned, refused or skipped step is
+never panics and always closes its socket. Aborting the worker first marks it
+stopped and fails every waiting request with `ConnectionStopped`; each
+request also races a closed signal that the abort and the worker stop set, so
+none can register in between and wait forever. Every abandoned, refused or skipped step is
 counted and logged at debug level. The vendored notification task, which
 storage disables, holds its connection weakly. In-crate regression tests use
 real connection, channel, session and tree handlers over a server that

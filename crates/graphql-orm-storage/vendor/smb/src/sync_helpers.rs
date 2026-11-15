@@ -71,6 +71,13 @@ impl<T> Mutex<T> {
     pub async fn lock(&self) -> LockResult<tokio::sync::MutexGuard<'_, T>> {
         Ok(self.inner.lock().await)
     }
+
+    /// Local patch (graphql-orm-storage): the guard if the lock is free now,
+    /// without waiting and without a runtime.
+    #[inline]
+    pub fn try_lock(&self) -> Option<tokio::sync::MutexGuard<'_, T>> {
+        self.inner.try_lock().ok()
+    }
 }
 
 #[cfg(not(feature = "async"))]

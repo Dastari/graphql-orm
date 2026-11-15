@@ -26,7 +26,9 @@ on a thread with no current Tokio runtime is now cleaned up on the
 connection's runtime instead of being left to the server. A connection dropped
 before or during negotiation, for example after a negotiation timeout or
 cancellation, now closes its socket at once on any thread, instead of leaving
-it open while its runtime lived when no runtime was current.
+it open while its runtime lived when no runtime was current. A request still
+waiting for a response when its connection drops now fails with the vendored
+client's `ConnectionStopped` error instead of waiting indefinitely.
 
 ## 0.13.0 to 0.14.0: cancel-safe SMB handle close
 

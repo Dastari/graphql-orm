@@ -1,5 +1,5 @@
 diff --git a/src/connection.rs b/src/connection.rs
-index 70e43ebc..c0d09fd2 100644
+index 70e43ebc..eec9d675 100644
 --- a/src/connection.rs
 +++ b/src/connection.rs
 @@ -783,7 +783,10 @@ impl ConnectionMessageHandler {
@@ -113,7 +113,7 @@ index 70e43ebc..c0d09fd2 100644
  }
  
  /// Local patch (graphql-orm-storage): a pinned server identity is enforced
-@@ -1203,3 +1251,219 @@ mod server_identity_tests {
+@@ -1203,3 +1251,270 @@ mod server_identity_tests {
          );
      }
  }
@@ -332,6 +332,57 @@ index 70e43ebc..c0d09fd2 100644
 +    fn an_unnegotiated_connection_drops_outside_any_runtime() {
 +        drop_outside_any_runtime(connection());
 +    }
++
++    /// #718 review: a receive waiting on the worker when the connection is
++    /// dropped (here after a cancelled negotiation, so the drop aborts the
++    /// worker) fails with `ConnectionStopped` instead of waiting forever,
++    /// even with no receive timeout. A receive started after the drop fails
++    /// at once.
++    #[tokio::test]
++    async fn a_receive_pending_when_the_connection_drops_fails_instead_of_waiting_forever() {
++        use crate::connection::worker::Worker;
++        use crate::msg_handler::ReceiveOptions;
++        let connection = connection();
++        let dropped = Arc::new(AtomicUsize::new(0));
++        let _ = tokio::time::timeout(
++            Duration::from_millis(20),
++            connection._negotiate(
++                Box::new(SilentServer {
++                    dropped: dropped.clone(),
++                }),
++                true,
++            ),
++        )
++        .await;
++        let worker = connection.handler.worker().unwrap().clone();
++        let options = ReceiveOptions::new()
++            .with_msg_id_filter(0)
++            .with_timeout(Duration::ZERO);
++        let waiting = worker.receive(&options);
++        tokio::pin!(waiting);
++        tokio::select! {
++            result = &mut waiting => panic!("unexpected early result: {result:?}"),
++            _ = tokio::time::sleep(Duration::from_millis(20)) => {},
++        }
++
++        drop(connection);
++        tokio::time::sleep(Duration::from_millis(20)).await;
++        assert_eq!(dropped.load(Ordering::SeqCst), 2, "the socket is closed");
++        let result = tokio::time::timeout(Duration::from_millis(200), &mut waiting)
++            .await
++            .expect("a pending receive must resolve after the connection drops");
++        assert!(
++            matches!(result, Err(crate::Error::ConnectionStopped)),
++            "{result:?}"
++        );
++        let late = tokio::time::timeout(Duration::from_millis(200), worker.receive(&options))
++            .await
++            .expect("a receive after the drop must not wait");
++        assert!(
++            matches!(late, Err(crate::Error::ConnectionStopped)),
++            "{late:?}"
++        );
++    }
 +}
 diff --git a/src/connection/connection_info.rs b/src/connection/connection_info.rs
 index 6adb6689..917c47be 100644
@@ -524,7 +575,7 @@ index e07bba19..46e4b0a1 100644
      fn make_notifier_awaiter_pair() -> (Self::AwaitingNotifier, Self::AwaitingWaiter);
      // TODO: Consider typing the tx/rx in the trait, like the notifier/awaiter.
 diff --git a/src/connection/worker/parallel/base.rs b/src/connection/worker/parallel/base.rs
-index cfbde99e..4b9f71f2 100644
+index cfbde99e..336e7555 100644
 --- a/src/connection/worker/parallel/base.rs
 +++ b/src/connection/worker/parallel/base.rs
 @@ -38,6 +38,10 @@ where
@@ -538,7 +589,20 @@ index cfbde99e..4b9f71f2 100644
      transformer: Transformer,
  
      /// A channel that is being used to pass on messages that are being received from the server with
-@@ -168,6 +172,7 @@ where
+@@ -50,6 +54,12 @@ where
+ 
+     /// A flag that indicates whether the worker is stopped.
+     stopped: AtomicBool,
++    /// Local patch (graphql-orm-storage): cancelled once the worker is
++    /// aborted or stopped. Every receive races it, so a receive waiting when
++    /// the worker ends, or that registered just before, fails with
++    /// `Error::ConnectionStopped` instead of waiting forever.
++    #[cfg(feature = "async")]
++    closed: CancellationToken,
+     /// The current timeout configured for the worker.
+     timeout: AtomicU64,
+ }
+@@ -168,22 +178,51 @@ where
          let worker = Arc::new(ParallelWorker::<T> {
              state: Mutex::new(state),
              backend_impl: Default::default(),
@@ -546,7 +610,9 @@ index cfbde99e..4b9f71f2 100644
              transformer: Transformer::default(),
              notify_messages_channel: Default::default(),
              sender: tx,
-@@ -175,15 +180,23 @@ where
+             stopped: AtomicBool::new(false),
++            #[cfg(feature = "async")]
++            closed: CancellationToken::new(),
              timeout: AtomicU64::new(u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX)),
          });
  
@@ -562,11 +628,29 @@ index cfbde99e..4b9f71f2 100644
          Ok(worker)
      }
  
-+    /// Local patch (graphql-orm-storage): marks the worker stopped and ends
-+    /// its loops at once, which releases the transport. Needs no current
-+    /// runtime and never blocks, so any destructor may call it.
++    /// Local patch (graphql-orm-storage): marks the worker stopped, fails
++    /// every awaiting receive with `Error::ConnectionStopped`, and ends its
++    /// loops at once, which releases the transport. Needs no current runtime
++    /// and never blocks, so any destructor may call it.
++    ///
++    /// The stopped flag is set first, so a receive that takes the state lock
++    /// afterwards is refused. A receive that registered before the flag is
++    /// failed by the drain below when the lock is free, and in any case by
++    /// the closed token, which every receive races: no receive can register
++    /// in between and wait forever.
 +    pub(crate) fn abort(&self) {
 +        self.stopped.store(true, Ordering::SeqCst);
++        #[cfg(feature = "async")]
++        self.closed.cancel();
++        #[cfg(feature = "async")]
++        let state = self.state.try_lock();
++        #[cfg(not(feature = "async"))]
++        let state = self.state.try_lock().ok();
++        if let Some(mut state) = state {
++            for (_, tx) in state.awaiting.drain() {
++                let _notify_result = T::send_notify(tx, Err(Error::ConnectionStopped));
++            }
++        }
 +        if let Some(backend) = self.aborter.get() {
 +            backend.abort();
 +        }
@@ -575,6 +659,34 @@ index cfbde99e..4b9f71f2 100644
      /// Local patch (graphql-orm-storage): marks the worker stopped after its
      /// receive loop ended, and fails every awaiting task, so later receives
      /// fail immediately instead of waiting for a response that cannot arrive.
+@@ -337,6 +376,10 @@ where
+     async fn stop(&self) -> crate::Result<()> {
+         self.stopped
+             .store(true, std::sync::atomic::Ordering::SeqCst);
++        // Local patch (graphql-orm-storage): receives fail once the stop ends,
++        // also when it is abandoned (its loops are then aborted).
++        #[cfg(feature = "async")]
++        let _closed = self.closed.clone().drop_guard();
+         {
+             self.backend_impl
+                 .lock()
+@@ -409,6 +452,16 @@ where
+         let timeout = options
+             .timeout
+             .unwrap_or_else(|| Duration::from_millis(self.timeout.load(Ordering::Relaxed)));
++        // Local patch (graphql-orm-storage): a worker that is aborted or
++        // stopped while this waits fails the receive instead of leaving it
++        // waiting forever.
++        #[cfg(feature = "async")]
++        let result = tokio::select! {
++            biased;
++            result = T::wait_on_waiter(wait_for_receive, timeout) => result?,
++            _ = self.closed.cancelled() => return Err(Error::ConnectionStopped),
++        };
++        #[cfg(not(feature = "async"))]
+         let result = T::wait_on_waiter(wait_for_receive, timeout).await?;
+ 
+         log::trace!("Received message {result:?}");
 diff --git a/src/connection/worker/parallel/threading_backend.rs b/src/connection/worker/parallel/threading_backend.rs
 index 39fdc27e..d42b5341 100644
 --- a/src/connection/worker/parallel/threading_backend.rs
@@ -766,6 +878,24 @@ index 07a56f69..d15cd761 100644
  }
  
  #[maybe_async(AFIT)]
+diff --git a/src/sync_helpers.rs b/src/sync_helpers.rs
+index 4f615625..15517b5e 100644
+--- a/src/sync_helpers.rs
++++ b/src/sync_helpers.rs
+@@ -71,6 +71,13 @@ impl<T> Mutex<T> {
+     pub async fn lock(&self) -> LockResult<tokio::sync::MutexGuard<'_, T>> {
+         Ok(self.inner.lock().await)
+     }
++
++    /// Local patch (graphql-orm-storage): the guard if the lock is free now,
++    /// without waiting and without a runtime.
++    #[inline]
++    pub fn try_lock(&self) -> Option<tokio::sync::MutexGuard<'_, T>> {
++        self.inner.try_lock().ok()
++    }
+ }
+ 
+ #[cfg(not(feature = "async"))]
 diff --git a/src/tree.rs b/src/tree.rs
 index c2cb93c2..ecb6c717 100644
 --- a/src/tree.rs

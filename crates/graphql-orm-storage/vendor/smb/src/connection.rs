@@ -1466,4 +1466,55 @@ mod destructor_runtime_tests {
     fn an_unnegotiated_connection_drops_outside_any_runtime() {
         drop_outside_any_runtime(connection());
     }
+
+    /// #718 review: a receive waiting on the worker when the connection is
+    /// dropped (here after a cancelled negotiation, so the drop aborts the
+    /// worker) fails with `ConnectionStopped` instead of waiting forever,
+    /// even with no receive timeout. A receive started after the drop fails
+    /// at once.
+    #[tokio::test]
+    async fn a_receive_pending_when_the_connection_drops_fails_instead_of_waiting_forever() {
+        use crate::connection::worker::Worker;
+        use crate::msg_handler::ReceiveOptions;
+        let connection = connection();
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let _ = tokio::time::timeout(
+            Duration::from_millis(20),
+            connection._negotiate(
+                Box::new(SilentServer {
+                    dropped: dropped.clone(),
+                }),
+                true,
+            ),
+        )
+        .await;
+        let worker = connection.handler.worker().unwrap().clone();
+        let options = ReceiveOptions::new()
+            .with_msg_id_filter(0)
+            .with_timeout(Duration::ZERO);
+        let waiting = worker.receive(&options);
+        tokio::pin!(waiting);
+        tokio::select! {
+            result = &mut waiting => panic!("unexpected early result: {result:?}"),
+            _ = tokio::time::sleep(Duration::from_millis(20)) => {},
+        }
+
+        drop(connection);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(dropped.load(Ordering::SeqCst), 2, "the socket is closed");
+        let result = tokio::time::timeout(Duration::from_millis(200), &mut waiting)
+            .await
+            .expect("a pending receive must resolve after the connection drops");
+        assert!(
+            matches!(result, Err(crate::Error::ConnectionStopped)),
+            "{result:?}"
+        );
+        let late = tokio::time::timeout(Duration::from_millis(200), worker.receive(&options))
+            .await
+            .expect("a receive after the drop must not wait");
+        assert!(
+            matches!(late, Err(crate::Error::ConnectionStopped)),
+            "{late:?}"
+        );
+    }
 }
