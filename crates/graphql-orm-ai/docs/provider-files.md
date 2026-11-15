@@ -3,8 +3,8 @@ title: "Provider-Persistent Files"
 kind: architecture
 status: draft
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-11-02
-review_by: 2026-12-02
+last_reviewed: 2026-11-15
+review_by: 2027-02-15
 supersedes: []
 ---
 
@@ -45,13 +45,50 @@ For those reasons:
   valid;
 - the native OpenAI adapter does not upload, create a vector store, attach a
   file, retrieve content, list objects, or search a store;
-- the existing native OpenAI deletion service remains available only for an
-  exact `file-...` reference already selected by fenced artifact cleanup; and
+- the existing native OpenAI deletion service
+  (`OpenAiFileDeletionService`) remains available only for an exact
+  `file-...` reference already selected by fenced artifact cleanup, under the
+  rules in [what deletion proves today](#what-deletion-proves-today); and
 - a host-created provider object cannot be adopted into search authority merely
   by writing its ID into a request or egress manifest.
 
 This is intentional capability closure, not an instruction for a consumer to
 implement the missing lifecycle around the crate.
+
+## What deletion proves today
+
+Deletion is the one provider-file effect the crate performs. Attachment
+artifact cleanup hands `OpenAiFileDeletionService` one exact reference for one
+logical profile; the service never lists files.
+
+- **Intent first.** Cleanup records a durable deletion intent
+  (`provider_delete_requested_at`) and counts the attempt
+  (`provider_delete_attempts`) before it sends `DELETE`.
+- **Confirmed absence.** A successful `DELETE` must be acknowledged for that
+  exact file with `deleted: true`, and a following retrieval must return
+  not-found. Only then is the file treated as absent.
+- **A 404 on `DELETE` is not proof by itself.** A credential that now addresses
+  another project receives the same answer while the file still exists. A 404
+  proves absence only when the artifact's recorded provider expiry has already
+  passed. An earlier deletion intent, a repeated 404, or an intent restored
+  from a backup proves nothing.
+- **Bounded retry.** Any other outcome is retried with backoff up to
+  `AiAttachmentCleanupLimits::with_maximum_provider_delete_attempts` (24 by
+  default). When the bound is reached the artifact ends in the terminal
+  `cleanup_unconfirmed` state and is counted in
+  `AiAttachmentCleanupReport::artifacts_unconfirmed`. The provider file is
+  never reported as deleted.
+- **What an unconfirmed artifact keeps.** After local blob absence is
+  confirmed, cleanup releases the protected derivative but keeps
+  `provider_kind`, `provider_profile_id` and `provider_reference` so an
+  operator can follow up. Retention leaves such rows in place.
+
+See [unconfirmed provider-file cleanup](attachments.md#unconfirmed-provider-file-cleanup)
+for the operator inventory and the backup caveat.
+
+Responses stored with `store_responses = true` are a separate object with no
+artifact row; see
+[session retention](session-retention.md#stored-provider-responses-are-not-deleted).
 
 ## Capability separation
 
@@ -130,7 +167,8 @@ The states are:
 Any known pre-transport failure may release its unused reservation. A timeout,
 disconnect, malformed acknowledgement, or crash after transport begins closes
 that effect as `recovery_required`; it is never automatically replayed.
-Provider `expired` is not exact absence. Failed indexing cannot expose a store
+A provider status of `expired` is not exact absence; deletion still has to be
+confirmed as described above. Failed indexing cannot expose a store
 to search and must drive dependency-ordered cleanup.
 
 Concurrent workers claim one exact row under compare-and-swap. A stale
@@ -171,10 +209,15 @@ Deleting-session and age-based cleanup process dependencies in this order:
 5. tombstone and then remove the durable lifecycle rows; and
 6. allow parent attachment/message cleanup to continue.
 
-Every ambiguous provider response retains all identifiers, protected content,
-and ownership bindings under bounded retry or `recovery_required`. A missing
-deletion adapter keeps the path closed. Cleanup never lists a provider
-collection or storage prefix.
+For the future store and membership objects, every ambiguous provider response
+must retain all identifiers, protected content, and ownership bindings under
+bounded retry or `recovery_required`. Provider-file deletion already has a
+bounded terminal outcome, `cleanup_unconfirmed`, which keeps the provider
+identifiers but releases the protected derivative (see
+[what deletion proves today](#what-deletion-proves-today)); the complete
+lifecycle must keep that outcome distinct from confirmed absence. A missing deletion
+adapter keeps the path closed. Cleanup never lists a provider collection or
+storage prefix.
 
 Backup metadata must retain the logical identity, owner/scope/session,
 source/hash, provider/profile, purpose/retention, state/generation, redacted

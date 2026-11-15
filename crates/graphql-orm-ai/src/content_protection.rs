@@ -15,6 +15,8 @@ pub enum AiContentProtectionMode {
     /// The deployment database/storage layer provides encryption at rest.
     DatabaseManaged,
     /// The application protects content before it reaches ORM persistence.
+    /// The host must supply the [`AiContentProtector`] that does so; the crate
+    /// has no implementation of this mode.
     ApplicationEncrypted,
 }
 
@@ -106,6 +108,13 @@ pub enum ContentProtectionError {
 
 /// Application-level content protection seam. Implementations should bind
 /// authenticated encryption to every field in [`ContentProtectionContext`].
+///
+/// This is an extension point, not an encryption feature. The crate ships no
+/// cipher and holds no keys: encryption, key management and key rotation are
+/// implemented and reviewed by the host. The seam covers conversational JSON
+/// values (message blocks, previews, event payloads, checkpoints and the
+/// like). It never sees attachment bytes, which are streamed to the host's
+/// blob store as uploaded.
 #[async_trait]
 pub trait AiContentProtector: Send + Sync {
     /// Protects a canonical JSON value for persistence.
@@ -127,6 +136,13 @@ pub trait AiContentProtector: Send + Sync {
 
 /// Explicit database-managed implementation. It refuses application-encrypted
 /// envelopes rather than silently treating ciphertext as plaintext.
+///
+/// It performs no encryption. `protect` stores the JSON value unchanged in a
+/// [`ProtectedContentEnvelope::DatabaseManaged`] envelope, so confidentiality
+/// is whatever the deployment's database and storage provide at rest. It
+/// returns [`ContentProtectionError::Unsupported`] for an
+/// [`AiContentProtectionMode::ApplicationEncrypted`] policy, and this is the
+/// only protector the crate provides.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DatabaseManagedContentProtector;
 

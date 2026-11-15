@@ -91,9 +91,31 @@ impl AiRunCancellationHub {
         let _ = self.sender.send(run_id);
     }
 
+    /// Starts listening for wake-ups.
+    ///
+    /// Subscribe before the durable cancellation check: a request that is
+    /// recorded and announced after that check but before the wait would
+    /// otherwise be missed until the wait times out.
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
-    pub(crate) async fn wait(&self, run_id: AiRunId, maximum_wait: StdDuration) {
-        let mut receiver = self.sender.subscribe();
+    pub(crate) fn subscribe(&self) -> AiRunCancellationSubscription {
+        AiRunCancellationSubscription {
+            receiver: self.sender.subscribe(),
+        }
+    }
+}
+
+/// A wake-up subscription taken before the durable cancellation check.
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub(crate) struct AiRunCancellationSubscription {
+    receiver: broadcast::Receiver<AiRunId>,
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+impl AiRunCancellationSubscription {
+    /// Waits for a wake-up for `run_id` announced since the subscription was
+    /// taken, or for `maximum_wait`.
+    pub(crate) async fn wait(mut self, run_id: AiRunId, maximum_wait: StdDuration) {
+        let receiver = &mut self.receiver;
         let wait = async {
             loop {
                 match receiver.recv().await {
@@ -157,5 +179,39 @@ impl AiRunCancellation {
     /// Server cancellation timestamp.
     pub const fn requested_at(self) -> i64 {
         self.requested_at
+    }
+}
+
+#[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
+mod tests {
+    use super::*;
+
+    /// A cancellation recorded after the durable check but before the wait
+    /// used to be missed until the wait timed out, because the wait
+    /// subscribed only once it started.
+    #[tokio::test]
+    async fn a_wakeup_announced_between_the_check_and_the_wait_is_delivered() {
+        let hub = AiRunCancellationHub::default();
+        let run_id = AiRunId(Uuid::new_v4());
+        let subscription = hub.subscribe();
+        // The durable check would run here and see no cancellation.
+        hub.notify(AiRunId(Uuid::new_v4()));
+        hub.notify(run_id);
+        tokio::time::timeout(
+            StdDuration::from_secs(5),
+            subscription.wait(run_id, StdDuration::from_secs(600)),
+        )
+        .await
+        .expect("the wake-up sent before the wait must end it");
+    }
+
+    #[tokio::test]
+    async fn a_wait_without_a_wakeup_still_ends_at_its_deadline() {
+        let hub = AiRunCancellationHub::default();
+        let subscription = hub.subscribe();
+        hub.notify(AiRunId(Uuid::new_v4()));
+        subscription
+            .wait(AiRunId(Uuid::new_v4()), StdDuration::from_millis(20))
+            .await;
     }
 }

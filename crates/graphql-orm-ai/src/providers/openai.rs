@@ -326,6 +326,154 @@ impl OpenAiFileDeletionService {
     }
 }
 
+/// What one stored-response deletion attempt established.
+#[cfg(feature = "provider-openai-core")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpenAiStoredResponseDeletion {
+    /// OpenAI acknowledged deleting this exact response and a following
+    /// retrieval with the same credential returned not-found.
+    DeletedAndConfirmedAbsent,
+    /// The delete request returned not-found.
+    ///
+    /// This is not proof of absence. A credential that moved to another
+    /// project, or one scoped to a different project than the one that stored
+    /// the response, also receives not-found while the response still exists.
+    /// Record the attempt and keep the identifier for operator follow-up.
+    NotFoundUnconfirmed,
+}
+
+/// Exact deletion adapter for responses stored by `store_responses = true`.
+///
+/// The crate does not delete stored responses on its own: session retention,
+/// run completion and purge leave them at the provider, where OpenAI's own
+/// retention applies. This adapter is the provider half of a host-owned
+/// cleanup job. It deletes one response by its exact identifier and confirms
+/// the result; choosing which identifiers to delete, and recording that they
+/// were, is the host's responsibility.
+#[cfg(feature = "provider-openai-core")]
+pub struct OpenAiStoredResponseDeletionService {
+    transport: OpenAiFileDeletionService,
+}
+
+#[cfg(feature = "provider-openai-core")]
+impl std::fmt::Debug for OpenAiStoredResponseDeletionService {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OpenAiStoredResponseDeletionService")
+            .field("credential", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "provider-openai-core")]
+impl OpenAiStoredResponseDeletionService {
+    /// Builds a deletion service fixed to OpenAI's official Responses
+    /// endpoint with redirects disabled.
+    ///
+    /// Use the credential, organization and project of the provider that
+    /// stored the responses; `store_responses` is ignored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::InvalidConfiguration`] for invalid safe header
+    /// metadata, timeout, or HTTP client construction.
+    pub fn new(
+        config: OpenAiProviderConfig,
+        secrets: Arc<dyn AiSecretStore>,
+    ) -> Result<Self, ProviderError> {
+        Self::build(config, secrets, OPENAI_RESPONSES_ENDPOINT.to_owned())
+    }
+
+    fn build(
+        config: OpenAiProviderConfig,
+        secrets: Arc<dyn AiSecretStore>,
+        responses_endpoint: String,
+    ) -> Result<Self, ProviderError> {
+        Ok(Self {
+            transport: OpenAiFileDeletionService::build(
+                "stored-responses".to_owned(),
+                config,
+                secrets,
+                responses_endpoint,
+            )?,
+        })
+    }
+
+    /// Lets this service's client use the process proxy environment.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::InvalidConfiguration`] when the HTTP client
+    /// cannot be rebuilt.
+    pub fn with_environment_proxy(mut self) -> Result<Self, ProviderError> {
+        self.transport = self.transport.with_environment_proxy()?;
+        Ok(self)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_loopback_test(
+        config: OpenAiProviderConfig,
+        secrets: Arc<dyn AiSecretStore>,
+        responses_endpoint: String,
+    ) -> Result<Self, ProviderError> {
+        if !responses_endpoint.starts_with("http://127.0.0.1:")
+            || !responses_endpoint.ends_with("/v1/responses")
+        {
+            return Err(ProviderError::InvalidConfiguration(
+                "test Responses endpoint must use IPv4 loopback".to_owned(),
+            ));
+        }
+        Self::build(config, secrets, responses_endpoint)
+    }
+
+    /// Deletes one stored response and confirms the result.
+    ///
+    /// Sends `DELETE` for the exact identifier, requires an acknowledgement
+    /// naming that identifier with `deleted: true`, then requires a retrieval
+    /// to return not-found. The identifier is never logged or placed in an
+    /// error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidInput`] for a value that is not an OpenAI
+    /// response identifier, and [`AiError::ProviderFailed`] when the request
+    /// fails, the acknowledgement does not match, or the response is still
+    /// retrievable afterwards. A failed attempt may be retried.
+    pub async fn delete_and_confirm_absent(
+        &self,
+        response_id: &str,
+    ) -> Result<OpenAiStoredResponseDeletion, AiError> {
+        if !valid_provider_identifier(response_id, "resp_") {
+            return Err(AiError::InvalidInput(
+                "invalid OpenAI response identifier".to_owned(),
+            ));
+        }
+        let endpoint = format!("{}/{response_id}", self.transport.files_endpoint);
+        let deletion = self
+            .transport
+            .send(reqwest::Method::DELETE, &endpoint)
+            .await?;
+        if deletion.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(OpenAiStoredResponseDeletion::NotFoundUnconfirmed);
+        }
+        if !deletion.status().is_success() {
+            return Err(AiError::ProviderFailed);
+        }
+        let acknowledgement = bounded_json(deletion).await?;
+        if acknowledgement.get("id").and_then(Value::as_str) != Some(response_id)
+            || acknowledgement.get("deleted").and_then(Value::as_bool) != Some(true)
+        {
+            return Err(AiError::ProviderFailed);
+        }
+        let retrieval = self.transport.send(reqwest::Method::GET, &endpoint).await?;
+        if retrieval.status() == reqwest::StatusCode::NOT_FOUND {
+            Ok(OpenAiStoredResponseDeletion::DeletedAndConfirmedAbsent)
+        } else {
+            Err(AiError::ProviderFailed)
+        }
+    }
+}
+
 #[cfg(feature = "provider-openai-core")]
 #[async_trait]
 impl AiProviderFileDeletionService for OpenAiFileDeletionService {
@@ -3764,6 +3912,98 @@ mod tests {
                 server.await.unwrap(),
                 vec!["DELETE /v1/files/file-proof HTTP/1.1"]
             );
+        }
+    }
+
+    fn stored_response_service(files_endpoint: &str) -> OpenAiStoredResponseDeletionService {
+        let reference =
+            SecretRef::parse("openai/response-delete-test").expect("test reference should parse");
+        OpenAiStoredResponseDeletionService::for_loopback_test(
+            OpenAiProviderConfig::new(reference.clone()),
+            Arc::new(TestSecrets(reference, "not-a-real-key".to_owned())),
+            files_endpoint.replace("/v1/files", "/v1/responses"),
+        )
+        .expect("stored-response deletion service should build")
+    }
+
+    #[tokio::test]
+    async fn stored_response_deletion_requires_acknowledgement_and_confirmed_absence() {
+        let (endpoint, server) = file_mock_server(vec![
+            (
+                "200 OK".to_owned(),
+                r#"{"id":"resp_stored_1","object":"response","deleted":true}"#.to_owned(),
+            ),
+            (
+                "404 Not Found".to_owned(),
+                r#"{"error":{"code":"not_found"}}"#.to_owned(),
+            ),
+        ])
+        .await;
+        let service = stored_response_service(&endpoint);
+        assert!(matches!(
+            service.delete_and_confirm_absent("resp_stored_1").await,
+            Ok(OpenAiStoredResponseDeletion::DeletedAndConfirmedAbsent)
+        ));
+        assert_eq!(
+            server.await.expect("server should finish"),
+            vec![
+                "DELETE /v1/responses/resp_stored_1 HTTP/1.1",
+                "GET /v1/responses/resp_stored_1 HTTP/1.1",
+            ]
+        );
+        assert!(!format!("{service:?}").contains("not-a-real-key"));
+    }
+
+    #[tokio::test]
+    async fn stored_response_deletion_never_reports_unproven_absence() {
+        // A first not-found is reported as unconfirmed, not as deleted.
+        let (endpoint, server) = file_mock_server(vec![(
+            "404 Not Found".to_owned(),
+            r#"{"error":{"code":"not_found"}}"#.to_owned(),
+        )])
+        .await;
+        assert!(matches!(
+            stored_response_service(&endpoint)
+                .delete_and_confirm_absent("resp_stored_1")
+                .await,
+            Ok(OpenAiStoredResponseDeletion::NotFoundUnconfirmed)
+        ));
+        assert_eq!(
+            server.await.expect("server should finish"),
+            vec!["DELETE /v1/responses/resp_stored_1 HTTP/1.1"]
+        );
+
+        // A mismatched or negative acknowledgement, and a response that is
+        // still retrievable, all fail.
+        for (acknowledgement, retrieval) in [
+            (r#"{"id":"resp_other","deleted":true}"#, None),
+            (r#"{"id":"resp_stored_1","deleted":false}"#, None),
+            (
+                r#"{"id":"resp_stored_1","deleted":true}"#,
+                Some(("200 OK", r#"{"id":"resp_stored_1"}"#)),
+            ),
+        ] {
+            let mut responses = vec![("200 OK".to_owned(), acknowledgement.to_owned())];
+            if let Some((status, body)) = retrieval {
+                responses.push((status.to_owned(), body.to_owned()));
+            }
+            let (endpoint, server) = file_mock_server(responses).await;
+            assert!(matches!(
+                stored_response_service(&endpoint)
+                    .delete_and_confirm_absent("resp_stored_1")
+                    .await,
+                Err(AiError::ProviderFailed)
+            ));
+            server.await.expect("server should finish");
+        }
+
+        // A value that is not a response identifier never leaves the process.
+        let service = stored_response_service("http://127.0.0.1:9/v1/files");
+        for invalid in ["", "resp_", "file-abc", "resp_a/../b", "resp_a?x=1"] {
+            assert!(matches!(
+                service.delete_and_confirm_absent(invalid).await,
+                Err(AiError::InvalidInput(_))
+            ));
         }
     }
 

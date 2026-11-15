@@ -10,6 +10,8 @@ supersedes: []
 
 # graphql-orm-ai
 
+AI 0.144.0 adds a pinned Anthropic model-snapshot mapping and an exact OpenAI stored-response deletion adapter, fixes a missed cancellation wake-up, bounds published skill schemas, and documents the lease clock contract and the limits of content protection. AI schema module stays `0.80.0`; see [migration guidance](MIGRATION.md#01430-to-01440-ai-follow-ups).
+
 AI 0.143.0 uses ORM/macros 0.152.0 and AI schema module `0.80.0` (nullable cleanup metadata columns; no data backfill). The runtime and provider bug batch tightens approval execution, principal validation, reclamation and egress bounds. Unshared obsolete credentials are deleted after durable cleanup recording; shared references and failed deletes remain available through scoped host retry APIs. Provider-file cleanup has a bounded, explicitly unconfirmed terminal outcome; see [migration guidance](MIGRATION.md#01420-to-01430-runtime-and-provider-bug-batch).
 
 Native quota retry and pending-quota lifecycle tests run on explicitly sized 1 MiB threads in the AI test lanes. Production provider/approval phases use heap-pinned futures, and an unstarted replacement drops its completed pass before the next pass starts.

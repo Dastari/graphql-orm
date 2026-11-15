@@ -14,6 +14,10 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - AI 0.144.0
+
+- AI adds a pinned Anthropic model-snapshot mapping and an exact OpenAI stored-response deletion adapter, fixes a missed cancellation wake-up and bounds published skill schemas (a hardening that can reject a schema accepted before). No schema module change. Details are in the [AI changelog](crates/graphql-orm-ai/CHANGELOG.md#unreleased---01440).
+
 ## Unreleased - ORM/macros 0.157.0
 
 - ORM and macros 0.157.0 (placeholder): **breaking/data safety:** migrations, the change journal and retention. See the [migration guide](MIGRATION.md#01560-to-01570-migrations-change-journal-and-retention).

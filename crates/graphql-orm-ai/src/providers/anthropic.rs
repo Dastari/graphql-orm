@@ -65,6 +65,8 @@ pub struct AnthropicProvider {
     bound_destination: Option<String>,
     /// Set for a policy-checked endpoint; rechecked before every request.
     endpoint_guard: Option<super::endpoint::ProviderEndpointGuard>,
+    /// Requested model identifier to the one pinned snapshot it may resolve to.
+    model_snapshots: BTreeMap<String, String>,
 }
 
 impl std::fmt::Debug for AnthropicProvider {
@@ -159,7 +161,58 @@ impl AnthropicProvider {
             endpoint,
             bound_destination,
             endpoint_guard: None,
+            model_snapshots: BTreeMap::new(),
         })
+    }
+
+    /// Declares the one pinned snapshot a requested model identifier may
+    /// resolve to.
+    ///
+    /// By default the model named in a response must equal the requested
+    /// string byte for byte. Anthropic answers a request for a model alias
+    /// with the dated snapshot the alias currently points at, so such a
+    /// request is refused after the tokens were spent. This mapping accepts
+    /// exactly one extra response identifier for one requested identifier.
+    /// Any other returned model is still refused, including a newer snapshot
+    /// the alias moved to.
+    ///
+    /// Budget reservations, pricing and usage stay keyed by the requested
+    /// identifier. Declaring a mapping asserts that the host prices the
+    /// requested identifier at the pinned snapshot's rate; the adapter cannot
+    /// check that.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::InvalidConfiguration`] when either identifier
+    /// is empty, longer than 128 bytes or not ASCII letters, digits, `-`, `_`,
+    /// `.` or `:`, when both are equal, or when the requested identifier is
+    /// already mapped.
+    pub fn with_model_snapshot(
+        mut self,
+        requested_model: impl Into<String>,
+        pinned_snapshot: impl Into<String>,
+    ) -> Result<Self, ProviderError> {
+        let requested_model = requested_model.into();
+        let pinned_snapshot = pinned_snapshot.into();
+        let valid = |model: &str| {
+            !model.is_empty()
+                && model.len() <= 128
+                && model.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
+                })
+        };
+        if !valid(&requested_model)
+            || !valid(&pinned_snapshot)
+            || requested_model == pinned_snapshot
+            || self.model_snapshots.contains_key(&requested_model)
+        {
+            return Err(ProviderError::InvalidConfiguration(
+                "invalid Anthropic model snapshot mapping".to_owned(),
+            ));
+        }
+        self.model_snapshots
+            .insert(requested_model, pinned_snapshot);
+        Ok(self)
     }
 
     fn client(
@@ -359,9 +412,11 @@ impl AiProvider for AnthropicProvider {
             .into_iter()
             .map(|tool| (tool.provider_name, tool.tool_id))
             .collect();
+        let pinned_snapshot = self.model_snapshots.get(&request.model).cloned();
         Ok(normalized_stream(
             response,
             request.model,
+            pinned_snapshot,
             offered_tools,
             request
                 .maximum_output_tokens
@@ -603,6 +658,8 @@ enum ContentBlockState {
 
 struct AnthropicEventNormalizer {
     expected_model: String,
+    /// The one other identifier the deployment accepts for `expected_model`.
+    pinned_snapshot: Option<String>,
     offered_tools: BTreeMap<String, String>,
     blocks: BTreeMap<u64, ContentBlockState>,
     completed_indices: BTreeSet<u64>,
@@ -632,6 +689,7 @@ impl AnthropicEventNormalizer {
         .unwrap_or(MAXIMUM_VISIBLE_TEXT_BYTES);
         Self {
             expected_model,
+            pinned_snapshot: None,
             offered_tools,
             blocks: BTreeMap::new(),
             completed_indices: BTreeSet::new(),
@@ -646,6 +704,17 @@ impl AnthropicEventNormalizer {
             visible_text_bytes: 0,
             wire_events: 0,
         }
+    }
+
+    fn with_pinned_snapshot(mut self, pinned_snapshot: Option<String>) -> Self {
+        self.pinned_snapshot = pinned_snapshot;
+        self
+    }
+
+    fn accepts_model(&self, model: Option<&str>) -> bool {
+        model.is_some_and(|model| {
+            model == self.expected_model || self.pinned_snapshot.as_deref() == Some(model)
+        })
     }
 
     fn normalize(&mut self, frame: SseFrame) -> Result<Vec<ProviderEvent>, ProviderError> {
@@ -685,7 +754,7 @@ impl AnthropicEventNormalizer {
         let message = value.get("message").ok_or(ProviderError::Rejected)?;
         if self.started
             || message.get("role").and_then(Value::as_str) != Some("assistant")
-            || message.get("model").and_then(Value::as_str) != Some(self.expected_model.as_str())
+            || !self.accepts_model(message.get("model").and_then(Value::as_str))
             || message
                 .get("content")
                 .and_then(Value::as_array)
@@ -843,6 +912,11 @@ impl AnthropicEventNormalizer {
             .pointer("/delta/stop_reason")
             .and_then(Value::as_str)
             .ok_or(ProviderError::Rejected)?;
+        // `pause_turn` is deliberately absent. Anthropic emits it only while a
+        // server tool runs, and this adapter refuses every request that offers
+        // one, so a paused turn can only be a response to something the
+        // adapter never sent. Accepting it would complete a turn the provider
+        // has not finished.
         if !matches!(
             stop_reason,
             "end_turn" | "tool_use" | "refusal" | "max_tokens" | "stop_sequence"
@@ -905,6 +979,7 @@ impl AnthropicEventNormalizer {
 fn normalized_stream(
     response: reqwest::Response,
     expected_model: String,
+    pinned_snapshot: Option<String>,
     offered_tools: BTreeMap<String, String>,
     maximum_output_tokens: u64,
 ) -> ProviderEventStream {
@@ -915,7 +990,8 @@ fn normalized_stream(
             expected_model,
             offered_tools,
             maximum_output_tokens,
-        );
+        )
+        .with_pinned_snapshot(pinned_snapshot);
         while let Some(chunk) = bytes.next().await {
             let chunk = chunk.map_err(|_| ProviderError::Unavailable)?;
             for frame in decoder.push(&chunk)? {
@@ -1521,6 +1597,97 @@ mod tests {
                 })
                 .to_string(),
             }),
+            Err(ProviderError::Rejected)
+        ));
+    }
+
+    fn start_with_model(
+        normalizer: &mut AnthropicEventNormalizer,
+        model: &str,
+    ) -> Result<Vec<ProviderEvent>, ProviderError> {
+        normalizer.message_start(&json!({"message": {
+            "role": "assistant",
+            "model": model,
+            "content": [],
+            "usage": {"input_tokens": 1}
+        }}))
+    }
+
+    #[test]
+    fn a_declared_snapshot_is_the_only_other_accepted_response_model() {
+        let exact = || AnthropicEventNormalizer::new("model-alias".into(), BTreeMap::new(), 128);
+        // Default: byte-for-byte equality, as before.
+        assert!(start_with_model(&mut exact(), "model-alias").is_ok());
+        assert!(matches!(
+            start_with_model(&mut exact(), "model-alias-20250101"),
+            Err(ProviderError::Rejected)
+        ));
+
+        let pinned = || exact().with_pinned_snapshot(Some("model-alias-20250101".to_owned()));
+        assert!(start_with_model(&mut pinned(), "model-alias").is_ok());
+        assert!(start_with_model(&mut pinned(), "model-alias-20250101").is_ok());
+        // The alias moved to a snapshot the deployment did not pin, or the
+        // provider answered with an unrelated or prefix-sharing model.
+        for other in [
+            "model-alias-20260101",
+            "model-alias-2025010",
+            "model-alias-20250101-extra",
+            "another-model",
+            "",
+        ] {
+            assert!(matches!(
+                start_with_model(&mut pinned(), other),
+                Err(ProviderError::Rejected)
+            ));
+        }
+    }
+
+    #[test]
+    fn snapshot_mappings_are_validated_and_single_valued() {
+        let provider = || test_provider("http://127.0.0.1:9/v1/messages");
+        let mapped = provider()
+            .with_model_snapshot("model-alias", "model-alias-20250101")
+            .expect("a pinned snapshot is accepted");
+        assert_eq!(
+            mapped
+                .model_snapshots
+                .get("model-alias")
+                .map(String::as_str),
+            Some("model-alias-20250101")
+        );
+        assert!(
+            mapped
+                .with_model_snapshot("model-alias", "model-alias-20260101")
+                .is_err(),
+            "one requested identifier pins one snapshot"
+        );
+        for (requested, snapshot) in [
+            ("", "model-alias-20250101"),
+            ("model-alias", ""),
+            ("model-alias", "model-alias"),
+            ("model alias", "model-alias-20250101"),
+            ("model-alias", "model/alias"),
+        ] {
+            assert!(provider().with_model_snapshot(requested, snapshot).is_err());
+        }
+        let long = "m".repeat(129);
+        assert!(provider().with_model_snapshot(long, "model-alias").is_err());
+    }
+
+    #[test]
+    fn a_paused_turn_is_refused_because_server_tools_are_never_offered() {
+        let mut normalizer =
+            AnthropicEventNormalizer::new("test-model".into(), BTreeMap::new(), 128);
+        start_with_model(&mut normalizer, "test-model").unwrap();
+        assert!(matches!(
+            normalizer.message_delta(
+                &json!({"delta": {"stop_reason": "pause_turn"}, "usage": {"output_tokens": 2}}),
+            ),
+            Err(ProviderError::Rejected)
+        ));
+        // The stream cannot then be completed as if the turn had ended.
+        assert!(matches!(
+            normalizer.message_stop(),
             Err(ProviderError::Rejected)
         ));
     }

@@ -233,8 +233,8 @@ impl OrmAiSkillCatalogService {
         let allowed_proposal_types =
             normalized_logical_types(input.allowed_proposal_types, "proposal type")?;
         let allowed_ui_intents = normalized_ui_intent_bindings(input.allowed_ui_intents)?;
-        validate_schema(&input.input_schema.0, "skill input")?;
-        validate_schema(&input.output_schema.0, "skill output")?;
+        validate_published_schema(&input.input_schema.0, "skill input")?;
+        validate_published_schema(&input.output_schema.0, "skill output")?;
         validate_budget(
             input.budget.maximum_steps,
             input.budget.maximum_duration_seconds,
@@ -1092,6 +1092,48 @@ fn normalized_stored_ui_intent_bindings(
     Ok(bindings.into_values().collect())
 }
 
+/// Deepest nesting accepted in a newly published skill schema.
+const MAXIMUM_PUBLISHED_SCHEMA_DEPTH: usize = 32;
+/// Longest regular expression accepted in a newly published skill schema.
+const MAXIMUM_PUBLISHED_SCHEMA_PATTERN_BYTES: usize = 256;
+
+/// Validates a schema a principal is publishing.
+///
+/// A published schema is user-authored and is compiled again on every later
+/// read, so beyond the size cap it must stay shallow and may not carry a long
+/// regular expression. Stored versions are read with [`validate_schema`]
+/// alone, so a version published before these bounds existed still loads.
+fn validate_published_schema(value: &serde_json::Value, field: &str) -> Result<(), AiError> {
+    if !published_schema_within_bounds(value, 0) {
+        return Err(AiError::InvalidInput(format!("invalid {field} schema")));
+    }
+    validate_schema(value, field)
+}
+
+fn published_schema_within_bounds(value: &serde_json::Value, depth: usize) -> bool {
+    if depth > MAXIMUM_PUBLISHED_SCHEMA_DEPTH {
+        return false;
+    }
+    match value {
+        serde_json::Value::Object(object) => object.iter().all(|(key, nested)| {
+            let pattern_within_bounds = match (key.as_str(), nested) {
+                ("pattern", serde_json::Value::String(pattern)) => {
+                    pattern.len() <= MAXIMUM_PUBLISHED_SCHEMA_PATTERN_BYTES
+                }
+                ("patternProperties", serde_json::Value::Object(patterns)) => patterns
+                    .keys()
+                    .all(|pattern| pattern.len() <= MAXIMUM_PUBLISHED_SCHEMA_PATTERN_BYTES),
+                _ => true,
+            };
+            pattern_within_bounds && published_schema_within_bounds(nested, depth + 1)
+        }),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .all(|nested| published_schema_within_bounds(nested, depth + 1)),
+        _ => true,
+    }
+}
+
 fn validate_schema(value: &serde_json::Value, field: &str) -> Result<(), AiError> {
     let encoded = serde_json::to_vec(value)
         .map_err(|_| AiError::InvalidInput(format!("invalid {field} schema")))?;
@@ -1234,5 +1276,43 @@ fn hide_inaccessible_id(error: AiError) -> AiError {
     match error {
         AiError::Forbidden => AiError::NotFound,
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod schema_bound_tests {
+    use super::*;
+
+    fn nested(depth: usize) -> serde_json::Value {
+        (0..depth).fold(
+            json!({"type": "string"}),
+            |inner, _| json!({"type": "object", "properties": {"child": inner}}),
+        )
+    }
+
+    #[test]
+    fn published_schemas_bound_nesting_and_pattern_length() {
+        let accepted = json!({
+            "type": "object",
+            "properties": {"code": {"type": "string", "pattern": "^[a-z]{1,8}$"}},
+            "patternProperties": {"^x-": {"type": "string"}}
+        });
+        assert!(validate_published_schema(&accepted, "skill input").is_ok());
+        assert!(validate_published_schema(&nested(8), "skill input").is_ok());
+
+        let long = "a".repeat(MAXIMUM_PUBLISHED_SCHEMA_PATTERN_BYTES + 1);
+        for rejected in [
+            nested(MAXIMUM_PUBLISHED_SCHEMA_DEPTH),
+            json!({"type": "string", "pattern": long}),
+            json!({"type": "object", "patternProperties": {long.clone(): {"type": "string"}}}),
+            json!({"allOf": [{"properties": {"deep": {"pattern": long}}}]}),
+        ] {
+            assert!(matches!(
+                validate_published_schema(&rejected, "skill input"),
+                Err(AiError::InvalidInput(_))
+            ));
+            // A version stored before the bounds existed is still readable.
+            assert!(validate_schema(&rejected, "stored skill input").is_ok());
+        }
     }
 }

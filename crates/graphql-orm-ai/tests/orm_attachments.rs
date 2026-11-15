@@ -520,6 +520,46 @@ fn page() -> graphql_orm::graphql::pagination::ValidatedKeysetConnection {
     .expect("valid attachment page")
 }
 
+/// Content protection is a seam for conversational JSON only. Attachment
+/// bytes go to the blob store exactly as uploaded; encrypting them is the
+/// blob store's or the deployment's job (see `docs/security.md`).
+#[tokio::test]
+async fn attachment_bytes_are_stored_as_uploaded_and_bypass_content_protection() {
+    let fixture = fixture().await;
+    let owner = principal("owner");
+    let session = create_session(&fixture, &owner).await;
+    let bytes = b"\x89PNG\r\n\x1a\nplaintext-attachment-marker".to_vec();
+    let ticket = fixture
+        .attachment_service
+        .create_upload(
+            &owner,
+            CreateAiAttachmentUploadInput {
+                session_id: session.id,
+                filename: "example.png".to_owned(),
+                declared_mime: Some("image/png".to_owned()),
+                expected_byte_count: bytes.len() as i64,
+            },
+        )
+        .await
+        .expect("ticket should create");
+    fixture
+        .attachment_service
+        .upload(
+            &owner,
+            ticket.attachment().id,
+            SecretString::from(ticket.secret().expose_secret().to_owned()),
+            StorageByteStream::from_bytes(bytes.clone()),
+        )
+        .await
+        .expect("clean exact body should become ready");
+    let stored = fixture.blobs.blobs.lock().expect("blob lock");
+    assert_eq!(stored.len(), 1);
+    assert!(
+        stored.values().all(|blob| blob == &bytes),
+        "the blob store holds the uploaded bytes unchanged"
+    );
+}
+
 #[tokio::test]
 async fn ticket_is_owner_bound_scanned_promoted_released_and_message_linked() {
     let fixture = fixture().await;

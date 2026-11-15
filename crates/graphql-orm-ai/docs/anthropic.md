@@ -3,7 +3,7 @@ title: "Native Anthropic Provider"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -60,6 +60,38 @@ arguments, and result identity. Contiguous tool results are mapped to one
 Anthropic user turn, but every result still requires its own fresh disclosure
 manifest in the provider-neutral request context. The adapter never accepts a
 model-authored tool definition or arbitrary GraphQL document.
+
+### Stop reasons
+
+`end_turn`, `tool_use`, `refusal`, `max_tokens` and `stop_sequence` complete
+the response. A `max_tokens` or `stop_sequence` stop keeps the text and usage
+already streamed; the provider-neutral event stream does not yet carry a finish
+reason, so a truncated answer looks like a completed one to the caller.
+
+`pause_turn` is refused. Anthropic emits it only while a server tool is
+running, and the adapter rejects every request that offers one, so a paused
+turn cannot be the answer to a request this adapter sent. Any other stop reason
+is refused too.
+
+### Response model identifier
+
+By default the model named in the response must equal the requested string
+exactly. Anthropic answers a request for a model alias with the dated snapshot
+the alias currently points at, so an alias request is refused after its tokens
+were spent. Either request the dated snapshot directly, or declare the one
+snapshot an alias may resolve to:
+
+```rust
+let provider = AnthropicProvider::new(config, secrets)?
+    .with_model_snapshot("example-alias", "example-alias-20250101")?;
+```
+
+The mapping accepts exactly one extra response identifier for one requested
+identifier. A response that names any other model is still refused, including a
+newer snapshot the alias later moves to; update the mapping deliberately when
+that happens. Budget reservations, pricing and usage stay keyed by the
+requested identifier, so declaring a mapping asserts that the host prices the
+alias at the pinned snapshot's rate.
 
 The following remain deliberately unsupported and fail closed:
 

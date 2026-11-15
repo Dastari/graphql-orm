@@ -863,14 +863,17 @@ impl OrmAiRunService {
         lease: &AiRunLease,
         maximum_wait: std::time::Duration,
     ) -> Result<Option<AiRunCancellation>, AiError> {
+        // Listen first, then read: a cancellation committed and announced
+        // between the read and the wait still wakes this call.
+        let subscription = self.cancellation_hub.as_ref().map(|hub| hub.subscribe());
         if let Some(cancellation) = self.cancellation(lease).await? {
             return Ok(Some(cancellation));
         }
         if maximum_wait.is_zero() {
             return Ok(None);
         }
-        if let Some(hub) = &self.cancellation_hub {
-            hub.wait(lease.run_id, maximum_wait).await;
+        if let Some(subscription) = subscription {
+            subscription.wait(lease.run_id, maximum_wait).await;
         } else {
             tokio::time::sleep(maximum_wait).await;
         }
