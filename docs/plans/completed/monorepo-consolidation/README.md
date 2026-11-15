@@ -1,10 +1,10 @@
 ---
 title: "GraphQL ORM monorepo consolidation"
 kind: plan
-status: accepted
+status: archived
 owner: workspace-maintainers
 last_reviewed: 2026-08-01
-review_by: 2027-02-01
+review_by: none
 supersedes: []
 ---
 

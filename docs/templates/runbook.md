@@ -3,8 +3,8 @@ title: TEMPLATE Operational runbook
 kind: runbook
 status: draft
 owner: workspace-maintainers
-last_reviewed: 2026-11-02
-review_by: 2026-12-02
+last_reviewed: 2026-11-15
+review_by: 2027-02-15
 supersedes: []
 ---
 

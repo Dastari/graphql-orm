@@ -1,10 +1,10 @@
 ---
 title: GraphQL ORM Router implementation completion
 kind: plan
-status: accepted
+status: archived
 owner: graphql-orm-router-maintainers
 last_reviewed: 2026-08-11
-review_by: 2027-02-11
+review_by: none
 supersedes: []
 ---
 
