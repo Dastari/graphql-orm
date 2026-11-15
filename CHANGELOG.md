@@ -26,6 +26,10 @@ for historical context.
   - **Fix:** the runtime GraphQL planner refuses an `orderBy` term on an unsortable or JSON field itself, with `unsupported_order`, before `runtime_order` checks it again ([#541](https://github.com/Dastari/graphql-orm/issues/541), in part).
   - **Tests and hygiene:** `cargo clippy -p graphql-orm --no-default-features --features sqlite,postgres,runtime-graphql --all-targets -- -D warnings` is clean: a change-journal helper is compiled only with its caller, and twelve single-backend test targets and one example no longer compile for two backends at once. `runtime_search_long_tables` runs in the SQLite and PostgreSQL runtime lanes and in CI; `runtime_relation_bind_limit`, on a connection limited to 999 variables, and `poisoned_error_buffer` run in the default suite, the former also in the SQLite lane.
 
+## Unreleased - AI 0.144.0
+
+- AI adds a pinned Anthropic model-snapshot mapping and an exact OpenAI stored-response deletion adapter, fixes a missed cancellation wake-up and bounds published skill schemas (a hardening that can reject a schema accepted before). No schema module change. Details are in the [AI changelog](crates/graphql-orm-ai/CHANGELOG.md#unreleased---01440).
+
 ## Unreleased - ORM/macros 0.157.0
 
 - ORM and macros 0.157.0 (placeholder): **breaking/data safety:** migrations, the change journal and retention. See the [migration guide](MIGRATION.md#01560-to-01570-migrations-change-journal-and-retention).

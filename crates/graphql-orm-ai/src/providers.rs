@@ -80,7 +80,10 @@ pub use chat_completions::{
 };
 
 #[cfg(feature = "provider-openai-core")]
-pub use openai::{OpenAiFileDeletionService, OpenAiProvider, OpenAiProviderConfig};
+pub use openai::{
+    OpenAiFileDeletionService, OpenAiProvider, OpenAiProviderConfig, OpenAiStoredResponseDeletion,
+    OpenAiStoredResponseDeletionService,
+};
 
 #[cfg(all(
     feature = "provider-openai-core",

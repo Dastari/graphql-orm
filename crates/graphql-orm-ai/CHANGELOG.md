@@ -3,12 +3,23 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Changelog
+
+## Unreleased - 0.144.0
+
+- **Breaking (hardening):** publishing a skill version rejects an input or output schema nested more than 32 levels deep or carrying a `pattern` or `patternProperties` key longer than 256 bytes. Stored versions still load (part of #543).
+- **Providers:** `AnthropicProvider::with_model_snapshot` declares the one pinned snapshot a requested model identifier may resolve to, so a deployment can request a model alias. Without a mapping the response model must still equal the request exactly, and any other returned model is refused. `pause_turn` stays refused: it only occurs with server tools, which the adapter never offers (part of #470).
+- **Providers:** `OpenAiStoredResponseDeletionService` deletes one stored response by exact identifier and confirms it with a follow-up retrieval; a not-found answer to the delete is reported as `NotFoundUnconfirmed`, never as deleted. The crate still does not delete stored responses on its own; the documentation now says so and describes the host-owned cleanup (part of #468).
+- **Fix:** `OrmAiRunService::wait_for_cancellation` subscribes to the cancellation hub before its durable check. A cancellation recorded between the check and the wait used to be missed until the wait timed out (part of #543).
+- **Internal:** approval argument digests use the operation catalogue's `canonical_json_hash` directly, so the two can no longer diverge; a test pins the equality (part of #543).
+- **Documentation:** the lease clock contract (per-process wall clocks, what skew can and cannot do, and the zero default of `with_lease_recovery_grace`) is stated in [worker and provider turn](docs/worker-provider-turn.md#lease-clocks) (part of #536). `AiContentProtector`, `DatabaseManagedContentProtector` and `AiContentProtectionMode::ApplicationEncrypted` now say in their API documentation that the crate ships no encryption and that attachment bytes bypass the protector; tests pin both facts (#469). The [provider-persistent file contract](docs/provider-files.md) was reviewed against the code and now states what provider-file deletion proves today: intent before `DELETE`, 404 as proof only at or after recorded expiry, bounded retry, and the terminal `cleanup_unconfirmed` outcome.
+
+No GraphQL SDL, persistent schema or data migration change; `AI_SCHEMA_MODULE_VERSION` stays `0.80.0`. See the migration guide.
 
 ## Unreleased - 0.143.0
 

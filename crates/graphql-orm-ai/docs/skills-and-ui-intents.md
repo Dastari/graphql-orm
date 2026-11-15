@@ -3,7 +3,7 @@ title: "Protected skills and typed UI intents"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -43,6 +43,12 @@ host `AiSkillAccessPolicy` authorization, and current compare-and-swap state.
 Publication protects instructions before ORM persistence, appends a redacted
 audit fact in the same state-machine transaction, and never modifies an older
 version. A skill cannot be enabled before a version exists.
+
+A published input or output schema is user-authored, so publication bounds it
+beyond the 1 MiB size cap: it may nest at most 32 levels deep, and a `pattern`
+value or `patternProperties` key may be at most 256 bytes. A schema outside
+those bounds is rejected with `InvalidInput`. The bounds apply to publication
+only; a version stored before they existed still loads.
 
 Reads return at most 100 redacted skills for one exact scope. Instruction text,
 schemas, and provider-capability details are not exposed by the GraphQL view.
