@@ -398,7 +398,10 @@ impl GraphqlOrmBackupAdapter for OrmBackupAdapter {
                 .map(orm_row_from_crate)
                 .collect::<Result<Vec<_>, _>>()?;
             // A second export of a table would silently replace the first.
-            if rows_by_table.insert(table.table_name.clone(), rows).is_some() {
+            if rows_by_table
+                .insert(table.table_name.clone(), rows)
+                .is_some()
+            {
                 return Err(BackupError::Database {
                     message: format!(
                         "restore export lists table {} more than once",

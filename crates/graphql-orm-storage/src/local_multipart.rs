@@ -154,9 +154,7 @@ async fn locked<T: Send + 'static>(
 fn read_manifest(dir: &Path) -> Result<Option<Manifest>, StorageError> {
     let path = dir.join(MANIFEST);
     match std::fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(json_error),
+        Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(json_error),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(source) => Err(StorageError::io(path, source)),
     }
@@ -328,8 +326,7 @@ impl MultipartBlobStore for LocalStorageBackend {
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<StoredPart>(&bytes).ok());
             sync_dir(&dir)?;
-            let bytes =
-                serde_json::to_vec(&stored).map_err(json_error)?;
+            let bytes = serde_json::to_vec(&stored).map_err(json_error)?;
             write_durably(&receipt_path, &bytes)?;
             if let Some(previous) = previous
                 && previous.data_file != stored.data_file

@@ -731,11 +731,7 @@ impl SmbStorageBackend {
                 .diagnostics
                 .bytes_downloaded
                 .load(Ordering::Relaxed),
-            read_requests: self
-                .inner
-                .diagnostics
-                .read_requests
-                .load(Ordering::Relaxed),
+            read_requests: self.inner.diagnostics.read_requests.load(Ordering::Relaxed),
             reconnects: self.inner.diagnostics.reconnects.load(Ordering::Relaxed),
             directory_cache_entries: self.inner.directories.len().await,
             directory_cache_hits: self
@@ -1116,11 +1112,7 @@ impl SmbStorageBackend {
                         let entries = match source.enumerate(&directory, &mut budget).await {
                             Ok(entries) => entries,
                             Err(error) => {
-                                if self
-                                    .with_timeout("close", directory.close())
-                                    .await
-                                    .is_err()
-                                {
+                                if self.with_timeout("close", directory.close()).await.is_err() {
                                     tally.cleanup_failed();
                                 }
                                 return Err(error);
@@ -1493,10 +1485,9 @@ impl SmbStorageBackend {
                     if read > 0 {
                         let diagnostics = &backend.inner.diagnostics;
                         diagnostics.read_requests.fetch_add(1, Ordering::Relaxed);
-                        diagnostics.bytes_downloaded.fetch_add(
-                            u64::try_from(read).unwrap_or(u64::MAX),
-                            Ordering::Relaxed,
-                        );
+                        diagnostics
+                            .bytes_downloaded
+                            .fetch_add(u64::try_from(read).unwrap_or(u64::MAX), Ordering::Relaxed);
                     }
                     if read == 0 {
                         return Err(remote_error(
@@ -1554,7 +1545,6 @@ impl SmbStorageBackend {
             file_time(basic.last_write_time.since_epoch()).map(OffsetDateTime::from),
         ))
     }
-
 
     async fn client_snapshot(&self) -> ConnectedClient {
         let client = self.inner.client.read().await;
@@ -2640,9 +2630,7 @@ impl SweepSession {
             };
             let session = match tokio::time::timeout(timeout, client.get_session(&self.share)).await
             {
-                Ok(Ok(session)) => {
-                    succeeded(tokio::time::timeout(timeout, session.logoff()).await)
-                }
+                Ok(Ok(session)) => succeeded(tokio::time::timeout(timeout, session.logoff()).await),
                 _ => false,
             };
             let connection =
@@ -6032,7 +6020,9 @@ mod tests {
         use std::io::Read;
         let mut byte = [0_u8; 1];
         assert_eq!(
-            accepted.read(&mut byte).expect("the peer closed, not timed out"),
+            accepted
+                .read(&mut byte)
+                .expect("the peer closed, not timed out"),
             0
         );
     }

@@ -471,7 +471,15 @@ async fn single_attempt_local_delete_failure_is_not_retryable() {
         .delete_blob("directory")
         .await
         .expect_err("cannot unlink directory");
-    assert!(ordinary.is_retryable(), "ordinary I/O taxonomy is retained");
+    // Ordinary deletion keeps the I/O taxonomy: its retryability follows the
+    // error kind, and a directory at the key is not transient.
+    let StorageError::Io { source, .. } = &ordinary else {
+        panic!("ordinary I/O taxonomy is retained: {ordinary:?}");
+    };
+    assert_eq!(
+        ordinary.is_retryable(),
+        graphql_orm_storage::io_error_is_retryable(source.kind())
+    );
     let once = backend
         .delete_blob_once("directory")
         .await

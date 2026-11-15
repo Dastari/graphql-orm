@@ -1094,8 +1094,7 @@ async fn s3_metadata_reports_the_last_modified_time() {
             };
             ScriptedReply::Respond(
                 status,
-                "Last-Modified: Wed, 01 Jan 2020 00:00:00 GMT\r\nETag: \"fixture\"\r\n"
-                    .to_string(),
+                "Last-Modified: Wed, 01 Jan 2020 00:00:00 GMT\r\nETag: \"fixture\"\r\n".to_string(),
                 body.to_string(),
             )
         },

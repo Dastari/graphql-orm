@@ -1456,7 +1456,10 @@ async fn samba_sweep_removes_only_stale_temporary_files() {
     assert_eq!(store.list_blobs("sweep/").await.expect("list"), expected);
 
     drop(holder);
-    held_dir.release().await.expect("release the held directory");
+    held_dir
+        .release()
+        .await
+        .expect("release the held directory");
     // The upload that was in progress still publishes.
     release.send(()).expect("release the upload");
     upload
@@ -1577,7 +1580,14 @@ fn fixture_shell(fixture: &VerifiedSambaFixture, script: &str) {
 fn smbclient_rename(container: &str, from: &str, to: &str) -> (bool, String) {
     let output = std::process::Command::new("docker")
         .args(["exec", container, "smbclient", "//127.0.0.1/backups"])
-        .args(["-U", "backup%BackupTest-42!", "-W", "WORKGROUP", "-m", "SMB3"])
+        .args([
+            "-U",
+            "backup%BackupTest-42!",
+            "-W",
+            "WORKGROUP",
+            "-m",
+            "SMB3",
+        ])
         .args(["-c", &format!("rename \"{from}\" \"{to}\"")])
         .output()
         .expect("run smbclient in the owned fixture");
@@ -1853,7 +1863,7 @@ async fn samba_range_reads_start_at_the_offset_and_report_metadata() {
     assert!(age.abs() < time::Duration::minutes(10), "{modified}");
     let whole = store.get_blob("range/blob.bin").await.expect("get");
     assert_eq!(
-        whole.metadata.expect("metadata").last_modified,
+        whole.metadata.as_ref().expect("metadata").last_modified,
         Some(modified)
     );
     drop(whole);

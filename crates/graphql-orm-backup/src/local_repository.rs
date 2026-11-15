@@ -48,10 +48,12 @@ impl LocalBackupRepository {
     /// directory.
     pub async fn open_existing(root: impl Into<PathBuf>) -> Result<Self, BackupError> {
         let root = root.into();
-        let metadata = tokio::fs::metadata(&root).await.map_err(|source| BackupError::Io {
-            path: root.clone(),
-            source,
-        })?;
+        let metadata = tokio::fs::metadata(&root)
+            .await
+            .map_err(|source| BackupError::Io {
+                path: root.clone(),
+                source,
+            })?;
         if !metadata.is_dir() {
             return Err(BackupError::InvalidRepositoryRoot { path: root });
         }

@@ -2077,3 +2077,72 @@ async fn a_table_exported_twice_is_refused_before_any_write() {
         .collect();
     assert!(written.is_empty(), "{written:?}");
 }
+
+/// A manifest cut short in the repository is refused, and restore applies
+/// nothing (#540).
+#[tokio::test]
+async fn a_truncated_manifest_is_refused_and_never_restored() {
+    let temp = TempDir::new().expect("temp dir");
+    let repository = repository(&temp);
+    let manifest = backup_with_object(&repository, "media/a.txt").await;
+    let key = snapshot_manifest_key(manifest.snapshot_id);
+    let stored = repository.get_blob(&key).await.expect("manifest");
+    repository
+        .put_blob(&key, stored.slice(..stored.len() / 2))
+        .await
+        .expect("truncate manifest");
+
+    load_manifest(&repository, manifest.snapshot_id)
+        .await
+        .expect_err("a truncated manifest is refused");
+    let target = MockDatabase::default();
+    restore_snapshot(
+        &repository,
+        &target,
+        manifest.snapshot_id,
+        RestoreContext::empty_database(),
+    )
+    .await
+    .expect_err("a truncated manifest is never restored");
+    assert!(target.restored().is_empty());
+}
+
+/// A payload cut short in the repository fails verification and restore by
+/// its checksum, and restore applies nothing (#540).
+#[tokio::test]
+async fn a_truncated_payload_fails_verification_and_is_never_restored() {
+    let temp = TempDir::new().expect("temp dir");
+    let repository = repository(&temp);
+    let manifest = backup_with_object(&repository, "media/a.txt").await;
+    let table_key = manifest.database.tables[0].content_key.clone();
+    let stored = repository.get_blob(&table_key).await.expect("payload");
+    repository
+        .put_blob(&table_key, stored.slice(..stored.len() - 1))
+        .await
+        .expect("truncate payload");
+
+    let error = verify_manifest_and_objects(&repository, &manifest)
+        .await
+        .expect_err("a truncated payload fails verification");
+    assert!(
+        matches!(error, BackupError::ChecksumMismatch { ref key, .. } if *key == table_key),
+        "{error:?}"
+    );
+    let target = MockDatabase::default();
+    let error = restore_snapshot(
+        &repository,
+        &target,
+        manifest.snapshot_id,
+        RestoreContext::empty_database(),
+    )
+    .await
+    .expect_err("a truncated payload is never restored");
+    assert!(
+        matches!(
+            restore_source(error),
+            BackupError::ChecksumMismatch { ref key, .. } if *key == table_key
+        ),
+        "the payload's checksum refuses it"
+    );
+    assert!(target.restored().is_empty());
+}

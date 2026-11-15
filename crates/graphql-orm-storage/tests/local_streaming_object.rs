@@ -356,9 +356,9 @@ async fn local_streaming_object_completion_never_publishes_an_object_without_met
         .expect("write chunk");
     // Make publishing the metadata fail: a non-empty directory holds its
     // final name, so the rename onto it fails.
-    let metadata_path = temp
-        .path()
-        .join(".graphql-orm-storage/object-metadata/recordings/sessions/epsilon/video.webm.metadata.json");
+    let metadata_path = temp.path().join(
+        ".graphql-orm-storage/object-metadata/recordings/sessions/epsilon/video.webm.metadata.json",
+    );
     std::fs::create_dir_all(metadata_path.join("occupied")).expect("occupy the metadata name");
 
     writer

@@ -378,7 +378,10 @@ mod prefix_tests {
         }
         let repository = BlobStoreBackupRepository::with_prefix(store, "repo").expect("prefix");
         assert_eq!(repository.apply_prefix_to_list(""), "repo/");
-        assert_eq!(repository.apply_prefix_to_list("snapshots/"), "repo/snapshots/");
+        assert_eq!(
+            repository.apply_prefix_to_list("snapshots/"),
+            "repo/snapshots/"
+        );
         assert_eq!(repository.strip_prefix("repo-other/b".to_string()), None);
         assert_eq!(
             BackupRepository::list_blobs(&repository, "")
