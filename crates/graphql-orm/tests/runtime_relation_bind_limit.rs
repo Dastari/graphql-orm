@@ -3,12 +3,38 @@
 //! SQLite builds before 3.32, and later builds that keep the old default,
 //! refuse a statement with more than 999 variables. A relation layer that
 //! binds more is sent as several statements, each within that limit, and
-//! returns what one statement would have (#528).
+//! returns what one statement would have. One parent group that alone needs
+//! more is refused before any statement runs (#528).
+//!
+//! The test's connection has its variable limit set to 999, as such a build
+//! has, so a statement above it fails in SQLite itself.
 #![cfg(all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))))]
 use graphql_orm::db::Database;
 use graphql_orm::graphql::orm::*;
 
 const PARENTS: i64 = 100;
+
+// SQLite's own limit setter, from the library sqlx links.
+unsafe extern "C" {
+    fn sqlite3_limit(
+        db: *mut std::ffi::c_void,
+        id: std::ffi::c_int,
+        new_value: std::ffi::c_int,
+    ) -> std::ffi::c_int;
+}
+const SQLITE_LIMIT_VARIABLE_NUMBER: std::ffi::c_int = 9;
+
+/// Give the pool's only connection the 999-variable limit of older builds.
+async fn limit_variables(database: &Database<SqliteBackend>) {
+    let mut connection = database.pool().acquire().await.unwrap();
+    let mut handle = connection.lock_handle().await.unwrap();
+    let raw = handle.as_raw_handle().as_ptr().cast::<std::ffi::c_void>();
+    // SAFETY: `raw` is the open connection this guard holds locked, and
+    // `sqlite3_limit` only reads and sets a per-connection integer.
+    unsafe { sqlite3_limit(raw, SQLITE_LIMIT_VARIABLE_NUMBER, 999) };
+    let current = unsafe { sqlite3_limit(raw, SQLITE_LIMIT_VARIABLE_NUMBER, -1) };
+    assert_eq!(current, 999);
+}
 
 fn fid(value: &str) -> FieldId {
     FieldId::new(value).unwrap()
@@ -175,6 +201,14 @@ async fn wide_relation_layers_are_split_at_the_sqlite_variable_limit() {
                 .unwrap();
         }
     }
+    limit_variables(&database).await;
+    // The limit is real: SQLite refuses 1,000 variables on this connection.
+    let too_many = format!("SELECT {}", vec!["?"; 1_000].join(" + "));
+    let mut query = sqlx::query(&too_many);
+    for _ in 0..1_000 {
+        query = query.bind(1_i64);
+    }
+    assert!(query.fetch_all(database.pool()).await.is_err());
     let query_limits = RuntimeQueryLimits::default();
     // Twelve bound values per parent, plus its key.
     let wanted = || {
@@ -293,6 +327,94 @@ async fn wide_relation_layers_are_split_at_the_sqlite_variable_limit() {
             );
         }
     }
+    // One parent group that needs more than 999 variables cannot be split.
+    // `filter(n)` binds n values across ten lists; with the parent key a
+    // group binds n + 1.
+    let filter = |values: usize| {
+        let lists = (0..10)
+            .map(|list| {
+                let size = values / 10 + usize::from(list < values % 10);
+                schema
+                    .runtime_list(
+                        &items,
+                        &label,
+                        RuntimeListOperator::In,
+                        (0..size)
+                            .map(|n| RuntimeValue::String(format!("l{n}")))
+                            .collect(),
+                        query_limits,
+                    )
+                    .unwrap()
+            })
+            .collect();
+        schema.runtime_and(&items, lists, query_limits).unwrap()
+    };
+    let page = parents(2).await;
+    for (values, served) in [(998, true), (999, false)] {
+        for include_count in [false, true] {
+            let request = schema
+                .runtime_relation_batch_request(
+                    &to_many,
+                    page.relation_parents(&to_many).unwrap(),
+                    &projection,
+                    Some(filter(values)),
+                    schema.runtime_order(&items, None, query_limits).unwrap(),
+                    RuntimeRelationSelection::ToMany {
+                        pages: vec![RuntimePageRequest::first(5, None); 2],
+                        include_count,
+                    },
+                    RuntimeRelationLimits::default(),
+                )
+                .unwrap();
+            reset_query_count();
+            let result = database
+                .execute_runtime_relation_batch(&request, None)
+                .await;
+            if served {
+                // 999 variables per statement: one statement per parent.
+                let batch = result.unwrap();
+                assert_eq!(query_count(), if include_count { 4 } else { 2 });
+                for result in &batch.results {
+                    let RuntimeRelationValue::ToMany(connection) = &result.value else {
+                        panic!("to-many relation");
+                    };
+                    assert_eq!(labels(connection), ["l0", "l1"]);
+                }
+            } else {
+                // 1,000 variables: refused before anything is sent, with the
+                // typed refusal the static relation loaders give.
+                let error = result.unwrap_err();
+                assert_eq!(error.code(), RuntimeRelationErrorCode::ResourceLimit);
+                assert_eq!(query_count(), 0, "{values} values");
+                let source = std::error::Error::source(&error)
+                    .and_then(|source| source.downcast_ref::<sqlx::Error>())
+                    .expect("the typed public refusal");
+                assert_eq!(
+                    graphql_orm::graphql::errors::OrmPublicError::from_sqlx(source).code,
+                    graphql_orm::graphql::errors::OrmErrorCode::InvalidInput
+                );
+            }
+        }
+    }
+    // The same for a to-one layer.
+    let one = schema
+        .runtime_relation_batch_request(
+            &to_one,
+            page.relation_parents(&to_one).unwrap(),
+            &projection,
+            Some(filter(999)),
+            schema.runtime_order(&items, None, query_limits).unwrap(),
+            RuntimeRelationSelection::ToOne,
+            RuntimeRelationLimits::default(),
+        )
+        .unwrap();
+    reset_query_count();
+    let error = database
+        .execute_runtime_relation_batch(&one, None)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), RuntimeRelationErrorCode::ResourceLimit);
+    assert_eq!(query_count(), 0);
     // The layer's own limit still bounds the total: nothing is sent above it.
     let page = parents(PARENTS).await;
     let refused = schema

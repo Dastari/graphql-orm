@@ -123,6 +123,95 @@ fn postgres_text_default_literal(default: &str) -> Option<String> {
 }
 
 #[cfg(test)]
+mod search_helper_conflict_tests {
+    use super::*;
+    use crate::graphql::orm::{MigrationStep, SearchHelperTableConflict};
+
+    fn create(table: &str, strategy: SearchIndexStrategy) -> MigrationStep {
+        MigrationStep::CreateSearchIndex {
+            table_name: table.to_owned(),
+            index: SearchIndexModel {
+                name: format!("idx_{}_search", table.len()),
+                table_name: table.to_owned(),
+                entity_name: table.to_owned(),
+                primary_key: "id".into(),
+                strategy,
+                language: "english".into(),
+                tokenizer: "unicode61".into(),
+                min_token_len: 2,
+                fallback_enabled: false,
+                fields: Vec::new(),
+                json_paths: Vec::new(),
+                relations: Vec::new(),
+                readiness_tracked: false,
+            },
+        }
+    }
+
+    /// Two base tables of one plan that need one helper table are refused
+    /// with the typed conflict before anything is rendered or run (#528).
+    #[test]
+    fn a_plan_whose_search_helper_tables_collide_is_refused() {
+        // `audit.logs` and `audit_logs` sanitize to the same helper name.
+        for (backend, strategy, helper) in [
+            (
+                DatabaseBackend::Postgres,
+                SearchIndexStrategy::PostgresTsvector,
+                "__graphql_orm_search_audit_logs",
+            ),
+            (
+                DatabaseBackend::Sqlite,
+                SearchIndexStrategy::SqliteFts5,
+                "__graphql_orm_fts_audit_logs",
+            ),
+            (
+                DatabaseBackend::Sqlite,
+                SearchIndexStrategy::FallbackTable,
+                "__graphql_orm_search_audit_logs",
+            ),
+        ] {
+            let steps = [
+                create("audit.logs", strategy),
+                create("audit_logs", strategy),
+            ];
+            let refs = steps.iter().map(StepRef::from).collect::<Vec<_>>();
+            let expected = SearchHelperTableConflict {
+                helper_table: helper.into(),
+                table: "audit_logs".into(),
+                other_table: Some("audit.logs".into()),
+            };
+            assert_eq!(
+                search_helper_collision(backend, &refs),
+                Some(expected.clone()),
+                "{backend:?}"
+            );
+            let error =
+                validate_migration_step_capabilities(backend, steps.iter().map(StepRef::from))
+                    .unwrap_err();
+            assert_eq!(
+                SearchHelperTableConflict::from_error(&error),
+                Some(&expected)
+            );
+        }
+        // Distinct helper names, and one base table named twice, are fine.
+        let steps = [
+            create("audit_logs", SearchIndexStrategy::PostgresTsvector),
+            create("audit_logs", SearchIndexStrategy::PostgresTsvector),
+            create(&"t".repeat(43), SearchIndexStrategy::PostgresTsvector),
+            create(
+                &format!("{}_80383f974f22964f", "t".repeat(25)),
+                SearchIndexStrategy::PostgresTsvector,
+            ),
+        ];
+        let refs = steps.iter().map(StepRef::from).collect::<Vec<_>>();
+        assert_eq!(
+            search_helper_collision(DatabaseBackend::Postgres, &refs),
+            None
+        );
+    }
+}
+
+#[cfg(test)]
 mod sqlite_add_column_default_tests {
     use super::*;
 
@@ -1053,12 +1142,141 @@ pub(super) fn postgres_alter_metadata_supported(before: &ColumnModel, after: &Co
         && (before.spatial == after.spatial || !same_type)
 }
 
+/// The helper tables that creating `index` makes on `backend`.
+fn search_helper_tables(backend: DatabaseBackend, index: &SearchIndexModel) -> Vec<String> {
+    match backend {
+        DatabaseBackend::Postgres => vec![super::search_table_name(&index.table_name)],
+        DatabaseBackend::Sqlite => match index.strategy {
+            SearchIndexStrategy::FallbackTable => vec![
+                super::search_table_name(&index.table_name),
+                super::search_token_table_name(&index.table_name),
+            ],
+            _ => vec![super::sqlite_fts_table_name(&index.table_name)],
+        },
+        DatabaseBackend::Mysql | DatabaseBackend::Mssql => Vec::new(),
+    }
+}
+
+/// Each `(base table, helper table)` the steps would create. An altered
+/// index keeps its base table's own helper table and is not listed.
+fn created_search_helpers(
+    backend: DatabaseBackend,
+    steps: &[StepRef<'_>],
+) -> Vec<(String, String)> {
+    let mut created = Vec::new();
+    let mut add = |index: &SearchIndexModel| {
+        for helper in search_helper_tables(backend, index) {
+            let entry = (index.table_name.clone(), helper);
+            if !created.contains(&entry) {
+                created.push(entry);
+            }
+        }
+    };
+    for step in steps {
+        match step {
+            StepRef::CreateTable(table) => table.search_indexes.iter().for_each(&mut add),
+            StepRef::CreateSearchIndex { index, .. } => add(index),
+            _ => {}
+        }
+    }
+    created
+}
+
+/// Two base tables whose search indexes the steps would create under one
+/// helper table name.
+pub(super) fn search_helper_collision(
+    backend: DatabaseBackend,
+    steps: &[StepRef<'_>],
+) -> Option<super::SearchHelperTableConflict> {
+    let created = created_search_helpers(backend, steps);
+    created
+        .iter()
+        .enumerate()
+        .find_map(|(position, (table, helper))| {
+            created[..position]
+                .iter()
+                .find(|(other, taken)| taken == helper && other != table)
+                .map(|(other, _)| super::SearchHelperTableConflict {
+                    helper_table: helper.clone(),
+                    table: table.clone(),
+                    other_table: Some(other.clone()),
+                })
+        })
+}
+
+/// A helper table the steps would create that already exists in the database
+/// without a search metadata row for its base table: it belongs to another
+/// base table, to an earlier release's truncated name, or to the host.
+///
+/// Read-only. A base table that already has its metadata row owns its helper
+/// tables, so planning or applying the same plan again reports nothing.
+pub(super) async fn search_helper_taken<B: super::OrmBackend>(
+    pool: &B::Pool,
+    steps: &[StepRef<'_>],
+) -> crate::Result<Option<super::SearchHelperTableConflict>> {
+    let backend = B::DIALECT;
+    let placeholder = backend.placeholder(1);
+    let exists_sql = match backend {
+        DatabaseBackend::Postgres => {
+            format!("SELECT 1 AS present WHERE pg_catalog.to_regclass({placeholder}) IS NOT NULL")
+        }
+        DatabaseBackend::Sqlite => {
+            format!("SELECT 1 AS present FROM sqlite_master WHERE name = {placeholder}")
+        }
+        DatabaseBackend::Mysql | DatabaseBackend::Mssql => return Ok(None),
+    };
+    let exists = |name: String| {
+        let exists_sql = &exists_sql;
+        async move {
+            let name = match backend {
+                DatabaseBackend::Postgres => backend.quote_identifier(&name),
+                _ => name,
+            };
+            B::fetch_rows(pool, exists_sql, &[super::SqlValue::String(name)])
+                .await
+                .map(|rows| !rows.is_empty())
+        }
+    };
+    let created = created_search_helpers(backend, steps);
+    if created.is_empty() {
+        return Ok(None);
+    }
+    let metadata_table = super::search_metadata_table_name();
+    let has_metadata = exists(metadata_table.to_owned()).await?;
+    for (table, helper) in created {
+        if !exists(helper.clone()).await? {
+            continue;
+        }
+        let recorded = has_metadata
+            && !B::fetch_rows(
+                pool,
+                &format!(
+                    "SELECT 1 AS present FROM {metadata_table} WHERE table_name = {placeholder}"
+                ),
+                &[super::SqlValue::String(table.clone())],
+            )
+            .await?
+            .is_empty();
+        if !recorded {
+            return Ok(Some(super::SearchHelperTableConflict {
+                helper_table: helper,
+                table,
+                other_table: None,
+            }));
+        }
+    }
+    Ok(None)
+}
+
 pub(super) fn validate_migration_step_capabilities<'a>(
     backend: DatabaseBackend,
     steps: impl Iterator<Item = StepRef<'a>>,
 ) -> crate::Result<()> {
+    let steps = steps.collect::<Vec<_>>();
+    if let Some(conflict) = search_helper_collision(backend, &steps) {
+        return Err(conflict.into_error());
+    }
     if backend == DatabaseBackend::Postgres {
-        let steps = steps.collect::<Vec<_>>();
         for step in &steps {
             if let StepRef::AlterColumn { before, after, .. } = step {
                 if !postgres_alter_metadata_supported(before, after) {

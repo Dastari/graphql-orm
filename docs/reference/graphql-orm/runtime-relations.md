@@ -137,8 +137,12 @@ also carries no more than the database accepts: on SQLite, whose older builds
 refuse more than 999 variables, a layer above 999 bound values is sent as
 several statements of consecutive parent groups, each within 999, and its row
 and count statements are split independently; on PostgreSQL the same happens
-above 32,000. A single parent group that alone exceeds the statement bound is
-sent as its own statement. Results are the same as from one statement. Without
+above 32,000. A single parent group that alone exceeds the statement bound
+cannot be split: its filter and cursor values leave no room for the parent
+key. It is refused with `resource_limit` before any statement runs, and the
+error's source is the `INVALID_INPUT` refusal that static relation loaders give
+the same condition. Every statement's rendered bind count is checked before it
+is sent. Results of a split layer are the same as from one statement. Without
 a read guard the statements of a split layer run one after another, each under
 the request's auth context; with a guard they share its transaction. Concurrent writes
 remain subject to the database transaction/isolation used by the caller; the

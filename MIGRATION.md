@@ -14,18 +14,33 @@ supersedes: []
 
 Upgrade runtime and macros together. Generated SDL, operation catalogues and
 fingerprints are unchanged. One entry needs action, and only from hosts with a
-searchable base table whose name is longer than 42 bytes.
+searchable base table whose name is longer than 42 bytes or ends in `_` and 16
+lowercase hexadecimal digits.
 
-- **Search helper table names (breaking for long base table names).**
+- **Search helper table names (breaking for unusual base table names).**
   `search_table_name(table)` is now at most 63 bytes, PostgreSQL's identifier
-  limit. Base table names of up to 42 bytes are unaffected. A longer name
-  becomes the first 46 bytes of `__graphql_orm_search_<table>`, then `_` and
-  16 hexadecimal digits of the SHA-256 of the whole base table name.
-  - PostgreSQL stored such a helper table under the first 63 bytes of the old
-    name. Rename it once, as its owner, before serving with this release.
-    Print the new name with `graphql_orm::graphql::orm::search_table_name`,
-    then run
-    `ALTER TABLE "<first 63 bytes of __graphql_orm_search_<table>>" RENAME TO "<new name>"`.
+  limit, and distinct base tables no longer share a helper name unless their
+  sanitized names are equal.
+  - **Unchanged:** a base table name of up to 42 bytes that does not end in
+    `_` and 16 lowercase hexadecimal digits keeps
+    `__graphql_orm_search_<table>`. Its installed search table keeps working
+    with no step.
+  - **Renamed:** every other base table gets a digest name, up to 46 bytes of
+    `__graphql_orm_search_<table>`, then `_` and 16 hexadecimal digits of the
+    SHA-256 of the whole base table name. This covers base table names longer
+    than 42 bytes, and shorter ones such as `events_2026111512345678` or
+    `x_0123456789abcdef`, whose plain helper name could otherwise equal the
+    digest name of a long table. Digits alone count as hexadecimal.
+  - To check a database, list the searchable base tables and compare each
+    installed helper table with the new name:
+    `SELECT table_name FROM __graphql_orm_search_metadata`, then call
+    `graphql_orm::graphql::orm::search_table_name` for each. Only the names
+    that differ need the step below.
+  - PostgreSQL stored the helper table of a long base table under the first
+    63 bytes of the old name, and that of a short digest-like base table under
+    its plain name. Rename it once, as its owner, before serving with this
+    release:
+    `ALTER TABLE "<old helper name>" RENAME TO "<new name>"`.
     For an entity with row-level security, the base table's search delete
     trigger stores the helper table's name and the helper table's policy
     names are derived from it. After the rename, apply the schema target's
@@ -37,15 +52,28 @@ searchable base table whose name is longer than 42 bytes.
     (`__graphql_orm_fts_<table>`) keep their names.
   - Two searchable tables that agree in their first 42 bytes could not both be
     indexed on PostgreSQL before; both can be now.
+- **Search helper table conflicts are refused up front.** Planning or applying
+  a migration that creates a search index now fails before any statement when
+  the helper table name is taken: by another base table of the same plan, or
+  by an existing table that the search metadata does not record for this base
+  table. Static planning and apply return `SearchHelperTableConflict`
+  (`SearchHelperTableConflict::from_error(&error)`); runtime migrations report
+  `TargetCollision` with the helper table as the diagnostic's subject. These
+  migrations failed before as well, part-way, with the database's own error.
+  A host that created a table under a helper name itself must rename it.
 - **Runtime GraphQL response budget.** Nothing to change. A request's layers
   are all read before any host projector runs, where a parent layer's
   projector used to run before its child layers were read. A projector that
   counts its calls is called the same number of times for a served response,
   and is not called at all when the stored fields and structure alone exceed
   `max_response_bytes`.
-- **Runtime relation layers on SQLite.** Nothing to change. A layer that binds
-  more than 999 values runs as several statements instead of one; a host that
-  counts statements per layer sees more of them for such a layer.
+- **Runtime relation layers on SQLite.** A layer that binds more than 999
+  values runs as several statements instead of one; a host that counts
+  statements per layer sees more of them for such a layer. One parent group
+  that alone binds more than 999 values, which takes a filter of 999 values
+  or raised query limits, is refused with `resource_limit` before any
+  statement runs. On a SQLite build that accepts more variables such a
+  request was served before; reduce the filter, or split it across requests.
 - **Typed refusals.** Nothing to change. Code that expected a panic from a
   poisoned request error buffer now receives `INTERNAL_ERROR`.
 - **Tests under two backends.** Twelve test targets and one example that

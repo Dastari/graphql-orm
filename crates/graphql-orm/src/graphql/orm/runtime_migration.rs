@@ -123,6 +123,17 @@ impl From<RuntimeMigrationDiagnostics> for RuntimeMigrationError {
         Self::Diagnostics(diagnostics)
     }
 }
+/// `TargetCollision` naming the base table and the contested helper table.
+fn search_helper_conflict(conflict: super::SearchHelperTableConflict) -> RuntimeMigrationError {
+    RuntimeMigrationError::Diagnostics(RuntimeMigrationDiagnostics(vec![
+        RuntimeMigrationDiagnostic {
+            code: RuntimeMigrationDiagnosticCode::TargetCollision,
+            collection: CollectionId::new(conflict.table).ok(),
+            subject: Some(conflict.helper_table),
+        },
+    ]))
+}
+
 pub(super) fn rejection(code: RuntimeMigrationDiagnosticCode) -> RuntimeMigrationDiagnostics {
     RuntimeMigrationDiagnostics(vec![RuntimeMigrationDiagnostic {
         code,
@@ -1366,6 +1377,20 @@ impl<'db, B: RuntimeMigrationBackend> SchemaManager<'db, B> {
                 );
             }
         }
+        {
+            // A search helper table name that two base tables of the plan
+            // share, or that something else in the database already has.
+            let steps = physical.steps.iter().map(StepRef::from).collect::<Vec<_>>();
+            let conflict = match super::migrations::search_helper_collision(B::DIALECT, &steps) {
+                Some(conflict) => Some(conflict),
+                None => super::migrations::search_helper_taken::<B>(self.database.pool(), &steps)
+                    .await
+                    .map_err(RuntimeMigrationError::Database)?,
+            };
+            if let Some(conflict) = conflict {
+                return Err(search_helper_conflict(conflict));
+            }
+        }
         let limits = target.limits;
         if physical.steps.len() > limits.max_plan_steps
             || physical.statements.len() > limits.max_plan_statements
@@ -1421,6 +1446,19 @@ impl<'db, B: RuntimeMigrationBackend> SchemaManager<'db, B> {
                 statements_applied: 0,
                 already_applied: false,
             });
+        }
+        // Checked again against the live database before any statement runs.
+        let steps = plan
+            .steps
+            .iter()
+            .map(|step| StepRef::from(&step.step))
+            .collect::<Vec<_>>();
+        if let Some(conflict) =
+            super::migrations::search_helper_taken::<B>(self.database.pool(), &steps)
+                .await
+                .map_err(RuntimeMigrationError::Database)?
+        {
+            return Err(search_helper_conflict(conflict));
         }
         B::apply_owned(self.database.pool(), plan, &options).await
     }

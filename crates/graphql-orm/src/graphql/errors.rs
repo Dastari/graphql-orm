@@ -566,8 +566,9 @@ fn tracing_log_internal(code: &OrmErrorCode, internal: &str) {
 /// row or event releases none of the diagnostics its host callbacks
 /// buffered. A panic while the buffer is locked poisons it. The helpers here
 /// then drop everything it holds, so no private diagnostic outlives the
-/// failure, and report a typed `INTERNAL_ERROR` instead of panicking in the
-/// request path.
+/// failure, clear the poison, and report a typed `INTERNAL_ERROR` instead of
+/// panicking in the request path. Clearing the poison matters: async-graphql
+/// locks the same buffer when it builds the response and would panic there.
 #[doc(hidden)]
 pub mod buffered_errors {
     use super::OrmPublicError;
@@ -582,10 +583,21 @@ pub mod buffered_errors {
         match errors.lock() {
             Ok(errors) => Ok(errors.len()),
             Err(recovered) => {
-                recovered.into_inner().clear();
+                recover(errors, recovered);
                 Err(poisoned())
             }
         }
+    }
+
+    /// Empty a poisoned buffer and clear its poison. The request goes on to
+    /// build its response, which locks the buffer again and would panic on a
+    /// poisoned one; the typed error is what reports the failure.
+    fn recover<E>(
+        errors: &Mutex<Vec<E>>,
+        recovered: std::sync::PoisonError<std::sync::MutexGuard<'_, Vec<E>>>,
+    ) {
+        recovered.into_inner().clear();
+        errors.clear_poison();
     }
 
     pub(crate) fn truncate_in<E>(errors: &Mutex<Vec<E>>, keep: usize) -> async_graphql::Result<()> {
@@ -595,7 +607,7 @@ pub mod buffered_errors {
                 Ok(())
             }
             Err(recovered) => {
-                recovered.into_inner().clear();
+                recover(errors, recovered);
                 Err(poisoned())
             }
         }
@@ -619,8 +631,9 @@ pub mod buffered_errors {
         truncate_in(&ctx.query_env.errors, keep)
     }
 
-    /// Drop every buffered field error, also from a poisoned buffer. For a
-    /// path that is already ending with its own error.
+    /// Drop every buffered field error, also from a poisoned buffer, whose
+    /// poison is cleared. For a path that is already ending with its own
+    /// error.
     pub fn clear(ctx: &async_graphql::Context<'_>) {
         let _ = truncate(ctx, 0);
     }
@@ -639,12 +652,7 @@ pub mod buffered_errors {
                 })
         }
 
-        /// A buffer poisoned by a panic is refused with a typed error, not a
-        /// second panic, and keeps none of its diagnostics (#511).
-        #[test]
-        fn a_poisoned_buffer_is_a_typed_error_and_is_emptied() {
-            let errors = Arc::new(Mutex::new(vec!["private diagnostic"]));
-            assert_eq!(count_in(&errors).unwrap(), 1);
+        fn poison<E: Send + 'static>(errors: &Arc<Mutex<Vec<E>>>) {
             let held = errors.clone();
             let panicked = std::thread::spawn(move || {
                 let _guard = held.lock().unwrap();
@@ -652,20 +660,29 @@ pub mod buffered_errors {
             })
             .join();
             assert!(panicked.is_err() && errors.is_poisoned());
+        }
+
+        /// A buffer poisoned by a panic is refused with a typed error, not a
+        /// second panic. It keeps none of its diagnostics and is usable
+        /// again, so the request can still build its response (#511).
+        #[test]
+        fn a_poisoned_buffer_is_a_typed_error_emptied_and_usable_again() {
+            let errors = Arc::new(Mutex::new(vec!["private diagnostic"]));
+            assert_eq!(count_in(&errors).unwrap(), 1);
+            poison(&errors);
             assert_eq!(
                 code(count_in(&errors).unwrap_err()).as_deref(),
                 Some("INTERNAL_ERROR")
             );
-            assert!(errors.lock().unwrap_err().into_inner().is_empty());
-            errors
-                .lock()
-                .unwrap_err()
-                .into_inner()
-                .push("later diagnostic");
+            assert!(!errors.is_poisoned());
+            assert!(errors.lock().unwrap().is_empty());
+            errors.lock().unwrap().push("later diagnostic");
+            poison(&errors);
             let refused = truncate_in(&errors, 1).unwrap_err();
             assert_eq!(refused.message, "internal error");
             assert_eq!(code(refused).as_deref(), Some("INTERNAL_ERROR"));
-            assert!(errors.lock().unwrap_err().into_inner().is_empty());
+            assert!(!errors.is_poisoned());
+            assert!(errors.lock().unwrap().is_empty());
         }
 
         #[test]

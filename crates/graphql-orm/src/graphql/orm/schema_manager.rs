@@ -280,7 +280,10 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         let current =
             B::introspect_schema_including(self.database.pool(), &declared_tables([&target]))
                 .await?;
-        self.plan_migration_with_options(version, description, &current, &target, options)
+        let plan =
+            self.plan_migration_with_options(version, description, &current, &target, options)?;
+        refuse_taken_search_helpers::<B>(self.database.pool(), &plan).await?;
+        Ok(plan)
     }
 
     /// Introspect the live database and plan a full schema target, including
@@ -328,6 +331,7 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
             &planned_current,
             &target.schema,
         )?;
+        refuse_taken_search_helpers::<B>(self.database.pool(), &migration).await?;
         let rls = build_schema_target_rls_plan(B::DIALECT, self.policy(), target);
         let mut statements = migration.statements.clone();
         statements.extend(rls.statements.clone());
@@ -390,6 +394,7 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
             });
         }
 
+        refuse_taken_search_helpers::<B>(self.database.pool(), plan).await?;
         B::preflight_migration_statements(self.database.pool(), &plan.statements).await?;
         B::prepare_migration_runtime(self.database.pool()).await?;
         if let Some(report) = resolve_recorded_version_apply::<B>(
@@ -463,6 +468,7 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
             });
         }
 
+        refuse_taken_search_helpers::<B>(self.database.pool(), &plan.migration).await?;
         B::preflight_migration_statements(self.database.pool(), &plan.statements).await?;
         B::prepare_migration_runtime(self.database.pool()).await?;
         if let Some(report) = resolve_recorded_version_apply::<B>(
@@ -955,6 +961,24 @@ Refuse to treat the plan as already applied.",
         statements_applied: 0,
         already_applied: true,
     }))
+}
+
+/// Refuse a plan that would create a search helper table whose name is
+/// already taken in the live database by something other than its own base
+/// table. Read-only; runs before any statement of the plan.
+async fn refuse_taken_search_helpers<B: OrmBackend>(
+    pool: &B::Pool,
+    plan: &PlannedMigration,
+) -> crate::Result<()> {
+    let steps = plan
+        .steps
+        .iter()
+        .map(|step| StepRef::from(&step.step))
+        .collect::<Vec<_>>();
+    match super::migrations::search_helper_taken::<B>(pool, &steps).await? {
+        Some(conflict) => Err(conflict.into_error()),
+        None => Ok(()),
+    }
 }
 
 fn plan_migration_for_backend<B: OrmBackend>(

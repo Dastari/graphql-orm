@@ -44,14 +44,12 @@ fn helper_names_are_bounded_and_distinct() {
     let long = "t".repeat(43);
     let bounded = search_table_name(&long);
     assert_eq!(bounded.len(), 63);
-    assert!(bounded.starts_with(&format!("__graphql_orm_search_{}_", "t".repeat(25))));
-    assert_eq!(bounded, search_table_name(&long));
     assert_eq!(
         bounded,
         "__graphql_orm_search_ttttttttttttttttttttttttt_80383f974f22964f"
     );
-    // Tables that agree in every byte PostgreSQL would keep stay distinct,
-    // and so do names that sanitize to the same text.
+    assert_eq!(bounded, search_table_name(&long));
+    // Tables that agree in every byte PostgreSQL would keep stay distinct.
     let (a, b) = (
         search_table_name(&table('a')),
         search_table_name(&table('b')),
@@ -64,6 +62,55 @@ fn helper_names_are_bounded_and_distinct() {
         search_table_name(&format!("{}_x", "t".repeat(50)))
     );
     assert!(search_table_name(&"é".repeat(40)).len() <= 63);
+}
+
+/// A plain helper name never ends like a digest name, so no short base table
+/// can be given the helper name of a long one.
+#[test]
+fn a_short_name_that_looks_like_a_digest_name_gets_its_own_digest() {
+    // The base table whose plain helper name would equal the digest name of
+    // forty-three `t`s.
+    let long = "t".repeat(43);
+    let lookalike = format!("{}_80383f974f22964f", "t".repeat(25));
+    assert_eq!(
+        format!("__graphql_orm_search_{lookalike}"),
+        search_table_name(&long)
+    );
+    let own = search_table_name(&lookalike);
+    assert_ne!(own, search_table_name(&long));
+    assert_eq!(own.len(), 63);
+    assert!(own.starts_with(&format!("__graphql_orm_search_{}_", "t".repeat(25))));
+    assert!(!own.ends_with("_80383f974f22964f"));
+    // The same for the lookalike of a long table that differs only at its end.
+    let prefix = &search_table_name(&table('a'))["__graphql_orm_search_".len()..];
+    assert_ne!(search_table_name(prefix), search_table_name(&table('a')));
+    // Any base table ending in `_` and 16 lowercase hexadecimal digits gets a
+    // digest name, whatever its length; digits alone count as hexadecimal.
+    for base in ["x_0123456789abcdef", "events_2026111512345678"] {
+        let name = search_table_name(base);
+        assert!(name.starts_with(&format!("__graphql_orm_search_{base}_")));
+        assert_eq!(
+            name.len(),
+            "__graphql_orm_search_".len() + base.len() + 17,
+            "{name}"
+        );
+    }
+    // A plain name is kept by every other ending: 15 or 17 digits, an
+    // uppercase digit, a non-hexadecimal letter, or no underscore.
+    for base in [
+        "x_0123456789abcde",
+        "x_0123456789abcdef0",
+        "x_0123456789ABCDEF",
+        "x_0123456789abcdeg",
+        "x0123456789abcdef",
+        "0123456789abcdef",
+    ] {
+        assert_eq!(
+            search_table_name(base),
+            format!("__graphql_orm_search_{base}"),
+            "{base}"
+        );
+    }
 }
 
 fn fid(value: &str) -> FieldId {
@@ -287,6 +334,149 @@ async fn long_tables_sharing_a_prefix_keep_separate_search_indexes() {
             assert_eq!(found.edges.len(), hits, "{name}: {query}");
         }
     }
+    db.pool().close().await;
+    #[cfg(feature = "postgres")]
+    {
+        let mut owned = owned;
+        owned.cleanup().unwrap();
+    }
+}
+
+/// The helper table name a search index of `base` needs on this backend.
+fn helper(base: &str) -> String {
+    #[cfg(feature = "postgres")]
+    return search_table_name(base);
+    #[cfg(feature = "sqlite")]
+    return sqlite_fts_table_name(base);
+}
+
+async fn table_exists(db: &Database<Backend>, name: &str) -> bool {
+    #[cfg(feature = "postgres")]
+    let sql = "SELECT 1 AS present FROM pg_catalog.pg_class WHERE relname = $1";
+    #[cfg(feature = "sqlite")]
+    let sql = "SELECT 1 AS present FROM sqlite_master WHERE name = ?";
+    !Backend::fetch_rows(db.pool(), sql, &[SqlValue::String(name.into())])
+        .await
+        .unwrap()
+        .is_empty()
+}
+
+fn collision(error: RuntimeMigrationError) -> Vec<(Option<String>, Option<String>)> {
+    let RuntimeMigrationError::Diagnostics(diagnostics) = error else {
+        panic!("expected diagnostics, got {error:?}");
+    };
+    diagnostics
+        .0
+        .into_iter()
+        .map(|diagnostic| {
+            assert_eq!(
+                diagnostic.code,
+                RuntimeMigrationDiagnosticCode::TargetCollision
+            );
+            (
+                diagnostic.collection.map(|id| id.as_str().to_owned()),
+                diagnostic.subject,
+            )
+        })
+        .collect()
+}
+
+/// A helper table name that something else in the database already has is
+/// refused with a typed error when the migration is planned and again when
+/// it is applied, before any statement runs: the base tables are not created
+/// and the existing table is untouched (#528).
+#[tokio::test]
+async fn a_helper_table_name_taken_by_something_else_is_refused_before_any_ddl() {
+    #[cfg(feature = "sqlite")]
+    let db = Database::<Backend>::connect_sqlite("sqlite::memory:")
+        .await
+        .unwrap();
+    #[cfg(feature = "postgres")]
+    let owned = owned_postgres::OwnedPostgres::start("runtime-search-helper-conflict").unwrap();
+    #[cfg(feature = "postgres")]
+    let db = Database::<Backend>::connect_postgres(&owned.url)
+        .await
+        .unwrap();
+    let schema = Arc::new(
+        RuntimeSchema {
+            repository_only: false,
+            format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
+            collections: vec![collection("alpha", 'a'), collection("beta", 'b')],
+        }
+        .validate()
+        .unwrap(),
+    );
+    let target = schema
+        .physical_schema::<Backend>(Default::default())
+        .unwrap();
+    let ownership = ManagedTableSet::new([table('a'), table('b')]).unwrap();
+    let plan = async || {
+        db.schema()
+            .plan_owned_migration(
+                "init",
+                "long search tables",
+                &target,
+                &ownership,
+                PlanOptions::strict(),
+            )
+            .await
+    };
+    // Planned while the name is free; taken before it is applied.
+    let planned = plan().await.unwrap();
+    let taken = helper(&table('b'));
+    Backend::fetch_rows(
+        db.pool(),
+        &format!("CREATE TABLE \"{taken}\" (kept BIGINT)"),
+        &[],
+    )
+    .await
+    .unwrap();
+    Backend::fetch_rows(
+        db.pool(),
+        &format!("INSERT INTO \"{taken}\" (kept) VALUES (7)"),
+        &[],
+    )
+    .await
+    .unwrap();
+    let expected = vec![(Some(table('b')), Some(taken.clone()))];
+    let refused = db
+        .schema()
+        .apply_runtime_migration(
+            &planned,
+            &schema,
+            ApplyOptions::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(collision(refused), expected);
+    // Planning again refuses too.
+    assert_eq!(collision(plan().await.unwrap_err()), expected);
+    // Nothing ran: neither base table nor the other helper table exists, and
+    // the table that has the name keeps its row.
+    for absent in [table('a'), table('b'), helper(&table('a'))] {
+        assert!(!table_exists(&db, &absent).await, "{absent}");
+    }
+    let rows = Backend::fetch_rows(db.pool(), &format!("SELECT kept FROM \"{taken}\""), &[])
+        .await
+        .unwrap();
+    assert_eq!(Backend::try_get_i64(&rows[0], "kept").unwrap(), 7);
+    // Once the name is free the same plan applies, and applying or planning
+    // again finds the helper tables recorded for their own base tables.
+    Backend::fetch_rows(db.pool(), &format!("DROP TABLE \"{taken}\""), &[])
+        .await
+        .unwrap();
+    db.schema()
+        .apply_runtime_migration(
+            &planned,
+            &schema,
+            ApplyOptions::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert!(table_exists(&db, &taken).await);
+    assert!(plan().await.unwrap().steps().is_empty());
     db.pool().close().await;
     #[cfg(feature = "postgres")]
     {

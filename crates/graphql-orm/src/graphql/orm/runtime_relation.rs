@@ -1378,7 +1378,7 @@ fn render_relation_counts(
 /// single statement is also bounded by what the database accepts: SQLite
 /// builds before 3.32, and later builds that keep the old default, refuse a
 /// statement with more than 999 variables, so a SQLite layer above that is
-/// sent as several statements.
+/// sent as several statements, and one parent group above it is refused.
 fn statement_bind_ceiling(backend: DatabaseBackend) -> usize {
     match backend {
         DatabaseBackend::Sqlite => 999,
@@ -1390,11 +1390,16 @@ fn statement_bind_ceiling(backend: DatabaseBackend) -> usize {
 /// otherwise as the fewest statements of consecutive items that each fit.
 ///
 /// The whole layer is rendered first, so its own limit is enforced on the
-/// total. An item that alone exceeds `ceiling` is sent as its own statement.
+/// total. An item that alone exceeds `ceiling` cannot be sent: the request's
+/// own filter and cursor values leave no room for its parent key. It is
+/// refused with `refused()` before any statement runs. Every returned
+/// statement is checked against `ceiling` once more, from its rendered bind
+/// count, so a part the packing missed is refused rather than sent.
 fn split_statements<T>(
     items: &[T],
     ceiling: usize,
     render: impl Fn(&[T]) -> Result<(String, Vec<SqlValue>), RuntimeRelationError>,
+    refused: impl Fn() -> RuntimeRelationError,
 ) -> Result<Vec<(String, Vec<SqlValue>)>, RuntimeRelationError> {
     let whole = render(items)?;
     if whole.1.len() <= ceiling {
@@ -1404,6 +1409,9 @@ fn split_statements<T>(
     let (mut start, mut binds) = (0usize, 0usize);
     for (index, item) in items.iter().enumerate() {
         let own = render(std::slice::from_ref(item))?.1.len();
+        if own > ceiling {
+            return Err(refused());
+        }
         if index > start && binds.saturating_add(own) > ceiling {
             statements.push(render(&items[start..index])?);
             (start, binds) = (index, 0);
@@ -1411,7 +1419,20 @@ fn split_statements<T>(
         binds = binds.saturating_add(own);
     }
     statements.push(render(&items[start..])?);
+    if statements.iter().any(|(_, values)| values.len() > ceiling) {
+        return Err(refused());
+    }
     Ok(statements)
+}
+
+/// One parent group binds more values than a statement accepts on this
+/// backend. `resource_limit`, the code of this layer's bind bounds, carrying
+/// as its source the typed `INVALID_INPUT` refusal that the static relation
+/// loaders give the same condition: the client must reduce its request.
+fn statement_bound_exceeded(request: &RuntimeRelationBatchRequest) -> RuntimeRelationError {
+    RuntimeRelationError::new(RuntimeRelationErrorCode::ResourceLimit)
+        .for_relation(&request.relation)
+        .source(crate::graphql::loaders::bind_limit_error())
 }
 
 impl<B> crate::db::Database<B>
@@ -1503,9 +1524,12 @@ where
             }));
         }
         let ceiling = statement_bind_ceiling(B::DIALECT);
-        let row_statements = split_statements(&groups, ceiling, |groups| {
-            render_relation_rows(request, B::DIALECT, groups)
-        })?;
+        let row_statements = split_statements(
+            &groups,
+            ceiling,
+            |groups| render_relation_rows(request, B::DIALECT, groups),
+            || statement_bound_exceeded(request),
+        )?;
         let counts_requested = matches!(
             request.selection,
             RuntimeRelationSelection::ToMany {
@@ -1515,9 +1539,12 @@ where
         );
         let (count_statements, count_groups) = if counts_requested {
             let (keys, count_groups) = count_keys(&groups)?;
-            let statements = split_statements(&keys, ceiling, |keys| {
-                render_relation_counts(request, B::DIALECT, keys)
-            })?;
+            let statements = split_statements(
+                &keys,
+                ceiling,
+                |keys| render_relation_counts(request, B::DIALECT, keys),
+                || statement_bound_exceeded(request),
+            )?;
             (statements, count_groups)
         } else {
             (Vec::new(), BTreeMap::new())
