@@ -1088,7 +1088,7 @@ async fn mutation_roots_share_the_response_budget_with_their_projections() {
     }
     // Count the projected objects copied into responses from here on.
     let copies = Arc::new(AtomicUsize::new(0));
-    let _copies = tracing::subscriber::set_default(Copies(copies.clone()));
+    let _copies = tracing::subscriber::set_default(Events(PROJECTION_COPIES, copies.clone()));
     let exact = run(low).await;
     assert!(exact.errors.is_empty(), "{:?}", exact.errors);
     assert_eq!(
@@ -1148,16 +1148,60 @@ async fn read_structure_is_reserved_before_projections_are_copied() {
     let projector = FileProjector::new(true);
     let api = f.api(f.options(&projector)).unwrap();
     let read = read();
-    for query in [
+    // Each query with the copy events at its smallest budget and at one byte
+    // less: the last projection is the one refused.
+    for (query, at_exact, at_short) in [
         // Root connection overhead, after the only projection.
-        "{ profiles(orderBy:[{field:id}]) { totalCount pageInfo { hasNextPage endCursor } \
+        (
+            "{ profiles(orderBy:[{field:id}]) { totalCount pageInfo { hasNextPage endCursor } \
             edges { cursor node { banner { name } } } } }",
+            1,
+            0,
+        ),
         // To-one: Ada's mentor is null; Bob's and Cy's is Ada.
-        "{ profiles(orderBy:[{field:id}]) { edges { node { id \
+        (
+            "{ profiles(orderBy:[{field:id}]) { edges { node { id \
             mentor { banner { name } } } } } }",
+            1,
+            0,
+        ),
         // To-many: Ada mentors two; Bob's and Cy's connections are empty.
-        "{ profiles(orderBy:[{field:id}]) { edges { node { id \
+        (
+            "{ profiles(orderBy:[{field:id}]) { edges { node { id \
             mentees(first:5) { totalCount pageInfo { endCursor } edges { cursor node { banner { name } } } } } } } }",
+            1,
+            0,
+        ),
+        // Relations below projected parents (#704): the mentor keys, Ada's
+        // null and the related records are reserved before the parents'
+        // banners are copied.
+        (
+            "{ profiles(orderBy:[{field:id}]) { edges { node { banner { name } mentor { id } } } } }",
+            1,
+            0,
+        ),
+        // The same for to-many connections, empty ones included.
+        (
+            "{ profiles(orderBy:[{field:id}]) { edges { node { banner { name } \
+            mentees(first:5) { totalCount pageInfo { endCursor } edges { cursor node { id name } } } } } } }",
+            1,
+            0,
+        ),
+        // Two levels below a projected parent.
+        (
+            "{ profiles(orderBy:[{field:id}]) { edges { node { banner { name } \
+            mentor { name mentees(first:5) { edges { cursor node { id } } } } } } } }",
+            1,
+            0,
+        ),
+        // Projections on both layers: parents first, so only the related
+        // records' projection is refused.
+        (
+            "{ profiles(orderBy:[{field:id}]) { edges { node { banner { name } \
+            mentor { id banner { name } } } } } }",
+            2,
+            1,
+        ),
     ] {
         let run = async |budget: usize| {
             let limits = RuntimeGraphqlLimits {
@@ -1169,26 +1213,181 @@ async fn read_structure_is_reserved_before_projections_are_copied() {
         let served = run(RuntimeGraphqlLimits::default().max_response_bytes).await;
         let low = smallest_budget(&api, &f, &read, query).await;
         let copies = Arc::new(AtomicUsize::new(0));
-        let _copies = tracing::subscriber::set_default(Copies(copies.clone()));
+        let _copies = tracing::subscriber::set_default(Events(PROJECTION_COPIES, copies.clone()));
         let exact = run(low).await;
         assert!(exact.errors.is_empty(), "{query}: {:?}", exact.errors);
         assert_eq!(exact.data, served.data, "{query}");
-        assert_eq!(copies.swap(0, Ordering::SeqCst), 1, "{query}");
+        assert_eq!(copies.swap(0, Ordering::SeqCst), at_exact, "{query}");
         let short = run(low - 1).await;
         assert_eq!(codes(&short), ["cost_exceeded"], "{query}");
         assert_eq!(
             copies.load(Ordering::SeqCst),
-            0,
+            at_short,
             "{query}: projected objects were copied before the response was refused"
         );
     }
     f.finish().await;
 }
 
-/// Counts `graphql_orm::runtime_projection` events: one per projection call
-/// that copied objects into a response.
-struct Copies(Arc<AtomicUsize>);
-impl tracing::Subscriber for Copies {
+/// A committed record's relation layers are read and reserved before the
+/// record's own projected objects are copied into the payload: one byte
+/// below the smallest budget refuses with no copy. The mutation stays
+/// committed (#704).
+#[tokio::test]
+async fn mutation_relation_structure_is_reserved_before_projections_are_copied() {
+    let f = Fixture::new().await;
+    // Large projected names, so the committed payloads, not the planning
+    // estimate, decide which budgets are enough.
+    let mut projector = Arc::try_unwrap(FileProjector::new(true)).ok().unwrap();
+    projector.files = BTreeMap::from([
+        (uuid(1), ("o".repeat(2_000), 10)),
+        (uuid(2), ("t".repeat(2_000), 20)),
+    ]);
+    let projector = Arc::new(projector);
+    let api = f.api(f.options(&projector)).unwrap();
+    let read = read();
+    for (query, at_exact, at_short) in [
+        // Bob's mentor is Ada.
+        (
+            r#"mutation($schema:String!){ updateProfile(expectedSchema:$schema, key:{id:"2"}, input:{name:"b"}) { record { banner { name } mentor { id name } } } }"#,
+            1,
+            0,
+        ),
+        // Ada has no mentor: the null is reserved first too.
+        (
+            r#"mutation($schema:String!){ updateProfile(expectedSchema:$schema, key:{id:"1"}, input:{name:"a"}) { record { banner { name } mentor { id } } } }"#,
+            1,
+            0,
+        ),
+        // The record's own projection is copied before the related one.
+        (
+            r#"mutation($schema:String!){ updateProfile(expectedSchema:$schema, key:{id:"2"}, input:{name:"b"}) { record { banner { name } mentor { banner { name } } } } }"#,
+            2,
+            1,
+        ),
+    ] {
+        let run = async |budget: usize| {
+            // Every write claims its banner; clear the claims between requests.
+            sqlx::query("DELETE FROM format_file_claims")
+                .execute(f.db.pool())
+                .await
+                .unwrap();
+            let limits = RuntimeGraphqlLimits {
+                max_response_bytes: budget,
+                ..Default::default()
+            };
+            api.execute(f.request(&read, query, limits)).await
+        };
+        let maximum = RuntimeGraphqlLimits::default().max_response_bytes;
+        let served = run(maximum).await;
+        assert!(served.errors.is_empty(), "{query}: {:?}", served.errors);
+        let (mut low, mut high) = (1usize, maximum);
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if run(middle).await.errors.is_empty() {
+                high = middle;
+            } else {
+                low = middle + 1;
+            }
+        }
+        let copies = Arc::new(AtomicUsize::new(0));
+        let _copies = tracing::subscriber::set_default(Events(PROJECTION_COPIES, copies.clone()));
+        let exact = run(low).await;
+        assert!(exact.errors.is_empty(), "{query}: {:?}", exact.errors);
+        assert_eq!(exact.data, served.data, "{query}");
+        assert_eq!(copies.swap(0, Ordering::SeqCst), at_exact, "{query}");
+        let short = run(low - 1).await;
+        assert_eq!(codes(&short), ["mutation_payload_failed"], "{query}");
+        assert_eq!(
+            copies.load(Ordering::SeqCst),
+            at_short,
+            "{query}: projected objects were copied before the payload was refused"
+        );
+    }
+    f.finish().await;
+}
+
+/// A read copies no record it does not have to: the executor borrows the
+/// records it read and the read layers move them, so a large stored value is
+/// allocated once, served or refused (#704). The one copy left is of a
+/// related record that several parents of one batch share, because each
+/// parent's result owns its record.
+#[tokio::test]
+async fn reads_clone_no_root_or_related_record() {
+    let f = Fixture::new().await;
+    let projector = FileProjector::new(true);
+    let api = f.api(f.options(&projector)).unwrap();
+    let read = read();
+    let clones = Arc::new(AtomicUsize::new(0));
+    for (query, shared) in [
+        // Root records, to-one and to-many related records, two levels deep.
+        // Ada and Bob: no two parents share a related record.
+        (
+            "{ profiles(first:2, orderBy:[{field:id}]) { edges { node { id name email banner { name } \
+            mentor { id name banner { name } mentees(first:2) { edges { node { id name } } } } \
+            mentees(first:2) { totalCount edges { cursor node { id name } } } } } } }",
+            0,
+        ),
+        // Bob and Cy share their mentor, Ada: one copy for the second parent.
+        (
+            "{ profiles(first:3, orderBy:[{field:id}]) { edges { node { id mentor { id name } } } } }",
+            1,
+        ),
+    ] {
+        let low = smallest_budget(&api, &f, &read, query).await;
+        let _clones = tracing::subscriber::set_default(Events(RECORD_CLONES, clones.clone()));
+        for budget in [RuntimeGraphqlLimits::default().max_response_bytes, low - 1] {
+            let limits = RuntimeGraphqlLimits {
+                max_response_bytes: budget,
+                ..Default::default()
+            };
+            let response = api.execute(f.request(&read, query, limits)).await;
+            assert_eq!(response.errors.is_empty(), budget >= low, "{budget}");
+            assert_eq!(
+                clones.swap(0, Ordering::SeqCst),
+                shared,
+                "{query}: records cloned at budget {budget}"
+            );
+        }
+    }
+    let _clones = tracing::subscriber::set_default(Events(RECORD_CLONES, clones.clone()));
+    // The counter sees clones: one is counted here.
+    let collection = f
+        .schema
+        .resolve_collection(&CollectionId::new("profiles").unwrap())
+        .unwrap();
+    let limits = RuntimeQueryLimits::default();
+    let id = f
+        .schema
+        .resolve_field(&collection, &FieldId::new("id").unwrap())
+        .unwrap();
+    let request = f
+        .schema
+        .runtime_read_request(
+            &collection,
+            &f.schema.resolve_projection(&collection, &[id]).unwrap(),
+            None,
+            f.schema.runtime_order(&collection, None, limits).unwrap(),
+            RuntimePageRequest::first(1, None),
+            false,
+            limits,
+        )
+        .unwrap();
+    let page = f.db.execute_runtime_read(&request, None).await.unwrap();
+    clones.store(0, Ordering::SeqCst);
+    let _copy = page.edges[0].node.clone();
+    assert_eq!(clones.load(Ordering::SeqCst), 1);
+    f.finish().await;
+}
+
+/// One event per projection call that copied objects into a response.
+const PROJECTION_COPIES: &str = "graphql_orm::runtime_projection";
+/// One event per cloned [`RuntimeRecord`].
+const RECORD_CLONES: &str = "graphql_orm::runtime_record";
+
+/// Counts the trace events of one target.
+struct Events(&'static str, Arc<AtomicUsize>);
+impl tracing::Subscriber for Events {
     // Ask per event: other tests' threads register and drop their own
     // dispatchers, so a cached callsite interest could miss this one's events.
     fn register_callsite(
@@ -1201,7 +1400,7 @@ impl tracing::Subscriber for Copies {
         Some(tracing::level_filters::LevelFilter::TRACE)
     }
     fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
-        metadata.target() == "graphql_orm::runtime_projection"
+        metadata.target() == self.0
     }
     fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
         tracing::span::Id::from_u64(1)
@@ -1209,8 +1408,8 @@ impl tracing::Subscriber for Copies {
     fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
     fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
     fn event(&self, event: &tracing::Event<'_>) {
-        if event.metadata().target() == "graphql_orm::runtime_projection" {
-            self.0.fetch_add(1, Ordering::SeqCst);
+        if event.metadata().target() == self.0 {
+            self.1.fetch_add(1, Ordering::SeqCst);
         }
     }
     fn enter(&self, _: &tracing::span::Id) {}

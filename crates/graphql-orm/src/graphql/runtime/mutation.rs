@@ -1266,6 +1266,23 @@ async fn execute_once<B: RuntimeMutationBackend>(
         maximum,
     )
     .map_err(|_| committed_error("mutation_payload_failed"))?;
+    // Related records are read first, through each child's authorized layer,
+    // continuing the same running total: their structure and ordinary fields
+    // are reserved before any host object is copied into the payload.
+    let related = super::execution::PayloadRelations::read(
+        &database,
+        context,
+        prepared.protection.as_ref(),
+        prepared.limits,
+        &prepared.relation_budget,
+        &prepared.module.schema,
+        record,
+        &prepared.children,
+        record_shapes.clone(),
+        spent,
+    )
+    .await
+    .map_err(|_| committed_error("mutation_payload_failed"))?;
     // Host objects resolve only after commit and the independent release check,
     // each charged before the next and refused before it is copied.
     let mut items = Vec::with_capacity(prepared.projected.len());
@@ -1274,8 +1291,8 @@ async fn execute_once<B: RuntimeMutationBackend>(
             .state(&projected.field)
             .map_err(|_| committed_error("mutation_payload_failed"))?
         {
-            RuntimeFieldState::Value(value) => value.clone(),
-            RuntimeFieldState::Null => RuntimeValue::Null,
+            RuntimeFieldState::Value(value) => value,
+            RuntimeFieldState::Null => &RuntimeValue::Null,
             RuntimeFieldState::Unloaded => return Err(committed_error("mutation_payload_failed")),
         };
         items.push((projected, stored));
@@ -1291,26 +1308,15 @@ async fn execute_once<B: RuntimeMutationBackend>(
         context.projection_context.as_deref(),
         prepared.limits,
         &record_shapes,
-        maximum.saturating_sub(spent),
+        maximum.saturating_sub(related.spent()),
     )
     .await
     .map_err(|_| committed_error("mutation_payload_failed"))?;
-    // Related records are read now, through each child's authorized layer,
-    // continuing the same running total.
-    let related = super::execution::payload_relations(
-        &database,
-        context,
-        prepared.protection.as_ref(),
-        prepared.limits,
-        &prepared.relation_budget,
-        &prepared.module.schema,
-        record,
-        &prepared.children,
-        record_shapes,
-        spent.saturating_add(charged),
-    )
-    .await
-    .map_err(|_| committed_error("mutation_payload_failed"))?;
+    // The related records' own projections come last.
+    let related = related
+        .finish(charged)
+        .await
+        .map_err(|_| committed_error("mutation_payload_failed"))?;
     let Value::Object(fields) = &mut payload else {
         return Err(committed_error("mutation_payload_failed"));
     };
@@ -1415,7 +1421,7 @@ fn spent_after(
 /// bytes charged.
 #[allow(clippy::too_many_arguments)]
 async fn project_committed(
-    items: &[(&super::projection::ProjectedPlan, RuntimeValue)],
+    items: &[(&super::projection::ProjectedPlan, &RuntimeValue)],
     schema: &ValidatedRuntimeSchema,
     purpose: super::RuntimeProjectionPurpose,
     auth: Option<&DbAuthContext>,
@@ -1511,10 +1517,7 @@ mod tests {
     async fn committed_projections_share_the_remaining_budget() {
         let (schema, plans) = fixture();
         let file = RuntimeValue::Uuid(uuid::Uuid::from_bytes([1; 16]));
-        let items = plans
-            .iter()
-            .map(|plan| (plan, file.clone()))
-            .collect::<Vec<_>>();
+        let items = plans.iter().map(|plan| (plan, &file)).collect::<Vec<_>>();
         let shape = record_shape();
         let shapes = Shapes::of(&shape);
         let run = |remaining: usize| {
@@ -1554,7 +1557,7 @@ mod tests {
         let shape = payload_shape();
         let record = Shapes::of(&shape).select("record");
         let file = RuntimeValue::Uuid(uuid::Uuid::from_bytes([1; 16]));
-        let items = vec![(&plans[0], file)];
+        let items = vec![(&plans[0], &file)];
         let control = "\u{1}".repeat(1_000);
         let maximum = 6_500;
         for (earlier, label) in [(0, control.as_str()), (maximum - 300, "short")] {

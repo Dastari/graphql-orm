@@ -10,8 +10,8 @@ use std::error::Error as StdError;
 use std::fmt;
 
 use super::runtime_query::{
-    RuntimeReadGuard, cursor_after_sql, effective_terms, guarded_rows, placeholder,
-    render_order_terms, value_bind,
+    RuntimeReadGuard, cursor_after_sql, effective_terms, placeholder, render_order_terms,
+    value_bind,
 };
 use super::{
     CollectionId, DatabaseBackend, DbAuthContext, FieldId, OrmBackend, RelationCardinality,
@@ -1006,7 +1006,7 @@ where
                     relation_key: (!any_null).then_some(relation_values),
                 });
             }
-            let node = edge.node.project(&request.output_projection)?;
+            let node = edge.node.into_projection(&request.output_projection)?;
             edges.push(RuntimeAnchoredEdge {
                 node,
                 cursor: edge.cursor,
@@ -1316,15 +1316,12 @@ fn render_relation_rows(
     Ok((sql, values))
 }
 
-fn render_relation_counts(
-    request: &RuntimeRelationBatchRequest,
-    backend: DatabaseBackend,
+/// The distinct parent keys to count, each with its count id, and the count id
+/// of every group.
+#[allow(clippy::type_complexity)]
+fn count_keys(
     groups: &[QueryGroup],
-) -> Result<(String, Vec<SqlValue>, BTreeMap<usize, usize>), RuntimeRelationError> {
-    let table = backend.quote_identifier(request.relation.target().physical_table());
-    let group_alias = backend.quote_identifier(GROUP_ALIAS);
-    let count_alias = backend.quote_identifier(COUNT_ALIAS);
-    let mut values = Vec::new();
+) -> Result<(Vec<(usize, Vec<RuntimeValue>)>, BTreeMap<usize, usize>), RuntimeRelationError> {
     let mut unique = BTreeMap::<Vec<u8>, (usize, Vec<RuntimeValue>)>::new();
     let mut group_to_count = BTreeMap::new();
     for group in groups {
@@ -1338,12 +1335,24 @@ fn render_relation_counts(
             .0;
         group_to_count.insert(group.id, id);
     }
+    Ok((unique.into_values().collect(), group_to_count))
+}
+
+fn render_relation_counts(
+    request: &RuntimeRelationBatchRequest,
+    backend: DatabaseBackend,
+    keys: &[(usize, Vec<RuntimeValue>)],
+) -> Result<(String, Vec<SqlValue>), RuntimeRelationError> {
+    let table = backend.quote_identifier(request.relation.target().physical_table());
+    let group_alias = backend.quote_identifier(GROUP_ALIAS);
+    let count_alias = backend.quote_identifier(COUNT_ALIAS);
+    let mut values = Vec::new();
     let mut branches = Vec::new();
-    for (id, key) in unique.into_values() {
+    for (id, key) in keys {
         let mut predicates = vec![bind_relation_key(
             backend,
             &request.relation,
-            &key,
+            key,
             &mut values,
         )?];
         if let Some(predicate) = &request.predicate {
@@ -1360,7 +1369,70 @@ fn render_relation_counts(
                 .for_relation(&request.relation),
         );
     }
-    Ok((branches.join(" UNION ALL "), values, group_to_count))
+    Ok((branches.join(" UNION ALL "), values))
+}
+
+/// Most bound values one relation statement carries on `backend`.
+///
+/// [`RuntimeRelationLimits::max_bind_parameters`] bounds a whole layer. A
+/// single statement is also bounded by what the database accepts: SQLite
+/// builds before 3.32, and later builds that keep the old default, refuse a
+/// statement with more than 999 variables, so a SQLite layer above that is
+/// sent as several statements, and one parent group above it is refused.
+fn statement_bind_ceiling(backend: DatabaseBackend) -> usize {
+    match backend {
+        DatabaseBackend::Sqlite => 999,
+        other => SqlDialect::max_statement_binds(&other),
+    }
+}
+
+/// Render `items` as one statement when its bound values fit `ceiling`, and
+/// otherwise as the fewest statements of consecutive items that each fit.
+///
+/// The whole layer is rendered first, so its own limit is enforced on the
+/// total. An item that alone exceeds `ceiling` cannot be sent: the request's
+/// own filter and cursor values leave no room for its parent key. It is
+/// refused with `refused()` before any statement runs. Every returned
+/// statement is checked against `ceiling` once more, from its rendered bind
+/// count, so a part the packing missed is refused rather than sent.
+fn split_statements<T>(
+    items: &[T],
+    ceiling: usize,
+    render: impl Fn(&[T]) -> Result<(String, Vec<SqlValue>), RuntimeRelationError>,
+    refused: impl Fn() -> RuntimeRelationError,
+) -> Result<Vec<(String, Vec<SqlValue>)>, RuntimeRelationError> {
+    let whole = render(items)?;
+    if whole.1.len() <= ceiling {
+        return Ok(vec![whole]);
+    }
+    let mut statements = Vec::new();
+    let (mut start, mut binds) = (0usize, 0usize);
+    for (index, item) in items.iter().enumerate() {
+        let own = render(std::slice::from_ref(item))?.1.len();
+        if own > ceiling {
+            return Err(refused());
+        }
+        if index > start && binds.saturating_add(own) > ceiling {
+            statements.push(render(&items[start..index])?);
+            (start, binds) = (index, 0);
+        }
+        binds = binds.saturating_add(own);
+    }
+    statements.push(render(&items[start..])?);
+    if statements.iter().any(|(_, values)| values.len() > ceiling) {
+        return Err(refused());
+    }
+    Ok(statements)
+}
+
+/// One parent group binds more values than a statement accepts on this
+/// backend. `resource_limit`, the code of this layer's bind bounds, carrying
+/// as its source the typed `INVALID_INPUT` refusal that the static relation
+/// loaders give the same condition: the client must reduce its request.
+fn statement_bound_exceeded(request: &RuntimeRelationBatchRequest) -> RuntimeRelationError {
+    RuntimeRelationError::new(RuntimeRelationErrorCode::ResourceLimit)
+        .for_relation(&request.relation)
+        .source(crate::graphql::loaders::bind_limit_error())
 }
 
 impl<B> crate::db::Database<B>
@@ -1451,7 +1523,13 @@ where
                     .collect(),
             }));
         }
-        let (sql, values) = render_relation_rows(request, B::DIALECT, &groups)?;
+        let ceiling = statement_bind_ceiling(B::DIALECT);
+        let row_statements = split_statements(
+            &groups,
+            ceiling,
+            |groups| render_relation_rows(request, B::DIALECT, groups),
+            || statement_bound_exceeded(request),
+        )?;
         let counts_requested = matches!(
             request.selection,
             RuntimeRelationSelection::ToMany {
@@ -1459,59 +1537,69 @@ where
                 ..
             }
         );
-        let (rows, count_rows, count_groups) = if let Some(guard) = guard {
-            let counted = if counts_requested {
-                Some(render_relation_counts(request, B::DIALECT, &groups)?)
-            } else {
-                None
-            };
-            let mut statements: Vec<(&str, &[SqlValue])> = vec![(&sql, &values)];
-            if let Some((count_sql, count_values, _)) = &counted {
-                statements.push((count_sql, count_values));
-            }
-            let Some((rows, counts)) = guarded_rows::<B>(self.pool(), guard, &statements, auth)
-                .await
-                .map_err(|error| {
-                    RuntimeRelationError::new(RuntimeRelationErrorCode::BackendExecution)
-                        .for_relation(&request.relation)
-                        .source(error)
-                })?
+        let (count_statements, count_groups) = if counts_requested {
+            let (keys, count_groups) = count_keys(&groups)?;
+            let statements = split_statements(
+                &keys,
+                ceiling,
+                |keys| render_relation_counts(request, B::DIALECT, keys),
+                || statement_bound_exceeded(request),
+            )?;
+            (statements, count_groups)
+        } else {
+            (Vec::new(), BTreeMap::new())
+        };
+        let backend_error = |error: crate::Error| {
+            RuntimeRelationError::new(RuntimeRelationErrorCode::BackendExecution)
+                .for_relation(&request.relation)
+                .source(error)
+        };
+        let reads = row_statements
+            .iter()
+            .chain(&count_statements)
+            .map(|(sql, values)| (sql.as_str(), values.as_slice()))
+            .collect::<Vec<_>>();
+        let mut sets = if let Some(guard) = guard {
+            let Some(sets) =
+                super::runtime_query::guarded_row_sets::<B>(self.pool(), guard, &reads, auth)
+                    .await
+                    .map_err(backend_error)?
             else {
                 return Ok(None);
             };
-            (
-                rows,
-                counts,
-                counted.map(|(_, _, groups)| groups).unwrap_or_default(),
-            )
-        } else if counts_requested {
-            let (count_sql, count_values, count_groups) =
-                render_relation_counts(request, B::DIALECT, &groups)?;
+            sets
+        } else if let [(sql, values), (count_sql, count_values)] = reads.as_slice() {
             let (rows, counts) = super::fetch_rows_pair_with_auth::<B>(
                 self.pool(),
-                &sql,
-                &values,
-                &count_sql,
-                &count_values,
+                sql,
+                values,
+                count_sql,
+                count_values,
                 auth,
             )
             .await
-            .map_err(|error| {
-                RuntimeRelationError::new(RuntimeRelationErrorCode::BackendExecution)
-                    .for_relation(&request.relation)
-                    .source(error)
-            })?;
-            (rows, Some(counts), count_groups)
+            .map_err(backend_error)?;
+            vec![rows, counts]
         } else {
-            let rows = super::fetch_rows_with_auth::<B>(self.pool(), &sql, &values, auth)
-                .await
-                .map_err(|error| {
-                    RuntimeRelationError::new(RuntimeRelationErrorCode::BackendExecution)
-                        .for_relation(&request.relation)
-                        .source(error)
-                })?;
-            (rows, None, BTreeMap::new())
+            let mut sets = Vec::with_capacity(reads.len());
+            for (sql, values) in &reads {
+                sets.push(
+                    super::fetch_rows_with_auth::<B>(self.pool(), sql, values, auth)
+                        .await
+                        .map_err(backend_error)?,
+                );
+            }
+            sets
         };
+        if sets.len() != reads.len() {
+            return Err(
+                RuntimeRelationError::new(RuntimeRelationErrorCode::BackendExecution)
+                    .for_relation(&request.relation),
+            );
+        }
+        let count_sets = sets.split_off(row_statements.len());
+        let rows = sets.into_iter().flatten();
+        let count_rows = counts_requested.then(|| count_sets.into_iter().flatten());
         let mut decoded = BTreeMap::<usize, Vec<RuntimeRecord>>::new();
         for row in rows {
             let group = usize::try_from(B::try_get_i64(&row, GROUP_ALIAS).map_err(|error| {
@@ -1556,18 +1644,24 @@ where
                         .map(|record| {
                             let anchors = record_anchors(&record, &request.target_anchors, 0)?;
                             Ok::<_, RuntimeRelationError>((
-                                record.project(&request.output_projection)?,
+                                record.into_projection(&request.output_projection)?,
                                 anchors,
                             ))
                         })
                         .transpose()?;
-                    for index in group.anchor_indexes {
-                        results[index].value = RuntimeRelationValue::ToOne(
-                            value.as_ref().map(|(node, _)| node.clone()),
-                        );
-                        results[index].nested_anchors = value
+                    // Each result owns its record: parents sharing one related
+                    // record get a copy each, and the last takes the original.
+                    let (mut node, anchors) = value.unzip();
+                    let last = group.anchor_indexes.len().saturating_sub(1);
+                    for (position, index) in group.anchor_indexes.into_iter().enumerate() {
+                        results[index].value = RuntimeRelationValue::ToOne(if position == last {
+                            node.take()
+                        } else {
+                            node.clone()
+                        });
+                        results[index].nested_anchors = anchors
                             .as_ref()
-                            .map(|(_, anchors)| vec![anchors.clone()])
+                            .map(|anchors: &Vec<RuntimeParentAnchor>| vec![anchors.clone()])
                             .unwrap_or_default();
                     }
                 }
@@ -1585,11 +1679,19 @@ where
                     if backward {
                         records.reverse();
                     }
-                    for index in group.anchor_indexes {
+                    // Each connection owns its records: parents sharing a key
+                    // and page get a copy each, and the last takes the originals.
+                    let last = group.anchor_indexes.len().saturating_sub(1);
+                    for (position, index) in group.anchor_indexes.into_iter().enumerate() {
                         let anchor = &request.anchors[index];
                         let mut edges = Vec::with_capacity(records.len());
                         let mut nested_anchors = Vec::with_capacity(records.len());
-                        for (edge_index, record) in records.iter().enumerate() {
+                        let owned = if position == last {
+                            std::mem::take(&mut records)
+                        } else {
+                            records.clone()
+                        };
+                        for (edge_index, record) in owned.into_iter().enumerate() {
                             let cursor_values = request
                                 .order
                                 .terms()
@@ -1602,16 +1704,16 @@ where
                                     )),
                                 })
                                 .collect::<Result<Vec<_>, RuntimeRelationError>>()?;
-                            edges.push(RuntimeEdge {
-                                node: record.project(&request.output_projection)?,
-                                cursor: encode_relation_cursor(request, anchor, cursor_values)?,
-                                score: None,
-                            });
                             nested_anchors.push(record_anchors(
-                                record,
+                                &record,
                                 &request.target_anchors,
                                 edge_index,
                             )?);
+                            edges.push(RuntimeEdge {
+                                node: record.into_projection(&request.output_projection)?,
+                                cursor: encode_relation_cursor(request, anchor, cursor_values)?,
+                                score: None,
+                            });
                         }
                         let start_cursor = edges.first().map(|edge| edge.cursor.clone());
                         let end_cursor = edges.last().map(|edge| edge.cursor.clone());

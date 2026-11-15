@@ -1,4 +1,5 @@
-#![cfg(feature = "postgres")]
+// One backend per build: the generated code below names no backend.
+#![cfg(all(feature = "postgres", not(feature = "sqlite")))]
 
 use graphql_orm::prelude::*;
 use std::process::Command;

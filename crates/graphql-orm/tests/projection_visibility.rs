@@ -1,5 +1,8 @@
 //! Executes against memory SQLite or an independently owned PostgreSQL container.
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
+#![cfg(all(
+    any(feature = "sqlite", feature = "postgres"),
+    not(all(feature = "sqlite", feature = "postgres"))
+))]
 use graphql_orm::prelude::*;
 use std::sync::{Arc, Mutex};
 

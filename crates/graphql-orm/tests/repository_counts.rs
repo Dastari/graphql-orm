@@ -1,4 +1,7 @@
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
+#![cfg(all(
+    any(feature = "sqlite", feature = "postgres"),
+    not(all(feature = "sqlite", feature = "postgres"))
+))]
 
 use graphql_orm::prelude::*;
 

@@ -2409,7 +2409,7 @@ where
                 .collect::<Result<Vec<_>, RuntimeQueryError>>()?;
             let cursor = encode_cursor(request, cursor_values, score)?;
             let node = decoded_record
-                .project(&request.output_projection)
+                .into_projection(&request.output_projection)
                 .map_err(RuntimeQueryError::from)?;
             edges.push(RuntimeEdge {
                 node,
@@ -2483,6 +2483,21 @@ pub(crate) async fn guarded_rows<B: OrmBackend>(
     reads: &[(&str, &[SqlValue])],
     auth: Option<&DbAuthContext>,
 ) -> crate::Result<Option<(Vec<B::Row>, Option<Vec<B::Row>>)>> {
+    Ok(guarded_row_sets::<B>(pool, guard, reads, auth)
+        .await?
+        .and_then(|sets| {
+            let mut results = sets.into_iter();
+            results.next().map(|rows| (rows, results.next()))
+        }))
+}
+
+/// [`guarded_rows`] for any number of reads: one row set per read, in order.
+pub(crate) async fn guarded_row_sets<B: OrmBackend>(
+    pool: &B::Pool,
+    guard: &RuntimeReadGuard,
+    reads: &[(&str, &[SqlValue])],
+    auth: Option<&DbAuthContext>,
+) -> crate::Result<Option<Vec<Vec<B::Row>>>> {
     let prelude = guard.prelude.iter().map(String::as_str).collect::<Vec<_>>();
     match super::fetch_rows_admitted_with_auth::<B>(
         pool,
@@ -2494,10 +2509,7 @@ pub(crate) async fn guarded_rows<B: OrmBackend>(
     .await
     {
         Err(_) | Ok(None) => Ok(None),
-        Ok(Some(read)) => {
-            let mut results = read?.into_iter();
-            Ok(results.next().map(|rows| (rows, results.next())))
-        }
+        Ok(Some(read)) => Ok(Some(read?)),
     }
 }
 
