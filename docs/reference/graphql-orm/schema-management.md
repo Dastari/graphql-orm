@@ -3,7 +3,7 @@ title: "Schema Management"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-10
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -99,6 +99,10 @@ Each `PlannedMigrationStep` carries a `MigrationRisk`:
 - `Risky`
 - `Destructive`
 
+A table's risk is the highest risk among its steps. PostgreSQL and SQL Server plans drop a removed
+table's own foreign keys first, so the first step for that table is a `Risky` `DropForeignKey` and
+the `Destructive` `DropTable` follows.
+
 Rendered SQL is available as `plan.statements`, but callers should treat it as an artifact of the plan rather than the migration source of truth.
 
 When `graphql-orm` owns only a subset of tables in a shared database, plan with
@@ -141,6 +145,17 @@ For SQLite, enable `PRAGMA foreign_keys = ON` on every managed connection and
 run `PRAGMA foreign_key_check` after migration. Migration application remains
 transactional: a failed table rebuild does not record history and restores the
 pre-migration schema and rows.
+
+A SQLite rebuild that removes a composite UNIQUE key is refused while any
+foreign key references that key, because the reference could no longer be
+enforced. One plan may remove both: when the child table's rebuild, which
+removes the foreign key, is scheduled before the parent's, the plan applies and
+keeps every row. The check before any change reads the child's foreign keys as
+its rebuild will leave them, and the parent's rebuild reads the catalog again
+inside the migration transaction, with nothing excused, immediately before it
+replaces the table. The refusal stands when the parent rebuild comes first, and
+when a table the plan does not rebuild (for example an unmanaged host table)
+still references the key.
 
 Managed migrations create full-text search storage, such as Postgres shadow tables/GIN indexes and
 SQLite FTS5 virtual tables. They do not backfill existing rows automatically. Run the generated
@@ -328,6 +343,39 @@ SQLite and Postgres implement validation, planning, and migration application.
 For PostgreSQL spatial fields, managed plans include `CREATE EXTENSION IF NOT EXISTS postgis` before
 table creation. Spatial indexes are rendered as normal migration statements, not concurrent index
 builds.
+
+PostgreSQL reports each built-in type under one name (`character varying(50)`,
+`integer`, `numeric(10,2)`, `timestamp with time zone`). A model may declare
+any alias of it (`varchar(50)`, `int`, `decimal(10,2)`, `timestamptz`): the
+planner and the foreign-key member check treat an alias and the reported name
+as the same type, so a freshly applied schema plans no change. Only a closed
+set of built-in names is recognised. Length, precision and scale still
+distinguish types, and domains, extension types and quoted type names are
+compared by spelling.
+
+PostgreSQL introspection reads the tables of the connection's current schema.
+A table an entity declares with a schema (`table = "audit.logs"`) is read as
+well, wherever it lives, when the target being planned or validated names it,
+and is reported under its declared path. This applies to
+`plan_migration_to_entities`, `plan_schema_target`, `validate_against_entities`,
+`validate_target`, schema stages and ABI upgrades. Two limits follow from
+reading only what the target names:
+
+- tables of other schemas that the target does not name are never read, so no
+  plan, strict or not, drops them;
+- a schema-qualified table that is removed from the target is no longer read
+  either, so the plan does not drop it. Drop it with explicit SQL.
+
+`introspect_postgres_schema` on its own still reads the current schema only.
+
+A PostgreSQL plan drops and re-adds a foreign key when its source column and
+the column it references both change type, because the first `ALTER COLUMN
+TYPE` would otherwise fail on mismatched members; re-adding the key rechecks
+every referencing row. The key stays attached when both members only widen
+within one base type: a longer `varchar` or `varbit`, or a `numeric` with more
+precision at the same scale. PostgreSQL rewrites neither table for those
+changes. MySQL plans follow the same foreign-key ordering as PostgreSQL and SQL
+Server plans but have no executable lane.
 
 PostgreSQL uniqueness introspection is structural. `pg_constraint.conkey`
 members are grouped in key ordinal order: a one-column UNIQUE constraint marks

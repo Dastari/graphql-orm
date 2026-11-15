@@ -107,6 +107,15 @@ pub enum BackupChangeAction {
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BackupChange {
+    /// Position of this entry in the journal. Entries are exported in
+    /// ascending order; pass the last one's value as
+    /// [`ChangeWindow::after_sequence`] to continue from it.
+    ///
+    /// An entry serialized by a release before 0.157.0 has no position and
+    /// deserializes with `0`, which is never a journal position.
+    #[serde(default)]
+    pub sequence: i64,
+    /// Random identifier of the entry. It does not order entries.
     pub id: uuid::Uuid,
     pub entity_name: String,
     pub table_name: String,
@@ -119,10 +128,87 @@ pub struct BackupChange {
     pub correlation_id: Option<String>,
 }
 
+/// The part of the change journal one export reads.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ChangeWindow {
-    pub after_snapshot_id: Option<uuid::Uuid>,
+    /// Export only entries after this journal position: the
+    /// [`BackupChange::sequence`] of the last entry the previous export
+    /// returned. `None` starts from the beginning of the journal.
+    pub after_sequence: Option<i64>,
+    /// Export only entries recorded at or before this Unix time, in seconds.
+    /// The export stops at the first entry recorded later, so it never skips
+    /// an entry that a later export would have to return.
     pub until: i64,
+}
+
+/// How long [`Database::export_changes`](crate::db::Database::export_changes)
+/// waits for journaled write transactions that were open when it started.
+pub const CHANGE_EXPORT_DEFAULT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A change journal export gave up waiting for open journaled transactions.
+///
+/// Nothing was exported, so no entry was skipped: retry with the same window.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChangeExportTimedOut {
+    /// How long the export waited.
+    pub waited: std::time::Duration,
+}
+
+impl std::fmt::Display for ChangeExportTimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "change journal export timed out after {:?} waiting for journaled write transactions that were open when it started",
+            self.waited
+        )
+    }
+}
+
+impl std::error::Error for ChangeExportTimedOut {}
+
+/// The change journal could not be given its sequence because a database
+/// object already has the name the upgrade needs for the rebuilt journal.
+///
+/// Nothing was changed: the journal, the conflicting object and their rows are
+/// as they were. Rename or remove the conflicting object, then prepare the
+/// journal again. Read it from the error with
+/// [`ChangeJournalUpgradeConflict::from_error`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChangeJournalUpgradeConflict {
+    /// Name of the existing database object.
+    pub name: String,
+}
+
+impl std::fmt::Display for ChangeJournalUpgradeConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the change journal upgrade needs the name {} but a database object already has it; nothing was changed",
+            self.name
+        )
+    }
+}
+
+impl std::error::Error for ChangeJournalUpgradeConflict {}
+
+impl ChangeJournalUpgradeConflict {
+    /// The conflict carried by `error`, if that is what it reports.
+    pub fn from_error(error: &crate::Error) -> Option<&Self> {
+        match error {
+            sqlx::Error::Decode(source) => source.downcast_ref::<Self>(),
+            _ => None,
+        }
+    }
+}
+
+impl ChangeExportTimedOut {
+    /// The timeout carried by `error`, if that is what it reports.
+    pub fn from_error(error: &crate::Error) -> Option<&Self> {
+        match error {
+            sqlx::Error::Decode(source) => source.downcast_ref::<Self>(),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(feature = "sqlite")]
@@ -307,14 +393,51 @@ impl crate::db::Database {
         }
     }
 
+    /// Export the change journal entries in `window`, in journal order.
+    ///
+    /// Each entry carries its journal position in [`BackupChange::sequence`].
+    /// To export incrementally, pass the last returned entry's position as
+    /// the next window's [`ChangeWindow::after_sequence`]. Consecutive exports
+    /// then return every entry exactly once: positions are assigned by the
+    /// database in increasing order, and an export returns a contiguous run of
+    /// them.
+    ///
+    /// On PostgreSQL a position is assigned when an entry is written, which
+    /// can be before its transaction commits. So that no entry appears later
+    /// behind a position already exported, the export waits for the journaled
+    /// write transactions that were open when it started, for up to
+    /// [`CHANGE_EXPORT_DEFAULT_WAIT`]; see
+    /// [`Self::export_changes_with_wait`]. SQLite has one writer at a time and
+    /// never waits.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the journal has no sequence column (a journal created by a
+    /// release before 0.157.0: run [`Self::ensure_change_journal_table`], or
+    /// on PostgreSQL apply the schema target, as the journal's owner), when a
+    /// PostgreSQL role subject to row security reads the journal, when the
+    /// PostgreSQL server is a standby (it cannot see the primary's open
+    /// transactions), and with [`ChangeExportTimedOut`] when open
+    /// transactions outlast the wait.
     pub async fn export_changes(&self, window: ChangeWindow) -> crate::Result<Vec<BackupChange>> {
+        self.export_changes_with_wait(window, CHANGE_EXPORT_DEFAULT_WAIT)
+            .await
+    }
+
+    /// [`Self::export_changes`] with an explicit limit on how long to wait
+    /// for open journaled write transactions on PostgreSQL.
+    pub async fn export_changes_with_wait(
+        &self,
+        window: ChangeWindow,
+        max_wait: std::time::Duration,
+    ) -> crate::Result<Vec<BackupChange>> {
         if !cfg!(feature = "change-journal") {
             return Err(sqlx::Error::Protocol(
                 "incremental backup export requires the graphql-orm change-journal feature"
                     .to_string(),
             ));
         }
-        export_changes(self.pool(), window).await
+        export_changes(self.pool(), window, max_wait).await
     }
 }
 
@@ -468,11 +591,20 @@ fn backup_backend_capabilities() -> BackupBackendCapabilities {
     }
 }
 
-async fn ensure_change_journal_table(pool: &DbPool) -> crate::Result<()> {
-    #[cfg(feature = "sqlite")]
-    let sql = format!(
+/// Columns of the change journal other than its sequence.
+const CHANGE_JOURNAL_ENTRY_COLUMNS: &str = "id, entity_name, table_name, primary_key, action, changed_at, transaction_id, row_hash, actor_id, correlation_id";
+
+/// Name of the journal column that orders entries.
+const CHANGE_JOURNAL_SEQUENCE_COLUMN: &str = "seq";
+
+#[cfg(feature = "sqlite")]
+fn sqlite_change_journal_table_sql(table: &str) -> String {
+    // `AUTOINCREMENT` never reuses a position, even after the newest entries
+    // are deleted, so a stored position cannot point past new entries.
+    format!(
         "CREATE TABLE IF NOT EXISTS {} (
-            id TEXT PRIMARY KEY,
+            seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            id TEXT NOT NULL UNIQUE,
             entity_name TEXT NOT NULL,
             table_name TEXT NOT NULL,
             primary_key TEXT NOT NULL,
@@ -483,16 +615,117 @@ async fn ensure_change_journal_table(pool: &DbPool) -> crate::Result<()> {
             actor_id TEXT NULL,
             correlation_id TEXT NULL
         )",
-        quote_identifier(CHANGE_JOURNAL_TABLE)
-    );
+        quote_identifier(table)
+    )
+}
 
-    #[cfg(feature = "postgres")]
-    let sql = super::rls::postgres_change_journal_table_sql();
+/// Create the SQLite journal, or give one created by an earlier release its
+/// sequence column.
+///
+/// SQLite cannot add an `AUTOINCREMENT` key to an existing table, so the
+/// journal is rebuilt in one immediate transaction: existing entries are
+/// copied in `changed_at` and then insertion (`rowid`) order. The transaction
+/// guard rolls the rebuild back when a statement or the commit fails, and a
+/// cancelled call closes its connection, which also rolls back, so the pool
+/// never hands out a connection that is still inside the upgrade.
+///
+/// The rebuild needs the name `__graphql_orm_change_log_sequenced` for a
+/// moment. Anything that already has that name was not created by this
+/// rebuild, which never commits it, so the upgrade refuses with
+/// [`ChangeJournalUpgradeConflict`] before it changes anything rather than
+/// drop an object it does not own.
+#[cfg(feature = "sqlite")]
+async fn ensure_change_journal_table(pool: &DbPool) -> crate::Result<()> {
+    // A caller that drops this future while `BEGIN IMMEDIATE` is in flight
+    // leaves SQLx no transaction guard to roll back, and the connection would
+    // return to the pool inside that transaction. Until the upgrade has run
+    // to an end, the lease is marked to be closed instead, which rolls back.
+    struct Lease {
+        connection: sqlx::pool::PoolConnection<sqlx::Sqlite>,
+        finished: bool,
+    }
+    impl Drop for Lease {
+        fn drop(&mut self) {
+            if !self.finished {
+                self.connection.close_on_drop();
+            }
+        }
+    }
+    let mut lease = Lease {
+        connection: pool.acquire().await?,
+        finished: false,
+    };
+    let result = upgrade_sqlite_change_journal(&mut lease.connection).await;
+    // Reached only when the upgrade was not cancelled: it committed, or its
+    // transaction guard has rolled it back.
+    lease.finished = true;
+    result
+}
 
-    sqlx::query(&sql).execute(pool).await?;
+#[cfg(feature = "sqlite")]
+async fn upgrade_sqlite_change_journal(
+    connection: &mut sqlx::SqliteConnection,
+) -> crate::Result<()> {
+    use sqlx::Connection;
+    let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
+    let table = quote_identifier(CHANGE_JOURNAL_TABLE);
+    let columns: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info(?, 'main')")
+        .bind(CHANGE_JOURNAL_TABLE)
+        .fetch_all(&mut *tx)
+        .await?;
+    if columns.is_empty() {
+        sqlx::query(&sqlite_change_journal_table_sql(CHANGE_JOURNAL_TABLE))
+            .execute(&mut *tx)
+            .await?;
+    } else if !columns
+        .iter()
+        .any(|column| column == CHANGE_JOURNAL_SEQUENCE_COLUMN)
+    {
+        let upgraded_name = format!("{CHANGE_JOURNAL_TABLE}_sequenced");
+        let taken: i64 = sqlx::query_scalar(
+            "SELECT (SELECT COUNT(*) FROM main.sqlite_master WHERE name = ?1 COLLATE NOCASE) + (SELECT COUNT(*) FROM temp.sqlite_master WHERE name = ?1 COLLATE NOCASE)",
+        )
+        .bind(&upgraded_name)
+        .fetch_one(&mut *tx)
+        .await?;
+        if taken != 0 {
+            return Err(sqlx::Error::Decode(Box::new(
+                ChangeJournalUpgradeConflict {
+                    name: upgraded_name,
+                },
+            )));
+        }
+        let upgraded = quote_identifier(&upgraded_name);
+        sqlx::query(&sqlite_change_journal_table_sql(&upgraded_name))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(&format!(
+            "INSERT INTO {upgraded} ({CHANGE_JOURNAL_ENTRY_COLUMNS}) SELECT {CHANGE_JOURNAL_ENTRY_COLUMNS} FROM {table} ORDER BY changed_at, rowid"
+        ))
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(&format!("DROP TABLE {table}"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(&format!("ALTER TABLE {upgraded} RENAME TO {table}"))
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await
+}
+
+#[cfg(feature = "postgres")]
+async fn ensure_change_journal_table(pool: &DbPool) -> crate::Result<()> {
+    sqlx::query(&super::rls::postgres_change_journal_table_sql())
+        .execute(pool)
+        .await?;
+    // A journal from an earlier release gets its sequence column when the
+    // caller owns it; otherwise the owner adds it by applying the target.
+    sqlx::query(&super::rls::postgres_change_journal_sequence_sql())
+        .execute(pool)
+        .await?;
     // The journal names every tenant's keys and drives restore deletes. Only
     // privileged roles read or write it; the database-side recorder appends.
-    #[cfg(feature = "postgres")]
     sqlx::query(&super::rls::postgres_ensure_change_log_rls_sql())
         .execute(pool)
         .await?;
@@ -955,41 +1188,190 @@ where
     ))
 }
 
-async fn export_changes(pool: &DbPool, window: ChangeWindow) -> crate::Result<Vec<BackupChange>> {
-    let mut conditions = vec!["changed_at <= ?".to_string()];
-    let mut values = vec![SqlValue::Int(window.until)];
-    if let Some(after_snapshot_id) = window.after_snapshot_id {
-        conditions.push("id > ?".to_string());
-        values.push(SqlValue::Uuid(after_snapshot_id));
-    }
-    let sql = format!(
-        "SELECT id, entity_name, table_name, primary_key, action, changed_at, transaction_id, row_hash, actor_id, correlation_id
-         FROM {}
-         WHERE {}
-         ORDER BY changed_at ASC, id ASC",
-        quote_identifier(CHANGE_JOURNAL_TABLE),
-        conditions.join(" AND ")
-    );
-    #[cfg(feature = "postgres")]
-    let rows = {
-        // `row_security = off` makes PostgreSQL refuse the read for a role
-        // subject to RLS instead of silently exporting an empty journal.
-        let mut tx = pool.begin().await?;
-        sqlx::query("SET LOCAL row_security = off")
-            .execute(&mut *tx)
-            .await?;
-        let sql = <PostgresBackend as super::OrmBackend>::normalize_sql(&sql, 1);
-        let mut query = sqlx::query(&sql);
-        for value in &values {
-            query = super::backend::bind_postgres_value(query, value);
+fn missing_change_journal_sequence() -> sqlx::Error {
+    sqlx::Error::Protocol(format!(
+        "change journal {CHANGE_JOURNAL_TABLE} has no {CHANGE_JOURNAL_SEQUENCE_COLUMN} column and cannot be exported in order; run ensure_change_journal_table, or on PostgreSQL apply the schema target, as the journal's owner"
+    ))
+}
+
+/// The entries to return from rows read in ascending sequence order: the run
+/// that ends before the first entry recorded after `until`.
+///
+/// Filtering later entries out instead would let the caller's next position
+/// pass an entry this export did not return.
+fn changes_until(rows: Vec<crate::DbRow>, until: i64) -> crate::Result<Vec<BackupChange>> {
+    let mut changes = Vec::with_capacity(rows.len());
+    for row in rows {
+        let change = decode_backup_change(row)?;
+        if change.changed_at > until {
+            break;
         }
-        let rows = query.fetch_all(&mut *tx).await?;
+        changes.push(change);
+    }
+    Ok(changes)
+}
+
+fn export_changes_sql(upper_bound: bool) -> String {
+    format!(
+        "SELECT {CHANGE_JOURNAL_SEQUENCE_COLUMN}, {CHANGE_JOURNAL_ENTRY_COLUMNS}
+         FROM {}
+         WHERE {CHANGE_JOURNAL_SEQUENCE_COLUMN} > ?{}
+         ORDER BY {CHANGE_JOURNAL_SEQUENCE_COLUMN} ASC",
+        quote_identifier(CHANGE_JOURNAL_TABLE),
+        if upper_bound {
+            format!(" AND {CHANGE_JOURNAL_SEQUENCE_COLUMN} <= ?")
+        } else {
+            String::new()
+        }
+    )
+}
+
+// SQLite admits one write transaction at a time, so positions are committed
+// in the order they are assigned and a read sees every position below the
+// highest one it returns.
+#[cfg(feature = "sqlite")]
+async fn export_changes(
+    pool: &DbPool,
+    window: ChangeWindow,
+    _max_wait: std::time::Duration,
+) -> crate::Result<Vec<BackupChange>> {
+    let sequenced: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM pragma_table_info(?, 'main') WHERE name = ?")
+            .bind(CHANGE_JOURNAL_TABLE)
+            .bind(CHANGE_JOURNAL_SEQUENCE_COLUMN)
+            .fetch_one(pool)
+            .await?;
+    let exists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM main.sqlite_master WHERE type = 'table' AND name = ?",
+    )
+    .bind(CHANGE_JOURNAL_TABLE)
+    .fetch_one(pool)
+    .await?;
+    if exists != 0 && sequenced == 0 {
+        return Err(missing_change_journal_sequence());
+    }
+    let rows = super::fetch_rows::<DefaultBackend>(
+        pool,
+        &export_changes_sql(false),
+        &[SqlValue::Int(window.after_sequence.unwrap_or(0))],
+    )
+    .await?;
+    changes_until(rows, window.until)
+}
+
+// PostgreSQL assigns a position when an entry is inserted, and the entry
+// becomes visible when its transaction commits. A transaction that inserted
+// position 5 may commit after one that inserted position 6, so a plain read
+// could return 6, and a later read "after 6" would never return 5.
+//
+// The recorder locks the journal in ROW EXCLUSIVE mode before it inserts and
+// holds the lock until its transaction ends. The export therefore:
+//
+// 1. reads the highest committed position;
+// 2. lists the transactions that hold that lock now. Any transaction with an
+//    uncommitted position at or below the one read is among them, because it
+//    took the lock before it took its position, and positions only grow;
+// 3. waits until each listed transaction has ended;
+// 4. returns the entries up to the position read in step 1. Every one of
+//    them is now committed and visible, or was rolled back and never will be.
+//
+// `pg_locks` is readable by every role, so an export role needs only `SELECT`
+// on the journal.
+#[cfg(feature = "postgres")]
+async fn export_changes(
+    pool: &DbPool,
+    window: ChangeWindow,
+    max_wait: std::time::Duration,
+) -> crate::Result<Vec<BackupChange>> {
+    let journal = quote_identifier(CHANGE_JOURNAL_TABLE);
+    let mut tx = pool.begin().await?;
+    // Each statement must see transactions that committed while the export
+    // waited, whatever the session's default isolation level is.
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+        .execute(&mut *tx)
+        .await?;
+    // `row_security = off` makes PostgreSQL refuse the read for a role
+    // subject to RLS instead of silently exporting an empty journal.
+    sqlx::query("SET LOCAL row_security = off")
+        .execute(&mut *tx)
+        .await?;
+    // A standby shows committed entries only, and its `pg_locks` does not
+    // list the primary's open write transactions, so an export there could
+    // pass a position that is still uncommitted on the primary.
+    let standby: bool = sqlx::query_scalar("SELECT pg_catalog.pg_is_in_recovery()")
+        .fetch_one(&mut *tx)
+        .await?;
+    if standby {
+        return Err(sqlx::Error::Protocol(
+            "the change journal must be exported from the primary: a standby cannot see the primary's open write transactions"
+                .to_string(),
+        ));
+    }
+    let sequenced: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
+            WHERE a.attrelid OPERATOR(pg_catalog.=) pg_catalog.to_regclass($1)::pg_catalog.oid
+              AND a.attname OPERATOR(pg_catalog.=) $2::pg_catalog.name
+              AND NOT a.attisdropped)",
+    )
+    .bind(&journal)
+    .bind(CHANGE_JOURNAL_SEQUENCE_COLUMN)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !sequenced {
+        let exists: bool = sqlx::query_scalar("SELECT pg_catalog.to_regclass($1) IS NOT NULL")
+            .bind(&journal)
+            .fetch_one(&mut *tx)
+            .await?;
+        if exists {
+            return Err(missing_change_journal_sequence());
+        }
+    }
+    let after = window.after_sequence.unwrap_or(0);
+    let high_water: Option<i64> = sqlx::query_scalar(&format!(
+        "SELECT pg_catalog.max({CHANGE_JOURNAL_SEQUENCE_COLUMN}) FROM {journal}"
+    ))
+    .fetch_one(&mut *tx)
+    .await?;
+    let Some(high_water) = high_water.filter(|position| *position > after) else {
         tx.commit().await?;
-        rows
+        return Ok(Vec::new());
     };
-    #[cfg(not(feature = "postgres"))]
-    let rows = super::fetch_rows::<DefaultBackend>(pool, &sql, &values).await?;
-    rows.into_iter().map(decode_backup_change).collect()
+    const OPEN_WRITERS: &str = "SELECT l.virtualtransaction::pg_catalog.text
+         FROM pg_catalog.pg_locks l
+         WHERE l.locktype OPERATOR(pg_catalog.=) 'relation'
+           AND l.database OPERATOR(pg_catalog.=) (SELECT d.oid FROM pg_catalog.pg_database d WHERE d.datname OPERATOR(pg_catalog.=) pg_catalog.current_database())
+           AND l.relation OPERATOR(pg_catalog.=) pg_catalog.to_regclass($1)::pg_catalog.oid
+           AND l.mode OPERATOR(pg_catalog.=) 'RowExclusiveLock'
+           AND l.granted
+           AND l.pid IS DISTINCT FROM pg_catalog.pg_backend_pid()";
+    let mut open: Vec<String> = sqlx::query_scalar(OPEN_WRITERS)
+        .bind(&journal)
+        .fetch_all(&mut *tx)
+        .await?;
+    let started = std::time::Instant::now();
+    let mut pause = std::time::Duration::from_millis(5);
+    while !open.is_empty() {
+        if started.elapsed() >= max_wait {
+            return Err(sqlx::Error::Decode(Box::new(ChangeExportTimedOut {
+                waited: started.elapsed(),
+            })));
+        }
+        tokio::time::sleep(pause.min(max_wait.saturating_sub(started.elapsed()))).await;
+        pause = (pause * 2).min(std::time::Duration::from_millis(200));
+        let current: Vec<String> = sqlx::query_scalar(OPEN_WRITERS)
+            .bind(&journal)
+            .fetch_all(&mut *tx)
+            .await?;
+        open.retain(|transaction| current.contains(transaction));
+    }
+    let sql = <PostgresBackend as super::OrmBackend>::normalize_sql(&export_changes_sql(true), 1);
+    let rows = sqlx::query(&sql)
+        .bind(after)
+        .bind(high_water)
+        .fetch_all(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    changes_until(rows, window.until)
 }
 
 #[cfg(feature = "postgres")]
@@ -2064,6 +2446,7 @@ fn require_decimal_definition(
 fn decode_backup_change(row: crate::DbRow) -> crate::Result<BackupChange> {
     let id: String = row.try_get("id")?;
     decode_backup_change_parts(
+        row.try_get(CHANGE_JOURNAL_SEQUENCE_COLUMN)?,
         uuid::Uuid::parse_str(&id).map_err(|error| sqlx::Error::Decode(Box::new(error)))?,
         row.try_get("entity_name")?,
         row.try_get("table_name")?,
@@ -2080,6 +2463,7 @@ fn decode_backup_change(row: crate::DbRow) -> crate::Result<BackupChange> {
 #[cfg(feature = "postgres")]
 fn decode_backup_change(row: crate::DbRow) -> crate::Result<BackupChange> {
     decode_backup_change_parts(
+        row.try_get(CHANGE_JOURNAL_SEQUENCE_COLUMN)?,
         row.try_get("id")?,
         row.try_get("entity_name")?,
         row.try_get("table_name")?,
@@ -2093,7 +2477,9 @@ fn decode_backup_change(row: crate::DbRow) -> crate::Result<BackupChange> {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn decode_backup_change_parts(
+    sequence: i64,
     id: uuid::Uuid,
     entity_name: String,
     table_name: String,
@@ -2116,6 +2502,7 @@ fn decode_backup_change_parts(
         }
     };
     Ok(BackupChange {
+        sequence,
         id,
         entity_name,
         table_name,

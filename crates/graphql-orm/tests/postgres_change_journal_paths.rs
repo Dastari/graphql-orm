@@ -146,7 +146,7 @@ async fn entries(
 ) -> Result<Vec<Entry>, Box<dyn std::error::Error>> {
     let mut entries = database
         .export_changes(ChangeWindow {
-            after_snapshot_id: None,
+            after_sequence: None,
             until: i64::MAX,
         })
         .await?

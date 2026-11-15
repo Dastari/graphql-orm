@@ -459,19 +459,87 @@ fn rewrite_table(
     ))
 }
 
+/// The foreign keys of one table that an earlier directive of the same plan
+/// rebuilds, as they will be once that rebuild has run.
+pub(crate) struct ScheduledForeignKeys {
+    /// Table the earlier directive rebuilds.
+    table: String,
+    /// Referenced table and referenced columns of each foreign key the
+    /// rebuilt table declares. A key that names no columns references the
+    /// primary key and is not listed.
+    references: Vec<(String, Vec<String>)>,
+}
+
+/// Referenced columns of every foreign key that references `table`: those the
+/// catalog holds now, except that a table in `scheduled` contributes the keys
+/// it will have after its own, earlier rebuild.
+async fn incoming_key_columns(
+    conn: &mut sqlx::SqliteConnection,
+    table: &str,
+    scheduled: &[ScheduledForeignKeys],
+) -> Result<Vec<Vec<String>>, sqlx::Error> {
+    let rows = sqlx::query(r#"SELECT m.name AS child, f.id AS id, f."to" AS target_column FROM main.sqlite_master m JOIN pragma_foreign_key_list(m.name, 'main') f WHERE m.type='table' AND f."table"=? COLLATE NOCASE ORDER BY m.name,f.id,f.seq"#).bind(table).fetch_all(&mut *conn).await?;
+    let mut groups = std::collections::BTreeMap::<(String, i64), Vec<String>>::new();
+    for row in rows {
+        let child: String = row.try_get("child")?;
+        if scheduled.iter().any(|entry| entry.table == child) {
+            continue;
+        }
+        if let Some(column) = row.try_get::<Option<String>, _>("target_column")? {
+            groups
+                .entry((child, row.try_get("id")?))
+                .or_default()
+                .push(column);
+        }
+    }
+    let mut keys = groups.into_values().collect::<Vec<_>>();
+    // The last directive for a table decides its final shape.
+    for (index, entry) in scheduled.iter().enumerate() {
+        if scheduled[index + 1..]
+            .iter()
+            .any(|later| later.table == entry.table)
+        {
+            continue;
+        }
+        keys.extend(
+            entry
+                .references
+                .iter()
+                .filter(|(parent, _)| parent.eq_ignore_ascii_case(table))
+                .map(|(_, columns)| columns.clone()),
+        );
+    }
+    Ok(keys)
+}
+
 // Incoming FKs may belong to tables excluded by managed-table-only planning.
 // Removing their only referenced key cannot preserve that enforcement contract.
-async fn validate_incoming_keys(
+//
+// An FK that an earlier directive of the same plan removes does not count:
+// `scheduled` carries that table's keys as its rebuild leaves them. The
+// rebuild itself checks the catalog again, with nothing excused, immediately
+// before it replaces the table (see `Prepared::apply`), so the removal is
+// proven inside the migration transaction rather than assumed from the plan.
+async fn incoming_keys_preserved(
     conn: &mut sqlx::SqliteConnection,
     table: &str,
     before: &Keys,
     after: &Keys,
+    scheduled: &[ScheduledForeignKeys],
 ) -> Result<(), sqlx::Error> {
     let members = |key: &[String]| {
         key.iter()
             .map(|s| s.to_ascii_lowercase())
             .collect::<BTreeSet<_>>()
     };
+    let removed = before
+        .iter()
+        .filter(|k| !after.contains(k))
+        .map(|k| members(k))
+        .collect::<Vec<_>>();
+    if removed.is_empty() {
+        return Ok(());
+    }
     let primary: Vec<String> =
         sqlx::query_scalar("SELECT name FROM pragma_table_info(?, 'main') WHERE pk>0 ORDER BY pk")
             .bind(table)
@@ -481,22 +549,7 @@ async fn validate_incoming_keys(
         .into_iter()
         .map(|s| s.to_ascii_lowercase())
         .collect::<Vec<_>>();
-    let removed = before
-        .iter()
-        .filter(|k| !after.contains(k))
-        .map(|k| members(k))
-        .collect::<Vec<_>>();
-    let rows = sqlx::query(r#"SELECT m.name AS child, f.id AS id, f."to" AS target_column FROM main.sqlite_master m JOIN pragma_foreign_key_list(m.name, 'main') f WHERE m.type='table' AND f."table"=? COLLATE NOCASE ORDER BY m.name,f.id,f.seq"#).bind(table).fetch_all(&mut *conn).await?;
-    let mut groups = std::collections::BTreeMap::<(String, i64), Vec<String>>::new();
-    for row in rows {
-        if let Some(column) = row.try_get::<Option<String>, _>("target_column")? {
-            groups
-                .entry((row.try_get("child")?, row.try_get("id")?))
-                .or_default()
-                .push(column);
-        }
-    }
-    for columns in groups.values() {
+    for columns in incoming_key_columns(conn, table, scheduled).await? {
         let columns = columns
             .iter()
             .map(|s| s.to_ascii_lowercase())
@@ -508,6 +561,17 @@ async fn validate_incoming_keys(
             return Err(unsupported());
         }
     }
+    Ok(())
+}
+
+async fn validate_incoming_keys(
+    conn: &mut sqlx::SqliteConnection,
+    table: &str,
+    before: &Keys,
+    after: &Keys,
+    scheduled: &[ScheduledForeignKeys],
+) -> Result<(), sqlx::Error> {
+    incoming_keys_preserved(conn, table, before, after, scheduled).await?;
     if sqlx::query("PRAGMA main.foreign_key_check")
         .fetch_optional(&mut *conn)
         .await?
@@ -526,6 +590,8 @@ pub(crate) struct Prepared {
     all: Vec<String>,
     rowid: String,
     schema_objects: Vec<String>,
+    /// Composite unique keys before the rebuild.
+    before: Keys,
     expected: Keys,
     sequence: Option<Option<i64>>,
 }
@@ -539,19 +605,50 @@ pub(crate) async fn preflight<S: AsRef<str>>(
     }
     let mut connection = pool.acquire().await?;
     let mut tx = connection.begin().await?;
-    for statement in statements {
-        if let Some(input) = directive(statement.as_ref()) {
-            prepare(&mut tx, input?).await.map_err(|_| unsupported())?;
-        }
-    }
+    prepare_all(&mut tx, statements).await?;
     tx.rollback().await?;
     Ok(())
 }
 
-// All directives are prepared before the executor runs any migration statement.
+/// Prepare every directive in `statements`, keyed by statement index, before
+/// the executor runs any migration statement.
+///
+/// Directives are prepared in plan order against the schema as it is now.
+/// Each one also learns the foreign keys that the tables rebuilt by earlier
+/// directives will be left with, so a plan that removes a child's foreign key
+/// and then the parent key it referenced is not refused for a constraint the
+/// plan itself removes first.
+pub(crate) async fn prepare_all<S: AsRef<str>>(
+    conn: &mut sqlx::SqliteConnection,
+    statements: &[S],
+) -> Result<std::collections::BTreeMap<usize, Prepared>, sqlx::Error> {
+    let mut prepared = std::collections::BTreeMap::new();
+    let mut scheduled = Vec::new();
+    for (index, statement) in statements.iter().enumerate() {
+        if let Some(input) = directive(statement.as_ref()) {
+            let rebuild = prepare_scheduled(conn, input?, &scheduled)
+                .await
+                .map_err(|_| unsupported())?;
+            scheduled.push(rebuild.scheduled_foreign_keys(conn).await?);
+            prepared.insert(index, rebuild);
+        }
+    }
+    Ok(prepared)
+}
+
+/// Prepare one directive on its own, against the schema as it is now.
+#[cfg(test)]
 pub(crate) async fn prepare(
     conn: &mut sqlx::SqliteConnection,
     input: Directive,
+) -> Result<Prepared, sqlx::Error> {
+    prepare_scheduled(conn, input, &[]).await
+}
+
+async fn prepare_scheduled(
+    conn: &mut sqlx::SqliteConnection,
+    input: Directive,
+    scheduled: &[ScheduledForeignKeys],
 ) -> Result<Prepared, sqlx::Error> {
     let Directive {
         table,
@@ -633,7 +730,7 @@ pub(crate) async fn prepare(
             }
         }
     }
-    validate_incoming_keys(conn, &table, &before, &after).await?;
+    validate_incoming_keys(conn, &table, &before, &after, scheduled).await?;
     sqlx::query(&format!("EXPLAIN {create}"))
         .fetch_all(&mut *conn)
         .await
@@ -717,6 +814,7 @@ pub(crate) async fn prepare(
         all,
         rowid,
         schema_objects,
+        before,
         expected: after,
         sequence,
     })
@@ -758,8 +856,58 @@ async fn physical_keys(
     Ok(keys)
 }
 impl Prepared {
+    /// The foreign keys this table will declare once it is rebuilt.
+    ///
+    /// SQLite reports them from the rebuilt table's own definition: the table
+    /// is created under its temporary name inside a savepoint that is rolled
+    /// back, so nothing is left behind.
+    async fn scheduled_foreign_keys(
+        &self,
+        conn: &mut sqlx::SqliteConnection,
+    ) -> Result<ScheduledForeignKeys, sqlx::Error> {
+        sqlx::query("SAVEPOINT graphql_orm_scheduled_rebuild")
+            .execute(&mut *conn)
+            .await?;
+        let read = async {
+            sqlx::query(&self.create).execute(&mut *conn).await?;
+            sqlx::query(
+                r#"SELECT "table" AS parent, id, "to" AS target_column FROM pragma_foreign_key_list(?, 'main') ORDER BY id, seq"#,
+            )
+            .bind(&self.temporary)
+            .fetch_all(&mut *conn)
+            .await
+        }
+        .await;
+        sqlx::query("ROLLBACK TO graphql_orm_scheduled_rebuild")
+            .execute(&mut *conn)
+            .await?;
+        sqlx::query("RELEASE graphql_orm_scheduled_rebuild")
+            .execute(&mut *conn)
+            .await?;
+        let mut groups = std::collections::BTreeMap::<i64, (String, Vec<String>)>::new();
+        for row in read? {
+            if let Some(column) = row.try_get::<Option<String>, _>("target_column")? {
+                let parent: String = row.try_get("parent")?;
+                groups
+                    .entry(row.try_get("id")?)
+                    .or_insert_with(|| (parent, Vec::new()))
+                    .1
+                    .push(column);
+            }
+        }
+        Ok(ScheduledForeignKeys {
+            table: self.table.clone(),
+            references: groups.into_values().collect(),
+        })
+    }
+
     pub(crate) async fn apply(self, conn: &mut sqlx::SqliteConnection) -> Result<(), sqlx::Error> {
         let quote = |s: &str| DatabaseBackend::Sqlite.quote_identifier(s);
+        // Preparation may have excused a foreign key that an earlier directive
+        // was due to remove. That directive has run by now, so nothing is
+        // excused here: the catalog must show that no remaining foreign key
+        // references a key this rebuild removes.
+        incoming_keys_preserved(conn, &self.table, &self.before, &self.expected, &[]).await?;
         let table = format!("main.{}", quote(&self.table));
         let temporary = format!("main.{}", quote(&self.temporary));
         let columns = std::iter::once(quote(&self.rowid))
