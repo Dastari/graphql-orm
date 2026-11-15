@@ -123,8 +123,164 @@ index 375b1875..a6d4e27d 100644
 +        assert!(CloseFailures::default().into_result().is_ok());
 +    }
 +}
+diff --git a/src/connection.rs b/src/connection.rs
+index 3fb24128..3af0e679 100644
+--- a/src/connection.rs
++++ b/src/connection.rs
+@@ -356,6 +356,8 @@ impl Connection {
+             preauth_hash,
+             client_guid: self.handler.client_guid,
+             server_address,
++            #[cfg(feature = "async")]
++            cleanup: connection_info::CleanupQueue::start(),
+         })
+     }
+ 
+@@ -924,9 +926,19 @@ impl Drop for ConnectionMessageHandler {
+             None => return,
+         };
+ 
+-        tokio::task::spawn(async move {
+-            worker.stop().await.ok();
+-        });
++        // Local patch (graphql-orm-storage): a destructor never requires a
++        // current runtime. Without one, the worker's tasks stop with the
++        // runtime that runs them.
++        match tokio::runtime::Handle::try_current() {
++            Ok(runtime) => {
++                runtime.spawn(async move {
++                    worker.stop().await.ok();
++                });
++            }
++            Err(_) => log::debug!(
++                "Connection dropped outside a runtime; its worker stops with its runtime."
++            ),
++        }
+     }
+ }
+ 
+diff --git a/src/connection/connection_info.rs b/src/connection/connection_info.rs
+index 0c45c19c..d82fc37f 100644
+--- a/src/connection/connection_info.rs
++++ b/src/connection/connection_info.rs
+@@ -65,4 +65,115 @@ pub struct ConnectionInfo {
+     pub preauth_hash: PreauthHashState,
+     /// The client GUID used for the connection.
+     pub client_guid: Guid,
++    /// Local patch (graphql-orm-storage): cleanup deferred by destructors,
++    /// run on the connection's runtime.
++    #[cfg(feature = "async")]
++    pub(crate) cleanup: CleanupQueue,
++}
++
++/// Local patch (graphql-orm-storage): a deferred cleanup step, such as the
++/// CLOSE of a handle dropped while still open.
++#[cfg(feature = "async")]
++pub(crate) type CleanupTask = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
++
++/// Local patch (graphql-orm-storage): cleanup that destructors defer to the
++/// connection's runtime.
++///
++/// A destructor may run on any thread, with no current Tokio runtime, for
++/// example after `Runtime::block_on` has returned. It hands its async
++/// cleanup to this queue, which needs no runtime to accept it. A task spawned
++/// on the runtime that negotiated the connection, the one that runs the
++/// connection's worker, drains the queue and runs each step there. If that
++/// runtime has shut down, the step is refused and dropped; the connection's
++/// socket closed with it, and the server releases what the session held.
++#[cfg(feature = "async")]
++#[derive(Clone)]
++pub(crate) struct CleanupQueue(tokio::sync::mpsc::UnboundedSender<CleanupTask>);
++
++#[cfg(feature = "async")]
++impl CleanupQueue {
++    /// A queue drained on the current runtime, or one that refuses every
++    /// step when there is none.
++    pub(crate) fn start() -> Self {
++        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<CleanupTask>();
++        match tokio::runtime::Handle::try_current() {
++            Ok(runtime) => {
++                runtime.spawn(async move {
++                    // Ends once every sender, and so the connection's state,
++                    // is gone and the queue is empty.
++                    while let Some(task) = receiver.recv().await {
++                        tokio::spawn(task);
++                    }
++                });
++            }
++            Err(_) => drop(receiver),
++        }
++        Self(sender)
++    }
++
++    /// Hands `task` to the connection's runtime. Returns whether it was
++    /// accepted; a refused task is dropped on this thread.
++    pub(crate) fn defer(&self, task: CleanupTask) -> bool {
++        self.0.send(task).is_ok()
++    }
++}
++
++#[cfg(feature = "async")]
++impl std::fmt::Debug for CleanupQueue {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("CleanupQueue")
++            .field("open", &!self.0.is_closed())
++            .finish()
++    }
++}
++
++#[cfg(all(test, feature = "async"))]
++mod cleanup_queue_tests {
++    use super::CleanupQueue;
++    use std::sync::{
++        Arc,
++        atomic::{AtomicBool, Ordering},
++    };
++
++    fn flag_task(flag: &Arc<AtomicBool>) -> super::CleanupTask {
++        let flag = flag.clone();
++        Box::pin(async move { flag.store(true, Ordering::SeqCst) })
++    }
++
++    #[test]
++    fn a_step_deferred_outside_any_runtime_runs_on_the_connections_runtime() {
++        let runtime = tokio::runtime::Builder::new_current_thread()
++            .enable_all()
++            .build()
++            .unwrap();
++        let queue = runtime.block_on(async { CleanupQueue::start() });
++        let ran = Arc::new(AtomicBool::new(false));
++        // No runtime is current here.
++        assert!(tokio::runtime::Handle::try_current().is_err());
++        assert!(queue.defer(flag_task(&ran)));
++        runtime.block_on(async {
++            for _ in 0..100 {
++                if ran.load(Ordering::SeqCst) {
++                    break;
++                }
++                tokio::task::yield_now().await;
++            }
++        });
++        assert!(ran.load(Ordering::SeqCst), "the deferred step ran");
++    }
++
++    #[test]
++    fn a_step_deferred_after_the_runtime_shut_down_is_refused_without_panicking() {
++        let runtime = tokio::runtime::Builder::new_current_thread()
++            .enable_all()
++            .build()
++            .unwrap();
++        let queue = runtime.block_on(async { CleanupQueue::start() });
++        drop(runtime);
++        let ran = Arc::new(AtomicBool::new(false));
++        assert!(!queue.defer(flag_task(&ran)));
++        assert!(!ran.load(Ordering::SeqCst));
++        // Without a runtime at all, the queue refuses every step.
++        assert!(!CleanupQueue::start().defer(flag_task(&ran)));
++    }
+ }
 diff --git a/src/resource.rs b/src/resource.rs
-index d80fb4c7..8b9a87ce 100644
+index d80fb4c7..2b6cfee0 100644
 --- a/src/resource.rs
 +++ b/src/resource.rs
 @@ -1,6 +1,6 @@
@@ -207,7 +363,7 @@ index d80fb4c7..8b9a87ce 100644
  
          log::debug!("Closed file {}.", self.name);
  
-@@ -917,8 +938,8 @@ impl Drop for ResourceHandle {
+@@ -917,21 +938,96 @@ impl Drop for ResourceHandle {
  #[cfg(feature = "async")]
  impl Drop for ResourceHandle {
      fn drop(&mut self) {
@@ -218,10 +374,37 @@ index d80fb4c7..8b9a87ce 100644
              return;
          }
  
-@@ -935,6 +956,70 @@ impl Drop for ResourceHandle {
-     }
- }
- 
+         let file_id = self._file_id;
++        if file_id == FileId::EMPTY {
++            return;
++        }
++        // Local patch (graphql-orm-storage): the destructor may run on any
++        // thread, with no current runtime. The CLOSE goes to the connection's
++        // cleanup queue, which runs it on the connection's runtime.
+         let handler = self.handler.clone();
+-        log::debug!("Spawning task to close file with ID: {file_id:?}");
+-        tokio::task::spawn(async move {
+-            if file_id != FileId::EMPTY {
+-                if let Err(e) = Self::send_close(file_id, &handler).await {
+-                    log::error!("Error closing file: {e}");
+-                }
++        log::debug!("Deferring close of file with ID: {file_id:?}");
++        let deferred = self.conn_info.cleanup.defer(Box::pin(async move {
++            if let Err(e) = Self::send_close(file_id, &handler).await {
++                log::error!("Error closing file: {e}");
+             }
+-        });
++        }));
++        if !deferred {
++            // The connection's runtime is gone, and its socket with it; the
++            // server releases the handle when the session ends.
++            log::debug!(
++                "Close of file with ID {file_id:?} not sent: the connection's runtime has shut down."
++            );
++        }
++    }
++}
++
 +/// Local patch (graphql-orm-storage): whether a handle is open, has a close
 +/// in progress, or has had CLOSE sent.
 +///
@@ -283,13 +466,10 @@ index d80fb4c7..8b9a87ce 100644
 +impl Drop for ClosingHandle<'_> {
 +    fn drop(&mut self) {
 +        self.state.0.store(HandleState::OPEN, Ordering::Release);
-+    }
-+}
-+
- /// Local patch (graphql-orm-storage): the resource type an opened handle
- /// becomes.
- #[derive(Debug, PartialEq, Eq)]
-@@ -998,6 +1083,62 @@ mod share_access_tests {
+     }
+ }
+ 
+@@ -998,6 +1094,62 @@ mod share_access_tests {
      }
  }
  
@@ -352,3 +532,65 @@ index d80fb4c7..8b9a87ce 100644
  #[cfg(test)]
  mod resource_kind_tests {
      use super::{ResourceKind, resource_kind};
+diff --git a/src/session.rs b/src/session.rs
+index 7ca16239..c46797d7 100644
+--- a/src/session.rs
++++ b/src/session.rs
+@@ -381,11 +381,18 @@ impl Drop for SessionMessageHandler {
+             return;
+         }
+ 
++        // Local patch (graphql-orm-storage): a destructor never requires a
++        // current runtime. Without one, the server ends the session when the
++        // connection closes.
++        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
++            log::debug!("Session dropped outside a runtime; it ends when its connection closes.");
++            return;
++        };
+         let session_id = self.session_id;
+         let primary_channel_id = self.primary_channel_id;
+         let primary_channel = self.primary_channel.clone();
+ 
+-        tokio::task::spawn(async move {
++        runtime.spawn(async move {
+             let temp_handler = SessionMessageHandler {
+                 session_id,
+                 dropping: AtomicBool::new(false),
+diff --git a/src/session/channel.rs b/src/session/channel.rs
+index f21eedb4..eba7b71f 100644
+--- a/src/session/channel.rs
++++ b/src/session/channel.rs
+@@ -483,6 +483,7 @@ mod tests {
+             },
+             preauth_hash: crate::connection::preauth_hash::PreauthHashState::Unsupported,
+             client_guid: Guid::generate(),
++            cleanup: crate::connection::connection_info::CleanupQueue::start(),
+         }
+     }
+ 
+diff --git a/src/tree.rs b/src/tree.rs
+index b09b2806..c2cb93c2 100644
+--- a/src/tree.rs
++++ b/src/tree.rs
+@@ -370,10 +370,20 @@ impl Drop for TreeMessageHandler {
+             return;
+         }
+ 
++        // Local patch (graphql-orm-storage): a destructor never requires a
++        // current runtime. Without one, the server disconnects the tree when
++        // the session ends.
++        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
++            log::debug!(
++                "Tree {} dropped outside a runtime; it is disconnected when the session ends.",
++                self.tree_name
++            );
++            return;
++        };
+         let upstream = self.upstream.clone();
+         let tree_name = self.tree_name.clone();
+         let encrypt = self.info.share_flags.encrypt_data();
+-        tokio::task::spawn(async move {
++        runtime.spawn(async move {
+             Self::_disconnect(upstream, tree_id, encrypt)
+                 .await
+                 .map_err(|e| {

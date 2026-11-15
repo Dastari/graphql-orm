@@ -143,7 +143,7 @@ class FixtureOwnershipTests(unittest.TestCase):
     def test_success_preserves_seven_cases_adds_sdk_cases_and_deletes_only_owned_ids(self):
         result, calls, state, cargo = self.run_fixture()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(len(cargo), 25)
+        self.assertEqual(len(cargo), 26)
         self.assertTrue(all(item["port"].isdigit() for item in cargo))
         # Only the restart, self-nesting and five sweep cases receive the owned container.
         self.assertEqual([item["container"] for item in cargo],
@@ -152,7 +152,7 @@ class FixtureOwnershipTests(unittest.TestCase):
                                        "immutable-fixture-id-1", "immutable-fixture-id-1",
                                        "immutable-fixture-id-1", "immutable-fixture-id-1",
                                        "immutable-fixture-id-1", None, None, None,
-                                       None, None, None, None])
+                                       None, None, None, None, None])
         runs = [args for args in calls if args[0] == "run"]
         self.assertEqual(len(runs), 3)
         mappings = [args[args.index("-p") + 1] for args in runs]
@@ -173,7 +173,7 @@ class FixtureOwnershipTests(unittest.TestCase):
         self.assertEqual(cargo[19]["port"], constrained_port)
         # The identity case alone reaches a second, distinct server.
         self.assertEqual([item["alternate_port"] for item in cargo],
-                         [None] * 10 + [constrained_port] + [None] * 14)
+                         [None] * 10 + [constrained_port] + [None] * 15)
         expected_names = [
             "samba_rejects_invalid_password",
             "samba_round_trip_streaming_listing_and_atomic_create",
@@ -199,6 +199,7 @@ class FixtureOwnershipTests(unittest.TestCase):
             "samba_stalled_transfers_release_their_permits",
             "samba_racing_conditional_creates_have_exactly_one_winner",
             "samba_a_close_cancelled_while_waiting_for_a_credit_releases_the_handle",
+            "samba_a_handle_dropped_outside_any_runtime_after_a_cancelled_close_is_released",
             "samba_client_close_reports_a_failed_session_and_connection_close",
         ]
         self.assertEqual([item["args"][item["args"].index("--") - 1] for item in cargo], expected_names)
@@ -219,7 +220,7 @@ class FixtureOwnershipTests(unittest.TestCase):
         self.assertEqual(default_result.returncode, 0, default_result.stderr)
         result, _, state, cargo = self.run_fixture(absolute_cargo=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(len(cargo), 25)
+        self.assertEqual(len(cargo), 26)
         self.assertTrue(all(Path(item["executable"]).is_absolute() for item in cargo))
         self.assertTrue(all(item["executable"].endswith("/explicit runner/bounded cargo")
                             for item in cargo))
@@ -257,7 +258,7 @@ class FixtureOwnershipTests(unittest.TestCase):
     def test_changed_ownership_is_not_deleted(self):
         result, calls, state, cargo = self.run_fixture("ownership_mismatch")
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(len(cargo), 25)
+        self.assertEqual(len(cargo), 26)
         removals = [args[-1] for args in calls if args[0] == "rm"]
         self.assertNotIn("immutable-fixture-id-1", removals)
         self.assertEqual(set(state["containers"]), {"immutable-fixture-id-1"})

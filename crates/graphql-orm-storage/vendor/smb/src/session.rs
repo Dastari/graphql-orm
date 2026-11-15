@@ -381,11 +381,18 @@ impl Drop for SessionMessageHandler {
             return;
         }
 
+        // Local patch (graphql-orm-storage): a destructor never requires a
+        // current runtime. Without one, the server ends the session when the
+        // connection closes.
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            log::debug!("Session dropped outside a runtime; it ends when its connection closes.");
+            return;
+        };
         let session_id = self.session_id;
         let primary_channel_id = self.primary_channel_id;
         let primary_channel = self.primary_channel.clone();
 
-        tokio::task::spawn(async move {
+        runtime.spawn(async move {
             let temp_handler = SessionMessageHandler {
                 session_id,
                 dropping: AtomicBool::new(false),

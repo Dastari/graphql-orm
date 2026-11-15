@@ -944,15 +944,26 @@ impl Drop for ResourceHandle {
         }
 
         let file_id = self._file_id;
+        if file_id == FileId::EMPTY {
+            return;
+        }
+        // Local patch (graphql-orm-storage): the destructor may run on any
+        // thread, with no current runtime. The CLOSE goes to the connection's
+        // cleanup queue, which runs it on the connection's runtime.
         let handler = self.handler.clone();
-        log::debug!("Spawning task to close file with ID: {file_id:?}");
-        tokio::task::spawn(async move {
-            if file_id != FileId::EMPTY {
-                if let Err(e) = Self::send_close(file_id, &handler).await {
-                    log::error!("Error closing file: {e}");
-                }
+        log::debug!("Deferring close of file with ID: {file_id:?}");
+        let deferred = self.conn_info.cleanup.defer(Box::pin(async move {
+            if let Err(e) = Self::send_close(file_id, &handler).await {
+                log::error!("Error closing file: {e}");
             }
-        });
+        }));
+        if !deferred {
+            // The connection's runtime is gone, and its socket with it; the
+            // server releases the handle when the session ends.
+            log::debug!(
+                "Close of file with ID {file_id:?} not sent: the connection's runtime has shut down."
+            );
+        }
     }
 }
 

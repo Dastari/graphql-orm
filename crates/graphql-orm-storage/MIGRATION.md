@@ -22,6 +22,11 @@ Paths such a close used to hold, for example a held directory or a file
 opened without delete sharing, become available again once the session can
 send the request.
 
+Dropping a vendored SMB handle, tree, session or connection on a thread with
+no current Tokio runtime, for example after `Runtime::block_on` returned, no
+longer panics. A handle dropped that way is closed when the connection's
+runtime next runs.
+
 ## 0.12.0 to 0.13.0: SMB sweep, error retryability and messages
 
 Update the storage requirement to 0.13.0 and refresh the consumer lockfile.

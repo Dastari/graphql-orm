@@ -122,10 +122,17 @@ fair credit semaphore and every later request queues behind it. A handle's
 close then waits for a credit and is cancelled; the test checks that the
 handle is still open on the server (an exclusive open fails with a sharing
 violation), drops it, and requires an exclusive open of the same path to
-succeed on the same session within five seconds. The other disconnects the
-tree, stops the connection under the session and requires `Client::close` to
-report the failed logoff and connection close. Both refuse to run without the
-runner's fixture identity and remove their task-owned files.
+succeed on the same session within five seconds. A second runs on a
+current-thread runtime it builds itself: it cancels the close inside
+`Runtime::block_on`, drops the handle after `block_on` returns (no runtime
+current), and requires the next `block_on` to release the handle through the
+connection's cleanup queue so an exclusive open succeeds on the same session.
+It then drops a handle after `Client::close`, and a client and handle after
+their runtime shut down, and requires none of those drops to panic. The third
+disconnects the tree, stops the connection under the session and requires
+`Client::close` to report the failed logoff and connection close. All refuse
+to run without the runner's fixture identity; they remove their task-owned
+files or mark them delete-on-close.
 
 The daemon-free ownership regression suite substitutes private fake Docker/Cargo
 executables and checks startup collisions, exact-ID cleanup, ownership changes,

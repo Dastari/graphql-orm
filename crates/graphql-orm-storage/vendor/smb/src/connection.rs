@@ -356,6 +356,8 @@ impl Connection {
             preauth_hash,
             client_guid: self.handler.client_guid,
             server_address,
+            #[cfg(feature = "async")]
+            cleanup: connection_info::CleanupQueue::start(),
         })
     }
 
@@ -924,9 +926,19 @@ impl Drop for ConnectionMessageHandler {
             None => return,
         };
 
-        tokio::task::spawn(async move {
-            worker.stop().await.ok();
-        });
+        // Local patch (graphql-orm-storage): a destructor never requires a
+        // current runtime. Without one, the worker's tasks stop with the
+        // runtime that runs them.
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(async move {
+                    worker.stop().await.ok();
+                });
+            }
+            Err(_) => log::debug!(
+                "Connection dropped outside a runtime; its worker stops with its runtime."
+            ),
+        }
     }
 }
 

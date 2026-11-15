@@ -370,10 +370,20 @@ impl Drop for TreeMessageHandler {
             return;
         }
 
+        // Local patch (graphql-orm-storage): a destructor never requires a
+        // current runtime. Without one, the server disconnects the tree when
+        // the session ends.
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            log::debug!(
+                "Tree {} dropped outside a runtime; it is disconnected when the session ends.",
+                self.tree_name
+            );
+            return;
+        };
         let upstream = self.upstream.clone();
         let tree_name = self.tree_name.clone();
         let encrypt = self.info.share_flags.encrypt_data();
-        tokio::task::spawn(async move {
+        runtime.spawn(async move {
             Self::_disconnect(upstream, tree_id, encrypt)
                 .await
                 .map_err(|e| {

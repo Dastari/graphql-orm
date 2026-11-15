@@ -483,6 +483,7 @@ mod tests {
             },
             preauth_hash: crate::connection::preauth_hash::PreauthHashState::Unsupported,
             client_guid: Guid::generate(),
+            cleanup: crate::connection::connection_info::CleanupQueue::start(),
         }
     }
 

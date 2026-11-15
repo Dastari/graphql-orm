@@ -284,9 +284,10 @@ else
 fi
 
 # Vendored client close regressions (#710): a close cancelled while it waits
-# for a credit leaves the handle to its destructor, and Client::close reports
-# a failed logoff or connection close.
-for case in samba_a_close_cancelled_while_waiting_for_a_credit_releases_the_handle samba_client_close_reports_a_failed_session_and_connection_close; do
+# for a credit leaves the handle to its destructor, a handle dropped outside
+# any runtime is closed through the connection's cleanup queue, and
+# Client::close reports a failed logoff or connection close.
+for case in samba_a_close_cancelled_while_waiting_for_a_credit_releases_the_handle samba_a_handle_dropped_outside_any_runtime_after_a_cancelled_close_is_released samba_client_close_reports_a_failed_session_and_connection_close; do
   SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
   SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
   SMB_TEST_FIXTURE_RUN="$RUN_ID" \

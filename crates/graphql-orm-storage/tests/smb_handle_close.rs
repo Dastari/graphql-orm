@@ -266,3 +266,154 @@ async fn samba_client_close_reports_a_failed_session_and_connection_close() -> R
     client.close().await?;
     Ok(())
 }
+
+/// Drops `value` on this thread, which must have no current runtime, and
+/// reports a panic in its destructor as a failure.
+fn drop_outside_any_runtime<T>(value: T, what: &str) -> Result<()> {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return Err(failure("precondition: no runtime may be current"));
+    }
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(value)))
+        .map_err(|_| failure(&format!("dropping {what} outside any runtime panicked")))
+}
+
+/// Opens `path` with delete access and marks it for deletion, so the server
+/// removes it once every handle on it is released, also when the session
+/// ends.
+async fn open_delete_pending(client: &Client, path: &UncPath) -> Result<File> {
+    let file = client
+        .create_file(
+            path,
+            &FileCreateArgs::make_open_existing(
+                FileAccessMask::new()
+                    .with_delete(true)
+                    .with_file_read_attributes(true),
+            ),
+        )
+        .await?
+        .unwrap_file();
+    file.set_info(FileDispositionInformation {
+        delete_pending: true.into(),
+    })
+    .await?;
+    Ok(file)
+}
+
+/// #710 review: a close cancelled inside `Runtime::block_on` leaves the handle
+/// open, and the handle is then dropped on a thread with no current runtime.
+/// The destructor must not panic, must still close the handle on the server
+/// through the connection's cleanup queue, and must not panic once the
+/// session, or the connection's runtime, is gone.
+#[test]
+#[ignore = "requires wrapper-owned Samba and explicit SMB_TEST_* fixture identity"]
+fn samba_a_handle_dropped_outside_any_runtime_after_a_cancelled_close_is_released() -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let (client, share) = runtime.block_on(connect(Some(CREDIT_BACKLOG)))?;
+    let run = Uuid::new_v4();
+    let held = share.clone().with_path(&format!("close-drop-{run}.bin"));
+    let staller = share
+        .clone()
+        .with_path(&format!("close-drop-{run}-stall.bin"));
+    let late = share
+        .clone()
+        .with_path(&format!("close-drop-{run}-late.bin"));
+
+    let (handle, stall) = runtime.block_on(async {
+        create_file(&client, &held, b"").await?;
+        create_file(&client, &staller, b"x").await?;
+        create_file(&client, &late, b"").await?;
+        let handle = open_file(&client, &held, false).await?;
+        let stall = Arc::new(open_file(&client, &staller, false).await?);
+        Ok::<_, Box<dyn Error>>((handle, stall))
+    })?;
+
+    // Inside block_on: the close waits for a credit and is cancelled before
+    // CLOSE is sent, which leaves the handle open.
+    runtime.block_on(async {
+        let stalled_read = tokio::spawn({
+            let stall = stall.clone();
+            async move {
+                let mut buffer = vec![0u8; STALLED_READ_BYTES];
+                stall.read_block(&mut buffer, 0, None, false).await
+            }
+        });
+        sleep(Duration::from_millis(500)).await;
+        if stalled_read.is_finished() {
+            return Err(failure(
+                "precondition: the oversized read was expected to wait for credits",
+            ));
+        }
+        if timeout(Duration::from_secs(1), handle.close())
+            .await
+            .is_ok()
+        {
+            return Err(failure(
+                "precondition: close was expected to wait for a credit behind the stalled read",
+            ));
+        }
+        stalled_read.abort();
+        let _ = stalled_read.await;
+        Ok(())
+    })?;
+
+    // block_on has returned: no runtime is current while the handle drops.
+    drop_outside_any_runtime(handle, "a handle whose close was cancelled")?;
+
+    // Once the connection's runtime runs again, its cleanup queue sends the
+    // CLOSE, and an exclusive open on the same session succeeds.
+    runtime.block_on(async {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let exclusive = loop {
+            match open_file(&client, &held, true).await {
+                Ok(file) => break file,
+                Err(error) if is_sharing_violation(&error) && Instant::now() < deadline => {
+                    sleep(Duration::from_millis(100)).await;
+                }
+                Err(error) if is_sharing_violation(&error) => {
+                    return Err(failure(
+                        "a handle dropped outside any runtime was never closed on the server",
+                    ));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        exclusive.close().await?;
+        Arc::try_unwrap(stall)
+            .map_err(|_| failure("the stalled read still holds its handle"))?
+            .close()
+            .await?;
+        delete_file(&client, &held).await?;
+        delete_file(&client, &staller).await?;
+        Ok::<_, Box<dyn Error>>(())
+    })?;
+    println!("SMB_DROP_OUTSIDE_RUNTIME_CLOSED_BY_CLEANUP_QUEUE");
+
+    // After the session has closed: the deferred CLOSE fails on the
+    // connection's runtime and is only logged.
+    let open_after_close = runtime.block_on(async {
+        let file = open_delete_pending(&client, &late).await?;
+        client.close().await?;
+        Ok::<_, Box<dyn Error>>(file)
+    })?;
+    drop_outside_any_runtime(open_after_close, "a handle after its session closed")?;
+    // Let the connection's runtime run the deferred CLOSE, which now fails.
+    runtime.block_on(async { sleep(Duration::from_millis(300)).await });
+
+    // After the connection's runtime has shut down: the queue refuses the
+    // CLOSE, and the handle's tree, session and connection drop with it on
+    // this thread.
+    let (other, other_share) = runtime.block_on(connect(Some(CREDIT_BACKLOG)))?;
+    let orphan = other_share.with_path(&format!("close-drop-{run}-orphan.bin"));
+    let orphaned = runtime.block_on(async {
+        create_file(&other, &orphan, b"").await?;
+        open_delete_pending(&other, &orphan).await
+    })?;
+    drop(runtime);
+    drop_outside_any_runtime(other, "a client whose runtime shut down")?;
+    drop_outside_any_runtime(orphaned, "a handle whose runtime shut down")?;
+    drop_outside_any_runtime(client, "a closed client")?;
+    println!("SMB_DROP_OUTSIDE_RUNTIME_AFTER_SESSION_AND_RUNTIME_END");
+    Ok(())
+}

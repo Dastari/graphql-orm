@@ -20,11 +20,17 @@ No public API changes.
   session. The vendored client marked the handle closed before sending CLOSE,
   so its destructor skipped it; a handle is now marked closed only once CLOSE
   has been handed to the connection, and otherwise dropping it sends CLOSE in
-  the background. A sixth owner-local vendor patch, `cancel-safe-close`,
+  the background. The destructor needs no current Tokio runtime: it hands the
+  CLOSE to a per-connection cleanup queue drained on the connection's
+  runtime, so dropping a handle on any thread, for example after
+  `Runtime::block_on` returned, neither panics nor leaks it. Tree, session and
+  connection destructors no longer panic without a runtime either. A sixth
+  owner-local vendor patch, `cancel-safe-close`,
   carries the fix. The vendored `Client::close` also attempts every tree
   disconnect, channel close, logoff and connection close and reports the
   first failure instead of ignoring them. The managed Samba suite gains a
-  credit-stalled cancelled-close case and a `Client::close` failure case.
+  credit-stalled cancelled-close case, a drop-outside-any-runtime case and a
+  `Client::close` failure case.
   ([#710](https://github.com/Dastari/graphql-orm/issues/710))
 
 ## 0.13.0 (unreleased)

@@ -61,14 +61,25 @@ waited for a credit, left the server handle open for the rest of the session.
 A handle is now marked closed only once CLOSE has been handed to the
 connection; until then it stays open, and dropping it sends CLOSE in the
 background on the same session. A second close while one is in progress is
-refused. `Client::close` now attempts every tree disconnect, channel close,
+refused. Destructors never need a current Tokio runtime: a dropped handle
+hands its CLOSE to a per-connection cleanup queue that a task on the
+connection's runtime drains, so a handle dropped after `Runtime::block_on`
+returned is closed once that runtime runs again. If the connection's runtime
+has shut down, the CLOSE is dropped and logged at debug level; the socket
+closed with the runtime, so the server releases the handle when the session
+ends. Tree, session and connection destructors spawn their disconnect, logoff
+and worker stop only on a current runtime, and otherwise log and leave them
+to the server, instead of panicking. `Client::close` now attempts every tree disconnect, channel close,
 logoff and connection close, returns the first failure and logs the others,
 instead of stopping at the first failed tree disconnect and ignoring the
 rest. The managed Samba suite stalls a close behind a request whose credit
 charge the connection cannot grant, cancels it, drops the handle and checks
-that an exclusive open of the same path then succeeds on the same session; a
-second case checks that `Client::close` reports a failed logoff and
-connection close.
+that an exclusive open of the same path then succeeds on the same session. A
+second case cancels the close inside `Runtime::block_on` and drops the handle
+on a thread with no runtime, then checks that an exclusive open succeeds on
+the same session and that drops after the session closed, or after the
+runtime shut down, do not panic. A third checks that `Client::close` reports
+a failed logoff and connection close.
 The protocol/authentication companions, cryptographic versions and feature
 selection remain pinned to the existing 0.10.2 family; this is not an adoption
 of the newer SDK's crypto graph.
