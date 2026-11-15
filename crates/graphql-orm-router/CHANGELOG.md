@@ -10,6 +10,12 @@ supersedes: []
 
 # Changelog
 
+## 0.15.2 (unreleased)
+
+- Fix an intermittent established-WebSocket deadlock during role-authority
+  refresh. Authorization hooks now release the policy context read guard before
+  replacing the principal, including when both entries share a DashMap shard.
+
 ## 0.15.1 (unreleased)
 
 - Tests: publish authority snapshots atomically, observe role re-expansion with a
