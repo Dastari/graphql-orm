@@ -239,6 +239,16 @@ SMB_TEST_CONTAINER_NAME="$NORMAL_ID" SMB_TEST_FIXTURE_RUN="$RUN_ID" \
   run_test samba_sweep_removes_only_stale_temporary_files "$SMB_TEST_CARGO" test --locked --features smb,smb-sweep-test-hooks --test smb_integration \
   samba_sweep_removes_only_stale_temporary_files -- --ignored --exact --nocapture
 
+# A dropped sweep releases its handles without its caller's runtime, and a
+# sweep that loses its session reports its progress and cleanup failures.
+for case in samba_sweep_releases_its_handles_without_the_callers_runtime samba_sweep_reports_progress_and_cleanup_failures_after_a_lost_session; do
+  SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
+  SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
+  SMB_TEST_CONTAINER_NAME="$NORMAL_ID" SMB_TEST_FIXTURE_RUN="$RUN_ID" \
+    run_test "$case" "$SMB_TEST_CARGO" test --locked --features smb,smb-sweep-test-hooks --test smb_integration \
+    "$case" -- --ignored --exact --nocapture
+done
+
 # The constrained server offers at most SMB 3.0, below the default minimum.
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$CONSTRAINED_PORT" SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \

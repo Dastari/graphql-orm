@@ -368,10 +368,67 @@ pub struct SmbTempSweepReport {
     /// the server refuses to follow, a reparse point, a directory another
     /// client holds with delete access, or one that vanished.
     pub skipped_directories: usize,
-    /// Handles or the sweep's connection that failed to close cleanly. The
-    /// sweep's dedicated connection is disconnected regardless, which makes
-    /// the server release them.
+    /// Cleanup steps that failed: closing a handle the sweep opened, and
+    /// disconnecting the tree, logging off, closing the connection or
+    /// stopping the session's runtime at the end. The sweep's dedicated
+    /// connection is closed regardless, which makes the server release every
+    /// handle it held.
     pub cleanup_failures: usize,
+}
+
+/// A failed [`SmbStorageBackend::sweep_temp_files`] call: the first error,
+/// and what the sweep had done by then.
+///
+/// The sweep removes files as it goes, so `report.removed` files stay
+/// removed, and `report.cleanup_failures` counts every cleanup step that
+/// failed, on the error path too. Converting it into a [`StorageError`]
+/// keeps only the error.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct SmbTempSweepError {
+    /// The first failure.
+    pub error: StorageError,
+    /// What the sweep removed, skipped and failed to clean up before it
+    /// stopped.
+    pub report: SmbTempSweepReport,
+}
+
+impl SmbTempSweepError {
+    /// A failure before the sweep touched the share.
+    fn before_start(error: StorageError) -> Self {
+        Self {
+            error,
+            report: SmbTempSweepReport::default(),
+        }
+    }
+
+    /// Whether retrying the sweep may succeed.
+    #[must_use]
+    pub const fn is_retryable(&self) -> bool {
+        self.error.is_retryable()
+    }
+}
+
+impl fmt::Display for SmbTempSweepError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "SMB temporary-file sweep failed after removing {} files, with {} cleanup failures: {}",
+            self.report.removed, self.report.cleanup_failures, self.error
+        )
+    }
+}
+
+impl std::error::Error for SmbTempSweepError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+impl From<SmbTempSweepError> for StorageError {
+    fn from(error: SmbTempSweepError) -> Self {
+        error.error
+    }
 }
 
 /// Options controlling whether a probe may create the configured root prefix.
@@ -769,9 +826,12 @@ impl SmbStorageBackend {
     /// Never run it on a share where an untrusted party has write access to
     /// the repository tree. Age is measured against the server's clock, read
     /// from a file the sweep creates and removes, never against this host's
-    /// clock. The sweep runs on its own SMB connection; if it is cancelled,
-    /// times out or fails, dropping it disconnects that connection, so the
-    /// server releases every handle it held.
+    /// clock. The sweep runs on its own SMB connection, owned by a runtime
+    /// on a thread of its own. At the end it disconnects the tree, logs off
+    /// and closes the connection, counting each step that fails; if it is
+    /// cancelled, times out or fails, dropping it stops that runtime, which
+    /// closes the socket without needing the caller's runtime to make
+    /// progress, so the server releases every handle it held.
     ///
     /// Defence in depth behind that precondition: every directory from the
     /// share root down to the one being processed, root prefix included, is
@@ -804,18 +864,20 @@ impl SmbStorageBackend {
     ///
     /// # Errors
     ///
-    /// Returns a non-retryable configuration error when `older_than` is less
-    /// than one hour, a listing-limit or deadline error when the walk reaches
-    /// a limit, and the first failed request's error. The sweep removes files
-    /// as it goes: files removed before an error remain removed. An error
-    /// after a removal request may have reached the server is a
-    /// non-retryable single-attempt error. The sweep is never retried
-    /// internally.
+    /// Returns an [`SmbTempSweepError`] holding a non-retryable
+    /// configuration error when `older_than` is less than one hour, a
+    /// listing-limit or deadline error when the walk reaches a limit, or the
+    /// first failed request's error, with the report of what the sweep had
+    /// done by then. The sweep removes files as it goes: files removed before
+    /// an error remain removed and are counted in that report, as are cleanup
+    /// failures. An error after a removal request may have reached the
+    /// server is a non-retryable single-attempt error. The sweep is never
+    /// retried internally.
     pub async fn sweep_temp_files(
         &self,
         quiesced: SmbRepositoryQuiesced,
         older_than: Duration,
-    ) -> Result<SmbTempSweepReport, StorageError> {
+    ) -> Result<SmbTempSweepReport, SmbTempSweepError> {
         self.sweep_with(quiesced, older_than, SweepHooks::none())
             .await
     }
@@ -834,7 +896,7 @@ impl SmbStorageBackend {
         quiesced: SmbRepositoryQuiesced,
         older_than: Duration,
         barrier: &SmbSweepBarrier,
-    ) -> Result<SmbTempSweepReport, StorageError> {
+    ) -> Result<SmbTempSweepReport, SmbTempSweepError> {
         self.sweep_with(quiesced, older_than, SweepHooks { barrier })
             .await
     }
@@ -885,57 +947,67 @@ impl SmbStorageBackend {
         quiesced: SmbRepositoryQuiesced,
         older_than: Duration,
         hooks: SweepHooks<'_>,
-    ) -> Result<SmbTempSweepReport, StorageError> {
+    ) -> Result<SmbTempSweepReport, SmbTempSweepError> {
         let SmbRepositoryQuiesced(()) = quiesced;
         if older_than < MIN_TEMP_SWEEP_AGE {
-            return Err(invalid_config(
+            return Err(SmbTempSweepError::before_start(invalid_config(
                 "the temporary-file sweep age must be at least one hour",
-            ));
+            )));
         }
         let limits = ListingLimits::from_config(&self.inner.config);
-        // A dedicated connection: if this future is dropped, times out or
-        // fails part-way, dropping the guard disconnects it, and the server
-        // releases every handle the sweep held, whatever state individual
-        // closes reached. The backend's shared connection never holds them.
-        let session = SweepSession::connect(self).await?;
-        let mut chain = Vec::new();
+        // A dedicated session on its own runtime thread: if this future is
+        // dropped, times out or fails part-way, dropping the session stops
+        // that runtime, which closes the socket, and the server releases
+        // every handle the sweep held, whatever state individual closes
+        // reached and whether or not the caller's runtime makes progress.
+        // The backend's shared connection never holds them.
+        let session = SweepSession::connect(self)
+            .await
+            .map_err(SmbTempSweepError::before_start)?;
+        let tally = SweepTally::default();
+        let mut progress = SweepProgress::default();
         let walked = within_listing_deadline(
             limits.timeout,
-            self.sweep_walk(session.client(), limits, older_than, &hooks, &mut chain),
+            self.sweep_walk(&session, limits, older_than, &hooks, &tally, &mut progress),
         )
         .await;
         // Release every held directory, innermost first, whatever happened,
-        // and count closes that failed; disconnecting releases them anyway.
-        let mut cleanup_failures = 0;
-        while let Some(held) = chain.pop() {
+        // and count closes that failed; stopping the session releases them
+        // anyway.
+        while let Some(held) = progress.chain.pop() {
             if self
                 .with_timeout("close", held.directory.close())
                 .await
                 .is_err()
             {
-                cleanup_failures += 1;
+                tally.cleanup_failed();
             }
         }
-        if session.shutdown().await.is_err() {
-            cleanup_failures += 1;
+        let shutdown_failures = session.shutdown().await;
+        let mut report = progress.report;
+        tally.add_to(&mut report);
+        report.cleanup_failures = report.cleanup_failures.saturating_add(shutdown_failures);
+        match walked {
+            Ok(()) => Ok(report),
+            Err(error) => Err(SmbTempSweepError { error, report }),
         }
-        walked.map(|mut report| {
-            report.cleanup_failures += cleanup_failures;
-            report
-        })
     }
 
-    /// Walks the root prefix depth-first, holding in `chain` every directory
-    /// from the share root to the one being processed.
+    /// Walks the root prefix depth-first, holding in `progress.chain` every
+    /// directory from the share root to the one being processed, and counts
+    /// what it does in `progress.report` as it goes, so the counts survive
+    /// an error or the deadline.
     async fn sweep_walk(
         &self,
-        client: &Client,
+        session: &SweepSession,
         limits: ListingLimits,
         older_than: Duration,
         hooks: &SweepHooks<'_>,
-        chain: &mut Vec<HeldDirectory>,
-    ) -> Result<SmbTempSweepReport, StorageError> {
-        let mut report = SmbTempSweepReport::default();
+        tally: &SweepTally,
+        progress: &mut SweepProgress,
+    ) -> Result<(), StorageError> {
+        let client = session.client();
+        let SweepProgress { chain, report } = progress;
         let root = self.inner.config.root_prefix.clone().unwrap_or_default();
         // Hold the share root and every root-prefix component.
         let mut path = String::new();
@@ -947,7 +1019,7 @@ impl SmbStorageBackend {
                 }
                 path.push_str(component);
             }
-            match self.hold_directory(client, &path).await? {
+            match self.hold_directory(client, &path, tally).await? {
                 DirectoryHold::Held(directory) => chain.push(HeldDirectory {
                     directory,
                     relative: String::new(),
@@ -955,20 +1027,19 @@ impl SmbStorageBackend {
                     depth: 0,
                 }),
                 // Nothing to sweep below a missing root.
-                DirectoryHold::Missing => return Ok(report),
+                DirectoryHold::Missing => return Ok(()),
                 DirectoryHold::Refused => {
                     report.skipped_directories += 1;
-                    return Ok(report);
+                    return Ok(());
                 }
             }
         }
-        let server_now = self.server_time(client).await?;
-        let skips = SweepSkips::default();
+        let server_now = self.server_time(client, tally).await?;
         let source = SmbListingSource {
             backend: self,
             client,
             base: self.share_path()?,
-            sweep: Some(&skips),
+            sweep: Some(tally),
         };
         let mut budget = ListingBudget::new(limits);
         let base_depth = chain.len();
@@ -986,7 +1057,14 @@ impl SmbStorageBackend {
                     break;
                 }
                 let done = chain.pop().expect("a held directory");
-                self.with_timeout("close", done.directory.close()).await?;
+                // Stopping the session releases a handle whose close fails.
+                if self
+                    .with_timeout("close", done.directory.close())
+                    .await
+                    .is_err()
+                {
+                    tally.cleanup_failed();
+                }
                 continue;
             };
             let name_len = entry.name.len();
@@ -1016,12 +1094,18 @@ impl SmbStorageBackend {
                     true => child.clone(),
                     false => format!("{root}/{child}"),
                 };
-                match self.hold_directory(client, &share_relative).await? {
+                match self.hold_directory(client, &share_relative, tally).await? {
                     DirectoryHold::Held(directory) => {
                         let entries = match source.enumerate(&directory, &mut budget).await {
                             Ok(entries) => entries,
                             Err(error) => {
-                                let _ = self.with_timeout("close", directory.close()).await;
+                                if self
+                                    .with_timeout("close", directory.close())
+                                    .await
+                                    .is_err()
+                                {
+                                    tally.cleanup_failed();
+                                }
                                 return Err(error);
                             }
                         };
@@ -1046,7 +1130,7 @@ impl SmbStorageBackend {
                 last_write: entry.last_write,
                 size: entry.size,
             };
-            hooks.before_candidate(&file.key, server_now).await;
+            hooks.before_candidate(&file.key, server_now, session).await;
             // Ask the held directory itself, not its path, whether it has
             // become a reparse point since it was opened. This narrows, but
             // does not close, the window in which another client with write
@@ -1060,7 +1144,7 @@ impl SmbStorageBackend {
                 report.skipped_directories += 1;
                 continue;
             }
-            match self.remove_stale_temp_file(client, &file).await? {
+            match self.remove_stale_temp_file(client, &file, tally).await? {
                 StaleRemoval::Removed => report.removed += 1,
                 StaleRemoval::Gone => {}
                 StaleRemoval::InUse => report.skipped_in_use += 1,
@@ -1068,9 +1152,7 @@ impl SmbStorageBackend {
                 StaleRemoval::ReparsePoint => report.skipped_reparse_points += 1,
             }
         }
-        let walked = skips.report();
-        report.skipped_reparse_points += walked.skipped_reparse_points;
-        Ok(report)
+        Ok(())
     }
 
     /// Opens the share-relative directory `path` so that it stays the same
@@ -1082,6 +1164,7 @@ impl SmbStorageBackend {
         &self,
         client: &Client,
         path: &str,
+        tally: &SweepTally,
     ) -> Result<DirectoryHold, StorageError> {
         let target = self.share_path()?.with_path(path);
         let mut args = FileCreateArgs::make_open_existing(
@@ -1124,7 +1207,7 @@ impl SmbStorageBackend {
             }
         };
         let Resource::Directory(directory) = resource else {
-            let _ = close_resource(resource).await;
+            tally.closed(close_resource(resource).await);
             return Ok(DirectoryHold::Refused);
         };
         let directory = Arc::new(directory);
@@ -1140,11 +1223,11 @@ impl SmbStorageBackend {
                 Ok(DirectoryHold::Held(directory))
             }
             Ok(_) => {
-                let _ = self.with_timeout("close", directory.close()).await;
+                tally.closed(self.with_timeout("close", directory.close()).await);
                 Ok(DirectoryHold::Refused)
             }
             Err(error) => {
-                let _ = self.with_timeout("close", directory.close()).await;
+                tally.closed(self.with_timeout("close", directory.close()).await);
                 Err(error)
             }
         }
@@ -1153,7 +1236,11 @@ impl SmbStorageBackend {
     /// The server's current time: the last-write time the server gives a
     /// file the sweep creates under the root prefix, with a temporary name
     /// listings hide, and removes through the same handle.
-    async fn server_time(&self, client: &Client) -> Result<SystemTime, StorageError> {
+    async fn server_time(
+        &self,
+        client: &Client,
+        tally: &SweepTally,
+    ) -> Result<SystemTime, StorageError> {
         let key = temp_file_name();
         let path = self.remote_path(&key)?;
         let resource = self
@@ -1169,7 +1256,7 @@ impl SmbStorageBackend {
             )
             .await?;
         let Resource::File(file) = resource else {
-            let _ = close_resource(resource).await;
+            tally.closed(close_resource(resource).await);
             return Err(probe_mismatch());
         };
         let basic: Result<FileBasicInformation, _> =
@@ -1181,6 +1268,11 @@ impl SmbStorageBackend {
             )
             .await;
         let closed = self.with_timeout("close", file.close()).await;
+        // A close that fails is returned when nothing failed before it, and
+        // counted otherwise.
+        if (basic.is_err() || disposed.is_err()) && closed.is_err() {
+            tally.cleanup_failed();
+        }
         let basic = basic?;
         disposed?;
         closed?;
@@ -1202,6 +1294,7 @@ impl SmbStorageBackend {
         &self,
         client: &Client,
         file: &ListedFile,
+        tally: &SweepTally,
     ) -> Result<StaleRemoval, StorageError> {
         let path = self.remote_path(&file.key)?;
         let mut args = FileCreateArgs::make_open_existing(
@@ -1246,7 +1339,7 @@ impl SmbStorageBackend {
             }
         };
         let Resource::File(handle) = resource else {
-            let _ = close_resource(resource).await;
+            tally.closed(close_resource(resource).await);
             return Ok(StaleRemoval::Changed);
         };
         let checked = self.check_stale_handle(&handle, file).await;
@@ -1263,10 +1356,15 @@ impl SmbStorageBackend {
         };
         let closed = self.with_timeout("close", handle.close()).await;
         match decision {
+            // The file is removed when this handle closes, so a failed close
+            // leaves the outcome unknown.
             Ok(StaleRemoval::Removed) => closed
                 .map(|()| StaleRemoval::Removed)
                 .map_err(StorageError::single_attempt),
-            other => other,
+            other => {
+                tally.closed(closed);
+                other
+            }
         }
     }
 
@@ -2052,22 +2150,45 @@ struct ListedFile {
     size: u64,
 }
 
-/// Entries one sweep walk skipped, counted while the walk runs.
+/// What one sweep walk skipped and failed to clean up, counted while the
+/// walk runs, from shared references.
 #[derive(Debug, Default)]
-struct SweepSkips {
+struct SweepTally {
     reparse_points: AtomicU64,
+    cleanup_failures: AtomicU64,
 }
 
-impl SweepSkips {
-    fn report(&self) -> SmbTempSweepReport {
+impl SweepTally {
+    fn cleanup_failed(&self) {
+        self.cleanup_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Counts a close that failed.
+    fn closed<E>(&self, result: Result<(), E>) {
+        if result.is_err() {
+            self.cleanup_failed();
+        }
+    }
+
+    fn add_to(&self, report: &mut SmbTempSweepReport) {
         let count = |counter: &AtomicU64| {
             usize::try_from(counter.load(Ordering::Relaxed)).unwrap_or(usize::MAX)
         };
-        SmbTempSweepReport {
-            skipped_reparse_points: count(&self.reparse_points),
-            ..SmbTempSweepReport::default()
-        }
+        report.skipped_reparse_points = report
+            .skipped_reparse_points
+            .saturating_add(count(&self.reparse_points));
+        report.cleanup_failures = report
+            .cleanup_failures
+            .saturating_add(count(&self.cleanup_failures));
     }
+}
+
+/// What a sweep holds and has done so far; it outlives the walk, so an
+/// error or the deadline keeps both.
+#[derive(Default)]
+struct SweepProgress {
+    chain: Vec<HeldDirectory>,
+    report: SmbTempSweepReport,
 }
 
 /// One directory the sweep holds while it works below it.
@@ -2103,6 +2224,8 @@ pub struct SmbSweepCandidate {
     pub key: String,
     /// The server's current time the sweep measures age against.
     pub server_now: SystemTime,
+    /// Stops the sweep's dedicated session, as a lost connection would.
+    pub session: SmbSweepSessionSeverer,
 }
 
 /// A test-only barrier the sweep awaits for each candidate.
@@ -2143,66 +2266,267 @@ impl SweepHooks<'_> {
 
     /// Runs before a candidate is opened.
     #[cfg(feature = "smb-sweep-test-hooks")]
-    async fn before_candidate(&self, key: &str, server_now: SystemTime) {
+    async fn before_candidate(&self, key: &str, server_now: SystemTime, session: &SweepSession) {
         (self.barrier)(SmbSweepCandidate {
             key: key.to_string(),
             server_now,
+            session: session.severer(),
         })
         .await;
     }
 
     #[cfg(not(feature = "smb-sweep-test-hooks"))]
     #[allow(clippy::unused_async)]
-    async fn before_candidate(&self, _key: &str, _server_now: SystemTime) {}
+    async fn before_candidate(&self, _key: &str, _server_now: SystemTime, _session: &SweepSession) {
+    }
 }
 
-/// The sweep's own SMB connection. Dropping it without
-/// [`SweepSession::shutdown`], as when the sweep is cancelled, times out or
-/// fails, closes the connection in the background, so the server releases
-/// every handle opened through it.
+/// Locks a mutex, ignoring poisoning: the guarded values stay valid.
+fn lock_ignoring_poison<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The stop control shared by a [`SessionRuntime`] and the test-only sever
+/// hook. The runtime thread never holds it, so dropping every holder, as a
+/// cancelled [`SessionRuntime::start`] does, also stops the thread.
+struct SessionControl {
+    /// Sending, or dropping, this ends the runtime thread.
+    stop: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+impl SessionControl {
+    /// Asks the runtime thread to stop. It never waits.
+    fn stop(&self) {
+        if let Some(stop) = lock_ignoring_poison(&self.stop).take() {
+            let _ = stop.send(());
+        }
+    }
+}
+
+/// The session's client, which the runtime thread drops inside the runtime
+/// before stopping it, because the vendored client's drop handlers spawn
+/// tasks on the current runtime.
+type SessionClientSlot = Arc<std::sync::Mutex<Option<Arc<Client>>>>;
+
+/// A current-thread Tokio runtime on a thread of its own, which owns the
+/// sweep session's socket.
+///
+/// The vendored client spawns the tasks that own its socket on the runtime
+/// it connects from, so the session connects from this runtime. Stopping it
+/// drops those tasks, which closes the socket, and the server then releases
+/// every handle the session held. It stops when [`SessionRuntime::stop`] is
+/// called or the guard is dropped; that happens on its own thread and needs
+/// no progress from the caller's runtime, nor a caller runtime at all.
+struct SessionRuntime {
+    handle: tokio::runtime::Handle,
+    control: Arc<SessionControl>,
+    client: SessionClientSlot,
+    /// Completes once the runtime has been dropped and the socket closed.
+    stopped: Option<tokio::sync::oneshot::Receiver<()>>,
+}
+
+impl SessionRuntime {
+    async fn start() -> Result<Self, StorageError> {
+        let unavailable = || {
+            remote_error(
+                StorageProviderErrorKind::Connectivity,
+                "connect",
+                "the sweep's session runtime could not start",
+                true,
+            )
+        };
+        let (stop, stop_requested) = tokio::sync::oneshot::channel::<()>();
+        let control = Arc::new(SessionControl {
+            stop: std::sync::Mutex::new(Some(stop)),
+        });
+        let client = SessionClientSlot::default();
+        let (started, handle) = tokio::sync::oneshot::channel();
+        let (stopped_tx, stopped) = tokio::sync::oneshot::channel();
+        let thread_client = Arc::clone(&client);
+        // The runtime is built and dropped on its own thread: dropping a
+        // runtime inside an asynchronous context panics.
+        std::thread::Builder::new()
+            .name("graphql-orm-storage-smb-sweep".to_string())
+            .spawn(move || {
+                let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                else {
+                    return;
+                };
+                if started.send(runtime.handle().clone()).is_err() {
+                    return;
+                }
+                runtime.block_on(async {
+                    let _ = stop_requested.await;
+                });
+                {
+                    let _entered = runtime.enter();
+                    drop(lock_ignoring_poison(&thread_client).take());
+                }
+                drop(runtime);
+                let _ = stopped_tx.send(());
+            })
+            .map_err(|_| unavailable())?;
+        let handle = handle.await.map_err(|_| unavailable())?;
+        Ok(Self {
+            handle,
+            control,
+            client,
+            stopped: Some(stopped),
+        })
+    }
+
+    /// Lets the runtime thread drop the client, inside the runtime, when it
+    /// stops.
+    fn adopt(&self, client: Arc<Client>) {
+        *lock_ignoring_poison(&self.client) = Some(client);
+    }
+
+    fn stop(&self) {
+        self.control.stop();
+    }
+
+    /// Stops the runtime and waits, at most `timeout`, until its socket is
+    /// closed. Returns whether it was.
+    async fn stop_and_wait(&mut self, timeout: Duration) -> bool {
+        self.stop();
+        match self.stopped.take() {
+            Some(stopped) => matches!(tokio::time::timeout(timeout, stopped).await, Ok(Ok(()))),
+            None => false,
+        }
+    }
+}
+
+impl Drop for SessionRuntime {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// The sweep's own SMB session, on its own connection and
+/// [`SessionRuntime`].
+///
+/// [`SweepSession::shutdown`] disconnects the tree, logs off and closes the
+/// connection in order and counts every step that fails. Dropping the
+/// session, including dropping a `shutdown` that has not finished, as when
+/// the sweep is cancelled, times out or fails, stops its runtime, which
+/// closes the socket without waiting for the caller's runtime.
 struct SweepSession {
-    client: Arc<Client>,
-    connection: Option<Arc<smb::Connection>>,
+    // Declared before `runtime`, so it is dropped first and the runtime
+    // thread drops the last reference.
+    client: Option<Arc<Client>>,
+    share: UncPath,
+    server: String,
+    timeout: Duration,
+    runtime: SessionRuntime,
 }
 
 impl SweepSession {
     async fn connect(backend: &SmbStorageBackend) -> Result<Self, StorageError> {
-        let config = &backend.inner.config;
-        let connected = connect_client(config, 0, Some(backend.inner.server_guid)).await?;
-        let connection = connected
-            .client
-            .get_connection(&config.server)
+        let runtime = SessionRuntime::start().await?;
+        let config = Arc::clone(&backend.inner.config);
+        let server_guid = backend.inner.server_guid;
+        let connected = runtime
+            .handle
+            .spawn(async move { connect_client(&config, 0, Some(server_guid)).await })
             .await
-            .map_err(|error| map_smb_error("connect", error))?;
+            .map_err(|_| {
+                remote_error(
+                    StorageProviderErrorKind::ConnectionLost,
+                    "connect",
+                    "the sweep's session stopped while connecting",
+                    true,
+                )
+            })??;
+        runtime.adopt(Arc::clone(&connected.client));
         Ok(Self {
-            client: connected.client,
-            connection: Some(connection),
+            client: Some(connected.client),
+            share: backend.share_path()?,
+            server: backend.inner.config.server.clone(),
+            timeout: backend.inner.config.operation_timeout,
+            runtime,
         })
     }
 
     fn client(&self) -> &Client {
-        &self.client
+        self.client
+            .as_deref()
+            .expect("the client is present until shutdown")
     }
 
-    /// Logs off and disconnects in order.
-    async fn shutdown(mut self) -> Result<(), StorageError> {
-        self.connection = None;
-        self.client
-            .close()
-            .await
-            .map_err(|error| map_smb_error("close", error))
+    /// Disconnects the tree, logs off, closes the connection and stops the
+    /// runtime, each bounded by the operation timeout. Returns how many of
+    /// those steps failed; the runtime is stopped whatever happened.
+    async fn shutdown(mut self) -> usize {
+        let timeout = self.timeout;
+        let succeeded = |outcome: Result<Result<(), smb::Error>, tokio::time::error::Elapsed>| {
+            matches!(outcome, Ok(Ok(())))
+        };
+        let mut failures = 0;
+        if let Some(client) = self.client.take() {
+            let tree = match tokio::time::timeout(timeout, client.get_tree(&self.share)).await {
+                Ok(Ok(tree)) => succeeded(tokio::time::timeout(timeout, tree.disconnect()).await),
+                _ => false,
+            };
+            let session = match tokio::time::timeout(timeout, client.get_session(&self.share)).await
+            {
+                Ok(Ok(session)) => {
+                    succeeded(tokio::time::timeout(timeout, session.logoff()).await)
+                }
+                _ => false,
+            };
+            let connection =
+                match tokio::time::timeout(timeout, client.get_connection(&self.server)).await {
+                    Ok(Ok(connection)) => {
+                        succeeded(tokio::time::timeout(timeout, connection.close()).await)
+                    }
+                    _ => false,
+                };
+            failures += [tree, session, connection]
+                .into_iter()
+                .filter(|ok| !ok)
+                .count();
+        }
+        if !self.runtime.stop_and_wait(timeout).await {
+            failures += 1;
+        }
+        failures
+    }
+
+    /// Test-only: a handle that stops this session's runtime, as a lost
+    /// connection would.
+    #[cfg(feature = "smb-sweep-test-hooks")]
+    fn severer(&self) -> SmbSweepSessionSeverer {
+        SmbSweepSessionSeverer {
+            control: Arc::clone(&self.runtime.control),
+        }
     }
 }
 
-impl Drop for SweepSession {
-    fn drop(&mut self) {
-        if let Some(connection) = self.connection.take()
-            && let Ok(runtime) = tokio::runtime::Handle::try_current()
-        {
-            runtime.spawn(async move {
-                let _ = connection.close().await;
-            });
-        }
+/// Stops a running sweep's dedicated session, as a lost connection would.
+/// Test infrastructure only.
+#[cfg(feature = "smb-sweep-test-hooks")]
+#[derive(Clone)]
+pub struct SmbSweepSessionSeverer {
+    control: Arc<SessionControl>,
+}
+
+#[cfg(feature = "smb-sweep-test-hooks")]
+impl SmbSweepSessionSeverer {
+    /// Stops the sweep session's runtime, which closes its socket. Requests
+    /// the sweep sends afterwards fail.
+    pub fn sever(&self) {
+        self.control.stop();
+    }
+}
+
+#[cfg(feature = "smb-sweep-test-hooks")]
+impl fmt::Debug for SmbSweepSessionSeverer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SmbSweepSessionSeverer")
     }
 }
 
@@ -2216,8 +2540,20 @@ pub struct SmbHeldDirectory {
 #[cfg(feature = "smb-sweep-test-hooks")]
 impl SmbHeldDirectory {
     /// Closes the handle.
-    pub async fn release(self) {
-        let _ = tokio::time::timeout(self.timeout, self.directory.close()).await;
+    ///
+    /// # Errors
+    ///
+    /// Returns the close's error, or a timeout.
+    pub async fn release(self) -> Result<(), StorageError> {
+        match tokio::time::timeout(self.timeout, self.directory.close()).await {
+            Ok(result) => result.map_err(|error| map_smb_error("close", error)),
+            Err(_) => Err(remote_error(
+                StorageProviderErrorKind::Timeout,
+                "close",
+                "operation timed out",
+                true,
+            )),
+        }
     }
 }
 
@@ -2569,7 +2905,7 @@ struct SmbListingSource<'a> {
     base: UncPath,
     /// Set for a temporary-file sweep: enumeration skips and counts entries
     /// the server reports as reparse points.
-    sweep: Option<&'a SweepSkips>,
+    sweep: Option<&'a SweepTally>,
 }
 
 #[async_trait]
@@ -5595,6 +5931,111 @@ mod tests {
         assert!(!holdable_directory(true, true), "a junction");
         assert!(!holdable_directory(false, true), "a file symbolic link");
         assert!(!holdable_directory(false, false), "a file");
+    }
+
+    /// Accepts one connection on a loopback listener, from a task spawned on
+    /// a sweep session runtime started by a caller runtime that is then
+    /// dropped. Returns the session runtime and the accepted socket.
+    fn session_runtime_holding_a_socket() -> (SessionRuntime, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("address");
+        let caller = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("caller runtime");
+        let session = caller.block_on(async {
+            let session = SessionRuntime::start().await.expect("start");
+            // As the vendored worker's tasks do, this task owns the socket.
+            session.handle.spawn(async move {
+                let stream = tokio::net::TcpStream::connect(address)
+                    .await
+                    .expect("connect");
+                std::future::pending::<()>().await;
+                drop(stream);
+            });
+            session
+        });
+        let (accepted, _) = listener.accept().expect("accept");
+        accepted
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("read timeout");
+        // The caller's runtime is gone before the session stops.
+        drop(caller);
+        (session, accepted)
+    }
+
+    fn assert_closed(mut accepted: std::net::TcpStream) {
+        use std::io::Read;
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            accepted.read(&mut byte).expect("the peer closed, not timed out"),
+            0
+        );
+    }
+
+    /// Dropping a sweep session closes its socket on the session's own
+    /// thread, with no caller runtime at all, so a sweep dropped while its
+    /// caller's runtime makes no progress still releases its handles (#593).
+    #[test]
+    fn dropping_a_session_runtime_closes_its_socket_without_a_caller_runtime() {
+        let (session, accepted) = session_runtime_holding_a_socket();
+        drop(session);
+        assert_closed(accepted);
+    }
+
+    /// The test-only sever hook and `stop` stop the same runtime, and a
+    /// later wait reports it stopped.
+    #[test]
+    fn stopping_a_session_runtime_closes_its_socket_and_reports_it() {
+        let (mut session, accepted) = session_runtime_holding_a_socket();
+        session.stop();
+        assert_closed(accepted);
+        let waiter = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("waiter runtime");
+        assert!(waiter.block_on(session.stop_and_wait(Duration::from_secs(10))));
+        assert!(
+            !waiter.block_on(session.stop_and_wait(Duration::from_secs(1))),
+            "a second wait has nothing to wait for"
+        );
+    }
+
+    /// A failed sweep keeps what it did: the error carries the report, its
+    /// message counts removals and cleanup failures without naming keys,
+    /// and converting it keeps only the storage error.
+    #[test]
+    fn a_failed_sweep_keeps_its_report() {
+        let failure = SmbTempSweepError {
+            error: listing_limit_exceeded("listing reached its entry limit".to_string()),
+            report: SmbTempSweepReport {
+                removed: 2,
+                cleanup_failures: 3,
+                ..SmbTempSweepReport::default()
+            },
+        };
+        assert!(!failure.is_retryable());
+        let message = failure.to_string();
+        assert!(
+            message.contains("after removing 2 files, with 3 cleanup failures"),
+            "{message}"
+        );
+        assert!(std::error::Error::source(&failure).is_some());
+        let storage: StorageError = failure.into();
+        assert!(!storage.is_retryable());
+
+        let tally = SweepTally::default();
+        tally.closed(Ok::<(), ()>(()));
+        tally.closed(Err::<(), ()>(()));
+        tally.cleanup_failed();
+        tally.reparse_points.fetch_add(1, Ordering::Relaxed);
+        let mut report = SmbTempSweepReport {
+            cleanup_failures: 1,
+            ..SmbTempSweepReport::default()
+        };
+        tally.add_to(&mut report);
+        assert_eq!(report.cleanup_failures, 3);
+        assert_eq!(report.skipped_reparse_points, 1);
     }
 
     #[test]

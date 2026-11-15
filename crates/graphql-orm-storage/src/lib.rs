@@ -80,10 +80,10 @@ pub use service::{ObjectStorage, StorageService};
 #[cfg(feature = "smb")]
 pub use smb::{
     SmbBackendDiagnostics, SmbDialect, SmbProbeOptions, SmbProbeResult, SmbRepositoryQuiesced,
-    SmbStorageBackend, SmbStorageConfig, SmbTempSweepReport,
+    SmbStorageBackend, SmbStorageConfig, SmbTempSweepError, SmbTempSweepReport,
 };
 #[cfg(feature = "smb-sweep-test-hooks")]
-pub use smb::{SmbHeldDirectory, SmbSweepBarrier, SmbSweepCandidate};
+pub use smb::{SmbHeldDirectory, SmbSweepBarrier, SmbSweepCandidate, SmbSweepSessionSeverer};
 pub use streaming_object::{
     BoxedMultipartWriter, MultipartWriter, ObjectContentRange, ObjectInfo, ObjectMetadata,
     ObjectRangeBody, StreamingObjectStore, validate_object_bucket,
