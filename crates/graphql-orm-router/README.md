@@ -10,6 +10,10 @@ supersedes: []
 
 # graphql-orm-router
 
+Version 0.15.3 releases the plugin context read lock before the router-hosted
+Node subgraph executes a lookup, so it cannot contend with authority renewal.
+Configuration and public APIs are unchanged.
+
 Version 0.15.2 fixes an intermittent deadlock when established WebSocket
 operations refresh role authority. Authorization policy snapshots release their
 context read locks before the refreshed principal is stored. Configuration and

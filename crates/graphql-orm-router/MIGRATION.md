@@ -10,6 +10,12 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.15.2 to 0.15.3
+
+No consumer migration is required. Node lookups no longer hold a plugin
+context read lock while they execute. Configuration and public APIs are
+unchanged.
+
 ## 0.15.1 to 0.15.2
 
 No consumer migration is required. Established WebSocket operations can resume
