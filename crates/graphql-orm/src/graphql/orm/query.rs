@@ -3886,7 +3886,7 @@ pub fn render_upsert_sql_with_managed_version(
     update_updated_at: bool,
     managed_version: Option<&str>,
 ) -> String {
-    let quoted_table = dialect.quote_identifier_path(table);
+    let quoted_table = dialect.render_table_identifier_path(table);
     let quoted_insert_columns = insert_columns
         .iter()
         .map(|column| dialect.quote_identifier_path(column))
@@ -4008,7 +4008,7 @@ pub fn render_insert_if_absent_sql(
     insert_values: &[&str],
     conflict_columns: &[&str],
 ) -> String {
-    let table = dialect.quote_identifier_path(table);
+    let table = dialect.render_table_identifier_path(table);
     let columns = insert_columns
         .iter()
         .map(|column| dialect.quote_identifier_path(column))
@@ -4053,7 +4053,7 @@ pub fn render_insert_sql(
     insert_columns: &[&str],
     insert_values: &[&str],
 ) -> String {
-    let table = dialect.quote_identifier_path(table);
+    let table = dialect.render_table_identifier_path(table);
     let columns = insert_columns
         .iter()
         .map(|column| dialect.quote_identifier_path(column))

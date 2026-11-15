@@ -14,6 +14,10 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.159.0
+
+- Fix PostgreSQL static entities with bare mixed-case table names (#716). Render quoted table references with the historical PostgreSQL folding of bare table components, and resolve declared names during introspection. Create/alter/index/trigger/RLS statements, reads and writes, catalog checks and search helpers address the same table while metadata and helper digests remain unchanged. Existing folded installs need no migration; lower-case names are unchanged. See [migration guidance](MIGRATION.md#01580-to-01590-postgresql-table-name-case).
+
 ## Unreleased - ORM/macros 0.158.0
 
 - ORM and macros 0.158.0 (placeholder): runtime response budget, relation statements, search helper names and request-path panics. One change is breaking for hosts whose searchable base table name is longer than 42 bytes or ends in `_` and 16 hexadecimal digits. See the [migration guide](MIGRATION.md#01570-to-01580-runtime-budget-search-helper-names-and-typed-refusals).

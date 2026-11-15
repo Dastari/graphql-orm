@@ -183,7 +183,7 @@ impl StaticDeleteBackend for PostgresBackend {
             // operations need conflicting relation locks on these targets.
             let tables = ownership
                 .tables()
-                .map(|table| DatabaseBackend::Postgres.quote_identifier_path(table))
+                .map(|table| DatabaseBackend::Postgres.render_table_identifier_path(table))
                 .collect::<Vec<_>>()
                 .join(", ");
             sqlx::query(&format!("LOCK TABLE {tables} IN SHARE ROW EXCLUSIVE MODE"))

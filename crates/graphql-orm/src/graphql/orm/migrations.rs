@@ -2424,7 +2424,7 @@ fn render_create_index_statement(
         "CREATE {}INDEX {} ON {}{} ({}){}",
         unique,
         backend.quote_identifier(index.name),
-        backend.quote_identifier_path(table_name),
+        backend.render_table_identifier_path(table_name),
         method,
         columns,
         predicate,
@@ -3486,7 +3486,7 @@ pub(super) fn render_migration_step_view(
                 vec![format!(
                     "DROP INDEX {} ON {}",
                     backend.quote_identifier(index_name),
-                    backend.quote_identifier_path(table_name)
+                    backend.render_table_identifier_path(table_name)
                 )]
             }
         },
@@ -4421,11 +4421,12 @@ pub(super) async fn introspect_owned_postgres_connection_with_internal(
 }
 
 /// Reads the owned catalog of the session's current schema, and of each
-/// schema-qualified table in `declared_tables` wherever it lives.
+/// table in `declared_tables` wherever it lives.
 ///
 /// A table declared with a schema (`audit.logs`) is not in the current
 /// schema, so a read of that schema alone never reports it and a planner
-/// would create it again. Each schema-qualified path is resolved as the ORM's
+/// would create it again. A bare mixed-case name also differs from the physical
+/// folded catalog name. Each declared path is resolved as the ORM's
 /// own SQL resolves it and, when the table exists, reported under the declared
 /// path. Tables of other schemas that no path names are never reported, so a
 /// strict plan cannot drop them.
@@ -4473,10 +4474,9 @@ pub(super) async fn introspect_owned_postgres_connection_including(
         relations.push((table_name.clone(), schema_name.clone(), table_name));
     }
     for declared in declared_tables {
-        if !super::dialect::identifier_path_is_qualified(declared)
-            || relations
-                .iter()
-                .any(|(reported, _, _)| reported == declared)
+        if relations
+            .iter()
+            .any(|(reported, _, _)| reported == declared)
         {
             continue;
         }

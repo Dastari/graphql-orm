@@ -1044,15 +1044,6 @@ fn identifier_path_parts(identifier: &str) -> impl Iterator<Item = &str> {
     })
 }
 
-/// Whether a declared table path names a schema as well as a table.
-#[cfg(feature = "postgres")]
-pub(crate) fn identifier_path_is_qualified(identifier: &str) -> bool {
-    identifier_path_parts(identifier)
-        .filter(|part| !part.is_empty())
-        .count()
-        > 1
-}
-
 /// The names PostgreSQL resolves each part of a declared path to when the
 /// ORM's SQL renders it with [`DatabaseBackend::render_identifier_path`]:
 /// a delimited part keeps its case, a part rendered bare folds to lower case,
@@ -1188,6 +1179,30 @@ impl DatabaseBackend {
                 .collect::<Vec<_>>()
                 .join("."),
         )
+    }
+
+    /// Delimit a table path while preserving the resolution of generated DDL.
+    ///
+    /// PostgreSQL historically creates plain, non-reserved table components
+    /// bare. Fold those components before delimiting them, so a quoted DML or
+    /// index reference still names that same table. Explicitly delimited and
+    /// non-plain components retain their case. Other backends keep their
+    /// existing quoted rendering. Declared metadata and helper names are unchanged.
+    pub fn render_table_identifier_path(self, identifier: &str) -> String {
+        if self != Self::Postgres {
+            return self.quote_identifier_path(identifier);
+        }
+        identifier_path_parts(identifier)
+            .filter(|part| !part.is_empty())
+            .map(|part| {
+                if !part.starts_with('"') && !self.identifier_needs_quoting(part) {
+                    self.quote_identifier(&part.to_ascii_lowercase())
+                } else {
+                    self.quote_identifier(part)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(".")
     }
 
     /// One string constant as generated DDL writes it, or `None` for MySQL,
@@ -1698,5 +1713,34 @@ pub fn current_backend() -> DatabaseBackend {
         DatabaseBackend::Mssql
     } else {
         DatabaseBackend::Sqlite
+    }
+}
+
+#[cfg(test)]
+mod table_identifier_tests {
+    use super::*;
+
+    #[test]
+    fn quoted_table_references_preserve_ddl_resolution() {
+        for (declared, quoted) in [
+            ("MixedNotes", "\"mixednotes\""),
+            ("lower_notes", "\"lower_notes\""),
+            ("Audit.MixedNotes", "\"audit\".\"mixednotes\""),
+            ("\"Audit\".MixedNotes", "\"Audit\".\"mixednotes\""),
+            ("\"MixedNotes\"", "\"MixedNotes\""),
+            ("Mixed Notes", "\"Mixed Notes\""),
+            ("Order", "\"Order\""),
+        ] {
+            assert_eq!(
+                DatabaseBackend::Postgres.render_table_identifier_path(declared),
+                quoted
+            );
+            for backend in [DatabaseBackend::Sqlite, DatabaseBackend::Mssql] {
+                assert_eq!(
+                    backend.render_table_identifier_path(declared),
+                    backend.quote_identifier_path(declared)
+                );
+            }
+        }
     }
 }
