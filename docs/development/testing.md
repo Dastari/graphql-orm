@@ -293,6 +293,12 @@ scripts/run-owned-database-lanes.sh mssql
 scripts/run-owned-database-lanes.sh ai-postgres
 ```
 
+`scripts/run-owned-database-lanes.sh query-loader-batch` runs the relation
+default-order, batch-isolation, filter-limit and relation-count-order
+regressions (`query_loader_batch`, `order_aggregate_visibility`) on SQLite,
+PostgreSQL and SQL Server. The `postgres` and `mssql` lanes include the same
+two test binaries.
+
 Use `all` only when the machine has enough memory for the lanes to run
 sequentially. Docker absence or failure is a failed required lane, not a skip.
 Follow the [PostgreSQL testing runbook](../operations/runbooks/postgres-testing.md)

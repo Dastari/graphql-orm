@@ -5617,7 +5617,11 @@ fn generate_entity_tokens(
                 filter_to_entity_match.push(entity_match_gen);
                 filter_is_empty_checks.push(is_empty_check);
                 filter_contains_spatial_checks.push(contains_spatial_check);
-                if filter_type == "date" || filter_type == "int64" {
+                // Each of these filters bounds its own operands (#455).
+                if matches!(
+                    filter_type.as_str(),
+                    "date" | "int64" | "string" | "number" | "uuid" | "bytes"
+                ) {
                     filter_validation_checks.push(quote! {
                         if let Some(filter) = &self.#filter_field_name {
                             filter.validate()?;
@@ -5918,6 +5922,8 @@ fn generate_entity_tokens(
         let search_key_json_fallback = search_key.clone();
         quote! {
             impl ::graphql_orm::graphql::orm::SearchableEntity for #struct_name {
+                const SEARCH_KEY_IS_BINARY: bool = #search_pk_is_bytes;
+
                 fn search_key(&self) -> String {
                     #search_key
                 }

@@ -10,6 +10,58 @@ supersedes: []
 
 # Migration Guide
 
+## 0.152.0 to 0.153.0: queries, filters and relation loading
+
+Upgrade runtime and macros together. No schema or data migration is needed.
+Generated SDL, operation catalogues and fingerprints are unchanged.
+
+- **Nested relation order (behaviour change).** A to-many relation field
+  selected without `orderBy` now returns each parent's rows in the target
+  entity's `default_sort` whether or not the relation is batched; the primary
+  key is the final tie-break. The batched path used to ignore `default_sort`
+  and order by primary key. Clients that relied on primary-key order for an
+  entity whose `default_sort` is something else should pass an explicit
+  `orderBy`. A target without `default_sort` orders by its primary key, as
+  before. Hand-built `CompositeRelationQueryKey` and `RelationQueryKey` values
+  with empty `sorts` get the same default.
+- **Filter operand limits (breaking for clients).** `inList` and `notIn` on
+  `StringFilter`, `IntFilter`, `UuidFilter` and `BytesFilter` accept at most
+  `MAX_FILTER_LIST_OPERANDS` (1,000) operands each. `contains`, `startsWith`,
+  `endsWith` and `similar` accept at most `MAX_FILTER_PATTERN_LENGTH` (1,000)
+  UTF-16 code units. Above either limit the request fails with
+  `INVALID_INPUT`; a Rust query built with such a filter fails the same way
+  when it is fetched. Split a longer list into several requests, or filter on
+  a relation or range instead. `eq` and `ne` operands are not limited.
+- **Relation targets.** Delete hand-written `BatchLoadEntity` implementations
+  that exist only to satisfy generated relations, or keep them: both compile.
+  Code that names the bound of `RelationLoader`'s relation-key loaders should
+  use `RelationTarget<B>`. `scan_authorized_relation` takes the same bound.
+- **Isolated batch outcomes.** Generated resolvers call
+  `load_one(IsolatedLoad(key))` on the registered `DataLoader`. A host that
+  replaces the generated `DataLoader<RelationLoader<T, B>>` or
+  `DataLoader<FederationKeyLoader<T, B>>` with its own instance of the same
+  type needs no change. Host code that calls the loaders directly may keep the
+  plain keys (one error fails the call) or switch to `IsolatedLoad`.
+- **Trusted SQL fragments (behaviour change).** In a fragment passed to
+  `where_values`, `FilterExpression::trusted_fragment` or
+  `SqlDialect::normalize_sql`, only `?`, `$<digits>` and `@p<digits>` are
+  placeholders. A bare `$` or `@p` used to be rewritten as one on PostgreSQL
+  and SQL Server; write `?` instead. Placeholder-like text inside a comment or
+  a PostgreSQL dollar-quoted string is now left alone, and on PostgreSQL
+  `[...]` is an array subscript whose contents are scanned. Use
+  `count_placeholders_for(backend, sql)` when the fragment is not written for
+  the default backend.
+- **Keyset predicate text.** `render_keyset_after` wraps its result in
+  parentheses. Generated code is unaffected; a host that compares the text
+  should expect the extra pair.
+- **Relation key equality.** `CompositeRelationQueryKey` and
+  `RelationQueryKey` are equal only when their `filter`, `sorts` and
+  `pagination` are equal too. Generated keys already derive their signatures
+  from those values.
+- **SQL Server named instances.** `server=host\INSTANCE` without a port now
+  asks SQL Server Browser on UDP 1434 for the instance's TCP port. The host
+  must allow that request. With a port (`server=host\INSTANCE,1500`) the
+  connection is direct and the instance name is ignored, as before.
 ## 0.151.0 to 0.152.0: batched row-security probe
 
 Upgrade ORM and macros together. No data migration is needed. The new optional

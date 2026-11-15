@@ -10,6 +10,18 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.153.0 fixes query, filter and relation-loading behaviour. Batched
+nested relations use the target's `default_sort` when the request gives no
+order; one failing key group no longer fails the rest of a shared `DataLoader`
+batch; relation targets need no hand-written `BatchLoadEntity`; static filter
+lists and patterns are bounded (1,000 operands, 1,000 UTF-16 code units);
+placeholder counting and rebasing agree; full-text search finds binary-keyed
+entities; projection queries bind relation-count order values; and SQL Server
+named instances resolve through SQL Server Browser. Two changes alter results
+or refuse requests that were accepted: the nested order and the filter limits.
+Upgrade ORM/macros together; see the
+[root migration guide](../../MIGRATION.md#01520-to-01530-queries-filters-and-relation-loading).
+
 ORM 0.152.0 adds a conservative batched row-security probe for recovery and maintenance callers. Upgrade macros to the matching version; no data migration is needed.
 
 Version 0.151.0 corrects SQL Server behaviour, with two breaking changes

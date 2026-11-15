@@ -1272,6 +1272,31 @@ impl From<&SqlValue> for MssqlParamValue {
     }
 }
 
+/// SQL Server Browser's UDP port, which the driver also reports as the
+/// address port of a named instance given without a TCP port.
+const SQL_BROWSER_PORT: &str = ":1434";
+
+/// Open the TCP stream for `config`.
+///
+/// A named instance given without a port (`server=host\\INSTANCE`) has no
+/// TCP port of its own: SQL Server Browser on the host answers a UDP request
+/// on port 1434 with the instance's port, and the stream connects there. An
+/// address with any other port, which includes every connection string that
+/// names a port, connects directly and ignores an instance name, as
+/// Microsoft's clients do. A routing redirect names its own TCP port and is
+/// always direct.
+async fn open_tcp(config: &Config, redirected: bool) -> crate::Result<TcpStream> {
+    use tiberius::SqlBrowser;
+    let address = config.get_addr();
+    if !redirected && address.ends_with(SQL_BROWSER_PORT) {
+        // Without an instance name this is a plain connection to TCP 1434.
+        return TcpStream::connect_named(config)
+            .await
+            .map_err(map_tiberius_error);
+    }
+    TcpStream::connect(address).await.map_err(sqlx::Error::Io)
+}
+
 /// Open one TDS connection, following at most one routing redirect.
 ///
 /// Under Azure SQL's Redirect connection policy the gateway answers a
@@ -1283,9 +1308,7 @@ impl From<&SqlValue> for MssqlParamValue {
 async fn open_client(mut config: Config) -> crate::Result<MssqlClient> {
     let mut redirected = false;
     loop {
-        let tcp = TcpStream::connect(config.get_addr())
-            .await
-            .map_err(sqlx::Error::Io)?;
+        let tcp = open_tcp(&config, redirected).await?;
         tcp.set_nodelay(true).map_err(sqlx::Error::Io)?;
         match tiberius::Client::connect(config.clone(), tcp.compat_write()).await {
             Ok(client) => return Ok(client),
@@ -1438,6 +1461,61 @@ mod tests {
         let mut config = config();
         follow_route(&mut config, "node7.worker.database.example", 11042);
         assert_eq!(config.get_addr(), "node7.worker.database.example:11042");
+    }
+
+    /// A named instance without a port is resolved through SQL Server
+    /// Browser (#518): the stream connects to the TCP port the browser
+    /// reports, not to the browser's own port.
+    #[tokio::test]
+    async fn a_named_instance_connects_to_the_port_sql_browser_reports() {
+        // SQL Server Browser has one well-known port. Without it the lookup
+        // cannot be observed, so the test needs the port to itself.
+        let browser = tokio::net::UdpSocket::bind("127.0.0.1:1434")
+            .await
+            .expect("UDP 1434 on loopback must be free for this test");
+        let instance = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = instance.local_addr().unwrap().port();
+        let answer = tokio::spawn(async move {
+            let mut request = [0u8; 64];
+            let (length, client) = browser.recv_from(&mut request).await.unwrap();
+            // CLNT_UCAST_INST: 0x04 followed by the instance name.
+            assert_eq!(&request[..length], b"\x04REPORTING");
+            let body = format!(
+                "ServerName;HOST;InstanceName;REPORTING;IsClustered;No;Version;16.0.1000.6;tcp;{port};;"
+            );
+            // SVR_RESP: 0x05, a little-endian length, then the description.
+            let mut reply = vec![0x05, body.len() as u8, (body.len() >> 8) as u8];
+            reply.extend_from_slice(body.as_bytes());
+            browser.send_to(&reply, client).await.unwrap();
+        });
+
+        let named = Config::from_ado_string(
+            "server=tcp:127.0.0.1\\REPORTING;database=test;user id=test;password=test;TrustServerCertificate=true",
+        )
+        .unwrap();
+        assert_eq!(named.get_addr(), "127.0.0.1:1434");
+        let stream = open_tcp(&named, false).await.unwrap();
+        answer.await.unwrap();
+        let (_accepted, peer) = instance.accept().await.unwrap();
+        assert_eq!(stream.local_addr().unwrap(), peer);
+        assert_eq!(stream.peer_addr().unwrap().port(), port);
+
+        // A connection string that names a port connects there directly and
+        // asks nothing of the browser; so does a routing redirect.
+        let direct = Config::from_ado_string(&format!(
+            "server=tcp:127.0.0.1\\REPORTING,{port};database=test;user id=test;password=test;TrustServerCertificate=true"
+        ))
+        .unwrap();
+        for (config, redirected) in [(&direct, false), (&direct, true)] {
+            let stream = open_tcp(config, redirected).await.unwrap();
+            let (_accepted, peer) = instance.accept().await.unwrap();
+            assert_eq!(stream.local_addr().unwrap(), peer);
+        }
+        let mut routed = named.clone();
+        follow_route(&mut routed, "127.0.0.1", port);
+        let stream = open_tcp(&routed, true).await.unwrap();
+        let (_accepted, peer) = instance.accept().await.unwrap();
+        assert_eq!(stream.local_addr().unwrap(), peer);
     }
 
     #[test]

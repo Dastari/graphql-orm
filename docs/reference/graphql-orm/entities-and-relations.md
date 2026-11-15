@@ -659,6 +659,17 @@ the same resolution wave, and the runtime groups compatible keys by relation, fo
 filter signature, sort signature, page signature, and auth context. Belongs-to relations use the
 same grouped loader with a single-row result per parent key.
 
+A relation selected without `orderBy` returns each parent's rows in the target entity's
+`default_sort`, with the primary key as the final tie-break. Batched and direct reads agree, and an
+explicit `orderBy` replaces the default. A relation target needs no loader trait of its own: any
+generated entity is a `RelationTarget`.
+
+Each group runs as its own statement, and a statement that fails gives its error to the keys it
+carried and to no other. The registered loaders are shared by every request on the schema, so one
+request's failing group does not fail the relation fields of another request, or other groups of
+the same request, that were batched in the same dispatch window. Generated resolvers load
+`IsolatedLoad(key)` for this; the plain key types keep one result for the whole call.
+
 Paged relation connections are pushed into SQL with `ROW_NUMBER() OVER (PARTITION BY ...)` and a
 grouped count on SQLite, Postgres, and MSSQL-capable relation reads. The window projects only the
 complete primary key and parent identity; the bounded keys join back to the entity table for full
@@ -810,9 +821,8 @@ created. Future SQLite indexing options are documented in [Backend Features](bac
 ## Entities across Rust crate boundaries
 
 Generated relationships can reference a real target entity imported from another
-crate. Import the target type into the source declaration's scope and provide its
-ordinary public `BatchLoadEntity<B>` implementation when using relationship
-loaders. Generated placeholder rendering uses `OrmBackend::placeholder`; consumers
+crate. Import the target type into the source declaration's scope; relationship
+loaders need nothing more from it. Generated placeholder rendering uses `OrmBackend::placeholder`; consumers
 never call the target's crate-private `__gom_*` helpers. Existing generated SQL,
 static SDL and helper visibility are unchanged.
 

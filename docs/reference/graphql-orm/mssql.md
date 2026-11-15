@@ -123,8 +123,13 @@ default of `NOCOUNT ON`.
 Connections follow one routing redirect: under Azure SQL's Redirect connection
 policy the gateway answers the login with the address of the node that hosts
 the database, and the pool and the notification connection connect there under
-the same transport policy. Named instances (`server=host\\INSTANCE`) are not
-resolved through SQL Server Browser; give the instance's TCP port instead.
+the same transport policy.
+
+A named instance given without a port (`server=host\INSTANCE`) is resolved through SQL Server
+Browser: the pool sends one UDP request to port 1434 on the host, waits up to one second for the
+instance's TCP port and connects there. The host and any firewall between must allow UDP 1434. A
+connection string that names a port (`server=host\INSTANCE,1500`) connects to that port directly
+and never contacts the browser, and so does the connection that follows a routing redirect.
 
 SQL Server uses the platform native TLS transport. Linux builds need OpenSSL
 headers and `pkg-config`; runtime images need OpenSSL and CA certificates.

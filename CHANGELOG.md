@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-13
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -13,6 +13,19 @@ supersedes: []
 This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
+
+## Unreleased - ORM/macros 0.153.0
+
+- ORM and macros 0.153.0 (placeholder): **behaviour changes:** query, filter, pagination and relation loading. See the [migration guide](MIGRATION.md#01520-to-01530-queries-filters-and-relation-loading).
+  - **Behaviour change (fix):** a batched nested relation without `orderBy` returns each parent's rows in the target's declared `default_sort`, with the primary key as the final tie-break, as the direct relation path and root lists already did. It used to return them in primary-key order, so the same relation could order differently depending on whether it was batched. An explicit `orderBy` still overrides the default. Pages, counts and visibility predicates are unchanged (#245).
+  - **Breaking for clients (fix):** static `String`, `Int`, `UUID` and `Bytes` filters accept at most 1,000 operands in one `inList` or `notIn` list (`MAX_FILTER_LIST_OPERANDS`), and a `contains`, `startsWith`, `endsWith` or `similar` operand of at most 1,000 UTF-16 code units (`MAX_FILTER_PATTERN_LENGTH`). A longer list or pattern is refused with `INVALID_INPUT` before any SQL runs, for GraphQL input and for filters built in Rust (new `validate()` on each filter). Lists were unbounded and could exceed SQL Server's 2,100 parameters; a long pattern exceeded its 8,000-byte `LIKE` limit. `Int64Filter` keeps its limit of 256 (#455).
+  - **Fix:** one failing key group in a relation or Federation key batch no longer fails every other key in the same `DataLoader` call. The loaders registered by `schema_builder` are shared by concurrent requests; generated resolvers now load `IsolatedLoad(key)`, whose value is a per-key `Result`, so a statement that fails for one group (one relation, filter, order, page and database auth context) fails only the keys it carried. The existing `Loader` implementations for the plain keys keep their all-or-nothing result (#444).
+  - **Feature:** a relation target no longer needs a hand-written `BatchLoadEntity` implementation. `RelationLoader`'s relation keys require only the new blanket-implemented `RelationTarget`; `BatchLoadEntity` remains for the single-column `Loader<String>` form. Existing implementations still compile and are simply unused by generated relations (#285).
+  - **Behaviour change (fix):** counting a SQL fragment's placeholders and rebasing them read the same tokens. A placeholder is `?`, `$<digits>` or `@p<digits>`; text inside string literals, quoted identifiers, comments and PostgreSQL dollar-quoted strings is skipped by both, and a bare `$` or `@p`, a variable such as `@page`, and `$1` attached to an identifier are no longer rewritten as placeholders. New `count_placeholders_for(backend, sql)`; `count_placeholders(sql)` uses the default backend. A search filter clause with more placeholders than values reaches the database as written instead of panicking (#458).
+  - **Fix:** full-text search finds entities with a binary (`Vec<u8>`) primary key on SQLite and PostgreSQL. The search join renders the key as its document stores it (`bin:<lowercase hex>`) (#560).
+  - **Fix:** a projection query binds the values of a prepared relation-count order instead of rendering its placeholders with no values. `order_aggregate_visibility` runs on PostgreSQL and SQL Server in CI, with a bound-filter case, a registered-`DataLoader` case and a `Prefilter` target case (#563).
+  - **Fix:** SQL Server named instances given without a port (`server=host\INSTANCE`) are resolved through SQL Server Browser (UDP 1434). A connection string that names a port connects to it directly (#518).
+  - **Behaviour change (fix):** `render_keyset_after` returns one parenthesized predicate, like `render_keyset_before`. Relation loader keys compare their structured filter, sorts and page as well as their signature strings, and keys that share signatures but not structure are run as separate statements. `Database`'s `Debug` output reports whether entity and row policies are installed. The three backend row-helper modules share one implementation (#541, in part).
 
 ## Unreleased - ORM/macros 0.152.0, AI 0.143.0
 
