@@ -1092,6 +1092,13 @@ async fn postgres_rls_context_is_propagated_to_read_count_and_relation_layers() 
         });
         let response = api.execute(Request::new("{parents{edges{node{label children{edges{node{label}}totalCount}}}totalCount}}")
             .data(RuntimeGraphqlRequest::<PostgresBackend>::new(runtime.fingerprint(), Arc::new(Public), auth, Default::default()).with_cursor_scope(tenant.unwrap_or("anonymous")))).await;
+        if label.is_none() {
+            // Without a DbAuthContext RLS would silently return no rows; the
+            // request is refused as misconfigured instead (#559).
+            assert_eq!(response.errors.len(), 1, "{:?}", response.errors);
+            assert_eq!(response.errors[0].message, "authorization_misconfigured");
+            continue;
+        }
         assert!(response.errors.is_empty(), "{:?}", response.errors);
         let data = response.data.into_json().unwrap();
         if let Some(label) = label {
@@ -1109,6 +1116,39 @@ async fn postgres_rls_context_is_propagated_to_read_count_and_relation_layers() 
             assert_eq!(data["parents"]["totalCount"], "0");
         }
     }
+    // `LegacyPermissive` keeps the earlier behaviour: RLS alone filters.
+    let mut legacy = Database::<PostgresBackend>::new(pool.clone());
+    legacy.set_authorization_mode(graphql_orm::graphql::auth::AuthorizationMode::LegacyPermissive);
+    let legacy = RuntimeGraphqlComposer::new(legacy, "Query", Default::default())
+        .unwrap()
+        .cursor_protection(
+            Arc::new(TestAead),
+            RuntimeCursorAudience::new("rls-test").unwrap(),
+            Default::default(),
+        )
+        .unwrap()
+        .install(RuntimeGraphqlModule::compile(runtime.clone(), Default::default()).unwrap())
+        .unwrap()
+        .finish()
+        .unwrap();
+    let response = legacy
+        .execute(
+            Request::new("{parents{totalCount}}").data(
+                RuntimeGraphqlRequest::<PostgresBackend>::new(
+                    runtime.fingerprint(),
+                    Arc::new(Public),
+                    None,
+                    Default::default(),
+                )
+                .with_cursor_scope("anonymous"),
+            ),
+        )
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    assert_eq!(
+        response.data.into_json().unwrap()["parents"]["totalCount"],
+        "0"
+    );
     pool.close().await;
     owner.pool().close().await;
     owned.cleanup().unwrap();

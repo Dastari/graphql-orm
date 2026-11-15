@@ -348,6 +348,152 @@ pub(super) fn validating_input<'a, T: 'a>(
     Scope(Box::pin(future))
 }
 
+/// Run `check` with the runtime scalars validating input, as they do inside
+/// [`validating_input`].
+fn with_input_validation<T>(check: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            VALIDATING_INPUT.with(|flag| flag.set(self.0));
+        }
+    }
+    let _restore = Restore(VALIDATING_INPUT.with(|flag| flag.replace(true)));
+    check()
+}
+
+/// The value [`input_value_valid`] accepts at any type: it stands for an
+/// argument's variable reference, whose value is checked once against the
+/// variable's declared type. A GraphQL literal is never binary, so client text
+/// cannot produce it.
+const VALIDATED_VARIABLE: &[u8] = b"\0graphql-orm validated variable\0";
+pub(super) fn validated_variable() -> Value {
+    Value::Binary(VALIDATED_VARIABLE.to_vec().into())
+}
+
+/// Whether `value` is a valid input value of the GraphQL type `ty`.
+///
+/// This makes the checks async-graphql's argument validation makes, with
+/// runtime scalars decoded under their input bounds, and also refuses what
+/// async-graphql 7.2.1 accepts: a value that is not an object for an input
+/// object, and a type the registry does not define. Every visited node costs one
+/// unit of `budget`; an exhausted budget refuses.
+pub(super) fn input_value_valid(
+    registry: &async_graphql::registry::Registry,
+    ty: &str,
+    value: &Value,
+    budget: &mut usize,
+) -> bool {
+    use async_graphql::registry::{MetaType, MetaTypeName};
+    let Some(remaining) = budget.checked_sub(1) else {
+        return false;
+    };
+    *budget = remaining;
+    if matches!(value, Value::Binary(bytes) if bytes.as_ref() == VALIDATED_VARIABLE) {
+        return true;
+    }
+    match MetaTypeName::create(ty) {
+        MetaTypeName::NonNull(inner) => {
+            value != &Value::Null && input_value_valid(registry, inner, value, budget)
+        }
+        MetaTypeName::List(inner) => match value {
+            Value::Null => true,
+            Value::List(items) => items
+                .iter()
+                .all(|item| input_value_valid(registry, inner, item, budget)),
+            // GraphQL coerces a single value to a one-element list.
+            item => input_value_valid(registry, inner, item, budget),
+        },
+        MetaTypeName::Named(name) => {
+            if value == &Value::Null {
+                return true;
+            }
+            match registry.types.get(name) {
+                Some(MetaType::Scalar { is_valid, .. }) => is_valid
+                    .as_ref()
+                    .is_none_or(|valid| with_input_validation(|| valid(value))),
+                Some(MetaType::Enum { enum_values, .. }) => match value {
+                    Value::Enum(item) => enum_values.contains_key(item.as_str()),
+                    Value::String(item) => enum_values.contains_key(item.as_str()),
+                    _ => false,
+                },
+                Some(MetaType::InputObject {
+                    input_fields,
+                    oneof,
+                    ..
+                }) => {
+                    let Value::Object(values) = value else {
+                        return false;
+                    };
+                    if *oneof && (values.len() != 1 || values.values().any(|v| v == &Value::Null)) {
+                        return false;
+                    }
+                    values
+                        .keys()
+                        .all(|name| input_fields.contains_key(name.as_str()))
+                        && input_fields.values().all(|field| {
+                            match values.get(field.name.as_str()) {
+                                Some(value) => {
+                                    input_value_valid(registry, &field.ty, value, budget)
+                                }
+                                None => {
+                                    !MetaTypeName::create(&field.ty).is_non_null()
+                                        || field.default_value.is_some()
+                                }
+                            }
+                        })
+                }
+                _ => false,
+            }
+        }
+    }
+}
+
+/// Whether every argument default of every object, interface and subscription
+/// field in `registry` is a valid input value of its argument type.
+///
+/// async-graphql validates request values, never a schema's argument defaults,
+/// and its dynamic schema passes an omitted argument's default straight to the
+/// resolver. Introspection types are left out.
+pub(super) fn argument_defaults_valid(registry: &async_graphql::registry::Registry) -> bool {
+    use async_graphql::registry::MetaType;
+    for (name, ty) in &registry.types {
+        let fields = match ty {
+            MetaType::Object { fields, .. } | MetaType::Interface { fields, .. }
+                if !name.starts_with("__") =>
+            {
+                fields
+            }
+            _ => continue,
+        };
+        for argument in fields.values().flat_map(|field| field.args.values()) {
+            let Some(text) = &argument.default_value else {
+                continue;
+            };
+            // The registry keeps defaults as GraphQL literals; read one back
+            // through the parser as a variable default.
+            let Ok(document) = async_graphql::parser::parse_query(format!(
+                "query($v: Boolean = {text}) {{ __typename }}"
+            )) else {
+                return false;
+            };
+            let Some(value) = document
+                .operations
+                .iter()
+                .next()
+                .and_then(|(_, operation)| operation.node.variable_definitions.first())
+                .and_then(|definition| definition.node.default_value.as_ref())
+            else {
+                return false;
+            };
+            let mut budget = text.len().saturating_mul(2).saturating_add(64);
+            if !input_value_valid(registry, &argument.ty, &value.node, &mut budget) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// The runtime scalars' GraphQL validator: strict [`decode`] during input
 /// validation, [`wire_form_valid`] otherwise.
 pub(super) fn validate(kind: RuntimeValueKind, value: &Value, limits: RuntimeScalarLimits) -> bool {
@@ -429,6 +575,8 @@ pub(super) fn wire_form_valid(
 /// Render a stored value. Never fails and applies no input bound, so one
 /// stored value cannot fail a whole page or payload.
 pub(super) fn encode(value: &RuntimeValue) -> Value {
+    #[cfg(test)]
+    tests::ENCODED.with(|count| count.set(count.get() + 1));
     match value {
         RuntimeValue::Null => Value::Null,
         RuntimeValue::Boolean(v) => Value::Boolean(*v),
@@ -441,6 +589,75 @@ pub(super) fn encode(value: &RuntimeValue) -> Value {
         RuntimeValue::Bytes(v) => Value::String(STANDARD.encode(v)),
         // `Display` for a JSON value is its compact serialization.
         RuntimeValue::Json(v) => Value::String(v.to_string()),
+    }
+}
+
+/// Bytes [`encode`]`(value)` takes in the response, by the rule of the
+/// response measure (`OutputShape::measure`): two of structure, plus six per
+/// byte of an output string or 32 for any other output value.
+///
+/// Measured from the borrowed value: nothing is copied, base64-encoded or
+/// serialized into memory. A JSON value is counted by a serializer that writes
+/// nowhere and stops once the size would exceed `maximum`; any size above
+/// `maximum` is refused with `cost_exceeded`.
+pub(super) fn encoded_bytes(
+    value: &RuntimeValue,
+    maximum: usize,
+) -> Result<usize, RuntimeGraphqlError> {
+    let over = || RuntimeGraphqlError::new("cost_exceeded");
+    // The longest output string that fits.
+    let limit = maximum.saturating_sub(2) / 6;
+    let text = match value {
+        RuntimeValue::Null | RuntimeValue::Boolean(_) | RuntimeValue::Float(_) => {
+            return Some(34).filter(|bytes| *bytes <= maximum).ok_or_else(over);
+        }
+        RuntimeValue::Integer(v) => {
+            let mut digits = 1;
+            let mut rest = v.unsigned_abs();
+            while rest >= 10 {
+                rest /= 10;
+                digits += 1;
+            }
+            digits + usize::from(*v < 0)
+        }
+        RuntimeValue::String(v) => v.len(),
+        // Hyphenated lowercase form.
+        RuntimeValue::Uuid(_) => 36,
+        RuntimeValue::DateTime(v) => v.as_str().len(),
+        // At most 18 digits, a sign and a point: a small bounded string.
+        RuntimeValue::Decimal(v) => canonical_runtime_decimal(*v).len(),
+        // Padded standard base64.
+        RuntimeValue::Bytes(v) => v.len().div_ceil(3).checked_mul(4).ok_or_else(over)?,
+        RuntimeValue::Json(v) => {
+            let mut counter = Counter { len: 0, limit };
+            serde_json::to_writer(&mut counter, v).map_err(|_| over())?;
+            counter.len
+        }
+    };
+    // `limit` bounds `text`, so this cannot overflow.
+    Some(text)
+        .filter(|text| *text <= limit)
+        .map(|text| text * 6 + 2)
+        .filter(|bytes| *bytes <= maximum)
+        .ok_or_else(over)
+}
+
+/// Counts what a serializer writes, refusing past `limit` bytes.
+struct Counter {
+    len: usize,
+    limit: usize,
+}
+impl std::io::Write for Counter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.len = self
+            .len
+            .checked_add(buf.len())
+            .filter(|len| *len <= self.limit)
+            .ok_or_else(|| std::io::Error::other("over the response budget"))?;
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -460,8 +677,18 @@ pub(super) const fn name(kind: RuntimeValueKind) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    thread_local! {
+        /// Stored values encoded for output on this thread.
+        pub(crate) static ENCODED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+    pub(crate) fn encoded() -> usize {
+        ENCODED.with(std::cell::Cell::get)
+    }
+    pub(crate) fn reset_encoded() {
+        ENCODED.with(|count| count.set(0));
+    }
     #[test]
     fn lossless_wire_values_and_strict_integer_forms() {
         let limits = RuntimeScalarLimits::default();

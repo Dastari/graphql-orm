@@ -92,6 +92,9 @@ pub struct RuntimeDeletedImageCheck<'a> {
     /// against the image and refuse any dependency it cannot prove.
     pub required_row: Option<&'a RuntimePredicate>,
 }
+/// Code that ends a live subscription without database context once a table
+/// of its module has row-level security.
+const ROW_SECURITY_REFUSED: &str = "authorization_misconfigured";
 fn wire_error(code: &'static str) -> async_graphql::Error {
     use async_graphql::ErrorExtensions;
     if code == SUBSCRIPTION_CONTINUITY_LOST {
@@ -199,7 +202,7 @@ pub(super) fn node_field() -> Field {
                 GraphqlOperationKind::Query,
                 "node",
             )?;
-            let results = ctx.data::<super::execution::Results>()?;
+            let results = super::execution::Results::prepared(&ctx)?;
             let field = ctx.field();
             let key = field.alias().unwrap_or(field.name());
             results.admit(key)?;
@@ -603,6 +606,20 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                     limits,
                 )
                 .map_err(safe)?;
+                // Before registration, admission reads or host authorization.
+                // A request with database context or trusted system access is
+                // exempt for the subscription's lifetime; any other is admitted
+                // again before each event's reads.
+                let context_exempt = request.auth.is_some()
+                    || ctx
+                        .data_opt::<crate::graphql::auth::SystemAccess>()
+                        .is_some();
+                let mut row_security = super::execution::RowSecurity::new(
+                    &database,
+                    request.auth.as_ref(),
+                    context_exempt,
+                );
+                row_security.admit(&module, None).await.map_err(safe)?;
                 let mut receiver = source
                     .0
                     .subscribe(&module.schema.fingerprint(), &c.id)
@@ -699,6 +716,10 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                         key,
                         protection.as_ref(),
                         limits,
+                        row_security.read_guard(&eligibility).as_ref(),
+                        // Admission output is never released.
+                        super::execution::Shapes::default(),
+                        &mut 0,
                     )
                     .await;
                     fence(&mut receiver, &mut pending, module.schema.fingerprint())
@@ -724,6 +745,7 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                         let entity_field = entity_field.clone();
                         let shape = shape.clone();
                         let protection = protection.clone();
+
                         async move {
                             let (mut receiver, mut pending) = subscription_state?;
                             loop {
@@ -863,6 +885,15 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                                         continue;
                                     }
                                 }
+                                // RLS may have been enabled since registration: each
+                                // read transaction locks the tables it reads and checks
+                                // them before reading.
+                                let read_guard = (!context_exempt)
+                                    .then(|| {
+                                        super::execution::RowSecurity::new(&database, None, false)
+                                            .read_guard(&delivery)
+                                    })
+                                    .flatten();
                                 let current = super::execution::point(
                                     &database,
                                     request,
@@ -870,6 +901,9 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                                     &key,
                                     protection.as_ref(),
                                     limits,
+                                    read_guard.as_ref(),
+                                    super::execution::Shapes::of(&shape).select(&entity_field),
+                                    &mut 0,
                                 )
                                 .await;
                                 if let Err(code) =
@@ -879,6 +913,9 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                                 }
                                 let value = match current {
                                     Ok(value) => value,
+                                    Err(error) if error.code() == ROW_SECURITY_REFUSED => {
+                                        return Some((Err(wire_error(ROW_SECURITY_REFUSED)), None));
+                                    }
                                     Err(_) => {
                                         return Some((
                                             Err(wire_error(SUBSCRIPTION_CONTINUITY_LOST)),
@@ -1022,6 +1059,17 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                                         Err(wire_error(SUBSCRIPTION_CONTINUITY_LOST)),
                                         None,
                                     ));
+                                }
+                                // Release authorization may have waited on the host while
+                                // RLS was enabled. Check again with no host await between
+                                // this check and delivery; refuse and end on any failure.
+                                if !context_exempt
+                                    && super::execution::RowSecurity::new(&database, None, false)
+                                        .admit(&module, None)
+                                        .await
+                                        .is_err()
+                                {
+                                    return Some((Err(wire_error(ROW_SECURITY_REFUSED)), None));
                                 }
                                 return Some((
                                     Ok(super::schema::field_value(payload)),

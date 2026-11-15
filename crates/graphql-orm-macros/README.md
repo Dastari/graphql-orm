@@ -3,7 +3,7 @@ title: "graphql-orm-macros"
 kind: reference
 status: active
 owner: graphql-orm-macros-maintainers
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-14
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -22,6 +22,16 @@ remove a child foreign key together with the parent key it referenced; and
 PostgreSQL inserts and retention purges work again for row-level security
 without an `UPDATE` policy. See the
 [migration guide](../../MIGRATION.md#01560-to-01570-migrations-change-journal-and-retention).
+
+Version 0.155.0 (placeholder) makes the runtime GraphQL request guard and
+async-graphql agree: variable defaults apply to `@skip`/`@include`, every
+argument is validated with the values execution resolves, argument defaults are
+checked at composition, and queries and mutations over `execute_stream` refuse
+with `request_not_prepared`. Runtime GraphQL refuses operations on PostgreSQL
+tables with row-level security without a `DbAuthContext`. Upgrade ORM/macros
+together; see the
+[root migration guide](../../MIGRATION.md#01520-to-01550-runtime-graphql-guard-and-row-level-security).
+
 Version 0.152.0 stays aligned with ORM 0.152.0 and its batched row-security probe. Generated operations are unchanged; no data migration is needed.
 
 Version 0.151.0 corrects SQL Server behaviour, with two breaking changes

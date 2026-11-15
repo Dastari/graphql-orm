@@ -1128,3 +1128,62 @@ async fn reconciled_string_cas_runs_once_through_graphql_and_atomic_journals() {
     assert_eq!(Journal::count_all(&f.db).await.unwrap(), 1);
     f.finish().await;
 }
+
+/// A runtime GraphQL operation that reaches a PostgreSQL table with row-level
+/// security refuses with `authorization_misconfigured` when the request carries
+/// no `DbAuthContext`, before any host authority call or write, even for a
+/// role that bypasses RLS. `SystemAccess` and a request context still run (#559).
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn row_level_security_tables_refuse_requests_without_db_auth_context() {
+    let f = Fixture::new().await;
+    for ddl in [
+        "ALTER TABLE runtime_records ENABLE ROW LEVEL SECURITY",
+        "CREATE POLICY tenant_rows ON runtime_records USING (tenant = current_setting('app.tenant_id', true)) WITH CHECK (tenant = current_setting('app.tenant_id', true))",
+    ] {
+        sqlx::query(ddl).execute(f.db.pool()).await.unwrap();
+    }
+    let api = api(&f);
+    const READ: &str = "{ records { edges { node { id label } } totalCount } }";
+    // The fixture connects as the table owner, which RLS does not restrict:
+    // without the refusal both operations would run unfiltered.
+    for query in [CREATE, READ] {
+        let response = api.execute(request(&f, query)).await;
+        assert_eq!(response.errors.len(), 1, "{query}: {:?}", response.errors);
+        assert_eq!(response.errors[0].message, "authorization_misconfigured");
+        let text = format!("{:?}", response.errors);
+        assert!(!text.contains("runtime_records"), "{text}");
+    }
+    assert_eq!(f.count().await, 0);
+    // With the request's database context the same operations run.
+    let with_auth = |query: &str| {
+        Request::new(query)
+            .variables(Variables::from_json(serde_json::json!({
+                "schema": f.schema().fingerprint().to_string()
+            })))
+            .data(
+                RuntimeGraphqlRequest::<Backend>::new(
+                    f.schema().fingerprint(),
+                    Arc::new(Read),
+                    Some(DbAuthContext {
+                        tenant_id: Some("north".into()),
+                        ..Default::default()
+                    }),
+                    Default::default(),
+                )
+                .with_mutation_environment(f.environment.clone())
+                .with_write_authority(Arc::new(f.authority())),
+            )
+    };
+    let created = api.execute(with_auth(CREATE)).await;
+    assert!(created.errors.is_empty(), "{:?}", created.errors);
+    let read = api.execute(with_auth(READ)).await;
+    assert!(read.errors.is_empty(), "{:?}", read.errors);
+    assert_eq!(read.data.into_json().unwrap()["records"]["totalCount"], "1");
+    // Named trusted system access is the deliberate bypass.
+    let system = api
+        .execute(request(&f, READ).data(graphql_orm::graphql::auth::SystemAccess::new("worker")))
+        .await;
+    assert!(system.errors.is_empty(), "{:?}", system.errors);
+    f.finish().await;
+}
