@@ -301,6 +301,9 @@ async fn disposable_postgres_runtime_records_match_sqlite_logically_and_fail_clo
 async fn disposable_postgres_runtime_query_filters_pages_and_counts()
 -> Result<(), Box<dyn std::error::Error>> {
     let owned = OwnedPostgres::start()?;
+    // The image restarts once after initialization; wait until a connection
+    // succeeds, as the other cases do, before the pool connects.
+    drop(owned.connect().await?);
     let database = graphql_orm::db::Database::connect_postgres(&owned.url).await?;
     graphql_orm::sqlx::query(
         "CREATE TABLE runtime_customers (
@@ -366,6 +369,59 @@ async fn disposable_postgres_runtime_query_filters_pages_and_counts()
     assert_eq!(result.edges[0].node.integer(&id)?, 4);
 
     drop(database);
+    drop(owned);
+    Ok(())
+}
+
+/// `infinity`, `-infinity` and years past chrono's range are valid PostgreSQL
+/// `timestamptz` values. Decoding one is a typed `InvalidValue` error, never a
+/// panic; the largest and smallest representable instants still decode (#528).
+#[tokio::test]
+#[ignore = "creates and owns a disposable Docker PostgreSQL container"]
+async fn disposable_postgres_out_of_range_timestamps_are_typed_errors()
+-> Result<(), Box<dyn std::error::Error>> {
+    let owned = OwnedPostgres::start()?;
+    let mut connection = owned.connect().await?;
+    let schema = schema();
+    let projection = schema.resolve_projection_ids(&cid("customers"), &[fid("happened_at")])?;
+    for literal in ["infinity", "-infinity", "294276-12-31 23:59:59+00"] {
+        let row =
+            graphql_orm::sqlx::query(&format!("SELECT '{literal}'::timestamptz AS happened_at"))
+                .fetch_one(&mut connection)
+                .await?;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            projection.decode_row::<PostgresBackend>(&row)
+        }))
+        .unwrap_or_else(|_| panic!("decoding {literal} panicked"));
+        assert_eq!(
+            result.unwrap_err().code(),
+            RuntimeRecordErrorCode::InvalidValue,
+            "{literal}"
+        );
+    }
+    for (literal, expected) in [
+        (
+            "262142-12-31 23:59:59.999999+00",
+            "+262142-12-31T23:59:59.999999Z",
+        ),
+        ("2026-07-15 12:34:56.5+00", "2026-07-15T12:34:56.500000Z"),
+        ("0001-01-01 00:00:00+00", "0001-01-01T00:00:00.000000Z"),
+    ] {
+        let row =
+            graphql_orm::sqlx::query(&format!("SELECT '{literal}'::timestamptz AS happened_at"))
+                .fetch_one(&mut connection)
+                .await?;
+        let record = projection.decode_row::<PostgresBackend>(&row)?;
+        let field = schema.resolve_field(
+            &schema.resolve_collection(&cid("customers"))?,
+            &fid("happened_at"),
+        )?;
+        let RuntimeValue::DateTime(value) = record.value(&field)? else {
+            panic!("{literal} decoded as another kind");
+        };
+        assert_eq!(value.as_str(), expected, "{literal}");
+    }
+    drop(connection);
     drop(owned);
     Ok(())
 }

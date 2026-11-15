@@ -108,14 +108,43 @@ fn definition(formats: bool) -> RuntimeSchema {
                 ),
                 field("avatar", RuntimeValueKind::Uuid, true, file.clone()),
                 field("banner", RuntimeValueKind::Uuid, false, file),
+                field("coach", RuntimeValueKind::Integer, true, None),
             ],
-            relations: vec![],
+            // Each profile's mentor and the profiles it mentors.
+            relations: vec![
+                relation("mentor", "coach", "id", RelationCardinality::One),
+                relation("mentees", "id", "coach", RelationCardinality::Many),
+            ],
             indexes: vec![],
             composite_unique: vec![],
             default_order: vec![],
             label_fields: Vec::new(),
             search: None,
         }],
+    }
+}
+
+fn relation(
+    name: &str,
+    source: &str,
+    target: &str,
+    cardinality: RelationCardinality,
+) -> RuntimeRelation {
+    RuntimeRelation {
+        description: None,
+        classification: None,
+        export: None,
+        id: RelationId::new(name).unwrap(),
+        api_name: name.into(),
+        target: CollectionId::new("profiles").unwrap(),
+        key_pairs: vec![RelationKeyPair {
+            source: FieldId::new(source).unwrap(),
+            target: FieldId::new(target).unwrap(),
+        }],
+        cardinality,
+        enforce_foreign_key: false,
+        on_delete: None,
+        join: None,
     }
 }
 
@@ -391,6 +420,11 @@ impl Fixture {
             .await
             .unwrap();
         }
+        // Ada mentors Bob and Cy; Ada has no mentor.
+        sqlx::query("UPDATE format_profiles SET coach = 1 WHERE id IN (2, 3)")
+            .execute(db.pool())
+            .await
+            .unwrap();
         Self {
             db,
             schema,
@@ -735,6 +769,8 @@ fn compilation_rejects_missing_unsupported_and_colliding_projections() {
     let mut keyed = definition(true);
     keyed.collections[0].fields[0].format = Some(format(FILE_REF, 1));
     keyed.collections[0].fields[0].value_kind = RuntimeValueKind::Uuid;
+    // The mentor relations join `coach` to `id`: keep their key kinds equal.
+    keyed.collections[0].fields[5].value_kind = RuntimeValueKind::Uuid;
     let keyed = Arc::new(keyed.validate().unwrap());
     assert_eq!(
         RuntimeGraphqlModule::compile(
@@ -939,6 +975,246 @@ async fn failing_hooks_roll_back_staged_claims_and_concurrent_claims_cannot_both
             .unwrap();
     assert_eq!(rows, 1);
     f.finish().await;
+}
+
+/// The response budget charges a projected object once for every record that
+/// carries it, not once per distinct stored value, so a page that repeats one
+/// value is refused before the next projector runs (#528).
+#[tokio::test]
+async fn projection_budget_counts_every_record_that_shares_a_value() {
+    let f = Fixture::new().await;
+    let projector = FileProjector::new(true);
+    let api = f.api(f.options(&projector)).unwrap();
+    let read = read();
+    // Banners: two.png (rows 1 and 3) and one.png (row 2). The smallest budget
+    // for the banners alone pays for three copies; counted once per distinct
+    // value, one byte less would leave a whole copy to spare.
+    let banners = smallest_budget(
+        &api,
+        &f,
+        &read,
+        "{ profiles { edges { node { banner { name } } } } }",
+    )
+    .await;
+    let query = "{ profiles { edges { node { banner { name } avatar { name } } } } }";
+    let before = projector.calls.load(Ordering::SeqCst);
+    let response = api
+        .execute(f.request(
+            &read,
+            query,
+            RuntimeGraphqlLimits {
+                max_response_bytes: banners - 1,
+                ..Default::default()
+            },
+        ))
+        .await;
+    assert_eq!(codes(&response), ["cost_exceeded"]);
+    assert_eq!(
+        projector.calls.load(Ordering::SeqCst) - before,
+        1,
+        "the avatar projector ran after the banners exceeded the budget"
+    );
+    f.finish().await;
+}
+
+/// The smallest response budget that serves `query`.
+async fn smallest_budget(api: &Schema, f: &Fixture, read: &Arc<Read>, query: &str) -> usize {
+    let run = async |budget: usize| {
+        let limits = RuntimeGraphqlLimits {
+            max_response_bytes: budget,
+            ..Default::default()
+        };
+        api.execute(f.request(read, query, limits)).await
+    };
+    let maximum = RuntimeGraphqlLimits::default().max_response_bytes;
+    let served = run(maximum).await;
+    assert!(served.errors.is_empty(), "{query}: {:?}", served.errors);
+    let (mut low, mut high) = (1usize, maximum);
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if run(middle).await.errors.is_empty() {
+            high = middle;
+        } else {
+            low = middle + 1;
+        }
+    }
+    low
+}
+
+/// Mutation roots of one request share the response budget, projections
+/// included: at the smallest budget that serves both roots everything is
+/// returned, and one byte less refuses the second root's payload, not the
+/// first's. Both mutations commit either way (#528).
+#[tokio::test]
+async fn mutation_roots_share_the_response_budget_with_their_projections() {
+    let f = Fixture::new().await;
+    // Large projected names, so the committed payloads, not the planning
+    // estimate, decide which budgets are enough.
+    let mut projector = Arc::try_unwrap(FileProjector::new(true)).ok().unwrap();
+    projector.files = BTreeMap::from([
+        (uuid(1), ("o".repeat(2_000), 10)),
+        (uuid(2), ("t".repeat(2_000), 20)),
+    ]);
+    let projector = Arc::new(projector);
+    let api = f.api(f.options(&projector)).unwrap();
+    let read = read();
+    const BOTH: &str = r#"mutation($schema:String!){
+        a: updateProfile(expectedSchema:$schema, key:{id:"1"}, input:{name:"a"}) { record { banner { name } } }
+        b: updateProfile(expectedSchema:$schema, key:{id:"2"}, input:{name:"b"}) { record { banner { name } } }
+    }"#;
+    let run = async |budget: usize| {
+        // Every write claims its banner; clear the claims between requests.
+        sqlx::query("DELETE FROM format_file_claims")
+            .execute(f.db.pool())
+            .await
+            .unwrap();
+        let limits = RuntimeGraphqlLimits {
+            max_response_bytes: budget,
+            ..Default::default()
+        };
+        api.execute(f.request(&read, BOTH, limits)).await
+    };
+    let served = run(RuntimeGraphqlLimits::default().max_response_bytes).await;
+    assert!(served.errors.is_empty(), "{:?}", served.errors);
+    // The smallest budget that serves both roots.
+    let (mut low, mut high) = (1usize, RuntimeGraphqlLimits::default().max_response_bytes);
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if run(middle).await.errors.is_empty() {
+            high = middle;
+        } else {
+            low = middle + 1;
+        }
+    }
+    // Count the projected objects copied into responses from here on.
+    let copies = Arc::new(AtomicUsize::new(0));
+    let _copies = tracing::subscriber::set_default(Copies(copies.clone()));
+    let exact = run(low).await;
+    assert!(exact.errors.is_empty(), "{:?}", exact.errors);
+    assert_eq!(
+        copies.swap(0, Ordering::SeqCst),
+        2,
+        "both banners are copied"
+    );
+    sqlx::query("UPDATE format_profiles SET name = 'reset' WHERE id IN (1, 2)")
+        .execute(f.db.pool())
+        .await
+        .unwrap();
+    let short = run(low - 1).await;
+    assert_eq!(
+        codes(&short),
+        ["mutation_payload_failed"],
+        "{:?}",
+        short.errors
+    );
+    // Root `b`'s banner, the one over the remainder, is refused before it is
+    // copied: only root `a`'s is.
+    assert_eq!(
+        copies.load(Ordering::SeqCst),
+        1,
+        "the refused banner was copied"
+    );
+    // The first root was served; the second, the one over the remainder, is refused.
+    // Root `b` is on line 3 of the operation.
+    assert_eq!(
+        short.errors[0]
+            .locations
+            .iter()
+            .map(|pos| pos.line)
+            .collect::<Vec<_>>(),
+        [3],
+        "{:?}",
+        short.errors
+    );
+    let names: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM format_profiles WHERE id IN (1, 2) ORDER BY id")
+            .fetch_all(f.db.pool())
+            .await
+            .unwrap();
+    assert_eq!(names, ["a", "b"], "both mutations committed");
+    f.finish().await;
+}
+
+/// A read's whole response structure is reserved before its projected
+/// objects are copied: connection objects, edges, cursors and page fields;
+/// each parent's relation key; the null of a to-one relation without a
+/// related record; and every to-many connection, empty ones included. At the
+/// smallest budget that serves the query its last projection is copied; one
+/// byte less refuses before that copy, so the running total and the final
+/// measure count the same bytes (#528).
+#[tokio::test]
+async fn read_structure_is_reserved_before_projections_are_copied() {
+    let f = Fixture::new().await;
+    let projector = FileProjector::new(true);
+    let api = f.api(f.options(&projector)).unwrap();
+    let read = read();
+    for query in [
+        // Root connection overhead, after the only projection.
+        "{ profiles(orderBy:[{field:id}]) { totalCount pageInfo { hasNextPage endCursor } \
+            edges { cursor node { banner { name } } } } }",
+        // To-one: Ada's mentor is null; Bob's and Cy's is Ada.
+        "{ profiles(orderBy:[{field:id}]) { edges { node { id \
+            mentor { banner { name } } } } } }",
+        // To-many: Ada mentors two; Bob's and Cy's connections are empty.
+        "{ profiles(orderBy:[{field:id}]) { edges { node { id \
+            mentees(first:5) { totalCount pageInfo { endCursor } edges { cursor node { banner { name } } } } } } } }",
+    ] {
+        let run = async |budget: usize| {
+            let limits = RuntimeGraphqlLimits {
+                max_response_bytes: budget,
+                ..Default::default()
+            };
+            api.execute(f.request(&read, query, limits)).await
+        };
+        let served = run(RuntimeGraphqlLimits::default().max_response_bytes).await;
+        let low = smallest_budget(&api, &f, &read, query).await;
+        let copies = Arc::new(AtomicUsize::new(0));
+        let _copies = tracing::subscriber::set_default(Copies(copies.clone()));
+        let exact = run(low).await;
+        assert!(exact.errors.is_empty(), "{query}: {:?}", exact.errors);
+        assert_eq!(exact.data, served.data, "{query}");
+        assert_eq!(copies.swap(0, Ordering::SeqCst), 1, "{query}");
+        let short = run(low - 1).await;
+        assert_eq!(codes(&short), ["cost_exceeded"], "{query}");
+        assert_eq!(
+            copies.load(Ordering::SeqCst),
+            0,
+            "{query}: projected objects were copied before the response was refused"
+        );
+    }
+    f.finish().await;
+}
+
+/// Counts `graphql_orm::runtime_projection` events: one per projection call
+/// that copied objects into a response.
+struct Copies(Arc<AtomicUsize>);
+impl tracing::Subscriber for Copies {
+    // Ask per event: other tests' threads register and drop their own
+    // dispatchers, so a cached callsite interest could miss this one's events.
+    fn register_callsite(
+        &self,
+        _: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        tracing::subscriber::Interest::sometimes()
+    }
+    fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
+        Some(tracing::level_filters::LevelFilter::TRACE)
+    }
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        metadata.target() == "graphql_orm::runtime_projection"
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        if event.metadata().target() == "graphql_orm::runtime_projection" {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
 }
 
 #[tokio::test]

@@ -538,14 +538,15 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
             })
             .collect::<Vec<_>>();
         if let Some(visible) = visible {
-            // Unqualified predicate columns resolve to the target row of the subquery.
+            // Unqualified predicate columns resolve to the target row of the
+            // subquery; its relation predicates correlate with the alias.
+            let target = d.quote_identifier("graphql_orm_target");
             let correlation = side
                 .other
                 .iter()
                 .map(|(field, column)| {
                     format!(
-                        "{}.{} = {alias}.{}",
-                        d.quote_identifier("graphql_orm_target"),
+                        "{target}.{} = {alias}.{}",
                         d.quote_identifier(field.physical_column()),
                         d.quote_identifier(column)
                     )
@@ -553,10 +554,9 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
                 .collect::<Vec<_>>()
                 .join(" AND ");
             condition.push(format!(
-                "EXISTS (SELECT 1 FROM {} AS {} WHERE {correlation} AND ({}))",
+                "EXISTS (SELECT 1 FROM {} AS {target} WHERE {correlation} AND ({}))",
                 d.quote_identifier(side.other_collection.physical_table()),
-                d.quote_identifier("graphql_orm_target"),
-                visible.render(d, &mut values)
+                visible.render_for_alias(d, &mut values, &target)
             ));
         }
         if values.len() > request.limits.query.max_bind_parameters {

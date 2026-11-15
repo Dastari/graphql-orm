@@ -1252,3 +1252,932 @@ async fn enforcement_passed_through_execute_data_still_refuses_in_resolvers() {
     );
     f.finish().await;
 }
+
+/// A query or mutation sent through `execute_stream` never reaches the request
+/// guard's `execute` hook, so nothing is prepared. Every runtime root, ORM or
+/// host, refuses with the one stable `request_not_prepared` code: no host
+/// resolver, read or write authority, or database connection runs, and no
+/// internal type name reaches the client (#578).
+#[tokio::test]
+async fn queries_and_mutations_over_execute_stream_refuse_unprepared() {
+    let f = Fixture::new().await;
+    let lookups = Arc::new(AtomicUsize::new(0));
+    let calls = lookups.clone();
+    let api = f
+        .composer()
+        .query_field(RuntimeHostField::new(
+            "hostLookup",
+            TypeRef::named_nn(TypeRef::BOOLEAN),
+            move |_| {
+                let calls = calls.clone();
+                FieldFuture::new(async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(Some(FieldValue::value(true)))
+                })
+            },
+        ))
+        .unwrap()
+        .finish()
+        .unwrap();
+    let id = graphql_orm::graphql::federation::encode_node_id("Event", vec!["e1".into()]);
+    let id = serde_json::to_string(&id.0).unwrap();
+    let mut operations = vec![
+        (
+            "posts".to_owned(),
+            "{ posts { edges { node { id } } } }".to_owned(),
+            1,
+        ),
+        (
+            "node".to_owned(),
+            format!("{{ node(NodeId: {id}) {{ NodeId }} }}"),
+            1,
+        ),
+        ("hostLookup".to_owned(), "{ hostLookup }".to_owned(), 1),
+        (
+            "mixed".to_owned(),
+            "{ hostLookup posts { edges { node { id } } } }".to_owned(),
+            2,
+        ),
+    ];
+    operations.extend(
+        MUTATIONS
+            .iter()
+            .map(|(root, query)| ((*root).to_owned(), (*query).to_owned(), 1)),
+    );
+    for (root, query, errors) in &operations {
+        f.reads.lock().unwrap().clear();
+        let before = f.acquisitions.load(Ordering::SeqCst);
+        let response = api
+            .execute_stream(f.request(query))
+            .next()
+            .await
+            .expect("one response");
+        let response = serde_json::to_value(response).unwrap();
+        let listed = response["errors"].as_array().cloned().unwrap_or_default();
+        assert_eq!(listed.len(), *errors, "{root}: {response}");
+        for error in &listed {
+            assert_eq!(
+                error["message"], "request_not_prepared",
+                "{root}: {response}"
+            );
+            assert_eq!(
+                error["extensions"]["code"], "request_not_prepared",
+                "{root}: {response}"
+            );
+        }
+        let text = response.to_string();
+        assert!(
+            !text.contains("graphql_orm") && !text.contains("does not exist"),
+            "{root} exposed an internal type: {text}"
+        );
+        assert_eq!(*f.reads.lock().unwrap(), Vec::<String>::new(), "{root}");
+        assert_eq!(
+            f.acquisitions.load(Ordering::SeqCst),
+            before,
+            "{root} reached the database"
+        );
+        assert_eq!(f.intents.load(Ordering::SeqCst), 0, "{root}");
+        assert_eq!(f.host_calls.load(Ordering::SeqCst), 0, "{root}");
+        assert_eq!(lookups.load(Ordering::SeqCst), 0, "{root}");
+    }
+    assert_eq!(f.count("ra_post").await, 1);
+    assert_eq!(f.count("ra_post_tags").await, 0);
+    assert_eq!(f.label().await.as_deref(), Some("first"));
+    // The same operations still run through `Schema::execute`.
+    let response = f
+        .run(&api, "{ hostLookup posts { edges { node { id } } } }")
+        .await;
+    assert!(response.get("errors").is_none(), "{response}");
+    assert_eq!(lookups.load(Ordering::SeqCst), 1);
+    f.finish().await;
+}
+
+impl Fixture {
+    /// Runs `query` with exactly `variables`, returning the response and the
+    /// collections the host read authority checked.
+    async fn observe_with(
+        &self,
+        api: &Schema,
+        query: &str,
+        variables: Value,
+    ) -> (Value, Vec<String>) {
+        self.reads.lock().unwrap().clear();
+        let mut request = self.request(query);
+        request.variables = Variables::from_json(variables);
+        let response = serde_json::to_value(api.execute(request).await).unwrap();
+        (response, std::mem::take(&mut *self.reads.lock().unwrap()))
+    }
+}
+
+/// `@skip`/`@include` read an omitted variable's operation default, in the
+/// request guard and in execution alike: a root or field the guard leaves out
+/// is not executed, and one it prepares is returned (#582).
+#[tokio::test]
+async fn skip_and_include_agree_with_execution_when_variable_defaults_apply() {
+    let f = Fixture::new().await;
+    let api = f.composer().finish().unwrap();
+    const POSTS: &str = "posts { edges { node { id } } }";
+    for (directive, default, variables, executed) in [
+        ("skip", "true", json!({}), false),
+        ("skip", "false", json!({}), true),
+        ("skip", "true", json!({"v": false}), true),
+        ("skip", "false", json!({"v": true}), false),
+        ("include", "true", json!({}), true),
+        ("include", "false", json!({}), false),
+        ("include", "true", json!({"v": false}), false),
+        ("include", "false", json!({"v": true}), true),
+    ] {
+        let query = format!(
+            "query($v: Boolean = {default}) {{ posts @{directive}(if: $v) {{ edges {{ node {{ id }} }} }} tags {{ edges {{ node {{ label }} }} }} }}"
+        );
+        let (response, reads) = f.observe_with(&api, &query, variables.clone()).await;
+        let case = format!("{directive} = {default} with {variables}");
+        assert!(response.get("errors").is_none(), "{case}: {response}");
+        assert_eq!(response["data"]["tags"]["edges"][0]["node"]["label"], "red");
+        if executed {
+            assert_eq!(
+                response["data"]["posts"]["edges"][0]["node"]["id"], "1",
+                "{case}: {response}"
+            );
+            assert_eq!(reads, ["post", "tag"], "{case}");
+        } else {
+            assert!(
+                response["data"].get("posts").is_none(),
+                "{case}: {response}"
+            );
+            assert_eq!(reads, ["tag"], "{case}: a skipped root was prepared");
+        }
+    }
+    // A nested field the guard leaves out is not resolved either.
+    for (directive, default, present) in [("skip", "true", false), ("include", "true", true)] {
+        let query = format!(
+            "query($v: Boolean = {default}) {{ posts {{ edges {{ node {{ id label @{directive}(if: $v) }} }} }} }}"
+        );
+        let (response, _) = f.observe_with(&api, &query, json!({})).await;
+        assert!(response.get("errors").is_none(), "{query}: {response}");
+        let node = &response["data"]["posts"]["edges"][0]["node"];
+        assert_eq!(node.get("label").is_some(), present, "{query}: {response}");
+    }
+    // The same through a fragment spread and an inline fragment.
+    let (response, reads) = f
+        .observe_with(
+            &api,
+            &format!(
+                "query($v: Boolean = true) {{ ...Posts @skip(if: $v) ... @include(if: $v) {{ tags {{ edges {{ node {{ label }} }} }} }} }} fragment Posts on Query {{ {POSTS} }}"
+            ),
+            json!({}),
+        )
+        .await;
+    assert!(response.get("errors").is_none(), "{response}");
+    assert!(response["data"].get("posts").is_none(), "{response}");
+    assert_eq!(reads, ["tag"]);
+    f.finish().await;
+}
+
+/// A host input object holding runtime scalars, for host-field arguments.
+fn echo_input() -> async_graphql::dynamic::InputObject {
+    use async_graphql::dynamic::{InputObject, InputValue};
+    InputObject::new("EchoInput")
+        .field(InputValue::new("when", TypeRef::named("RuntimeDateTime")))
+        .field(InputValue::new("at", TypeRef::named("RuntimeDateTime")))
+}
+
+/// Host-field arguments are validated with the operation's variable defaults
+/// applied, so a literal out of the runtime scalar bounds never reaches the
+/// host resolver beside an omitted variable; a non-object value for a host
+/// input object is refused too (#583).
+#[tokio::test]
+async fn host_field_arguments_are_validated_after_variable_defaults_apply() {
+    let f = Fixture::new().await;
+    let echoes = Arc::new(AtomicUsize::new(0));
+    let calls = echoes.clone();
+    let api = f
+        .composer()
+        .register(echo_input().into())
+        .unwrap()
+        .query_field(
+            RuntimeHostField::new("echo", TypeRef::named_nn(TypeRef::BOOLEAN), move |_| {
+                let calls = calls.clone();
+                FieldFuture::new(async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(Some(FieldValue::value(true)))
+                })
+            })
+            .argument("input", TypeRef::named("EchoInput"), None)
+            .unwrap()
+            .argument("inputs", TypeRef::named_list("EchoInput"), None)
+            .unwrap(),
+        )
+        .unwrap()
+        .finish()
+        .unwrap();
+    const FAR: &str = "+10000-01-01T00:00:00Z";
+    for (query, variables) in [
+        // An omitted variable with a default inside an object literal.
+        (
+            format!(
+                "query($t: RuntimeDateTime = \"2020-01-01T00:00:00Z\") {{ echo(input: {{when: \"{FAR}\", at: $t}}) }}"
+            ),
+            json!({}),
+        ),
+        // ... inside a list literal.
+        (
+            format!(
+                "query($t: RuntimeDateTime = \"2020-01-01T00:00:00Z\") {{ echo(inputs: [{{when: \"{FAR}\"}}, {{at: $t}}]) }}"
+            ),
+            json!({}),
+        ),
+        // An omitted nullable variable without a default.
+        (
+            format!("query($t: RuntimeDateTime) {{ echo(input: {{when: \"{FAR}\", at: $t}}) }}"),
+            json!({}),
+        ),
+        // A non-object value for a host input object.
+        ("{ echo(input: 5) }".to_owned(), json!({})),
+        ("{ echo(inputs: [true]) }".to_owned(), json!({})),
+        (
+            "query($i: EchoInput) { echo(input: $i) }".to_owned(),
+            json!({"i": "not an object"}),
+        ),
+    ] {
+        let (response, _) = f.observe_with(&api, &query, variables).await;
+        let errors = response["errors"].as_array().cloned().unwrap_or_default();
+        assert_eq!(errors.len(), 1, "{query}: {response}");
+        assert_eq!(
+            errors[0]["message"], "invalid_graphql_input",
+            "{query}: {response}"
+        );
+        assert!(!response.to_string().contains("10000"), "{response}");
+        assert_eq!(
+            echoes.load(Ordering::SeqCst),
+            0,
+            "{query} reached the host resolver"
+        );
+    }
+    // Valid values, defaults included, still run.
+    let (response, _) = f
+        .observe_with(
+            &api,
+            "query($t: RuntimeDateTime = \"2020-01-01T00:00:00Z\") { echo(input: {when: \"2021-01-01T00:00:00Z\", at: $t}) }",
+            json!({}),
+        )
+        .await;
+    assert!(response.get("errors").is_none(), "{response}");
+    assert_eq!(echoes.load(Ordering::SeqCst), 1);
+    f.finish().await;
+}
+
+/// Argument defaults declared by the host are input the request never
+/// validates, so composition checks every one of them against its type:
+/// runtime scalar bounds, host input objects, and arguments of host types
+/// added through `register` or `subscription_root` (#583).
+#[tokio::test]
+async fn composition_refuses_host_argument_defaults_outside_their_types() {
+    use async_graphql::dynamic::{
+        Field, InputValue, Object, Subscription, SubscriptionField, SubscriptionFieldFuture,
+    };
+    let f = Fixture::new().await;
+    const FAR: &str = "+10000-01-01T00:00:00Z";
+    let refused = |result: Result<Schema, RuntimeGraphqlError>| {
+        assert_eq!(
+            result.err().map(RuntimeGraphqlError::code),
+            Some("invalid_composition")
+        );
+    };
+    fn flag(_: async_graphql::dynamic::ResolverContext<'_>) -> FieldFuture<'_> {
+        FieldFuture::new(async { Ok(Some(FieldValue::value(true))) })
+    }
+    // A host-field default typed with a host input object.
+    refused(
+        f.composer()
+            .register(echo_input().into())
+            .unwrap()
+            .query_field(
+                RuntimeHostField::new("echo", TypeRef::named_nn(TypeRef::BOOLEAN), flag)
+                    .argument(
+                        "input",
+                        TypeRef::named("EchoInput"),
+                        Some(async_graphql::value!({"when": FAR})),
+                    )
+                    .unwrap(),
+            )
+            .unwrap()
+            .finish(),
+    );
+    refused(
+        f.composer()
+            .register(echo_input().into())
+            .unwrap()
+            .query_field(
+                RuntimeHostField::new("echo", TypeRef::named_nn(TypeRef::BOOLEAN), flag)
+                    .argument(
+                        "input",
+                        TypeRef::named("EchoInput"),
+                        Some(async_graphql::value!(5)),
+                    )
+                    .unwrap(),
+            )
+            .unwrap()
+            .finish(),
+    );
+    // An argument default of a host object added through `register`.
+    let host_object = |default: &str| {
+        Object::new("Clock").field(
+            Field::new("tick", TypeRef::named(TypeRef::BOOLEAN), flag).argument(
+                InputValue::new("at", TypeRef::named("RuntimeDateTime"))
+                    .default_value(default.to_owned()),
+            ),
+        )
+    };
+    let with_object = |default: &str| {
+        f.composer()
+            .register(host_object(default).into())
+            .unwrap()
+            .query_field(RuntimeHostField::new(
+                "clock",
+                TypeRef::named("Clock"),
+                |_| FieldFuture::new(async { Ok(None::<FieldValue>) }),
+            ))
+            .unwrap()
+            .finish()
+    };
+    refused(with_object(FAR));
+    assert!(with_object("2020-01-01T00:00:00Z").is_ok());
+    // An argument default of a host subscription root field, beside a module
+    // without live collections.
+    let plain = Arc::new(
+        RuntimeSchema {
+            repository_only: false,
+            format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
+            collections: vec![collection("tag", "Tag", "Tags")],
+        }
+        .validate()
+        .unwrap(),
+    );
+    let with_subscription = |default: &str| {
+        RuntimeGraphqlComposer::<Backend>::new(f.db.clone(), "Query", Default::default())
+            .unwrap()
+            .install(
+                RuntimeGraphqlModule::compile(
+                    plain.clone(),
+                    RuntimeGraphqlOptions::default()
+                        .with_cursor_profile(RuntimeCursorProfile::Unprotected),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .subscription_root(
+                Subscription::new("HostSubscription").field(
+                    SubscriptionField::new("pulse", TypeRef::named_nn(TypeRef::BOOLEAN), |_| {
+                        SubscriptionFieldFuture::new(async {
+                            Ok(futures::stream::iter([Ok(FieldValue::value(true))]))
+                        })
+                    })
+                    .argument(
+                        InputValue::new("at", TypeRef::named("RuntimeDateTime"))
+                            .default_value(default.to_owned()),
+                    ),
+                ),
+            )
+            .unwrap()
+            .finish()
+    };
+    refused(with_subscription(FAR));
+    assert!(with_subscription("2020-01-01T00:00:00Z").is_ok());
+    f.finish().await;
+}
+
+/// Without any subscription root, async-graphql refuses a streamed query
+/// before preparation with its own uncoded message. It is still refused and
+/// does no work; no placeholder subscription root changes the SDL (#578).
+#[tokio::test]
+async fn streamed_queries_without_a_subscription_root_are_refused_without_work() {
+    let f = Fixture::new().await;
+    let lookups = Arc::new(AtomicUsize::new(0));
+    let calls = lookups.clone();
+    let plain = Arc::new(
+        RuntimeSchema {
+            repository_only: false,
+            format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
+            collections: vec![collection("tag", "Tag", "Tags")],
+        }
+        .validate()
+        .unwrap(),
+    );
+    let api = RuntimeGraphqlComposer::<Backend>::new(f.db.clone(), "Query", Default::default())
+        .unwrap()
+        .install(
+            RuntimeGraphqlModule::compile(
+                plain.clone(),
+                RuntimeGraphqlOptions::default()
+                    .with_cursor_profile(RuntimeCursorProfile::Unprotected),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .query_field(RuntimeHostField::new(
+            "hostLookup",
+            TypeRef::named_nn(TypeRef::BOOLEAN),
+            move |_| {
+                let calls = calls.clone();
+                FieldFuture::new(async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(Some(FieldValue::value(true)))
+                })
+            },
+        ))
+        .unwrap()
+        .finish()
+        .unwrap();
+    assert!(!api.sdl().contains("type Subscription"));
+    let request = || {
+        Request::new("{ hostLookup tags { edges { node { id } } } }").data(RuntimeGraphqlRequest::<
+            Backend,
+        >::new(
+            plain.fingerprint(),
+            Arc::new(Reads(f.reads.clone())),
+            None,
+            Default::default(),
+        ))
+    };
+    f.reads.lock().unwrap().clear();
+    let before = f.acquisitions.load(Ordering::SeqCst);
+    let response = api
+        .execute_stream(request())
+        .next()
+        .await
+        .expect("one response");
+    let response = serde_json::to_value(response).unwrap();
+    assert!(
+        !response["errors"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .is_empty(),
+        "{response}"
+    );
+    assert_eq!(response["data"], Value::Null, "{response}");
+    assert!(!response.to_string().contains("graphql_orm"), "{response}");
+    assert_eq!(*f.reads.lock().unwrap(), Vec::<String>::new());
+    assert_eq!(f.acquisitions.load(Ordering::SeqCst), before);
+    assert_eq!(lookups.load(Ordering::SeqCst), 0);
+    // `Schema::execute` serves the same request.
+    let served = serde_json::to_value(api.execute(request()).await).unwrap();
+    assert!(served.get("errors").is_none(), "{served}");
+    assert_eq!(lookups.load(Ordering::SeqCst), 1);
+    f.finish().await;
+}
+
+/// Tag labels returned by a `tags` query, or the error messages.
+fn tag_labels(response: &Value) -> Result<Vec<String>, Vec<String>> {
+    if let Some(errors) = response["errors"].as_array() {
+        return Err(errors
+            .iter()
+            .map(|e| e["message"].as_str().unwrap_or_default().to_owned())
+            .collect());
+    }
+    Ok(response["data"]["tags"]["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|edge| edge["node"]["label"].as_str().unwrap().to_owned())
+        .collect())
+}
+
+/// Operation defaults of every shape reach ORM roots exactly as GraphQL
+/// variable coercion defines them: objects, lists, enums and `null`, an
+/// explicit `null` overriding a default, and a single value coerced to a
+/// list (#582).
+#[tokio::test]
+async fn orm_arguments_receive_coerced_variable_defaults() {
+    let f = Fixture::new().await;
+    Backend::fetch_rows(
+        f.db.pool(),
+        "INSERT INTO ra_tag (id, label) VALUES (11, 'blue'), (12, 'green')",
+        &[],
+    )
+    .await
+    .unwrap();
+    let api = f.composer().finish().unwrap();
+    const PAGE: &str = "edges { node { label } }";
+    let all = ["red", "blue", "green"];
+    let cases: &[(&str, Value, &[&str])] = &[
+        // An object default, overridden by an explicit value or `null`.
+        (
+            "query($w: TagWhereInput = {label: {eq: \"blue\"}}) { tags(where: $w, orderBy: [{field: id}]) { PAGE } }",
+            json!({}),
+            &["blue"],
+        ),
+        (
+            "query($w: TagWhereInput = {label: {eq: \"blue\"}}) { tags(where: $w, orderBy: [{field: id}]) { PAGE } }",
+            json!({"w": {"label": {"eq": "green"}}}),
+            &["green"],
+        ),
+        (
+            "query($w: TagWhereInput = {label: {eq: \"blue\"}}) { tags(where: $w, orderBy: [{field: id}]) { PAGE } }",
+            json!({"w": null}),
+            &all,
+        ),
+        // A `null` default, and an omitted nullable variable without one.
+        (
+            "query($w: TagWhereInput = null) { tags(where: $w, orderBy: [{field: id}]) { PAGE } }",
+            json!({}),
+            &all,
+        ),
+        (
+            "query($l: String) { tags(where: {label: {eq: $l}}, orderBy: [{field: id}]) { PAGE } }",
+            json!({}),
+            &all,
+        ),
+        // A list default, and single values coerced to a one-element list.
+        (
+            "query($ids: [RuntimeInt64!] = [\"10\", \"12\"]) { tags(where: {id: {in: $ids}}, orderBy: [{field: id}]) { PAGE } }",
+            json!({}),
+            &["red", "green"],
+        ),
+        (
+            "query($ids: [RuntimeInt64!] = \"11\") { tags(where: {id: {in: $ids}}, orderBy: [{field: id}]) { PAGE } }",
+            json!({}),
+            &["blue"],
+        ),
+        (
+            "{ tags(where: {id: {in: \"11\"}}, orderBy: [{field: id}]) { PAGE } }",
+            json!({}),
+            &["blue"],
+        ),
+        // An enum default inside a list of input objects.
+        (
+            "query($d: RuntimeOrderDirection = DESC) { tags(orderBy: [{field: id, direction: $d}]) { PAGE } }",
+            json!({}),
+            &["green", "blue", "red"],
+        ),
+        (
+            "query($d: RuntimeOrderDirection = DESC) { tags(orderBy: [{field: id, direction: $d}]) { PAGE } }",
+            json!({"d": "ASC"}),
+            &all,
+        ),
+    ];
+    for (query, variables, expected) in cases {
+        let query = query.replace("PAGE", PAGE);
+        let (response, _) = f.observe_with(&api, &query, variables.clone()).await;
+        assert_eq!(
+            tag_labels(&response),
+            Ok(expected.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>()),
+            "{query} with {variables}"
+        );
+    }
+    f.finish().await;
+}
+
+/// Host arguments are validated with the values execution resolves, for every
+/// input shape: custom scalar validators, object, list, enum and `null`
+/// defaults, omitted versus explicit `null`, single values coerced to a list,
+/// and conflicting aliased fields (#583).
+#[tokio::test]
+async fn host_arguments_are_validated_for_every_input_shape() {
+    use async_graphql::dynamic::{Enum, EnumItem, InputObject, InputValue, Scalar};
+    let f = Fixture::new().await;
+    // Every resolved argument map, exactly as the host resolver receives it.
+    let resolved = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let echo = |name: &str| {
+        let resolved = resolved.clone();
+        RuntimeHostField::new(name, TypeRef::named_nn(TypeRef::BOOLEAN), move |ctx| {
+            let arguments = async_graphql::Value::Object(ctx.args.as_index_map().clone());
+            resolved
+                .lock()
+                .unwrap()
+                .push(arguments.into_json().unwrap());
+            FieldFuture::new(async move { Ok(Some(FieldValue::value(true))) })
+        })
+    };
+    let api = f
+        .composer()
+        .register(
+            Scalar::new("Even")
+                .validator(|value| matches!(value, async_graphql::Value::Number(n) if n.as_i64().is_some_and(|n| n % 2 == 0)))
+                .into(),
+        )
+        .unwrap()
+        .register(
+            Enum::new("EchoMode")
+                .item(EnumItem::new("FAST"))
+                .item(EnumItem::new("SLOW"))
+                .into(),
+        )
+        .unwrap()
+        .register(
+            InputObject::new("EchoInput")
+                .field(InputValue::new("when", TypeRef::named("RuntimeDateTime")))
+                .field(InputValue::new("at", TypeRef::named("RuntimeDateTime")))
+                .field(InputValue::new("even", TypeRef::named("Even")))
+                .into(),
+        )
+        .unwrap()
+        .query_field(
+            echo("echo")
+                .argument("input", TypeRef::named("EchoInput"), None)
+                .unwrap()
+                .argument("inputs", TypeRef::named_list("EchoInput"), None)
+                .unwrap()
+                .argument("even", TypeRef::named("Even"), None)
+                .unwrap()
+                .argument("mode", TypeRef::named("EchoMode"), None)
+                .unwrap(),
+        )
+        .unwrap()
+        .query_field(
+            echo("need")
+                .argument("value", TypeRef::named_nn("Even"), None)
+                .unwrap(),
+        )
+        .unwrap()
+        .finish()
+        .unwrap();
+    const FAR: &str = "\"+10000-01-01T00:00:00Z\"";
+    const NEAR: &str = "\"2021-01-01T00:00:00Z\"";
+    const NEAR_VALUE: &str = "2021-01-01T00:00:00Z";
+    // `Some(arguments)`: accepted, and the resolver must receive exactly these
+    // arguments. `None`: refused before the resolver runs.
+    let cases: Vec<(String, Value, Option<Value>)> = vec![
+        // A custom scalar with a validator: defaults, variables and literals.
+        (
+            "query($e: Even = 3) { echo(even: $e) }".into(),
+            json!({}),
+            None,
+        ),
+        (
+            "query($e: Even = 4) { echo(even: $e) }".into(),
+            json!({}),
+            Some(json!({"even": 4})),
+        ),
+        (
+            "query($e: Even) { echo(even: $e) }".into(),
+            json!({"e": 5}),
+            None,
+        ),
+        (
+            "query($e: Even) { echo(even: $e) }".into(),
+            json!({"e": 8}),
+            Some(json!({"even": 8})),
+        ),
+        (
+            format!("query($t: RuntimeDateTime = {NEAR}) {{ echo(input: {{even: 3, at: $t}}) }}"),
+            json!({}),
+            None,
+        ),
+        (
+            format!("query($t: RuntimeDateTime = {NEAR}) {{ echo(input: {{even: 2, at: $t}}) }}"),
+            json!({}),
+            Some(json!({"input": {"even": 2, "at": NEAR_VALUE}})),
+        ),
+        // Object, list, enum and null defaults.
+        (
+            format!("query($i: EchoInput = {{when: {FAR}}}) {{ echo(input: $i) }}"),
+            json!({}),
+            None,
+        ),
+        (
+            format!("query($i: EchoInput = {{when: {NEAR}}}) {{ echo(input: $i) }}"),
+            json!({}),
+            Some(json!({"input": {"when": NEAR_VALUE}})),
+        ),
+        (
+            format!(
+                "query($l: [EchoInput!] = [{{when: {NEAR}}}, {{when: {FAR}}}]) {{ echo(inputs: $l) }}"
+            ),
+            json!({}),
+            None,
+        ),
+        (
+            format!(
+                "query($l: [EchoInput!] = [{{when: {NEAR}}}, {{even: 6}}]) {{ echo(inputs: $l) }}"
+            ),
+            json!({}),
+            Some(json!({"inputs": [{"when": NEAR_VALUE}, {"even": 6}]})),
+        ),
+        (
+            "query($m: EchoMode = FAST) { echo(mode: $m) }".into(),
+            json!({}),
+            Some(json!({"mode": "FAST"})),
+        ),
+        (
+            "query($m: EchoMode = FAST) { echo(mode: $m) }".into(),
+            json!({"m": "SLOW"}),
+            Some(json!({"mode": "SLOW"})),
+        ),
+        (
+            "query($m: EchoMode = FAST) { echo(mode: $m) }".into(),
+            json!({"m": "MEDIUM"}),
+            None,
+        ),
+        (
+            "query($i: EchoInput = null) { echo(input: $i) }".into(),
+            json!({}),
+            Some(json!({"input": null})),
+        ),
+        // An omitted nullable variable without a default resolves to null.
+        (
+            "query($i: EchoInput) { echo(input: $i) }".into(),
+            json!({}),
+            Some(json!({"input": null})),
+        ),
+        // An explicit value overrides an object default; so does explicit null.
+        (
+            format!("query($i: EchoInput = {{when: {NEAR}}}) {{ echo(input: $i) }}"),
+            json!({"i": {"even": 10}}),
+            Some(json!({"input": {"even": 10}})),
+        ),
+        (
+            format!("query($i: EchoInput = {{when: {NEAR}}}) {{ echo(input: $i) }}"),
+            json!({"i": null}),
+            Some(json!({"input": null})),
+        ),
+        // Omitted versus explicit null for a non-null argument with a default.
+        (
+            "query($e: Even = 4) { need(value: $e) }".into(),
+            json!({}),
+            Some(json!({"value": 4})),
+        ),
+        (
+            "query($e: Even = 4) { need(value: $e) }".into(),
+            json!({"e": null}),
+            None,
+        ),
+        // A single value for a list argument: validated as a one-element list
+        // and passed to the dynamic resolver as written.
+        (
+            format!("{{ echo(inputs: {{when: {FAR}}}) }}"),
+            json!({}),
+            None,
+        ),
+        (
+            format!("{{ echo(inputs: {{when: {NEAR}}}) }}"),
+            json!({}),
+            Some(json!({"inputs": {"when": NEAR_VALUE}})),
+        ),
+        (
+            format!("query($i: EchoInput = {{when: {NEAR}}}) {{ echo(inputs: $i) }}"),
+            json!({}),
+            Some(json!({"inputs": {"when": NEAR_VALUE}})),
+        ),
+        // Conflicting aliased fields.
+        (
+            "{ a: echo(even: 4) a: echo(even: 6) }".into(),
+            json!({}),
+            None,
+        ),
+        (
+            "{ a: echo(even: 4) a: echo(even: 3) }".into(),
+            json!({}),
+            None,
+        ),
+    ];
+    for (query, variables, expected) in cases {
+        resolved.lock().unwrap().clear();
+        let (response, _) = f.observe_with(&api, &query, variables.clone()).await;
+        let received = std::mem::take(&mut *resolved.lock().unwrap());
+        match expected {
+            Some(arguments) => {
+                assert!(
+                    response.get("errors").is_none(),
+                    "{query} with {variables}: {response}"
+                );
+                assert_eq!(received, [arguments], "{query} with {variables}");
+            }
+            None => {
+                let errors = response["errors"].as_array().cloned().unwrap_or_default();
+                assert_eq!(errors.len(), 1, "{query} with {variables}: {response}");
+                assert_eq!(
+                    errors[0]["message"], "invalid_graphql_input",
+                    "{query}: {response}"
+                );
+                assert!(
+                    received.is_empty(),
+                    "{query} reached the host resolver: {received:?}"
+                );
+            }
+        }
+    }
+    f.finish().await;
+}
+
+/// Replaces the request's document, as a persisted-document extension does,
+/// either before parsing (`prepare_request`) or after it (`parse_query`).
+struct Persisted {
+    query: &'static str,
+    after_parse: bool,
+}
+impl async_graphql::extensions::ExtensionFactory for Persisted {
+    fn create(&self) -> Arc<dyn async_graphql::extensions::Extension> {
+        Arc::new(Persisted {
+            query: self.query,
+            after_parse: self.after_parse,
+        })
+    }
+}
+#[async_graphql::async_trait::async_trait]
+impl async_graphql::extensions::Extension for Persisted {
+    async fn prepare_request(
+        &self,
+        ctx: &async_graphql::extensions::ExtensionContext<'_>,
+        mut request: Request,
+        next: async_graphql::extensions::NextPrepareRequest<'_>,
+    ) -> async_graphql::ServerResult<Request> {
+        if !self.after_parse {
+            request.query = self.query.to_owned();
+        }
+        next.run(ctx, request).await
+    }
+    async fn parse_query(
+        &self,
+        ctx: &async_graphql::extensions::ExtensionContext<'_>,
+        query: &str,
+        variables: &Variables,
+        next: async_graphql::extensions::NextParseQuery<'_>,
+    ) -> async_graphql::ServerResult<async_graphql::parser::types::ExecutableDocument> {
+        let document = next.run(ctx, query, variables).await?;
+        if !self.after_parse {
+            return Ok(document);
+        }
+        Ok(async_graphql::parser::parse_query(self.query).unwrap())
+    }
+}
+
+/// A persisted document substituted before parsing gets its defaults like any
+/// other. One substituted after parsing, whose defaulted variables the request
+/// therefore lacks, is refused before any read or host resolver (#582, #583).
+#[tokio::test]
+async fn persisted_documents_get_defaults_or_are_refused() {
+    let f = Fixture::new().await;
+    const SKIPPED: &str = "query($v: Boolean = true) { posts @skip(if: $v) { edges { node { id } } } tags { edges { node { label } } } }";
+    let api = |after_parse| {
+        f.composer()
+            .register(echo_input().into())
+            .unwrap()
+            .query_field(
+                f.host_field_named("echo")
+                    .argument("input", TypeRef::named("EchoInput"), None)
+                    .unwrap(),
+            )
+            .unwrap()
+            .extension(Persisted {
+                query: SKIPPED,
+                after_parse,
+            })
+            .finish()
+            .unwrap()
+    };
+    let (response, reads) = f
+        .observe_with(&api(false), "{ __typename }", json!({}))
+        .await;
+    assert!(response.get("errors").is_none(), "{response}");
+    assert!(response["data"].get("posts").is_none(), "{response}");
+    assert_eq!(reads, ["tag"]);
+    let (response, reads) = f
+        .observe_with(&api(true), "{ __typename }", json!({}))
+        .await;
+    assert_eq!(
+        response["errors"][0]["message"], "invalid_graphql_input",
+        "{response}"
+    );
+    assert_eq!(reads, Vec::<String>::new());
+    // A host root alone is refused the same way, before its resolver runs.
+    let host = f
+        .composer()
+        .register(echo_input().into())
+        .unwrap()
+        .query_field(
+            f.host_field_named("echo")
+                .argument("input", TypeRef::named("EchoInput"), None)
+                .unwrap(),
+        )
+        .unwrap()
+        .extension(Persisted {
+            query: "query($t: RuntimeDateTime = \"2020-01-01T00:00:00Z\") { echo(input: {at: $t}) }",
+            after_parse: true,
+        })
+        .finish()
+        .unwrap();
+    let before = f.host_calls.load(Ordering::SeqCst);
+    let (response, _) = f.observe_with(&host, "{ __typename }", json!({})).await;
+    assert_eq!(
+        response["errors"][0]["message"], "invalid_graphql_input",
+        "{response}"
+    );
+    assert_eq!(f.host_calls.load(Ordering::SeqCst), before);
+    f.finish().await;
+}
+
+impl Fixture {
+    /// A host query field counted in `host_calls`.
+    fn host_field_named(&self, name: &str) -> RuntimeHostField {
+        let calls = self.host_calls.clone();
+        RuntimeHostField::new(name, TypeRef::named_nn(TypeRef::BOOLEAN), move |_| {
+            let calls = calls.clone();
+            FieldFuture::new(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(FieldValue::value(true)))
+            })
+        })
+    }
+}

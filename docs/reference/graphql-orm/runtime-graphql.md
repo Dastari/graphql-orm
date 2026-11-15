@@ -3,7 +3,7 @@ title: Runtime GraphQL reads and checked composition
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-11
+last_reviewed: 2026-11-14
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -72,11 +72,27 @@ let request = Request::new("{ notes(first:20) { edges { node { label } } totalCo
 let response = api.execute(request).await;
 ```
 
+Serve runtime queries and mutations with `Schema::execute`. The request guard
+prepares an operation in async-graphql's `execute` extension hook, which
+`execute_stream` does not run for queries and mutations, so a query or mutation
+sent over `execute_stream` (for example a graphql-ws transport) is always
+refused before any host resolver, authority call or database work. When the
+schema has a subscription root (a live collection or a host
+`subscription_root`), every runtime query and mutation root, including
+`RuntimeHostField` roots, refuses with the stable code `request_not_prepared`.
+Without one, async-graphql refuses the request itself, with its own uncoded
+message, before any extension runs; the ORM adds no placeholder subscription
+root, which would change the SDL. Live `…Changed` subscriptions and host-owned
+subscription roots use `execute_stream` as before.
+
 Install protection before a protected module. The default profile requires it.
 Options are non-exhaustive so future D configuration can remain source-compatible;
 construct them with `Default` and explicit setters/field updates.
 `RuntimeGraphqlOptions::default().with_cursor_profile(RuntimeCursorProfile::Unprotected)` is an explicit alternative for hosts accepting
 readable existing cursors; it must not be used for confidential hidden keys.
+An unprotected cursor carries the effective order's values in plain text with a
+checksum anyone can recompute, so serving it implies read access to every
+sortable field and key in that order, including hidden tie-breakers.
 
 ## Operation assurance
 
@@ -183,6 +199,27 @@ identities as resolution. Field/operator authorization uses validated requested
 capabilities captured before constant lowering: empty `in: []` is false and empty
 `notIn: []` is true, but neither bypasses filter-field or operator authorization.
 Explicit nested `and`, `or` and `not` capabilities remain visible to the host.
+
+Before validation the guard writes every omitted variable's operation default
+(or `null` for an omitted nullable variable without one) into the request
+variables, as GraphQL variable coercion requires. `@skip`/`@include`, argument
+validation, the guard's planning and execution therefore read the same values:
+`query($v: Boolean = true) { notes @skip(if: $v) { … } }` sent without variables
+leaves `notes` out everywhere. async-graphql 7.2.1 alone evaluates directives
+and validates arguments against the raw request variables. If another extension
+replaces the document so that a defaulted variable is missing at execution, the
+operation is refused with `invalid_graphql_input`. An explicit `null` for a
+directive condition is refused the same way.
+
+After async-graphql's validation the guard checks every argument of the
+selected operation again, including `RuntimeHostField` and host type arguments:
+each variable value once against its declared type, and each argument with its
+variable references in place. Runtime scalars use their input bounds; a value
+that is not an object for an input object, and a missing non-null value, are
+refused with `invalid_graphql_input` before any resolver runs. Composition
+(`finish`) refuses with `invalid_composition` any argument default, on a host
+field, a type added with `register` or a host subscription root, that is not a
+valid value of its type: async-graphql never validates schema defaults.
 Use `RuntimeReadCheck::filter_operations` for requested filter authorization;
 the lowered predicate's referenced fields alone cannot represent constant inputs.
 A root list with full-text `search` also reports it as
@@ -334,8 +371,17 @@ bounds, and the scalar validators accept those forms. A row written by an
 earlier release, by host code or under a higher limit is returned as stored:
 a date-time such as `+10000-01-01T00:00:00.000000Z` or
 `0000-12-31T23:00:00.000000Z`, and JSON, bytes or strings longer than the input
-limits. `max_response_bytes` still bounds the whole response. Such a value is
-also a valid cursor position, so pages resume across it, including PostgreSQL
+limits. `max_response_bytes` still bounds the whole response, and is checked
+before output is built: each layer first reserves its structure (connection
+objects, edges, cursors, page fields, every parent's relation key and the null
+of a missing to-one relation), then each record's ordinary fields, measured
+from the stored values, and only then encodes them or copies projected
+objects. A response over the budget is refused with `cost_exceeded` before its
+ordinary stored values are base64-encoded or serialized. Known limits (#704):
+records are cloned before reservation, a child relation's structure is reserved
+after its parent layer's projections are copied, and host projector output is
+encoded before it is charged; such a response is still refused. A stored value
+outside the input limits is also a valid cursor position, so pages resume across it, including PostgreSQL
 ` BC` years, which read back as year 0000 and below. Clients cannot send an
 out-of-range date-time back as input, and runtime mutations refuse to write one
 from host code.
