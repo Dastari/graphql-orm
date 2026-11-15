@@ -164,10 +164,24 @@ impl OllamaProvider {
         Ok(self)
     }
 
+    #[cfg(test)]
     fn request_body(
         &self,
         request: &ModelRequest,
         context: &ProviderRequestContext,
+    ) -> Result<Value, ProviderError> {
+        self.dispatch_body(
+            request,
+            context,
+            &crate::ModelDispatchReferences::withheld(),
+        )
+    }
+
+    fn dispatch_body(
+        &self,
+        request: &ModelRequest,
+        context: &ProviderRequestContext,
+        references: &crate::ModelDispatchReferences,
     ) -> Result<Value, ProviderError> {
         request.validate()?;
         if request.input.is_empty() || !request.builtin_tools.is_empty() {
@@ -205,12 +219,12 @@ impl OllamaProvider {
         }
 
         match &request.continuation {
-            None => messages.push(user_message(&request.input, context)?),
+            None => messages.push(user_message(&request.input, context, references)?),
             Some(ModelContinuation::StatelessConversation {
                 messages: history, ..
             }) => {
                 for message in history {
-                    messages.push(conversation_message(message, &definitions)?);
+                    messages.push(conversation_message(message, &definitions, references)?);
                 }
                 let calls = match history.last() {
                     Some(ModelConversationMessage::Assistant { tool_calls, .. }) => tool_calls,
@@ -316,9 +330,10 @@ impl AiProvider for OllamaProvider {
 
     async fn stream(
         &self,
-        request: ModelRequest,
+        dispatch: crate::ModelDispatchRequest,
         context: ProviderRequestContext,
     ) -> Result<ProviderEventStream, ProviderError> {
+        let (request, references) = dispatch.into_parts();
         context.validate_request(&ProviderKind::Ollama, &request)?;
         if !context.permits_destination(
             &ProviderKind::Ollama,
@@ -334,7 +349,7 @@ impl AiProvider for OllamaProvider {
             request.maximum_output_tokens,
             self.config.maximum_stream_chunks,
         );
-        let body = self.request_body(&request, &context)?;
+        let body = self.dispatch_body(&request, &context, &references)?;
         let expected_model = request.model;
         let offered_tools = request
             .tools
@@ -364,13 +379,16 @@ impl AiProvider for OllamaProvider {
 fn user_message(
     input: &[ModelInputBlock],
     context: &ProviderRequestContext,
+    references: &crate::ModelDispatchReferences,
 ) -> Result<Value, ProviderError> {
     let mut content = Vec::new();
     let mut images = Vec::new();
     for block in input {
         match block {
             ModelInputBlock::Text { text } => content.push(text.clone()),
-            ModelInputBlock::Json { value } => content.push(value.to_string()),
+            ModelInputBlock::Json { value } => {
+                content.push(references.wire_json(value).to_string());
+            }
             ModelInputBlock::Attachment { mime, .. } => {
                 if !matches!(mime.as_str(), "image/png" | "image/jpeg" | "image/webp") {
                     return Err(ProviderError::Unsupported);
@@ -396,6 +414,7 @@ fn user_message(
 fn conversation_message(
     message: &ModelConversationMessage,
     definitions: &BTreeMap<&str, &crate::ModelToolDefinition>,
+    references: &crate::ModelDispatchReferences,
 ) -> Result<Value, ProviderError> {
     match message {
         ModelConversationMessage::User { content } => {
@@ -403,7 +422,7 @@ fn conversation_message(
                 .iter()
                 .map(|block| match block {
                     ModelInputBlock::Text { text } => Ok(text.clone()),
-                    ModelInputBlock::Json { value } => Ok(value.to_string()),
+                    ModelInputBlock::Json { value } => Ok(references.wire_json(value).to_string()),
                     ModelInputBlock::Attachment { .. } | ModelInputBlock::ToolResult { .. } => {
                         Err(ProviderError::InvalidRequest)
                     }
@@ -1170,7 +1189,7 @@ mod tests {
         let request = request("local-test");
         let context = context("local-test", &request, None, "http://127.0.0.1:11434");
         assert!(matches!(
-            provider.stream(request, context).await,
+            provider.stream(request.into(), context).await,
             Err(ProviderError::EgressDenied)
         ));
     }
@@ -1184,7 +1203,7 @@ mod tests {
         let request = request("local-test");
         let context = context("local-test", &request, None, &base_url);
         let result = provider
-            .stream(request, context)
+            .stream(request.into(), context)
             .await
             .unwrap()
             .try_collect::<Vec<_>>()
@@ -1237,7 +1256,7 @@ mod tests {
         let model_request = request("local-test");
         let error = wrong_model_provider
             .stream(
-                model_request.clone(),
+                model_request.clone().into(),
                 context("local-test", &model_request, None, &base_url),
             )
             .await
@@ -1254,7 +1273,7 @@ mod tests {
         let provider = provider(&base_url);
         let error = provider
             .stream(
-                model_request.clone(),
+                model_request.clone().into(),
                 context("local-test", &model_request, None, &base_url),
             )
             .await
@@ -1279,7 +1298,7 @@ mod tests {
         let model_request = request("local-test");
         let events = provider
             .stream(
-                model_request.clone(),
+                model_request.clone().into(),
                 context("local-test", &model_request, None, &base_url),
             )
             .await
@@ -1326,7 +1345,7 @@ mod tests {
         model_request.tools = vec![tool_definition()];
         let events = provider
             .stream(
-                model_request.clone(),
+                model_request.clone().into(),
                 context("local-test", &model_request, None, &base_url),
             )
             .await

@@ -180,7 +180,10 @@ pub struct AiMessageConnection {
 }
 
 /// One bounded message content block.
-#[derive(Clone, Debug, SimpleObject)]
+///
+/// `content` is what the reading principal may see now, including what an
+/// entity reference resolved to for that reader. `Debug` never prints it.
+#[derive(Clone, SimpleObject)]
 #[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
 pub struct AiMessageBlockView {
     /// Block ID.
@@ -197,6 +200,21 @@ pub struct AiMessageBlockView {
     pub byte_count: i64,
     /// Original line count.
     pub line_count: i64,
+}
+
+impl std::fmt::Debug for AiMessageBlockView {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AiMessageBlockView")
+            .field("id", &self.id)
+            .field("message_id", &self.message_id)
+            .field("block_index", &self.block_index)
+            .field("kind", &self.kind)
+            .field("content", &"<redacted>")
+            .field("byte_count", &self.byte_count)
+            .field("line_count", &self.line_count)
+            .finish()
+    }
 }
 
 /// Durable event view.
@@ -387,6 +405,14 @@ pub struct SendAiMessageInput {
     pub attachment_ids: Vec<Uuid>,
     /// Client idempotency ID.
     pub client_message_id: Uuid,
+    /// Structured references to host entities, bound to this message.
+    ///
+    /// A reference confers no authority. The host resolves each one as the
+    /// sending principal; a reference that yields no data is dropped and
+    /// reported in [`SendAiMessagePayload::reference_notices`]. A service with
+    /// no [`crate::AiEntityReferenceRegistry`] rejects a non-empty list.
+    #[graphql(default)]
+    pub references: Vec<crate::AiEntityReferenceInput>,
 }
 
 /// Accepted message/run references.
@@ -397,6 +423,9 @@ pub struct SendAiMessagePayload {
     pub message_id: Uuid,
     /// Queued run.
     pub run_id: Uuid,
+    /// One typed notice per submitted reference that produced no data, in
+    /// submission order. A notice never says whether the entity exists.
+    pub reference_notices: Vec<crate::AiEntityReferenceNotice>,
 }
 
 /// Owner/scope-aware session backend. Implementations must use keyset-bounded
@@ -849,7 +878,10 @@ impl AiMutationRoot {
         input: SendAiMessageInput,
     ) -> async_graphql::Result<SendAiMessagePayload> {
         let principal = agql_auth::principal_from_ctx(context)?;
-        if input.text.is_empty() || input.text.len() > 256 * 1024 || input.attachment_ids.len() > 10
+        if input.text.is_empty()
+            || input.text.len() > 256 * 1024
+            || input.attachment_ids.len() > 10
+            || input.references.len() > crate::entity_references::MAXIMUM_ENTITY_REFERENCES
         {
             return Err(
                 AiError::InvalidInput("message exceeds configured limits".to_owned()).extend(),

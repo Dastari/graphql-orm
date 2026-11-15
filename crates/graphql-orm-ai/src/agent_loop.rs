@@ -351,11 +351,17 @@ impl AiAgentContinuation {
     }
 
     pub(crate) fn checkpoint_value(&self) -> serde_json::Value {
+        // Whatever this continuation holds in memory, its stored form carries
+        // entity-reference handles only.
+        let mut continuation = self.continuation.clone();
+        crate::entity_references::redact_model_continuation(&mut continuation);
+        let mut input = self.input.clone();
+        crate::entity_references::redact_model_blocks(&mut input);
         serde_json::json!({
             "formatVersion": if self.native_outcome { 4 } else { 3 },
-            "continuation": self.continuation,
+            "continuation": continuation,
             "reasoningEffort": self.reasoning_effort,
-            "input": self.input,
+            "input": input,
             "transfers": self.transfers,
             "replayTransfers": self.replay_transfers,
         })
@@ -375,8 +381,12 @@ impl AiAgentContinuation {
             replay_transfers: Vec<AiEgressManifest>,
         }
 
-        let snapshot: Snapshot =
+        let mut snapshot: Snapshot =
             serde_json::from_value(value).map_err(|_| AiError::PersistenceFailed)?;
+        // Stored history holds entity-reference handles only. Enforce that on
+        // load too, so nothing a stored value carried beside a handle can be
+        // replayed.
+        crate::entity_references::redact_model_continuation(&mut snapshot.continuation);
         if !matches!(snapshot.format_version, 1..=4)
             || snapshot.input.is_empty()
             || snapshot.input.len() > 256

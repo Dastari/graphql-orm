@@ -243,7 +243,16 @@ impl AnthropicProvider {
         Ok(self)
     }
 
+    #[cfg(test)]
     fn request_body(&self, request: &ModelRequest) -> Result<Value, ProviderError> {
+        self.dispatch_body(request, &crate::ModelDispatchReferences::withheld())
+    }
+
+    fn dispatch_body(
+        &self,
+        request: &ModelRequest,
+        references: &crate::ModelDispatchReferences,
+    ) -> Result<Value, ProviderError> {
         request.validate()?;
         if request.input.is_empty()
             || !request.builtin_tools.is_empty()
@@ -275,13 +284,13 @@ impl AnthropicProvider {
         let (instructions, messages) = match &request.continuation {
             None => (
                 request.instructions.as_slice(),
-                vec![anthropic_user_message(&request.input)?],
+                vec![anthropic_user_message(&request.input, references)?],
             ),
             Some(ModelContinuation::StatelessConversation {
                 instructions,
                 messages,
             }) => {
-                let mut mapped = anthropic_history(messages, &definitions)?;
+                let mut mapped = anthropic_history(messages, &definitions, references)?;
                 mapped.push(anthropic_current_tool_results(
                     messages,
                     &request.input,
@@ -364,9 +373,10 @@ impl AiProvider for AnthropicProvider {
 
     async fn stream(
         &self,
-        request: ModelRequest,
+        dispatch: crate::ModelDispatchRequest,
         context: ProviderRequestContext,
     ) -> Result<ProviderEventStream, ProviderError> {
+        let (request, references) = dispatch.into_parts();
         context.validate_request(&ProviderKind::Anthropic, &request)?;
         if let Some(destination) = &self.bound_destination
             && !context.permits_destination(&ProviderKind::Anthropic, &request, destination)
@@ -376,7 +386,7 @@ impl AiProvider for AnthropicProvider {
         if request.reasoning_summary.maximum_bytes().is_some() {
             return Err(ProviderError::Unsupported);
         }
-        let body = self.request_body(&request)?;
+        let body = self.dispatch_body(&request, &references)?;
         if let Some(guard) = &self.endpoint_guard {
             guard.recheck()?;
         }
@@ -425,13 +435,16 @@ impl AiProvider for AnthropicProvider {
     }
 }
 
-fn anthropic_user_message(input: &[ModelInputBlock]) -> Result<Value, ProviderError> {
+fn anthropic_user_message(
+    input: &[ModelInputBlock],
+    references: &crate::ModelDispatchReferences,
+) -> Result<Value, ProviderError> {
     let content = input
         .iter()
         .map(|block| match block {
             ModelInputBlock::Text { text } => Ok(json!({"type": "text", "text": text})),
             ModelInputBlock::Json { value } => {
-                Ok(json!({"type": "text", "text": value.to_string()}))
+                Ok(json!({"type": "text", "text": references.wire_json(value).to_string()}))
             }
             ModelInputBlock::Attachment { .. } | ModelInputBlock::ToolResult { .. } => {
                 Err(ProviderError::InvalidRequest)
@@ -447,13 +460,14 @@ fn anthropic_user_message(input: &[ModelInputBlock]) -> Result<Value, ProviderEr
 fn anthropic_history(
     history: &[ModelConversationMessage],
     definitions: &BTreeMap<&str, &crate::ModelToolDefinition>,
+    references: &crate::ModelDispatchReferences,
 ) -> Result<Vec<Value>, ProviderError> {
     let mut messages = Vec::new();
     let mut index = 0;
     while index < history.len() {
         match &history[index] {
             ModelConversationMessage::User { content } => {
-                messages.push(anthropic_user_message(content)?);
+                messages.push(anthropic_user_message(content, references)?);
                 index += 1;
             }
             ModelConversationMessage::Assistant {
@@ -1411,7 +1425,7 @@ mod tests {
         let provider = test_provider(&endpoint);
         let request = initial_request();
         let events = provider
-            .stream(request.clone(), context(&request, &endpoint))
+            .stream(request.clone().into(), context(&request, &endpoint))
             .await
             .expect("Anthropic stream should start")
             .try_collect::<Vec<_>>()
@@ -1504,7 +1518,7 @@ mod tests {
         let request = initial_request();
         assert!(matches!(
             provider
-                .stream(request.clone(), context(&request, "anthropic"))
+                .stream(request.clone().into(), context(&request, "anthropic"))
                 .await,
             Err(ProviderError::EgressDenied)
         ));
@@ -1525,7 +1539,7 @@ mod tests {
         let provider = test_provider(&endpoint);
         assert!(matches!(
             provider
-                .stream(request.clone(), context(&request, &endpoint))
+                .stream(request.clone().into(), context(&request, &endpoint))
                 .await,
             Err(ProviderError::CredentialUnavailable)
         ));
@@ -1536,7 +1550,7 @@ mod tests {
         let provider = test_provider(&endpoint);
         assert!(matches!(
             provider
-                .stream(request.clone(), context(&request, &endpoint))
+                .stream(request.clone().into(), context(&request, &endpoint))
                 .await,
             Err(ProviderError::Unavailable)
         ));

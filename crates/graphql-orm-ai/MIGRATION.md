@@ -10,6 +10,93 @@ supersedes: []
 
 # Migration Guide
 
+## 0.144.0 to 0.145.0: entity references
+
+Apply AI schema module `0.81.0` before starting workers. It changes no table,
+column, index or constraint and needs no data backfill. It records a new value
+domain: a user message may now store `entity_reference` blocks after its text
+block. Such a block holds a reference handle (kind and identifier) and never
+resolved data.
+
+### Breaking changes
+
+- **Custom `AiProvider` implementations.** `stream`, `dispatch`,
+  `stream_with_dynamic_tools`, `dispatch_with_dynamic_tools` and
+  `submit_background` take `ModelDispatchRequest` in place of `ModelRequest`.
+  `prepare_dispatch` and `create_empty_session` still take `&ModelRequest`.
+  To migrate:
+
+  1. Change the parameter type and split the value:
+     `let (request, references) = dispatch.into_parts();`. `request` is the
+     `ModelRequest` the adapter had before. It holds entity-reference handles
+     only and is safe to validate, hash, clone and log.
+  2. Wherever the adapter serializes a `ModelInputBlock::Json { value }`, in
+     the current input and in the replayed user messages of a stateless
+     continuation, send `references.wire_json(value)` in place of `value`. A
+     value that is not an entity reference is returned unchanged.
+  3. Do not copy what `wire_json` returns into anything stored, logged, queued
+     or retried. `ModelDispatchReferences` is not `Clone` and is dropped when
+     the call ends.
+  4. In an override of `dispatch` or `dispatch_with_dynamic_tools`, pass
+     `request.request()` to `prepare_dispatch`.
+
+  An adapter that cannot confine resolved data to one transport write calls
+  `dispatch.into_unavailable_request()` and continues with the returned
+  `ModelRequest`; every reference is then sent as the unavailable marker. An
+  adapter that skips step 2 sends handle blocks, which carry no data. Code
+  that calls a provider directly passes `request.into()`, which resolves
+  nothing.
+- `SendAiMessageInput` has a new `references` field and `SendAiMessagePayload`
+  a new `reference_notices` field. Add `references: Vec::new()` to struct
+  literals, and return `reference_notices: Vec::new()` from a custom
+  `AiSessionService::send_message`. GraphQL clients need no change: the input
+  field defaults to an empty list.
+- Code that reads message blocks directly must no longer assume a user message
+  has exactly one block. Block 0 is always the text. Clients that render
+  `AiMessageBlockView` should handle, or ignore, the `entity_reference` block
+  kind, whose content is resolved for the reader on every read and is either
+  resolved data or a fixed unavailable marker.
+- `AiMessageBlockView` implements `Debug` by hand and prints `<redacted>` for
+  `content`. Code that relied on `{:?}` to show block content must read the
+  field.
+- A JSON model-input block whose `type` member is `entity_reference` is
+  reserved. Plan construction and the executor reduce it to a reference
+  handle, discarding its other members.
+
+### Optional adoption
+
+- **Entity references** are off until a host installs the same
+  `AiEntityReferenceRegistry` with `AiRuntimeBuilder::entity_references` and
+  `OrmAiSessionService::with_entity_references`. Until then a message that
+  carries a reference is rejected with `InvalidInput`, and a runtime without
+  a registry sends every reference as the unavailable marker. Only reference
+  handles are stored. The host hook must evaluate current row, field and
+  scope policy on every call, because it is called again at every use.
+- The host worker that builds provider requests calls
+  `OrmAiSessionService::entity_reference_model_input` for the messages it
+  includes and puts the returned handle blocks in `ModelRequest::input`.
+  There is no resolution step for the host to call: `AiProviderCallExecutor`
+  resolves the handles for the run's rehydrated principal at every dispatch,
+  including retries, tool-result continuations and resumed or recovered runs,
+  and `OrmAiOpenAiBackgroundSubmissionService` does so before submitting.
+- **Sizing.** Each handle reserves
+  `AiEntityReferenceLimits::maximum_resolved_bytes` plus 512 bytes in the
+  sealed egress manifest and token estimate of every request that carries
+  it, including each stateless replay. The default is 16 KiB a reference. Set
+  the limit to what the hook actually returns, and make sure the egress
+  policy, the deployment egress boundary and the budget admit the reserved
+  total, or the call is refused before transport.
+- **Dispatch paths that send the marker.** `AiRuntime::dispatch_provider`,
+  `stream_provider`, their dynamic-tool variants and
+  `submit_provider_background` called directly, and the Codex app-server,
+  Grok ACP and local-harness adapters, send every reference as the marker.
+- **Provider-side residual.** Data already sent to a provider cannot be
+  recalled. With provider-retained continuation (`previous_response_id`,
+  stored responses) or a background response the provider keeps the request
+  it was sent and can draw on it after access is revoked. Use stateless
+  replay where revocation must take effect inside a running tool loop. See
+  [entity references](docs/entity-references.md).
+
 ## 0.143.0 to 0.144.0: AI follow-ups
 
 No GraphQL SDL, public struct, persistent schema or data migration change.

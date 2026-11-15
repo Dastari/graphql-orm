@@ -168,6 +168,7 @@ pub struct AiRuntime {
     content_protection_policy_resolver: Arc<dyn AiContentProtectionPolicyResolver>,
     content_protector: Arc<dyn AiContentProtector>,
     providers: BTreeMap<ProviderKind, Arc<dyn AiProvider>>,
+    entity_references: Option<crate::AiEntityReferenceRegistry>,
     start_gate: AiRuntimeStartGate,
 }
 
@@ -1168,19 +1169,68 @@ impl AiRuntime {
 
     /// Dispatches a provider request while preserving whether failure occurred
     /// before or after the transport uncertainty boundary.
+    ///
+    /// This entry point resolves no entity reference: each one in `request`
+    /// is sent as the unavailable marker. Only
+    /// [`crate::AiProviderCallExecutor`] and the background-submission
+    /// service resolve references, for the principal they rehydrate.
     pub async fn dispatch_provider(
         &self,
         provider_kind: &ProviderKind,
         request: ModelRequest,
         context: ProviderRequestContext,
     ) -> crate::AiProviderDispatchOutcome {
+        self.dispatch_provider_request(provider_kind, request.into(), context)
+            .await
+    }
+
+    /// Returns the registry that resolves per-message entity references, if
+    /// the deployment installed one.
+    pub const fn entity_reference_registry(&self) -> Option<&crate::AiEntityReferenceRegistry> {
+        self.entity_references.as_ref()
+    }
+
+    #[cfg(all(test, feature = "sqlite"))]
+    pub(crate) fn install_entity_references_for_test(
+        &mut self,
+        registry: crate::AiEntityReferenceRegistry,
+    ) {
+        self.entity_references = Some(registry);
+    }
+
+    /// Builds the one value that may carry resolved reference data to a
+    /// provider, for `principal`, now. Without a registry every reference
+    /// becomes the unavailable marker.
+    #[cfg_attr(not(any(feature = "sqlite", feature = "postgres")), allow(dead_code))]
+    pub(crate) async fn resolve_dispatch_request(
+        &self,
+        principal: &agql_auth::AuthPrincipal,
+        scope: &crate::AiScope,
+        request: ModelRequest,
+    ) -> crate::ModelDispatchRequest {
+        crate::ModelDispatchRequest::resolve(
+            self.entity_references.as_ref(),
+            principal,
+            scope,
+            request,
+        )
+        .await
+    }
+
+    pub(crate) async fn dispatch_provider_request(
+        &self,
+        provider_kind: &ProviderKind,
+        dispatch: crate::ModelDispatchRequest,
+        context: ProviderRequestContext,
+    ) -> crate::AiProviderDispatchOutcome {
+        let request = dispatch.request();
         let local = || {
             if !self.start_gate.is_ready() {
                 return Err(ProviderError::InvalidConfiguration(
                     "AI runtime is not ready".to_owned(),
                 ));
             }
-            context.validate_request(provider_kind, &request)?;
+            context.validate_request(provider_kind, request)?;
             let provider = self
                 .providers
                 .get(provider_kind)
@@ -1211,7 +1261,7 @@ impl AiRuntime {
                 if let Err(error) = context.authorize_tool_source_delivery().await {
                     return crate::AiProviderDispatchOutcome::RejectedBeforeDispatch(error);
                 }
-                provider.dispatch(request, context).await
+                provider.dispatch(dispatch, context).await
             }
             Err(error) => crate::AiProviderDispatchOutcome::RejectedBeforeDispatch(error),
         }
@@ -1245,7 +1295,8 @@ impl AiRuntime {
         }
     }
 
-    /// Dynamic-tool counterpart of [`Self::dispatch_provider`].
+    /// Dynamic-tool counterpart of [`Self::dispatch_provider`]. It resolves
+    /// no entity reference either.
     pub async fn dispatch_provider_with_dynamic_tools(
         &self,
         provider_kind: &ProviderKind,
@@ -1253,13 +1304,30 @@ impl AiRuntime {
         context: ProviderRequestContext,
         responder: Arc<dyn crate::ProviderDynamicToolResponder>,
     ) -> crate::AiProviderDispatchOutcome {
+        self.dispatch_provider_request_with_dynamic_tools(
+            provider_kind,
+            request.into(),
+            context,
+            responder,
+        )
+        .await
+    }
+
+    pub(crate) async fn dispatch_provider_request_with_dynamic_tools(
+        &self,
+        provider_kind: &ProviderKind,
+        dispatch: crate::ModelDispatchRequest,
+        context: ProviderRequestContext,
+        responder: Arc<dyn crate::ProviderDynamicToolResponder>,
+    ) -> crate::AiProviderDispatchOutcome {
+        let request = dispatch.request();
         let local = || {
             if !self.start_gate.is_ready() {
                 return Err(ProviderError::InvalidConfiguration(
                     "AI runtime is not ready".to_owned(),
                 ));
             }
-            context.validate_request(provider_kind, &request)?;
+            context.validate_request(provider_kind, request)?;
             let provider = self
                 .providers
                 .get(provider_kind)
@@ -1306,7 +1374,7 @@ impl AiRuntime {
                     return crate::AiProviderDispatchOutcome::RejectedBeforeDispatch(error);
                 }
                 provider
-                    .dispatch_with_dynamic_tools(request, context, responder)
+                    .dispatch_with_dynamic_tools(dispatch, context, responder)
                     .await
             }
             Err(error) => crate::AiProviderDispatchOutcome::RejectedBeforeDispatch(error),
@@ -1538,6 +1606,9 @@ impl AiRuntime {
     /// Starts a registered provider background response after runtime,
     /// capability, budget, and exact egress validation.
     ///
+    /// This entry point resolves no entity reference: each one in `request`
+    /// is sent as the unavailable marker.
+    ///
     /// # Errors
     ///
     /// Returns a provider error when the runtime is closed, the provider is
@@ -1550,12 +1621,24 @@ impl AiRuntime {
         context: ProviderRequestContext,
         binding: ProviderBackgroundBinding,
     ) -> Result<ProviderBackgroundSubmission, ProviderError> {
+        self.submit_provider_background_request(provider_kind, request.into(), context, binding)
+            .await
+    }
+
+    pub(crate) async fn submit_provider_background_request(
+        &self,
+        provider_kind: &ProviderKind,
+        dispatch: crate::ModelDispatchRequest,
+        context: ProviderRequestContext,
+        binding: ProviderBackgroundBinding,
+    ) -> Result<ProviderBackgroundSubmission, ProviderError> {
+        let request = dispatch.request();
         if !self.start_gate.is_ready() {
             return Err(ProviderError::InvalidConfiguration(
                 "AI runtime is not ready".to_owned(),
             ));
         }
-        context.validate_request(provider_kind, &request)?;
+        context.validate_request(provider_kind, request)?;
         let provider = self
             .providers
             .get(provider_kind)
@@ -1570,7 +1653,7 @@ impl AiRuntime {
         if !capabilities.background {
             return Err(ProviderError::Unsupported);
         }
-        provider.submit_background(request, context, binding).await
+        provider.submit_background(dispatch, context, binding).await
     }
 
     /// Retrieves one exactly bound provider background response after runtime,
@@ -1912,9 +1995,25 @@ pub struct AiRuntimeBuilder {
     content_protection_policy_resolver: Option<Arc<dyn AiContentProtectionPolicyResolver>>,
     content_protector: Option<Arc<dyn AiContentProtector>>,
     providers: BTreeMap<ProviderKind, Arc<dyn AiProvider>>,
+    entity_references: Option<crate::AiEntityReferenceRegistry>,
 }
 
 impl AiRuntimeBuilder {
+    /// Installs the registry that resolves per-message entity references at
+    /// provider dispatch.
+    ///
+    /// The provider-call executor and the background-submission service use
+    /// it to resolve every reference of a request for the run's rehydrated
+    /// principal, immediately before each provider call. Without it every
+    /// reference is sent as the unavailable marker. Install the same registry
+    /// on the session service
+    /// (`OrmAiSessionService::with_entity_references`) so that messages may
+    /// carry references at all.
+    pub fn entity_references(mut self, registry: crate::AiEntityReferenceRegistry) -> Self {
+        self.entity_references = Some(registry);
+        self
+    }
+
     /// Sets current-principal rehydration.
     pub fn principal_resolver(mut self, resolver: Arc<dyn CurrentPrincipalResolver>) -> Self {
         self.principal_resolver = Some(resolver);
@@ -2178,6 +2277,7 @@ impl AiRuntimeBuilder {
             content_protection_policy_resolver,
             content_protector,
             providers: self.providers,
+            entity_references: self.entity_references,
             start_gate: AiRuntimeStartGate::new(fingerprint),
         })
     }

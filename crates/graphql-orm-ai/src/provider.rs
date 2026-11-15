@@ -476,7 +476,15 @@ impl ModelContinuation {
         match self {
             Self::ProviderResponse { response_id } => Some(response_id.clone()),
             Self::StatelessConversation { .. } => {
-                let encoded = serde_json::to_vec(&(self, input)).ok()?;
+                // Bind the chain to entity-reference handles, never to what a
+                // reference resolved to for some principal: the same history
+                // resolves differently on each turn, and stored state holds
+                // handles only. Without references this changes nothing.
+                let mut canonical = self.clone();
+                crate::entity_references::redact_model_continuation(&mut canonical);
+                let mut input = input.to_vec();
+                crate::entity_references::redact_model_blocks(&mut input);
+                let encoded = serde_json::to_vec(&(&canonical, &input)).ok()?;
                 let mut hasher = Sha256::new();
                 hasher.update(b"graphql-orm-ai/stateless-continuation/v1\0");
                 hasher.update(encoded);
@@ -797,7 +805,10 @@ impl ModelRequest {
     ///
     /// The value includes fixed serialization overhead, every instruction and
     /// input block, tool and built-in definitions, continuation/output schema,
-    /// and Base64 expansion of declared attachment bytes. It is an egress
+    /// Base64 expansion of declared attachment bytes, and, for every
+    /// entity-reference handle in the input or replayed history, the bytes
+    /// that handle reserves for its data plus
+    /// [`crate::AI_ENTITY_REFERENCE_ENVELOPE_RESERVED_BYTES`]. It is an egress
     /// capacity bound, not an exact provider wire-size or authorization proof.
     pub fn conservative_egress_bytes(&self) -> u64 {
         let serialized_bytes = self.serialized_metadata_bytes().unwrap_or(u64::MAX);
@@ -955,6 +966,13 @@ impl ModelRequest {
         if let Some(schema) = &self.output_schema {
             total = total.checked_add(serialized_bytes(schema)?)?;
         }
+        // A request holds entity-reference handles only. What they resolve to
+        // is added at dispatch, so reserve its bytes here: every manifest and
+        // budget estimate sealed over this request already covers it.
+        total = total.checked_add(crate::entity_references::reserved_egress_bytes(
+            self.continuation.as_ref(),
+            &self.input,
+        ))?;
         (total <= MAXIMUM_PROVIDER_REQUEST_METADATA_BYTES).then_some(total)
     }
 }
@@ -3601,15 +3619,23 @@ pub trait AiProvider: Send + Sync {
 
     /// Starts a streaming request. The context can only be constructed from an
     /// allowed exact egress decision.
+    ///
+    /// `request` pairs the handle-only [`ModelRequest`] with what its entity
+    /// references resolved to for this one dispatch. An adapter validates,
+    /// hashes and logs [`crate::ModelDispatchRequest::request`], and passes
+    /// the value of every [`ModelInputBlock::Json`] it serializes through
+    /// [`crate::ModelDispatchReferences::wire_json`]. It must not copy
+    /// resolved data into anything that outlives the call.
     async fn stream(
         &self,
-        request: ModelRequest,
+        request: crate::ModelDispatchRequest,
         context: ProviderRequestContext,
     ) -> Result<ProviderEventStream, ProviderError>;
 
     /// Performs adapter-owned validation and local preparation before the
     /// transport boundary. The default is empty for compatibility; reviewed
     /// external adapters override it for their complete local validation.
+    /// The request holds entity-reference handles only.
     async fn prepare_dispatch(
         &self,
         _request: &ModelRequest,
@@ -3627,10 +3653,10 @@ pub trait AiProvider: Send + Sync {
     /// [`AiProviderDispatchOutcome::RejectedBeforeDispatch`].
     async fn dispatch(
         &self,
-        request: ModelRequest,
+        request: crate::ModelDispatchRequest,
         context: ProviderRequestContext,
     ) -> AiProviderDispatchOutcome {
-        if let Err(error) = self.prepare_dispatch(&request, &context).await {
+        if let Err(error) = self.prepare_dispatch(request.request(), &context).await {
             return AiProviderDispatchOutcome::RejectedBeforeDispatch(error);
         }
         if let Err(error) = context.authorize_tool_source_delivery().await {
@@ -3651,12 +3677,12 @@ pub trait AiProvider: Send + Sync {
     /// credentials. Tool-free requests continue through [`Self::stream`].
     async fn stream_with_dynamic_tools(
         &self,
-        request: ModelRequest,
+        request: crate::ModelDispatchRequest,
         context: ProviderRequestContext,
         responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> Result<ProviderEventStream, ProviderError> {
         let _ = responder;
-        if !request.tools.is_empty() {
+        if !request.request().tools.is_empty() {
             return Err(ProviderError::Unsupported);
         }
         self.stream(request, context).await
@@ -3666,11 +3692,11 @@ pub trait AiProvider: Send + Sync {
     /// and an explicit uncertainty boundary.
     async fn dispatch_with_dynamic_tools(
         &self,
-        request: ModelRequest,
+        request: crate::ModelDispatchRequest,
         context: ProviderRequestContext,
         responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> AiProviderDispatchOutcome {
-        if let Err(error) = self.prepare_dispatch(&request, &context).await {
+        if let Err(error) = self.prepare_dispatch(request.request(), &context).await {
             return AiProviderDispatchOutcome::RejectedBeforeDispatch(error);
         }
         if let Err(error) = context.authorize_tool_source_delivery().await {
@@ -3768,7 +3794,7 @@ pub trait AiProvider: Send + Sync {
     /// so a later reconciler can reject swapped responses.
     async fn submit_background(
         &self,
-        _request: ModelRequest,
+        _request: crate::ModelDispatchRequest,
         _context: ProviderRequestContext,
         _binding: ProviderBackgroundBinding,
     ) -> Result<ProviderBackgroundSubmission, ProviderError> {
