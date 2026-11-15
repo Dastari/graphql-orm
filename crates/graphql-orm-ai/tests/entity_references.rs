@@ -540,15 +540,71 @@ async fn revocation_between_turns_reaches_the_next_turn_and_the_transcript() {
     assert_eq!(fourth_turn[0][0]["status"], "resolved");
 }
 
-/// A restored store holds handles only. Opened by a deployment whose host
-/// policy gives the principal no access, or by one with no registry at all,
-/// it discloses nothing that the original sender could read.
+/// Exports every AI-owned table through the portable ORM backup runtime.
+async fn export_snapshot(
+    database: &Database<SqliteBackend>,
+) -> (
+    graphql_orm::graphql::orm::GraphqlOrmSchemaSnapshot,
+    std::collections::BTreeMap<String, Vec<graphql_orm::graphql::orm::BackupRow>>,
+) {
+    use graphql_orm::graphql::orm::GraphqlOrmBackupRuntime;
+    let entities = AiSchemaModule.entities().to_vec();
+    let schema = database.schema_snapshot("ai-reference-test-v1", &entities);
+    let mut descriptors = database.list_backup_entities(&entities);
+    descriptors.sort_by_key(|descriptor| (descriptor.export_order, descriptor.table_name.clone()));
+    let mut snapshot = database
+        .begin_consistent_snapshot()
+        .await
+        .expect("backup snapshot should begin");
+    let mut rows = std::collections::BTreeMap::new();
+    for descriptor in &descriptors {
+        let exported = database
+            .export_table_rows(&mut snapshot, descriptor)
+            .await
+            .expect("backup rows should export");
+        rows.insert(descriptor.table_name.clone(), exported);
+    }
+    drop(snapshot);
+    (schema, rows)
+}
+
+/// A fresh, migrated, empty store with no live epoch of its own.
+async fn empty_target() -> Database<SqliteBackend> {
+    let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
+        .await
+        .expect("in-memory SQLite should open")
+        .with_pagination_config(PaginationConfig::explicit_only(
+            PaginationConfig::SECURE_MAX_LIMIT,
+        ));
+    let module = AiSchemaModule;
+    let plan = database
+        .schema()
+        .plan_migration_to_entities(
+            "ai-reference-test-v1",
+            "AI entity reference test",
+            module.entities(),
+        )
+        .await
+        .expect("AI schema migration should plan");
+    database
+        .schema()
+        .apply_migration(&plan, ApplyOptions::default())
+        .await
+        .expect("AI schema migration should apply");
+    database
+}
+
+/// A real backup export and restore into a fresh store. The backup holds the
+/// handle and nothing the reference resolved to, and the restored session,
+/// opened where the principal has no access to the entity, shows the marker.
 #[tokio::test]
-async fn a_restored_store_reauthorizes_on_use_and_holds_no_resolved_data() {
+async fn a_backup_holds_handles_only_and_a_restored_session_reauthorizes_on_use() {
+    use graphql_orm::graphql::orm::{GraphqlOrmBackupRuntime, RestoreContext};
+
     let widgets = Arc::new(Widgets::default());
-    let shared = database().await;
+    let source = database().await;
     let protector = Arc::new(RecordingProtector::default());
-    let original = service_on(shared.clone(), protector.clone())
+    let original = service_on(source.clone(), protector.clone())
         .with_entity_references(registry(widgets.clone()));
     let owner = principal("owner");
     let id = session(&original, &owner).await;
@@ -559,46 +615,58 @@ async fn a_restored_store_reauthorizes_on_use_and_holds_no_resolved_data() {
         )
         .await
         .expect("message is accepted");
-    assert_eq!(
-        turn_input(&original, &owner, id, &[sent.message_id]).await[0][0]["status"],
-        "resolved"
-    );
-    // The rows a backup would copy never contained the resolved payload.
-    assert!(
-        protector
-            .stored
-            .lock()
-            .unwrap()
-            .iter()
-            .all(|value| !value.contains(PAYLOAD_MARKER) && !value.contains(FIELD_MARKER))
-    );
+    // The reference resolved, and was used, on the source deployment.
+    let used = turn_input(&original, &owner, id, &[sent.message_id]).await;
+    assert_eq!(used[0][0]["data"]["name"], PAYLOAD_MARKER);
+    assert!(protector
+        .stored
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|value| !value.contains(PAYLOAD_MARKER) && !value.contains(FIELD_MARKER)));
 
-    // The same rows, served after a restore where the principal has no
-    // access to the entity.
+    // The exported backup carries the handle and no resolved value.
+    let (schema, rows) = export_snapshot(&source).await;
+    let exported = serde_json::to_string(&rows).expect("backup rows serialize");
+    assert!(exported.contains("visible"), "the handle is in the backup");
+    assert!(!exported.contains(PAYLOAD_MARKER));
+    assert!(!exported.contains(FIELD_MARKER));
+
+    // Restore into a fresh store.
+    let target = empty_target().await;
+    let entities = AiSchemaModule.entities().to_vec();
+    let current = target.schema_snapshot("ai-reference-test-v1", &entities);
+    target
+        .restore_backup_rows(&schema, &current, &rows, &RestoreContext::empty_database())
+        .await
+        .expect("snapshot should restore into an empty target");
+
+    // The restored deployment's host gives the principal no access.
     let denied = Arc::new(Widgets::default());
     denied.row_access.store(false, Ordering::SeqCst);
-    let restored = service_on(shared.clone(), Arc::new(DatabaseManagedContentProtector))
+    let restored = service_on(target.clone(), Arc::new(DatabaseManagedContentProtector))
         .with_entity_references(registry(denied.clone()));
+    let transcript = restored
+        .message_blocks(&owner, sent.message_id, None, 20)
+        .await
+        .expect("owner reads the restored transcript");
+    assert_eq!(transcript.len(), 2);
+    assert_eq!(
+        transcript[0].content.0["text"],
+        "What is the state of this widget?"
+    );
+    assert_eq!(transcript[1].content.0, unavailable("visible"));
     let turn = turn_input(&restored, &owner, id, &[sent.message_id]).await;
     assert_eq!(turn[0][0]["status"], "unavailable");
     assert!(!turn[0][0].to_string().contains(PAYLOAD_MARKER));
     assert_eq!(
-        restored
-            .message_blocks(&owner, sent.message_id, None, 20)
-            .await
-            .expect("owner reads the restored transcript")[1]
-            .content
-            .0,
-        unavailable("visible")
-    );
-    assert_eq!(
         denied.call_count(),
         2,
-        "each use asked the restored host again"
+        "each use asked the restored deployment's host"
     );
 
     // A restored deployment with no registry resolves nothing.
-    let bare = service_on(shared, Arc::new(DatabaseManagedContentProtector));
+    let bare = service_on(target, Arc::new(DatabaseManagedContentProtector));
     assert_eq!(
         turn_input(&bare, &owner, id, &[sent.message_id]).await[0][0]["status"],
         "unavailable"
@@ -611,6 +679,63 @@ async fn a_restored_store_reauthorizes_on_use_and_holds_no_resolved_data() {
             .0,
         unavailable("visible")
     );
+}
+
+/// A provider request that is replayed or rebuilt carries handles, and is
+/// resolved for the current principal each time it is about to be sent.
+#[tokio::test]
+async fn a_request_is_resolved_again_before_every_provider_call() {
+    let widgets = Arc::new(Widgets::default());
+    let registry = registry(widgets.clone());
+    let owner = principal("owner");
+    let scope = AiScope::new("collection", "54").with_tenant_id("tenant-1");
+    let resolved = registry
+        .resolve_for_use(&owner, &scope, &[reference("visible")])
+        .await
+        .remove(0)
+        .model_input_block();
+    let mut request = ModelRequest {
+        model: "test-model".to_owned(),
+        instructions: Vec::new(),
+        input: vec![
+            ModelInputBlock::Text {
+                text: "What is the state of this widget?".to_owned(),
+            },
+            resolved,
+        ],
+        continuation: None,
+        continuation_mode: ModelContinuationMode::StatelessReplay,
+        tools: Vec::new(),
+        builtin_tools: Vec::new(),
+        maximum_builtin_tool_calls: None,
+        reasoning_summary: ModelReasoningSummaryRequest::Disabled,
+        reasoning_effort: ModelReasoningEffort::Unspecified,
+        output_schema: None,
+        maximum_output_tokens: Some(64),
+    };
+    let wire = |request: &ModelRequest| serde_json::to_string(request).expect("serializes");
+    assert!(wire(&request).contains(FIELD_MARKER));
+
+    // A retry after the field scope is revoked drops the field.
+    widgets.field_scope.store(false, Ordering::SeqCst);
+    registry.resolve_request_for_use(&owner, &scope, &mut request).await;
+    assert!(wire(&request).contains(PAYLOAD_MARKER));
+    assert!(!wire(&request).contains(FIELD_MARKER));
+
+    // A retry after the row is revoked carries the marker.
+    widgets.row_access.store(false, Ordering::SeqCst);
+    registry.resolve_request_for_use(&owner, &scope, &mut request).await;
+    assert!(!wire(&request).contains(PAYLOAD_MARKER));
+    assert!(wire(&request).contains(r#""status":"unavailable""#));
+    assert!(wire(&request).contains("What is the state of this widget?"));
+
+    // Withholding reduces every reference to its handle, with no data.
+    widgets.row_access.store(true, Ordering::SeqCst);
+    registry.resolve_request_for_use(&owner, &scope, &mut request).await;
+    assert!(wire(&request).contains(PAYLOAD_MARKER));
+    withhold_request_entity_references(&mut request);
+    assert!(!wire(&request).contains(PAYLOAD_MARKER));
+    assert!(wire(&request).contains(r#""status":"handle""#));
 }
 
 #[tokio::test]

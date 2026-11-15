@@ -14,12 +14,21 @@ use async_graphql::{Enum, InputObject, SimpleObject};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use crate::{AiError, AiScope, ModelInputBlock};
+use crate::{
+    AiError, AiScope, ModelContinuation, ModelConversationMessage, ModelInputBlock, ModelRequest,
+};
 
 /// Message-block kind of a stored entity-reference handle.
 pub const AI_ENTITY_REFERENCE_BLOCK_KIND: &str = "entity_reference";
 /// Provenance tag carried by every resolved reference.
 pub const AI_ENTITY_REFERENCE_PROVENANCE: &str = "server_resolved_entity_reference";
+
+/// `type` member of every entity-reference model-input envelope.
+///
+/// The value is reserved. A JSON input block whose `type` is this value is
+/// treated as an entity reference wherever provider input is stored, hashed
+/// or replayed, and is reduced to its handle there.
+pub const AI_ENTITY_REFERENCE_MODEL_BLOCK_TYPE: &str = "entity_reference";
 
 /// Hard ceiling on references per message, whatever a registry configures.
 pub(crate) const MAXIMUM_ENTITY_REFERENCES: usize = 64;
@@ -542,7 +551,7 @@ impl AiEntityReferenceUse {
         ModelInputBlock::Json {
             value: match &self.data {
                 Some(data) => json!({
-                    "type": "entity_reference",
+                    "type": AI_ENTITY_REFERENCE_MODEL_BLOCK_TYPE,
                     "status": "resolved",
                     "provenance": AI_ENTITY_REFERENCE_PROVENANCE,
                     "handling": "Server-resolved reference data supplied with the user's \
@@ -551,7 +560,7 @@ impl AiEntityReferenceUse {
                     "data": data,
                 }),
                 None => json!({
-                    "type": "entity_reference",
+                    "type": AI_ENTITY_REFERENCE_MODEL_BLOCK_TYPE,
                     "status": "unavailable",
                     "handling": "The user referenced this item, but no data is available \
                                  for it. Do not guess its contents.",
@@ -560,6 +569,166 @@ impl AiEntityReferenceUse {
             },
         }
     }
+}
+
+/// The stored and replayed form of a reference inside provider input.
+///
+/// Continuations, checkpoints and every other durable or hashed copy of a
+/// provider request hold this block in place of whatever the reference
+/// resolved to. It carries no data.
+fn handle_model_block(reference: &AiEntityReferenceInput) -> ModelInputBlock {
+    ModelInputBlock::Json {
+        value: json!({
+            "type": AI_ENTITY_REFERENCE_MODEL_BLOCK_TYPE,
+            "status": "handle",
+            "reference": {"kind": reference.kind, "id": reference.id},
+        }),
+    }
+}
+
+/// An envelope whose handle cannot be read back. It carries nothing at all.
+fn anonymous_unavailable_model_block() -> ModelInputBlock {
+    ModelInputBlock::Json {
+        value: json!({
+            "type": AI_ENTITY_REFERENCE_MODEL_BLOCK_TYPE,
+            "status": "unavailable",
+        }),
+    }
+}
+
+/// Classifies a provider-input block: `None` when it is not an
+/// entity-reference envelope, otherwise its handle if one can be read.
+fn model_block_handle(block: &ModelInputBlock) -> Option<Option<AiEntityReferenceInput>> {
+    let ModelInputBlock::Json { value } = block else {
+        return None;
+    };
+    if value.get("type").and_then(Value::as_str) != Some(AI_ENTITY_REFERENCE_MODEL_BLOCK_TYPE) {
+        return None;
+    }
+    Some(stored_handle(value))
+}
+
+/// Reduces every entity-reference envelope in `blocks` to its handle.
+///
+/// Whatever the envelope held (resolved data, a marker, anything a host put
+/// beside the reference) is dropped. The operation is idempotent.
+pub(crate) fn redact_model_blocks(blocks: &mut [ModelInputBlock]) {
+    for block in blocks {
+        if let Some(handle) = model_block_handle(block) {
+            *block = match handle {
+                Some(reference) => handle_model_block(&reference),
+                None => anonymous_unavailable_model_block(),
+            };
+        }
+    }
+}
+
+/// Reduces every entity-reference envelope in a continuation's replayed
+/// history to its handle. A provider-retained continuation has no history.
+pub(crate) fn redact_model_continuation(continuation: &mut ModelContinuation) {
+    if let ModelContinuation::StatelessConversation { messages, .. } = continuation {
+        for message in messages {
+            if let ModelConversationMessage::User { content } = message {
+                redact_model_blocks(content);
+            }
+        }
+    }
+}
+
+/// Every entity-reference envelope of a request, oldest first: the replayed
+/// history, then the current input.
+fn envelope_blocks<'a>(
+    continuation: Option<&'a mut ModelContinuation>,
+    input: &'a mut [ModelInputBlock],
+) -> Vec<&'a mut ModelInputBlock> {
+    let mut blocks = Vec::new();
+    if let Some(ModelContinuation::StatelessConversation { messages, .. }) = continuation {
+        for message in messages {
+            if let ModelConversationMessage::User { content } = message {
+                blocks.extend(
+                    content
+                        .iter_mut()
+                        .filter(|block| model_block_handle(block).is_some()),
+                );
+            }
+        }
+    }
+    blocks.extend(
+        input
+            .iter_mut()
+            .filter(|block| model_block_handle(block).is_some()),
+    );
+    blocks
+}
+
+impl AiEntityReferenceRegistry {
+    /// Resolves every entity reference in a provider request, in place, for
+    /// the principal that is current now.
+    ///
+    /// Call this immediately before sealing the plan of **each** provider
+    /// call, with the run's freshly rehydrated principal: the first turn, a
+    /// tool-result continuation, a resumed, recovered or reclaimed run, and a
+    /// retry. It covers the request input and the replayed history of a
+    /// stateless continuation. Every envelope, whatever it held, is first
+    /// reduced to its handle and then resolved again; a reference the
+    /// principal cannot read now becomes the unavailable marker, and
+    /// references beyond
+    /// [`AiEntityReferenceLimits::maximum_resolutions_per_use`] across the
+    /// whole request are not resolved.
+    ///
+    /// A request built from stored state that is never passed through this
+    /// method carries handles only, with no data.
+    pub async fn resolve_request_for_use(
+        &self,
+        principal: &AuthPrincipal,
+        scope: &AiScope,
+        request: &mut ModelRequest,
+    ) {
+        self.resolve_parts_for_use(
+            principal,
+            scope,
+            request.continuation.as_mut(),
+            &mut request.input,
+        )
+        .await;
+    }
+
+    pub(crate) async fn resolve_parts_for_use(
+        &self,
+        principal: &AuthPrincipal,
+        scope: &AiScope,
+        continuation: Option<&mut ModelContinuation>,
+        input: &mut [ModelInputBlock],
+    ) {
+        let blocks = envelope_blocks(continuation, input);
+        let handles = blocks
+            .iter()
+            .map(|block| model_block_handle(block).flatten())
+            .collect::<Vec<_>>();
+        let known = handles.iter().flatten().cloned().collect::<Vec<_>>();
+        let mut resolved = self
+            .resolve_for_use(principal, scope, &known)
+            .await
+            .into_iter();
+        for (block, handle) in blocks.into_iter().zip(handles) {
+            *block = match handle.and_then(|_| resolved.next()) {
+                Some(used) => used.model_input_block(),
+                None => anonymous_unavailable_model_block(),
+            };
+        }
+    }
+}
+
+/// Reduces every entity reference in a provider request to its handle.
+///
+/// Use this for a request that must not carry reference data, for example in
+/// a deployment with no registry. The crate applies the same reduction to
+/// every continuation and checkpoint it stores.
+pub fn withhold_request_entity_references(request: &mut ModelRequest) {
+    if let Some(continuation) = &mut request.continuation {
+        redact_model_continuation(continuation);
+    }
+    redact_model_blocks(&mut request.input);
 }
 
 /// Model input for the entity references of one message, for one turn.

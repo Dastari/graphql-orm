@@ -1672,6 +1672,166 @@ mod tests {
         );
     }
 
+    /// End to end: a real compaction over a session whose first user message
+    /// carries an entity reference, run after the user lost access to the
+    /// referenced entity. Neither the summarizer's prompt, the stored
+    /// checkpoint, the loaded summary nor the next prompt holds what the
+    /// reference resolved to earlier.
+    ///
+    /// The reference block is inserted in the exact stored form the send path
+    /// writes (`stored_handle_content`); `tests/entity_references.rs` proves
+    /// the send path stores nothing else.
+    #[tokio::test]
+    async fn compaction_after_revocation_carries_reference_handles_only() {
+        const PAYLOAD: &str = "payload readable before revocation";
+        struct Hook(Arc<std::sync::atomic::AtomicBool>);
+        #[async_trait]
+        impl crate::AiEntityReferenceResolver for Hook {
+            async fn resolve(
+                &self,
+                _principal: &AuthPrincipal,
+                _scope: &AiScope,
+                _reference: &crate::AiEntityReferenceInput,
+            ) -> Result<Option<crate::AiResolvedEntityReference>, AiError> {
+                Ok(self
+                    .0
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    .then(|| crate::AiResolvedEntityReference::new(serde_json::json!({"note": PAYLOAD}))))
+            }
+        }
+        let fixture = fixture().await;
+        let access = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let registry =
+            crate::AiEntityReferenceRegistry::new(["record"], Arc::new(Hook(access.clone())))
+                .expect("registry should validate");
+        let reference = crate::AiEntityReferenceInput {
+            kind: "record".to_owned(),
+            id: "r-compacted".to_owned(),
+        };
+        let principal = AuthPrincipal::User(AuthUser {
+            user_id: "context-user".to_owned(),
+            session_id: Uuid::new_v4(),
+            roles: Vec::new(),
+            scopes: Vec::new(),
+            session: SessionContext::default(),
+            token_claims: AccessTokenMetadata::default(),
+        });
+
+        // Message one carries the reference, stored as a handle block.
+        let first_block = AiMessageBlockRecord::find_by_id(&fixture.database, &fixture.first_block_id)
+            .await
+            .expect("block lookup should succeed")
+            .expect("first block should exist");
+        let message_id = first_block.message_id;
+        let handle = serde_json::to_value(ProtectedContentEnvelope::DatabaseManaged {
+            value: crate::entity_references::stored_handle_content(&reference),
+        })
+        .expect("handle should serialize");
+        fixture
+            .database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    tx.insert::<AiMessageBlockRecord>(CreateAiMessageBlockRecordInput {
+                        id: Uuid::new_v4(),
+                        message_id,
+                        block_index: 1,
+                        block_kind: crate::AI_ENTITY_REFERENCE_BLOCK_KIND.to_owned(),
+                        protected_content: handle,
+                        byte_count: 48,
+                        line_count: 1,
+                    })
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                    tx.update_by_id::<AiMessageRecord>(
+                        &message_id,
+                        crate::persistence::UpdateAiMessageRecordInput {
+                            block_count: Some(2),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                    Ok(())
+                })
+            })
+            .await
+            .expect("reference block should attach");
+
+        // Before revocation a turn resolves the reference to the payload.
+        let before = registry
+            .resolve_for_use(&principal, &fixture.scope, std::slice::from_ref(&reference))
+            .await;
+        assert!(before[0].view_content().to_string().contains(PAYLOAD));
+
+        // Access is revoked, then the session is compacted.
+        access.store(false, std::sync::atomic::Ordering::SeqCst);
+        let prepared = fixture
+            .service
+            .prepare(&fixture.lease, ProviderKind::OpenAi, "test-model", 2, 128)
+            .await
+            .expect("compaction should prepare");
+        let summarizer_prompt =
+            serde_json::to_string(prepared.model_request()).expect("request serializes");
+        assert!(summarizer_prompt.contains("r-compacted"), "the handle is kept");
+        assert!(!summarizer_prompt.contains(PAYLOAD));
+        assert!(!summarizer_prompt.contains("\"data\""));
+        let result = AiProviderCallResult::test_context_compaction_result(
+            prepared.lease(),
+            ProviderKind::OpenAi,
+            prepared.model_request().clone(),
+            manifest(&prepared, &fixture.scope),
+            "The user asked about record r-compacted.",
+        );
+        let persisted = fixture
+            .service
+            .persist(prepared, &result)
+            .await
+            .expect("checkpoint should persist");
+        let stored = AiContextCheckpointRecord::query(fixture.database.pool())
+            .limit(10)
+            .fetch_all()
+            .await
+            .expect("checkpoints should load");
+        assert_eq!(stored.len(), 1);
+        assert!(
+            !serde_json::to_string(&stored)
+                .expect("checkpoint serializes")
+                .contains(PAYLOAD)
+        );
+        let loaded = fixture
+            .service
+            .load_latest(persisted.lease())
+            .await
+            .expect("checkpoint should load")
+            .expect("checkpoint should exist");
+        assert!(!loaded.summary().contains(PAYLOAD));
+
+        // The next prompt is the summary plus the reference resolved for the
+        // current principal: the marker, since access is gone.
+        let mut next = ModelRequest {
+            model: "test-model".to_owned(),
+            instructions: vec![loaded.summary().to_owned()],
+            input: vec![before[0].model_input_block()],
+            continuation: None,
+            continuation_mode: ModelContinuationMode::ProviderRetained,
+            tools: Vec::new(),
+            builtin_tools: Vec::new(),
+            maximum_builtin_tool_calls: None,
+            reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
+            reasoning_effort: crate::ModelReasoningEffort::Unspecified,
+            output_schema: None,
+            maximum_output_tokens: Some(64),
+        };
+        // Even a block that was resolved before revocation is resolved again.
+        registry
+            .resolve_request_for_use(&principal, &fixture.scope, &mut next)
+            .await;
+        let next_prompt = serde_json::to_string(&next).expect("request serializes");
+        assert!(!next_prompt.contains(PAYLOAD));
+        assert!(next_prompt.contains(r#""status":"unavailable""#));
+        assert!(next_prompt.contains("r-compacted"));
+    }
+
     #[tokio::test]
     async fn exact_compaction_chains_and_loads_without_debug_disclosure() {
         let fixture = fixture().await;

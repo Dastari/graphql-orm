@@ -174,10 +174,12 @@ pub use control_plane::ai_control_plane_root_fields;
 pub use domain::*;
 pub use egress::*;
 pub use entity_references::{
-    AI_ENTITY_REFERENCE_BLOCK_KIND, AI_ENTITY_REFERENCE_PROVENANCE, AiEntityReferenceInput,
+    AI_ENTITY_REFERENCE_BLOCK_KIND, AI_ENTITY_REFERENCE_MODEL_BLOCK_TYPE,
+    AI_ENTITY_REFERENCE_PROVENANCE, AiEntityReferenceInput,
     AiEntityReferenceLimits, AiEntityReferenceNotice, AiEntityReferenceNoticeCode,
     AiEntityReferenceRegistry, AiEntityReferenceResolver, AiEntityReferenceUse,
     AiMessageEntityReferenceInput, AiResolvedEntityReference, is_entity_reference_block_kind,
+    withhold_request_entity_references,
 };
 pub use execution::*;
 pub use graphql_orm_ai_tool_profiles::*;

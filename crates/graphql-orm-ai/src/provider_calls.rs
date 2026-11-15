@@ -3208,7 +3208,19 @@ impl AiProviderCallResult {
         Ok(ModelContinuation::ProviderResponse { response_id })
     }
 
+    /// The continuation for the next provider turn.
+    ///
+    /// Its replayed history holds entity-reference handles only. What the
+    /// references resolved to for this turn's principal is dropped here, at
+    /// the one place history is built, so it is never checkpointed, parked or
+    /// replayed; the next turn resolves the handles again.
     pub(crate) fn next_continuation(&self) -> Result<ModelContinuation, AiError> {
+        let mut continuation = self.next_unredacted_continuation()?;
+        crate::entity_references::redact_model_continuation(&mut continuation);
+        Ok(continuation)
+    }
+
+    fn next_unredacted_continuation(&self) -> Result<ModelContinuation, AiError> {
         if self.tool_calls.is_empty() {
             return Err(AiError::ProviderFailed);
         }
@@ -16420,6 +16432,298 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    /// Review regression. Turn one resolves an entity reference to a field
+    /// value and the model asks for a tool. Access to the field is revoked
+    /// before the tool result continues the run. Neither the checkpoints nor
+    /// the continuation may hold the value, and the next provider request
+    /// must carry what the principal can read now.
+    #[tokio::test]
+    async fn stateless_continuation_stores_reference_handles_and_resolves_them_again() {
+        const FIELD: &str = "field value resolved on turn one";
+        struct Hook(Arc<AtomicBool>);
+        #[async_trait]
+        impl crate::AiEntityReferenceResolver for Hook {
+            async fn resolve(
+                &self,
+                _principal: &AuthPrincipal,
+                _scope: &AiScope,
+                _reference: &crate::AiEntityReferenceInput,
+            ) -> Result<Option<crate::AiResolvedEntityReference>, AiError> {
+                Ok(self.0.load(Ordering::SeqCst).then(|| {
+                    crate::AiResolvedEntityReference::new(json!({"owner_note": FIELD}))
+                }))
+            }
+        }
+        let access = Arc::new(AtomicBool::new(true));
+        let registry =
+            crate::AiEntityReferenceRegistry::new(["record"], Arc::new(Hook(access.clone())))
+                .expect("registry should validate");
+        let reference = crate::AiEntityReferenceInput {
+            kind: "record".to_owned(),
+            id: "r-1".to_owned(),
+        };
+
+        let fixture = fixture(vec![
+            ProviderEvent::ResponseStarted { response_id: None },
+            ProviderEvent::ToolCallStarted {
+                call_id: "reference-call-1".to_owned(),
+                tool_id: "records.read".to_owned(),
+            },
+            ProviderEvent::ToolCallCompleted {
+                call_id: "reference-call-1".to_owned(),
+                arguments: json!({"recordId": "54"}),
+            },
+            ProviderEvent::Usage {
+                input_tokens: 18,
+                output_tokens: 5,
+                cached_input_tokens: 0,
+            },
+            ProviderEvent::ResponseCompleted { response_id: None },
+        ])
+        .await;
+
+        // Turn one: the reference resolves for the current principal and the
+        // resolved value is part of the request that is sent.
+        let mut first = stateless_tool_plan(&fixture);
+        first.request.input.push(
+            registry
+                .resolve_for_use(&fixture.principal, &fixture.scope, &[reference])
+                .await
+                .remove(0)
+                .model_input_block(),
+        );
+        first.transfers[0].estimated_bytes = first.request.conservative_egress_bytes();
+        assert!(
+            serde_json::to_string(&first.request)
+                .expect("request serializes")
+                .contains(FIELD)
+        );
+        let provider_executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8_192, 64 * 1_024)
+                .expect("test provider limits should validate"),
+        );
+        let result = provider_executor
+            .execute(&fixture.lease, first)
+            .await
+            .expect("turn one should normalize");
+        assert!(
+            !serde_json::to_string(&result.next_continuation().expect("history builds"))
+                .expect("continuation serializes")
+                .contains(FIELD),
+            "history is built from handles"
+        );
+
+        let mut guard = AiAgentLoopGuard::new(
+            &fixture.lease,
+            AiAgentLoopLimits::new(4, 4).expect("test loop limits should validate"),
+        );
+        guard
+            .observe_provider_turn(&result)
+            .expect("turn one should bind");
+        let route = AiToolResultEgressRoute::new(
+            "mock-profile",
+            "local-mock",
+            AiDestinationTrust::Local,
+            "continue_authorized_tool_result",
+            "none",
+            "egress-v1",
+        )
+        .expect("tool-result route should validate");
+        let checkpoint_service = OrmAiCoordinatorCheckpointService::new(
+            fixture.run_service.clone(),
+            Arc::new(Resolver(fixture.principal.clone())),
+            Arc::new(AllowAccess),
+            Arc::new(ProtectionPolicy),
+            Arc::new(DatabaseManagedContentProtector),
+            Arc::new(TestRuleResolver::default()),
+            Arc::new(SystemClock),
+            AiCoordinatorCheckpointLimits::new(256 * 1_024, Duration::seconds(30))
+                .expect("checkpoint limits should validate"),
+        );
+        let (rules, provider_rule_usage) = test_rule_checkpoint(&fixture.scope, &[&result], 0);
+        let lease = checkpoint_service
+            .persist_provider_turn(
+                &fixture.lease,
+                &result,
+                &fixture.scope,
+                "reference-tool-loop",
+                &route,
+                &rules,
+                provider_rule_usage,
+                guard.provider_turns(),
+                guard.total_tool_calls(),
+            )
+            .await
+            .expect("provider turn should checkpoint");
+        let tool_service = OrmAiApplicationToolCallService::new(
+            fixture.run_service.clone(),
+            fixture.runtime.clone(),
+            fixture.audit.clone(),
+            Arc::new(SystemClock),
+            AiApplicationToolCallLimits::new(
+                8_192,
+                16_384,
+                4,
+                4,
+                Duration::seconds(30),
+                Duration::seconds(10),
+            )
+            .expect("test tool limits should validate"),
+        );
+        let persisted = tool_service
+            .execute_read_only(
+                &lease,
+                &result,
+                AiApplicationToolCallContext::new(
+                    0,
+                    0,
+                    fixture.scope.clone(),
+                    "reference-tool-loop",
+                    "reference-provider-turn-1",
+                )
+                .expect("tool context should validate"),
+                route.clone(),
+            )
+            .await
+            .expect("tool should execute through the resolver");
+        guard
+            .observe_tool_result(&persisted)
+            .expect("tool output should match the turn");
+        let continuation = guard
+            .continuation()
+            .expect("complete batch should continue");
+        let (_, batch_rule_usage) = test_rule_checkpoint(&fixture.scope, &[&result], 1);
+        checkpoint_service
+            .persist_tool_batch(
+                persisted.lease(),
+                &result,
+                std::slice::from_ref(&persisted),
+                &continuation,
+                &fixture.scope,
+                "reference-tool-loop",
+                &route,
+                &rules,
+                batch_rule_usage,
+                guard.provider_turns(),
+                guard.total_tool_calls(),
+            )
+            .await
+            .expect("tool batch should checkpoint");
+
+        // No persisted checkpoint of the run holds the resolved value; the
+        // tool-batch checkpoint holds the handle.
+        let checkpoints = AiRunCheckpointRecord::query(fixture.database.pool())
+            .limit(50)
+            .fetch_all()
+            .await
+            .expect("checkpoints should load");
+        assert!(checkpoints.len() >= 2);
+        let stored = serde_json::to_string(&checkpoints).expect("checkpoints serialize");
+        assert!(!stored.contains(FIELD), "a checkpoint stored resolved data");
+        assert!(!stored.contains("owner_note"));
+        assert!(stored.contains(r#""status":"handle""#));
+
+        let descriptor = fixture
+            .runtime
+            .tool_catalog()
+            .descriptor(&AiToolId::parse("records.read").expect("tool ID should parse"))
+            .expect("tool should remain registered");
+        let mut policy = AiToolPolicySet::new(ToolMaturity::ReadOnly);
+        policy.bind(AiToolPolicyBinding {
+            tool_id: descriptor.id.clone(),
+            fingerprint: descriptor.fingerprint.clone(),
+            enabled: true,
+        });
+        let next_request = |continuation: crate::AiAgentContinuation| {
+            let base = plan(&fixture);
+            AiProviderCallPlan::new_continuation_with_read_capabilities(
+                base.provider_kind,
+                ModelRequest {
+                    model: "mock-model".to_owned(),
+                    instructions: Vec::new(),
+                    input: Vec::new(),
+                    continuation: None,
+                    continuation_mode: ModelContinuationMode::StatelessReplay,
+                    tools: mixed_read_definitions(&fixture),
+                    builtin_tools: Vec::new(),
+                    maximum_builtin_tool_calls: None,
+                    reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
+                    reasoning_effort: crate::ModelReasoningEffort::Unspecified,
+                    output_schema: None,
+                    maximum_output_tokens: Some(100),
+                },
+                base.budget,
+                base.transfers,
+                "reference-continuation",
+                continuation,
+                fixture.runtime.tool_catalog(),
+                &policy,
+                &fixture.generated_target_policy,
+            )
+            .expect("continuation plan should seal")
+            .request
+        };
+        let wire = |request: &ModelRequest| serde_json::to_string(request).expect("serializes");
+        let chain = |request: &ModelRequest| {
+            request
+                .continuation
+                .as_ref()
+                .expect("continuation is applied")
+                .chain_reference(&request.input)
+        };
+
+        // A continuation that is not resolved replays the handle, no data.
+        let unresolved = next_request(continuation.clone());
+        assert!(!wire(&unresolved).contains(FIELD));
+        assert!(wire(&unresolved).contains(r#""status":"handle""#));
+
+        // While access holds, the next turn resolves the handle again.
+        let still_allowed = next_request(
+            continuation
+                .clone()
+                .resolve_entity_references(&registry, &fixture.principal, &fixture.scope)
+                .await,
+        );
+        assert!(wire(&still_allowed).contains(FIELD));
+
+        // Access to the field is revoked before the tool result continues the
+        // run. The next provider request carries the marker, not the value.
+        access.store(false, Ordering::SeqCst);
+        let resolved = continuation
+            .clone()
+            .resolve_entity_references(&registry, &fixture.principal, &fixture.scope)
+            .await;
+        assert!(
+            !serde_json::to_string(&resolved.checkpoint_value())
+                .expect("continuation serializes")
+                .contains(FIELD)
+        );
+        let after_revocation = next_request(resolved);
+        assert!(!wire(&after_revocation).contains(FIELD));
+        assert!(!wire(&after_revocation).contains("owner_note"));
+        assert!(wire(&after_revocation).contains(r#""status":"unavailable""#));
+
+        // The chain binding is the same whatever the references resolve to,
+        // so a re-resolved request still chains to the stored turn.
+        assert_eq!(chain(&unresolved), chain(&still_allowed));
+        assert_eq!(chain(&unresolved), chain(&after_revocation));
+
+        // Even a continuation resolved in memory is stored as handles.
+        access.store(true, Ordering::SeqCst);
+        let resolved_in_memory = continuation
+            .resolve_entity_references(&registry, &fixture.principal, &fixture.scope)
+            .await;
+        let stored = serde_json::to_string(&resolved_in_memory.checkpoint_value())
+            .expect("continuation serializes");
+        assert!(!stored.contains(FIELD));
+        assert!(stored.contains(r#""status":"handle""#));
     }
 
     #[tokio::test]
