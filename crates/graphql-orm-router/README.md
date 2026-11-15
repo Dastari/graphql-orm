@@ -3,12 +3,15 @@ title: graphql-orm-router
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-11-14
+last_reviewed: 2026-11-15
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # graphql-orm-router
+
+Version 0.15.1 stabilizes loopback WebSocket authority and byte-route tests.
+Runtime behavior and configuration are unchanged.
 
 The current workspace selects published Auth `v0.26.0`, peeled to
 `7d016f6a6bc3e697382e2e05865f596862189240`. Direct Auth consumers must select

@@ -3,12 +3,16 @@ title: graphql-orm-router migration guide
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-11-14
+last_reviewed: 2026-11-15
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # graphql-orm-router migration guide
+
+## 0.15.0 to 0.15.1
+
+Test fixture stability only; no consumer migration is required.
 
 ## 0.14.0 to 0.15.0: router hardening
 
