@@ -12,7 +12,7 @@ method = "git-full-revision"
 
 [features]
 default = ["local"]
-local = ["graphql-orm-storage/local"]
+local = ["dep:tokio", "graphql-orm-storage/local"]
 smb = ["dep:secrecy", "graphql-orm-storage/smb"]
 # Requires the host application to enable exactly one graphql-orm backend
 # feature (sqlite or postgres).
@@ -33,6 +33,8 @@ serde_json = "1"
 secrecy = { version = "0.10", optional = true }
 sha2 = "0.10"
 thiserror = "2"
+# Asynchronous file-system checks for the local repository only.
+tokio = { version = "1", features = ["fs"], optional = true }
 uuid = { version = "1", features = ["serde", "v4"] }
 zeroize = "1"
 zstd = "0.13"

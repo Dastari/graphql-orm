@@ -1930,3 +1930,150 @@ fn seal_format_two(manifest: &mut BackupSnapshotManifest) {
         .unwrap(),
     );
 }
+
+/// A manifest's totals must match its payload entries and each table may
+/// appear once; the host never seals one that does not, and a reader
+/// refuses it (#540).
+#[tokio::test]
+async fn manifest_counts_and_duplicate_tables_are_refused() {
+    let temp = TempDir::new().expect("temp dir");
+    let repository = repository(&temp);
+    let manifest = backup_with_object(&repository, "media/a.txt").await;
+    assert_eq!(manifest.database.table_count, 1);
+    let trusting = legacy_repository(&temp, LegacyManifestPolicy::TrustUnauthenticated);
+
+    let mut row_count = legacy(&manifest);
+    row_count.database.row_count += 1;
+    let mut table_count = legacy(&manifest);
+    table_count.database.table_count += 1;
+    let mut duplicate = legacy(&manifest);
+    let repeated = duplicate.database.tables[0].clone();
+    duplicate.database.row_count += repeated.row_count;
+    duplicate.database.table_count += 1;
+    duplicate.database.tables.push(repeated);
+    for (case, forged) in [
+        ("row count", row_count),
+        ("table count", table_count),
+        ("duplicate table", duplicate),
+    ] {
+        let mut sealed = forged.clone();
+        sealed.format_version = manifest.format_version;
+        let error = authenticate_manifest(&authenticator(), &mut sealed)
+            .expect_err("inconsistent manifests are not sealed");
+        assert!(
+            matches!(error, BackupError::InvalidManifestEntry { .. }),
+            "{case}: {error:?}"
+        );
+        let mut forged = forged;
+        write_raw_manifest(&repository, &mut forged).await;
+        let error = load_manifest(&trusting, manifest.snapshot_id)
+            .await
+            .expect_err("inconsistent manifests are refused");
+        assert!(
+            matches!(error, BackupError::InvalidManifestEntry { .. }),
+            "{case}: {error:?}"
+        );
+    }
+}
+
+/// A sealed manifest whose payload holds another number of rows than its
+/// entry states is refused before anything is restored (#540).
+#[tokio::test]
+async fn a_payload_with_another_row_count_than_its_entry_is_never_restored() {
+    let temp = TempDir::new().expect("temp dir");
+    let repository = repository(&temp);
+    let manifest = backup_with_object(&repository, "media/a.txt").await;
+    let mut forged = manifest.clone();
+    forged.database.tables[0].row_count += 1;
+    forged.database.row_count += 1;
+    authenticate_manifest(
+        repository
+            .manifest_authenticator()
+            .expect("repository authenticator"),
+        &mut forged,
+    )
+    .expect("consistent counts are sealed");
+    repository
+        .put_blob(
+            &snapshot_manifest_key(forged.snapshot_id),
+            Bytes::from(serde_json::to_vec(&forged).expect("json")),
+        )
+        .await
+        .expect("replace manifest");
+
+    let target = MockDatabase::default();
+    let error = restore_snapshot(
+        &repository,
+        &target,
+        manifest.snapshot_id,
+        RestoreContext::empty_database(),
+    )
+    .await
+    .expect_err("a payload with another row count is refused");
+    let BackupError::RestoreStageFailed { progress, source } = error else {
+        panic!("restore errors identify their stage");
+    };
+    assert_eq!(progress.phase, RestoreFailurePhase::Preparation);
+    assert!(!progress.target_may_have_changed());
+    assert!(
+        matches!(*source, BackupError::InvalidManifestEntry { .. }),
+        "{source:?}"
+    );
+    assert!(target.restored().is_empty());
+}
+
+/// An adapter that exports a table twice is refused before anything is
+/// written: both exports would share one payload key (#540).
+#[tokio::test]
+async fn a_table_exported_twice_is_refused_before_any_write() {
+    let temp = TempDir::new().expect("temp dir");
+    let repository = repository(&temp);
+    let before = walk(temp.path());
+    let database = MockDatabase {
+        tables: vec![
+            BackupTableExport {
+                table_name: "users".to_string(),
+                rows: vec![row("users", "1", "Ada")],
+            },
+            BackupTableExport {
+                table_name: "users".to_string(),
+                rows: vec![row("users", "2", "Grace")],
+            },
+        ],
+        ..MockDatabase::default()
+    };
+    let objects = MockObjectIndex {
+        object: BackupObjectRef {
+            object_id: Uuid::new_v4(),
+            storage_key: "media/a.txt".to_string(),
+            sha256_hex: bytes_sha256_hex(b"object bytes"),
+            size_bytes: 12,
+            mime_type: None,
+        },
+        bytes: Bytes::from_static(b"object bytes"),
+    };
+    let error = create_full_backup(
+        &repository,
+        &database,
+        &objects,
+        FullBackupRequest {
+            snapshot_id: Uuid::new_v4(),
+            created_at: 1_775_174_400,
+            app_id: "example-app".to_string(),
+            app_version: "0.1.0".to_string(),
+        },
+    )
+    .await
+    .expect_err("a duplicated table is refused");
+    assert!(
+        matches!(error, BackupError::InvalidManifestEntry { .. }),
+        "{error:?}"
+    );
+    let written: Vec<_> = walk(temp.path())
+        .into_iter()
+        .filter(|path| !before.contains(path))
+        .map(|path| path.display().to_string())
+        .filter(|path| path.contains("snapshots") || path.contains("objects"))
+        .collect();
+    assert!(written.is_empty(), "{written:?}");
+}

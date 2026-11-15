@@ -392,14 +392,20 @@ impl GraphqlOrmBackupAdapter for OrmBackupAdapter {
         backup_snapshot.schema_hash = backup_schema.schema_hash;
         let mut rows_by_table = BTreeMap::new();
         for table in export {
-            rows_by_table.insert(
-                table.table_name.clone(),
-                table
-                    .rows
-                    .into_iter()
-                    .map(orm_row_from_crate)
-                    .collect::<Result<Vec<_>, _>>()?,
-            );
+            let rows = table
+                .rows
+                .into_iter()
+                .map(orm_row_from_crate)
+                .collect::<Result<Vec<_>, _>>()?;
+            // A second export of a table would silently replace the first.
+            if rows_by_table.insert(table.table_name.clone(), rows).is_some() {
+                return Err(BackupError::Database {
+                    message: format!(
+                        "restore export lists table {} more than once",
+                        table.table_name
+                    ),
+                });
+            }
         }
         self.database
             .restore_backup_rows(
