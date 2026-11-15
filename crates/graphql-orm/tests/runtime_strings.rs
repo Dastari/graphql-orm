@@ -1,4 +1,8 @@
-#![cfg(all(any(feature = "sqlite", feature = "postgres"), not(feature = "mssql")))]
+#![cfg(all(
+    any(feature = "sqlite", feature = "postgres"),
+    not(all(feature = "sqlite", feature = "postgres")),
+    not(feature = "mssql")
+))]
 //! Executable runtime string contract on databases owned exclusively by this test.
 
 use graphql_orm::prelude::*;

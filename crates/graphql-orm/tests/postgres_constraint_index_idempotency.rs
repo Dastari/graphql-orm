@@ -1,4 +1,5 @@
-#![cfg(feature = "postgres")]
+// One backend per build: the generated code below names no backend.
+#![cfg(all(feature = "postgres", not(feature = "sqlite")))]
 
 use std::collections::BTreeSet;
 use std::process::Command;

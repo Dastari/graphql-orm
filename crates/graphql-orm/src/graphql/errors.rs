@@ -558,6 +558,126 @@ fn tracing_log_internal(code: &OrmErrorCode, internal: &str) {
     }
 }
 
+/// The field errors a running request has buffered, guarded against a
+/// poisoned buffer.
+///
+/// async-graphql collects a request's field errors behind a standard mutex.
+/// Generated resolvers read its length and cut it back so that a withheld
+/// row or event releases none of the diagnostics its host callbacks
+/// buffered. A panic while the buffer is locked poisons it. The helpers here
+/// then drop everything it holds, so no private diagnostic outlives the
+/// failure, and report a typed `INTERNAL_ERROR` instead of panicking in the
+/// request path.
+#[doc(hidden)]
+pub mod buffered_errors {
+    use super::OrmPublicError;
+    use std::sync::Mutex;
+
+    fn poisoned() -> async_graphql::Error {
+        OrmPublicError::internal("the request's error buffer was poisoned by a panic")
+            .into_graphql_error()
+    }
+
+    pub(crate) fn count_in<E>(errors: &Mutex<Vec<E>>) -> async_graphql::Result<usize> {
+        match errors.lock() {
+            Ok(errors) => Ok(errors.len()),
+            Err(recovered) => {
+                recovered.into_inner().clear();
+                Err(poisoned())
+            }
+        }
+    }
+
+    pub(crate) fn truncate_in<E>(errors: &Mutex<Vec<E>>, keep: usize) -> async_graphql::Result<()> {
+        match errors.lock() {
+            Ok(mut errors) => {
+                errors.truncate(keep);
+                Ok(())
+            }
+            Err(recovered) => {
+                recovered.into_inner().clear();
+                Err(poisoned())
+            }
+        }
+    }
+
+    /// How many field errors the request has buffered so far.
+    ///
+    /// # Errors
+    ///
+    /// `INTERNAL_ERROR` when the buffer is poisoned; it is emptied first.
+    pub fn count(ctx: &async_graphql::Context<'_>) -> async_graphql::Result<usize> {
+        count_in(&ctx.query_env.errors)
+    }
+
+    /// Drop every field error buffered after the first `keep`.
+    ///
+    /// # Errors
+    ///
+    /// `INTERNAL_ERROR` when the buffer is poisoned; it is emptied first.
+    pub fn truncate(ctx: &async_graphql::Context<'_>, keep: usize) -> async_graphql::Result<()> {
+        truncate_in(&ctx.query_env.errors, keep)
+    }
+
+    /// Drop every buffered field error, also from a poisoned buffer. For a
+    /// path that is already ending with its own error.
+    pub fn clear(ctx: &async_graphql::Context<'_>) {
+        let _ = truncate(ctx, 0);
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::sync::Arc;
+
+        fn code(error: async_graphql::Error) -> Option<String> {
+            error
+                .extensions
+                .and_then(|extensions| match extensions.get("code") {
+                    Some(async_graphql::Value::String(code)) => Some(code.clone()),
+                    _ => None,
+                })
+        }
+
+        /// A buffer poisoned by a panic is refused with a typed error, not a
+        /// second panic, and keeps none of its diagnostics (#511).
+        #[test]
+        fn a_poisoned_buffer_is_a_typed_error_and_is_emptied() {
+            let errors = Arc::new(Mutex::new(vec!["private diagnostic"]));
+            assert_eq!(count_in(&errors).unwrap(), 1);
+            let held = errors.clone();
+            let panicked = std::thread::spawn(move || {
+                let _guard = held.lock().unwrap();
+                panic!("poison the buffer");
+            })
+            .join();
+            assert!(panicked.is_err() && errors.is_poisoned());
+            assert_eq!(
+                code(count_in(&errors).unwrap_err()).as_deref(),
+                Some("INTERNAL_ERROR")
+            );
+            assert!(errors.lock().unwrap_err().into_inner().is_empty());
+            errors
+                .lock()
+                .unwrap_err()
+                .into_inner()
+                .push("later diagnostic");
+            let refused = truncate_in(&errors, 1).unwrap_err();
+            assert_eq!(refused.message, "internal error");
+            assert_eq!(code(refused).as_deref(), Some("INTERNAL_ERROR"));
+            assert!(errors.lock().unwrap_err().into_inner().is_empty());
+        }
+
+        #[test]
+        fn a_healthy_buffer_is_counted_and_cut_back() {
+            let errors = Mutex::new(vec![1, 2, 3]);
+            assert_eq!(count_in(&errors).unwrap(), 3);
+            truncate_in(&errors, 1).unwrap();
+            assert_eq!(*errors.lock().unwrap(), [1]);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

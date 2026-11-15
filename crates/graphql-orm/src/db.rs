@@ -1572,15 +1572,16 @@ impl<B: OrmBackend> Database<B> {
         if !ctx.look_ahead().field(result_field).exists() {
             return Ok(None);
         }
-        let errors_before = ctx.query_env.errors.lock().unwrap().len();
-        let committed = |error| {
-            crate::graphql::errors::graphql_error_from_callback(error).extend_with(
-                |_, extensions| {
-                    extensions.set("outcome", "committed");
-                    extensions.set("retryable", false);
-                },
-            )
-        };
+        fn after_commit(error: async_graphql::Error) -> async_graphql::Error {
+            error.extend_with(|_, extensions| {
+                extensions.set("outcome", "committed");
+                extensions.set("retryable", false);
+            })
+        }
+        let errors_before =
+            crate::graphql::errors::buffered_errors::count(ctx).map_err(after_commit)?;
+        let committed =
+            |error| after_commit(crate::graphql::errors::graphql_error_from_callback(error));
         let output = async {
             let surface = crate::graphql::orm::EntityAccessSurface::GraphqlMutation;
             self.ensure_entity_access(
@@ -1605,7 +1606,8 @@ impl<B: OrmBackend> Database<B> {
         .await;
         // A withheld row must not release private host diagnostics either.
         if !matches!(output, Ok(Some(_))) {
-            ctx.query_env.errors.lock().unwrap().truncate(errors_before);
+            crate::graphql::errors::buffered_errors::truncate(ctx, errors_before)
+                .map_err(after_commit)?;
         }
         output
     }

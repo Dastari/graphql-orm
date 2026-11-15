@@ -1,4 +1,8 @@
-#![cfg(all(any(feature = "sqlite", feature = "postgres"), not(feature = "mssql")))]
+#![cfg(all(
+    any(feature = "sqlite", feature = "postgres"),
+    not(all(feature = "sqlite", feature = "postgres")),
+    not(feature = "mssql")
+))]
 
 use graphql_orm::prelude::*;
 use std::sync::{Arc, Mutex};

@@ -307,7 +307,7 @@ impl ProjectedPlan {
     pub(super) async fn resolve(
         &self,
         schema: &ValidatedRuntimeSchema,
-        stored: &[RuntimeValue],
+        stored: &[&RuntimeValue],
         purpose: RuntimeProjectionPurpose,
         auth: Option<&DbAuthContext>,
         context: Option<&(dyn Any + Send + Sync)>,
@@ -343,7 +343,7 @@ impl ProjectedPlan {
             match keys.entry(key) {
                 std::collections::btree_map::Entry::Vacant(entry) => {
                     entry.insert(distinct.len());
-                    distinct.push(value.clone());
+                    distinct.push((*value).clone());
                     uses.push(1);
                 }
                 std::collections::btree_map::Entry::Occupied(entry) => {
@@ -722,8 +722,8 @@ pub(crate) mod tests {
         let plan = &plans[0];
         let shared = RuntimeValue::Uuid(uuid::Uuid::from_bytes([1; 16]));
         let other = RuntimeValue::Uuid(uuid::Uuid::from_bytes([2; 16]));
-        let mut stored = vec![shared; 49];
-        stored.push(other);
+        let mut stored = vec![&shared; 49];
+        stored.push(&other);
         let shape = record_shape();
         let shapes = super::super::execution::Shapes::of(&shape);
         let charge = |value: &async_graphql::Value| shapes.field_bytes("avatar", value, usize::MAX);

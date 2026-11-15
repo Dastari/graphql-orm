@@ -43,8 +43,8 @@ run_sqlite() {
     --test migration_planner --test migration_apply --test legacy_migration_history \
     --test runtime_compat_goldens --test runtime_typed_defaults --test runtime_field_formats \
     --test runtime_graphql_formats \
-    --test runtime_search_graphql --test runtime_search_writes --test runtime_search_ir \
-    --test runtime_many_to_many \
+    --test runtime_search_graphql --test runtime_search_writes --test runtime_search_ir --test runtime_search_long_tables \
+    --test runtime_many_to_many --test runtime_relation_bind_limit \
     -- --test-threads=1
   cargo test -p graphql-orm --no-default-features --features sqlite \
     --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial --locked
@@ -69,7 +69,7 @@ run_postgres() {
     --test migration_planner --test migration_apply --test legacy_migration_history \
     --test runtime_compat_goldens --test runtime_typed_defaults --test runtime_field_formats \
     --test runtime_graphql_formats \
-    --test runtime_search_graphql --test runtime_search_writes --test runtime_search_ir \
+    --test runtime_search_graphql --test runtime_search_writes --test runtime_search_ir --test runtime_search_long_tables \
     -- --test-threads=1
   cargo test -p graphql-orm --no-default-features --features postgres \
     --test runtime_strings --test full_text_search --locked -- --include-ignored --test-threads=1

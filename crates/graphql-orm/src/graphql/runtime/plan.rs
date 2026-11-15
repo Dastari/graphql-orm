@@ -16,6 +16,28 @@ fn record_error(e: RuntimeRecordError) -> RuntimeGraphqlError {
     RuntimeGraphqlError::new(e.code().as_str())
 }
 
+/// The field an `orderBy` term names by API name.
+///
+/// The order enum lists sortable fields only and `runtime_order` checks each
+/// term again; this refuses an unsortable or JSON field here as well, so the
+/// planner never resolves one whatever the schema's enum admitted.
+fn order_field<'c>(
+    c: &'c RuntimeCollection,
+    api_name: &str,
+) -> Result<&'c RuntimeField, RuntimeGraphqlError> {
+    let field = c
+        .fields
+        .iter()
+        .find(|field| field.api_name == api_name)
+        .ok_or_else(invalid)?;
+    if !field.sortable || matches!(field.value_kind, RuntimeValueKind::Json) {
+        return Err(RuntimeGraphqlError::new(
+            RuntimeQueryErrorCode::UnsupportedOrder.as_str(),
+        ));
+    }
+    Ok(field)
+}
+
 #[derive(Clone)]
 pub(super) struct Plan {
     pub point_read: bool,
@@ -340,11 +362,7 @@ impl Planner<'_> {
                     return Err(invalid());
                 };
                 let f = enum_text(values.get("field").ok_or_else(invalid)?)?;
-                let field = c
-                    .fields
-                    .iter()
-                    .find(|v| v.api_name == f)
-                    .ok_or_else(invalid)?;
+                let field = order_field(c, f)?;
                 let direction = match values.get("direction") {
                     None | Some(Value::Null) => RuntimeOrderDirection::Asc,
                     Some(v) if enum_text(v)? == "ASC" => RuntimeOrderDirection::Asc,
@@ -1349,6 +1367,26 @@ mod checked_compatibility_tests {
             &mut RelationGrants::Disallowed,
         )
     }
+    /// `orderBy` resolves sortable fields only (#541): an unsortable field
+    /// is refused by the planner itself, before `runtime_order` sees it.
+    #[test]
+    fn order_terms_resolve_sortable_fields_only() {
+        let s = schema();
+        let c = &s.schema().collections[0];
+        assert_eq!(order_field(c, "id").unwrap().api_name, "id");
+        for unsortable in ["text", "flag", "hidden"] {
+            assert_eq!(
+                order_field(c, unsortable).err().map(|e| e.code()),
+                Some("unsupported_order"),
+                "{unsortable}"
+            );
+        }
+        assert_eq!(
+            order_field(c, "unknown").err().map(|e| e.code()),
+            Some(invalid().code())
+        );
+    }
+
     #[test]
     // Internal old-filter compatibility; these are not claims that unknown or
     // unfilterable wire fields pass GraphQL schema validation.

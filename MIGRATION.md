@@ -10,6 +10,49 @@ supersedes: []
 
 # Migration Guide
 
+## 0.157.0 to 0.158.0: runtime budget, search helper names and typed refusals
+
+Upgrade runtime and macros together. Generated SDL, operation catalogues and
+fingerprints are unchanged. One entry needs action, and only from hosts with a
+searchable base table whose name is longer than 42 bytes.
+
+- **Search helper table names (breaking for long base table names).**
+  `search_table_name(table)` is now at most 63 bytes, PostgreSQL's identifier
+  limit. Base table names of up to 42 bytes are unaffected. A longer name
+  becomes the first 46 bytes of `__graphql_orm_search_<table>`, then `_` and
+  16 hexadecimal digits of the SHA-256 of the whole base table name.
+  - PostgreSQL stored such a helper table under the first 63 bytes of the old
+    name. Rename it once, as its owner, before serving with this release.
+    Print the new name with `graphql_orm::graphql::orm::search_table_name`,
+    then run
+    `ALTER TABLE "<first 63 bytes of __graphql_orm_search_<table>>" RENAME TO "<new name>"`.
+    For an entity with row-level security, the base table's search delete
+    trigger stores the helper table's name and the helper table's policy
+    names are derived from it. After the rename, apply the schema target's
+    row-level security again, which recreates the trigger and creates the
+    policies under their new names, and run `validate_target`; drop the
+    policies left under the old names.
+  - SQLite hosts that use the fallback search table (not FTS5) for such a base
+    table rename `__graphql_orm_search_<table>` in the same way. FTS5 tables
+    (`__graphql_orm_fts_<table>`) keep their names.
+  - Two searchable tables that agree in their first 42 bytes could not both be
+    indexed on PostgreSQL before; both can be now.
+- **Runtime GraphQL response budget.** Nothing to change. A request's layers
+  are all read before any host projector runs, where a parent layer's
+  projector used to run before its child layers were read. A projector that
+  counts its calls is called the same number of times for a served response,
+  and is not called at all when the stored fields and structure alone exceed
+  `max_response_bytes`.
+- **Runtime relation layers on SQLite.** Nothing to change. A layer that binds
+  more than 999 values runs as several statements instead of one; a host that
+  counts statements per layer sees more of them for such a layer.
+- **Typed refusals.** Nothing to change. Code that expected a panic from a
+  poisoned request error buffer now receives `INTERNAL_ERROR`.
+- **Tests under two backends.** Twelve test targets and one example that
+  generate code for a single backend are now compiled only when exactly one
+  of `sqlite` and `postgres` is enabled. No CI lane or documented command
+  enabled both for them.
+
 ## 0.156.0 to 0.157.0: migrations, change journal and retention
 
 Upgrade runtime and macros together. Generated SDL, operation catalogues and

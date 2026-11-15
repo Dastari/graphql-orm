@@ -193,6 +193,13 @@ Scores are not comparable across backends, and `minScore` thresholds are backend
 
 ## Backend differences
 
+The PostgreSQL document table is named by `search_table_name`:
+`__graphql_orm_search_<table>` for a base table name of up to 42 bytes. A
+longer base table name would pass PostgreSQL's 63-byte identifier limit, so
+its helper name keeps the first 46 bytes and ends in `_` and 16 hexadecimal
+digits of the SHA-256 of the whole base table name. Two long tables that share
+a prefix therefore keep separate documents.
+
 | | SQLite | PostgreSQL |
 | --- | --- | --- |
 | Storage | FTS5 table `__graphql_orm_fts_<table>` | `__graphql_orm_search_<table>` with weighted `tsvector` and GIN |

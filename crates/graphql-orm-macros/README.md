@@ -10,6 +10,17 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.158.0 closes follow-ups from the recent batches. The runtime GraphQL
+response budget reserves every selected layer's structure and stored fields
+before a projected host object is copied, and the read path no longer copies
+records before their bytes are reserved. On SQLite a runtime relation layer
+with more than 999 bound values is sent as several statements. Search helper
+table names are bounded to PostgreSQL's 63 bytes, which is breaking only for a
+searchable base table name longer than 42 bytes: its helper table is renamed
+once. A poisoned request error buffer and an unknown aggregate operator are
+typed errors instead of panics. See the
+[migration guide](../../MIGRATION.md#01570-to-01580-runtime-budget-search-helper-names-and-typed-refusals).
+
 Version 0.157.0 fixes data-safety defects in migrations, the change journal
 and retention. One change is breaking: `export_changes` pages the change
 journal by a new monotonic `seq` column (`ChangeWindow::after_sequence`,

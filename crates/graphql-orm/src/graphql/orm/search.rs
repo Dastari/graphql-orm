@@ -149,9 +149,33 @@ pub trait SearchableEntity: DatabaseSearchSchema {
     }
 }
 
+/// Longest identifier PostgreSQL keeps. It truncates a longer one silently,
+/// so two helper tables whose names agree in their first 63 bytes would be
+/// one table.
+const MAX_SEARCH_TABLE_NAME_BYTES: usize = 63;
+
 /// Return the managed PostgreSQL/fallback search table name for a base table.
+///
+/// The name is `__graphql_orm_search_<table>` while that fits PostgreSQL's
+/// 63-byte identifier limit, which holds for base table names of up to 42
+/// bytes. A longer base table name keeps as much of itself as fits and ends
+/// in `_` and 16 hexadecimal digits of the SHA-256 of the whole base table
+/// name, so the result is always at most 63 bytes and distinct base tables
+/// keep distinct helper tables.
 pub fn search_table_name(table_name: &str) -> String {
-    format!("__graphql_orm_search_{}", sanitize_search_name(table_name))
+    let name = format!("__graphql_orm_search_{}", sanitize_search_name(table_name));
+    if name.len() <= MAX_SEARCH_TABLE_NAME_BYTES {
+        return name;
+    }
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(table_name.as_bytes());
+    let suffix = digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    // Sanitized names are ASCII, so any byte offset is a character boundary.
+    let kept = MAX_SEARCH_TABLE_NAME_BYTES - suffix.len() - 1;
+    format!("{}_{suffix}", &name[..kept])
 }
 
 /// Return the managed SQLite FTS5 table name for a base table.
