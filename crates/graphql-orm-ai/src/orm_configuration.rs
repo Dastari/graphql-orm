@@ -34,6 +34,26 @@ use crate::{
     SetAiRetentionPolicyInput, UpsertAiBudgetPolicyInput, UpsertAiProviderProfileInput,
 };
 
+/// A pending host-only secret cleanup command. Contains no credential material.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AiPendingSecretCleanup {
+    /// Durable command identifier.
+    pub id: Uuid,
+    /// Exact obsolete secret reference; never disclose this host metadata to a model.
+    pub reference: SecretRef,
+    /// Version required when completing the command.
+    pub row_version: i64,
+}
+
+/// One bounded page of pending cleanup commands for an authorized exact scope.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AiPendingSecretCleanupPage {
+    /// Pending commands, without credential plaintext.
+    pub entries: Vec<AiPendingSecretCleanup>,
+    /// Cursor for the next page, if any.
+    pub next_cursor: Option<String>,
+}
+
 /// Deployment hard bounds for GraphQL-managed budget policies.
 ///
 /// GraphQL values may only narrow these ceilings. This type does not grant
@@ -220,6 +240,221 @@ impl OrmAiConfigurationService {
         &self.host_database
     }
 
+    /// Lists up to 100 pending secret cleanups in one exact configuration scope.
+    ///
+    /// Legacy commands without scope metadata are excluded and require operator review.
+    /// # Errors
+    /// Requires recent MFA and `ManageProviderCredentials` for the exact scope.
+    /// Invalid cursors, invalid stored references and persistence errors fail closed.
+    pub async fn pending_secret_cleanups(
+        &self,
+        principal: &AuthPrincipal,
+        scope: &AiScope,
+        after: Option<String>,
+    ) -> Result<AiPendingSecretCleanupPage, AiError> {
+        self.require_recent_mfa(principal)?;
+        self.require_access(
+            principal,
+            scope,
+            AiConfigurationAction::ManageProviderCredentials,
+        )
+        .await?;
+        let page = AiSecretCleanupRecord::keyset_connection_page(
+            &self.database,
+            AiSecretCleanupRecordWhereInput {
+                scope_key: Some(StringFilter {
+                    eq: Some(crate::ai_scope_key(scope)),
+                    ..Default::default()
+                }),
+                state: Some(StringFilter {
+                    eq: Some("pending".to_owned()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            graphql_orm::graphql::pagination::KeysetConnectionInput {
+                after,
+                first: Some(crate::orm_read_bounds::client_page_limit(
+                    self.database.pagination_config(),
+                    100,
+                )),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(map_orm)?;
+        let entries = page
+            .edges
+            .into_iter()
+            .map(|edge| {
+                Ok(AiPendingSecretCleanup {
+                    id: edge.node.id,
+                    reference: SecretRef::parse(edge.node.secret_reference)
+                        .map_err(|_| AiError::PersistenceFailed)?,
+                    row_version: edge.node.row_version,
+                })
+            })
+            .collect::<Result<Vec<_>, AiError>>()?;
+        Ok(AiPendingSecretCleanupPage {
+            entries,
+            next_cursor: if page.page_info.has_next_page {
+                page.page_info.end_cursor
+            } else {
+                None
+            },
+        })
+    }
+
+    /// Deletes one unshared obsolete secret and completes its durable command.
+    ///
+    /// Store failure leaves the command pending. A reference still used by any
+    /// provider profile cannot be deleted, including profiles in other scopes.
+    /// # Errors
+    /// Requires recent MFA and `ManageProviderCredentials` in the recorded scope.
+    /// Missing or inaccessible commands return `NotFound`; stale versions and
+    /// shared references or an unproven unfiltered scan return `Conflict`;
+    /// store/database failures remain pending.
+    pub async fn complete_secret_cleanup(
+        &self,
+        principal: &AuthPrincipal,
+        scope: &AiScope,
+        id: Uuid,
+        expected_version: i64,
+    ) -> Result<(), AiError> {
+        self.require_recent_mfa(principal)?;
+        self.require_access(
+            principal,
+            scope,
+            AiConfigurationAction::ManageProviderCredentials,
+        )
+        .await
+        .map_err(|error| {
+            if matches!(error, AiError::Forbidden) {
+                AiError::NotFound
+            } else {
+                error
+            }
+        })?;
+        let command = AiSecretCleanupRecord::find_by_id(&self.database, &id)
+            .await
+            .map_err(|error| map_orm(OrmPublicError::from(error)))?
+            .ok_or(AiError::NotFound)?;
+        if command.scope_key.as_deref() != Some(crate::ai_scope_key(scope).as_str()) {
+            return Err(AiError::NotFound);
+        }
+        if command.row_version != expected_version || command.state != "pending" {
+            return Err(AiError::Conflict);
+        }
+        self.delete_unshared_secret(
+            command,
+            Some((principal_kind(principal), principal.subject().to_owned())),
+        )
+        .await
+    }
+
+    async fn delete_unshared_secret(
+        &self,
+        command: AiSecretCleanupRecord,
+        actor: Option<(String, String)>,
+    ) -> Result<(), AiError> {
+        // A filtered scan cannot establish that another profile has released
+        // this reference. Preserve the durable command rather than delete blind.
+        if !crate::orm_runs::recovery_filtering_excluded(&self.database).await {
+            return Err(AiError::Conflict);
+        }
+        let reference = SecretRef::parse(command.secret_reference.clone())
+            .map_err(|_| AiError::PersistenceFailed)?;
+        // put(None) creates fresh references; host configuration never attaches an old
+        // reference. Check all scopes before deleting a legacy shared reference.
+        let reference_value = reference.as_str().to_owned();
+        let users = self
+            .database
+            .transaction(TransactionMode::Default, move |tx| {
+                Box::pin(async move {
+                    tx.query::<AiProviderProfileRecord>()
+                        .filter(AiProviderProfileRecordWhereInput {
+                            credential_reference: Some(StringFilter {
+                                eq: Some(reference_value),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .internal_limit(1)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .map_err(map_transaction)?;
+        if !users.is_empty() {
+            return Err(AiError::Conflict);
+        }
+        self.secret_store
+            .delete(&reference)
+            .await
+            .map_err(|_| AiError::PersistenceFailed)?;
+        let id = command.id;
+        let result = self
+            .database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let result = tx
+                        .compare_and_swap::<AiSecretCleanupRecord>(
+                            &id,
+                            command.row_version,
+                            AiSecretCleanupRecordWhereInput {
+                                state: Some(StringFilter {
+                                    eq: Some("pending".to_owned()),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            },
+                            UpdateAiSecretCleanupRecordInput {
+                                state: Some("complete".to_owned()),
+                                completed_at: Some(Some(unix_seconds())),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if matches!(&result, ConditionalUpdateOutcome::Updated(_)) {
+                        let (kind, subject) = actor
+                            .unwrap_or_else(|| ("system".to_owned(), "secret-cleanup".to_owned()));
+                        insert_audit(
+                            tx,
+                            AuditFact {
+                                actor_principal_kind: &kind,
+                                actor_subject: &subject,
+                                action: "ai.secret_cleanup.complete",
+                                resource_kind: "secret_cleanup",
+                                resource_reference: &id.to_string(),
+                                outcome: "allowed",
+                                reason_code: "unshared_secret_deleted",
+                                policy_version: None,
+                            },
+                        )
+                        .await?;
+                    }
+                    Ok(result)
+                })
+            })
+            .await
+            .map_err(map_transaction)?;
+        match result {
+            ConditionalUpdateOutcome::Updated(_) => Ok(()),
+            _ => Err(AiError::Conflict),
+        }
+    }
+
+    async fn complete_cleanup(&self, id: Option<Uuid>) {
+        if let Some(id) = id
+            && let Ok(Some(command)) = AiSecretCleanupRecord::find_by_id(&self.database, &id).await
+        {
+            let _ = self.delete_unshared_secret(command, None).await;
+        }
+    }
+
     async fn require_access(
         &self,
         principal: &AuthPrincipal,
@@ -250,24 +485,6 @@ impl OrmAiConfigurationService {
             .await
             .map_err(|error| map_orm(OrmPublicError::from(error)))?
             .ok_or(AiError::NotFound)
-    }
-
-    async fn complete_cleanup(&self, cleanup_id: Option<Uuid>, reference: &SecretRef) {
-        let Some(cleanup_id) = cleanup_id else {
-            return;
-        };
-        if self.secret_store.delete(reference).await.is_ok() {
-            let _ = AiSecretCleanupRecord::update_by_id(
-                &self.database,
-                &cleanup_id,
-                UpdateAiSecretCleanupRecordInput {
-                    state: Some("complete".to_owned()),
-                    completed_at: Some(Some(unix_seconds())),
-                    ..Default::default()
-                },
-            )
-            .await;
-        }
     }
 }
 
@@ -427,7 +644,10 @@ impl AiConfigurationService for OrmAiConfigurationService {
         let credentialed_move_authorized = match (profile_id, expected_version) {
             (Some(id), Some(expected_version)) => {
                 let current = self.profile(id).await?;
-                if current.scope_key != scope_hash || current.row_version != expected_version {
+                if current.scope_key != scope_hash {
+                    return Err(AiError::NotFound);
+                }
+                if current.row_version != expected_version {
                     return Err(AiError::Conflict);
                 }
                 if moves_credentialed_endpoint(&current, &provider_kind, base_url.as_deref()) {
@@ -474,9 +694,10 @@ impl AiConfigurationService for OrmAiConfigurationService {
                                 .ok_or_else(OrmPublicError::not_found)?;
                             // The authority decision above was made for exactly this
                             // version; any other version is a race and reports Conflict.
-                            if current.scope_key != scope_hash
-                                || current.row_version != expected_version
-                            {
+                            if current.scope_key != scope_hash {
+                                return Err(OrmPublicError::not_found());
+                            }
+                            if current.row_version != expected_version {
                                 return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                             }
                             if provider_kind == AiProviderKindInput::LocalHarness.as_str()
@@ -555,7 +776,11 @@ impl AiConfigurationService for OrmAiConfigurationService {
             &scope,
             AiConfigurationAction::ManageProviderCredentials,
         )
-        .await?;
+        .await
+        .map_err(|error| match error {
+            AiError::Forbidden => AiError::NotFound,
+            other => other,
+        })?;
         if existing.provider_kind == AiProviderKindInput::LocalHarness.as_str() {
             return Err(AiError::InvalidInput(
                 "local-harness profiles do not accept provider credentials".to_owned(),
@@ -580,6 +805,7 @@ impl AiConfigurationService for OrmAiConfigurationService {
         let actor_subject = principal.subject().to_owned();
         let new_reference_value = new_reference.as_str().to_owned();
         let previous_for_tx = previous_reference.clone();
+        let cleanup_scope_key = crate::ai_scope_key(&scope);
         let result = self
             .database
             .transaction(TransactionMode::StateMachine, move |tx| {
@@ -619,6 +845,7 @@ impl AiConfigurationService for OrmAiConfigurationService {
                         tx.insert::<AiSecretCleanupRecord>(CreateAiSecretCleanupRecordInput {
                             id: cleanup_id,
                             secret_reference: previous.as_str().to_owned(),
+                            scope_key: Some(cleanup_scope_key.clone()),
                             reason_code: "credential_rotated".to_owned(),
                             state: "pending".to_owned(),
                             retry_count: 0,
@@ -653,9 +880,7 @@ impl AiConfigurationService for OrmAiConfigurationService {
                 return Err(map_transaction(error));
             }
         };
-        if let Some(previous) = previous_reference.as_ref() {
-            self.complete_cleanup(cleanup_id, previous).await;
-        }
+        self.complete_cleanup(cleanup_id).await;
         provider_view(&profile)
     }
 
@@ -672,7 +897,11 @@ impl AiConfigurationService for OrmAiConfigurationService {
             &scope,
             AiConfigurationAction::ManageProviderCredentials,
         )
-        .await?;
+        .await
+        .map_err(|error| match error {
+            AiError::Forbidden => AiError::NotFound,
+            other => other,
+        })?;
         if existing.row_version != input.expected_version {
             return Err(AiError::Conflict);
         }
@@ -684,6 +913,7 @@ impl AiConfigurationService for OrmAiConfigurationService {
             .map_err(|_| AiError::InvalidConfiguration("invalid secret reference".to_owned()))?;
         let cleanup_id = previous_reference.as_ref().map(|_| Uuid::new_v4());
         let previous_for_tx = previous_reference.clone();
+        let cleanup_scope_key = crate::ai_scope_key(&scope);
         let actor_kind = principal_kind(principal);
         let actor_subject = principal.subject().to_owned();
         let profile_id = input.profile_id;
@@ -719,6 +949,7 @@ impl AiConfigurationService for OrmAiConfigurationService {
                         tx.insert::<AiSecretCleanupRecord>(CreateAiSecretCleanupRecordInput {
                             id: cleanup_id,
                             secret_reference: previous.as_str().to_owned(),
+                            scope_key: Some(cleanup_scope_key.clone()),
                             reason_code: "credential_removed".to_owned(),
                             state: "pending".to_owned(),
                             retry_count: 0,
@@ -747,9 +978,7 @@ impl AiConfigurationService for OrmAiConfigurationService {
             })
             .await
             .map_err(map_transaction)?;
-        if let Some(previous) = previous_reference.as_ref() {
-            self.complete_cleanup(cleanup_id, previous).await;
-        }
+        self.complete_cleanup(cleanup_id).await;
         provider_view(&profile)
     }
 
@@ -1422,6 +1651,7 @@ impl AiConfigurationService for OrmAiConfigurationService {
                     {
                         return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                     }
+                    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
                     let previous_state = record.state.clone();
                     let updated =
                         crate::orm_budget::commit_stranded_reservation(tx, &record, now).await?;
@@ -2627,6 +2857,72 @@ mod tests {
         .await
         .expect("other-tenant reservation should seed");
         inserted.id
+    }
+
+    #[tokio::test]
+    async fn reclaim_uses_custody_under_a_deny_everything_host_policy() {
+        let (mut database, now, reservation_id) = stranded_reservation_fixture().await;
+        terminate_run(&database).await;
+        expire_reservation(
+            &database,
+            reservation_id,
+            (now - Duration::days(2)).unix_timestamp(),
+        )
+        .await;
+        database.set_field_policy(crate::custody_field_policy::tests::DenyEverything);
+        let service = configuration_service(database, Arc::new(AllowConfiguration), now, true);
+        let before = service
+            .budget_scope_capacity(&admin_principal(now), scope())
+            .await
+            .unwrap();
+        let reclaimed = service
+            .reclaim_budget_reservation(
+                &admin_principal(now),
+                ReclaimAiBudgetReservationInput {
+                    scope: scope_input(),
+                    reservation_id,
+                    expected_version: before.reservations[0].row_version,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(reclaimed.state, "committed");
+    }
+
+    #[tokio::test]
+    async fn reclaim_refuses_a_closed_recovery_epoch() {
+        let (database, now, reservation_id) = stranded_reservation_fixture().await;
+        terminate_run(&database).await;
+        expire_reservation(
+            &database,
+            reservation_id,
+            (now - Duration::days(2)).unix_timestamp(),
+        )
+        .await;
+        let service =
+            configuration_service(database.clone(), Arc::new(AllowConfiguration), now, true);
+        let before = service
+            .budget_scope_capacity(&admin_principal(now), scope())
+            .await
+            .unwrap();
+        crate::orm_runtime_recovery::close_test_epoch(&database).await;
+        let result = service
+            .reclaim_budget_reservation(
+                &admin_principal(now),
+                ReclaimAiBudgetReservationInput {
+                    scope: scope_input(),
+                    reservation_id,
+                    expected_version: before.reservations[0].row_version,
+                },
+            )
+            .await;
+        assert!(matches!(result, Err(AiError::RuntimeNotReady)));
+        let after = service
+            .budget_scope_capacity(&admin_principal(now), scope())
+            .await
+            .unwrap();
+        assert_eq!(after.reservations[0].state, before.reservations[0].state);
+        assert_eq!(after.policies[0].committed_input_tokens, 0);
     }
 
     #[tokio::test]

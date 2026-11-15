@@ -260,12 +260,16 @@ pub struct AuthorizedAiApproval {
 ///
 /// This proves only one-shot approval consumption. It does not prove current
 /// resolver authorization, unchanged resource versions, or successful domain
-/// mutation execution.
+/// mutation execution. Clones share one in-process execution claim: an approved
+/// runtime dispatch can be attempted at most once across all clones. A failed
+/// dispatch still spends that claim. This is not a durable domain-idempotence
+/// token or proof that the application mutation committed.
 #[derive(Clone, Debug)]
 pub struct ConsumedAiApproval {
     approval_id: AiApprovalId,
     binding_hash: String,
     consumed_at: OffsetDateTime,
+    execution_claimed: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ConsumedAiApproval {
@@ -275,7 +279,20 @@ impl ConsumedAiApproval {
             approval_id: authorized.approval_id,
             binding_hash: authorized.binding_hash,
             consumed_at,
+            execution_claimed: Default::default(),
         }
+    }
+
+    pub(crate) fn claim_execution(&self) -> Result<(), crate::AiError> {
+        self.execution_claimed
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .map(|_| ())
+            .map_err(|_| crate::AiError::Forbidden)
     }
 
     /// Consumed approval identifier.
@@ -688,6 +705,22 @@ mod preview_bound_tests {
             targets: vec![],
             details,
         }
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    #[test]
+    fn consumed_approval_clones_share_one_execution_claim() {
+        let proof = ConsumedAiApproval::new(
+            AuthorizedAiApproval {
+                approval_id: AiApprovalId::new(),
+                binding_hash: "binding".into(),
+            },
+            OffsetDateTime::UNIX_EPOCH,
+        );
+        let copy = proof.clone();
+        assert!(proof.claim_execution().is_ok());
+        assert!(copy.claim_execution().is_err());
+        assert!(proof.claim_execution().is_err());
     }
 
     #[test]

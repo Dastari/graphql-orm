@@ -276,7 +276,7 @@ pub trait AiRunExecutionSelectionReader: Send + Sync {
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub(crate) async fn resolve_exact(
-    resolver: &dyn AiSessionExecutionSelectionResolver,
+    selection_policy_resolver: &dyn AiSessionExecutionSelectionResolver,
     principal: &AuthPrincipal,
     scope: &AiScope,
     requested: Option<&AiSessionExecutionSelectionInput>,
@@ -291,7 +291,9 @@ pub(crate) async fn resolve_exact(
             )
         })
         .transpose()?;
-    let selection = resolver.resolve(principal, scope, requested).await?;
+    let selection = selection_policy_resolver
+        .resolve(principal, scope, requested)
+        .await?;
     selection.validate()?;
     if expected.as_ref().is_some_and(|v| v != &selection) {
         return Err(AiError::SessionExecutionUnavailable);

@@ -37,37 +37,71 @@ fn crate_source_has_no_direct_database_dependency() {
     }
 }
 
-/// Every principal-reference resolution goes through
-/// `principal_projection::resolve_current_reference`, which refuses legacy
-/// delegated and sessionless stored references before the host resolver runs.
-/// A direct `CurrentPrincipalResolver::resolve` call elsewhere would bypass it.
 #[test]
-fn principal_references_resolve_only_through_the_delegation_refusal() {
+fn current_principal_resolution_is_owned_by_the_guarded_handle() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut direct = Vec::new();
     for path in rust_files(&root) {
-        let source: String = fs::read_to_string(&path)
-            .expect("Rust source should be readable")
-            .chars()
-            .filter(|character| !character.is_whitespace())
-            .collect();
-        assert!(
-            !source.contains("CurrentPrincipalResolver::resolve("),
-            "{} resolves a principal reference without the delegation refusal",
-            path.display()
-        );
-        let mut rest = source.as_str();
-        while let Some(start) = rest.find(".resolve(") {
-            rest = &rest[start + ".resolve(".len()..];
-            let argument = rest.split(')').next().unwrap_or_default();
-            if !argument.contains(',') && argument.to_ascii_lowercase().contains("reference") {
-                direct.push(path.clone());
+        if path
+            .file_name()
+            .is_some_and(|name| name == "principal_projection.rs")
+        {
+            continue;
+        }
+        let source = fs::read_to_string(&path).unwrap();
+        let compact: String = source.chars().filter(|ch| !ch.is_whitespace()).collect();
+        for declaration in compact.split("struct").skip(1) {
+            let Some(open) = declaration.find('{') else {
+                continue;
+            };
+            if declaration[..open].contains(';') || declaration.starts_with("AiRuntimeBuilder{") {
+                continue;
+            }
+            let mut depth = 1;
+            let mut end = open + 1;
+            for byte in declaration.as_bytes()[open + 1..].iter() {
+                end += 1;
+                match byte {
+                    b'{' => depth += 1,
+                    b'}' => depth -= 1,
+                    _ => {}
+                }
+                if depth == 0 {
+                    break;
+                }
+            }
+            let fields = &declaration[open + 1..end - 1];
+            for raw in [
+                "Arc<dynCurrentPrincipalResolver>",
+                "Arc<dynagql_auth::CurrentPrincipalResolver>",
+            ] {
+                assert!(
+                    !fields.contains(raw),
+                    "{} stores raw principal authority outside the guarded owner",
+                    path.display()
+                );
             }
         }
+        // Constructors may accept the host trait, but engine calls must use
+        // resolve_current_reference and the private, non-Deref resolver handle.
+        let mut principal_calls = compact.clone();
+        for policy_field in [
+            "selection_policy_resolver",
+            "content_protection_policy_resolver",
+            "protection_policy_resolver",
+        ] {
+            principal_calls =
+                principal_calls.replace(&format!("{policy_field}.resolve("), "policy_call(");
+        }
+        for forbidden in [
+            "resolver.resolve(",
+            "CurrentPrincipalResolver::resolve(",
+            "CurrentPrincipalResolver>::resolve(",
+        ] {
+            assert!(
+                !principal_calls.contains(forbidden),
+                "{} bypasses the current-reference guard: {forbidden}",
+                path.display()
+            );
+        }
     }
-    assert_eq!(
-        direct,
-        vec![root.join("principal_projection.rs")],
-        "only resolve_current_reference may call the host resolver"
-    );
 }

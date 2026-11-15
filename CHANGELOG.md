@@ -4,8 +4,6 @@ kind: reference
 status: active
 owner: workspace-maintainers
 last_reviewed: 2026-11-14
-
-last_reviewed: 2026-11-13
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -16,9 +14,16 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.152.0, AI 0.143.0
+
+- Clarification of the AI 0.131.0 stored-reference refusal: claims can create and fail an internal attempt/lease in the same transaction. No lease reaches a worker, and no provider/tool dispatch or host callback is authorized by the refused reference (#608).
+
+- ORM adds `RlsIntrospectionBackend::probe_row_security`: PostgreSQL resolves every supplied table path and probes the current role in one read-only catalog query with catalog-qualified functions and operators, resisting search-path operator shadowing. Unknown/missing/unsupported relations return `None`; consumers must fail closed on errors or incomplete results. SQLite returns inactive security; other backends default to unknown. AI recovery uses this contract (#687). Macros remain version-aligned without generated-code changes.
+- AI runtime/provider fixes are detailed in the [AI changelog](crates/graphql-orm-ai/CHANGELOG.md#unreleased---01430).
+
 ## Unreleased
 
-- ORM and macros 0.155.0 (placeholder): **breaking/security:** the runtime GraphQL request guard and async-graphql agree on every request, and runtime GraphQL fails closed for PostgreSQL row-level security. See the [migration guide](MIGRATION.md#01510-to-01550-runtime-graphql-guard-and-row-level-security).
+- ORM and macros 0.155.0 (placeholder): **breaking/security:** the runtime GraphQL request guard and async-graphql agree on every request, and runtime GraphQL fails closed for PostgreSQL row-level security. See the [migration guide](MIGRATION.md#01520-to-01550-runtime-graphql-guard-and-row-level-security).
   - **Breaking (security):** a runtime query, `node` lookup, mutation or live subscription registration whose module includes a PostgreSQL table with row-level security enabled is refused with `authorization_misconfigured` when the request carries no `DbAuthContext`, before any host authority call or database work. A live subscription registered without context is checked again in each read transaction of an event (which locks the tables it reads `IN ACCESS SHARE MODE` with a bounded lock timeout, checks them, and only then reads) and immediately before each payload is delivered (after release authorization); once RLS is enabled, or a lock times out, it ends with `authorization_misconfigured` and that event delivers nothing. RLS is read live from `pg_class` for the module's collection, link and search tables and, for writes, the tables of verified incoming dependencies. Such requests previously ran without `app.*` settings: silently filtered under a role subject to RLS, unfiltered under the table owner or a bypassing role. `SystemAccess` in the request data and `AuthorizationMode::LegacyPermissive` keep the earlier behaviour ([#559](https://github.com/Dastari/graphql-orm/issues/559)).
   - **Fix:** a runtime query or mutation sent through `Schema::execute_stream`, which the request guard cannot prepare, is always refused without doing any work: every runtime root, `RuntimeHostField` roots included, refuses with the stable code `request_not_prepared` when the schema has a subscription root, and async-graphql refuses the request itself (uncoded) when it has none. ORM roots returned an error naming an internal type, and host roots ran without the assurance pre-pass ([#578](https://github.com/Dastari/graphql-orm/issues/578)).
   - **Fix:** the request guard writes each omitted variable's operation default into the request before validation, so `@skip`/`@include`, argument validation, planning and execution read the same values. With `query($v: Boolean = true)` and no variables, `@skip(if: $v)` now skips (the root returned `authorization_missing`) and `@include(if: $v)` now includes (the root was prepared, read and then dropped). A document replaced by another extension so that a defaulted variable is missing, or an explicit `null` directive condition, is refused with `invalid_graphql_input` ([#582](https://github.com/Dastari/graphql-orm/issues/582)).

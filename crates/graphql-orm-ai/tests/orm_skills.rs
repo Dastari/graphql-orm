@@ -331,3 +331,66 @@ async fn publication_rejects_duplicate_capability_bindings_and_versions() {
         Err(AiError::Conflict)
     ));
 }
+
+struct DenySkills;
+
+#[async_trait]
+impl AiSkillAccessPolicy for DenySkills {
+    async fn can_access_skill(&self, _: &AuthPrincipal, _: &AiScope, _: AiSkillAction) -> bool {
+        false
+    }
+}
+
+#[tokio::test]
+async fn inaccessible_skill_ids_are_masked_like_missing_ids() {
+    let administrator = service().await;
+    let principal = principal(true);
+    let created = administrator
+        .upsert_skill(
+            &principal,
+            UpsertAiSkillInput {
+                id: None,
+                scope: scope_input(),
+                name: "Private skill".to_owned(),
+                description: "Private metadata".to_owned(),
+                expected_version: None,
+            },
+        )
+        .await
+        .unwrap();
+    let denied = OrmAiSkillCatalogService::new(
+        administrator.database().clone(),
+        Arc::new(DenySkills),
+        Arc::new(ProtectionPolicy),
+        Arc::new(DatabaseManagedContentProtector),
+        RecentMfaPolicy {
+            maximum_age: Duration::minutes(5),
+            clock_skew: Duration::seconds(30),
+            allowed_amr: vec!["otp".to_owned()],
+            allowed_acr: vec!["urn:test:loa:2".to_owned()],
+            match_mode: AssuranceMatchMode::All,
+        },
+        Arc::new(FixedClock::new(now())),
+    );
+    for id in [created.id, Uuid::new_v4()] {
+        assert!(matches!(
+            denied
+                .publish_version(&principal, publish_input(id, 0))
+                .await,
+            Err(AiError::NotFound)
+        ));
+        assert!(matches!(
+            denied
+                .set_enabled(
+                    &principal,
+                    SetAiSkillEnabledInput {
+                        skill_id: id,
+                        enabled: false,
+                        expected_version: 0
+                    }
+                )
+                .await,
+            Err(AiError::NotFound)
+        ));
+    }
+}

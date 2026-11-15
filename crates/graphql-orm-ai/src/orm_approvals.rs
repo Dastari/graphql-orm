@@ -275,6 +275,9 @@ pub struct AiApprovalWaitReconciliationReport {
     pub still_waiting: usize,
     /// Candidates concurrently changed before the transactional decision.
     pub raced: usize,
+    /// Candidates skipped because their current authority, protection, state,
+    /// or persistence operation could not be verified. They grant no authority.
+    pub skipped: usize,
 }
 
 /// Result of parking a fenced run on one exact approval.
@@ -341,7 +344,7 @@ pub struct OrmAiApprovalService {
     /// The handle the host supplied, returned by `database()`.
     host_database: Database<DefaultWriteBackend>,
     run_service: OrmAiRunService,
-    principal_resolver: Arc<dyn CurrentPrincipalResolver>,
+    principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver,
     access_policy: Arc<dyn AiApprovalAccessPolicy>,
     tool_catalog: Arc<AiToolCatalog>,
     recent_mfa_policy: RecentMfaPolicy,
@@ -372,7 +375,10 @@ impl OrmAiApprovalService {
             host_database,
             database,
             run_service,
-            principal_resolver,
+            principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver::from(
+                principal_resolver,
+            )
+            .with_clock(clock.clone()),
             access_policy,
             tool_catalog,
             recent_mfa_policy,
@@ -1622,12 +1628,13 @@ pub struct OrmAiApprovalWaitReconciliationService {
     /// The handle the host supplied, returned by `database()`.
     host_database: Database<DefaultWriteBackend>,
     run_service: OrmAiRunService,
-    principal_resolver: Arc<dyn CurrentPrincipalResolver>,
+    principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver,
     wait_policy: Arc<dyn AiApprovalWaitReconciliationPolicy>,
     protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
     content_protector: Arc<dyn AiContentProtector>,
     clock: Arc<dyn Clock>,
     limits: AiApprovalWaitReconciliationLimits,
+    scan_cursor: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl OrmAiApprovalWaitReconciliationService {
@@ -1648,12 +1655,16 @@ impl OrmAiApprovalWaitReconciliationService {
             host_database,
             database,
             run_service,
-            principal_resolver,
+            principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver::from(
+                principal_resolver,
+            )
+            .with_clock(clock.clone()),
             wait_policy,
             protection_policy,
             content_protector,
             clock,
             limits: AiApprovalWaitReconciliationLimits::default(),
+            scan_cursor: Arc::default(),
         }
     }
 
@@ -1680,10 +1691,10 @@ impl OrmAiApprovalWaitReconciliationService {
     ///
     /// # Errors
     ///
-    /// Returns an error for an invalid worker ID, stale or mismatched current
-    /// principal, unavailable content protection, malformed ownership state,
-    /// policy failure, or persistence ambiguity. Individual CAS races are
-    /// counted and do not fail the bounded pass.
+    /// Returns an error for invalid input, a failed candidate scan, or a
+    /// failed durable progress stamp (after processing the other candidates).
+    /// Candidate authority, protection, policy and state failures are counted
+    /// as skipped; individual CAS races are counted separately.
     pub async fn reconcile_waits(
         &self,
         worker_id: &str,
@@ -1692,50 +1703,60 @@ impl OrmAiApprovalWaitReconciliationService {
         let now = canonical_second(self.clock.now());
         let candidates = self.load_candidates().await?;
         let mut report = AiApprovalWaitReconciliationReport::default();
+        let mut stamp_error = None;
         for run in candidates {
-            let snapshot = self.load_snapshot(run).await?;
-            let session = snapshot
-                .session
-                .as_ref()
-                .ok_or(AiError::PersistenceFailed)?;
-            let reference: PrincipalReference =
-                serde_json::from_value(snapshot.run.principal_reference.clone())
-                    .map_err(|_| AiError::PersistenceFailed)?;
-            // A legacy run whose stored reference is delegated or sessionless
-            // is closed without resolving it: resolution would yield the user
-            // session behind it. No host policy, protection or wait-policy
-            // callback runs for it.
-            let resolved = if crate::principal_projection::is_delegated_reference(&reference) {
-                None
-            } else {
-                Some(self.resolve_current(&reference).await?)
-            };
-            let (owner_kind, owner_subject) = match resolved.as_ref() {
-                Some(resolved) => principal_identity(resolved.principal()),
-                None => ("user".to_owned(), reference.subject.as_str()),
-            };
-            if session.id != snapshot.run.session_id
-                || session.owner_principal_kind != owner_kind
-                || session.owner_subject != owner_subject
-            {
-                return Err(AiError::PersistenceFailed);
-            }
-            let scope = record_scope(session);
-            let protection = match resolved.as_ref() {
-                Some(resolved) => Some(
-                    self.current_protection_policy(resolved.principal(), &scope)
-                        .await?,
-                ),
-                None => None,
-            };
-            let linkage_valid = approval_wait_linkage_is_valid(&snapshot, &reference);
-            let approval_state = snapshot
-                .approval
-                .as_ref()
-                .and_then(|approval| parse_state(&approval.state).ok());
+            let id = run.id;
+            let version = run.row_version;
+            let state = run.state.clone();
+            let active_lease = run.lease_owner.is_some()
+                && run
+                    .lease_expires_at
+                    .is_some_and(|expiry| expiry > now.unix_timestamp());
+            let result: Result<(), AiError> = async {
+                let snapshot = self.load_snapshot(run).await?;
+                let session = snapshot
+                    .session
+                    .as_ref()
+                    .ok_or(AiError::PersistenceFailed)?;
+                let reference: PrincipalReference =
+                    serde_json::from_value(snapshot.run.principal_reference.clone())
+                        .map_err(|_| AiError::PersistenceFailed)?;
+                // A legacy run whose stored reference is delegated or sessionless
+                // is closed without resolving it: resolution would yield the user
+                // session behind it. No host policy, protection or wait-policy
+                // callback runs for it.
+                let resolved = if crate::principal_projection::is_delegated_reference(&reference) {
+                    None
+                } else {
+                    Some(self.resolve_current(&reference).await?)
+                };
+                let (owner_kind, owner_subject) = match resolved.as_ref() {
+                    Some(resolved) => principal_identity(resolved.principal()),
+                    None => ("user".to_owned(), reference.subject.as_str()),
+                };
+                if session.id != snapshot.run.session_id
+                    || session.owner_principal_kind != owner_kind
+                    || session.owner_subject != owner_subject
+                {
+                    return Err(AiError::PersistenceFailed);
+                }
+                let scope = record_scope(session);
+                let protection = match resolved.as_ref() {
+                    Some(resolved) => Some(
+                        self.current_protection_policy(resolved.principal(), &scope)
+                            .await?,
+                    ),
+                    None => None,
+                };
+                let linkage_valid = approval_wait_linkage_is_valid(&snapshot, &reference);
+                let approval_state = snapshot
+                    .approval
+                    .as_ref()
+                    .and_then(|approval| parse_state(&approval.state).ok());
 
-            let (outcome, outcome_code, policy_version, report_kind) =
-                if let Some(resolved) = resolved.as_ref() {
+                let (outcome, outcome_code, policy_version, report_kind) = if let Some(resolved) =
+                    resolved.as_ref()
+                {
                     if !linkage_valid || approval_state.is_none() {
                         (
                             PreparedApprovalWaitOutcome::RecoveryRequired {
@@ -1827,7 +1848,7 @@ impl OrmAiApprovalWaitReconciliationService {
                                         .await?;
                                     if decision.may_continue() {
                                         report.still_waiting += 1;
-                                        continue;
+                                        return Ok(());
                                     }
                                     (
                                         "approval_wait_policy_cancelled",
@@ -1870,8 +1891,8 @@ impl OrmAiApprovalWaitReconciliationService {
                     delegated_wait_outcome(&snapshot, linkage_valid, approval_state)
                 };
 
-            let event_id = Uuid::new_v4();
-            let protected_event = match protection.as_ref() {
+                let event_id = Uuid::new_v4();
+                let protected_event = match protection.as_ref() {
                 Some(protection) => Some(
                     self.protect_event(
                         protection,
@@ -1888,54 +1909,103 @@ impl OrmAiApprovalWaitReconciliationService {
                 ),
                 None => None,
             };
-            let prepared = PreparedApprovalWaitReconciliation {
-                expected_run: snapshot.run,
-                expected_owner_principal_kind: owner_kind,
-                expected_owner_subject: owner_subject.to_owned(),
-                expected_scope_kind: scope.kind,
-                expected_scope_id: scope.id,
-                expected_tenant_id: scope.tenant_id,
-                outcome,
-                outcome_code: outcome_code.to_owned(),
-                policy_version,
-                event_id,
-                protected_event,
-                worker_id: worker_id.to_owned(),
-            };
-            match self.run_service.reconcile_approval_wait(prepared).await {
-                Ok(()) => report.record(report_kind),
-                Err(AiError::Conflict) => report.raced += 1,
-                Err(error) => return Err(error),
+                let prepared = PreparedApprovalWaitReconciliation {
+                    expected_run: snapshot.run,
+                    expected_owner_principal_kind: owner_kind,
+                    expected_owner_subject: owner_subject.to_owned(),
+                    expected_scope_kind: scope.kind,
+                    expected_scope_id: scope.id,
+                    expected_tenant_id: scope.tenant_id,
+                    outcome,
+                    outcome_code: outcome_code.to_owned(),
+                    policy_version,
+                    event_id,
+                    protected_event,
+                    worker_id: worker_id.to_owned(),
+                };
+                match self.run_service.reconcile_approval_wait(prepared).await {
+                    Ok(()) => report.record(report_kind),
+                    Err(AiError::Conflict) => report.raced += 1,
+                    Err(error) => return Err(error),
+                }
+                Ok(())
             }
+            .await;
+            if result.is_ok() {
+                continue;
+            }
+            report.skipped += 1;
+            // Live workers retain their original CAS fence, even on resolution failure.
+            if active_lease {
+                continue;
+            }
+            let stamp = retry_transaction(self.run_service.maximum_transaction_retries(), || {
+                let state = state.clone();
+                self.database
+                    .transaction(TransactionMode::StateMachine, move |tx| {
+                        Box::pin(async move {
+                            crate::orm_runs::stamp_run_recovery_progress(
+                                tx,
+                                id,
+                                version,
+                                &state,
+                                now.unix_timestamp(),
+                            )
+                            .await
+                        })
+                    })
+            })
+            .await;
+            if let Err(error) = stamp {
+                stamp_error.get_or_insert_with(|| map_transaction(error));
+            }
+        }
+        if let Some(error) = stamp_error {
+            return Err(error);
         }
         Ok(report)
     }
 
     async fn load_candidates(&self) -> Result<Vec<AiRunRecord>, AiError> {
-        let maximum_candidate_scan = self.limits.maximum_candidate_scan;
-        self.database
-            .transaction(TransactionMode::Default, move |tx| {
-                Box::pin(async move {
-                    let mut runs = tx
-                        .query::<AiRunRecord>()
-                        .filter(AiRunRecordWhereInput {
-                            state: Some(StringFilter {
-                                eq: Some("waiting_approval".to_owned()),
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        })
-                        .internal_limit(maximum_candidate_scan as i64)
-                        .fetch_all()
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    runs.sort_by_key(|run| (run.created_at, run.id));
-                    runs.truncate(maximum_candidate_scan);
-                    Ok(runs)
-                })
-            })
-            .await
-            .map_err(map_transaction)
+        let after = self
+            .scan_cursor
+            .lock()
+            .map_err(|_| AiError::PersistenceFailed)?
+            .clone();
+        // Deployment-validated internal bounds must not inherit a client page
+        // ceiling. Only this read's cloned handle changes; the host keeps its cap.
+        let database = self.database.clone().with_pagination_config(
+            graphql_orm::graphql::orm::PaginationConfig::explicit_only(
+                self.limits.maximum_candidate_scan as i64,
+            ),
+        );
+        let page = AiRunRecord::keyset_connection_page(
+            &database,
+            AiRunRecordWhereInput {
+                state: Some(StringFilter {
+                    eq: Some("waiting_approval".to_owned()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            KeysetConnectionInput {
+                after,
+                first: Some(self.limits.maximum_candidate_scan as i64),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(map_orm)?;
+        // Paging is read-only: valid waits and live lease fences must never be stamped.
+        *self
+            .scan_cursor
+            .lock()
+            .map_err(|_| AiError::PersistenceFailed)? = if page.page_info.has_next_page {
+            page.page_info.end_cursor
+        } else {
+            None
+        };
+        Ok(page.edges.into_iter().map(|edge| edge.node).collect())
     }
 
     async fn load_snapshot(&self, run: AiRunRecord) -> Result<ApprovalWaitSnapshot, AiError> {
@@ -3404,6 +3474,179 @@ mod tests {
             .await
             .expect("approval request should park the run");
         (requested, tool_call_id)
+    }
+
+    #[tokio::test]
+    async fn reconciliation_preserves_live_wait_consumption_and_heartbeat() {
+        let mut fixture = fixture().await;
+        let host_limit = graphql_orm::graphql::orm::PaginationConfig::explicit_only(1);
+        fixture
+            .reconciliation_service
+            .database
+            .set_pagination_config(host_limit);
+        fixture
+            .reconciliation_service
+            .host_database
+            .set_pagination_config(host_limit);
+        fixture.reconciliation_service.limits = AiApprovalWaitReconciliationLimits::new(
+            Duration::minutes(5),
+            Duration::days(3_650),
+            256,
+        )
+        .unwrap();
+        let (requested, tool_call_id) =
+            request_wait(&fixture, fixture.now + Duration::hours(2)).await;
+        let report = fixture
+            .reconciliation_service
+            .reconcile_waits("observer")
+            .await
+            .unwrap();
+        assert_eq!(report.still_waiting, 1);
+        assert_eq!(
+            fixture
+                .reconciliation_service
+                .database()
+                .pagination_config(),
+            host_limit
+        );
+        let view = fixture
+            .approval_service
+            .approval(&fixture.principal, requested.approval_id())
+            .await
+            .unwrap()
+            .unwrap();
+        fixture
+            .approval_service
+            .decide_approval(
+                &fixture.principal,
+                DecideAiApprovalInput {
+                    id: view.id,
+                    decision: AiApprovalDecision::Approve,
+                    expected_version: view.row_version,
+                },
+            )
+            .await
+            .unwrap();
+        let (binding, preview) = approval_binding(&fixture, requested.lease(), tool_call_id);
+        let consumed = fixture
+            .approval_service
+            .consume_approval(
+                requested.lease(),
+                requested.approval_id(),
+                &binding,
+                &preview,
+            )
+            .await
+            .expect("valid waits retain their original fence");
+        // Heartbeats accept leased/running claims; consumption returns the resumed
+        // running fence derived from the unchanged approval-wait lease.
+        fixture
+            .run_service
+            .heartbeat(consumed.lease())
+            .await
+            .expect("the resumed worker can still heartbeat after reconciliation");
+    }
+
+    #[tokio::test]
+    async fn an_unresolvable_wait_rotates_and_does_not_block_a_denied_wait() {
+        for (expired, expired_lease) in [(true, false), (false, false), (false, true)] {
+            let fixture = fixture().await;
+            let (first, _) = request_wait(&fixture, fixture.now + Duration::hours(2)).await;
+            let (second, _) = request_wait(&fixture, fixture.now + Duration::hours(2)).await;
+            let left = AiRunRecord::find_by_id(&fixture.database, &first.lease().run_id().0)
+                .await
+                .unwrap()
+                .unwrap();
+            let right = AiRunRecord::find_by_id(&fixture.database, &second.lease().run_id().0)
+                .await
+                .unwrap()
+                .unwrap();
+            let (bad, denied) = if (left.created_at, left.id) < (right.created_at, right.id) {
+                (first, second)
+            } else {
+                (second, first)
+            };
+            let view = fixture
+                .approval_service
+                .approval(&fixture.principal, denied.approval_id())
+                .await
+                .unwrap()
+                .unwrap();
+            fixture
+                .approval_service
+                .decide_approval(
+                    &fixture.principal,
+                    DecideAiApprovalInput {
+                        id: view.id,
+                        decision: AiApprovalDecision::Deny,
+                        expected_version: view.row_version,
+                    },
+                )
+                .await
+                .unwrap();
+            let mut reference = fixture.principal.reference();
+            if expired {
+                reference.expires_at = Some(fixture.now - Duration::seconds(1));
+            } else {
+                reference.subject = "unresolvable-owner".into();
+            }
+            AiRunRecord::update_by_id(
+                &fixture.database,
+                &bad.lease().run_id().0,
+                UpdateAiRunRecordInput {
+                    principal_reference: Some(serde_json::to_value(reference).unwrap()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let mut host = fixture.database.clone();
+            host.set_field_policy(crate::custody_field_policy::tests::DenyEverything);
+            let reconciler = OrmAiApprovalWaitReconciliationService::new(
+                host,
+                fixture.run_service.clone(),
+                Arc::new(Resolver {
+                    principal: fixture.principal.clone(),
+                    clock: fixture.clock.clone(),
+                }),
+                Arc::new(WaitPolicy { may_continue: true }),
+                Arc::new(Protection(fixture.scope.clone())),
+                Arc::new(crate::DatabaseManagedContentProtector),
+                fixture.clock.clone(),
+            )
+            .with_limits(
+                AiApprovalWaitReconciliationLimits::new(
+                    Duration::minutes(5),
+                    Duration::days(3_650),
+                    1,
+                )
+                .unwrap(),
+            );
+            if expired_lease {
+                fixture.clock.advance_seconds(3_601);
+            }
+            let before = AiRunRecord::find_by_id(&fixture.database, &bad.lease().run_id().0)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(reconciler.reconcile_waits("first").await.is_ok());
+            let after = AiRunRecord::find_by_id(&fixture.database, &before.id)
+                .await
+                .unwrap()
+                .unwrap();
+            if expired_lease {
+                assert!(after.recovery_examined_at > 0);
+                // Simulate a restarted reconciler: durable failed-candidate order survives it.
+                *reconciler.scan_cursor.lock().unwrap() = None;
+            } else {
+                assert_eq!(
+                    after.row_version, before.row_version,
+                    "even a failed candidate keeps its active worker fence"
+                );
+            }
+            let next = reconciler.reconcile_waits("next").await.unwrap();
+            assert_eq!(next.cancelled_denied, 1);
+        }
     }
 
     #[tokio::test]
@@ -5193,11 +5436,75 @@ mod tests {
         );
     }
 
+    struct UnreachableResolution;
+    #[async_trait]
+    impl CurrentPrincipalResolver for UnreachableResolution {
+        async fn resolve(
+            &self,
+            _: &PrincipalReference,
+        ) -> agql_auth::AuthResult<ResolvedPrincipal> {
+            panic!("legacy references must not reach the host resolver")
+        }
+    }
+    struct UnreachableProtection;
+    #[async_trait]
+    impl AiContentProtectionPolicyResolver for UnreachableProtection {
+        async fn resolve(
+            &self,
+            _: &AuthPrincipal,
+            _: &AiScope,
+        ) -> Result<AiContentProtectionPolicy, AiError> {
+            panic!("legacy references must not reach the protection policy")
+        }
+    }
+
+    #[tokio::test]
+    async fn delegated_consumed_wait_requires_recovery_without_host_callbacks() {
+        let mut fixture = fixture().await;
+        let (requested, _) = request_wait(&fixture, fixture.now + Duration::hours(2)).await;
+        let reference =
+            crate::principal_projection::test_delegated_references(&fixture.principal.reference())
+                .pop()
+                .unwrap()
+                .1;
+        store_legacy_delegated_wait(
+            &fixture,
+            requested.lease().run_id(),
+            requested.approval_id(),
+            &reference,
+        )
+        .await;
+        AiApprovalRecord::update_by_id(
+            &fixture.database,
+            &requested.approval_id().0,
+            UpdateAiApprovalRecordInput {
+                state: Some("consumed".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        fixture.reconciliation_service.principal_resolver =
+            (Arc::new(UnreachableResolution) as Arc<dyn CurrentPrincipalResolver>).into();
+        fixture.reconciliation_service.protection_policy = Arc::new(UnreachableProtection);
+        let report = fixture
+            .reconciliation_service
+            .reconcile_waits("legacy-malformed")
+            .await
+            .unwrap();
+        assert_eq!(report.recovery_required, 1);
+        let run = AiRunRecord::find_by_id(&fixture.database, &requested.lease().run_id().0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.state, "recovery_required");
+    }
+
     #[tokio::test]
     async fn legacy_delegated_approved_wait_is_never_resumed() {
         let base = fixture().await.principal.reference();
         for (kind, reference) in crate::principal_projection::test_delegated_references(&base) {
-            let fixture = fixture().await;
+            let mut fixture = fixture().await;
             let (_, requested, _, _) = approved_wait(&fixture).await;
             let run_id = requested.lease().run_id();
             let approval_id = requested.approval_id();
@@ -5228,6 +5535,9 @@ mod tests {
                 .unwrap();
             assert_eq!(run.state, "waiting_approval", "{kind}");
 
+            fixture.reconciliation_service.principal_resolver =
+                (Arc::new(UnreachableResolution) as Arc<dyn CurrentPrincipalResolver>).into();
+            fixture.reconciliation_service.protection_policy = Arc::new(UnreachableProtection);
             let report = fixture
                 .reconciliation_service
                 .reconcile_waits("delegated-wait-reconciler")

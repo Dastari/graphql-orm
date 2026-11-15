@@ -772,6 +772,10 @@ pub(crate) struct PreparedToolCallFinish {
 }
 
 impl OrmAiRunService {
+    pub(crate) const fn maximum_transaction_retries(&self) -> usize {
+        self.limits.maximum_transaction_retries
+    }
+
     pub(crate) const fn lease_ttl(&self) -> Duration {
         self.limits.lease_ttl
     }
@@ -873,10 +877,13 @@ impl OrmAiRunService {
         self.cancellation(lease).await
     }
 
-    /// Claims the oldest eligible queued/retry-scheduled run.
+    /// Claims an eligible queued/retry-scheduled run, oldest first among rows
+    /// with the same maintenance progress stamp.
     ///
-    /// The claim and immutable attempt fact commit atomically. Concurrent
-    /// workers can never receive the same attempt/generation pair.
+    /// Each candidate's claim and immutable attempt fact commit atomically.
+    /// A failed candidate rolls back independently, is reported with the safe
+    /// `claim_candidate_skipped` tracing code and rotates behind other rows.
+    /// Concurrent workers can never receive the same attempt/generation pair.
     ///
     /// # Errors
     ///
@@ -885,18 +892,71 @@ impl OrmAiRunService {
     pub async fn claim_next(&self, worker_id: &str) -> Result<Option<AiRunLease>, AiError> {
         validate_worker_id(worker_id)?;
         let now = canonical_second(self.clock.now());
-        for retry in 0..=self.limits.maximum_transaction_retries {
-            match self.claim_once(worker_id.to_owned(), now).await {
-                Ok(result) => return result,
-                Err(TransactionError::Retryable(_))
-                    if retry < self.limits.maximum_transaction_retries =>
-                {
-                    tokio::task::yield_now().await;
+        let candidates = retry_transaction(self.limits.maximum_transaction_retries, || {
+            self.load_claim_candidates(now)
+        })
+        .await
+        .map_err(map_transaction)?;
+        let mut last_error = None;
+        for candidate in candidates {
+            let mut failed = false;
+            for retry in 0..=self.limits.maximum_transaction_retries {
+                match self.claim_once(worker_id.to_owned(), candidate.id).await {
+                    Ok(Ok(Some(lease))) => return Ok(Some(lease)),
+                    Ok(Ok(None)) => break,
+                    Ok(Err(error)) => {
+                        last_error = Some(error);
+                        failed = true;
+                        break;
+                    }
+                    Err(TransactionError::Retryable(_))
+                        if retry < self.limits.maximum_transaction_retries =>
+                    {
+                        tokio::task::yield_now().await;
+                    }
+                    Err(error) => {
+                        last_error = Some(map_transaction(error));
+                        failed = true;
+                        break;
+                    }
                 }
-                Err(error) => return Err(map_transaction(error)),
+            }
+            if failed {
+                // The failed candidate transaction rolled back. Rotate only
+                // the unchanged row, without granting a lease or authority.
+                tracing::warn!(run_id = %candidate.id, code = "claim_candidate_skipped", "AI claim candidate could not be verified");
+                let stamp = retry_transaction(self.limits.maximum_transaction_retries, || {
+                    let state = candidate.state.clone();
+                    let id = candidate.id;
+                    let version = candidate.row_version;
+                    self.database
+                        .transaction(TransactionMode::StateMachine, move |tx| {
+                            Box::pin(async move {
+                                stamp_run_recovery_progress(
+                                    tx,
+                                    id,
+                                    version,
+                                    &state,
+                                    now.unix_timestamp(),
+                                )
+                                .await
+                            })
+                        })
+                })
+                .await;
+                if let Err(error) = stamp {
+                    tracing::warn!(
+                        code = "claim_progress_stamp_failed",
+                        "AI claim progress could not be recorded"
+                    );
+                    last_error = Some(map_transaction(error));
+                }
             }
         }
-        Err(AiError::PersistenceFailed)
+        match last_error {
+            Some(error) => Err(error),
+            None => Ok(None),
+        }
     }
 
     /// Claims one approved, unconsumed `WaitingApproval` run for immediate
@@ -1080,6 +1140,8 @@ impl OrmAiRunService {
                             current.row_version,
                             exact_state(&current.state),
                             UpdateAiRunRecordInput {
+                                recovery_examined_at: (current.recovery_examined_at != 0)
+                                    .then_some(0),
                                 state: Some(completion.final_state.as_str().to_owned()),
                                 lease_owner: Some(None),
                                 lease_expires_at: Some(None),
@@ -1173,6 +1235,8 @@ impl OrmAiRunService {
                                 current.row_version,
                                 exact_state(&current.state),
                                 UpdateAiRunRecordInput {
+                                    recovery_examined_at: (current.recovery_examined_at != 0)
+                                        .then_some(0),
                                     state: Some(AiRunState::RetryScheduled.as_str().to_owned()),
                                     attempt_id: Some(None),
                                     lease_owner: Some(None),
@@ -3834,6 +3898,8 @@ impl OrmAiRunService {
                         let run_update_input =
                             if let Some((parked, _)) = parked_provider_wait.as_ref() {
                                 UpdateAiRunRecordInput {
+                                    recovery_examined_at: (current.recovery_examined_at != 0)
+                                        .then_some(0),
                                     state: Some(AiRunState::WaitingApproval.as_str().to_owned()),
                                     attempt_id: Some(None),
                                     lease_owner: Some(None),
@@ -3849,6 +3915,8 @@ impl OrmAiRunService {
                                     OrmPublicError::new(OrmErrorCode::InternalError)
                                 })?;
                                 UpdateAiRunRecordInput {
+                                    recovery_examined_at: (current.recovery_examined_at != 0)
+                                        .then_some(0),
                                     state: Some(AiRunState::WaitingApproval.as_str().to_owned()),
                                     lease_expires_at: Some(Some(expiry.unix_timestamp())),
                                     lease_heartbeat_at: Some(Some(now.unix_timestamp())),
@@ -4090,6 +4158,8 @@ impl OrmAiRunService {
                                 current.row_version,
                                 exact_state(&current.state),
                                 UpdateAiRunRecordInput {
+                                    recovery_examined_at: (current.recovery_examined_at != 0)
+                                        .then_some(0),
                                     state: Some(AiRunState::Running.as_str().to_owned()),
                                     lease_expires_at: Some(Some(expiry.unix_timestamp())),
                                     lease_heartbeat_at: Some(Some(now.unix_timestamp())),
@@ -4387,21 +4457,15 @@ impl OrmAiRunService {
         .map_err(map_transaction)
     }
 
-    async fn claim_once(
+    async fn load_claim_candidates(
         &self,
-        worker_id: String,
         now: OffsetDateTime,
-    ) -> Result<Result<Option<AiRunLease>, AiError>, TransactionError> {
-        let database = self.database.clone();
+    ) -> Result<Vec<AiRunRecord>, TransactionError> {
         let limits = self.limits;
-        database
+        self.database
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
-                    let epoch = crate::orm_runtime_recovery::require_live_epoch(tx).await?;
-                    let expiry = match now.checked_add(limits.lease_ttl) {
-                        Some(expiry) => expiry,
-                        None => return Ok(Err(AiError::PersistenceFailed)),
-                    };
+                    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
                     // Select only eligible rows, oldest first, in SQL so rows
                     // not yet due cannot fill the bounded window.
                     let mut candidates = Vec::new();
@@ -4426,7 +4490,10 @@ impl OrmAiRunService {
                                     next_attempt_at: Some(eligible),
                                     ..Default::default()
                                 })
-                                .default_order()
+                                .order_by(AiRunRecordOrderByInput {
+                                    recovery_examined_at: Some(OrderDirection::Asc),
+                                    created_at: Some(OrderDirection::Asc),
+                                })
                                 .internal_limit(limits.maximum_candidate_scan as i64)
                                 .fetch_all()
                                 .await
@@ -4438,9 +4505,45 @@ impl OrmAiRunService {
                         run.next_attempt_at
                             .is_none_or(|eligible_at| eligible_at <= now.unix_timestamp())
                     });
-                    candidates.sort_by_key(|run| (run.created_at, run.id));
+                    candidates
+                        .sort_by_key(|run| (run.recovery_examined_at, run.created_at, run.id));
                     candidates.dedup_by_key(|run| run.id);
                     candidates.truncate(limits.maximum_candidate_scan);
+                    Ok(candidates)
+                })
+            })
+            .await
+    }
+
+    async fn claim_once(
+        &self,
+        worker_id: String,
+        run_id: Uuid,
+    ) -> Result<Result<Option<AiRunLease>, AiError>, TransactionError> {
+        let database = self.database.clone();
+        let limits = self.limits;
+        let clock = self.clock.clone();
+        database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let now = canonical_second(clock.now());
+                    let epoch = crate::orm_runtime_recovery::require_live_epoch(tx).await?;
+                    let expiry = match now.checked_add(limits.lease_ttl) {
+                        Some(expiry) => expiry,
+                        None => return Ok(Err(AiError::PersistenceFailed)),
+                    };
+                    let candidates = tx
+                        .find_by_id::<AiRunRecord>(&run_id)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .into_iter()
+                        .filter(|run| {
+                            matches!(run.state.as_str(), "queued" | "retry_scheduled")
+                                && run
+                                    .next_attempt_at
+                                    .is_none_or(|at| at <= now.unix_timestamp())
+                        })
+                        .collect::<Vec<_>>();
                     for current in candidates {
                         let generation = current.lease_generation.checked_add(1).filter(|_| {
                             current.lease_generation >= 0
@@ -4482,6 +4585,8 @@ impl OrmAiRunService {
                                 current.row_version,
                                 exact_state(&current.state),
                                 UpdateAiRunRecordInput {
+                                    recovery_examined_at: (current.recovery_examined_at != 0)
+                                        .then_some(0),
                                     state: Some(AiRunState::Leased.as_str().to_owned()),
                                     attempt_id: Some(Some(attempt.id)),
                                     lease_owner: Some(Some(worker_id.clone())),
@@ -4939,6 +5044,7 @@ impl OrmAiRunService {
                                 run.row_version,
                                 exact_state(AiRunState::WaitingApproval.as_str()),
                                 UpdateAiRunRecordInput {
+                recovery_examined_at: (run.recovery_examined_at != 0).then_some(0),
                                     state: Some(AiRunState::WaitingTool.as_str().to_owned()),
                                     attempt_id: resumed_attempt
                                         .map(|(attempt_id, _)| Some(attempt_id)),
@@ -5463,6 +5569,8 @@ impl OrmAiRunService {
                             current.row_version,
                             exact_state(AiRunState::WaitingApproval.as_str()),
                             UpdateAiRunRecordInput {
+                                recovery_examined_at: (current.recovery_examined_at != 0)
+                                    .then_some(0),
                                 state: Some(final_state.as_str().to_owned()),
                                 lease_owner: Some(None),
                                 lease_expires_at: Some(None),
@@ -5596,6 +5704,8 @@ impl OrmAiRunService {
                             current.row_version,
                             exact_state(&current.state),
                             UpdateAiRunRecordInput {
+                                recovery_examined_at: (current.recovery_examined_at != 0)
+                                    .then_some(0),
                                 state: Some(next_state.as_str().to_owned()),
                                 lease_expires_at: Some(Some(expiry.unix_timestamp())),
                                 lease_heartbeat_at: Some(Some(now.unix_timestamp())),
@@ -6112,6 +6222,7 @@ async fn recover_expired_run(
             current.row_version,
             exact_state(&current.state),
             UpdateAiRunRecordInput {
+                recovery_examined_at: (current.recovery_examined_at != 0).then_some(0),
                 state: Some(transition.next_state.as_str().to_owned()),
                 attempt_id: Some(None),
                 lease_owner: Some(None),
@@ -6288,8 +6399,6 @@ async fn settle_stranded_budget_reservation(
 /// Row security the backend applies to the AI tables for the current role.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BackendRowSecurity {
-    /// The backend has no row security (SQLite).
-    None,
     /// Row security exists but is not active for this role on any AI table.
     Inactive,
     /// Row security is active for this role on at least one AI table.
@@ -6302,11 +6411,7 @@ enum BackendRowSecurity {
 /// is registered and the backend cannot be filtering the AI tables for the
 /// current role.
 fn filtering_excluded_decision(row_policy_registered: bool, backend: BackendRowSecurity) -> bool {
-    !row_policy_registered
-        && matches!(
-            backend,
-            BackendRowSecurity::None | BackendRowSecurity::Inactive
-        )
+    !row_policy_registered && backend == BackendRowSecurity::Inactive
 }
 
 /// Decides, once per recovery pass, whether reads can have been filtered.
@@ -6320,48 +6425,31 @@ fn filtering_excluded_decision(row_policy_registered: bool, backend: BackendRowS
 /// or incomplete introspection counts as "cannot be excluded". The run
 /// service is compiled only for SQLite and PostgreSQL.
 pub(crate) async fn recovery_filtering_excluded(database: &Database<DefaultWriteBackend>) -> bool {
-    use graphql_orm::graphql::orm::{OrmBackend, RlsIntrospectionBackend, RlsTableProbe};
-    let backend =
-        match <DefaultWriteBackend as RlsIntrospectionBackend>::introspect_rls_enforcement(
-            database.pool(),
-        )
-        .await
+    use graphql_orm::graphql::orm::{OrmBackend, RlsIntrospectionBackend};
+    let paths = <crate::AiSchemaModule as graphql_orm::graphql::orm::OrmSchemaModule>::entities(
+        &crate::AiSchemaModule,
+    )
+    .iter()
+    .map(|entity| {
+        <DefaultWriteBackend as OrmBackend>::DIALECT
+            .render_identifier_path(entity.table_name)
+            .into_owned()
+    })
+    .collect::<Vec<_>>();
+    let backend = match <DefaultWriteBackend as RlsIntrospectionBackend>::probe_row_security(
+        database.pool(),
+        &paths,
+    )
+    .await
+    {
+        Ok(states)
+            if states.len() == paths.len() && states.iter().all(|state| *state == Some(false)) =>
         {
-            Ok(None) => BackendRowSecurity::None,
-            Err(_) => BackendRowSecurity::Unknown,
-            Ok(Some(_)) => {
-                let probes = <crate::AiSchemaModule as graphql_orm::graphql::orm::OrmSchemaModule>::entities(
-                &crate::AiSchemaModule,
-            )
-            .iter()
-            .map(|entity| RlsTableProbe {
-                table_sql: <DefaultWriteBackend as OrmBackend>::DIALECT
-                    .render_identifier_path(entity.table_name)
-                    .into_owned(),
-                expressions: Vec::new(),
-                render: false,
-            })
-            .collect::<Vec<_>>();
-                match <DefaultWriteBackend as RlsIntrospectionBackend>::introspect_rls_target(
-                    database.pool(),
-                    &probes,
-                )
-                .await
-                {
-                    Ok(target)
-                        if target.tables.len() == probes.len()
-                            && target.tables.iter().all(|table| table.relation.is_some()) =>
-                    {
-                        if target.tables.iter().any(|table| table.row_security_active) {
-                            BackendRowSecurity::Active
-                        } else {
-                            BackendRowSecurity::Inactive
-                        }
-                    }
-                    _ => BackendRowSecurity::Unknown,
-                }
-            }
-        };
+            BackendRowSecurity::Inactive
+        }
+        Ok(states) if states.contains(&Some(true)) => BackendRowSecurity::Active,
+        _ => BackendRowSecurity::Unknown,
+    };
     filtering_excluded_decision(database.row_policy().is_some(), backend)
 }
 
@@ -6453,7 +6541,7 @@ async fn terminal_event_session(
 /// `max(now, previous + 1)`, so repeated passes within one second still
 /// rotate. Returns `false` when the run changed since it was scanned (someone
 /// else progressed it); any other failure is returned as an error.
-async fn stamp_run_recovery_progress(
+pub(crate) async fn stamp_run_recovery_progress(
     tx: &mut MutationContext<'_, DefaultWriteBackend>,
     run_id: Uuid,
     observed_version: i64,
@@ -6784,6 +6872,7 @@ async fn quarantine_unclaimable_run(
             current.row_version,
             exact_state(&current.state),
             UpdateAiRunRecordInput {
+                recovery_examined_at: (current.recovery_examined_at != 0).then_some(0),
                 state: Some(AiRunState::RecoveryRequired.as_str().to_owned()),
                 attempt_id: Some(None),
                 lease_owner: Some(None),
@@ -7031,6 +7120,7 @@ async fn refuse_delegated_claim(
             leased.row_version,
             exact_state(AiRunState::Leased.as_str()),
             UpdateAiRunRecordInput {
+                recovery_examined_at: (leased.recovery_examined_at != 0).then_some(0),
                 state: Some(AiRunState::Failed.as_str().to_owned()),
                 lease_owner: Some(None),
                 lease_expires_at: Some(None),
@@ -8543,6 +8633,128 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recovery_quarantines_a_null_lease_expiry_and_still_recovers_the_rest() {
+        let fixture = fixture().await;
+        let broken = seed_queued(&fixture).await;
+        let broken_lease = fixture
+            .service
+            .claim_next("worker-broken")
+            .await
+            .expect("claim should succeed")
+            .expect("run should be eligible");
+        fixture
+            .service
+            .start(&broken_lease)
+            .await
+            .expect("broken run should start");
+        let healthy = seed_queued(&fixture).await;
+        fixture
+            .service
+            .claim_next("worker-healthy")
+            .await
+            .expect("claim should succeed")
+            .expect("run should be eligible");
+        // A leased row with no expiry must be scanned, not silently omitted.
+        let current = run_record(&fixture, broken).await;
+        let outcome = fixture
+            .database
+            .transaction(TransactionMode::Default, move |tx| {
+                Box::pin(async move {
+                    tx.compare_and_swap::<AiRunRecord>(
+                        &current.id,
+                        current.row_version,
+                        AiRunRecordWhereInput::default(),
+                        UpdateAiRunRecordInput {
+                            lease_expires_at: Some(None),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("test corruption should commit");
+        assert!(matches!(outcome, ConditionalUpdateOutcome::Updated(_)));
+
+        fixture.clock.advance_seconds(61);
+        let report = fixture
+            .service
+            .recover_expired_leases()
+            .await
+            .expect("one malformed row must not abort the recovery pass");
+        assert_eq!(report.requeued, 1);
+        assert_eq!(report.quarantined, 1);
+        assert_eq!(
+            run_record(&fixture, healthy).await.state,
+            AiRunState::RetryScheduled.as_str()
+        );
+        let quarantined = run_record(&fixture, broken).await;
+        assert_eq!(quarantined.state, AiRunState::RecoveryRequired.as_str());
+        assert_eq!(
+            quarantined.error_code.as_deref(),
+            Some("lease_recovery_state_invalid")
+        );
+        assert!(quarantined.lease_owner.is_none());
+        assert!(quarantined.lease_expires_at.is_none());
+        // The quarantined row leaves the scan, so the next pass is clean.
+        let next = fixture
+            .service
+            .recover_expired_leases()
+            .await
+            .expect("the next pass should succeed");
+        assert_eq!(next, AiRunRecoveryReport::default());
+    }
+
+    #[tokio::test]
+    async fn a_failed_legacy_terminal_event_cannot_block_a_healthy_claim() {
+        let fixture = fixture().await;
+        let one = seed_queued(&fixture).await;
+        let two = seed_queued(&fixture).await;
+        let one_row = run_record(&fixture, one).await;
+        let two_row = run_record(&fixture, two).await;
+        let (bad, healthy) = if (one_row.created_at, one_row.id) < (two_row.created_at, two_row.id)
+        {
+            (one, two)
+        } else {
+            (two, one)
+        };
+        let row = run_record(&fixture, bad).await;
+        let reference =
+            serde_json::from_value::<PrincipalReference>(row.principal_reference).unwrap();
+        let narrowed = crate::principal_projection::test_delegated_references(&reference)
+            .pop()
+            .unwrap()
+            .1;
+        AiRunRecord::update_by_id(
+            &fixture.database,
+            &bad.0,
+            UpdateAiRunRecordInput {
+                session_id: Some(Uuid::new_v4()),
+                principal_reference: Some(serde_json::to_value(narrowed).unwrap()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mut host = fixture.database.clone();
+        host.set_field_policy(crate::custody_field_policy::tests::DenyEverything);
+        let service = OrmAiRunService::new(
+            host,
+            Arc::new(fixture.clock.clone()),
+            fixture.service.limits,
+        );
+        let lease = service
+            .claim_next("healthy-after-legacy-failure")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(lease.run_id(), healthy);
+        let bad = run_record(&fixture, bad).await;
+        assert!(bad.attempt_id.is_none() && bad.lease_owner.is_none());
+    }
+
+    #[tokio::test]
     async fn a_malformed_queued_row_cannot_block_every_claim() {
         let fixture = fixture().await;
         // The malformed row sorts first by primary key and creation time.
@@ -8745,6 +8957,27 @@ mod tests {
                 .limits
                 .with_lease_recovery_grace(Duration::seconds(61))
                 .is_err()
+        );
+        assert!(
+            fixture
+                .service
+                .limits
+                .with_lease_recovery_grace(Duration::seconds(-1))
+                .is_err()
+        );
+        assert!(
+            fixture
+                .service
+                .limits
+                .with_lease_recovery_grace(Duration::MAX)
+                .is_err()
+        );
+        assert!(
+            fixture
+                .service
+                .limits
+                .with_lease_recovery_grace(Duration::seconds(60))
+                .is_ok()
         );
         let recovering = OrmAiRunService::new(
             fixture.database.clone(),
@@ -9547,13 +9780,11 @@ mod tests {
 
     #[test]
     fn filtering_is_excluded_only_without_any_possible_filter() {
-        use BackendRowSecurity::{Active, Inactive, None as NoRowSecurity, Unknown};
+        use BackendRowSecurity::{Active, Inactive, Unknown};
         for (row_policy, backend, excluded) in [
-            (false, NoRowSecurity, true),
             (false, Inactive, true),
             (false, Active, false),
             (false, Unknown, false),
-            (true, NoRowSecurity, false),
             (true, Inactive, false),
             (true, Active, false),
             (true, Unknown, false),
@@ -10860,6 +11091,68 @@ mod tests {
             fixture.service.append_ui_intent_event(&lease, ui()).await,
             Err(AiError::RuntimeNotReady)
         ));
+    }
+
+    #[tokio::test]
+    async fn requeued_runs_clear_the_scan_stamp_and_keep_their_claim_order() {
+        let fixture = fixture().await;
+        let original = seed_queued_with_id(&fixture, Uuid::from_u128(1)).await;
+        AiRunRecord::update_by_id(
+            &fixture.database,
+            &original.0,
+            UpdateAiRunRecordInput {
+                recovery_examined_at: Some(123),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let lease = fixture.service.claim_next("first").await.unwrap().unwrap();
+        assert_eq!(lease.run_id(), original);
+        assert_eq!(
+            run_record(&fixture, original).await.recovery_examined_at,
+            0,
+            "claim clears stale scan history"
+        );
+        fixture.service.start(&lease).await.unwrap();
+        // Seed legacy scan history, then reconstruct its current test fence.
+        let record = AiRunRecord::update_by_id(
+            &fixture.database,
+            &original.0,
+            UpdateAiRunRecordInput {
+                recovery_examined_at: Some(234),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let lease = lease_from_record(&record).unwrap();
+        fixture
+            .service
+            .schedule_retry(&lease, Duration::ZERO, "retry")
+            .await
+            .unwrap();
+        assert_eq!(
+            run_record(&fixture, original).await.recovery_examined_at,
+            0,
+            "requeue clears scan history"
+        );
+        fixture.clock.advance_seconds(1);
+        for index in 2..10 {
+            seed_queued_with_id(&fixture, Uuid::from_u128(index)).await;
+        }
+        assert_eq!(
+            fixture
+                .service
+                .claim_next("next")
+                .await
+                .unwrap()
+                .unwrap()
+                .run_id(),
+            original,
+            "fresh backlog cannot starve a requeued run"
+        );
     }
 
     #[tokio::test]

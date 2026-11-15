@@ -995,6 +995,104 @@ async fn samba_listing_follows_the_provider_prefix_contract() {
     }
 }
 
+/// With `portable_keys`, a new write of a key a Windows target cannot store
+/// as written is refused before any request, while objects stored earlier
+/// under such names stay listed, readable and deletable (#482).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the managed Samba container harness"]
+async fn samba_portable_keys_refuse_windows_unsafe_names() {
+    use graphql_orm_storage::StorageError;
+
+    let root = format!("graphql-orm-storage-portable/{}", Uuid::new_v4());
+    let posix = SmbStorageBackend::connect(test_config(root.clone()))
+        .await
+        .expect("connect");
+    let mut config = test_config(root);
+    config.portable_keys = true;
+    let portable = SmbStorageBackend::connect(config).await.expect("connect");
+    let body = || StorageByteStream::from_bytes(Bytes::from_static(b"portable"));
+
+    // Names a POSIX share stores, written before the mode was enabled.
+    let existing = ["names/CON.txt", "names/kept.bin", "names/report."];
+    for key in existing {
+        posix
+            .put_blob(key, body(), BlobPutOptions::default())
+            .await
+            .unwrap_or_else(|error| panic!("{key}: {error}"));
+    }
+
+    // Existing objects stay listed: the portable listing is the ordinary
+    // one. Samba's default `mangled names = yes` presents names Windows
+    // cannot store under 8.3 aliases, such as `CSHOFG~F.TXT` for `CON.txt`,
+    // in every listing; the mode does not change what the server presents.
+    let listed = portable.list_blobs("names/").await.expect("portable list");
+    assert_eq!(listed, posix.list_blobs("names/").await.expect("list"));
+    assert_eq!(listed.len(), existing.len(), "{listed:?}");
+    assert!(listed.contains(&"names/kept.bin".to_string()), "{listed:?}");
+    for key in ["names/report.", "names/CON.txt"] {
+        let read = portable
+            .get_blob(key)
+            .await
+            .expect("an existing object reads");
+        assert_eq!(
+            collect_storage_stream(read.body).await.expect("body"),
+            Bytes::from_static(b"portable")
+        );
+        assert!(portable.blob_exists(key).await.expect("exists"));
+    }
+
+    // New writes of non-portable keys are refused, and the refusal does not
+    // reveal the key or the root prefix.
+    for key in [
+        "names/report.",
+        "names/CON.txt",
+        "names/a?b",
+        "LPT1/x",
+        "new.",
+    ] {
+        let refused = |result: Result<(), StorageError>| match result {
+            Err(error @ StorageError::InvalidStorageKey { .. }) => {
+                let message = error.to_string();
+                assert!(!message.contains(key), "{message}");
+                assert!(
+                    !message.contains("graphql-orm-storage-portable"),
+                    "{message}"
+                );
+            }
+            other => panic!("{key}: {other:?}"),
+        };
+        refused(
+            portable
+                .put_blob(key, body(), BlobPutOptions::default())
+                .await
+                .map(drop),
+        );
+        refused(
+            portable
+                .put_blob_if_not_exists(key, body(), BlobPutOptions::default())
+                .await
+                .map(drop),
+        );
+        refused(portable.copy_blob("names/kept.bin", key).await);
+    }
+
+    portable
+        .put_blob("names/portable.bin", body(), BlobPutOptions::default())
+        .await
+        .expect("a portable key is written");
+
+    // Existing non-portable objects can still be deleted.
+    portable
+        .delete_blob("names/report.")
+        .await
+        .expect("an existing object deletes");
+    assert!(!posix.blob_exists("names/report.").await.expect("exists"));
+    for key in ["names/CON.txt", "names/kept.bin", "names/portable.bin"] {
+        portable.delete_blob(key).await.expect("delete");
+    }
+    assert!(posix.list_blobs("").await.expect("list").is_empty());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires a managed Samba server limited to SMB 3.0"]
 async fn samba_refuses_a_dialect_below_the_minimum() {

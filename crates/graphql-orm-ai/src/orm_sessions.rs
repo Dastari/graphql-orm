@@ -1607,9 +1607,9 @@ impl AiSessionService for OrmAiSessionService {
             &self.execution_selection_resolver,
             execution_selection.as_deref(),
         ) {
-            (Some(resolver), Some(encoded)) => {
+            (Some(selection_policy_resolver), Some(encoded)) => {
                 let selection = crate::AiSessionExecutionSelection::decode(encoded)?;
-                if resolver
+                if selection_policy_resolver
                     .resolve(principal, &scope, Some(&selection.as_input()))
                     .await?
                     != selection

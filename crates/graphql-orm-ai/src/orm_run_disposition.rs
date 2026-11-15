@@ -78,7 +78,7 @@ pub struct OrmAiRunDispositionService {
     access_policy: Arc<dyn AiAccessPolicy>,
     protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
     content_protector: Arc<dyn AiContentProtector>,
-    principal_resolver: Arc<dyn CurrentPrincipalResolver>,
+    principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver,
     clock: Arc<dyn Clock>,
     limits: AiRunDispositionLimits,
     run_authorization: Option<Arc<crate::AiRunAuthorization>>,
@@ -102,7 +102,10 @@ impl OrmAiRunDispositionService {
             access_policy,
             protection_policy,
             content_protector,
-            principal_resolver,
+            principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver::from(
+                principal_resolver,
+            )
+            .with_clock(clock.clone()),
             clock,
             limits,
             run_authorization: None,

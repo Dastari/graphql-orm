@@ -11,11 +11,8 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# The companions job relinks every graphql-orm-ai test binary once per provider
-# feature combination. With full debug info that exhausted the runner disk and
-# the linker died with SIGBUS mid-link. `line-tables-only` keeps file and line
-# numbers in failure backtraces, which is what CI diagnosis actually needs,
-# at a fraction of the size.
+# Keep line information for most jobs. AI jobs disable debug data below;
+# sequential provider lanes also prune completed test executables to bound disk usage.
 env:
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
@@ -405,9 +402,47 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo test -p graphql-orm --locked --no-default-features --features sqlite,resolver-case-snake,argument-case-snake,field-case-snake --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test grouped_aggregates --test record_version_ui --test subscription_path_order --test composite_subscription_scopes --test operation_catalog_sdl_conformance --test generated_input_disclosure --test custom_input_disclosure_roots
 
+  # Provider tests and companion lint/docs use separate runners, while provider
+  # lanes run sequentially to avoid consuming nine hosted runner slots per PR.
+  ai-provider-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: ai-provider-tests-no-debug
+      - name: Runner resources before provider lanes
+        run: |
+          df -h
+          free -m
+      - run: scripts/check-ai-provider-lanes.sh test
+        env:
+          GRAPHQL_ORM_AI_PRUNE_TEST_EXECUTABLES: "1"
+      - name: Runner resources after provider lanes
+        if: always()
+        run: |
+          df -h
+          free -m
+
   companions:
     runs-on: ubuntu-latest
     timeout-minutes: 150
+    env:
+      # Provider feature combinations retain distinct artifacts. Avoid debug
+      # data and incremental state filling the hosted runner's disk.
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+      CARGO_BUILD_JOBS: "2"
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -416,7 +451,6 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - run: scripts/check-ai-provider-lanes.sh test
       - run: cargo test -p graphql-orm-ai --features graphql-case-pascal --test graphql_naming
       - run: cargo clippy -p graphql-orm-ai --all-targets --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,provider-chat-completions,local-harness -- -D warnings
       - run: cargo clippy -p graphql-orm-operation-catalog -p graphql-orm-ai-tool-profiles --all-targets -- -D warnings
@@ -507,6 +541,10 @@ jobs:
         run: cargo test -p graphql-orm-backup --locked --no-default-features --features local,orm-postgres --test orm_016_postgres_conformance -- --ignored --test-threads=1
       - run: cargo check -p graphql-orm-storage --no-default-features --features s3,azure --all-targets
       - run: cargo check -p graphql-orm-storage --no-default-features --features smb --all-targets
+      - name: Compile every storage target without a provider feature (#422)
+        run: cargo check -p graphql-orm-storage --locked --no-default-features --all-targets
+      - name: Lint every backup target in the native SMB configuration without local (#662)
+        run: cargo clippy -p graphql-orm-backup --locked --no-default-features --features smb --all-targets -- -D warnings
       - name: Run owner-local SMB vendor unit tests (GHSA-439h-2cx8-xwgx regression)
         run: scripts/test-smb-vendor.sh
       - name: Verify the SMB vendor tree against the registry archive and recorded patches

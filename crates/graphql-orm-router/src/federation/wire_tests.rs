@@ -16,7 +16,7 @@ use std::{
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::{
-        Arc, Condvar, Mutex,
+        Arc, Condvar, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread::{self, JoinHandle},
@@ -446,15 +446,24 @@ struct TestAuthenticationProvider;
 
 /// The `role-events` catalogue as the parent test controls it. The file holds
 /// either `fresh`/`stale`, or `key=value` lines: `state`, `generation`,
-/// space-separated `scopes`, and `lifetime_ms`.
+/// space-separated `scopes`, `lifetime_ms`, and optional controlled `clock_ms`.
 struct TestAuthority {
     stale: bool,
     generation: u64,
     scopes: Vec<String>,
     lifetime: Duration,
+    clock_ms: Option<u64>,
 }
 
 impl TestAuthority {
+    fn now(&self) -> Instant {
+        static START: OnceLock<Instant> = OnceLock::new();
+        match self.clock_ms {
+            Some(ms) => *START.get_or_init(Instant::now) + Duration::from_millis(ms),
+            None => Instant::now(),
+        }
+    }
+
     fn read() -> Self {
         let mut authority = Self {
             stale: false,
@@ -464,6 +473,7 @@ impl TestAuthority {
                 "products.failure.events".to_owned(),
             ],
             lifetime: ROLE_AUTHORITY_LIFETIME,
+            clock_ms: None,
         };
         let content = env::var_os(AUTHORITY_CONTROL_ENV)
             .and_then(|path| fs::read_to_string(path).ok())
@@ -476,6 +486,7 @@ impl TestAuthority {
                 Some(("scopes", value)) => {
                     authority.scopes = value.split_whitespace().map(str::to_owned).collect();
                 }
+                Some(("clock_ms", value)) => authority.clock_ms = Some(value.parse().unwrap()),
                 Some(("lifetime_ms", value)) => {
                     authority.lifetime = Duration::from_millis(value.parse().unwrap());
                 }
@@ -486,7 +497,29 @@ impl TestAuthority {
     }
 }
 
+// Publish complete snapshots: truncating the live file lets the child read
+// default scopes/generation/deadlines in the middle of a catalogue update.
+fn publish_authority(path: &std::path::Path, content: &str) {
+    let pending = path.with_extension("pending");
+    fs::write(&pending, content).unwrap();
+    fs::rename(pending, path).unwrap();
+}
+
+fn wait_for_authority(control: &std::path::Path, generation: u64, clock_ms: u64) {
+    let expected = format!("{generation}:{clock_ms}");
+    wait_until("role authority re-expansion", || {
+        fs::read_to_string(control.with_extension("observed"))
+            .unwrap_or_default()
+            .lines()
+            .any(|line| line == expected)
+    });
+}
+
 impl AuthenticationProvider for TestAuthenticationProvider {
+    fn monotonic_now(&self) -> Instant {
+        TestAuthority::read().now()
+    }
+
     fn authority_generation(&self) -> Option<u64> {
         Some(TestAuthority::read().generation)
     }
@@ -502,13 +535,32 @@ impl AuthenticationProvider for TestAuthenticationProvider {
                     "role-scope catalogue snapshot exceeded its maximum staleness",
                 ));
             }
-            return Ok(AuthenticatedPrincipal::new(
+            let deadline = authority.now() + authority.lifetime;
+            let principal = AuthenticatedPrincipal::new(
                 "role-subject",
                 authority.scopes,
                 SystemTime::now().checked_add(Duration::from_secs(3_600)),
             )?
-            .with_authority_valid_until(Instant::now() + authority.lifetime)
-            .with_authority_generation(authority.generation));
+            .with_authority_valid_until(deadline)
+            .with_authority_generation(authority.generation);
+            if let Some(control) = env::var_os(AUTHORITY_CONTROL_ENV) {
+                let mut observed = fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(PathBuf::from(control).with_extension("observed"))
+                    .unwrap();
+                observed
+                    .write_all(
+                        format!(
+                            "{}:{}\n",
+                            authority.generation,
+                            authority.clock_ms.unwrap_or(0)
+                        )
+                        .as_bytes(),
+                    )
+                    .unwrap();
+            }
+            return Ok(principal);
         }
         let (subject, scopes) = match token {
             "product-p1" => ("test-subject", vec!["products.p1.read"]),
@@ -2574,7 +2626,7 @@ fn established_websocket_respects_the_role_authority_deadline() {
     ));
     let temp = TemporaryConfig::new();
     let control = temp.directory.join("authority");
-    fs::write(&control, "fresh").unwrap();
+    publish_authority(&control, "state=fresh\nclock_ms=0\n");
     let child = Command::new(env::current_exe().expect("test executable path"))
         .args([
             "--exact",
@@ -2614,7 +2666,10 @@ fn established_websocket_respects_the_role_authority_deadline() {
         "p1"
     );
     // Fresh expansions renew the deadline: the connection outlives several.
-    thread::sleep(ROLE_AUTHORITY_LIFETIME * 3);
+    for clock_ms in [301, 602, 903] {
+        publish_authority(&control, &format!("state=fresh\nclock_ms={clock_ms}\n"));
+        wait_for_authority(&control, 1, clock_ms);
+    }
     let mut direct = TestWebSocket::connect_at(router.address, "/api/graphql");
     direct.connection_init_bearer("product-events");
     direct.subscribe("direct", subscription);
@@ -2622,7 +2677,7 @@ fn established_websocket_respects_the_role_authority_deadline() {
 
     // The authority goes stale: the held subscription ends, and new operations
     // are refused, while the connection itself stays open.
-    fs::write(&control, "stale").unwrap();
+    publish_authority(&control, "state=stale\nclock_ms=1204\n");
     assert_unavailable(&role.wait_for_operation_message("held", "error"));
     role.subscribe("after", subscription);
     assert_unavailable(&role.wait_for_operation_message("after", "error"));
@@ -2634,7 +2689,7 @@ fn established_websocket_respects_the_role_authority_deadline() {
     direct.wait_for_operation_message("direct-2", "next");
 
     // A refreshed authority restores the same role-bearing connection.
-    fs::write(&control, "fresh").unwrap();
+    publish_authority(&control, "state=fresh\nclock_ms=1204\n");
     role.subscribe("renewed", subscription);
     assert_eq!(
         role.wait_for_operation_message("renewed", "next")["payload"]["data"]["productChanged"]["id"],
@@ -2665,11 +2720,10 @@ fn refreshed_role_catalogue_applies_to_established_websockets() {
     let control = temp.directory.join("authority");
     // A long deadline: only the generation can trigger re-expansion here.
     let catalogue = |generation: u64, scopes: &str| {
-        fs::write(
+        publish_authority(
             &control,
-            format!("state=fresh\ngeneration={generation}\nscopes={scopes}\nlifetime_ms=600000\n"),
-        )
-        .unwrap();
+            &format!("state=fresh\ngeneration={generation}\nscopes={scopes}\nlifetime_ms=600000\n"),
+        );
     };
     catalogue(1, "products.p1.events products.failure.events");
     let child = Command::new(env::current_exe().expect("test executable path"))
@@ -2706,9 +2760,9 @@ fn refreshed_role_catalogue_applies_to_established_websockets() {
     direct.wait_for_operation_message("direct", "next");
 
     // An unrelated catalogue change leaves the effective scopes identical: the
-    // held subscription keeps running across several generation checks.
+    // held subscription keeps running after the generation is re-expanded.
     catalogue(2, "products.failure.events products.p1.events");
-    thread::sleep(Duration::from_millis(1_500));
+    wait_for_authority(&control, 2, 0);
     role.subscribe("same", p1);
     let message = role.next_message();
     assert_eq!(
@@ -4141,8 +4195,9 @@ impl TestWebSocket {
     }
 
     fn next_message(&mut self) -> Value {
+        let deadline = Instant::now() + TEST_TIMEOUT;
         loop {
-            let (opcode, payload) = read_websocket_frame(&mut self.stream)
+            let (opcode, payload) = read_websocket_frame_before(&mut self.stream, deadline)
                 .expect("router should send a valid WebSocket frame");
             match opcode {
                 0x1 => {
@@ -4183,7 +4238,7 @@ impl TestWebSocket {
                 "router did not close before the deadline"
             );
             self.stream.set_read_timeout(Some(remaining)).unwrap();
-            let (opcode, payload) = read_websocket_frame(&mut self.stream)
+            let (opcode, payload) = read_websocket_frame_before(&mut self.stream, deadline)
                 .expect("router should close within the bounded expiry window");
             match opcode {
                 0x8 if payload.len() >= 2 => {
@@ -4250,9 +4305,73 @@ fn write_websocket_frame(stream: &mut TcpStream, opcode: u8, payload: &[u8]) -> 
     stream.flush()
 }
 
+#[test]
+fn websocket_frame_read_retains_partial_bytes_across_poll_timeouts() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_millis(20)))
+        .unwrap();
+    let (mut server, _) = listener.accept().unwrap();
+    let sender = thread::spawn(move || {
+        // Timeouts in either the header or payload must preserve bytes already read.
+        for part in [&[0x81][..], &[2][..], b"o", b"k"] {
+            server.write_all(part).unwrap();
+            thread::sleep(Duration::from_millis(100));
+        }
+    });
+    let frame = read_websocket_frame(&mut client);
+    sender.join().unwrap();
+    assert_eq!(frame.unwrap(), (0x1, b"ok".to_vec()));
+}
+
+// A poll timeout means no bytes yet, not EOF. Retry within one absolute
+// deadline and retain partial headers/payloads instead of restarting the frame.
+fn read_exact_before(
+    stream: &mut TcpStream,
+    mut bytes: &mut [u8],
+    deadline: Instant,
+) -> io::Result<()> {
+    while !bytes.is_empty() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "WebSocket frame deadline",
+            ));
+        }
+        stream.set_read_timeout(Some(remaining.min(Duration::from_millis(20))))?;
+        match stream.read(bytes) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "WebSocket closed mid-frame",
+                ));
+            }
+            Ok(count) => bytes = &mut bytes[count..],
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::Interrupted
+                ) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 fn read_websocket_frame(stream: &mut TcpStream) -> io::Result<(u8, Vec<u8>)> {
+    read_websocket_frame_before(stream, Instant::now() + TEST_TIMEOUT)
+}
+
+fn read_websocket_frame_before(
+    stream: &mut TcpStream,
+    deadline: Instant,
+) -> io::Result<(u8, Vec<u8>)> {
     let mut header = [0_u8; 2];
-    stream.read_exact(&mut header)?;
+    read_exact_before(stream, &mut header, deadline)?;
     assert!(header[0] & 0x80 != 0, "fragmented test WebSocket frame");
     assert!(header[1] & 0x80 == 0, "router must not mask server frames");
     let opcode = header[0] & 0x0F;
@@ -4260,12 +4379,12 @@ fn read_websocket_frame(stream: &mut TcpStream) -> io::Result<(u8, Vec<u8>)> {
         length @ 0..=125 => usize::from(length),
         126 => {
             let mut bytes = [0_u8; 2];
-            stream.read_exact(&mut bytes)?;
+            read_exact_before(stream, &mut bytes, deadline)?;
             usize::from(u16::from_be_bytes(bytes))
         }
         127 => {
             let mut bytes = [0_u8; 8];
-            stream.read_exact(&mut bytes)?;
+            read_exact_before(stream, &mut bytes, deadline)?;
             usize::try_from(u64::from_be_bytes(bytes)).map_err(|_| {
                 io::Error::new(io::ErrorKind::InvalidData, "WebSocket frame exceeds usize")
             })?
@@ -4273,7 +4392,7 @@ fn read_websocket_frame(stream: &mut TcpStream) -> io::Result<(u8, Vec<u8>)> {
         _ => unreachable!("the WebSocket length discriminator is seven bits"),
     };
     let mut payload = vec![0_u8; length];
-    stream.read_exact(&mut payload)?;
+    read_exact_before(stream, &mut payload, deadline)?;
     Ok((opcode, payload))
 }
 
