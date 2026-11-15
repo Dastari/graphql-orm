@@ -193,7 +193,7 @@ impl OrmBackupAdapter {
         } else {
             let tables = descriptors
                 .iter()
-                .map(|descriptor| quote_identifier(&descriptor.table_name))
+                .map(|descriptor| quote_table_identifier(&descriptor.table_name))
                 .collect::<Vec<_>>()
                 .join(", ");
             graphql_orm::sqlx::query(&format!("TRUNCATE TABLE {tables} CASCADE"))
@@ -227,7 +227,10 @@ impl OrmBackupAdapter {
                 .await
                 .map_err(database_error("clear restore target"))?;
             for descriptor in descriptors {
-                let sql = format!("DELETE FROM {}", quote_identifier(&descriptor.table_name));
+                let sql = format!(
+                    "DELETE FROM {}",
+                    quote_table_identifier(&descriptor.table_name)
+                );
                 graphql_orm::sqlx::query(&sql)
                     .execute(&mut *tx)
                     .await
@@ -305,7 +308,7 @@ impl GraphqlOrmBackupAdapter for OrmBackupAdapter {
         for descriptor in self.descriptors()? {
             let sql = format!(
                 "SELECT COUNT(*) AS row_count FROM {}",
-                quote_identifier(&descriptor.table_name)
+                quote_table_identifier(&descriptor.table_name)
             );
             let row = graphql_orm::sqlx::query(&sql)
                 .fetch_one(&mut *tx)
@@ -805,6 +808,15 @@ fn is_valid_sha256_hex(value: &str) -> bool {
 fn database_error(operation: &str) -> impl Fn(graphql_orm::Error) -> BackupError + '_ {
     move |error| BackupError::Database {
         message: format!("{operation}: {error}"),
+    }
+}
+
+fn quote_table_identifier(identifier: &str) -> String {
+    let backend = graphql_orm::graphql::orm::current_backend();
+    if backend == graphql_orm::graphql::orm::DatabaseBackend::Postgres {
+        backend.render_table_identifier_path(identifier)
+    } else {
+        quote_identifier(identifier)
     }
 }
 

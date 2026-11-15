@@ -28,6 +28,16 @@ previous spelling; SQLite and SQL Server are unchanged. No table rename or
 data copy is required. Recompile entities to use the corrected generated DML.
 Generated GraphQL names are unchanged.
 
+Bare declarations remain confined to `current_schema()` during planning; a
+same-named table later in `search_path` is not adopted or changed. Qualified
+paths may name another schema. Two PostgreSQL declarations that resolve to
+one identifier are refused before DDL with `TableIdentifierConflict`
+(`TableIdentifierConflict::from_error`), even without search indexes. Owned
+planning uses its existing `TargetCollision` diagnostic.
+Dependent-delete ownership checks use resolved catalog names while preserving
+declared metadata. PostgreSQL users of the optional backup adapter should also
+upgrade to [backup 0.23.0](crates/graphql-orm-backup/MIGRATION.md#to-0230-postgresql-mixed-case-table-restore).
+
 ## 0.157.0 to 0.158.0: runtime budget, search helper names and typed refusals
 
 Upgrade runtime and macros together. Generated SDL, operation catalogues and

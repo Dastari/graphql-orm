@@ -249,7 +249,10 @@ async fn a_case_variant_of_the_helper_name_is_refused_before_any_ddl() {
     assert_eq!(conflict(at_apply), wanted);
     assert_eq!(conflict(plan().await.unwrap_err()), wanted);
     // Nothing ran: the base table does not exist and the squatter is intact.
+    #[cfg(feature = "sqlite")]
     assert!(!f.stored("MixedNotes").await);
+    #[cfg(feature = "postgres")]
+    assert!(!f.stored("mixednotes").await);
     assert!(f.stored(&variant).await);
     // Once the name is free the same plan applies and plans clean again.
     f.run(&format!("DROP TABLE \"{variant}\"")).await;

@@ -211,6 +211,19 @@ async fn plan_pending_schema_stages<B: MigrationBackend>(
     stages: &[SchemaStage],
 ) -> crate::Result<(String, Vec<PlannedSchemaStage>)> {
     ensure_planning_policy(policy, "plan schema stages")?;
+    // Refuse ambiguous declarations before even preparing history-table DDL.
+    for stage in stages {
+        if let Some(conflict) = super::migrations::table_identifier_conflict(
+            B::DIALECT,
+            stage
+                .target_schema
+                .tables
+                .iter()
+                .map(|table| table.table_name.as_str()),
+        ) {
+            return Err(conflict.into_error());
+        }
+    }
     B::prepare_migration_runtime(pool).await?;
     validate_schema_stages(stages)?;
 

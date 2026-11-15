@@ -10,6 +10,11 @@ supersedes: []
 
 # graphql-orm-backup
 
+Version 0.23.0 fixes PostgreSQL ORM restore for mixed-case entity table names.
+The optional ORM adapter uses ORM 0.159.0's shared table rendering for target
+clear and emptiness checks. Existing manifests and tables need no conversion.
+See [MIGRATION.md](MIGRATION.md).
+
 Version 0.22.0 requires storage 0.14.0, whose SMB handle close no longer
 leaks a server handle when it times out; the backup API is unchanged. See
 [MIGRATION.md](MIGRATION.md).

@@ -35,6 +35,59 @@ fn is_internal_graphql_orm_table(table_name: &str) -> bool {
     table_name.starts_with("__graphql_orm_") || table_name == "spatial_ref_sys"
 }
 
+/// Two declarations that resolve to the same PostgreSQL table identifier.
+/// Planning refuses the target before emitting any DDL.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TableIdentifierConflict {
+    /// The first declared table path.
+    pub table: String,
+    /// The other declaration of the same physical identifier.
+    pub other_table: String,
+}
+
+impl std::fmt::Display for TableIdentifierConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "tables {} and {} resolve to the same PostgreSQL identifier",
+            self.table, self.other_table
+        )
+    }
+}
+impl std::error::Error for TableIdentifierConflict {}
+impl TableIdentifierConflict {
+    /// Read a table identifier conflict carried by an ORM error.
+    pub fn from_error(error: &crate::Error) -> Option<&Self> {
+        match error {
+            sqlx::Error::Decode(source) => source.downcast_ref::<Self>(),
+            _ => None,
+        }
+    }
+    pub(crate) fn into_error(self) -> crate::Error {
+        sqlx::Error::Decode(Box::new(self))
+    }
+}
+
+pub(super) fn table_identifier_conflict<'a>(
+    backend: DatabaseBackend,
+    tables: impl IntoIterator<Item = &'a str>,
+) -> Option<TableIdentifierConflict> {
+    if backend != DatabaseBackend::Postgres {
+        return None;
+    }
+    let mut seen = std::collections::BTreeMap::new();
+    for table in tables {
+        let parts = super::dialect::postgres_resolved_identifier_parts(table);
+        if let Some(other) = seen.insert(parts, table) {
+            return Some(TableIdentifierConflict {
+                table: other.to_owned(),
+                other_table: table.to_owned(),
+            });
+        }
+    }
+    None
+}
+
 // Comparison-only catalog equivalences: never feed these spellings into persisted hashes.
 fn timestamp_default_for_comparison(backend: DatabaseBackend, default: &str) -> String {
     let value = super::dialect::canonicalize_column_default_expression(default);
@@ -211,9 +264,9 @@ mod search_helper_conflict_tests {
             assert_eq!(conflict.table, "audit_logs", "{backend:?}");
             assert_eq!(conflict.other_table.as_deref(), Some("Audit-Logs"));
         }
-        // On SQLite one base table spelled in two cases is one table, not two
-        // owners; on PostgreSQL the two spellings are two quoted tables whose
-        // unquoted helper names fold to one.
+        // Bare case variants are one base table on both backends. PostgreSQL
+        // target declarations are rejected separately as typed table aliases,
+        // rather than misclassified as two owners of a search helper.
         let steps = [
             create("Notes", SearchIndexStrategy::SqliteFts5),
             create("notes", SearchIndexStrategy::SqliteFts5),
@@ -223,7 +276,14 @@ mod search_helper_conflict_tests {
             search_helper_collision(DatabaseBackend::Sqlite, &refs),
             None
         );
-        assert!(search_helper_collision(DatabaseBackend::Postgres, &refs).is_some());
+        assert_eq!(
+            search_helper_collision(DatabaseBackend::Postgres, &refs),
+            None
+        );
+        assert!(table_identifier_conflict(DatabaseBackend::Postgres, ["Notes", "notes"]).is_some());
+        assert!(
+            table_identifier_conflict(DatabaseBackend::Postgres, ["\"Notes\"", "notes"]).is_none()
+        );
         // A whole target is checked the same way as a plan's steps.
         let indexes =
             ["a-b", "a_b"].map(
@@ -1215,11 +1275,15 @@ fn same_helper_table(backend: DatabaseBackend, left: &str, right: &str) -> bool 
 }
 
 /// Whether two declared base table names are one table on `backend`.
-/// PostgreSQL base tables are written as declared, quoted where needed, so
-/// they compare exactly.
+/// PostgreSQL folds bare non-reserved components; delimited components and
+/// names that rendering quotes retain their case.
 fn same_base_table(backend: DatabaseBackend, left: &str, right: &str) -> bool {
     match backend {
         DatabaseBackend::Sqlite => left.eq_ignore_ascii_case(right),
+        DatabaseBackend::Postgres => {
+            super::dialect::postgres_resolved_identifier_parts(left)
+                == super::dialect::postgres_resolved_identifier_parts(right)
+        }
         _ => left == right,
     }
 }
@@ -4420,16 +4484,17 @@ pub(super) async fn introspect_owned_postgres_connection_with_internal(
     introspect_owned_postgres_connection_including(connection, include_internal, &[]).await
 }
 
-/// Reads the owned catalog of the session's current schema, and of each
-/// table in `declared_tables` wherever it lives.
+/// Reads the owned catalog of the session's current schema, and of explicitly
+/// qualified tables in `declared_tables` wherever they live.
 ///
 /// A table declared with a schema (`audit.logs`) is not in the current
 /// schema, so a read of that schema alone never reports it and a planner
 /// would create it again. A bare mixed-case name also differs from the physical
-/// folded catalog name. Each declared path is resolved as the ORM's
-/// own SQL resolves it and, when the table exists, reported under the declared
-/// path. Tables of other schemas that no path names are never reported, so a
-/// strict plan cannot drop them.
+/// folded catalog name. Such bare names are remapped only within current_schema(),
+/// never by adopting a table later in search_path. A qualified path resolves as
+/// the ORM's own SQL does. Each physical relation keeps its first declared name.
+/// Tables of other schemas that no qualified path names are never reported, so
+/// a strict plan cannot drop them.
 #[cfg(feature = "postgres")]
 pub(super) async fn introspect_owned_postgres_connection_including(
     connection: &mut sqlx::PgConnection,
@@ -4471,13 +4536,27 @@ pub(super) async fn introspect_owned_postgres_connection_including(
     let mut relations = Vec::<(String, String, String)>::new();
     for row in table_rows {
         let table_name: String = row.try_get("table_name")?;
-        relations.push((table_name.clone(), schema_name.clone(), table_name));
+        // A catalog name is already physical: do not render a case-sensitive
+        // catalog spelling as a bare name that would reach another table.
+        let reported = if super::dialect::postgres_resolved_identifier(&table_name) != table_name {
+            format!("\"{}\"", table_name.replace('"', "\"\""))
+        } else {
+            table_name.clone()
+        };
+        relations.push((reported, schema_name.clone(), table_name));
     }
+    let mut reported_relations = std::collections::BTreeSet::new();
     for declared in declared_tables {
-        if relations
-            .iter()
-            .any(|(reported, _, _)| reported == declared)
-        {
+        let parts = super::dialect::postgres_resolved_identifier_parts(declared);
+        // Unchanged bare spellings are already covered by current_schema().
+        // Never follow search_path to adopt another schema's bare table.
+        if parts.as_slice() == [*declared] {
+            if relations
+                .iter()
+                .any(|(_, schema, name)| schema == &schema_name && name == declared)
+            {
+                reported_relations.insert((schema_name.clone(), (*declared).to_owned()));
+            }
             continue;
         }
         let resolved = sqlx::query(
@@ -4485,9 +4564,11 @@ pub(super) async fn introspect_owned_postgres_connection_including(
              FROM pg_catalog.pg_class c
              JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
              WHERE c.oid OPERATOR(pg_catalog.=) pg_catalog.to_regclass($1)::pg_catalog.oid
-               AND c.relkind OPERATOR(pg_catalog.=) ANY (ARRAY['r', 'p']::pg_catalog.\"char\"[])",
+               AND c.relkind OPERATOR(pg_catalog.=) ANY (ARRAY['r', 'p']::pg_catalog.\"char\"[])
+               AND ($2::pg_catalog.bool OR n.nspname OPERATOR(pg_catalog.=) pg_catalog.current_schema())",
         )
         .bind(DatabaseBackend::Postgres.render_identifier_path(declared).as_ref())
+        .bind(parts.len() > 1)
         .fetch_optional(&mut *connection)
         .await?;
         let Some(resolved) = resolved else {
@@ -4495,6 +4576,9 @@ pub(super) async fn introspect_owned_postgres_connection_including(
         };
         let relation_schema: String = resolved.try_get("schema_name")?;
         let relation_name: String = resolved.try_get("table_name")?;
+        if !reported_relations.insert((relation_schema.clone(), relation_name.clone())) {
+            continue;
+        }
         if let Some(existing) = relations
             .iter_mut()
             .find(|(_, schema, name)| *schema == relation_schema && *name == relation_name)
@@ -4502,9 +4586,7 @@ pub(super) async fn introspect_owned_postgres_connection_including(
             // A path that names a table of the current schema: report that
             // table under the declared path. A second path to one table
             // keeps the first name.
-            if existing.0 == relation_name {
-                existing.0 = (*declared).to_string();
-            }
+            existing.0 = (*declared).to_string();
         } else {
             relations.push(((*declared).to_string(), relation_schema, relation_name));
         }
