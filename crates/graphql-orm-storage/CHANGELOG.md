@@ -43,8 +43,9 @@ contain keys or paths. See [MIGRATION.md](MIGRATION.md).
   outside SMB. A fifth owner-local vendor patch, `share-access-override`,
   adds the share-access option the exclusive and hold opens need. The
   test-only `smb-sweep-test-hooks` feature adds a barrier between
-  enumeration and removal, and a handle that severs the sweep's session,
-  for the managed Samba suite; applications must not enable it.
+  enumeration and removal, a barrier before each close that can stall or
+  fail it, and a handle that severs the sweep's session, for the managed
+  Samba suite; applications must not enable it.
   ([#593](https://github.com/Dastari/graphql-orm/issues/593))
 - SMB sweep teardown: the sweep runs on its own SMB session, connected from
   a current-thread runtime on a thread of its own, which owns the session's
@@ -53,7 +54,10 @@ contain keys or paths. See [MIGRATION.md](MIGRATION.md).
   runtime, so the server releases every handle it held. At the end it
   disconnects the tree, logs off and closes the connection itself; every
   cleanup step that fails, on success and error paths alike, is counted in
-  `SmbTempSweepReport::cleanup_failures` rather than dropped. A failed sweep
+  `SmbTempSweepReport::cleanup_failures` rather than dropped. Each close is
+  counted before it is awaited and cleared only once it is confirmed, so a
+  close that fails, times out, or is cancelled by the sweep's deadline stays
+  counted. A failed sweep
   returns `SmbTempSweepError` with the first error and the report of what it
   had removed and failed to clean up; it converts into `StorageError`.
   ([#593](https://github.com/Dastari/graphql-orm/issues/593))
@@ -77,11 +81,13 @@ contain keys or paths. See [MIGRATION.md](MIGRATION.md).
   blob's size. `SmbBackendDiagnostics` gains `bytes_downloaded` and
   `read_requests`.
   ([#540](https://github.com/Dastari/graphql-orm/issues/540))
-- Local: `LocalMultipartWriter::complete` publishes the object's metadata
-  before the object, so a failure or crash between the two renames never
-  leaves an object that `list_objects` skips; it can leave metadata for an
-  object that is not there, which reads report as missing and the next
-  completion for the key replaces.
+- Local: `LocalMultipartWriter::complete` makes the object's metadata
+  durable before the object can appear: the metadata file is synced,
+  renamed into place and its directory synced, and only then is the object
+  renamed and its directory synced. A failure, crash or power loss at any
+  step never leaves an object that `list_objects` skips; it can leave
+  metadata for an object that is not there, which reads report as missing
+  and the next completion for the key replaces.
   ([#540](https://github.com/Dastari/graphql-orm/issues/540))
 
 ## 0.12.0 (unreleased)

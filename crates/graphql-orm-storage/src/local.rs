@@ -705,26 +705,29 @@ impl MultipartWriter for LocalMultipartWriter {
 
         write_object_metadata(&self.metadata_temp, &object).await?;
 
-        // The metadata is published before the object, so the object never
-        // appears without it: listings read the object tree and skip an
-        // object that has no metadata. A failure or crash between the two
-        // renames leaves metadata for an object that is not there, which
-        // reads report as missing and the next completion for the key
-        // replaces. A failure or cancellation before each rename removes the
-        // staged files that remain.
+        // The metadata is made durable before the object can appear:
+        // listings read the object tree and skip an object that has no
+        // metadata. Its file was synced when written; it is renamed into
+        // place and its directory synced before the object is renamed, and
+        // the object's directory is synced last. A failure, crash or power
+        // loss at any step can leave metadata for an object that is not
+        // there, which reads report as missing and the next completion for
+        // the key replaces, but never the object without its metadata. A
+        // failure or cancellation before each rename removes the staged
+        // files that remain.
         if let Err(source) = tokio::fs::rename(self.metadata_temp.path(), &self.metadata_path).await
         {
             return Err(StorageError::io(&self.metadata_path, source));
         }
         self.metadata_temp.mark_published();
         trace_published(Some(self.metadata_temp.path()), &self.metadata_path);
+        sync_entry(&self.metadata_path).await?;
         if let Err(source) = tokio::fs::rename(self.temp.path(), &self.object_path).await {
             return Err(StorageError::io(&self.object_path, source));
         }
         self.temp.mark_published();
         trace_published(Some(self.temp.path()), &self.object_path);
         sync_entry(&self.object_path).await?;
-        sync_entry(&self.metadata_path).await?;
 
         Ok(object)
     }
@@ -1589,6 +1592,69 @@ mod durability_tests {
                 "directory of {path:?} not synced after removal: {steps:?}"
             );
         }
+    }
+
+    /// Whether `target` is certainly present after a crash at the end of
+    /// `done`: it was published from a file synced beforehand, and its
+    /// directory was synced afterwards.
+    fn durably_present(done: &[(DurabilityStep, PathBuf)], target: &Path) -> bool {
+        let Some(published) = position(done, DurabilityStep::Published, target) else {
+            return false;
+        };
+        let parent = target.parent().expect("parent");
+        let source_synced = match published.checked_sub(1).map(|index| &done[index]) {
+            Some((DurabilityStep::PublishedFrom, source)) => {
+                position(&done[..published], DurabilityStep::FileSynced, source).is_some()
+            }
+            _ => false,
+        };
+        source_synced
+            && done[published + 1..]
+                .iter()
+                .any(|(step, path)| *step == DurabilityStep::DirSynced && path == parent)
+    }
+
+    /// A crash or power loss at any step of a streamed object's completion
+    /// never leaves the object present without its metadata, which listings
+    /// would silently omit (#540). A rename may or may not survive a crash
+    /// until its directory is synced, so the object may be present as soon
+    /// as it is renamed, and its metadata counts only once durable.
+    #[tokio::test]
+    async fn object_completion_never_exposes_an_object_without_durable_metadata() {
+        let temp = TempDir::new().expect("temp dir");
+        let backend = LocalStorageBackend::new(temp.path());
+        let mut writer = backend
+            .create_multipart_object(
+                "recordings",
+                "sessions/alpha/video.webm",
+                None,
+                ObjectMetadata::new(),
+            )
+            .await
+            .expect("create writer");
+        writer
+            .write_chunk(Bytes::from_static(b"payload"))
+            .await
+            .expect("write");
+        let _ = durability_log::take_under(temp.path());
+        writer.complete().await.expect("complete");
+
+        let steps = durability_log::take_under(temp.path());
+        let object = temp.path().join("recordings/sessions/alpha/video.webm");
+        let metadata = temp.path().join(
+            ".graphql-orm-storage/object-metadata/recordings/sessions/alpha/video.webm.metadata.json",
+        );
+        for crash in 0..=steps.len() {
+            let done = &steps[..crash];
+            let object_may_be_present =
+                position(done, DurabilityStep::Published, &object).is_some();
+            assert!(
+                !object_may_be_present || durably_present(done, &metadata),
+                "a crash after step {crash} can keep the object without its metadata: {done:?}"
+            );
+        }
+        assert!(durably_present(&steps, &object), "{steps:?}");
+        assert!(durably_present(&steps, &metadata), "{steps:?}");
     }
 
     #[tokio::test]

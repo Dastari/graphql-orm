@@ -1826,6 +1826,144 @@ async fn samba_sweep_reports_progress_and_cleanup_failures_after_a_lost_session(
     }
 }
 
+/// A close cancelled by the sweep's deadline is reported as a cleanup
+/// failure (#593): the sweep counts each close before awaiting it and
+/// clears the count only when the close is confirmed. Here the close of a
+/// finished directory stalls until the listing deadline expires.
+#[cfg(feature = "smb-sweep-test-hooks")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the managed Samba container harness"]
+async fn samba_sweep_reports_a_close_the_deadline_cancelled() {
+    use graphql_orm_storage::{
+        SmbRepositoryQuiesced, SmbSweepBarrier, SmbSweepCandidate, SmbSweepClose,
+        SmbSweepCloseBarrier, SmbSweepCloseOutcome,
+    };
+
+    let root = format!("graphql-orm-storage-sweep/{}", Uuid::new_v4());
+    let mut config = test_config(root.clone());
+    config.listing_timeout = Duration::from_secs(8);
+    let store = SmbStorageBackend::connect(config).await.expect("connect");
+    store
+        .put_blob(
+            "deadline/sub/kept.bin",
+            StorageByteStream::from_bytes(Bytes::from_static(b"caller")),
+            BlobPutOptions::default(),
+        )
+        .await
+        .expect("create the tree");
+    let stalled = format!("{root}/deadline/sub");
+    let close_barrier: Box<SmbSweepCloseBarrier> = Box::new(move |close: SmbSweepClose| {
+        let stall = close.path == stalled;
+        Box::pin(async move {
+            if stall {
+                std::future::pending::<()>().await;
+            }
+            SmbSweepCloseOutcome::Proceed
+        })
+    });
+    let barrier: Box<SmbSweepBarrier> = Box::new(|_: SmbSweepCandidate| Box::pin(async {}));
+    let failure = store
+        .sweep_temp_files_with_hooks(
+            SmbRepositoryQuiesced::confirmed_by_host(),
+            Duration::from_secs(60 * 60),
+            &barrier,
+            &close_barrier,
+        )
+        .await
+        .expect_err("the deadline expires during the close");
+    assert!(!failure.is_retryable(), "{failure:?}");
+    assert_eq!(failure.report.cleanup_failures, 1, "{failure:?}");
+    assert_eq!(failure.report.removed, 0, "{failure:?}");
+
+    for key in store.list_blobs("").await.expect("list") {
+        store.delete_blob(&key).await.expect("delete");
+    }
+}
+
+/// A primary close that fails after a removal is counted as a cleanup
+/// failure as well as returned as a single-attempt error (#593). The close
+/// barrier fails the candidate's close as a lost response would; the
+/// server still removes the file once the session releases its handle.
+#[cfg(feature = "smb-sweep-test-hooks")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the managed Samba container harness"]
+async fn samba_sweep_counts_a_failed_candidate_close() {
+    use graphql_orm_storage::{
+        SmbRepositoryQuiesced, SmbSweepBarrier, SmbSweepCandidate, SmbSweepClose,
+        SmbSweepCloseBarrier, SmbSweepCloseOutcome, StorageError,
+    };
+
+    let fixture = owned_fixture();
+    let root = format!("graphql-orm-storage-sweep/{}", Uuid::new_v4());
+    let share = format!("/share/{root}");
+    let store = SmbStorageBackend::connect(test_config(root.clone()))
+        .await
+        .expect("connect");
+    store
+        .put_blob(
+            "failing/kept.bin",
+            StorageByteStream::from_bytes(Bytes::from_static(b"caller")),
+            BlobPutOptions::default(),
+        )
+        .await
+        .expect("create the directory");
+    let temp = format!("failing/.{}.uploading", Uuid::new_v4());
+    seed_stale_temp_files(&fixture, &share, &[&temp]);
+
+    let failing = format!("{root}/{temp}");
+    let close_barrier: Box<SmbSweepCloseBarrier> = Box::new(move |close: SmbSweepClose| {
+        let outcome = if close.path == failing {
+            SmbSweepCloseOutcome::Fail
+        } else {
+            SmbSweepCloseOutcome::Proceed
+        };
+        Box::pin(async move { outcome })
+    });
+    let barrier: Box<SmbSweepBarrier> = Box::new(|_: SmbSweepCandidate| Box::pin(async {}));
+    let failure = store
+        .sweep_temp_files_with_hooks(
+            SmbRepositoryQuiesced::confirmed_by_host(),
+            Duration::from_secs(60 * 60),
+            &barrier,
+            &close_barrier,
+        )
+        .await
+        .expect_err("a failed close after a removal has an unknown outcome");
+    assert!(
+        matches!(failure.error, StorageError::SingleAttemptFailed { .. }),
+        "{failure:?}"
+    );
+    assert_eq!(failure.report.cleanup_failures, 1, "{failure:?}");
+
+    // The removal was requested before the close; the server completes it
+    // when the sweep's session releases the handle.
+    let mut gone = false;
+    for _ in 0..40 {
+        let mut exists = true;
+        fixture
+            .run_with(|container| {
+                exists = std::process::Command::new("docker")
+                    .args(["exec", container, "test", "-e"])
+                    .arg(format!("{share}/{temp}"))
+                    .status()
+                    .map_err(|_| "cannot run in owned fixture".to_string())?
+                    .success();
+                Ok(())
+            })
+            .expect("inspect");
+        if !exists {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert!(gone, "the removal completed when the handle was released");
+
+    for key in store.list_blobs("").await.expect("list") {
+        store.delete_blob(&key).await.expect("delete");
+    }
+}
+
 /// Range reads start at the range's offset on the server instead of reading
 /// and discarding the bytes before it, clamp to the blob's size, and every
 /// read reports the server's last-write time (#540).

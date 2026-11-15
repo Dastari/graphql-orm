@@ -910,8 +910,42 @@ impl SmbStorageBackend {
         older_than: Duration,
         barrier: &SmbSweepBarrier,
     ) -> Result<SmbTempSweepReport, SmbTempSweepError> {
-        self.sweep_with(quiesced, older_than, SweepHooks { barrier })
-            .await
+        self.sweep_with(
+            quiesced,
+            older_than,
+            SweepHooks {
+                barrier,
+                close_barrier: None,
+            },
+        )
+        .await
+    }
+
+    /// Runs [`Self::sweep_temp_files_with_barrier`], also awaiting
+    /// `close_barrier` before each close the sweep sends, after counting it
+    /// as unconfirmed. Test infrastructure only: the close barrier can stall
+    /// a close past the deadline or fail it.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Self::sweep_temp_files`].
+    #[cfg(feature = "smb-sweep-test-hooks")]
+    pub async fn sweep_temp_files_with_hooks(
+        &self,
+        quiesced: SmbRepositoryQuiesced,
+        older_than: Duration,
+        barrier: &SmbSweepBarrier,
+        close_barrier: &SmbSweepCloseBarrier,
+    ) -> Result<SmbTempSweepReport, SmbTempSweepError> {
+        self.sweep_with(
+            quiesced,
+            older_than,
+            SweepHooks {
+                barrier,
+                close_barrier: Some(close_barrier),
+            },
+        )
+        .await
     }
 
     /// Opens the directory at the root-relative `key` with delete access and
@@ -977,7 +1011,7 @@ impl SmbStorageBackend {
         let session = SweepSession::connect(self)
             .await
             .map_err(SmbTempSweepError::before_start)?;
-        let tally = SweepTally::default();
+        let tally = hooks.tally();
         let mut progress = SweepProgress::default();
         let walked = within_listing_deadline(
             limits.timeout,
@@ -988,13 +1022,12 @@ impl SmbStorageBackend {
         // and count closes that failed; stopping the session releases them
         // anyway.
         while let Some(held) = progress.chain.pop() {
-            if self
-                .with_timeout("close", held.directory.close())
-                .await
-                .is_err()
-            {
-                tally.cleanup_failed();
-            }
+            let _ = tally
+                .confirm_close(
+                    &held.share_relative,
+                    self.with_timeout("close", held.directory.close()),
+                )
+                .await;
         }
         let shutdown_failures = session.shutdown().await;
         let mut report = progress.report;
@@ -1016,7 +1049,7 @@ impl SmbStorageBackend {
         limits: ListingLimits,
         older_than: Duration,
         hooks: &SweepHooks<'_>,
-        tally: &SweepTally,
+        tally: &SweepTally<'_>,
         progress: &mut SweepProgress,
     ) -> Result<(), StorageError> {
         let client = session.client();
@@ -1036,6 +1069,7 @@ impl SmbStorageBackend {
                 DirectoryHold::Held(directory) => chain.push(HeldDirectory {
                     directory,
                     relative: String::new(),
+                    share_relative: path.clone(),
                     entries: Vec::new().into_iter(),
                     depth: 0,
                 }),
@@ -1070,14 +1104,14 @@ impl SmbStorageBackend {
                     break;
                 }
                 let done = chain.pop().expect("a held directory");
-                // Stopping the session releases a handle whose close fails.
-                if self
-                    .with_timeout("close", done.directory.close())
-                    .await
-                    .is_err()
-                {
-                    tally.cleanup_failed();
-                }
+                // Counted until confirmed, so a close the deadline cancels
+                // stays counted; stopping the session releases the handle.
+                let _ = tally
+                    .confirm_close(
+                        &done.share_relative,
+                        self.with_timeout("close", done.directory.close()),
+                    )
+                    .await;
                 continue;
             };
             let name_len = entry.name.len();
@@ -1112,15 +1146,19 @@ impl SmbStorageBackend {
                         let entries = match source.enumerate(&directory, &mut budget).await {
                             Ok(entries) => entries,
                             Err(error) => {
-                                if self.with_timeout("close", directory.close()).await.is_err() {
-                                    tally.cleanup_failed();
-                                }
+                                let _ = tally
+                                    .confirm_close(
+                                        &share_relative,
+                                        self.with_timeout("close", directory.close()),
+                                    )
+                                    .await;
                                 return Err(error);
                             }
                         };
                         chain.push(HeldDirectory {
                             directory,
                             relative: child,
+                            share_relative,
                             entries: entries.into_iter(),
                             depth: depth + 1,
                         });
@@ -1173,7 +1211,7 @@ impl SmbStorageBackend {
         &self,
         client: &Client,
         path: &str,
-        tally: &SweepTally,
+        tally: &SweepTally<'_>,
     ) -> Result<DirectoryHold, StorageError> {
         let target = self.share_path()?.with_path(path);
         let mut args = FileCreateArgs::make_open_existing(
@@ -1216,7 +1254,9 @@ impl SmbStorageBackend {
             }
         };
         let Resource::Directory(directory) = resource else {
-            tally.closed(close_resource(resource).await);
+            let _ = tally
+                .confirm_close(path, self.with_timeout("close", close_resource(resource)))
+                .await;
             return Ok(DirectoryHold::Refused);
         };
         let directory = Arc::new(directory);
@@ -1232,11 +1272,15 @@ impl SmbStorageBackend {
                 Ok(DirectoryHold::Held(directory))
             }
             Ok(_) => {
-                tally.closed(self.with_timeout("close", directory.close()).await);
+                let _ = tally
+                    .confirm_close(path, self.with_timeout("close", directory.close()))
+                    .await;
                 Ok(DirectoryHold::Refused)
             }
             Err(error) => {
-                tally.closed(self.with_timeout("close", directory.close()).await);
+                let _ = tally
+                    .confirm_close(path, self.with_timeout("close", directory.close()))
+                    .await;
                 Err(error)
             }
         }
@@ -1248,7 +1292,7 @@ impl SmbStorageBackend {
     async fn server_time(
         &self,
         client: &Client,
-        tally: &SweepTally,
+        tally: &SweepTally<'_>,
     ) -> Result<SystemTime, StorageError> {
         let key = temp_file_name();
         let path = self.remote_path(&key)?;
@@ -1264,8 +1308,11 @@ impl SmbStorageBackend {
                 ),
             )
             .await?;
+        let label = self.mapped_key(&key)?;
         let Resource::File(file) = resource else {
-            tally.closed(close_resource(resource).await);
+            let _ = tally
+                .confirm_close(&label, self.with_timeout("close", close_resource(resource)))
+                .await;
             return Err(probe_mismatch());
         };
         let basic: Result<FileBasicInformation, _> =
@@ -1276,12 +1323,11 @@ impl SmbStorageBackend {
                 file.set_info(FileDispositionInformation::default()),
             )
             .await;
-        let closed = self.with_timeout("close", file.close()).await;
-        // A close that fails is returned when nothing failed before it, and
-        // counted otherwise.
-        if (basic.is_err() || disposed.is_err()) && closed.is_err() {
-            tally.cleanup_failed();
-        }
+        // A close that fails is counted, and returned when nothing failed
+        // before it.
+        let closed = tally
+            .confirm_close(&label, self.with_timeout("close", file.close()))
+            .await;
         let basic = basic?;
         disposed?;
         closed?;
@@ -1303,7 +1349,7 @@ impl SmbStorageBackend {
         &self,
         client: &Client,
         file: &ListedFile,
-        tally: &SweepTally,
+        tally: &SweepTally<'_>,
     ) -> Result<StaleRemoval, StorageError> {
         let path = self.remote_path(&file.key)?;
         let mut args = FileCreateArgs::make_open_existing(
@@ -1347,8 +1393,11 @@ impl SmbStorageBackend {
                 };
             }
         };
+        let label = self.mapped_key(&file.key)?;
         let Resource::File(handle) = resource else {
-            tally.closed(close_resource(resource).await);
+            let _ = tally
+                .confirm_close(&label, self.with_timeout("close", close_resource(resource)))
+                .await;
             return Ok(StaleRemoval::Changed);
         };
         let checked = self.check_stale_handle(&handle, file).await;
@@ -1363,17 +1412,17 @@ impl SmbStorageBackend {
                 .map_err(StorageError::single_attempt),
             other => other,
         };
-        let closed = self.with_timeout("close", handle.close()).await;
+        // Every failed close is counted. The file is removed when this handle
+        // closes, so after a removal a failed close also leaves the outcome
+        // unknown.
+        let closed = tally
+            .confirm_close(&label, self.with_timeout("close", handle.close()))
+            .await;
         match decision {
-            // The file is removed when this handle closes, so a failed close
-            // leaves the outcome unknown.
             Ok(StaleRemoval::Removed) => closed
                 .map(|()| StaleRemoval::Removed)
                 .map_err(StorageError::single_attempt),
-            other => {
-                tally.closed(closed);
-                other
-            }
+            other => other,
         }
     }
 
@@ -2308,23 +2357,60 @@ struct ListedFile {
 }
 
 /// What one sweep walk skipped and failed to clean up, counted while the
-/// walk runs, from shared references.
-#[derive(Debug, Default)]
-struct SweepTally {
+/// walk runs, from shared references. It outlives the walk, so its counts
+/// survive an error, the deadline or cancellation of the walk.
+#[derive(Default)]
+struct SweepTally<'h> {
     reparse_points: AtomicU64,
     cleanup_failures: AtomicU64,
+    /// Test-only fault injection for closes.
+    #[cfg(feature = "smb-sweep-test-hooks")]
+    close_barrier: Option<&'h SmbSweepCloseBarrier>,
+    #[cfg(not(feature = "smb-sweep-test-hooks"))]
+    _hooks: std::marker::PhantomData<&'h ()>,
 }
 
-impl SweepTally {
+impl SweepTally<'_> {
     fn cleanup_failed(&self) {
         self.cleanup_failures.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Counts a close that failed.
-    fn closed<E>(&self, result: Result<(), E>) {
-        if result.is_err() {
-            self.cleanup_failed();
+    /// Awaits `close` of the share-relative `path`, counting it as a cleanup
+    /// failure until it is confirmed. The count is taken before the close is
+    /// awaited and cleared only when it succeeds, so a close that fails, times
+    /// out, or is cancelled while awaited, as when the sweep's deadline
+    /// expires, stays counted.
+    async fn confirm_close<E>(
+        &self,
+        path: &str,
+        close: impl std::future::Future<Output = Result<(), E>>,
+    ) -> Result<(), E>
+    where
+        E: From<StorageError>,
+    {
+        self.cleanup_failed();
+        #[cfg(feature = "smb-sweep-test-hooks")]
+        if let Some(barrier) = self.close_barrier {
+            let outcome = barrier(SmbSweepClose {
+                path: path.to_string(),
+            })
+            .await;
+            if outcome == SmbSweepCloseOutcome::Fail {
+                return Err(E::from(remote_error(
+                    StorageProviderErrorKind::ConnectionLost,
+                    "close",
+                    "close failed by the test barrier",
+                    true,
+                )));
+            }
         }
+        #[cfg(not(feature = "smb-sweep-test-hooks"))]
+        let _ = path;
+        let closed = close.await;
+        if closed.is_ok() {
+            self.cleanup_failures.fetch_sub(1, Ordering::Relaxed);
+        }
+        closed
     }
 
     fn add_to(&self, report: &mut SmbTempSweepReport) {
@@ -2353,6 +2439,8 @@ struct HeldDirectory {
     directory: Arc<Directory>,
     /// Root-relative path; empty for the root and its ancestors.
     relative: String,
+    /// Share-relative path, as held.
+    share_relative: String,
     /// Entries not yet processed.
     entries: std::vec::IntoIter<ListedEntry>,
     depth: usize,
@@ -2385,6 +2473,34 @@ pub struct SmbSweepCandidate {
     pub session: SmbSweepSessionSeverer,
 }
 
+/// A close the sweep is about to send, handed to the test-only close
+/// barrier after it is counted as unconfirmed.
+#[cfg(feature = "smb-sweep-test-hooks")]
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct SmbSweepClose {
+    /// Share-relative path of the handle being closed.
+    pub path: String,
+}
+
+/// What the test-only close barrier lets a close do.
+#[cfg(feature = "smb-sweep-test-hooks")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SmbSweepCloseOutcome {
+    /// Send the close.
+    Proceed,
+    /// Fail the close without sending it, as a lost response would.
+    Fail,
+}
+
+/// A test-only barrier the sweep awaits before each close it sends.
+#[cfg(feature = "smb-sweep-test-hooks")]
+pub type SmbSweepCloseBarrier = dyn Fn(
+        SmbSweepClose,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = SmbSweepCloseOutcome> + Send>>
+    + Send
+    + Sync;
+
 /// A test-only barrier the sweep awaits for each candidate.
 #[cfg(feature = "smb-sweep-test-hooks")]
 pub type SmbSweepBarrier = dyn Fn(SmbSweepCandidate) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
@@ -2396,6 +2512,7 @@ pub type SmbSweepBarrier = dyn Fn(SmbSweepCandidate) -> std::pin::Pin<Box<dyn st
 #[cfg(feature = "smb-sweep-test-hooks")]
 struct SweepHooks<'a> {
     barrier: &'a SmbSweepBarrier,
+    close_barrier: Option<&'a SmbSweepCloseBarrier>,
 }
 
 #[cfg(not(feature = "smb-sweep-test-hooks"))]
@@ -2418,7 +2535,24 @@ impl SweepHooks<'_> {
         )
             -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
             |_| Box::pin(async {});
-        Self { barrier: &NONE }
+        Self {
+            barrier: &NONE,
+            close_barrier: None,
+        }
+    }
+
+    /// A tally that applies this sweep's close barrier.
+    #[cfg(feature = "smb-sweep-test-hooks")]
+    fn tally(&self) -> SweepTally<'_> {
+        SweepTally {
+            close_barrier: self.close_barrier,
+            ..SweepTally::default()
+        }
+    }
+
+    #[cfg(not(feature = "smb-sweep-test-hooks"))]
+    fn tally(&self) -> SweepTally<'_> {
+        SweepTally::default()
     }
 
     /// Runs before a candidate is opened.
@@ -3060,7 +3194,7 @@ struct SmbListingSource<'a> {
     base: UncPath,
     /// Set for a temporary-file sweep: enumeration skips and counts entries
     /// the server reports as reparse points.
-    sweep: Option<&'a SweepTally>,
+    sweep: Option<&'a SweepTally<'a>>,
 }
 
 #[async_trait]
@@ -6079,16 +6213,42 @@ mod tests {
         assert!(!storage.is_retryable());
 
         let tally = SweepTally::default();
-        tally.closed(Ok::<(), ()>(()));
-        tally.closed(Err::<(), ()>(()));
-        tally.cleanup_failed();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            // A confirmed close is not counted, a failed one is, and so is
+            // one cancelled while awaited, as when the deadline expires.
+            assert!(
+                tally
+                    .confirm_close("a", async { Ok::<(), StorageError>(()) })
+                    .await
+                    .is_ok()
+            );
+            assert!(
+                tally
+                    .confirm_close("b", async { Err::<(), StorageError>(probe_mismatch()) })
+                    .await
+                    .is_err()
+            );
+            let stalled = tokio::time::timeout(
+                Duration::from_millis(10),
+                tally.confirm_close("c", std::future::pending::<Result<(), StorageError>>()),
+            )
+            .await;
+            assert!(stalled.is_err(), "the close was cancelled");
+        });
         tally.reparse_points.fetch_add(1, Ordering::Relaxed);
         let mut report = SmbTempSweepReport {
             cleanup_failures: 1,
             ..SmbTempSweepReport::default()
         };
         tally.add_to(&mut report);
-        assert_eq!(report.cleanup_failures, 3);
+        assert_eq!(
+            report.cleanup_failures, 3,
+            "one earlier, one failed, one cancelled"
+        );
         assert_eq!(report.skipped_reparse_points, 1);
     }
 

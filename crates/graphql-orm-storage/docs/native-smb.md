@@ -509,7 +509,9 @@ replacement for it:
   progress. At the end the sweep disconnects the tree, logs off and closes
   the connection itself. Every cleanup step that fails, closing a handle or
   any of those teardown steps, on a normal finish or an error path, is
-  counted in `cleanup_failures`.
+  counted in `cleanup_failures`. A close is counted before it is awaited and
+  cleared only once confirmed, so a close cancelled by the sweep's deadline
+  stays counted.
 
 What these checks stop: on a server that enforces share modes for every
 client of the share, another SMB client cannot rename, delete or replace a
@@ -539,7 +541,11 @@ reference time is the server's, and that cancelling a sweep at the barrier
 releases its held directories, also when the cancelled sweep's runtime is
 never driven again. A second case severs the sweep's session at the barrier
 and checks that the error reports the file removed before it and the failed
-cleanup steps, and that a later sweep removes the rest. Samba 4.12 reports no reparse points to SMB2
+cleanup steps, and that a later sweep removes the rest. Two more cases use
+the test-only close barrier: one stalls a directory's close until the
+deadline expires and checks that the report counts it, and one fails a
+candidate's close after its removal and checks that it is counted and
+reported as a single-attempt error. Samba 4.12 reports no reparse points to SMB2
 clients, so junctions and reparse handles are covered by decision-level unit
 tests, and the shared host clock means a skewed client clock is covered by a
 unit test only. The barrier is available only with the test-only
