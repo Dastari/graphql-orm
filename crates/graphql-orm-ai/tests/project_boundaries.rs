@@ -83,14 +83,22 @@ fn current_principal_resolution_is_owned_by_the_guarded_handle() {
         }
         // Constructors may accept the host trait, but engine calls must use
         // resolve_current_reference and the private, non-Deref resolver handle.
+        let mut principal_calls = compact.clone();
+        for policy_field in [
+            "selection_policy_resolver",
+            "content_protection_policy_resolver",
+            "protection_policy_resolver",
+        ] {
+            principal_calls =
+                principal_calls.replace(&format!("{policy_field}.resolve("), "policy_call(");
+        }
         for forbidden in [
-            "principal_resolver.resolve(",
-            ".resolver.resolve(",
+            "resolver.resolve(",
             "CurrentPrincipalResolver::resolve(",
             "CurrentPrincipalResolver>::resolve(",
         ] {
             assert!(
-                !compact.contains(forbidden),
+                !principal_calls.contains(forbidden),
                 "{} bypasses the current-reference guard: {forbidden}",
                 path.display()
             );
