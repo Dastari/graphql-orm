@@ -644,12 +644,13 @@ impl RuntimeHostField {
         let mut field = Field::new(&self.name, self.ty, move |ctx| {
             let field = ctx.field();
             let key = field.alias().unwrap_or(field.name());
+            // Host query and mutation roots run only in an operation the request
+            // guard prepared, like every ORM root: over `execute_stream` they
+            // would otherwise skip the assurance pre-pass.
             let admitted =
                 crate::graphql::assurance::enforce_operation_assurance(ctx.ctx, kind, &root)
-                    .and_then(|()| {
-                        ctx.data_opt::<super::execution::Results>()
-                            .map_or(Ok(()), |results| results.admit(key))
-                    });
+                    .and_then(|()| super::execution::Results::prepared(&ctx))
+                    .and_then(|results| results.admit(key));
             match admitted {
                 Ok(()) => resolver(ctx),
                 Err(error) => {
@@ -1275,7 +1276,8 @@ impl<B: RuntimeReadBackend> RuntimeGraphqlComposer<B> {
             limits: self.limits,
             protection: self.protection,
         };
-        self.actions
+        let schema = self
+            .actions
             .into_iter()
             .fold(
                 Schema::build(
@@ -1292,7 +1294,13 @@ impl<B: RuntimeReadBackend> RuntimeGraphqlComposer<B> {
             .limit_complexity(self.limits.max_selections)
             .limit_recursive_depth(self.limits.max_depth)
             .finish()
-            .map_err(|_| RuntimeGraphqlError::new("invalid_composition"))
+            .map_err(|_| RuntimeGraphqlError::new("invalid_composition"))?;
+        // An omitted argument resolves to its default without validation, so
+        // every default must already be valid input, host types included.
+        if !super::scalar::argument_defaults_valid(schema.registry()) {
+            return Err(RuntimeGraphqlError::new("invalid_composition"));
+        }
+        Ok(schema)
     }
 }
 

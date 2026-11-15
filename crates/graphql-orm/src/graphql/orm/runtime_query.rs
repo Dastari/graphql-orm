@@ -553,6 +553,51 @@ impl RuntimePredicate {
         render_expr(backend, &self.expr, values)
     }
 
+    /// Render for a FROM item aliased `row` (already quoted): relation
+    /// predicates correlate with `row` instead of the collection's bare table
+    /// name, which the alias hides.
+    pub(crate) fn render_for_alias(
+        &self,
+        backend: DatabaseBackend,
+        values: &mut Vec<SqlValue>,
+        row: &str,
+    ) -> String {
+        render_scoped(backend, &self.expr, values, Some(row), 0)
+    }
+
+    /// Physical tables this predicate's relation subqueries read, and the
+    /// link tables they correlate through.
+    #[cfg(feature = "runtime-graphql")]
+    pub(crate) fn subquery_tables(&self) -> std::collections::BTreeSet<String> {
+        fn visit(expr: &PredicateExpr, tables: &mut std::collections::BTreeSet<String>) {
+            match expr {
+                PredicateExpr::Relation {
+                    relation,
+                    grant,
+                    filter,
+                    ..
+                } => {
+                    tables.insert(relation.target().physical_table().to_owned());
+                    if let Some(join) = relation.join() {
+                        tables.insert(join.physical_table().to_owned());
+                    }
+                    visit(grant, tables);
+                    visit(filter, tables);
+                }
+                PredicateExpr::And(nodes) | PredicateExpr::Or(nodes) => {
+                    for node in nodes {
+                        visit(node, tables);
+                    }
+                }
+                PredicateExpr::Not(node) => visit(node, tables),
+                _ => {}
+            }
+        }
+        let mut tables = std::collections::BTreeSet::new();
+        visit(&self.expr, &mut tables);
+        tables
+    }
+
     /// Whether this predicate contains a relation (correlated subquery) node.
     pub fn has_relation_filters(&self) -> bool {
         fn visit(expr: &PredicateExpr) -> bool {
@@ -2244,6 +2289,24 @@ where
         request: &RuntimeReadRequest,
         auth: Option<&DbAuthContext>,
     ) -> Result<RuntimeConnection, RuntimeQueryError> {
+        self.execute_runtime_read_guarded(request, auth, None)
+            .await?
+            .ok_or_else(|| {
+                RuntimeQueryError::new(RuntimeQueryErrorCode::BackendExecution)
+                    .collection(request.collection.id())
+            })
+    }
+
+    /// [`Self::execute_runtime_read`] with an optional guard statement run last
+    /// in the read's own transaction. `None` means the guard returned a row, or
+    /// the guarded transaction could not complete; the read's rows are then
+    /// discarded unread.
+    pub(crate) async fn execute_runtime_read_guarded(
+        &self,
+        request: &RuntimeReadRequest,
+        auth: Option<&DbAuthContext>,
+        guard: Option<&RuntimeReadGuard>,
+    ) -> Result<Option<RuntimeConnection>, RuntimeQueryError> {
         if !B::RUNTIME_ROW_DECODING_SUPPORTED {
             return Err(
                 RuntimeQueryError::new(RuntimeQueryErrorCode::UnsupportedBackend)
@@ -2251,7 +2314,23 @@ where
             );
         }
         let (sql, values, count, backward) = render_request(request, B::DIALECT)?;
-        let (rows, count_rows) = if let Some((count_sql, count_values)) = count {
+        let (rows, count_rows) = if let Some(guard) = guard {
+            let mut statements: Vec<(&str, &[SqlValue])> = vec![(&sql, &values)];
+            if let Some((count_sql, count_values)) = &count {
+                statements.push((count_sql, count_values));
+            }
+            let Some((rows, count_rows)) = guarded_rows::<B>(self.pool(), guard, &statements, auth)
+                .await
+                .map_err(|error| {
+                    RuntimeQueryError::new(RuntimeQueryErrorCode::BackendExecution)
+                        .collection(request.collection.id())
+                        .source(error)
+                })?
+            else {
+                return Ok(None);
+            };
+            (rows, count_rows)
+        } else if let Some((count_sql, count_values)) = count {
             let (rows, count_rows) = super::fetch_rows_pair_with_auth::<B>(
                 self.pool(),
                 &sql,
@@ -2279,7 +2358,10 @@ where
         };
         let requested = match request.page {
             RuntimePageRequest::First { size, .. } | RuntimePageRequest::Last { size, .. } => {
-                usize::try_from(size).expect("validated positive page size")
+                usize::try_from(size).map_err(|_| {
+                    RuntimeQueryError::new(RuntimeQueryErrorCode::InvalidRequest)
+                        .collection(request.collection.id())
+                })?
             }
         };
         let lookahead = rows.len() > requested;
@@ -2370,11 +2452,52 @@ where
                     .collection(request.collection.id()));
             }
         };
-        Ok(RuntimeConnection {
+        Ok(Some(RuntimeConnection {
             edges,
             page_info,
             total_count,
-        })
+        }))
+    }
+}
+
+/// The admission a guarded read runs in its own transaction, before its read
+/// statements: `prelude` (locks on the tables the read touches, so their state
+/// cannot change until the transaction ends), then `sql`. Any row from `sql`
+/// refuses the read, which then never runs.
+#[derive(Clone, Debug)]
+pub(crate) struct RuntimeReadGuard {
+    pub(crate) prelude: Vec<String>,
+    pub(crate) sql: String,
+    pub(crate) values: Vec<SqlValue>,
+}
+
+/// Run `reads` (one or two statements) after `guard` in one transaction.
+///
+/// `Ok(Some(..))` holds the first read's rows and, when present, the second's.
+/// `Ok(None)` means the read is refused: the admission returned a row, or the
+/// prelude or admission failed (for example on a lock timeout); the reads did
+/// not run. A failed read is the error.
+pub(crate) async fn guarded_rows<B: OrmBackend>(
+    pool: &B::Pool,
+    guard: &RuntimeReadGuard,
+    reads: &[(&str, &[SqlValue])],
+    auth: Option<&DbAuthContext>,
+) -> crate::Result<Option<(Vec<B::Row>, Option<Vec<B::Row>>)>> {
+    let prelude = guard.prelude.iter().map(String::as_str).collect::<Vec<_>>();
+    match super::fetch_rows_admitted_with_auth::<B>(
+        pool,
+        &prelude,
+        (&guard.sql, &guard.values),
+        reads,
+        auth,
+    )
+    .await
+    {
+        Err(_) | Ok(None) => Ok(None),
+        Ok(Some(read)) => {
+            let mut results = read?.into_iter();
+            Ok(results.next().map(|rows| (rows, results.next())))
+        }
     }
 }
 
