@@ -3,7 +3,7 @@ title: "Usage Guide"
 kind: reference
 status: active
 owner: graphql-orm-backup-maintainers
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -390,6 +390,39 @@ re-listing manifests gives a different set. Just before the object sweep they
 list manifests again and stop, without deleting any object, unless the set is
 exactly the retained snapshots. A listing truncated identically on every read
 cannot be detected; the storage provider must fail such listings.
+
+### Snapshot records
+
+A sealed manifest stays valid after its snapshot is deleted, so a repository
+writer can put a pruned snapshot back. Keep a record of deleted (or of live)
+snapshot ids outside the repository and give it to the authenticator:
+
+```rust
+use graphql_orm_backup::{BackupRepository, KeepPolicy, ManifestAuthenticator, prune};
+use uuid::Uuid;
+
+fn authenticator(base: ManifestAuthenticator, revoked: Vec<Uuid>) -> ManifestAuthenticator {
+    // `revoked` is loaded from the host's own store on every start.
+    base.with_revoked_snapshots(revoked)
+}
+
+async fn prune_and_record(
+    repository: &dyn BackupRepository,
+    revoked: &mut Vec<Uuid>,
+) -> Result<(), graphql_orm_backup::BackupError> {
+    let result = prune(repository, &KeepPolicy::default()).await?;
+    // Persist these before the next start.
+    revoked.extend(result.deleted_snapshot_ids);
+    Ok(())
+}
+```
+
+`with_known_snapshots` takes the opposite record, the ids that are live, and
+also refuses snapshots the host never recorded. Every manifest read refuses a
+snapshot the records do not admit with `BackupError::SnapshotNotAdmitted`.
+`prune` refuses to run while such a snapshot is listed; remove it with
+`delete_snapshot`, which then deletes it without reading its manifest. See the
+[trust model](architecture.md#trust-model).
 
 `delete_snapshot` removes one snapshot under the repository writer lock. It
 refuses to delete a snapshot that is the parent of another manifest and

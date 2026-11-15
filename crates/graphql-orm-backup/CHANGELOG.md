@@ -10,6 +10,27 @@ supersedes: []
 
 # Changelog
 
+## 0.24.0 (unreleased)
+
+- Host-held snapshot records (#610). A seal proves the host once wrote a
+  manifest, not that the snapshot is still wanted: a pruned snapshot that a
+  repository writer put back used to verify, restore and count toward
+  retention. `ManifestAuthenticator::with_known_snapshots` (the snapshots that
+  are live) and `with_revoked_snapshots` (the snapshots the host deleted) now
+  refuse such a snapshot on every manifest read with the new
+  `BackupError::SnapshotNotAdmitted`. A revoked id is never sealed again.
+  Without either record behaviour is unchanged.
+- `PruneResult::deleted_snapshot_ids` and
+  `DeleteSnapshotResult::deleted_snapshot_ids` report the deleted snapshot
+  ids, for the host to record.
+- `prune` refuses to run while a snapshot the records do not admit is listed.
+  `delete_snapshot` removes such a snapshot by id without reading its
+  manifest; every other manifest must still verify.
+- With ORM 0.160.0 the ORM adapter's `restore_full` restores all tables in one
+  transaction on PostgreSQL and SQLite and resets the runtime search index of
+  every restored table (#574, #280). Requires ORM 0.160.0 for the optional
+  ORM adapter.
+
 ## 0.23.0 (unreleased)
 
 - PostgreSQL ORM restores resolve bare mixed-case entity table names with the

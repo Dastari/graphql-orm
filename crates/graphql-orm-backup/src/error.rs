@@ -55,6 +55,18 @@ pub enum BackupError {
     #[error("manifest authentication failed for {key}: {reason}")]
     ManifestAuthenticationFailed { key: String, reason: String },
 
+    /// The host's snapshot records do not admit this snapshot: it is on the
+    /// revocation list, or missing from the known-snapshot list, of the
+    /// repository's [`crate::ManifestAuthenticator`]. Its seal may be valid;
+    /// a deleted snapshot that was put back into the repository fails here.
+    #[error("snapshot {snapshot_id} is not admitted by the host's snapshot records: {reason}")]
+    SnapshotNotAdmitted {
+        /// Snapshot that was refused.
+        snapshot_id: uuid::Uuid,
+        /// Which record refused it.
+        reason: String,
+    },
+
     /// An unauthenticated legacy manifest was refused by the configured
     /// [`crate::LegacyManifestPolicy`].
     #[error("unauthenticated legacy manifest for snapshot {snapshot_id} refused by policy")]

@@ -1520,6 +1520,15 @@ async fn try_backup(
     repository: &dyn BackupRepository,
     storage_key: &str,
 ) -> Result<BackupSnapshotManifest, BackupError> {
+    try_backup_as(repository, storage_key, Uuid::new_v4(), 1_775_174_400).await
+}
+
+async fn try_backup_as(
+    repository: &dyn BackupRepository,
+    storage_key: &str,
+    snapshot_id: Uuid,
+    created_at: i64,
+) -> Result<BackupSnapshotManifest, BackupError> {
     let bytes = Bytes::from_static(b"object bytes");
     let objects = MockObjectIndex {
         object: BackupObjectRef {
@@ -1543,14 +1552,184 @@ async fn try_backup(
         &database,
         &objects,
         FullBackupRequest {
-            snapshot_id: Uuid::new_v4(),
-            created_at: 1_775_174_400,
+            snapshot_id,
+            created_at,
             app_id: "example-app".to_string(),
             app_version: "0.1.0".to_string(),
         },
     )
     .await
     .map(|result| result.manifest)
+}
+
+/// Every snapshot and object blob, as a repository writer can copy them.
+async fn copy_out(repository: &LocalBackupRepository) -> Vec<(String, Bytes)> {
+    let mut blobs = Vec::new();
+    for prefix in ["snapshots", "objects"] {
+        for key in repository.list_blobs(prefix).await.expect("list") {
+            let bytes = repository.get_blob(&key).await.expect("read");
+            blobs.push((key, bytes));
+        }
+    }
+    blobs
+}
+
+/// Two full snapshots, the older of which is pruned and then put back with
+/// every one of its blobs, as anyone with repository write access can do.
+/// Returns the ids of the retained and of the pruned-and-replayed snapshot.
+async fn prune_then_replay(temp: &TempDir) -> (Uuid, Uuid) {
+    let repository = repository(temp);
+    let old = try_backup_as(&repository, "media/old.txt", Uuid::new_v4(), 1_775_174_400)
+        .await
+        .expect("old backup");
+    let kept = try_backup_as(&repository, "media/kept.txt", Uuid::new_v4(), 1_775_174_500)
+        .await
+        .expect("kept backup");
+    let copied = copy_out(&repository).await;
+
+    let pruned = prune(&repository, &KeepPolicy::default())
+        .await
+        .expect("prune");
+    assert_eq!(pruned.deleted_snapshot_ids, vec![old.snapshot_id]);
+    assert_eq!(pruned.deleted_snapshots, 1);
+    assert!(load_manifest(&repository, old.snapshot_id).await.is_err());
+
+    for (key, bytes) in copied {
+        if !repository.blob_exists(&key).await.expect("exists") {
+            repository.put_blob(&key, bytes).await.expect("replay");
+        }
+    }
+    // The seal is the host's own, so without a host record it verifies again.
+    load_manifest(&repository, old.snapshot_id)
+        .await
+        .expect("a sealed manifest alone cannot tell that it was deleted");
+    (kept.snapshot_id, old.snapshot_id)
+}
+
+fn not_admitted(error: &BackupError, snapshot_id: Uuid) -> bool {
+    matches!(error, BackupError::SnapshotNotAdmitted { snapshot_id: refused, .. } if *refused == snapshot_id)
+}
+
+#[tokio::test]
+async fn a_pruned_snapshot_put_back_is_refused_by_the_revocation_record() {
+    let temp = TempDir::new().expect("temp dir");
+    let (kept, replayed) = prune_then_replay(&temp).await;
+    let repository = repository_with(&temp, authenticator().with_revoked_snapshots([replayed]));
+
+    let error = load_manifest(&repository, replayed)
+        .await
+        .expect_err("revoked snapshot is refused");
+    assert!(not_admitted(&error, replayed), "{error}");
+    let error = restore_source(
+        restore_snapshot(
+            &repository,
+            &MockDatabase::default(),
+            replayed,
+            RestoreContext::empty_database(),
+        )
+        .await
+        .expect_err("a revoked snapshot is never restored"),
+    );
+    assert!(not_admitted(&error, replayed), "{error}");
+    load_manifest(&repository, kept)
+        .await
+        .expect("the retained snapshot is unaffected");
+
+    // Retention never runs over a snapshot the host did not admit.
+    let before = without_locks(repository.list_blobs("").await.expect("list"));
+    let error = prune(&repository, &KeepPolicy::default())
+        .await
+        .expect_err("prune refuses while a revoked snapshot is listed");
+    assert!(not_admitted(&error, replayed), "{error}");
+    assert_eq!(
+        without_locks(repository.list_blobs("").await.expect("list")),
+        before,
+        "nothing deleted"
+    );
+
+    // Deleting it by id removes it without trusting its manifest.
+    let deleted = delete_snapshot(&repository, replayed, &RepositoryLockOptions::default())
+        .await
+        .expect("delete the replayed snapshot");
+    assert_eq!(deleted.deleted_snapshot_ids, vec![replayed]);
+    assert_eq!(deleted.retained_snapshots, 1);
+    assert!(
+        repository
+            .list_blobs(&format!("snapshots/{replayed}"))
+            .await
+            .expect("list")
+            .is_empty()
+    );
+    let pruned = prune(&repository, &KeepPolicy::default())
+        .await
+        .expect("prune runs again");
+    assert_eq!(pruned.retained_snapshots, 1);
+    assert!(pruned.deleted_snapshot_ids.is_empty());
+    load_manifest(&repository, kept).await.expect("still there");
+}
+
+#[tokio::test]
+async fn a_revoked_snapshot_id_is_never_sealed_again() {
+    let temp = TempDir::new().expect("temp dir");
+    let revoked = Uuid::new_v4();
+    let repository = repository_with(&temp, authenticator().with_revoked_snapshots([revoked]));
+    try_backup(&repository, "media/first.txt")
+        .await
+        .expect("other ids are unaffected");
+    let before = without_locks(repository.list_blobs("").await.expect("list"));
+    let error = try_backup_as(&repository, "media/again.txt", revoked, 1_775_174_600)
+        .await
+        .expect_err("a revoked id is not written");
+    assert!(not_admitted(&error, revoked), "{error}");
+    assert_eq!(
+        without_locks(repository.list_blobs("snapshots").await.expect("list")),
+        before
+            .into_iter()
+            .filter(|key| key.starts_with("snapshots/"))
+            .collect::<Vec<_>>(),
+        "no manifest or payload of the revoked id remains"
+    );
+}
+
+#[tokio::test]
+async fn a_known_snapshot_record_admits_only_listed_snapshots() {
+    let temp = TempDir::new().expect("temp dir");
+    let (kept, replayed) = prune_then_replay(&temp).await;
+    let repository = repository_with(&temp, authenticator().with_known_snapshots([kept]));
+
+    load_manifest(&repository, kept)
+        .await
+        .expect("listed snapshot");
+    let error = load_manifest(&repository, replayed)
+        .await
+        .expect_err("unlisted snapshot is refused");
+    assert!(not_admitted(&error, replayed), "{error}");
+
+    // A new snapshot is written without being listed, and read once the host
+    // has recorded it.
+    let added = try_backup(&repository, "media/new.txt")
+        .await
+        .expect("writing does not need the id on the list");
+    let error = load_manifest(&repository, added.snapshot_id)
+        .await
+        .expect_err("not yet recorded");
+    assert!(not_admitted(&error, added.snapshot_id), "{error}");
+    let recorded = repository_with(
+        &temp,
+        authenticator().with_known_snapshots([kept, added.snapshot_id]),
+    );
+    load_manifest(&recorded, added.snapshot_id)
+        .await
+        .expect("recorded snapshot");
+    // Both records apply together: revocation wins over the known list.
+    let both = repository_with(
+        &temp,
+        authenticator()
+            .with_known_snapshots([kept, added.snapshot_id])
+            .with_revoked_snapshots([kept]),
+    );
+    let error = load_manifest(&both, kept).await.expect_err("revoked");
+    assert!(not_admitted(&error, kept), "{error}");
 }
 
 /// Writes a manifest exactly as a repository writer without the host key can.

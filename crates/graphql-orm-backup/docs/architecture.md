@@ -3,7 +3,7 @@ title: "graphql-orm-backup Architecture"
 kind: architecture
 status: active
 owner: graphql-orm-backup-maintainers
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -91,8 +91,25 @@ storage with `with_repository_identity` to detect replacement of the record
 itself; the identity record is not a trust anchor. Unpinned format 3 operations
 fail closed. Keep independent copies, and choose the snapshot id to restore from host
 records rather than from the repository listing alone. Sealed manifests are
-not encrypted. Previously valid pruned snapshots can be replayed; there is no
-host-held revocation or live-snapshot index in this implementation.
+not encrypted.
+
+A seal does not expire. A snapshot that was pruned and then put back with its
+payloads, by anyone who can write the repository, verifies again unless the
+host keeps a record that says otherwise. `ManifestAuthenticator` takes two
+such records, both held outside the repository:
+
+- `with_revoked_snapshots`: the ids the host deleted. `prune` and
+  `delete_snapshot` report them in `deleted_snapshot_ids`.
+- `with_known_snapshots`: the ids that are live. It also refuses a snapshot
+  the host never recorded, and needs updating after every backup.
+
+Every manifest read refuses a snapshot the records do not admit with
+`SnapshotNotAdmitted`, after its seal verified, and a revoked id is never
+sealed again. `prune` refuses to run while such a snapshot is listed;
+`delete_snapshot` removes it by id without reading its manifest. Without
+either record a pruned snapshot can still be replayed. The records are as
+trustworthy as where the host keeps them: store them with the repository
+identity pin, not in the repository.
 
 ## Collaborating Components
 

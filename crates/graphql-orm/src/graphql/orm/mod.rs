@@ -23,6 +23,7 @@ mod owned_schema;
 mod point_read;
 mod query;
 mod read_authorization;
+mod restore_marker;
 mod rls;
 mod root_fields;
 mod runtime_backup;
@@ -95,6 +96,7 @@ pub use owned_schema::{IndexModel, IndexPredicateModel, OwnedSchemaModel, OwnedT
 pub use point_read::*;
 pub use query::*;
 pub use read_authorization::*;
+pub use restore_marker::{RESTORE_MARKER_TABLE, RestoreInProgress};
 pub use rls::*;
 pub use root_fields::*;
 pub use runtime_backup::*;

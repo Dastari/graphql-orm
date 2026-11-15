@@ -14,6 +14,15 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.160.0, backup 0.24.0
+
+- **A snapshot restores in one transaction on PostgreSQL and SQLite (#574).** `restore_backup_rows` imports every table, runs the row-count and row-hash checks and commits once. A table the database refuses, or a failed check, rolls back the tables imported before it, so a failed restore leaves the target empty and can be retried without cleanup. The hash check used to run after each table's commit. `import_table_rows` still restores one table in its own transaction.
+- **A restore-in-progress marker for host-run SQL Server restores (#574).** SQL Server has no ORM restore, so a host's own restore may commit table by table. `Database::begin_restore_marker` and `finish_restore_marker` bracket it; while the marker is present, `Database::ensure_no_restore_in_progress`, `SchemaManager::validate_against_entities` and `validate_target` fail with an error carrying `RestoreInProgress`. PostgreSQL and SQLite keep no marker.
+- **`SchemaManager::reset_runtime_search` (#280).** Discards a runtime collection's search documents and marks its index `building` in one transaction, so search is refused with `search_index_not_ready` until `backfill_runtime_search` rebuilds it. A snapshot restore does the same, inside its transaction, for the readiness-tracked index of every restored table. Static search indexes are not rebuilt by a restore; see the runtime search reference.
+- **An ignored field-write denial no longer clears the stored value on upsert (#688).** With `FieldPolicy::ignore_denied_field_write`, a GraphQL upsert onto an existing row leaves a denied optional column out of the conflict update, on SQLite, PostgreSQL and SQL Server. It used to write `NULL`. Mutation hooks no longer see the column among the upsert's changes.
+- **Backup 0.24.0: host-held snapshot records (#610).** `ManifestAuthenticator::with_known_snapshots` and `with_revoked_snapshots` refuse a snapshot the host's records do not admit, with `BackupError::SnapshotNotAdmitted`, so a pruned snapshot that is put back into the repository no longer verifies. `PruneResult::deleted_snapshot_ids` and `DeleteSnapshotResult::deleted_snapshot_ids` report what to record. See the [backup changelog](crates/graphql-orm-backup/CHANGELOG.md).
+- See the [migration guide](MIGRATION.md#01590-to-01600-atomic-restore-search-reset-and-kept-values-on-ignored-denials).
+
 ## Unreleased - ORM/macros 0.159.0
 
 - Fix PostgreSQL static entities with bare mixed-case table names (#716). Render quoted table references with the historical PostgreSQL folding of bare table components, and resolve declared names during introspection. Create/alter/index/trigger/RLS statements, reads and writes, catalog checks and search helpers address the same table while metadata and helper digests remain unchanged. Existing folded installs need no migration; lower-case names are unchanged. See [migration guidance](MIGRATION.md#01580-to-01590-postgresql-table-name-case).

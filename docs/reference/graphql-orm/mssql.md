@@ -3,7 +3,7 @@ title: "Microsoft SQL Server Backend"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -86,7 +86,8 @@ An entity declared with `schema_policy = "external_read_only"` does not contain:
 - mutation repository helpers or subscriptions
 - migration runners
 - schema diffing or schema creation APIs
-- backup/restore APIs
+- backup/restore APIs (a host-run restore records the
+  [restore-in-progress marker](#restore-in-progress-marker))
 
 An entity declared with `schema_policy = "external_writable"` may generate the normal applicable
 repository and GraphQL DML surface: insert/bulk insert, key and bounded predicate update/delete,
@@ -117,6 +118,39 @@ fixture checks an untrusted private CA, an explicitly trusted CA, and a
 mismatched hostname. The transport fixture checks the encryption default, each
 explicit opt-in, session reset between checkouts, pool timeouts and a server
 default of `NOCOUNT ON`.
+
+## Restore-in-progress marker
+
+The ORM does not restore SQL Server databases. A host that restores one with
+its own statements may commit table by table, so a failure can leave the
+database partly restored. The marker lets every process see that:
+
+```rust
+database.begin_restore_marker("snapshot-2026-11-15").await?;
+// ... the host's restore statements ...
+database.finish_restore_marker("snapshot-2026-11-15").await?;
+```
+
+- `begin_restore_marker(restore_id)` records one row in
+  `__graphql_orm_restore_marker` before the first restore write. It needs an
+  external-writable pool. It creates the table in the login's default schema
+  when it is missing; create it beforehand as the schema owner when the
+  runtime login may not run DDL (the statement is in the
+  [migration guide](../../../MIGRATION.md#01590-to-01600-atomic-restore-search-reset-and-kept-values-on-ignored-denials)).
+  It fails with `RestoreInProgress` while another marker is present.
+- While the marker is present, `Database::ensure_no_restore_in_progress`,
+  `SchemaManager::validate_against_entities` and `validate_target` fail with
+  an error carrying `RestoreInProgress` (read it with
+  `RestoreInProgress::from_error`). Call one of them when a service starts and
+  refuse to serve on that error. `Database::restore_in_progress` reads the
+  marker without failing, on read-only pools too.
+- `finish_restore_marker(restore_id)` clears the marker once the restore has
+  completed, or after a failed restore's partial rows were removed. It clears
+  only the marker of the restore it names.
+
+The marker blocks processes that check it; it does not stop writes from a
+process that is already running. Stop writers before a restore. PostgreSQL
+and SQLite restore a snapshot in one transaction and keep no marker.
 
 ## Connections
 

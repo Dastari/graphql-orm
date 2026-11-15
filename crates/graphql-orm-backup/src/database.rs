@@ -63,6 +63,11 @@ pub trait GraphqlOrmBackupAdapter: Send + Sync {
     /// rows. Full and incremental restore calls are separate stages; orchestration
     /// does not promise a transaction across them. Document whether a failed call
     /// rolls back its own work, and require a fresh staging target otherwise.
+    /// [`crate::OrmBackupAdapter`] restores all tables in one transaction on
+    /// PostgreSQL and SQLite. An adapter that cannot (a host-written SQL
+    /// Server adapter, for example) should record a restore-in-progress
+    /// marker before its first write and clear it after its last, and the
+    /// host should refuse to start while the marker is present.
     ///
     /// # Errors
     ///

@@ -10,6 +10,12 @@ supersedes: []
 
 # graphql-orm-backup
 
+Version 0.24.0 adds host-held snapshot records: a known-snapshot list or a
+revocation list on `ManifestAuthenticator` refuses a pruned snapshot that is
+put back into the repository, and `prune` and `delete_snapshot` report the
+snapshot ids they deleted. With ORM 0.160.0 the ORM adapter restores all tables
+in one transaction. See [MIGRATION.md](MIGRATION.md).
+
 Version 0.23.0 fixes PostgreSQL ORM restore for mixed-case entity table names.
 The optional ORM adapter uses ORM 0.159.0's shared table rendering for target
 clear and emptiness checks. Existing manifests and tables need no conversion.

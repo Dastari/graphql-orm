@@ -35,6 +35,12 @@ pub struct PruneResult {
     pub retained_snapshots: usize,
     /// Number of expired snapshot manifests.
     pub deleted_snapshots: usize,
+    /// Ids of the expired snapshots, in ascending order. Record them in the
+    /// host's snapshot records (see
+    /// [`crate::ManifestAuthenticator::with_revoked_snapshots`] and
+    /// [`crate::ManifestAuthenticator::with_known_snapshots`]) so a deleted
+    /// snapshot that is later put back into the repository is refused.
+    pub deleted_snapshot_ids: Vec<Uuid>,
     /// Number of blobs deleted, including orphaned payloads.
     pub deleted_blobs: usize,
     /// Number of deleted snapshot payloads that no manifest owned, such as
@@ -117,10 +123,11 @@ async fn prune_inner(
     }
 
     let all_ids = manifest_ids(&manifests);
-    let expired_ids = all_ids
+    let mut expired_ids = all_ids
         .difference(&retained_ids)
         .copied()
         .collect::<Vec<_>>();
+    expired_ids.sort();
 
     let mut deleted_blobs = 0_usize;
     for snapshot_id in &expired_ids {
@@ -143,6 +150,7 @@ async fn prune_inner(
     Ok(PruneResult {
         retained_snapshots: retained_ids.len(),
         deleted_snapshots: expired_ids.len(),
+        deleted_snapshot_ids: expired_ids,
         deleted_blobs,
         deleted_orphan_blobs,
     })
@@ -187,6 +195,9 @@ pub struct DeleteSnapshotResult {
     pub deleted_blobs: usize,
     /// Number of snapshot manifests remaining after deletion.
     pub retained_snapshots: usize,
+    /// Id of the deleted snapshot. Record it in the host's snapshot records,
+    /// as for [`PruneResult::deleted_snapshot_ids`].
+    pub deleted_snapshot_ids: Vec<Uuid>,
 }
 
 /// Deletes one snapshot and any object blobs no other snapshot references.
@@ -197,6 +208,13 @@ pub struct DeleteSnapshotResult {
 /// parent, or a different manifest set on re-listing, aborts before the
 /// snapshot or any object is deleted, and the manifest set is checked again
 /// before the object sweep.
+///
+/// A snapshot the host's snapshot records do not admit (see
+/// [`crate::ManifestAuthenticator::with_revoked_snapshots`]) can still be
+/// deleted, which is how a deleted snapshot that was put back into the
+/// repository is removed: its own manifest is then not read or trusted, and
+/// every other manifest must still verify. [`prune`] refuses to run while
+/// such a snapshot is listed.
 ///
 /// # Errors
 ///
@@ -218,14 +236,21 @@ async fn delete_snapshot_inner(
     repository: &dyn BackupRepository,
     snapshot_id: Uuid,
 ) -> Result<DeleteSnapshotResult, BackupError> {
-    let manifests = load_all_manifests(repository).await?;
+    // A snapshot the host's records refuse is deleted without reading its
+    // manifest, which is not trusted. Its payload keys come from the listing.
+    let unadmitted = !required_authenticator(repository)?.admits_snapshot(snapshot_id);
+    let listed_ids = list_manifest_ids(repository).await?;
+    let mut manifests = Vec::new();
+    for listed in &listed_ids {
+        if unadmitted && *listed == snapshot_id {
+            continue;
+        }
+        manifests.push(load_manifest(repository, *listed).await?);
+    }
     ensure_listed_parents(repository, &manifests).await?;
     // A listing that hid a child would pass the dependency check below.
-    ensure_stable_listing(repository, &manifest_ids(&manifests)).await?;
-    if !manifests
-        .iter()
-        .any(|manifest| manifest.snapshot_id == snapshot_id)
-    {
+    ensure_stable_listing(repository, &listed_ids).await?;
+    if !listed_ids.contains(&snapshot_id) {
         return Err(BackupError::MissingBlob {
             key: snapshot_manifest_key(snapshot_id),
         });
@@ -270,7 +295,8 @@ async fn delete_snapshot_inner(
 
     Ok(DeleteSnapshotResult {
         deleted_blobs,
-        retained_snapshots: manifests.len() - 1,
+        retained_snapshots: remaining_ids.len(),
+        deleted_snapshot_ids: vec![snapshot_id],
     })
 }
 

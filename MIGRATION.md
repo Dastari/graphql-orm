@@ -10,6 +10,46 @@ supersedes: []
 
 # Migration Guide
 
+## 0.159.0 to 0.160.0: atomic restore, search reset and kept values on ignored denials
+
+Upgrade ORM and macros together. Generated SDL, operation catalogues and
+fingerprints are unchanged.
+
+- **Upsert with an ignored field-write denial. Action needed** only for hosts
+  that return `true` from `FieldPolicy::ignore_denied_field_write` and relied
+  on a denied optional field being cleared. A GraphQL upsert that resolves to
+  an existing row now leaves the denied column out of the conflict update, so
+  its stored value is kept; it used to be written as `NULL`. This applies to
+  fields with a declared `write_policy` and to key-less optional fields, on
+  SQLite, PostgreSQL and SQL Server. An upsert that inserts, updates, bulk
+  updates and required fields are unchanged. To clear such a field, allow the
+  write in `can_write_field`. `MutationEvent::changes` of that upsert no
+  longer lists the column. Recompile entities to pick up the generated code.
+- **Snapshot restore is one transaction. No action.** On PostgreSQL and SQLite
+  `restore_backup_rows` (and the backup adapter's `restore_full`) now commits
+  all tables together or not at all. A failed restore no longer needs the
+  target cleared before a retry. Row-hash validation runs before the commit; a
+  mismatch used to be reported after the table was already committed. Very
+  large restores hold one transaction for their whole duration: size the
+  PostgreSQL `statement_timeout` and `idle_in_transaction_session_timeout` of
+  the restoring role accordingly.
+- **Restore resets runtime search. Action needed** only for hosts that restore
+  the tables of searchable runtime collections with `restore_backup_rows`:
+  the restore leaves each such index `building`, so run
+  `backfill_runtime_search` for those collections before serving search.
+  Hosts that import runtime rows another way should call the new
+  `SchemaManager::reset_runtime_search` afterwards.
+- **SQL Server restore marker. No action** unless you restore SQL Server
+  databases with host statements: then bracket the restore with
+  `Database::begin_restore_marker` and `finish_restore_marker`, and call
+  `Database::ensure_no_restore_in_progress` (or validate the schema) at
+  start. The first `begin_restore_marker` creates
+  `__graphql_orm_restore_marker` in the login's default schema; create it
+  beforehand as the schema owner when the runtime login may not run DDL:
+  `CREATE TABLE __graphql_orm_restore_marker (marker_key TINYINT NOT NULL PRIMARY KEY CHECK (marker_key = 1), restore_id NVARCHAR(200) NOT NULL, started_at BIGINT NOT NULL)`.
+- Backup users also upgrade to
+  [backup 0.24.0](crates/graphql-orm-backup/MIGRATION.md#to-0240-host-held-snapshot-records).
+
 ## 0.158.0 to 0.159.0: PostgreSQL table-name case
 
 Upgrade ORM and macros together. Static PostgreSQL table references now agree

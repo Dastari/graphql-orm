@@ -10,6 +10,40 @@ supersedes: []
 
 # Migration Guide
 
+## To 0.24.0: host-held snapshot records
+
+Upgrade backup to 0.24.0 and, when using the optional ORM adapter, ORM/macros
+to 0.160.0 on the same reviewed revision. Existing manifests, keys and
+repository identities need no conversion.
+
+- **`PruneResult` and `DeleteSnapshotResult` gained `deleted_snapshot_ids`,
+  and `BackupError` gained `SnapshotNotAdmitted`. Action needed** only for
+  code that builds or destructures those structs field by field, or matches
+  `BackupError` without a wildcard arm: add the field or the arm.
+- **Snapshot records are opt-in. Action needed** to close the replay gap:
+  until a record is configured, a pruned snapshot that is put back into the
+  repository still verifies. Keep one of these outside the repository and
+  pass it to the authenticator on every start:
+  1. a revocation list: append the ids in `deleted_snapshot_ids` after every
+     `prune` and `delete_snapshot`, and configure
+     `with_revoked_snapshots(ids)`; or
+  2. a known-snapshot list: add the id of every snapshot a backup or
+     compaction returns, remove the ids in `deleted_snapshot_ids`, and
+     configure `with_known_snapshots(ids)`. This also refuses a snapshot the
+     host never wrote down, at the cost of updating the record on every
+     backup.
+  Record the deleted ids before the next process start; a crash between a
+  prune and the record leaves those ids replayable under a revocation list.
+  With a known-snapshot list, remove ids before pruning instead, so a crash
+  errs toward refusal.
+- **Removing a replayed snapshot.** `prune` fails with `SnapshotNotAdmitted`
+  while one is listed. Delete it with `delete_snapshot(repository, id, ..)`.
+- **ORM adapter restore is one transaction. No action.** A failed
+  `restore_full` on PostgreSQL or SQLite now leaves the target empty. Hosts
+  that restore the tables of searchable runtime collections must backfill
+  their search indexes afterwards; see the
+  [workspace migration guide](../../MIGRATION.md#01590-to-01600-atomic-restore-search-reset-and-kept-values-on-ignored-denials).
+
 ## To 0.23.0: PostgreSQL mixed-case table restore
 
 When using the optional PostgreSQL ORM adapter, upgrade ORM/macros to 0.159.0

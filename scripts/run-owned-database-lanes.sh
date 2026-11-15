@@ -154,7 +154,7 @@ run_mssql() {
   cargo test -p graphql-orm --locked --no-default-features --features mssql \
     --lib delivery_is_at_least_once_through_failures_and_cancellation -- --ignored --test-threads=1
   cargo test -p graphql-orm --no-default-features --features mssql \
-    --test mssql_writes --test mssql_trigger_writes --test mssql_integration --test mssql_correctness --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial --test implicit_timestamp_defaults --test read_predicate --test point_read_visibility_backends --test visible_row_pages --test query_loader_batch --test order_aggregate_visibility --locked -- --ignored --test-threads=1
+    --test mssql_writes --test mssql_trigger_writes --test mssql_restore_marker --test mssql_integration --test mssql_correctness --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial --test implicit_timestamp_defaults --test read_predicate --test point_read_visibility_backends --test visible_row_pages --test query_loader_batch --test order_aggregate_visibility --locked -- --ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features sqlite \
     --test federation_end_to_end_fixture -- --ignored node_lookup_through_the_router_on_owned_mssql
 }
