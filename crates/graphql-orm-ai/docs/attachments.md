@@ -206,3 +206,31 @@ The separate [provider-persistent file contract](provider-files.md) defines the
 required upload, index, logical-use, cost, cleanup, and restore evidence. Until
 that complete graph exists, `ModelBuiltinTool::FileSearch` is rejected and a
 raw provider store ID cannot be adopted as authority.
+
+## Unconfirmed provider-file cleanup
+
+A DELETE 404 proves absence only at or after the recorded provider expiry. An
+earlier deletion intent or repeated 404s cannot distinguish absence from a
+credential that now addresses another project, including after restore. Without
+expiry, unconfirmed outcomes retry up to the configured bound (24 by default).
+Exhaustion produces `cleanup_unconfirmed` and increments the host cleanup report's
+`artifacts_unconfirmed`; it never reports provider deletion as successful.
+
+After confirming local blob absence, cleanup releases protected derivatives but
+retains `provider_kind`, `provider_profile_id` and `provider_reference`. Retention
+keeps those rows for operator follow-up; file IDs are not credentials and remain
+in backups. Ordinary attachment GraphQL views still exclude provider references.
+An authorized operator can inventory them on the AI store with this read-only
+query (apply the deployment's schema qualification):
+
+```sql
+SELECT id, provider_kind, provider_profile_id, provider_reference
+FROM graphql_orm_ai_attachment_artifacts
+WHERE cleanup_state = 'cleanup_unconfirmed';
+```
+
+Do not filter out rows with `deleted_at`: that timestamp describes local cleanup,
+not confirmed provider absence. Reconcile the exact provider project/profile and
+file through the host's reviewed deletion boundary before clearing references or
+removing the operator record. No new columns or data backfill are required by
+this correction to the unreleased cleanup contract.

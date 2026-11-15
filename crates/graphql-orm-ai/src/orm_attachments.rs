@@ -805,15 +805,13 @@ impl OrmAiAttachmentService {
                                 sha256: Some(None),
                                 byte_count: Some(0),
                                 protected_content: Some(None),
-                                provider_reference: Some(None),
-                                provider_kind: Some(None),
-                                provider_profile_id: Some(None),
                                 provider_expires_at: Some(None),
                                 cleanup_state: Some(Some("cleanup_unconfirmed".to_owned())),
                                 cleanup_lease_expires_at: Some(None),
                                 cleanup_next_attempt_at: Some(None),
                                 deleted_at: Some(Some(now)),
-                                // A terminal audit record is retained without claiming provider deletion.
+                                // Retain provider identifiers for operator reconciliation;
+                                // the local tombstone never proves provider absence.
                                 ..Default::default()
                             },
                             "unconfirmed",

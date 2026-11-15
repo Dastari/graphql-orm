@@ -273,7 +273,7 @@ impl OpenAiFileDeletionService {
     }
 
     #[cfg(all(test, feature = "provider-openai-core"))]
-    fn for_loopback_test(
+    pub(crate) fn for_loopback_test(
         provider_profile_id: impl Into<String>,
         config: OpenAiProviderConfig,
         secrets: Arc<dyn AiSecretStore>,
@@ -342,9 +342,7 @@ impl AiProviderFileDeletionService for OpenAiFileDeletionService {
         }
         let endpoint = format!("{}/{}", self.files_endpoint, request.provider_reference());
         let deletion = self.send(reqwest::Method::DELETE, &endpoint).await?;
-        if deletion.status() == reqwest::StatusCode::NOT_FOUND
-            && (request.delete_previously_requested() || request.provider_expired())
-        {
+        if deletion.status() == reqwest::StatusCode::NOT_FOUND && request.provider_expired() {
             return Ok(());
         }
         if !deletion.status().is_success() {
@@ -3728,7 +3726,8 @@ mod tests {
     #[tokio::test]
     async fn file_404_requires_a_prior_delete_intent_or_recorded_expiry() {
         for (previous, expires, accepted) in [
-            (true, Some(101), true),
+            (true, Some(101), false),
+            (true, None, false),
             (false, Some(100), true),
             (false, Some(99), true),
             (false, Some(101), false),

@@ -93,16 +93,20 @@ token plus 1,024 framing chunks, under `OllamaProviderConfig.maximum_stream_chun
 the ceiling. The 16 MiB total, 2 MiB line and request-duration limits still apply.
 
 OpenAI artifact cleanup persists exact-reference deletion intent before issuing
-DELETE. A first 404 before recorded expiry remains unconfirmed; a 404 on a later
-attempt after recorded intent, or at/after `provider_expires_at`, proves absence.
+DELETE. A 404 proves absence only at/after recorded `provider_expires_at`.
+Prior intent (including restored intent records) and repeated 404s without expiry
+remain unconfirmed: credentials may now address a different provider project.
 Other ambiguous outcomes back off exponentially (120 seconds initially, capped
 at one hour). `AiAttachmentCleanupLimits::with_maximum_provider_delete_attempts`
 sets an intent bound in 1..=1024 (default 24); interrupted calls count. On exhaustion,
-`cleanup_unconfirmed` releases protected derivatives and sensitive references,
+`cleanup_unconfirmed` releases protected derivatives and local blob references,
 retains minimal audit evidence with `provider_cleanup_attempts_exhausted`, and
 increments `AiAttachmentCleanupReport.artifacts_unconfirmed`, never
-`artifacts_cleaned`. Metadata retention may remove the terminal artifact row;
-the immutable audit remains. Local blob deletion must be confirmed before this
+`artifacts_cleaned`. Provider kind, profile and file reference remain on the row
+for operator follow-up, including in backups. Metadata retention keeps these
+unconfirmed rows until the provider references are explicitly reconciled; the
+[attachment operator query](docs/attachments.md#unconfirmed-provider-file-cleanup)
+locates them even though their local `deleted_at` is set. Local blob deletion must be confirmed before this
 terminal transition, so an unavailable blob store cannot orphan local bytes.
 Stored-response deletion remains a host responsibility.
 Anthropic accepts `max_tokens` and `stop_sequence` only with complete, bounded

@@ -494,6 +494,9 @@ impl AiProviderFileDeletionRequest {
     }
 
     /// Whether a durable exact-reference deletion intent predates this attempt.
+    ///
+    /// This is audit history, never proof of absence: credentials or their provider
+    /// project may have changed, and intent survives backup/restore.
     pub const fn delete_previously_requested(&self) -> bool {
         self.delete_previously_requested
     }

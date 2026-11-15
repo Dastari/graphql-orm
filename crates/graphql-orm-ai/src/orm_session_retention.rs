@@ -1403,7 +1403,10 @@ impl OrmAiSessionRetentionService {
                                             continue;
                                         }
                                         artifact_dependency_remains = true;
-                                        if attachment_artifact_cleanup_pending(&artifact) {
+                                        if attachment_artifact_cleanup_pending(&artifact)
+                                            || artifact.cleanup_state.as_deref()
+                                                == Some("cleanup_unconfirmed")
+                                        {
                                             attachment_cleanup_blocked = true;
                                             continue;
                                         }
@@ -4708,14 +4711,15 @@ pub(crate) fn validate_attachment_artifact(
                     .cleanup_retry_count
                     .is_none_or(|retry_count| retry_count <= 0)
                 || artifact.cleanup_next_attempt_at.is_none()))
+        || (artifact.cleanup_state.as_deref() == Some("complete")
+            && (artifact.provider_kind.is_some()
+                || artifact.provider_profile_id.is_some()
+                || artifact.provider_reference.is_some()))
         || (matches!(
             artifact.cleanup_state.as_deref(),
             Some("complete" | "cleanup_unconfirmed")
         ) && (artifact.blob_reference.is_some()
             || artifact.protected_content.is_some()
-            || artifact.provider_kind.is_some()
-            || artifact.provider_profile_id.is_some()
-            || artifact.provider_reference.is_some()
             || artifact.provider_expires_at.is_some()
             || artifact.deleted_at.is_none()
             || artifact.cleanup_generation.is_none()
@@ -5029,9 +5033,70 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "provider-openai-core")]
+    async fn openai_file_not_found(request: &AiProviderFileDeletionRequest) -> Result<(), AiError> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        struct Secrets;
+        #[async_trait]
+        impl crate::AiSecretStore for Secrets {
+            async fn resolve(
+                &self,
+                _: &crate::SecretRef,
+            ) -> Result<secrecy::SecretString, crate::SecretError> {
+                Ok(secrecy::SecretString::from("fixture-key".to_owned()))
+            }
+            async fn put(
+                &self,
+                _: Option<&crate::SecretRef>,
+                _: secrecy::SecretString,
+            ) -> Result<crate::SecretRef, crate::SecretError> {
+                Err(crate::SecretError::ReadOnly)
+            }
+            async fn delete(&self, _: &crate::SecretRef) -> Result<(), crate::SecretError> {
+                Err(crate::SecretError::ReadOnly)
+            }
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1/files", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut header = Vec::new();
+            while !header.ends_with(b"\r\n\r\n") {
+                header.push(socket.read_u8().await.unwrap());
+                assert!(header.len() < 8192);
+            }
+            assert!(header.starts_with(b"DELETE /v1/files/file-proof HTTP/1.1"));
+            socket
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+        let service = crate::providers::OpenAiFileDeletionService::for_loopback_test(
+            "profile-openai",
+            crate::providers::OpenAiProviderConfig::new(
+                crate::SecretRef::parse("fixture/openai").unwrap(),
+            ),
+            Arc::new(Secrets),
+            endpoint,
+        )
+        .unwrap();
+        let result = service.delete_and_confirm_absent(request).await;
+        server.await.unwrap();
+        result
+    }
+
+    #[cfg(feature = "provider-openai-core")]
+    #[tokio::test]
+    async fn consecutive_openai_404s_without_expiry_end_unconfirmed_and_remain_discoverable() {
+        Box::pin(artifact_worker_cleanup_scenario(3)).await;
+    }
+
     #[derive(Default)]
     struct ProviderFileDeletion {
         fail: AtomicBool,
+        not_found: AtomicBool,
         deleted: Mutex<Vec<String>>,
         database: Mutex<Option<Database<DefaultWriteBackend>>>,
         evidence: Mutex<Vec<bool>>,
@@ -5081,6 +5146,10 @@ mod tests {
             assert_eq!(request.artifact_kind(), "provider_file");
             assert_eq!(request.provider_kind(), &ProviderKind::OpenAi);
             assert_eq!(request.provider_profile_id(), "profile-openai");
+            #[cfg(feature = "provider-openai-core")]
+            if self.not_found.load(Ordering::SeqCst) {
+                openai_file_not_found(request).await?;
+            }
             if self.fail.load(Ordering::SeqCst) {
                 return Err(AiError::PersistenceFailed);
             }
@@ -8151,7 +8220,11 @@ mod tests {
             .expect("attachment should exist");
         let artifact_id = Uuid::new_v4();
         let local_reference = "artifact:local:exact";
-        let provider_reference = "provider:file:exact";
+        let provider_reference = if mode == 3 {
+            "file-proof"
+        } else {
+            "provider:file:exact"
+        };
         AiAttachmentArtifactRecord::insert(
             &database,
             CreateAiAttachmentArtifactRecordInput {
@@ -8166,7 +8239,7 @@ mod tests {
                 provider_kind: Some(ProviderKind::OpenAi.as_str().to_owned()),
                 provider_profile_id: Some("profile-openai".to_owned()),
                 provider_reference: Some(provider_reference.to_owned()),
-                provider_expires_at: Some(now().unix_timestamp() - 1),
+                provider_expires_at: (mode != 3).then_some(now().unix_timestamp() - 1),
                 provider_delete_requested_at: None,
                 provider_delete_attempts: None,
                 cleanup_state: None,
@@ -8236,7 +8309,8 @@ mod tests {
         );
 
         set_provider_file_delete_required(&database, &scope, true).await;
-        provider.set_fail(true);
+        provider.not_found.store(mode == 3, Ordering::SeqCst);
+        provider.set_fail(mode != 3);
 
         let ambiguous = cleanup
             .cleanup_once()
@@ -8286,7 +8360,7 @@ mod tests {
             .await
             .unwrap();
         }
-        provider.set_fail(terminal);
+        provider.set_fail(terminal && mode != 3);
         clock.advance_seconds(121);
         let (left, right) = tokio::join!(cleanup.cleanup_once(), cleanup.cleanup_once());
         let left = left.expect("left artifact worker should converge");
@@ -8329,7 +8403,18 @@ mod tests {
             }
         );
         assert!(cleaned.blob_reference.is_none());
-        assert!(cleaned.provider_reference.is_none());
+        assert_eq!(
+            cleaned.provider_reference.as_deref(),
+            terminal.then_some(provider_reference)
+        );
+        assert_eq!(
+            cleaned.provider_kind.as_deref(),
+            terminal.then_some("openai")
+        );
+        assert_eq!(
+            cleaned.provider_profile_id.as_deref(),
+            terminal.then_some("profile-openai")
+        );
         assert!(cleaned.provider_expires_at.is_none());
         assert!(cleaned.protected_content.is_none());
         assert!(cleaned.deleted_at.is_some());
@@ -8368,6 +8453,33 @@ mod tests {
             .prune_session_content(None)
             .await
             .expect("retention should delete artifact metadata before parent cleanup");
+        if terminal {
+            assert_eq!(finalized.deleting_session_attachment_artifacts_deleted, 0);
+            let retained = AiAttachmentArtifactRecord::find_by_id(&database, &artifact_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                retained.cleanup_state.as_deref(),
+                Some("cleanup_unconfirmed")
+            );
+            assert_eq!(
+                retained.provider_reference.as_deref(),
+                Some(provider_reference)
+            );
+            let repeated = retention.prune_session_content(None).await.unwrap();
+            assert_eq!(repeated.deleting_session_attachment_artifacts_deleted, 0);
+            assert_eq!(
+                AiAttachmentArtifactRecord::find_by_id(&database, &artifact_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .cleanup_state
+                    .as_deref(),
+                Some("cleanup_unconfirmed")
+            );
+            return;
+        }
         assert_eq!(finalized.deleting_session_attachment_artifacts_deleted, 1);
         assert_eq!(finalized.deleting_session_attachment_cleanups_requested, 1);
         assert!(
