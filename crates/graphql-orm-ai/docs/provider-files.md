@@ -3,8 +3,8 @@ title: "Provider-Persistent Files"
 kind: architecture
 status: draft
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-11-02
-review_by: 2026-12-02
+last_reviewed: 2026-11-15
+review_by: 2027-02-15
 supersedes: []
 ---
 
