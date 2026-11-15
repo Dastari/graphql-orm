@@ -6492,7 +6492,11 @@ fn generate_graphql_operations_unfiltered(
                             };
                             // Host policies may buffer private diagnostics before denying an event.
                             // Cover every filter and release-proof drop, not only payload preparation.
-                            let errors_before = ctx.query_env.errors.lock().unwrap().len();
+                            // A poisoned error buffer ends the stream with one typed error.
+                            let errors_before = match ::graphql_orm::graphql::errors::buffered_errors::count(ctx) {
+                                Ok(count) => count,
+                                Err(error) => return Some(Err(error)),
+                            };
                             let delivered: Option<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_event>> = async move {
                                 let event = witness.event.as_ref();
                                 if key.as_ref().is_some_and(|key| ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(key)) != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)) { return None; }
@@ -6552,7 +6556,9 @@ fn generate_graphql_operations_unfiltered(
                                 }
                             }.await;
                             if delivered.is_none() {
-                                ctx.query_env.errors.lock().unwrap().truncate(errors_before);
+                                if let Err(error) = ::graphql_orm::graphql::errors::buffered_errors::truncate(ctx, errors_before) {
+                                    return Some(Err(error));
+                                }
                             }
                             delivered.map(Ok)
                         }
@@ -6579,7 +6585,7 @@ fn generate_graphql_operations_unfiltered(
                                 if result.is_err() {
                                     // A timer may preempt a pending event preparation.
                                     // Never attach its private diagnostics to the terminal frame.
-                                    ctx.query_env.errors.lock().unwrap().clear();
+                                    ::graphql_orm::graphql::errors::buffered_errors::clear(ctx);
                                 }
                                 result
                             }
@@ -8471,7 +8477,11 @@ fn generate_graphql_operations_unfiltered(
                             };
                             // Host policies may buffer private diagnostics before denying an event.
                             // Cover every filter and release-proof drop, not only payload preparation.
-                            let errors_before = ctx.query_env.errors.lock().unwrap().len();
+                            // A poisoned error buffer ends the stream with one typed error.
+                            let errors_before = match ::graphql_orm::graphql::errors::buffered_errors::count(ctx) {
+                                Ok(count) => count,
+                                Err(error) => return Some(Err(error)),
+                            };
                             let delivered: Option<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_event>> = async move {
                                 let event = witness.event.as_ref();
                                 if key.as_ref().is_some_and(|key| ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(key)) != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)) { return None; }
@@ -8531,7 +8541,9 @@ fn generate_graphql_operations_unfiltered(
                                 }
                             }.await;
                             if delivered.is_none() {
-                                ctx.query_env.errors.lock().unwrap().truncate(errors_before);
+                                if let Err(error) = ::graphql_orm::graphql::errors::buffered_errors::truncate(ctx, errors_before) {
+                                    return Some(Err(error));
+                                }
                             }
                             delivered.map(Ok)
                         }
@@ -8558,7 +8570,7 @@ fn generate_graphql_operations_unfiltered(
                                 if result.is_err() {
                                     // A timer may preempt a pending event preparation.
                                     // Never attach its private diagnostics to the terminal frame.
-                                    ctx.query_env.errors.lock().unwrap().clear();
+                                    ::graphql_orm::graphql::errors::buffered_errors::clear(ctx);
                                 }
                                 result
                             }

@@ -1253,11 +1253,66 @@ pub trait TypedAggregateField<T: Entity>: Copy + Eq + Send + Sync + 'static {
     }
 }
 
+/// An aggregate operator this version renders.
+///
+/// [`GraphqlAggregateOperator`](super::GraphqlAggregateOperator) is
+/// non-exhaustive: a newer operation catalogue can name an operator this
+/// version cannot render. Such an operator is refused with a typed error
+/// when the metric is added, so rendering and decoding never meet one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SupportedAggregateOperator {
+    Count,
+    Min,
+    Max,
+    Sum,
+}
+
+impl SupportedAggregateOperator {
+    fn new(operator: super::GraphqlAggregateOperator) -> Option<Self> {
+        #[allow(unreachable_patterns)]
+        match operator {
+            super::GraphqlAggregateOperator::Count => Some(Self::Count),
+            super::GraphqlAggregateOperator::Min => Some(Self::Min),
+            super::GraphqlAggregateOperator::Max => Some(Self::Max),
+            super::GraphqlAggregateOperator::Sum => Some(Self::Sum),
+            _ => None,
+        }
+    }
+
+    /// The SQL aggregate function, which is also the canonical operator name.
+    fn sql(self) -> &'static str {
+        match self {
+            Self::Count => "COUNT",
+            Self::Min => "MIN",
+            Self::Max => "MAX",
+            Self::Sum => "SUM",
+        }
+    }
+
+    fn public(self) -> super::GraphqlAggregateOperator {
+        match self {
+            Self::Count => super::GraphqlAggregateOperator::Count,
+            Self::Min => super::GraphqlAggregateOperator::Min,
+            Self::Max => super::GraphqlAggregateOperator::Max,
+            Self::Sum => super::GraphqlAggregateOperator::Sum,
+        }
+    }
+}
+
+/// Canonical name of an operator in a result: the SQL function of a supported
+/// one, and the upper-cased variant name of one this version does not render.
+fn aggregate_operator_name(operator: super::GraphqlAggregateOperator) -> String {
+    match SupportedAggregateOperator::new(operator) {
+        Some(operator) => operator.sql().to_owned(),
+        None => format!("{operator:?}").to_uppercase(),
+    }
+}
+
 /// One requested aggregate expression.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct AggregateExpression {
     /// Aggregate operator.
-    operator: super::GraphqlAggregateOperator,
+    operator: SupportedAggregateOperator,
     /// Selected field, or `None` for row count.
     field: Option<AggregateFieldRef>,
 }
@@ -1417,9 +1472,7 @@ impl From<AggregateResultValue> for GraphqlAggregateResultValue {
         };
         Self {
             field: value.field.map(str::to_owned),
-            operator: value
-                .operator
-                .map(|operator| aggregate_operator_sql(operator).to_owned()),
+            operator: value.operator.map(aggregate_operator_name),
             kind,
             value: rendered,
         }
@@ -2866,7 +2919,7 @@ fn aggregate_metric_projection(
     expression: &AggregateExpression,
     alias: &str,
 ) -> String {
-    use super::GraphqlAggregateOperator as Operator;
+    use SupportedAggregateOperator as Operator;
     let column = expression
         .field
         .map(|field| dialect.quote_identifier_path(field.column_name));
@@ -2890,43 +2943,25 @@ fn aggregate_metric_projection(
             format!("CAST(SUM({argument}) AS NVARCHAR(64)) AS {alias}")
         }
         (operator, Some(AggregateFieldKind::Decimal(_)), DatabaseBackend::Postgres) => {
-            format!(
-                "CAST({}({argument}) AS TEXT) AS {alias}",
-                aggregate_operator_sql(operator)
-            )
+            format!("CAST({}({argument}) AS TEXT) AS {alias}", operator.sql())
         }
         (operator, Some(AggregateFieldKind::Decimal(_)), DatabaseBackend::Mssql) => format!(
             "CAST({}({argument}) AS NVARCHAR(64)) AS {alias}",
-            aggregate_operator_sql(operator)
+            operator.sql()
         ),
-        (operator, Some(AggregateFieldKind::Text), DatabaseBackend::Postgres) => format!(
-            "CAST({}({argument}) AS TEXT) AS {alias}",
-            aggregate_operator_sql(operator)
-        ),
+        (operator, Some(AggregateFieldKind::Text), DatabaseBackend::Postgres) => {
+            format!("CAST({}({argument}) AS TEXT) AS {alias}", operator.sql())
+        }
         (operator, Some(AggregateFieldKind::Text), DatabaseBackend::Mssql) => format!(
             "{} AS {alias}",
             mssql_lossless_text(
-                &format!("{}({argument})", aggregate_operator_sql(operator)),
+                &format!("{}({argument})", operator.sql()),
                 AggregateFieldKind::Text
             )
         ),
         (operator, _, _) => {
-            format!(
-                "{}({argument}) AS {alias}",
-                aggregate_operator_sql(operator)
-            )
+            format!("{}({argument}) AS {alias}", operator.sql())
         }
-    }
-}
-
-fn aggregate_operator_sql(operator: super::GraphqlAggregateOperator) -> &'static str {
-    #[allow(unreachable_patterns)]
-    match operator {
-        super::GraphqlAggregateOperator::Count => "COUNT",
-        super::GraphqlAggregateOperator::Min => "MIN",
-        super::GraphqlAggregateOperator::Max => "MAX",
-        super::GraphqlAggregateOperator::Sum => "SUM",
-        _ => unreachable!("unsupported aggregate operator from a newer catalogue"),
     }
 }
 
@@ -3291,6 +3326,11 @@ where
                 "aggregate operator is not valid for field",
             ));
         }
+        // An operator of a newer operation catalogue that this version cannot
+        // render is refused here, before anything is rendered.
+        let Some(operator) = SupportedAggregateOperator::new(operator) else {
+            return Err(invalid_aggregate("unsupported aggregate operator"));
+        };
         if self
             .metrics
             .iter()
@@ -3695,7 +3735,7 @@ fn decode_metric_value<B: OrmBackend>(
     alias: &str,
     metric: AggregateExpression,
 ) -> crate::Result<AggregateValue> {
-    use super::GraphqlAggregateOperator as Operator;
+    use SupportedAggregateOperator as Operator;
     if metric.operator == Operator::Count {
         return B::try_get_i64(row, alias).map(AggregateValue::Count);
     }
@@ -3782,7 +3822,7 @@ fn decode_aggregate_row<B: OrmBackend>(
         .map(|(index, metric)| {
             Ok(AggregateResultValue {
                 field: metric.field.map(|field| field.api_name),
-                operator: Some(metric.operator),
+                operator: Some(metric.operator.public()),
                 value: decode_metric_value::<B>(row, &format!("__gom_metric_{index:03}"), *metric)?,
             })
         })
@@ -6294,6 +6334,18 @@ mod grouped_aggregate_tests {
         super::super::GraphqlAggregateOperator::Sum,
     ];
 
+    /// Every operator of this version is supported and keeps its canonical
+    /// name; an unsupported one is refused where metrics are added (#511).
+    #[test]
+    fn every_known_aggregate_operator_is_supported() {
+        for (operator, name) in OPERATORS.iter().zip(["COUNT", "MIN", "MAX", "SUM"]) {
+            let supported = SupportedAggregateOperator::new(*operator).unwrap();
+            assert_eq!(supported.sql(), name);
+            assert_eq!(supported.public(), *operator);
+            assert_eq!(aggregate_operator_name(*operator), name);
+        }
+    }
+
     fn field(name: &'static str, kind: AggregateFieldKind) -> AggregateFieldRef {
         AggregateFieldRef::generated(name, name, name, kind, false, true, OPERATORS)
     }
@@ -6344,7 +6396,7 @@ mod grouped_aggregate_tests {
                 field("attempt", AggregateFieldKind::Integral),
             ],
             metrics: vec![AggregateExpression {
-                operator: super::super::GraphqlAggregateOperator::Max,
+                operator: SupportedAggregateOperator::Max,
                 field: Some(field("note", AggregateFieldKind::Text)),
             }],
             filter: None,
@@ -6538,7 +6590,7 @@ mod grouped_aggregate_tests {
             table: "work_records",
             groups: vec![field("team", AggregateFieldKind::Text)],
             metrics: vec![AggregateExpression {
-                operator: super::super::GraphqlAggregateOperator::Sum,
+                operator: SupportedAggregateOperator::Sum,
                 field: Some(field("units", AggregateFieldKind::Integral)),
             }],
             filter: None,
@@ -6564,11 +6616,11 @@ mod grouped_aggregate_tests {
             ],
             metrics: vec![
                 AggregateExpression {
-                    operator: super::super::GraphqlAggregateOperator::Count,
+                    operator: SupportedAggregateOperator::Count,
                     field: None,
                 },
                 AggregateExpression {
-                    operator: super::super::GraphqlAggregateOperator::Max,
+                    operator: SupportedAggregateOperator::Max,
                     field: Some(field("units", AggregateFieldKind::Integral)),
                 },
             ],

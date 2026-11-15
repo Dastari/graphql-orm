@@ -558,6 +558,143 @@ fn tracing_log_internal(code: &OrmErrorCode, internal: &str) {
     }
 }
 
+/// The field errors a running request has buffered, guarded against a
+/// poisoned buffer.
+///
+/// async-graphql collects a request's field errors behind a standard mutex.
+/// Generated resolvers read its length and cut it back so that a withheld
+/// row or event releases none of the diagnostics its host callbacks
+/// buffered. A panic while the buffer is locked poisons it. The helpers here
+/// then drop everything it holds, so no private diagnostic outlives the
+/// failure, clear the poison, and report a typed `INTERNAL_ERROR` instead of
+/// panicking in the request path. Clearing the poison matters: async-graphql
+/// locks the same buffer when it builds the response and would panic there.
+#[doc(hidden)]
+pub mod buffered_errors {
+    use super::OrmPublicError;
+    use std::sync::Mutex;
+
+    fn poisoned() -> async_graphql::Error {
+        OrmPublicError::internal("the request's error buffer was poisoned by a panic")
+            .into_graphql_error()
+    }
+
+    pub(crate) fn count_in<E>(errors: &Mutex<Vec<E>>) -> async_graphql::Result<usize> {
+        match errors.lock() {
+            Ok(errors) => Ok(errors.len()),
+            Err(recovered) => {
+                recover(errors, recovered);
+                Err(poisoned())
+            }
+        }
+    }
+
+    /// Empty a poisoned buffer and clear its poison. The request goes on to
+    /// build its response, which locks the buffer again and would panic on a
+    /// poisoned one; the typed error is what reports the failure.
+    fn recover<E>(
+        errors: &Mutex<Vec<E>>,
+        recovered: std::sync::PoisonError<std::sync::MutexGuard<'_, Vec<E>>>,
+    ) {
+        recovered.into_inner().clear();
+        errors.clear_poison();
+    }
+
+    pub(crate) fn truncate_in<E>(errors: &Mutex<Vec<E>>, keep: usize) -> async_graphql::Result<()> {
+        match errors.lock() {
+            Ok(mut errors) => {
+                errors.truncate(keep);
+                Ok(())
+            }
+            Err(recovered) => {
+                recover(errors, recovered);
+                Err(poisoned())
+            }
+        }
+    }
+
+    /// How many field errors the request has buffered so far.
+    ///
+    /// # Errors
+    ///
+    /// `INTERNAL_ERROR` when the buffer is poisoned; it is emptied first.
+    pub fn count(ctx: &async_graphql::Context<'_>) -> async_graphql::Result<usize> {
+        count_in(&ctx.query_env.errors)
+    }
+
+    /// Drop every field error buffered after the first `keep`.
+    ///
+    /// # Errors
+    ///
+    /// `INTERNAL_ERROR` when the buffer is poisoned; it is emptied first.
+    pub fn truncate(ctx: &async_graphql::Context<'_>, keep: usize) -> async_graphql::Result<()> {
+        truncate_in(&ctx.query_env.errors, keep)
+    }
+
+    /// Drop every buffered field error, also from a poisoned buffer, whose
+    /// poison is cleared. For a path that is already ending with its own
+    /// error.
+    pub fn clear(ctx: &async_graphql::Context<'_>) {
+        let _ = truncate(ctx, 0);
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::sync::Arc;
+
+        fn code(error: async_graphql::Error) -> Option<String> {
+            error
+                .extensions
+                .and_then(|extensions| match extensions.get("code") {
+                    Some(async_graphql::Value::String(code)) => Some(code.clone()),
+                    _ => None,
+                })
+        }
+
+        fn poison<E: Send + 'static>(errors: &Arc<Mutex<Vec<E>>>) {
+            let held = errors.clone();
+            let panicked = std::thread::spawn(move || {
+                let _guard = held.lock().unwrap();
+                panic!("poison the buffer");
+            })
+            .join();
+            assert!(panicked.is_err() && errors.is_poisoned());
+        }
+
+        /// A buffer poisoned by a panic is refused with a typed error, not a
+        /// second panic. It keeps none of its diagnostics and is usable
+        /// again, so the request can still build its response (#511).
+        #[test]
+        fn a_poisoned_buffer_is_a_typed_error_emptied_and_usable_again() {
+            let errors = Arc::new(Mutex::new(vec!["private diagnostic"]));
+            assert_eq!(count_in(&errors).unwrap(), 1);
+            poison(&errors);
+            assert_eq!(
+                code(count_in(&errors).unwrap_err()).as_deref(),
+                Some("INTERNAL_ERROR")
+            );
+            assert!(!errors.is_poisoned());
+            assert!(errors.lock().unwrap().is_empty());
+            errors.lock().unwrap().push("later diagnostic");
+            poison(&errors);
+            let refused = truncate_in(&errors, 1).unwrap_err();
+            assert_eq!(refused.message, "internal error");
+            assert_eq!(code(refused).as_deref(), Some("INTERNAL_ERROR"));
+            assert!(!errors.is_poisoned());
+            assert!(errors.lock().unwrap().is_empty());
+        }
+
+        #[test]
+        fn a_healthy_buffer_is_counted_and_cut_back() {
+            let errors = Mutex::new(vec![1, 2, 3]);
+            assert_eq!(count_in(&errors).unwrap(), 3);
+            truncate_in(&errors, 1).unwrap();
+            assert_eq!(*errors.lock().unwrap(), [1]);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

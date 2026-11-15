@@ -1580,7 +1580,7 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
     fn records(
         &mut self,
         plan: &Plan,
-        records: &[RuntimeRecord],
+        records: &[&RuntimeRecord],
         shapes: &Shapes<'_>,
     ) -> Result<Vec<Value>, RuntimeGraphqlError> {
         let metadata = plan
@@ -1617,7 +1617,7 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
     async fn project(
         &mut self,
         plan: &Plan,
-        records: &[RuntimeRecord],
+        records: &[&RuntimeRecord],
         nodes: &mut [Value],
         shapes: &Shapes<'_>,
     ) -> Result<(), RuntimeGraphqlError> {
@@ -1626,8 +1626,8 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
             let stored = records
                 .iter()
                 .map(|record| match record.state(&projected.field) {
-                    Ok(RuntimeFieldState::Value(value)) => Ok(value.clone()),
-                    Ok(RuntimeFieldState::Null) => Ok(RuntimeValue::Null),
+                    Ok(RuntimeFieldState::Value(value)) => Ok(value),
+                    Ok(RuntimeFieldState::Null) => Ok(&NULL),
                     _ => Err(RuntimeGraphqlError::new("projection_mismatch")),
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -1665,14 +1665,29 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
         }
         Ok(())
     }
-    /// Read one root layer. `shapes` are where it appears in the response: its
-    /// connection objects, or for a point read its node objects.
+    /// Read one root layer and everything below it. `shapes` are where it
+    /// appears in the response: its connection objects, or for a point read
+    /// its node objects.
+    ///
+    /// Every layer is read and reserved first ([`Self::read_root`]); host
+    /// projections are copied only afterwards ([`Self::finish`]).
     async fn root(
         &mut self,
         plan: &Plan,
         request: RuntimeAnchoredReadRequest,
         shapes: Shapes<'_>,
     ) -> Result<Value, RuntimeGraphqlError> {
+        let loaded = self.read_root(plan, request, shapes).await?;
+        self.finish(loaded).await?.pop().ok_or_else(invalid)
+    }
+    /// Read a root layer and all its descendants, reserving for each layer its
+    /// structure and its records' ordinary fields. No projection is resolved.
+    async fn read_root<'p>(
+        &mut self,
+        plan: &'p Plan,
+        request: RuntimeAnchoredReadRequest,
+        shapes: Shapes<'p>,
+    ) -> Result<Loaded<'p>, RuntimeGraphqlError> {
         let (connections, node_shapes) = if plan.point_read {
             (Shapes::default(), shapes)
         } else {
@@ -1685,11 +1700,6 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
             .await
             .map_err(relation_error)?
             .ok_or_else(row_security_refused)?;
-        let records = connection
-            .edges
-            .iter()
-            .map(|e| e.node.clone())
-            .collect::<Vec<_>>();
         // The connection's structure is reserved before any node is built.
         let shell = if plan.point_read {
             None
@@ -1705,42 +1715,40 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
                     .await?,
             )
         };
-        let mut nodes = self.records(plan, &records, &node_shapes)?;
-        self.project(plan, &records, &mut nodes, &node_shapes)
-            .await?;
+        let rows = Rows::Root(connection);
+        let nodes = self.records(plan, &rows.records(), &node_shapes)?;
+        let mut children = Vec::with_capacity(plan.children.len());
         for child in &plan.children {
             let relation = child.relation.as_ref().ok_or_else(invalid)?;
+            let Rows::Root(connection) = &rows else {
+                return Err(invalid());
+            };
             let parents = connection
                 .relation_parents(relation)
                 .map_err(relation_error)?;
-            let values = self.layer(child, parents, node_shapes.clone()).await?;
-            attach(
-                &mut nodes,
-                &super::schema::relation_output_key(&child.field_name, &child.response_key),
-                values,
-            )?;
+            children.push(self.read_layer(child, parents, node_shapes.clone()).await?);
         }
-        if plan.point_read {
-            return Ok(object([(
-                "edges",
-                Value::List(
-                    nodes
-                        .into_iter()
-                        .map(|node| object([("node", node)]))
-                        .collect(),
-                ),
-            )]));
-        }
-        shell.ok_or_else(invalid)?.assemble(nodes)
+        Ok(Loaded {
+            plan,
+            rows,
+            node_shapes,
+            nodes,
+            shells: vec![shell],
+            children,
+        })
     }
     /// Read one relation layer for `parents`, whose node objects appear at
-    /// `parent_nodes` in the response.
-    fn layer<'a>(
-        &'a mut self,
-        plan: &'a Plan,
+    /// `parent_nodes` in the response, and every layer below it. Reserves each
+    /// parent's key for this relation, the null of a to-one relation without
+    /// a record, each to-many connection without its nodes, and each record's
+    /// ordinary fields. No projection is resolved. `None` when there is no
+    /// parent.
+    fn read_layer<'s, 'p: 's>(
+        &'s mut self,
+        plan: &'p Plan,
         parents: Vec<RuntimeParentAnchor>,
-        parent_nodes: Shapes<'a>,
-    ) -> BoxFuture<'a, Result<Vec<Value>, RuntimeGraphqlError>> {
+        parent_nodes: Shapes<'p>,
+    ) -> BoxFuture<'s, Result<Option<Loaded<'p>>, RuntimeGraphqlError>> {
         Box::pin(async move {
             let relation = plan.relation.as_ref().ok_or_else(invalid)?;
             let here = parent_nodes.relation(&plan.field_name, &plan.response_key);
@@ -1753,7 +1761,7 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
                 (here, nodes)
             };
             if parents.is_empty() {
-                return Ok(Vec::new());
+                return Ok(None);
             }
             let selection = if relation.cardinality() == RelationCardinality::One {
                 RuntimeRelationSelection::ToOne
@@ -1791,16 +1799,6 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
                 .await
                 .map_err(relation_error)?
                 .ok_or_else(row_security_refused)?;
-            let records = batch
-                .results
-                .iter()
-                .flat_map(|r| match &r.value {
-                    RuntimeRelationValue::ToOne(v) => v.iter().cloned().collect::<Vec<_>>(),
-                    RuntimeRelationValue::ToMany(c) => {
-                        c.edges.iter().map(|e| e.node.clone()).collect()
-                    }
-                })
-                .collect::<Vec<_>>();
             // Before any node is built or projected: each parent's key for
             // this relation, the null of a to-one relation without a record,
             // and each to-many connection without its nodes.
@@ -1834,40 +1832,140 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
                     }
                 });
             }
-            let mut nodes = self.records(plan, &records, &node_shapes)?;
-            self.project(plan, &records, &mut nodes, &node_shapes)
-                .await?;
+            let rows = Rows::Related(batch);
+            let nodes = self.records(plan, &rows.records(), &node_shapes)?;
+            let mut children = Vec::with_capacity(plan.children.len());
             for child in &plan.children {
+                let Rows::Related(batch) = &rows else {
+                    return Err(invalid());
+                };
                 let parents = batch
                     .relation_parents(child.relation.as_ref().ok_or_else(invalid)?)
                     .map_err(relation_error)?;
-                let values = self.layer(child, parents, node_shapes.clone()).await?;
+                children.push(self.read_layer(child, parents, node_shapes.clone()).await?);
+            }
+            Ok(Some(Loaded {
+                plan,
+                rows,
+                node_shapes,
+                nodes,
+                shells,
+                children,
+            }))
+        })
+    }
+    /// Resolve the projections of a read layer and of every layer below it,
+    /// parents first, and assemble the layer's output: the connection (or
+    /// point-read object) of a root, or one value per parent of a relation.
+    ///
+    /// Runs only after the whole subtree was read, so each projection is
+    /// charged on top of every descendant's reserved structure and ordinary
+    /// fields.
+    fn finish<'s, 'p: 's>(
+        &'s mut self,
+        loaded: Loaded<'p>,
+    ) -> BoxFuture<'s, Result<Vec<Value>, RuntimeGraphqlError>> {
+        Box::pin(async move {
+            let Loaded {
+                plan,
+                rows,
+                node_shapes,
+                mut nodes,
+                shells,
+                children,
+            } = loaded;
+            self.project(plan, &rows.records(), &mut nodes, &node_shapes)
+                .await?;
+            for (child, loaded) in plan.children.iter().zip(children) {
+                let values = match loaded {
+                    Some(loaded) => self.finish(loaded).await?,
+                    None => Vec::new(),
+                };
                 attach(
                     &mut nodes,
                     &super::schema::relation_output_key(&child.field_name, &child.response_key),
                     values,
                 )?;
             }
-            let mut nodes = nodes.into_iter();
-            let mut output = Vec::new();
-            for (result, shell) in batch.results.into_iter().zip(shells) {
-                output.push(match result.value {
-                    RuntimeRelationValue::ToOne(v) => {
-                        if v.is_some() {
-                            nodes.next().ok_or_else(invalid)?
-                        } else {
-                            Value::Null
-                        }
+            let mut shells = shells.into_iter();
+            match rows {
+                Rows::Root(_) if plan.point_read => Ok(vec![object([(
+                    "edges",
+                    Value::List(
+                        nodes
+                            .into_iter()
+                            .map(|node| object([("node", node)]))
+                            .collect(),
+                    ),
+                )])]),
+                Rows::Root(_) => Ok(vec![
+                    shells
+                        .next()
+                        .flatten()
+                        .ok_or_else(invalid)?
+                        .assemble(nodes)?,
+                ]),
+                Rows::Related(batch) => {
+                    let mut nodes = nodes.into_iter();
+                    let mut output = Vec::with_capacity(batch.results.len());
+                    for result in &batch.results {
+                        let shell = shells.next().ok_or_else(invalid)?;
+                        output.push(match &result.value {
+                            RuntimeRelationValue::ToOne(Some(_)) => {
+                                nodes.next().ok_or_else(invalid)?
+                            }
+                            RuntimeRelationValue::ToOne(None) => Value::Null,
+                            RuntimeRelationValue::ToMany(connection) => {
+                                let values = nodes.by_ref().take(connection.edges.len()).collect();
+                                shell.ok_or_else(invalid)?.assemble(values)?
+                            }
+                        });
                     }
-                    RuntimeRelationValue::ToMany(connection) => {
-                        let values = nodes.by_ref().take(connection.edges.len()).collect();
-                        shell.ok_or_else(invalid)?.assemble(values)?
-                    }
-                });
+                    Ok(output)
+                }
             }
-            Ok(output)
         })
     }
+}
+/// The rows one layer read. Records are borrowed from here for as long as
+/// the layer is built; none is cloned.
+enum Rows {
+    Root(RuntimeAnchoredConnection),
+    Related(RuntimeRelationBatch),
+}
+impl Rows {
+    /// The layer's records in response order.
+    fn records(&self) -> Vec<&RuntimeRecord> {
+        match self {
+            Self::Root(connection) => connection.edges.iter().map(|e| &e.node).collect(),
+            Self::Related(batch) => batch
+                .results
+                .iter()
+                .flat_map(|result| match &result.value {
+                    RuntimeRelationValue::ToOne(record) => record.iter().collect::<Vec<_>>(),
+                    RuntimeRelationValue::ToMany(connection) => {
+                        connection.edges.iter().map(|e| &e.node).collect()
+                    }
+                })
+                .collect(),
+        }
+    }
+}
+/// A layer that was read, with every layer below it. Its structure and its
+/// records' ordinary fields are reserved and its node objects built; its
+/// projections are not resolved yet.
+struct Loaded<'p> {
+    plan: &'p Plan,
+    rows: Rows,
+    /// Where the layer's node objects appear in the response.
+    node_shapes: Shapes<'p>,
+    /// One object per record, without projected fields and relations.
+    nodes: Vec<Value>,
+    /// A root's connection (none for a point read), or one entry per parent:
+    /// the connection of a to-many relation, none for a to-one relation.
+    shells: Vec<Option<Shell>>,
+    /// One per child plan, in order; none where the layer has no record.
+    children: Vec<Option<Loaded<'p>>>,
 }
 /// A connection whose structure is reserved, waiting for its nodes.
 struct Shell {
@@ -2037,62 +2135,115 @@ pub(super) struct PayloadBudget {
     projection_calls: std::sync::atomic::AtomicUsize,
 }
 
-/// Read authorized to-one relation layers of one committed mutation record.
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn payload_relations<B: RuntimeReadBackend>(
-    database: &Database<B>,
-    request: &RuntimeGraphqlRequest<B>,
-    protection: Option<&Protection>,
-    limits: RuntimeGraphqlLimits,
-    budget: &PayloadBudget,
-    schema: &ValidatedRuntimeSchema,
-    record: &RuntimeRecord,
-    children: &[Plan],
-    shapes: Shapes<'_>,
-    spent: usize,
-) -> Result<Vec<(String, Value)>, RuntimeGraphqlError> {
-    use std::sync::atomic::Ordering;
-    // Mutation fields of one request run serially; carry their counts forward.
-    let mut executor = Executor {
-        database,
-        request,
-        guard: None,
-        protection,
-        limits,
-        response_bytes: spent,
-        crypto_calls: budget.crypto_calls.load(Ordering::SeqCst),
-        projection_calls: budget.projection_calls.load(Ordering::SeqCst),
-    };
-    let result = payload_layers(&mut executor, schema, record, children, shapes).await;
-    budget
-        .crypto_calls
-        .store(executor.crypto_calls, Ordering::SeqCst);
-    budget
-        .projection_calls
-        .store(executor.projection_calls, Ordering::SeqCst);
-    result
+/// The to-one relation layers of one committed mutation record, read and
+/// reserved, waiting for the record's own projections before theirs resolve.
+pub(super) struct PayloadRelations<'a, B: RuntimeReadBackend> {
+    executor: Executor<'a, B>,
+    budget: &'a PayloadBudget,
+    layers: Vec<(&'a Plan, Option<Loaded<'a>>)>,
 }
-async fn payload_layers<B: RuntimeReadBackend>(
-    executor: &mut Executor<'_, B>,
+impl<'a, B: RuntimeReadBackend> PayloadRelations<'a, B> {
+    /// Read the authorized relation layers below one committed record and
+    /// reserve their structure and ordinary fields on top of `spent`. No
+    /// projection is resolved.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn read(
+        database: &'a Database<B>,
+        request: &'a RuntimeGraphqlRequest<B>,
+        protection: Option<&'a Protection>,
+        limits: RuntimeGraphqlLimits,
+        budget: &'a PayloadBudget,
+        schema: &ValidatedRuntimeSchema,
+        record: &RuntimeRecord,
+        children: &'a [Plan],
+        shapes: Shapes<'a>,
+        spent: usize,
+    ) -> Result<Self, RuntimeGraphqlError> {
+        use std::sync::atomic::Ordering;
+        // Mutation fields of one request run serially; carry their counts forward.
+        let mut executor = Executor {
+            database,
+            request,
+            guard: None,
+            protection,
+            limits,
+            response_bytes: spent,
+            crypto_calls: budget.crypto_calls.load(Ordering::SeqCst),
+            projection_calls: budget.projection_calls.load(Ordering::SeqCst),
+        };
+        let mut layers = Vec::with_capacity(children.len());
+        let mut result = Ok(());
+        for child in children {
+            match payload_layer(&mut executor, schema, record, child, shapes.clone()).await {
+                Ok(loaded) => layers.push((child, loaded)),
+                Err(error) => {
+                    result = Err(error);
+                    break;
+                }
+            }
+        }
+        let relations = Self {
+            executor,
+            budget,
+            layers,
+        };
+        relations.keep_counts();
+        result.map(|()| relations)
+    }
+    /// The response budget used so far: what [`Self::read`] started from plus
+    /// everything the relation layers reserved.
+    pub(super) fn spent(&self) -> usize {
+        self.executor.response_bytes
+    }
+    fn keep_counts(&self) {
+        use std::sync::atomic::Ordering;
+        self.budget
+            .crypto_calls
+            .store(self.executor.crypto_calls, Ordering::SeqCst);
+        self.budget
+            .projection_calls
+            .store(self.executor.projection_calls, Ordering::SeqCst);
+    }
+    /// Resolve the related records' projections, after `charged` more bytes
+    /// were used by the committed record's own, and return each relation's
+    /// output key and value.
+    pub(super) async fn finish(
+        mut self,
+        charged: usize,
+    ) -> Result<Vec<(String, Value)>, RuntimeGraphqlError> {
+        let result = async {
+            self.executor.reserve(charged)?;
+            let mut output = Vec::with_capacity(self.layers.len());
+            for (child, loaded) in std::mem::take(&mut self.layers) {
+                let value = match loaded {
+                    Some(loaded) => self.executor.finish(loaded).await?.pop(),
+                    None => None,
+                }
+                .ok_or_else(invalid)?;
+                output.push((
+                    super::schema::relation_output_key(&child.field_name, &child.response_key),
+                    value,
+                ));
+            }
+            Ok(output)
+        }
+        .await;
+        self.keep_counts();
+        result
+    }
+}
+async fn payload_layer<'a, B: RuntimeReadBackend>(
+    executor: &mut Executor<'a, B>,
     schema: &ValidatedRuntimeSchema,
     record: &RuntimeRecord,
-    children: &[Plan],
-    shapes: Shapes<'_>,
-) -> Result<Vec<(String, Value)>, RuntimeGraphqlError> {
-    let mut output = Vec::with_capacity(children.len());
-    for child in children {
-        let relation = child.relation.as_ref().ok_or_else(invalid)?;
-        let parents = schema
-            .runtime_relation_parents(relation, std::slice::from_ref(record))
-            .map_err(relation_error)?;
-        let mut values = executor.layer(child, parents, shapes.clone()).await?;
-        let value = values.pop().ok_or_else(invalid)?;
-        output.push((
-            super::schema::relation_output_key(&child.field_name, &child.response_key),
-            value,
-        ));
-    }
-    Ok(output)
+    child: &'a Plan,
+    shapes: Shapes<'a>,
+) -> Result<Option<Loaded<'a>>, RuntimeGraphqlError> {
+    let relation = child.relation.as_ref().ok_or_else(invalid)?;
+    let parents = schema
+        .runtime_relation_parents(relation, std::slice::from_ref(record))
+        .map_err(relation_error)?;
+    executor.read_layer(child, parents, shapes).await
 }
 fn attach(nodes: &mut [Value], key: &str, values: Vec<Value>) -> Result<(), RuntimeGraphqlError> {
     if nodes.len() != values.len() {

@@ -1,4 +1,5 @@
-#![cfg(feature = "postgres")]
+// One backend per build: the generated code below names no backend.
+#![cfg(all(feature = "postgres", not(feature = "sqlite")))]
 //! Federation keys under the PostgreSQL backend.
 //!
 //! The key predicate is rendered by the shared dialect-neutral filter path, so

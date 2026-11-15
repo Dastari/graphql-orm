@@ -296,7 +296,11 @@ mod example {
         Ok(())
     }
 }
-#[cfg(all(feature = "runtime-graphql", feature = "postgres"))]
+#[cfg(all(
+    feature = "runtime-graphql",
+    feature = "postgres",
+    not(any(feature = "sqlite", feature = "mssql"))
+))]
 #[path = "../tests/support/owned_postgres.rs"]
 mod owned_postgres;
 #[cfg(all(

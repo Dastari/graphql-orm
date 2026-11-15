@@ -949,13 +949,30 @@ pub enum RuntimeFieldState<'a> {
 /// The record retains all known field IDs and kinds for its collection, so an
 /// absent value can be distinguished as unloaded rather than unknown. Values
 /// are stored in stable-ID-ordered maps for deterministic equality and Serde.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
 pub struct RuntimeRecord {
     format_version: u32,
     schema_fingerprint: SchemaFingerprint,
     collection: CollectionId,
     field_kinds: BTreeMap<FieldId, RuntimeValueKind>,
     values: BTreeMap<FieldId, RuntimeValue>,
+}
+
+/// A deep copy: every owned value is copied. Each clone emits a `TRACE` event
+/// with target `graphql_orm::runtime_record`, so a test can assert that a
+/// path which must not copy stored values (the runtime GraphQL read executor,
+/// before the response budget is reserved) does not.
+impl Clone for RuntimeRecord {
+    fn clone(&self) -> Self {
+        tracing::trace!(target: "graphql_orm::runtime_record", "runtime record cloned");
+        Self {
+            format_version: self.format_version,
+            schema_fingerprint: self.schema_fingerprint.clone(),
+            collection: self.collection.clone(),
+            field_kinds: self.field_kinds.clone(),
+            values: self.values.clone(),
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -1012,18 +1029,7 @@ impl RuntimeRecord {
     /// Rejects a projection from another schema or collection, or a projected
     /// field that was not decoded into this record.
     pub fn project(&self, projection: &RuntimeProjection) -> Result<Self, RuntimeRecordError> {
-        if projection.schema_fingerprint != self.schema_fingerprint {
-            return Err(
-                RuntimeRecordError::new(RuntimeRecordErrorCode::SchemaMismatch)
-                    .collection(&self.collection),
-            );
-        }
-        if projection.collection.id != self.collection {
-            return Err(
-                RuntimeRecordError::new(RuntimeRecordErrorCode::CrossCollectionField)
-                    .collection(&self.collection),
-            );
-        }
+        self.check_projection(projection)?;
         let mut values = BTreeMap::new();
         for field in &projection.fields {
             let value = self.values.get(&field.id).ok_or_else(|| {
@@ -1038,6 +1044,40 @@ impl RuntimeRecord {
             field_kinds: self.field_kinds.clone(),
             values,
         })
+    }
+
+    /// [`Self::project`] that consumes the record: the projected values are
+    /// moved, not copied, so a large stored value is allocated once.
+    pub(crate) fn into_projection(
+        mut self,
+        projection: &RuntimeProjection,
+    ) -> Result<Self, RuntimeRecordError> {
+        self.check_projection(projection)?;
+        let mut values = BTreeMap::new();
+        for field in &projection.fields {
+            let value = self.values.remove(&field.id).ok_or_else(|| {
+                RuntimeRecordError::new(RuntimeRecordErrorCode::FieldUnloaded).for_field(field)
+            })?;
+            values.insert(field.id.clone(), value);
+        }
+        self.values = values;
+        Ok(self)
+    }
+
+    fn check_projection(&self, projection: &RuntimeProjection) -> Result<(), RuntimeRecordError> {
+        if projection.schema_fingerprint != self.schema_fingerprint {
+            return Err(
+                RuntimeRecordError::new(RuntimeRecordErrorCode::SchemaMismatch)
+                    .collection(&self.collection),
+            );
+        }
+        if projection.collection.id != self.collection {
+            return Err(
+                RuntimeRecordError::new(RuntimeRecordErrorCode::CrossCollectionField)
+                    .collection(&self.collection),
+            );
+        }
+        Ok(())
     }
 
     /// Deserialize and validate a deterministic JSON record representation.

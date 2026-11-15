@@ -26,19 +26,17 @@ pub struct ChangedPayload<T> {
 impl<T: async_graphql::OutputType> ChangedPayload<T> {
     /// Prepare one selected event; failures never become subscription frames.
     pub async fn prepare(event: T, ctx: &Context<'_>) -> Option<Self> {
-        let errors_before = ctx.query_env.errors.lock().unwrap().len();
+        use crate::graphql::errors::buffered_errors;
+        // A poisoned error buffer prepares nothing: the generated stream's
+        // own check of the buffer then ends the subscription with a typed
+        // error instead of panicking here.
+        let errors_before = buffered_errors::count(ctx).ok()?;
         let type_name = event.introspection_type_name();
         let selection = ctx.with_selection_set(&ctx.item.node.selection_set);
         let resolved = event.resolve(&selection, ctx.item).await;
-        let field_failed = {
-            let mut errors = ctx.query_env.errors.lock().unwrap();
-            let failed = errors.len() > errors_before;
-            if failed {
-                errors.truncate(errors_before);
-            }
-            failed
-        };
+        let field_failed = buffered_errors::count(ctx).ok()? > errors_before;
         if field_failed {
+            buffered_errors::truncate(ctx, errors_before).ok()?;
             return None;
         }
         resolved.ok().map(|value| Self {

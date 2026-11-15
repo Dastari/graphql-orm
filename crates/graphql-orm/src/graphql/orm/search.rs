@@ -149,9 +149,114 @@ pub trait SearchableEntity: DatabaseSearchSchema {
     }
 }
 
+/// Longest identifier PostgreSQL keeps. It truncates a longer one silently,
+/// so two helper tables whose names agree in their first 63 bytes would be
+/// one table.
+const MAX_SEARCH_TABLE_NAME_BYTES: usize = 63;
+
+/// Hexadecimal digits of the digest that ends a bounded helper table name.
+const SEARCH_TABLE_DIGEST_DIGITS: usize = 16;
+
+/// Whether `name` ends the way a bounded helper table name does: `_` and 16
+/// lowercase hexadecimal digits.
+fn ends_like_a_digest(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    bytes.len() > SEARCH_TABLE_DIGEST_DIGITS
+        && bytes[bytes.len() - SEARCH_TABLE_DIGEST_DIGITS - 1] == b'_'
+        && bytes[bytes.len() - SEARCH_TABLE_DIGEST_DIGITS..]
+            .iter()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// Return the managed PostgreSQL/fallback search table name for a base table.
+///
+/// The name is `__graphql_orm_search_<table>` when that fits PostgreSQL's
+/// 63-byte identifier limit (a base table name of up to 42 bytes) and the
+/// base table name does not itself end in `_` and 16 lowercase hexadecimal
+/// digits. Every other base table gets a digest name: as much of
+/// `__graphql_orm_search_<table>` as fits in 46 bytes, then `_` and 16
+/// hexadecimal digits of the SHA-256 of the whole base table name.
+///
+/// A plain name therefore never ends like a digest name, so a short base
+/// table can never be given the helper name of a long one, and the result is
+/// always at most 63 bytes. The mapping is not injective past that: two base
+/// table names whose sanitized forms are equal (`a-b` and `a_b`), or that
+/// differ only in a case the backend ignores, still share a helper name.
+/// Planning a schema that holds both, or creating one while the other's
+/// helper table exists, is refused with [`SearchHelperTableConflict`]
+/// (`TargetCollision` for runtime migrations) before any statement runs.
 pub fn search_table_name(table_name: &str) -> String {
-    format!("__graphql_orm_search_{}", sanitize_search_name(table_name))
+    let base = sanitize_search_name(table_name);
+    let name = format!("__graphql_orm_search_{base}");
+    // A digest name is the prefix, part of the base, `_` and the digest, so
+    // only a base that itself ends that way could equal one.
+    if name.len() <= MAX_SEARCH_TABLE_NAME_BYTES && !ends_like_a_digest(&base) {
+        return name;
+    }
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(table_name.as_bytes());
+    let suffix = digest[..SEARCH_TABLE_DIGEST_DIGITS / 2]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    // Sanitized names are ASCII, so any byte offset is a character boundary.
+    let kept = (MAX_SEARCH_TABLE_NAME_BYTES - suffix.len() - 1).min(name.len());
+    format!("{}_{suffix}", &name[..kept])
+}
+
+/// A search index was not created because the helper table it needs already
+/// belongs to something else.
+///
+/// Either two base tables of one target or plan map to the same helper table
+/// (`other_table` names the second), or a table of that name already exists
+/// in the database and the search metadata does not record it for this base
+/// table (`other_table` is `None`). Names are compared as the backend
+/// compares the identifiers the ORM writes: without regard to ASCII case on
+/// SQLite and for PostgreSQL's unquoted helper names. The refusal comes before any statement of
+/// the plan runs; nothing was changed. Read it from a planning or apply error
+/// with [`SearchHelperTableConflict::from_error`]; runtime (owned) migrations
+/// report it as `TargetCollision` with the helper table as the subject.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchHelperTableConflict {
+    /// The helper table name both parties need.
+    pub helper_table: String,
+    /// The base table whose search index was being created.
+    pub table: String,
+    /// The other base table of the same plan, when the plan itself collides.
+    pub other_table: Option<String>,
+}
+
+impl std::fmt::Display for SearchHelperTableConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.other_table {
+            Some(other) => write!(
+                f,
+                "search indexes of tables {} and {} both need the helper table {}; nothing was changed",
+                self.table, other, self.helper_table
+            ),
+            None => write!(
+                f,
+                "the search index of table {} needs the helper table {}, which already exists and is not recorded for that table; nothing was changed",
+                self.table, self.helper_table
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SearchHelperTableConflict {}
+
+impl SearchHelperTableConflict {
+    /// The conflict carried by `error`, if that is what it reports.
+    pub fn from_error(error: &crate::Error) -> Option<&Self> {
+        match error {
+            sqlx::Error::Decode(source) => source.downcast_ref::<Self>(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn into_error(self) -> crate::Error {
+        sqlx::Error::Decode(Box::new(self))
+    }
 }
 
 /// Return the managed SQLite FTS5 table name for a base table.

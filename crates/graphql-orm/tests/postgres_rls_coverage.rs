@@ -5,7 +5,8 @@
 //! test-owned disposable PostgreSQL container. Assertions about tenant
 //! isolation always execute as a separate restricted role: the container
 //! owner is a superuser and cannot establish RLS enforcement.
-#![cfg(feature = "postgres")]
+// One backend per build: the generated code below names no backend.
+#![cfg(all(feature = "postgres", not(feature = "sqlite")))]
 
 #[allow(dead_code)]
 #[path = "support/owned_postgres.rs"]

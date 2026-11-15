@@ -774,12 +774,17 @@ fn ensure_within_bind_limit(dialect: DatabaseBackend, bound_values: usize) -> Re
 /// Reported as `INVALID_INPUT`, the code for a request the client must
 /// reduce; the statement is never sent.
 fn bind_limit_exceeded() -> String {
+    crate::graphql::errors::loader_error_from_sqlx(bind_limit_error())
+}
+
+/// The typed `INVALID_INPUT` refusal of a request whose own values leave no
+/// room for one key in a batched statement. Shared with the runtime relation
+/// layer, which carries it as the source of its `resource_limit` error.
+pub(crate) fn bind_limit_error() -> sqlx::Error {
     use crate::graphql::errors::{OrmErrorCode, OrmPublicError};
-    crate::graphql::errors::loader_error_from_sqlx(crate::graphql::errors::sqlx_error_from_public(
-        OrmPublicError::with_message(
-            OrmErrorCode::InvalidInput,
-            "the request binds more values than one batched statement accepts",
-        ),
+    crate::graphql::errors::sqlx_error_from_public(OrmPublicError::with_message(
+        OrmErrorCode::InvalidInput,
+        "the request binds more values than one batched statement accepts",
     ))
 }
 

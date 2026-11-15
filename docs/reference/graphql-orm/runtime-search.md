@@ -193,6 +193,38 @@ Scores are not comparable across backends, and `minScore` thresholds are backend
 
 ## Backend differences
 
+The PostgreSQL document table is named by `search_table_name`:
+`__graphql_orm_search_<table>` for a base table name of up to 42 bytes that
+does not end in `_` and 16 lowercase hexadecimal digits. Every other base
+table gets a digest name, because the plain name would pass PostgreSQL's
+63-byte identifier limit or could equal another table's digest name: up to 46
+bytes of the plain name, then `_` and 16 hexadecimal digits of the SHA-256 of
+the whole base table name. Two long tables that share a prefix therefore keep
+separate documents, and a short table can never be given a long table's
+helper name.
+
+Planning or applying a migration refuses, before any statement runs, a search
+index whose helper table name is already taken: by another base table of the
+same target or plan, or by a table that exists without a
+`__graphql_orm_search_metadata` row for this base table. The mapping is not
+injective once names are sanitized (`a-b` and `a_b` share a helper name), so
+this refusal is what keeps two such base tables apart. Names are compared as
+the backend compares the identifiers the ORM writes: without regard to ASCII
+case on SQLite, and on PostgreSQL as unquoted identifiers, which fold to lower
+case. Runtime migrations report `TargetCollision` with the
+helper table as the subject; static plans return `SearchHelperTableConflict`.
+The metadata row is the ownership record, so a base table that already has
+its index plans and applies again without a refusal.
+
+## Backend differences
+
+The PostgreSQL document table is named by `search_table_name`:
+`__graphql_orm_search_<table>` for a base table name of up to 42 bytes. A
+longer base table name would pass PostgreSQL's 63-byte identifier limit, so
+its helper name keeps the first 46 bytes and ends in `_` and 16 hexadecimal
+digits of the SHA-256 of the whole base table name. Two long tables that share
+a prefix therefore keep separate documents.
+
 | | SQLite | PostgreSQL |
 | --- | --- | --- |
 | Storage | FTS5 table `__graphql_orm_fts_<table>` | `__graphql_orm_search_<table>` with weighted `tsvector` and GIN |

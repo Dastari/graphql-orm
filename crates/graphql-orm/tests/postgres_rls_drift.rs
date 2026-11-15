@@ -7,7 +7,8 @@
 //!
 //! Container-backed tests are ignored by default and run only against the
 //! test-owned disposable PostgreSQL container.
-#![cfg(feature = "postgres")]
+// One backend per build: the generated code below names no backend.
+#![cfg(all(feature = "postgres", not(feature = "sqlite")))]
 
 #[allow(dead_code)]
 #[path = "support/owned_postgres.rs"]
