@@ -1,4 +1,8 @@
 mod notifications;
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../tests/support/owned_mssql.rs"]
+mod owned_mssql;
 mod transport;
 pub use notifications::{
     MssqlBrokerQueue, MssqlQueryNotificationConnection, MssqlQueryNotificationKind,
@@ -203,9 +207,117 @@ impl MssqlPoolOptions {
 /// The client is returned to the pool only after a successful explicit commit
 /// or rollback, which also resets its session. Cancellation, protocol errors,
 /// timeouts and drop discard the socket.
+///
+/// A statement the server refused (a constraint violation, a deadlock) keeps
+/// the connection but fails the transaction: later statements and `commit` are
+/// refused, and `rollback` ends whatever the server left open. Rolling back a
+/// transaction whose connection was already discarded is a no-op, because SQL
+/// Server rolled it back when the session closed.
 pub struct MssqlTransaction {
     pool: MssqlPool,
     lease: Option<Lease>,
+    failed: bool,
+}
+
+/// An error SQL Server reported for a statement.
+///
+/// Carried inside [`sqlx::Error::Database`], so `as_database_error()`, `code()`
+/// (the error number as text) and `kind()` classify it like any other backend:
+/// 2627 and 2601 are unique violations, 547 is a foreign-key or check
+/// violation and 515 is a not-null violation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MssqlServerError {
+    number: u32,
+    state: u8,
+    class: u8,
+    message: String,
+}
+
+impl MssqlServerError {
+    /// Build an error from the fields of a server error token.
+    pub fn new(number: u32, state: u8, class: u8, message: impl Into<String>) -> Self {
+        Self {
+            number,
+            state,
+            class,
+            message: message.into(),
+        }
+    }
+
+    /// SQL Server error number, such as 2627 or 1205.
+    pub fn number(&self) -> u32 {
+        self.number
+    }
+
+    /// Error state reported with the number.
+    pub fn state(&self) -> u8 {
+        self.state
+    }
+
+    /// Severity class. The server closes the session at 20 and above.
+    pub fn class(&self) -> u8 {
+        self.class
+    }
+
+    /// Whether running the whole transaction again can succeed.
+    ///
+    /// Deadlock victim (1205), lock request timeout (1222), snapshot update
+    /// conflict (3960), the memory-optimized table conflicts (41301, 41302,
+    /// 41305, 41325, 41839), and the service-busy and failover errors 40501,
+    /// 40197 and 40613. Constraint and truncation errors are never retried.
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self.number,
+            1205 | 1222 | 3960 | 41301 | 41302 | 41305 | 41325 | 41839 | 40501 | 40197 | 40613
+        )
+    }
+}
+
+impl std::fmt::Display for MssqlServerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} (code: {}, state: {}, class: {})",
+            self.message, self.number, self.state, self.class
+        )
+    }
+}
+
+impl std::error::Error for MssqlServerError {}
+
+impl sqlx::error::DatabaseError for MssqlServerError {
+    fn message(&self) -> &str {
+        &self.message
+    }
+
+    fn code(&self) -> Option<Cow<'_, str>> {
+        Some(Cow::Owned(self.number.to_string()))
+    }
+
+    fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+        self
+    }
+
+    fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+        self
+    }
+
+    fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+        self
+    }
+
+    fn kind(&self) -> sqlx::error::ErrorKind {
+        use sqlx::error::ErrorKind;
+        match self.number {
+            2627 | 2601 => ErrorKind::UniqueViolation,
+            515 => ErrorKind::NotNullViolation,
+            // 547 is raised for FOREIGN KEY, REFERENCE and CHECK conflicts
+            // only; the message names which one.
+            547 if self.message.contains("CHECK") => ErrorKind::CheckViolation,
+            547 => ErrorKind::ForeignKeyViolation,
+            _ => ErrorKind::Other,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -446,6 +558,7 @@ impl MssqlPool {
         Ok(MssqlTransaction {
             pool: self.clone(),
             lease: Some(lease),
+            failed: false,
         })
     }
 
@@ -524,13 +637,7 @@ impl MssqlPool {
     async fn connect(&self) -> crate::Result<MssqlClient> {
         let config = self.inner.config.clone();
         let connect = async move {
-            let tcp = TcpStream::connect(config.get_addr())
-                .await
-                .map_err(sqlx::Error::Io)?;
-            tcp.set_nodelay(true).map_err(sqlx::Error::Io)?;
-            let mut client = tiberius::Client::connect(config, tcp.compat_write())
-                .await
-                .map_err(map_tiberius_error)?;
+            let mut client = open_client(config).await?;
             execute_control_statement(&mut client, SESSION_RESET)
                 .await
                 .map_err(|failure| failure.error)?;
@@ -629,6 +736,9 @@ impl MssqlTransaction {
         sql: &str,
         values: &[SqlValue],
     ) -> crate::Result<Vec<MssqlRow>> {
+        if self.failed {
+            return Err(failed_transaction());
+        }
         let lease = self.lease.as_mut().ok_or_else(inactive_transaction)?;
         let result = self
             .pool
@@ -642,6 +752,9 @@ impl MssqlTransaction {
         sql: &str,
         values: &[SqlValue],
     ) -> crate::Result<MssqlWriteResult> {
+        if self.failed {
+            return Err(failed_transaction());
+        }
         let lease = self.lease.as_mut().ok_or_else(inactive_transaction)?;
         let result = self
             .pool
@@ -650,35 +763,65 @@ impl MssqlTransaction {
         result.map_err(|failure| self.poison(failure))
     }
 
-    pub(crate) async fn commit(self) -> crate::Result<()> {
-        self.finish(COMMIT_TRANSACTION).await
+    pub(crate) async fn commit(mut self) -> crate::Result<()> {
+        if self.lease.is_none() {
+            return Err(inactive_transaction());
+        }
+        if self.failed {
+            // Never commit the statements that ran before the failed one.
+            self.finish(SESSION_RESET).await?;
+            return Err(failed_transaction());
+        }
+        self.finish(&format!("{COMMIT_TRANSACTION} {SESSION_RESET}"))
+            .await
     }
 
-    pub(crate) async fn rollback(self) -> crate::Result<()> {
-        self.finish("ROLLBACK TRANSACTION;").await
+    /// Roll back whatever the server still holds open and return the
+    /// connection to the pool.
+    ///
+    /// A no-op when the connection was already discarded: the server rolled
+    /// the transaction back when the session closed. After a failed statement
+    /// the server may already have ended the transaction (a deadlock victim),
+    /// so the batch rolls back only while `@@TRANCOUNT` is above zero.
+    pub(crate) async fn rollback(mut self) -> crate::Result<()> {
+        if self.lease.is_none() {
+            return Ok(());
+        }
+        self.finish(SESSION_RESET).await
     }
 
     /// End the transaction and reset the session in one batch, then return
     /// the connection to the pool. On any failure the connection is closed.
-    async fn finish(mut self, end: &str) -> crate::Result<()> {
+    async fn finish(&mut self, batch: &str) -> crate::Result<()> {
         let mut lease = self.lease.take().ok_or_else(inactive_transaction)?;
-        let batch = format!("{end} {SESSION_RESET}");
         self.pool
-            .bounded(execute_control_statement(&mut lease.client, &batch))
+            .bounded(execute_control_statement(&mut lease.client, batch))
             .await
             .map_err(|failure| failure.error)?;
         self.pool.release(lease);
         Ok(())
     }
 
+    /// Record a failed statement. A server error keeps the connection, whose
+    /// state is known, and fails the transaction; anything else discards it.
     fn poison(&mut self, failure: StatementFailure) -> sqlx::Error {
-        self.lease.take();
+        if failure.reusable {
+            self.failed = true;
+        } else {
+            self.lease.take();
+        }
         failure.error
     }
 }
 
 fn inactive_transaction() -> sqlx::Error {
     sqlx::Error::Protocol("SQL Server transaction is no longer active".to_string())
+}
+
+fn failed_transaction() -> sqlx::Error {
+    sqlx::Error::Protocol(
+        "SQL Server transaction had a failed statement and can only be rolled back".to_string(),
+    )
 }
 
 fn timed_out(message: &'static str) -> sqlx::Error {
@@ -766,8 +909,16 @@ impl MssqlScalar for String {
         if let Ok(value) = index.try_get_raw::<&str>(&row.inner) {
             return Ok(value.map(str::to_owned));
         }
+        // RFC 3339, the text SQLite and PostgreSQL date columns hold. A
+        // `datetime2`, `datetime` or `smalldatetime` carries no offset and is
+        // read as UTC, like the `SYSUTCDATETIME()` defaults the ORM writes.
         if let Ok(value) = index.try_get_raw::<tiberius::time::chrono::NaiveDateTime>(&row.inner) {
-            return Ok(value.map(|value| value.to_string()));
+            return Ok(value.map(naive_utc_rfc3339));
+        }
+        if let Ok(value) = index.try_get_raw::<chrono::DateTime<chrono::FixedOffset>>(&row.inner) {
+            return Ok(
+                value.map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true))
+            );
         }
         if let Ok(value) = index.try_get_raw::<tiberius::time::chrono::NaiveDate>(&row.inner) {
             return Ok(value.map(|value| value.to_string()));
@@ -952,10 +1103,51 @@ impl MssqlScalar for rust_decimal::Decimal {
     where
         I: MssqlColumnIndex,
     {
+        // The driver's own `Decimal` conversion panics beyond 28 decimal
+        // places or a 96-bit mantissa, which `DECIMAL(38, s)` columns of an
+        // externally managed table can hold.
         index
-            .try_get_raw::<rust_decimal::Decimal>(&row.inner)
-            .map_err(map_tiberius_error)
+            .try_get_raw::<tiberius::numeric::Numeric>(&row.inner)
+            .map_err(map_tiberius_error)?
+            .map(|numeric| {
+                decimal_from_numeric(numeric.value(), numeric.scale()).map_err(|source| {
+                    sqlx::Error::ColumnDecode {
+                        index: index.display(),
+                        source: source.into(),
+                    }
+                })
+            })
+            .transpose()
     }
+}
+
+/// RFC 3339 text of a date-time that carries no offset, read as UTC.
+///
+/// The legacy `datetime` type counts 1/300 of a second, which the driver
+/// truncates to nanoseconds (`.996666666` for the tick SQL Server shows as
+/// `.997`). Such a value is never a multiple of 100 ns, the unit of every
+/// other date-time type, so it is rounded to the millisecond the server shows.
+fn naive_utc_rfc3339(value: tiberius::time::chrono::NaiveDateTime) -> String {
+    use chrono::Timelike;
+    let nanos = value.nanosecond();
+    let value = if nanos.is_multiple_of(100) {
+        value
+    } else {
+        // At most 299/300 s, so rounding never reaches the next second.
+        value
+            .with_nanosecond((nanos + 500_000) / 1_000_000 * 1_000_000)
+            .unwrap_or(value)
+    };
+    value
+        .and_utc()
+        .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
+}
+
+/// Convert a TDS numeric to `Decimal`, refusing values it cannot represent.
+fn decimal_from_numeric(value: i128, scale: u8) -> Result<rust_decimal::Decimal, String> {
+    rust_decimal::Decimal::try_from_i128_with_scale(value, u32::from(scale)).map_err(|error| {
+        format!("SQL Server DECIMAL value is outside the supported decimal range: {error}")
+    })
 }
 
 impl<'a> tiberius::IntoSql<'a> for MssqlParamValue {
@@ -1080,8 +1272,51 @@ impl From<&SqlValue> for MssqlParamValue {
     }
 }
 
+/// Open one TDS connection, following at most one routing redirect.
+///
+/// Under Azure SQL's Redirect connection policy the gateway answers a
+/// successful login with the address of the node that hosts the database and
+/// the client must connect there. The redirect arrives after the gateway's
+/// TLS session and login, and the second connection is validated under the
+/// same transport policy against the redirected host name. A second redirect
+/// is an error.
+async fn open_client(mut config: Config) -> crate::Result<MssqlClient> {
+    let mut redirected = false;
+    loop {
+        let tcp = TcpStream::connect(config.get_addr())
+            .await
+            .map_err(sqlx::Error::Io)?;
+        tcp.set_nodelay(true).map_err(sqlx::Error::Io)?;
+        match tiberius::Client::connect(config.clone(), tcp.compat_write()).await {
+            Ok(client) => return Ok(client),
+            Err(tiberius::error::Error::Routing { host, port }) if !redirected => {
+                redirected = true;
+                follow_route(&mut config, &host, port);
+            }
+            Err(error) => return Err(map_tiberius_error(error)),
+        }
+    }
+}
+
+/// Point `config` at the node a routing redirect named.
+fn follow_route(config: &mut Config, host: &str, port: u16) {
+    config.host(host);
+    config.port(port);
+}
+
+/// Keep the driver error's class: a server error stays a database error with
+/// its number, and I/O and TLS failures stay I/O and TLS failures.
 fn map_tiberius_error(error: tiberius::error::Error) -> sqlx::Error {
-    sqlx::Error::Protocol(error.to_string())
+    match error {
+        tiberius::error::Error::Server(token) => sqlx::Error::Database(Box::new(
+            MssqlServerError::new(token.code(), token.state(), token.class(), token.message()),
+        )),
+        tiberius::error::Error::Io { kind, message } => {
+            sqlx::Error::Io(std::io::Error::new(kind, message))
+        }
+        tiberius::error::Error::Tls(message) => sqlx::Error::Tls(message.into()),
+        other => sqlx::Error::Protocol(other.to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -1104,6 +1339,143 @@ mod tests {
         )
         .expect_err("a read-only pool must reject DML before connecting");
         assert!(error.to_string().contains("physically read-only"));
+    }
+
+    #[test]
+    fn server_errors_keep_their_number_and_classification() {
+        use sqlx::error::ErrorKind;
+        let kind = |number, message: &str| {
+            let error =
+                sqlx::Error::Database(Box::new(MssqlServerError::new(number, 1, 14, message)));
+            let database = error.as_database_error().expect("database error");
+            assert_eq!(
+                database.code().as_deref(),
+                Some(number.to_string().as_str())
+            );
+            database.kind()
+        };
+        assert!(matches!(
+            kind(2627, "PRIMARY KEY"),
+            ErrorKind::UniqueViolation
+        ));
+        assert!(matches!(
+            kind(2601, "unique index"),
+            ErrorKind::UniqueViolation
+        ));
+        assert!(matches!(kind(515, "NULL"), ErrorKind::NotNullViolation));
+        assert!(matches!(
+            kind(547, "conflicted with the FOREIGN KEY constraint"),
+            ErrorKind::ForeignKeyViolation
+        ));
+        assert!(matches!(
+            kind(547, "conflicted with the REFERENCE constraint"),
+            ErrorKind::ForeignKeyViolation
+        ));
+        assert!(matches!(
+            kind(547, "conflicted with the CHECK constraint"),
+            ErrorKind::CheckViolation
+        ));
+        assert!(matches!(kind(8152, "truncated"), ErrorKind::Other));
+
+        for number in [1205, 1222, 3960, 41302, 40501, 40197, 40613] {
+            assert!(MssqlServerError::new(number, 1, 13, "").is_retryable());
+        }
+        // A message that merely contains a retryable number is not retryable.
+        for number in [2627, 2601, 547, 515, 8152, 2628, 262, 517] {
+            assert!(!MssqlServerError::new(number, 1, 16, "row 1205 of 3960").is_retryable());
+        }
+    }
+
+    #[test]
+    fn public_errors_classify_server_errors_by_number() {
+        use crate::graphql::errors::{OrmErrorCode, OrmPublicError};
+        let public = |number, message: &str| {
+            OrmPublicError::from_sqlx(&sqlx::Error::Database(Box::new(MssqlServerError::new(
+                number, 1, 14, message,
+            ))))
+        };
+        assert_eq!(
+            public(2627, "duplicate").code,
+            OrmErrorCode::ConstraintViolation
+        );
+        assert_eq!(
+            public(547, "CHECK constraint").code,
+            OrmErrorCode::ConstraintViolation
+        );
+        let deadlock = public(1205, "deadlock victim");
+        assert_eq!(deadlock.code, OrmErrorCode::ServiceUnavailable);
+        assert!(deadlock.is_retryable());
+        // 262 and 517 are SQLite's retryable result codes but ordinary SQL
+        // Server errors, and 5 and 6 are not retryable there either.
+        for number in [5, 6, 261, 262, 517] {
+            let error = public(number, "not transient");
+            assert_eq!(error.code, OrmErrorCode::InternalError);
+            assert!(!error.is_retryable());
+        }
+    }
+
+    #[test]
+    fn driver_errors_keep_their_class() {
+        let io = map_tiberius_error(tiberius::error::Error::Io {
+            kind: std::io::ErrorKind::ConnectionReset,
+            message: "reset".into(),
+        });
+        assert!(
+            matches!(&io, sqlx::Error::Io(error) if error.kind() == std::io::ErrorKind::ConnectionReset)
+        );
+        assert!(matches!(
+            map_tiberius_error(tiberius::error::Error::Tls("handshake".into())),
+            sqlx::Error::Tls(_)
+        ));
+        assert!(matches!(
+            map_tiberius_error(tiberius::error::Error::Protocol("bad token".into())),
+            sqlx::Error::Protocol(_)
+        ));
+    }
+
+    #[test]
+    fn a_routing_redirect_changes_only_the_address() {
+        let mut config = config();
+        follow_route(&mut config, "node7.worker.database.example", 11042);
+        assert_eq!(config.get_addr(), "node7.worker.database.example:11042");
+    }
+
+    #[test]
+    fn date_times_without_an_offset_read_as_rfc3339_utc() {
+        let at = |nanos: u32| {
+            chrono::NaiveDate::from_ymd_opt(2026, 11, 9)
+                .unwrap()
+                .and_hms_nano_opt(12, 34, 56, nanos)
+                .unwrap()
+        };
+        assert_eq!(naive_utc_rfc3339(at(0)), "2026-11-09T12:34:56Z");
+        assert_eq!(
+            naive_utc_rfc3339(at(125_000_000)),
+            "2026-11-09T12:34:56.125Z"
+        );
+        // `datetime2(7)` keeps its 100 ns digits.
+        assert_eq!(
+            naive_utc_rfc3339(at(123_456_700)),
+            "2026-11-09T12:34:56.123456700Z"
+        );
+        // Legacy `datetime` ticks of 1/300 s, truncated by the driver.
+        assert_eq!(naive_utc_rfc3339(at(3_333_333)), "2026-11-09T12:34:56.003Z");
+        assert_eq!(naive_utc_rfc3339(at(6_666_666)), "2026-11-09T12:34:56.007Z");
+        assert_eq!(
+            naive_utc_rfc3339(at(996_666_666)),
+            "2026-11-09T12:34:56.997Z"
+        );
+    }
+
+    #[test]
+    fn out_of_range_decimals_are_decode_errors_not_panics() {
+        assert_eq!(
+            decimal_from_numeric(12345, 2).unwrap().to_string(),
+            "123.45"
+        );
+        // Scale beyond 28 and a mantissa beyond 96 bits both fit DECIMAL(38, s).
+        assert!(decimal_from_numeric(1, 30).is_err());
+        assert!(decimal_from_numeric(10i128.pow(37), 0).is_err());
     }
 
     #[test]

@@ -1011,8 +1011,10 @@ impl WriteBackend for MssqlBackend {
     }
 
     fn is_retryable_write_error(error: &sqlx::Error) -> bool {
-        let message = error.to_string();
-        message.contains("1205") || message.contains("3960") || message.contains("40501")
+        error
+            .as_database_error()
+            .and_then(|error| error.try_downcast_ref::<crate::db::mssql::MssqlServerError>())
+            .is_some_and(crate::db::mssql::MssqlServerError::is_retryable)
     }
 }
 

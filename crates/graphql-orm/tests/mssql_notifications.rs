@@ -62,8 +62,9 @@ async fn native_notifications_register_rearm_expire_and_reject()
         "{message:?}"
     );
     assert_eq!(message.notification_id.as_deref(), Some("first"));
-    // Registration is one-shot; re-arm after each wakeup and reconnect.
-    drop(listener);
+    // Registration is one-shot; re-arm after each wakeup and reconnect. The
+    // handled message is acknowledged first, or it would be delivered again.
+    listener.close().await?;
     let mut listener =
         MssqlQueryNotificationConnection::connect_ado(&listener_connection, queue).await?;
     assert_eq!(
@@ -118,7 +119,7 @@ async fn native_notifications_register_rearm_expire_and_reject()
         }
     }
     assert!(expired, "SQL Server must deliver registration expiry");
-    drop(listener);
+    listener.close().await?;
     server.cleanup()?;
     Ok(())
 }
