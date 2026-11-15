@@ -3,12 +3,24 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.13.0 to 0.14.0: cancel-safe SMB handle close
+
+Update the storage requirement to 0.14.0 and refresh the consumer lockfile. No
+code changes are needed: the public API is unchanged.
+
+An SMB operation whose handle close times out or is cancelled before CLOSE is
+sent now leaves that handle to be closed in the background on the same
+session, instead of leaving it open on the server until the session ends.
+Paths such a close used to hold, for example a held directory or a file
+opened without delete sharing, become available again once the session can
+send the request.
 
 ## 0.12.0 to 0.13.0: SMB sweep, error retryability and messages
 

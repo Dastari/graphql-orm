@@ -3,7 +3,7 @@ title: "graphql-orm-storage"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -21,6 +21,11 @@ bytes in database rows.
 The local backend requires a trusted, exclusively managed filesystem root and
 restrictive permissions. See the [local filesystem trust boundary](docs/blob-store.md#local-filesystem-trust-boundary)
 before using local directories or OS-mounted shares.
+
+Version 0.14.0 makes SMB handle close cancel-safe: a close that times out or
+is cancelled before its request is sent no longer leaks the server handle for
+the rest of the session. The public API is unchanged. See
+[MIGRATION.md](MIGRATION.md).
 
 Version 0.13.0 adds `SmbStorageBackend::sweep_temp_files`, which removes
 stale SMB temporary upload files during a quiesced maintenance window on its
@@ -103,13 +108,13 @@ resolved dependency graph.
 
 ```toml
 [dependencies]
-graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.12.0" }
+graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.14.0" }
 ```
 
 For S3-compatible storage without the default local backend:
 
 ```toml
-graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.12.0", default-features = false, features = ["s3"] }
+graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.14.0", default-features = false, features = ["s3"] }
 ```
 
 ## Five-minute local start

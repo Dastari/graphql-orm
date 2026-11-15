@@ -1,6 +1,6 @@
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicU8, Ordering},
 };
 
 use maybe_async::*;
@@ -170,7 +170,7 @@ impl Resource {
         let handle = ResourceHandle {
             name: name.to_string(),
             handler: ResourceMessageHandle::new(upstream),
-            open: AtomicBool::new(true),
+            state: HandleState::open(),
             _file_id: response.file_id,
             created: response.creation_time.date_time(),
             modified: response.last_write_time.date_time(),
@@ -255,9 +255,8 @@ pub struct ResourceHandle {
     name: String,
     handler: HandlerReference<ResourceMessageHandle>,
 
-    // Whether the resource is open or not.
-    // TODO: Consider using RwLock here on FileId instead of AtomicBool+FileId.
-    open: AtomicBool,
+    // Whether the resource is open, closing, or closed.
+    state: HandleState,
 
     // Avoid accessing directly; use the `file_id()` getter,
     // that makes sure the resource is still open.
@@ -306,7 +305,7 @@ impl ResourceHandle {
         // The current design here allows the race condition over a close after this validation occurs.
         // therefore, this atomic load can be relaxed, and actual atomic compare and exchange are used
         // to avoid double close somehow.
-        if !self.open.load(std::sync::atomic::Ordering::Relaxed) {
+        if !self.state.is_open() {
             return Err(Error::InvalidState("Resource is closed".into()));
         }
         Ok(self._file_id)
@@ -793,15 +792,37 @@ impl ResourceHandle {
     /// Closes the resource.
     /// The resource may not be used after calling this method.
     ///
+    /// Local patch (graphql-orm-storage): the handle is marked closed only
+    /// once the CLOSE request has been handed to the connection. A close that
+    /// fails or is cancelled before then, for example while it waits for a
+    /// credit, leaves the handle open, so dropping it still closes it on the
+    /// server. Once CLOSE is sent the server closes the handle whether or not
+    /// the response is awaited; an error response is returned.
+    ///
     /// # Returns
     /// A `Result` indicating success or failure.
     pub async fn close(&self) -> crate::Result<()> {
-        if !self.open.swap(false, std::sync::atomic::Ordering::Relaxed) {
-            return Err(Error::InvalidState("Resource is already closed".into()));
-        }
+        let closing = self.state.begin_close()?;
 
         log::debug!("Closing handle for {} ({:?})", self.name, self._file_id);
-        Self::send_close(self._file_id, &self.handler).await?;
+        let request = OutgoingMessage::new(
+            CloseRequest {
+                file_id: self._file_id,
+            }
+            .into(),
+        );
+        let channel_id = request.channel_id;
+        let sent = self.handler.sendo(request).await?;
+        closing.sent();
+
+        let mut options = ReceiveOptions::new().with_cmd(Some(Command::Close));
+        options.msg_id = sent.msg_id;
+        options.channel_id = channel_id;
+        let response = self.handler.recvo(options).await?;
+        log::debug!(
+            "Close response received for file ID: {:?}, {response:?}",
+            self._file_id
+        );
 
         log::debug!("Closed file {}.", self.name);
 
@@ -917,8 +938,8 @@ impl Drop for ResourceHandle {
 #[cfg(feature = "async")]
 impl Drop for ResourceHandle {
     fn drop(&mut self) {
-        if !self.open.swap(false, std::sync::atomic::Ordering::Relaxed) {
-            // already closed, no problem
+        if !self.state.take_for_drop() {
+            // CLOSE was already sent, no problem
             return;
         }
 
@@ -932,6 +953,70 @@ impl Drop for ResourceHandle {
                 }
             }
         });
+    }
+}
+
+/// Local patch (graphql-orm-storage): whether a handle is open, has a close
+/// in progress, or has had CLOSE sent.
+///
+/// A close moves the handle from open to closing, and to closed only once the
+/// CLOSE request has been handed to the connection. If the close fails or is
+/// cancelled before then, its [`ClosingHandle`] returns the handle to open, so
+/// the destructor still closes it on the server instead of leaking it.
+struct HandleState(AtomicU8);
+
+impl HandleState {
+    const OPEN: u8 = 0;
+    const CLOSING: u8 = 1;
+    const CLOSED: u8 = 2;
+
+    fn open() -> Self {
+        Self(AtomicU8::new(Self::OPEN))
+    }
+
+    fn is_open(&self) -> bool {
+        self.0.load(Ordering::Acquire) == Self::OPEN
+    }
+
+    /// Starts a close, refusing a handle that is closed or already closing.
+    fn begin_close(&self) -> crate::Result<ClosingHandle<'_>> {
+        match self.0.compare_exchange(
+            Self::OPEN,
+            Self::CLOSING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => Ok(ClosingHandle { state: self }),
+            Err(Self::CLOSING) => Err(Error::InvalidState("Resource is already closing".into())),
+            Err(_) => Err(Error::InvalidState("Resource is already closed".into())),
+        }
+    }
+
+    /// Marks the handle closed for the destructor. Returns whether the handle
+    /// was still open, so the destructor must send CLOSE itself.
+    fn take_for_drop(&self) -> bool {
+        // No close can be in progress: a close borrows the handle.
+        self.0.swap(Self::CLOSED, Ordering::AcqRel) == Self::OPEN
+    }
+}
+
+/// Local patch (graphql-orm-storage): a close in progress. Dropping it before
+/// [`Self::sent`] returns the handle to open.
+struct ClosingHandle<'a> {
+    state: &'a HandleState,
+}
+
+impl ClosingHandle<'_> {
+    /// CLOSE has been handed to the connection: the server closes the handle.
+    fn sent(self) {
+        self.state.0.store(HandleState::CLOSED, Ordering::Release);
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for ClosingHandle<'_> {
+    fn drop(&mut self) {
+        self.state.0.store(HandleState::OPEN, Ordering::Release);
     }
 }
 
@@ -995,6 +1080,62 @@ mod share_access_tests {
             requested_share_access(&FileCreateArgs::make_pipe(), ShareType::Pipe),
             ShareAccessFlags::new()
         );
+    }
+}
+
+#[cfg(all(test, feature = "async"))]
+mod close_state_tests {
+    use super::HandleState;
+    use crate::Error;
+    use std::time::Duration;
+
+    #[test]
+    fn a_sent_close_leaves_nothing_for_the_destructor() {
+        let state = HandleState::open();
+        let closing = state.begin_close().unwrap();
+        assert!(!state.is_open(), "a closing handle is not usable");
+        closing.sent();
+        assert!(!state.is_open());
+        assert!(matches!(state.begin_close(), Err(Error::InvalidState(_))));
+        assert!(!state.take_for_drop(), "CLOSE was already sent");
+    }
+
+    #[test]
+    fn a_close_that_fails_before_sending_keeps_the_handle_open() {
+        let state = HandleState::open();
+        drop(state.begin_close().unwrap());
+        assert!(state.is_open());
+        assert!(state.take_for_drop(), "the destructor must send CLOSE");
+        assert!(!state.take_for_drop());
+    }
+
+    #[test]
+    fn a_concurrent_close_is_refused_while_one_is_in_progress() {
+        let state = HandleState::open();
+        let closing = state.begin_close().unwrap();
+        assert!(matches!(state.begin_close(), Err(Error::InvalidState(_))));
+        drop(closing);
+        state.begin_close().unwrap().sent();
+    }
+
+    #[tokio::test]
+    async fn a_close_cancelled_while_waiting_for_a_credit_stays_the_destructors() {
+        let state = HandleState::open();
+        let credits = tokio::sync::Semaphore::new(0);
+        let close = async {
+            let closing = state.begin_close()?;
+            // Waits for a credit that never arrives.
+            credits.acquire().await.unwrap().forget();
+            closing.sent();
+            Ok::<_, Error>(())
+        };
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), close)
+                .await
+                .is_err()
+        );
+        assert!(state.is_open(), "the unsent close is not confirmed");
+        assert!(state.take_for_drop(), "the destructor must send CLOSE");
     }
 }
 

@@ -3,7 +3,7 @@ title: "Native SMB2/SMB3 Blob Storage"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -52,6 +52,23 @@ test-only `PATCHES/test-image-digest.patch`. `FileCreateArgs` gains an optional
 share-access override; without one, a create keeps the share type's default.
 The temporary-file sweep uses it to open a candidate exclusively, so a file
 another handle still has open is skipped rather than deleted.
+
+Storage 0.14.0 adds `PATCHES/cancel-safe-close.patch`, applied last. Upstream
+`ResourceHandle::close` marked a handle closed before sending CLOSE, and the
+destructor skips a closed handle, so a close that was cancelled or failed
+before CLOSE was sent, for example an operation timeout while the request
+waited for a credit, left the server handle open for the rest of the session.
+A handle is now marked closed only once CLOSE has been handed to the
+connection; until then it stays open, and dropping it sends CLOSE in the
+background on the same session. A second close while one is in progress is
+refused. `Client::close` now attempts every tree disconnect, channel close,
+logoff and connection close, returns the first failure and logs the others,
+instead of stopping at the first failed tree disconnect and ignoring the
+rest. The managed Samba suite stalls a close behind a request whose credit
+charge the connection cannot grant, cancels it, drops the handle and checks
+that an exclusive open of the same path then succeeds on the same session; a
+second case checks that `Client::close` reports a failed logoff and
+connection close.
 The protocol/authentication companions, cryptographic versions and feature
 selection remain pinned to the existing 0.10.2 family; this is not an adoption
 of the newer SDK's crypto graph.

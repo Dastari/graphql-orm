@@ -96,6 +96,45 @@ pub struct AltChannelInfo {
     connection: Arc<Connection>,
 }
 
+/// Local patch (graphql-orm-storage): the outcome of each step of
+/// [`Client::close`]. The first failure is kept and returned; later ones are
+/// logged, so no failed step is silently ignored.
+#[derive(Default)]
+struct CloseFailures {
+    first: Option<Error>,
+    count: usize,
+}
+
+impl CloseFailures {
+    fn record(&mut self, step: &str, result: crate::Result<()>) {
+        let Err(error) = result else {
+            return;
+        };
+        self.count += 1;
+        if self.first.is_none() {
+            log::warn!("Client close: {step} failed: {error}");
+            self.first = Some(error);
+        } else {
+            log::warn!("Client close: {step} also failed: {error}");
+        }
+    }
+
+    fn into_result(self) -> crate::Result<()> {
+        match self.first {
+            None => Ok(()),
+            Some(error) => {
+                if self.count > 1 {
+                    log::warn!(
+                        "Client close: {} steps failed; returning the first",
+                        self.count
+                    );
+                }
+                Err(error)
+            }
+        }
+    }
+}
+
 #[maybe_async(AFIT)]
 impl Client {
     /// Creates a new `Client` instance with the given configuration.
@@ -117,11 +156,18 @@ impl Client {
     /// directly or indirectly.
     ///
     /// See [Drop behavior][Client#drop-behavior] for more information.
+    ///
+    /// Local patch (graphql-orm-storage): every tree disconnect, alternate
+    /// channel close, session logoff and connection close is attempted, even
+    /// after an earlier one fails, and the client releases all of them. The
+    /// first failure is returned; later ones are logged.
     pub async fn close(&self) -> crate::Result<()> {
+        let mut failures = CloseFailures::default();
+
         // Close all opened shares
         let mut trees = self.share_connects.lock().await?;
         for (_unc, connected_tree) in trees.iter() {
-            connected_tree.tree.disconnect().await?;
+            failures.record("tree disconnect", connected_tree.tree.disconnect().await);
         }
         trees.clear();
 
@@ -132,21 +178,22 @@ impl Client {
                 // First close alternate channels
                 if let Some(alt_channels) = &mut session.session_alt_channels {
                     for (_channel_id, alt_conn) in alt_channels.iter() {
-                        alt_conn.connection.close().await.ok();
+                        failures
+                            .record("alternate channel close", alt_conn.connection.close().await);
                     }
                     alt_channels.clear();
                 }
                 // Close primary session
-                session.session.logoff().await.ok();
+                failures.record("session logoff", session.session.logoff().await);
             }
         }
         // Close connections
         for (_ip, conn) in connections.iter() {
-            conn.connection.close().await.ok();
+            failures.record("connection close", conn.connection.close().await);
         }
         connections.clear();
 
-        Ok(())
+        failures.into_result()
     }
 
     /// Lists all shares on the specified server.
@@ -919,5 +966,29 @@ impl MultiChannelUtils {
             .collect();
 
         Ok(index_to_address)
+    }
+}
+
+#[cfg(test)]
+mod close_failure_tests {
+    use super::CloseFailures;
+    use crate::Error;
+
+    #[test]
+    fn every_failed_close_step_is_reported_and_the_first_is_returned() {
+        let mut failures = CloseFailures::default();
+        failures.record("tree disconnect", Ok(()));
+        assert!(failures.first.is_none());
+        failures.record("session logoff", Err(Error::InvalidState("first".into())));
+        failures.record(
+            "connection close",
+            Err(Error::InvalidState("second".into())),
+        );
+        assert_eq!(failures.count, 2);
+        assert!(matches!(
+            failures.into_result(),
+            Err(Error::InvalidState(message)) if message == "first"
+        ));
+        assert!(CloseFailures::default().into_result().is_ok());
     }
 }

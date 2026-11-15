@@ -3,7 +3,7 @@ title: "Development"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-10-31
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -114,6 +114,18 @@ reproduction of the lost-wake schedule or immediate server-side close. Both use
 a current-thread runtime and attempt task-owned path cleanup before reporting
 Result errors; unexpected panic or process termination uses the runner's owned
 container and volume cleanup fallback.
+
+The `smb_handle_close` tests also use the actual SDK on the owned normal share.
+One connects with a credit backlog of 8 and starts a 4 MiB read, whose credit
+charge of 64 the connection can never grant, so it waits at the head of the
+fair credit semaphore and every later request queues behind it. A handle's
+close then waits for a credit and is cancelled; the test checks that the
+handle is still open on the server (an exclusive open fails with a sharing
+violation), drops it, and requires an exclusive open of the same path to
+succeed on the same session within five seconds. The other disconnects the
+tree, stops the connection under the session and requires `Client::close` to
+report the failed logoff and connection close. Both refuse to run without the
+runner's fixture identity and remove their task-owned files.
 
 The daemon-free ownership regression suite substitutes private fake Docker/Cargo
 executables and checks startup collisions, exact-ID cleanup, ownership changes,
