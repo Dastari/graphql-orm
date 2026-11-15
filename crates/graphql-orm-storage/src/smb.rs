@@ -1013,9 +1013,11 @@ impl SmbStorageBackend {
             .map_err(SmbTempSweepError::before_start)?;
         let tally = hooks.tally();
         let mut progress = SweepProgress::default();
+        // Boxed so the walk's large state machine lives on the heap, not on
+        // the stack of the task that polls the sweep.
         let walked = within_listing_deadline(
             limits.timeout,
-            self.sweep_walk(&session, limits, older_than, &hooks, &tally, &mut progress),
+            Box::pin(self.sweep_walk(&session, limits, older_than, &hooks, &tally, &mut progress)),
         )
         .await;
         // Release every held directory, innermost first, whatever happened,
@@ -2406,7 +2408,9 @@ impl SweepTally<'_> {
         }
         #[cfg(not(feature = "smb-sweep-test-hooks"))]
         let _ = path;
-        let closed = close.await;
+        // Boxed: a close future is large, and the sweep awaits one at many
+        // depths of its state machine.
+        let closed = Box::pin(close).await;
         if closed.is_ok() {
             self.cleanup_failures.fetch_sub(1, Ordering::Relaxed);
         }
