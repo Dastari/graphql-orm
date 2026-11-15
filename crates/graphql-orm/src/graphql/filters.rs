@@ -613,6 +613,117 @@ impl DateFilter {
     }
 }
 
+/// The most operands one `inList` or `notIn` list of a static `String`, `Int`,
+/// `UUID` or `Bytes` filter accepts.
+///
+/// Every operand is one bound parameter, and SQL Server accepts 2,100
+/// parameters in a statement, so a list of this size leaves room for the rest
+/// of the statement on every backend. [`Int64Filter`] keeps its own limit of
+/// 256.
+pub const MAX_FILTER_LIST_OPERANDS: usize = 1_000;
+
+/// The most UTF-16 code units a `contains`, `startsWith`, `endsWith` or
+/// `similar` operand of a [`StringFilter`] accepts.
+///
+/// These operands become `LIKE` patterns. SQL Server limits a pattern to
+/// 8,000 bytes (4,000 characters), and escaping can double an operand's
+/// length, so this limit keeps every escaped pattern valid on every backend.
+pub const MAX_FILTER_PATTERN_LENGTH: usize = 1_000;
+
+fn invalid_filter_operands(message: String) -> sqlx::Error {
+    crate::graphql::errors::sqlx_error_from_public(
+        crate::graphql::errors::OrmPublicError::new(
+            crate::graphql::errors::OrmErrorCode::InvalidInput,
+        )
+        .with_internal(message),
+    )
+}
+
+/// Refuse an `inList` or `notIn` list above [`MAX_FILTER_LIST_OPERANDS`].
+fn validate_filter_lists<A, B>(
+    in_list: Option<&Vec<A>>,
+    not_in: Option<&Vec<B>>,
+) -> crate::Result<()> {
+    let longest = in_list.map_or(0, Vec::len).max(not_in.map_or(0, Vec::len));
+    if longest > MAX_FILTER_LIST_OPERANDS {
+        return Err(invalid_filter_operands(format!(
+            "filter list has {longest} operands; the maximum is {MAX_FILTER_LIST_OPERANDS}"
+        )));
+    }
+    Ok(())
+}
+
+impl StringFilter {
+    /// Bound the lists and pattern operands before SQL is generated; applies
+    /// to GraphQL input and to filters built in Rust.
+    ///
+    /// # Errors
+    ///
+    /// `INVALID_INPUT` when `in_list` or `not_in` holds more than
+    /// [`MAX_FILTER_LIST_OPERANDS`] operands, or a pattern operand is longer
+    /// than [`MAX_FILTER_PATTERN_LENGTH`].
+    pub fn validate(&self) -> crate::Result<()> {
+        validate_filter_lists(self.in_list.as_ref(), self.not_in.as_ref())?;
+        let patterns = [
+            self.contains.as_deref(),
+            self.starts_with.as_deref(),
+            self.ends_with.as_deref(),
+            self.similar.as_ref().map(|similar| similar.value.as_str()),
+        ];
+        for pattern in patterns.into_iter().flatten() {
+            // Byte length bounds the UTF-16 length, so a short operand is
+            // admitted without being counted.
+            if pattern.len() > MAX_FILTER_PATTERN_LENGTH
+                && pattern.encode_utf16().count() > MAX_FILTER_PATTERN_LENGTH
+            {
+                return Err(invalid_filter_operands(format!(
+                    "filter pattern operand is longer than {MAX_FILTER_PATTERN_LENGTH} UTF-16 code units"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl IntFilter {
+    /// Bound each list before SQL is generated; applies to GraphQL input and
+    /// to filters built in Rust.
+    ///
+    /// # Errors
+    ///
+    /// `INVALID_INPUT` when `in_list` or `not_in` holds more than
+    /// [`MAX_FILTER_LIST_OPERANDS`] operands.
+    pub fn validate(&self) -> crate::Result<()> {
+        validate_filter_lists(self.in_list.as_ref(), self.not_in.as_ref())
+    }
+}
+
+impl UuidFilter {
+    /// Bound each list before SQL is generated; applies to GraphQL input and
+    /// to filters built in Rust.
+    ///
+    /// # Errors
+    ///
+    /// `INVALID_INPUT` when `in_list` or `not_in` holds more than
+    /// [`MAX_FILTER_LIST_OPERANDS`] operands.
+    pub fn validate(&self) -> crate::Result<()> {
+        validate_filter_lists(self.in_list.as_ref(), self.not_in.as_ref())
+    }
+}
+
+impl BytesFilter {
+    /// Bound each list before SQL is generated; applies to GraphQL input and
+    /// to filters built in Rust.
+    ///
+    /// # Errors
+    ///
+    /// `INVALID_INPUT` when `in_list` or `not_in` holds more than
+    /// [`MAX_FILTER_LIST_OPERANDS`] operands.
+    pub fn validate(&self) -> crate::Result<()> {
+        validate_filter_lists(self.in_list.as_ref(), self.not_in.as_ref())
+    }
+}
+
 fn validate_positive_calendar_span(name: &str, days: i32) -> crate::Result<()> {
     if !(1..=MAX_CALENDAR_DAY_SPAN).contains(&days) {
         return Err(invalid_date_filter(format!(

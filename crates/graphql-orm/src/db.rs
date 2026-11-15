@@ -152,6 +152,8 @@ impl<B: OrmBackend> std::fmt::Debug for Database<B> {
         );
         debug.field("has_mutation_hook", &self.mutation_hook.is_some());
         debug
+            .field("has_entity_policy", &self.entity_policy.is_some())
+            .field("has_row_policy", &self.row_policy.is_some())
             .field("has_field_policy", &self.field_policy.is_some())
             .finish()
     }
@@ -2232,8 +2234,9 @@ impl<B: OrmBackend> DatabaseBuilder<B> {
     }
 }
 
-#[cfg(feature = "sqlite")]
-pub mod sqlite_helpers {
+/// Conversions shared by every backend's generated row decoding. Each
+/// backend's helper module re-exports these, so they cannot drift apart.
+mod row_helpers {
     pub fn json_from_str<T>(value: &str) -> crate::Result<T>
     where
         T: serde::de::DeserializeOwned,
@@ -2257,6 +2260,9 @@ pub mod sqlite_helpers {
         Ok(value.to_string())
     }
 
+    /// Decode a JSON array, reading text that is not one as an empty list.
+    /// Use the backend's `json_from_str` or `json_from_value` where corrupt
+    /// JSON must be an error.
     pub fn json_to_vec<T>(value: &str) -> Vec<T>
     where
         T: serde::de::DeserializeOwned,
@@ -2265,68 +2271,30 @@ pub mod sqlite_helpers {
     }
 }
 
+#[cfg(feature = "sqlite")]
+pub mod sqlite_helpers {
+    pub use super::row_helpers::{
+        int_to_bool, json_from_str, json_to_vec, str_to_datetime, str_to_uuid, uuid_to_string,
+    };
+}
+
 #[cfg(feature = "postgres")]
 pub mod postgres_helpers {
+    pub use super::row_helpers::{
+        int_to_bool, json_to_vec, str_to_datetime, str_to_uuid, uuid_to_string,
+    };
+
     pub fn json_from_value<T>(value: serde_json::Value) -> crate::Result<T>
     where
         T: serde::de::DeserializeOwned,
     {
         serde_json::from_value(value).map_err(|error| sqlx::Error::Decode(Box::new(error)))
     }
-
-    pub fn uuid_to_string(value: &uuid::Uuid) -> String {
-        value.to_string()
-    }
-
-    pub fn int_to_bool(value: i32) -> bool {
-        value != 0
-    }
-
-    pub fn str_to_uuid(value: &str) -> Result<uuid::Uuid, uuid::Error> {
-        uuid::Uuid::parse_str(value)
-    }
-
-    pub fn str_to_datetime(value: &str) -> Result<String, std::convert::Infallible> {
-        Ok(value.to_string())
-    }
-
-    pub fn json_to_vec<T>(value: &str) -> Vec<T>
-    where
-        T: serde::de::DeserializeOwned,
-    {
-        serde_json::from_str(value).unwrap_or_default()
-    }
 }
 
 #[cfg(feature = "mssql")]
 pub mod mssql_helpers {
-    pub fn json_from_str<T>(value: &str) -> crate::Result<T>
-    where
-        T: serde::de::DeserializeOwned,
-    {
-        serde_json::from_str(value).map_err(|error| sqlx::Error::Decode(Box::new(error)))
-    }
-
-    pub fn uuid_to_string(value: &uuid::Uuid) -> String {
-        value.to_string()
-    }
-
-    pub fn int_to_bool(value: i32) -> bool {
-        value != 0
-    }
-
-    pub fn str_to_uuid(value: &str) -> Result<uuid::Uuid, uuid::Error> {
-        uuid::Uuid::parse_str(value)
-    }
-
-    pub fn str_to_datetime(value: &str) -> Result<String, std::convert::Infallible> {
-        Ok(value.to_string())
-    }
-
-    pub fn json_to_vec<T>(value: &str) -> Vec<T>
-    where
-        T: serde::de::DeserializeOwned,
-    {
-        json_from_str(value).unwrap_or_default()
-    }
+    pub use super::row_helpers::{
+        int_to_bool, json_from_str, json_to_vec, str_to_datetime, str_to_uuid, uuid_to_string,
+    };
 }

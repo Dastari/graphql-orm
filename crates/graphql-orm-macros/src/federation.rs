@@ -420,8 +420,10 @@ pub(crate) fn federation_entity_resolver_tokens(
                             >,
                         >,
                     >();
+                    // Loaded with its own outcome: another caller's failing key
+                    // group in the same batch does not fail this one.
                     let __gom_federation_loaded = __gom_federation_loader
-                        .load_one(::graphql_orm::graphql::loaders::FederationEntityKey {
+                        .load_one(::graphql_orm::graphql::loaders::IsolatedLoad(::graphql_orm::graphql::loaders::FederationEntityKey {
                             key: #loader_identity,
                             columns: vec![#(#key_columns),*],
                             key_part_kinds: vec![#(#key_part_kinds),*],
@@ -430,9 +432,11 @@ pub(crate) fn federation_entity_resolver_tokens(
                                 __gom_federation_parts, &[#(#key_part_kinds),*],
                             ),
                             auth_context: auth_context.clone(),
-                        })
-                        .await
-                        .map_err(::graphql_orm::graphql::errors::graphql_error_from_loader)?;
+                        }))
+                        .await;
+                    let __gom_federation_loaded =
+                        ::graphql_orm::graphql::loaders::isolated_load_result(__gom_federation_loaded)
+                            .map_err(::graphql_orm::graphql::errors::graphql_error_from_loader)?;
 
                     // The same row authority as generated list reads.
                     let mut entity = ::graphql_orm::graphql::orm::authorize_loaded_point_row(
@@ -608,8 +612,10 @@ pub(crate) fn node_id_entity_resolver_tokens(
                     >,
                 >,
             >();
+            // Loaded with its own outcome: another caller's failing key
+            // group in the same batch does not fail this one.
             let __gom_federation_loaded = __gom_federation_loader
-                .load_one(::graphql_orm::graphql::loaders::FederationEntityKey {
+                .load_one(::graphql_orm::graphql::loaders::IsolatedLoad(::graphql_orm::graphql::loaders::FederationEntityKey {
                     key: #loader_identity,
                     columns: vec![#(#key_columns),*],
                     key_part_kinds: vec![#(#key_part_kinds),*],
@@ -618,9 +624,11 @@ pub(crate) fn node_id_entity_resolver_tokens(
                         __gom_federation_parts, &[#(#key_part_kinds),*],
                     ),
                     auth_context: auth_context.clone(),
-                })
-                .await
-                .map_err(::graphql_orm::graphql::errors::graphql_error_from_loader)?;
+                }))
+                .await;
+            let __gom_federation_loaded =
+                ::graphql_orm::graphql::loaders::isolated_load_result(__gom_federation_loaded)
+                    .map_err(::graphql_orm::graphql::errors::graphql_error_from_loader)?;
 
             // The same row authority as generated list reads.
             let mut entity = ::graphql_orm::graphql::orm::authorize_loaded_point_row(

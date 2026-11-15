@@ -313,9 +313,10 @@ a compile error that names this declaration. `complex` may appear anywhere among
 in one attribute or a separate one: `#[graphql(rename_fields = "PascalCase", complex)]` is
 equivalent to `#[graphql(complex, rename_fields = "PascalCase")]`. A relation without `from` uses
 the primary-key field as its source. The one exception is an entity with `schema_only = true`,
-which has no generated object. Each relation target also needs a `BatchLoadEntity` implementation
-([#285](https://github.com/Dastari/graphql-orm/issues/285)). For generated relations the keys come
-from the relation, so `batch_column` and `batch_key_from_row` can name the primary key:
+which has no generated object. A relation target needs no loader implementation: generated
+relations take their keys from the relation, and every generated entity is a `RelationTarget`.
+`BatchLoadEntity` is needed only to load an entity through `RelationLoader`'s single-column
+`Loader<String>` form from handwritten code:
 
 ```rust,ignore
 impl BatchLoadEntity for Account {
@@ -374,14 +375,6 @@ pub struct ProbeParent {
     pub children: Vec<ProbeChild>,
 }
 
-impl BatchLoadEntity for ProbeChild {
-    fn batch_column() -> &'static str { "id" }
-    fn batch_key_from_row(row: &graphql_orm::DbRow) -> Result<String, graphql_orm::sqlx::Error> {
-        use graphql_orm::sqlx::Row;
-        row.try_get("id")
-    }
-}
-
 schema_roots! {
     backend: "sqlite",
     schema_policy: "managed",
@@ -392,8 +385,8 @@ schema_roots! {
 
 `ProbeParent` exports `NodeId: ID!`, `RecordVersion: Int!`, its persisted scalars including
 `RowVersion`, and `Children(...)`, a connection of `ProbeChild`. The child is a plain generated
-object with the same identity and version. `ProbeParent` is not a relation target here, so it needs
-no `BatchLoadEntity`. A relation field is not a `Changed`
+object with the same identity and version. Neither entity needs a `BatchLoadEntity`
+implementation. A relation field is not a `Changed`
 payload field: `Changed` snapshots serve `NodeId`, `RecordVersion` and persisted scalars, and a
 selection of `Children` is refused before registration.
 A host row policy over a relation target also needs `Database::with_authorized_scan_config`.
@@ -1237,6 +1230,16 @@ and [repository example](repository-only-entities.md).
 `Int64Filter`. See the [migration contract](../../../MIGRATION.md#0810-to-0820-exact-static-signed64-filters)
 for coercion, SDK mappings, null/empty-list semantics and finite list bounds.
 `number` continues to select the existing `IntFilter`.
+
+### Static filter operand limits
+
+One `inList` or `notIn` list of a `StringFilter`, `IntFilter`, `UuidFilter` or `BytesFilter` holds at
+most `MAX_FILTER_LIST_OPERANDS` (1,000) operands, and a `contains`, `startsWith`, `endsWith` or
+`similar` operand at most `MAX_FILTER_PATTERN_LENGTH` (1,000) UTF-16 code units. Each operand is a
+bound parameter and each pattern a `LIKE` pattern, so the limits keep a filter inside SQL Server's
+2,100 parameters and 8,000-byte patterns on every backend. Above a limit the request fails with
+`INVALID_INPUT` before any SQL runs; the same check applies to filters built in Rust, through each
+filter's `validate()` and the generated `WhereInput`'s `DatabaseFilter::validate`.
 
 ## Managed versions
 

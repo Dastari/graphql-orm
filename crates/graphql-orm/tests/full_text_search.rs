@@ -1057,3 +1057,143 @@ async fn native_search_binds_visibility_filter_and_limit() -> Result<(), Box<dyn
     assert!(connection["edges"][0]["score"].as_f64().unwrap() > 0.0);
     Ok(())
 }
+
+/// A searchable entity keyed by bytes (#560): its documents are stored under
+/// `bin:<lowercase hex>`, and the search join must render the key the same way.
+#[derive(GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[cfg_attr(
+    feature = "sqlite",
+    graphql_entity(
+        table = "binary_notes",
+        plural = "BinaryNotes",
+        auth = "none",
+        backend = "sqlite"
+    )
+)]
+#[cfg_attr(
+    feature = "postgres",
+    graphql_entity(
+        table = "binary_notes",
+        plural = "BinaryNotes",
+        auth = "none",
+        backend = "postgres"
+    )
+)]
+#[graphql_orm(search(index = true))]
+struct BinaryNote {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false, min_length = 4, max_length = 4)]
+    pub digest: Vec<u8>,
+    #[sortable]
+    #[filterable(type = "string")]
+    #[graphql_orm(searchable(weight = "A"))]
+    pub title: String,
+}
+
+/// A handwritten filter whose clause names two placeholders and supplies one
+/// value (#458).
+#[derive(Clone)]
+struct LopsidedFilter;
+impl DatabaseFilter for LopsidedFilter {
+    fn to_sql_conditions(&self) -> (Vec<String>, Vec<SqlValue>) {
+        (
+            vec!["title = ? AND title <> ?".to_string()],
+            vec![SqlValue::String("needle".into())],
+        )
+    }
+    fn is_empty(&self) -> bool {
+        false
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(feature = "postgres", ignore = "owned PostgreSQL lane")]
+async fn native_search_finds_entities_with_binary_keys() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(feature = "sqlite")]
+    let (pool, _owner) = (
+        sqlx::SqlitePool::connect("sqlite::memory:").await?,
+        SearchFixtureOwner,
+    );
+    #[cfg(feature = "postgres")]
+    let (pool, _owner) = {
+        let owner = SearchFixtureOwner::start("native-search-binary-keys")?;
+        (sqlx::PgPool::connect(&owner.url).await?, owner)
+    };
+    let plan = build_migration_plan(
+        DefaultBackend::DIALECT,
+        &SchemaModel {
+            extensions: vec![],
+            tables: vec![],
+        },
+        &SchemaModel::from_entities(&[BinaryNote::metadata()]),
+    );
+    for statement in &plan.statements {
+        sqlx::query(statement).execute(&pool).await?;
+    }
+    let db = Database::new(pool);
+    // Upper-half bytes: the stored key is lowercase hex.
+    for (digest, title) in [
+        (vec![0xAB, 0xCD, 0xEF, 0x01], "needle in bytes"),
+        (vec![0x00, 0x01, 0x02, 0x03], "needle again"),
+        (vec![0xFF, 0xFE, 0xFD, 0xFC], "nothing to find"),
+    ] {
+        BinaryNote::insert(
+            &db,
+            CreateBinaryNoteInput {
+                digest,
+                title: title.into(),
+            },
+        )
+        .await?;
+    }
+    let search = || SearchInput {
+        query: "needle".into(),
+        mode: Some(SearchMode::Plain),
+        min_score: None,
+    };
+    // The native query alone: no portable fallback can supply the hits.
+    let native = EntitySearchQuery::<BinaryNote, BinaryNoteWhereInput, DefaultBackend>::new(
+        db.pool(),
+        search(),
+    );
+    let hits = native.fetch_all().await?;
+    let mut found = hits
+        .iter()
+        .map(|hit| hit.entity.digest.clone())
+        .collect::<Vec<_>>();
+    found.sort();
+    assert_eq!(
+        found,
+        [vec![0x00, 0x01, 0x02, 0x03], vec![0xAB, 0xCD, 0xEF, 0x01]]
+    );
+    assert!(hits.iter().all(|hit| hit.score > 0.0));
+    let filtered = EntitySearchQuery::<BinaryNote, BinaryNoteWhereInput, DefaultBackend>::new(
+        db.pool(),
+        search(),
+    )
+    .filter(BinaryNoteWhereInput {
+        title: Some(StringFilter {
+            contains: Some("again".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .fetch_all()
+    .await?;
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].entity.digest, [0x00, 0x01, 0x02, 0x03]);
+
+    // A clause with more placeholders than values reaches the database as
+    // written instead of panicking while the statement is assembled. SQLite
+    // reads the unbound parameter as NULL; PostgreSQL refuses the statement.
+    let lopsided =
+        EntitySearchQuery::<BinaryNote, LopsidedFilter, DefaultBackend>::new(db.pool(), search())
+            .filter(LopsidedFilter)
+            .fetch_all()
+            .await;
+    #[cfg(feature = "sqlite")]
+    assert!(lopsided?.is_empty());
+    #[cfg(feature = "postgres")]
+    assert!(lopsided.is_err());
+    Ok(())
+}
