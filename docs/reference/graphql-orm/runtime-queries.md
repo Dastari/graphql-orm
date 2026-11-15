@@ -3,7 +3,7 @@ title: "Runtime select, filter, order, and keyset reads"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-24
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -202,8 +202,20 @@ logical order. Sizes are positive and capped. Row queries fetch at most
 `size + 1`; offset cursors are not accepted. Versioned `gormrq1` cursors bind
 the schema fingerprint, collection stable ID, complete stable-field order
 signature, directions, null placement, and typed values. Strict size, arity,
-kind, and checksum checks reject malformed or tampered cursors. Cursors are
-opaque integrity envelopes, not authorization tokens or cryptographic secrets.
+kind, and checksum checks reject malformed or corrupted cursors. The checksum
+uses no secret: a caller of this host API can rewrite a cursor and recompute
+it, which only moves the resume position. Cursors are integrity envelopes, not
+authorization tokens or cryptographic secrets. Runtime GraphQL seals them with
+the host's authenticated encryption by default.
+
+A cursor carries the order values of its row. When they do not fit
+`max_cursor_bytes` (16 KiB by default), usually because of one long stored
+string sort key, the page is refused with `cursor_key_too_large`
+(`RuntimeQueryErrorCode::CursorKeyTooLarge`, and
+`RuntimeRelationErrorCode::CursorKeyTooLarge` for a relation layer) instead of
+the request's `resource_limit`. Every row on the page gets a cursor, so one
+such row refuses each page that contains it in that order. Order by a bounded
+field, or raise the limit.
 
 Order fields absent from the output projection are selected only for cursor
 construction. Returned `RuntimeRecord` nodes are narrowed back to the caller

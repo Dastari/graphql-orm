@@ -1541,6 +1541,18 @@ pub struct PaginationConfig {
     /// and `delete_where` helpers are trusted code and are not bounded by it.
     /// `None` removes the bound.
     pub max_bulk_write_rows: Option<i64>,
+    /// Refuse a client page limit above [`Self::max_limit`] instead of
+    /// reducing it. Off by default.
+    ///
+    /// By default a generated GraphQL page (`Page.Limit` on list roots,
+    /// relations and search, `First`/`Last`/`Limit` on keyset connections)
+    /// that asks for more than `max_limit` rows is served `max_limit` rows,
+    /// and nothing in the response says the size was reduced. With this set,
+    /// such a request fails with `PAGE_LIMIT_EXCEEDED` before any row is
+    /// read, so a client can tell a reduced page from a last page. An omitted
+    /// limit still uses `default_limit`. See
+    /// [`Self::resolve_client_page`].
+    pub refuse_oversized_limit: bool,
 }
 
 impl Default for PaginationConfig {
@@ -1550,6 +1562,7 @@ impl Default for PaginationConfig {
             max_limit: Some(Self::DEFAULT_MAX_LIMIT),
             max_scanned_rows: Some(Self::DEFAULT_MAX_SCANNED_ROWS),
             max_bulk_write_rows: Some(Self::DEFAULT_MAX_BULK_WRITE_ROWS),
+            refuse_oversized_limit: false,
         }
     }
 }
@@ -1592,6 +1605,7 @@ impl PaginationConfig {
             max_limit: None,
             max_scanned_rows: None,
             max_bulk_write_rows: None,
+            refuse_oversized_limit: false,
         }
     }
 
@@ -1602,6 +1616,7 @@ impl PaginationConfig {
             max_limit: Some(Self::LEGACY_MAX_LIMIT),
             max_scanned_rows: Some(Self::DEFAULT_MAX_SCANNED_ROWS),
             max_bulk_write_rows: Some(Self::DEFAULT_MAX_BULK_WRITE_ROWS),
+            refuse_oversized_limit: false,
         }
     }
 
@@ -1612,6 +1627,7 @@ impl PaginationConfig {
             max_limit: Some(Self::SECURE_MAX_LIMIT),
             max_scanned_rows: Some(Self::DEFAULT_MAX_SCANNED_ROWS),
             max_bulk_write_rows: Some(Self::DEFAULT_MAX_BULK_WRITE_ROWS),
+            refuse_oversized_limit: false,
         }
     }
 
@@ -1622,6 +1638,7 @@ impl PaginationConfig {
             max_limit: Some(max_limit),
             max_scanned_rows: Some(Self::DEFAULT_MAX_SCANNED_ROWS),
             max_bulk_write_rows: Some(Self::DEFAULT_MAX_BULK_WRITE_ROWS),
+            refuse_oversized_limit: false,
         }
     }
 
@@ -1649,6 +1666,62 @@ impl PaginationConfig {
     pub fn with_max_bulk_write_rows(mut self, max_bulk_write_rows: Option<i64>) -> Self {
         self.max_bulk_write_rows = max_bulk_write_rows;
         self
+    }
+
+    /// Return a copy that refuses, or reduces, a client page limit above
+    /// `max_limit`; see [`Self::refuse_oversized_limit`].
+    pub fn with_oversized_limit_refusal(mut self, refuse: bool) -> Self {
+        self.refuse_oversized_limit = refuse;
+        self
+    }
+
+    /// Check a client page limit against [`Self::refuse_oversized_limit`].
+    ///
+    /// Does nothing unless the refusal is enabled and `limit` is above a
+    /// configured `max_limit`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OrmErrorCode::PageLimitExceeded`](crate::graphql::errors::OrmErrorCode::PageLimitExceeded)
+    /// with a message naming the requested limit and the maximum. Both are
+    /// values the client supplied or may be told.
+    pub fn admit_client_limit(
+        &self,
+        limit: Option<i64>,
+    ) -> Result<(), crate::graphql::errors::OrmPublicError> {
+        if !self.refuse_oversized_limit {
+            return Ok(());
+        }
+        match (limit, self.max_limit) {
+            (Some(limit), Some(maximum)) if limit > maximum.max(0) => {
+                Err(crate::graphql::errors::OrmPublicError::with_message(
+                    crate::graphql::errors::OrmErrorCode::PageLimitExceeded,
+                    format!(
+                        "requested limit {limit} exceeds the maximum page limit {}",
+                        maximum.max(0)
+                    ),
+                ))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Resolve a client page like [`Self::resolve_page`], after
+    /// [`Self::admit_client_limit`].
+    ///
+    /// Generated GraphQL resolvers use this. A custom resolver that takes a
+    /// client `PageInput` should too, so the opt-in refusal covers it.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PAGE_LIMIT_EXCEEDED` as [`Self::admit_client_limit`] does.
+    pub fn resolve_client_page(
+        &self,
+        page: Option<&PageInput>,
+        apply_default_limit: bool,
+    ) -> Result<PaginationRequest, crate::graphql::errors::OrmPublicError> {
+        self.admit_client_limit(page.and_then(|page| page.limit))?;
+        Ok(self.resolve_page(page, apply_default_limit))
     }
 
     /// Clamp one explicit limit without applying a default.
@@ -1775,6 +1848,88 @@ impl PaginationConfig {
             None => normalized,
         }
     }
+}
+
+/// Largest maximum page limit a schema of this process declared with
+/// `schema_roots!(max_page_limit: ...)`; `0` while none has.
+static DECLARED_PAGE_MAXIMUM: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// Page size the generated relation complexity estimate caps a requested
+/// page at.
+///
+/// A complexity expression sees only its arguments, never the request's
+/// `Database`, so the bound is process-wide: the largest maximum declared with
+/// `schema_roots!(max_page_limit: ...)` by a schema built so far, or
+/// [`PaginationConfig::DEFAULT_MAX_LIMIT`] when none declares one. With
+/// several schemas it over-estimates for the smaller ones, never under.
+#[doc(hidden)]
+pub fn page_complexity_maximum() -> i64 {
+    match DECLARED_PAGE_MAXIMUM.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => PaginationConfig::DEFAULT_MAX_LIMIT,
+        declared => declared,
+    }
+}
+
+/// Check, when a generated schema is built, that its declared maximum page
+/// limit is the one `database` applies, and record it for
+/// [`page_complexity_maximum`]. A schema that declares none is not checked.
+///
+/// # Panics
+///
+/// Panics when the two differ: the semantic catalogue would publish a bound
+/// the database does not apply, and the complexity estimate would count
+/// fewer rows than a query can return.
+#[doc(hidden)]
+pub fn admit_declared_page_maximum<B: OrmBackend>(
+    database: &crate::db::Database<B>,
+    declared: Option<u32>,
+) {
+    let Some(declared) = declared.map(i64::from) else {
+        return;
+    };
+    let configured = database.pagination_config().max_limit;
+    assert!(
+        configured == Some(declared),
+        "schema_roots! declares `max_page_limit: {declared}`, but the Database applies {}; \
+         configure it with `DatabaseBuilder::max_page_limit(Some({declared}))` or declare the \
+         maximum the Database uses",
+        match configured {
+            Some(maximum) => format!("a maximum page limit of {maximum}"),
+            None => "no maximum page limit".to_owned(),
+        }
+    );
+    DECLARED_PAGE_MAXIMUM.fetch_max(declared, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Publish a schema's declared maximum page limit in one entity's semantic
+/// metadata: every pageable relationship list takes it as its ceiling in
+/// place of the compile-time default. Without a declaration the metadata is
+/// returned unchanged.
+#[doc(hidden)]
+pub fn with_declared_page_maximum(
+    mut metadata: super::GraphqlEntitySemanticMetadata,
+    declared: Option<u32>,
+) -> super::GraphqlEntitySemanticMetadata {
+    let Some(declared) = declared else {
+        return metadata;
+    };
+    for field in metadata.fields.iter_mut() {
+        let pageable = field.relationship.as_ref().is_some_and(|relationship| {
+            matches!(
+                relationship.collection_bound,
+                Some(super::GraphqlSemanticCollectionBound::Pageable { .. })
+            )
+        });
+        if pageable
+            && let super::GraphqlSemanticTypeRef::List {
+                maximum_items: Some(maximum),
+                ..
+            } = &mut field.type_ref
+        {
+            *maximum = declared;
+        }
+    }
+    metadata
 }
 
 /// Row bound of one Rust repository read. See
@@ -4673,6 +4828,8 @@ pub struct EntityQuery<T, B: OrmBackend = DefaultBackend> {
     entity_matchers: Vec<EntityMatcher<T>>,
     filter_is_valid: bool,
     pub(crate) keyset_filter_identities: Vec<String>,
+    /// Per-read maximum of this query's keyset and scan pages.
+    pub(crate) max_limit: Option<i64>,
     _marker: PhantomData<(T, B)>,
 }
 
@@ -4687,6 +4844,7 @@ impl<T, B: OrmBackend> Clone for EntityQuery<T, B> {
             entity_matchers: self.entity_matchers.clone(),
             filter_is_valid: self.filter_is_valid,
             keyset_filter_identities: self.keyset_filter_identities.clone(),
+            max_limit: self.max_limit,
             _marker: PhantomData,
         }
     }
@@ -4707,6 +4865,7 @@ where
             entity_matchers: Vec::new(),
             filter_is_valid: true,
             keyset_filter_identities: Vec::new(),
+            max_limit: None,
             _marker: PhantomData,
         }
     }
@@ -4827,13 +4986,29 @@ where
         self
     }
 
+    /// Override the database's maximum page limit for this query's keyset
+    /// and authorized-scan pages (`fetch_authorized_keyset*`,
+    /// `fetch_authorized_scan`).
+    ///
+    /// Trusted Rust code that pages through a set, or reads `bound + 1` rows
+    /// to detect an overflow, uses this to ask for more rows a page than
+    /// GraphQL clients may. The page is still bounded by `maximum`. Never
+    /// pass a value a client chose without validating it first. A negative
+    /// `maximum` is treated as `0`.
+    pub fn with_max_limit(mut self, maximum: i64) -> Self {
+        self.max_limit = Some(maximum.max(0));
+        self
+    }
+
     fn build_select_query_with_config(
         &self,
         pagination_config: PaginationConfig,
         apply_default_limit: bool,
     ) -> crate::Result<SelectQuery> {
         self.ensure_filter_valid()?;
-        let page = pagination_config.resolve_page(self.page.as_ref(), apply_default_limit);
+        let page = pagination_config
+            .resolve_client_page(self.page.as_ref(), apply_default_limit)
+            .map_err(crate::graphql::errors::sqlx_error_from_public)?;
         let mut sorts = self
             .order_clauses
             .iter()
@@ -5675,6 +5850,10 @@ where
     where
         P: PoolProvider<B> + ?Sized,
     {
+        provider
+            .pagination_config()
+            .admit_client_limit(self.page.as_ref().and_then(|page| page.limit))
+            .map_err(crate::graphql::errors::sqlx_error_from_public)?;
         if self.requires_in_memory_filtering() {
             let nodes = self.fetch_unpaged_filtered(provider).await?;
             let total = nodes.len() as i64;
@@ -5773,6 +5952,10 @@ where
     where
         P: PoolProvider<B> + ?Sized,
     {
+        provider
+            .pagination_config()
+            .admit_client_limit(self.page.as_ref().and_then(|page| page.limit))
+            .map_err(crate::graphql::errors::sqlx_error_from_public)?;
         self.ensure_filter_valid()?;
         if self.requires_in_memory_filtering() || (selection.rows && selection.count) {
             return self.fetch_connection_with_auth(provider, auth).await;
@@ -5863,6 +6046,10 @@ where
     where
         P: PoolProvider<B> + ?Sized,
     {
+        provider
+            .pagination_config()
+            .admit_client_limit(self.page.as_ref().and_then(|page| page.limit))
+            .map_err(crate::graphql::errors::sqlx_error_from_public)?;
         if self.requires_in_memory_filtering() {
             let nodes = self
                 .fetch_unpaged_filtered_with_auth(provider, auth)

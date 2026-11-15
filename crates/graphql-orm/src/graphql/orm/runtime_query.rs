@@ -38,6 +38,11 @@ pub enum RuntimeQueryErrorCode {
     /// The collection declares no search, or the search input is empty or
     /// malformed.
     InvalidSearch,
+    /// The order values of a row on the page do not fit a cursor within
+    /// `RuntimeQueryLimits::max_cursor_bytes` (or the relation equivalent),
+    /// typically because of one long stored string sort key. The page is
+    /// refused; order by a bounded field, or raise the limit.
+    CursorKeyTooLarge,
 }
 
 impl RuntimeQueryErrorCode {
@@ -55,6 +60,7 @@ impl RuntimeQueryErrorCode {
             Self::Decode => "decode",
             Self::BackendExecution => "backend_execution",
             Self::InvalidSearch => "invalid_search",
+            Self::CursorKeyTooLarge => "cursor_key_too_large",
         }
     }
 }
@@ -1537,7 +1543,12 @@ fn encode_cursor(
         RuntimeQueryError::new(RuntimeQueryErrorCode::CursorInvalid).source(error)
     })?;
     if bytes.len() > request.limits.max_cursor_bytes {
-        return Err(limit_error(request.collection.id()));
+        // A stored value, not the request, is over the bound: say so with
+        // its own code rather than the request's `resource_limit`.
+        return Err(
+            RuntimeQueryError::new(RuntimeQueryErrorCode::CursorKeyTooLarge)
+                .collection(request.collection.id()),
+        );
     }
     Ok(format!("{RUNTIME_CURSOR_PREFIX}{}", hex(&bytes)))
 }

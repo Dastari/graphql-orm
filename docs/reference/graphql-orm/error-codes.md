@@ -3,7 +3,7 @@ title: "Public ORM Error-Code Contract"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-14
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -24,8 +24,8 @@ constraint names, filesystem paths, and configuration strings stay server-side.
 | `NOT_FOUND` | Resource missing or not visible (no cross-tenant existence leak) |
 | `CONFLICT` | State conflict |
 | `CONSTRAINT_VIOLATION` | Database constraint failed without schema leak |
-| `CURSOR_INVALID` | Pagination cursor invalid/tampered/version mismatch |
-| `PAGE_LIMIT_EXCEEDED` | Requested page size exceeds configured max, a visible-row scan ran out of budget, or a generated GraphQL bulk write selects more rows than `PaginationConfig::max_bulk_write_rows` |
+| `CURSOR_INVALID` | Pagination cursor malformed, corrupted, bound to another entity, order or filter, or of another version. A static keyset cursor is not authenticated; see [what a keyset cursor is bound to](pagination-migration.md#what-a-keyset-cursor-is-bound-to) |
+| `PAGE_LIMIT_EXCEEDED` | A Rust repository `limit` exceeds the configured maximum, a GraphQL page limit exceeds it while `PaginationConfig::refuse_oversized_limit` is set (by default it is reduced instead), a visible-row scan ran out of budget, or a generated GraphQL bulk write selects more rows than `PaginationConfig::max_bulk_write_rows` |
 | `SERVICE_UNAVAILABLE` | Temporary dependency failure |
 | `INTERNAL_ERROR` | Unexpected failure |
 | `AUTHORIZATION_MISCONFIGURED` | A declared policy key has no provider. Under `DeclaredPoliciesRequired` this covers every key; in every mode it covers an entity `write_policy` without a row provider on generated writes |
@@ -130,7 +130,9 @@ per surface.
   Missing/misconfigured admission on a hand-built schema refuses with
   `SUBSCRIPTION_ADMISSION_REQUIRED`. An event-independent authority timer uses
   `FORBIDDEN` for definite subscriber denial and `SUBSCRIPTION_CONTINUITY_LOST`
-  for host/DB failures, once, then ends. All per-event denials stay silent.
+  for host/DB failures, once, then ends. A stream that lagged ends on that
+  timer's next tick, with `FORBIDDEN` when its authority is gone and
+  `SUBSCRIPTION_CONTINUITY_LOST` otherwise. All per-event denials stay silent.
 - **Runtime GraphQL** (fields installed by a `RuntimeGraphqlModule`) and the
   runtime host APIs use lower case, for example `authorization_denied`,
   `resource_limit`, `cursor_invalid` and `search_index_not_ready`. See
@@ -170,6 +172,13 @@ grant quietly withholds the event and leaves the stream open; other authority
 errors, reload errors and restrictions changing at a prepared row/removal's
 final release end with `SUBSCRIPTION_CONTINUITY_LOST` then `complete`, independent
 of prior visibility. Empty reloads without approved image evidence stay quiet.
+Lag ends a stream on its next jittered tick: with `authorization_denied` when
+the subscriber is then denied, otherwise with `SUBSCRIPTION_CONTINUITY_LOST`.
+
+A runtime page whose boundary row has order values too long for a cursor
+(usually one long stored string sort key) is refused with
+`cursor_key_too_large`, on root and relation connections. Order by a bounded
+field, or raise `max_cursor_bytes` and the cursor protection limits.
 
 Runtime live streams deliberately share the generated exceptions:
 `SUBSCRIPTION_CONTINUITY_LOST` and `SUBSCRIPTION_SOURCE_CLOSED` stay uppercase.

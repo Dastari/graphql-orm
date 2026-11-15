@@ -10,6 +10,18 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.161.0 adds opt-in contract settings and one stable code. A GraphQL
+page limit above the maximum can be refused with `PAGE_LIMIT_EXCEEDED` instead
+of being reduced (`DatabaseBuilder::refuse_oversized_page_limit`), and
+`schema_roots!(max_page_limit: N)` publishes the real maximum in the semantic
+catalogue and refuses a `Database` configured differently. Runtime GraphQL can
+serve `RecordVersion` and integer live keys as `RuntimeInt64` strings
+(`with_int64_identity_strings`). A runtime page whose stored sort key is too
+long for a cursor is refused with `cursor_key_too_large`. A subscriber that
+lagged now ends on the next authority tick instead of at once. Defaults are
+unchanged except for that timing. See the
+[migration guide](../../MIGRATION.md#01590-to-01610-page-limits-64-bit-identities-cursor-keys-and-subscription-lag).
+
 Version 0.159.0 fixes PostgreSQL static tables declared with mixed-case bare
 names. Table references follow PostgreSQL's historical folding, so migrations,
 reads/writes, RLS and search helpers resolve the same table while declared

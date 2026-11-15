@@ -2185,6 +2185,14 @@ impl<B: OrmBackend> DatabaseBuilder<B> {
         self
     }
 
+    /// Refuse a client page limit above the maximum with
+    /// `PAGE_LIMIT_EXCEEDED` instead of reducing it. Off by default; see
+    /// [`PaginationConfig::refuse_oversized_limit`].
+    pub fn refuse_oversized_page_limit(mut self, refuse: bool) -> Self {
+        self.database.pagination_config.refuse_oversized_limit = refuse;
+        self
+    }
+
     /// Set the maximum rows one generated GraphQL `updateMany` or
     /// `deleteMany` loads and locks; see
     /// [`PaginationConfig::max_bulk_write_rows`]. A bulk write that selects

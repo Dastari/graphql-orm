@@ -8754,7 +8754,7 @@ fn generate_graphql_operations_unfiltered(
                         Some(ctx), ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
                     ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                     if visibility.requires_residual_checks() {
-                        let resolved_page = db.pagination_config().resolve_page(page.as_ref(), true);
+                        let resolved_page = db.pagination_config().resolve_client_page(page.as_ref(), true).map_err(|error| error.into_graphql_error())?;
                         let authorized_page = ::graphql_orm::graphql::loaders::scan_authorized_query(
                             db, ctx, query, auth_context.as_ref(), &visibility, resolved_page,
                             ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
@@ -9421,7 +9421,7 @@ fn generate_graphql_operations_unfiltered(
                     Some(ctx), ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                 if visibility.requires_residual_checks() {
-                    let resolved_page = db.pagination_config().resolve_page(page.as_ref(), true);
+                    let resolved_page = db.pagination_config().resolve_client_page(page.as_ref(), true).map_err(|error| error.into_graphql_error())?;
                     let authorized_page = ::graphql_orm::graphql::loaders::scan_authorized_query(
                         db, ctx, query, auth_context.as_ref(), &visibility, resolved_page,
                         ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,

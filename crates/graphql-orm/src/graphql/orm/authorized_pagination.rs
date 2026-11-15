@@ -1131,6 +1131,9 @@ where
                 })
                 .collect()
         };
+        // Only a size the caller asked for can be refused as oversized; an
+        // omitted one takes the default and is reduced to the maximum.
+        let requested_limit = page.first.or(page.last);
         let page = page
             .validate(PaginationConfig::DEFAULT_LIMIT, i64::MAX)
             .map_err(|e| e.into_graphql_error())?;
@@ -1153,8 +1156,13 @@ where
         base.page = None;
         base.order_clauses = order.iter().map(|c| c.order_sql()).collect();
         base.order_values.clear();
-        let limit = db
-            .pagination_config()
+        // A per-read maximum set with `with_max_limit` replaces the
+        // database's for this page, as it does for `fetch_all`.
+        let page_config = db.pagination_config().with_read_maximum(base.max_limit);
+        page_config
+            .admit_client_limit(requested_limit)
+            .map_err(|error| error.into_graphql_error())?;
+        let limit = page_config
             .resolve_page(
                 Some(&PageInput {
                     limit: Some(page.limit),
@@ -1273,13 +1281,15 @@ where
         base.order_values.clear();
         let limit = db
             .pagination_config()
-            .resolve_page(
+            .with_read_maximum(base.max_limit)
+            .resolve_client_page(
                 Some(&PageInput {
                     limit: page.limit,
                     offset: Some(0),
                 }),
                 true,
             )
+            .map_err(|error| error.into_graphql_error())?
             .limit
             .unwrap_or(PaginationConfig::DEFAULT_LIMIT)
             .max(1) as usize;

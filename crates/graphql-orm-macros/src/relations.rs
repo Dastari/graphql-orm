@@ -666,7 +666,7 @@ pub(crate) fn generate_graphql_relations(
         let page_rust_type = argument_contract.page_rust_type();
         let connection_type = syn::Ident::new(&connection_type_str, struct_name.span());
         let edge_type = syn::Ident::new(&edge_type_str, struct_name.span());
-        let list_relation_complexity = "{ let requested = page.as_ref().and_then(|page| page.limit).unwrap_or(::graphql_orm::graphql::orm::PaginationConfig::DEFAULT_LIMIT); let capped = requested.max(0).min(::graphql_orm::graphql::orm::PaginationConfig::DEFAULT_MAX_LIMIT); 2 + (capped as usize).saturating_mul(child_complexity) }";
+        let list_relation_complexity = "{ let requested = page.as_ref().and_then(|page| page.limit).unwrap_or(::graphql_orm::graphql::orm::PaginationConfig::DEFAULT_LIMIT); let capped = requested.max(0).min(::graphql_orm::graphql::orm::page_complexity_maximum()); 2 + (capped as usize).saturating_mul(child_complexity) }";
         let single_relation_complexity = "2 + child_complexity";
         let source_condition_multiple_guard = quote! {
             if !(#source_condition) {
@@ -782,7 +782,7 @@ pub(crate) fn generate_graphql_relations(
 
         let relation_query_key = quote! {{
             let __gom_relation_page =
-                db.pagination_config().resolve_page(page.as_ref(), true);
+                db.pagination_config().resolve_client_page(page.as_ref(), true).map_err(|error| error.into_graphql_error())?;
             let __gom_relation_pagination =
                 if __gom_relation_page.limit.is_some() || __gom_relation_page.offset > 0 {
                     Some(__gom_relation_page.clone())
@@ -973,7 +973,7 @@ pub(crate) fn generate_graphql_relations(
                         }
 
                         let resolved_page =
-                            db.pagination_config().resolve_page(page.as_ref(), true);
+                            db.pagination_config().resolve_client_page(page.as_ref(), true).map_err(|error| error.into_graphql_error())?;
                         if resolved_page.limit.is_some() || resolved_page.offset > 0 {
                             query = query.paginate(&::graphql_orm::graphql::orm::PageInput {
                                 limit: resolved_page.limit,

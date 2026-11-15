@@ -10,6 +10,58 @@ supersedes: []
 
 # Migration Guide
 
+## 0.159.0 to 0.161.0: page limits, 64-bit identities, cursor keys and subscription lag
+
+Upgrade runtime and macros together. No schema or data migration is needed.
+Generated SDL, operation catalogues and fingerprints are unchanged unless you
+turn on one of the new settings.
+
+- **Subscription lag ends on the authority tick. Action needed** only if a
+  client or test expects the end at once. A generated `Changed` stream or a
+  runtime live stream whose receiver fell behind used to end immediately with
+  `SUBSCRIPTION_CONTINUITY_LOST`. It now stops delivering and ends on its next
+  jittered authority tick, up to one recheck period later (30 to 33 seconds by
+  default; `Database::with_subscription_authority_recheck_interval`, 1 to 300
+  seconds). At the tick a subscriber whose authority is gone ends with
+  `FORBIDDEN` (generated) or `authorization_denied` (runtime); any other ends
+  with `SUBSCRIPTION_CONTINUITY_LOST` as before. Clients still resubscribe and
+  refetch. A runtime live client must now treat `authorization_denied` as a
+  terminal frame. Source closure, host continuity signals and schema-revision
+  changes still end at once.
+- **Runtime cursor keys that are too long. Action needed** only if you match
+  runtime error codes. A runtime page whose row has order values too long for
+  a cursor fails with `cursor_key_too_large`. Runtime GraphQL returned
+  `invalid_request` or `invalid_cursor` for it, and
+  `execute_runtime_read` / the relation batch returned `resource_limit`.
+  `RuntimeQueryErrorCode` and `RuntimeRelationErrorCode` each gain a
+  `CursorKeyTooLarge` variant: add an arm to an exhaustive `match`.
+- **`PaginationConfig` has a new field. Action needed** only for a struct
+  literal that lists every field: add `refuse_oversized_limit: false`, or use
+  `..Default::default()` or the constructors.
+- **Refusing oversized page limits. No action.** Off by default. To let a
+  client tell a reduced page from a last page, set
+  `DatabaseBuilder::refuse_oversized_page_limit(true)`: an explicit GraphQL
+  page limit above the maximum then fails with `PAGE_LIMIT_EXCEEDED`.
+- **Declared maximum page limit. No action.** Optional
+  `schema_roots!(max_page_limit: N)` publishes `N` in the semantic catalogue
+  and the complexity estimate and refuses a `Database` configured differently.
+  Declaring a maximum other than 100 changes the semantic catalogue and so its
+  fingerprint.
+- **Host-side reads above the page maximum. No action.** Repository and
+  transaction builders have been exact or refused since 0.128.0;
+  `with_max_limit(n)` gives one read its own maximum. The keyset helpers still
+  reduce an oversized limit; `EntityQuery::with_max_limit(n)` now applies to
+  them, and a handle with a raised maximum works as before. See
+  [page size](docs/reference/graphql-orm/pagination-migration.md#page-size-reduced-by-default-refused-on-request).
+  The next breaking release turns the remaining silent reduction into an error.
+- **64-bit identities as strings. No action.** Off by default.
+  `RuntimeGraphqlOptions::with_int64_identity_strings()` types runtime
+  `RecordVersion` and integer live keys as `RuntimeInt64` strings. It changes
+  the SDL and fingerprints. The next breaking release makes it the default.
+- **Keyset cursor documentation. No action.** Static keyset cursors were never
+  tamper-evident; the documentation now says so. Do not treat a cursor as
+  proof of anything: authorization is applied to every page.
+
 ## 0.158.0 to 0.159.0: PostgreSQL table-name case
 
 Upgrade ORM and macros together. Static PostgreSQL table references now agree

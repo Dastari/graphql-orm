@@ -43,6 +43,10 @@ pub enum RuntimeRelationErrorCode {
     CardinalityViolation,
     Decode,
     BackendExecution,
+    /// The order values of a related row do not fit a cursor within
+    /// `RuntimeRelationLimits::max_cursor_bytes`. See
+    /// `RuntimeQueryErrorCode::CursorKeyTooLarge`.
+    CursorKeyTooLarge,
 }
 
 impl RuntimeRelationErrorCode {
@@ -61,6 +65,7 @@ impl RuntimeRelationErrorCode {
             Self::CardinalityViolation => "cardinality_violation",
             Self::Decode => "decode",
             Self::BackendExecution => "backend_execution",
+            Self::CursorKeyTooLarge => "cursor_key_too_large",
         }
     }
 }
@@ -144,7 +149,15 @@ impl From<RuntimeRecordError> for RuntimeRelationError {
 
 impl From<RuntimeQueryError> for RuntimeRelationError {
     fn from(error: RuntimeQueryError) -> Self {
-        Self::new(RuntimeRelationErrorCode::InvalidRequest).source(error)
+        // A stored sort key too long for a cursor keeps its own stable code;
+        // every other query failure of a relation layer is an invalid request.
+        let code = match error.code() {
+            super::RuntimeQueryErrorCode::CursorKeyTooLarge => {
+                RuntimeRelationErrorCode::CursorKeyTooLarge
+            }
+            _ => RuntimeRelationErrorCode::InvalidRequest,
+        };
+        Self::new(code).source(error)
     }
 }
 
@@ -1109,7 +1122,7 @@ fn encode_relation_cursor(
     })?;
     if bytes.len() > request.limits.max_cursor_bytes {
         return Err(
-            RuntimeRelationError::new(RuntimeRelationErrorCode::ResourceLimit)
+            RuntimeRelationError::new(RuntimeRelationErrorCode::CursorKeyTooLarge)
                 .for_relation(&request.relation),
         );
     }
