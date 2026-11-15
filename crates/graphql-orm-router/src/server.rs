@@ -1190,7 +1190,7 @@ impl RouterPlugin for StaticGraphPlugin {
         if payload.subgraph_name == crate::node_lookup::NODE_SUBGRAPH_NAME {
             // The router-hosted Node subgraph is never contacted over the
             // network; answer from the graph this request is pinned to.
-            let selected = selected_node_lookup(&payload.context);
+            let selected = selected_node_lookup(payload.context);
             let response = crate::node_lookup::execute(
                 selected.as_ref().and_then(|selected| selected.0.as_ref()),
                 &payload.body,
