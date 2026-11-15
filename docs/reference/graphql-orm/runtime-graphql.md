@@ -371,7 +371,13 @@ bounds, and the scalar validators accept those forms. A row written by an
 earlier release, by host code or under a higher limit is returned as stored:
 a date-time such as `+10000-01-01T00:00:00.000000Z` or
 `0000-12-31T23:00:00.000000Z`, and JSON, bytes or strings longer than the input
-limits. `max_response_bytes` still bounds the whole response. Such a value is
+limits. `max_response_bytes` still bounds the whole response, and is checked
+before output is built: each layer first reserves its structure (connection
+objects, edges, cursors, page fields, every parent's relation key and the null
+of a missing to-one relation), then each record's ordinary fields, measured
+from the stored values, and only then encodes them or copies projected
+objects. A response over the budget is refused with `cost_exceeded` without
+base64-encoding, serializing or cloning a large stored value. Such a value is
 also a valid cursor position, so pages resume across it, including PostgreSQL
 ` BC` years, which read back as year 0000 and below. Clients cannot send an
 out-of-range date-time back as input, and runtime mutations refuse to write one

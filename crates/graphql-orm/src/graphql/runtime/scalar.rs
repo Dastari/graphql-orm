@@ -575,6 +575,8 @@ pub(super) fn wire_form_valid(
 /// Render a stored value. Never fails and applies no input bound, so one
 /// stored value cannot fail a whole page or payload.
 pub(super) fn encode(value: &RuntimeValue) -> Value {
+    #[cfg(test)]
+    tests::ENCODED.with(|count| count.set(count.get() + 1));
     match value {
         RuntimeValue::Null => Value::Null,
         RuntimeValue::Boolean(v) => Value::Boolean(*v),
@@ -587,6 +589,75 @@ pub(super) fn encode(value: &RuntimeValue) -> Value {
         RuntimeValue::Bytes(v) => Value::String(STANDARD.encode(v)),
         // `Display` for a JSON value is its compact serialization.
         RuntimeValue::Json(v) => Value::String(v.to_string()),
+    }
+}
+
+/// Bytes [`encode`]`(value)` takes in the response, by the rule of the
+/// response measure (`OutputShape::measure`): two of structure, plus six per
+/// byte of an output string or 32 for any other output value.
+///
+/// Measured from the borrowed value: nothing is copied, base64-encoded or
+/// serialized into memory. A JSON value is counted by a serializer that writes
+/// nowhere and stops once the size would exceed `maximum`; any size above
+/// `maximum` is refused with `cost_exceeded`.
+pub(super) fn encoded_bytes(
+    value: &RuntimeValue,
+    maximum: usize,
+) -> Result<usize, RuntimeGraphqlError> {
+    let over = || RuntimeGraphqlError::new("cost_exceeded");
+    // The longest output string that fits.
+    let limit = maximum.saturating_sub(2) / 6;
+    let text = match value {
+        RuntimeValue::Null | RuntimeValue::Boolean(_) | RuntimeValue::Float(_) => {
+            return Some(34).filter(|bytes| *bytes <= maximum).ok_or_else(over);
+        }
+        RuntimeValue::Integer(v) => {
+            let mut digits = 1;
+            let mut rest = v.unsigned_abs();
+            while rest >= 10 {
+                rest /= 10;
+                digits += 1;
+            }
+            digits + usize::from(*v < 0)
+        }
+        RuntimeValue::String(v) => v.len(),
+        // Hyphenated lowercase form.
+        RuntimeValue::Uuid(_) => 36,
+        RuntimeValue::DateTime(v) => v.as_str().len(),
+        // At most 18 digits, a sign and a point: a small bounded string.
+        RuntimeValue::Decimal(v) => canonical_runtime_decimal(*v).len(),
+        // Padded standard base64.
+        RuntimeValue::Bytes(v) => v.len().div_ceil(3).checked_mul(4).ok_or_else(over)?,
+        RuntimeValue::Json(v) => {
+            let mut counter = Counter { len: 0, limit };
+            serde_json::to_writer(&mut counter, v).map_err(|_| over())?;
+            counter.len
+        }
+    };
+    // `limit` bounds `text`, so this cannot overflow.
+    Some(text)
+        .filter(|text| *text <= limit)
+        .map(|text| text * 6 + 2)
+        .filter(|bytes| *bytes <= maximum)
+        .ok_or_else(over)
+}
+
+/// Counts what a serializer writes, refusing past `limit` bytes.
+struct Counter {
+    len: usize,
+    limit: usize,
+}
+impl std::io::Write for Counter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.len = self
+            .len
+            .checked_add(buf.len())
+            .filter(|len| *len <= self.limit)
+            .ok_or_else(|| std::io::Error::other("over the response budget"))?;
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -606,8 +677,18 @@ pub(super) const fn name(kind: RuntimeValueKind) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    thread_local! {
+        /// Stored values encoded for output on this thread.
+        pub(crate) static ENCODED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+    pub(crate) fn encoded() -> usize {
+        ENCODED.with(std::cell::Cell::get)
+    }
+    pub(crate) fn reset_encoded() {
+        ENCODED.with(|count| count.set(0));
+    }
     #[test]
     fn lossless_wire_values_and_strict_integer_forms() {
         let limits = RuntimeScalarLimits::default();

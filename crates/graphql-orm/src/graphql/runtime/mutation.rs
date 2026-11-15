@@ -1231,7 +1231,6 @@ async fn execute_once<B: RuntimeMutationBackend>(
         Err(_) => return Err(committed_error("mutation_payload_timeout")),
     }
     // Serialize only the authorized selected projection, never internal policy/key fields.
-    let mut values = async_graphql::indexmap::IndexMap::new();
     let metadata = prepared
         .module
         .schema
@@ -1240,52 +1239,33 @@ async fn execute_once<B: RuntimeMutationBackend>(
         .iter()
         .find(|c| &c.id == prepared.collection.id())
         .ok_or_else(|| committed_error("mutation_payload_failed"))?;
-    for field in &prepared.selected {
-        if prepared
-            .projected
-            .iter()
-            .any(|projected| &projected.field == field)
-        {
-            continue;
-        }
-        let value = match record
-            .state(field)
-            .map_err(|_| committed_error("mutation_payload_failed"))?
-        {
-            RuntimeFieldState::Value(value) => super::scalar::encode(value),
-            RuntimeFieldState::Null => Value::Null,
-            RuntimeFieldState::Unloaded => return Err(committed_error("mutation_payload_failed")),
-        };
-        let name = &metadata
-            .fields
-            .iter()
-            .find(|f| &f.id == field.id())
-            .ok_or_else(|| committed_error("mutation_payload_failed"))?
-            .api_name;
-        values.insert(async_graphql::Name::new(name), value);
-    }
-    super::live::insert_identity_fields(
+    let pending = super::execution::PendingNode::new(
         &prepared.module,
         metadata,
         &prepared.collection,
         record,
+        &prepared.selected,
+        &prepared.projected,
         prepared.node_id,
         prepared.record_version,
-        &mut values,
     )
     .map_err(|_| committed_error("mutation_payload_failed"))?;
     // One accounting with the final reservation: what earlier roots used, this
-    // root's key and the payload built so far, measured as `reserve_payload`
-    // will measure the whole payload.
+    // root's key and the record with its ordinary fields, measured from the
+    // stored values as `reserve_payload` will measure the whole payload, and
+    // encoded only once that fits.
     let maximum = prepared.limits.max_response_bytes;
     let record_shapes = super::execution::Shapes::of(&prepared.shape).select("record");
-    let mut payload = Value::Object(
-        [(async_graphql::Name::new("record"), Value::Object(values))]
-            .into_iter()
-            .collect(),
-    );
-    let spent = payload_spent(prepared, key, &payload)
-        .map_err(|_| committed_error("mutation_payload_failed"))?;
+    let (mut payload, spent) = encode_record(
+        prepared
+            .response_bytes
+            .load(std::sync::atomic::Ordering::SeqCst),
+        key,
+        &prepared.shape,
+        pending,
+        maximum,
+    )
+    .map_err(|_| committed_error("mutation_payload_failed"))?;
     // Host objects resolve only after commit and the independent release check,
     // each charged before the next and refused before it is copied.
     let mut items = Vec::with_capacity(prepared.projected.len());
@@ -1376,24 +1356,41 @@ fn root_bytes(key: &str) -> usize {
     key.len().saturating_mul(6).saturating_add(8)
 }
 
-/// The response budget used once `payload` (built so far) is added: earlier
-/// mutation roots, this root's key and the payload's present fields, measured
-/// as [`reserve_payload`] measures. Refuses with `cost_exceeded` when that
-/// already exceeds the budget.
-fn payload_spent(
-    prepared: &Prepared,
+/// The payload `{ record }` of one committed record and the response budget
+/// used once it is added: earlier mutation roots, this root's key and the
+/// payload's present fields, measured as [`reserve_payload`] measures. The
+/// record's stored values are measured before any is encoded; a total above
+/// `maximum` is refused with `cost_exceeded` and encodes nothing.
+fn encode_record(
+    earlier: usize,
     key: &str,
-    payload: &Value,
-) -> Result<usize, RuntimeGraphqlError> {
-    spent_after(
-        prepared
-            .response_bytes
-            .load(std::sync::atomic::Ordering::SeqCst),
+    shape: &super::execution::OutputShape,
+    pending: super::execution::PendingNode<'_>,
+    maximum: usize,
+) -> Result<(Value, usize), RuntimeGraphqlError> {
+    let shapes = super::execution::Shapes::of(shape);
+    // The payload object without its record, then each `record` key.
+    let outer = spent_after(
+        earlier,
         key,
-        &prepared.shape,
-        payload,
-        prepared.limits.max_response_bytes,
-    )
+        shape,
+        &Value::Object(Default::default()),
+        maximum,
+    )?
+    .checked_add(shapes.slot_bytes("record", false)?)
+    .filter(|bytes| *bytes <= maximum)
+    .ok_or_else(|| RuntimeGraphqlError::new("cost_exceeded"))?;
+    let mut spent = outer;
+    let record = pending.encode_within(&shapes.select("record"), maximum - outer, |bytes| {
+        spent += bytes;
+        Ok(())
+    })?;
+    let payload = Value::Object(
+        [(async_graphql::Name::new("record"), record)]
+            .into_iter()
+            .collect(),
+    );
+    Ok((payload, spent))
 }
 fn spent_after(
     earlier: usize,
@@ -1475,7 +1472,7 @@ fn reserve_payload(prepared: &Prepared, payload: &Value, key: &str) -> async_gra
 
 #[cfg(test)]
 mod tests {
-    use super::super::execution::{OutputShape, Shapes};
+    use super::super::execution::{OutputShape, PendingNode, Shapes};
     use super::super::projection::tests::{
         OBJECT_BYTES, fixture, materialized, record_shape, reset_materialized,
     };
@@ -1591,11 +1588,75 @@ mod tests {
             assert_eq!(materialized(), 0, "{earlier} earlier bytes");
         }
         // Earlier roots that already exceed the budget refuse before measuring.
+        let late = PendingNode::of(vec![]);
+        assert_eq!(
+            encode_record(maximum, "updateFile", &shape, late, maximum)
+                .err()
+                .map(RuntimeGraphqlError::code),
+            Some("cost_exceeded")
+        );
         assert_eq!(
             spent_after(maximum, "updateFile", &shape, &payload("x"), maximum)
                 .err()
                 .map(RuntimeGraphqlError::code),
             Some("cost_exceeded")
         );
+    }
+
+    /// A committed record's ordinary fields are measured from their stored
+    /// values before any is encoded: with earlier roots, this root's key and
+    /// the payload structure, the total is what `reserve_payload` measures
+    /// for the encoded payload, and one byte less encodes nothing (#528).
+    #[test]
+    fn committed_records_are_measured_before_their_fields_are_encoded() {
+        // `updateFile { record { label alias: label } }`.
+        let leaf = || OutputShape::of_fields(vec![]);
+        let shape = OutputShape::of_fields(vec![(
+            "record",
+            "record",
+            OutputShape::of_fields(vec![("label", "label", leaf()), ("alias", "label", leaf())]),
+        )]);
+        let large = [
+            RuntimeValue::String("\u{1}".repeat(50_000)),
+            RuntimeValue::Json(serde_json::json!(["\"".repeat(50_000)])),
+            RuntimeValue::Bytes(vec![1; 100_000]),
+        ];
+        for value in &large {
+            let pending = || PendingNode::of(vec![("label", value)]);
+            let earlier = 300;
+            super::super::scalar::tests::reset_encoded();
+            let (payload, spent) =
+                encode_record(earlier, "updateFile", &shape, pending(), usize::MAX).unwrap();
+            assert_eq!(super::super::scalar::tests::encoded(), 1);
+            let mut final_measure = 0;
+            shape
+                .measure(&payload, &mut final_measure, usize::MAX)
+                .unwrap();
+            assert_eq!(spent, earlier + root_bytes("updateFile") + final_measure);
+            assert_eq!(
+                spent,
+                spent_after(earlier, "updateFile", &shape, &payload, usize::MAX).unwrap()
+            );
+            assert_eq!(
+                encode_record(earlier, "updateFile", &shape, pending(), spent)
+                    .unwrap()
+                    .1,
+                spent
+            );
+            for maximum in [spent - 1, 400] {
+                super::super::scalar::tests::reset_encoded();
+                assert_eq!(
+                    encode_record(earlier, "updateFile", &shape, pending(), maximum)
+                        .err()
+                        .map(RuntimeGraphqlError::code),
+                    Some("cost_exceeded")
+                );
+                assert_eq!(
+                    super::super::scalar::tests::encoded(),
+                    0,
+                    "encoded before refusal at {maximum}"
+                );
+            }
+        }
     }
 }

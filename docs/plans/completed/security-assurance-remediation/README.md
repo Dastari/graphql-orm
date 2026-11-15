@@ -3,8 +3,8 @@ title: Security assurance remediation
 kind: plan
 status: accepted
 owner: workspace-maintainers
-last_reviewed: 2026-10-16
-review_by: 2026-11-14
+last_reviewed: 2026-11-15
+review_by: 2027-05-15
 supersedes: []
 ---
 
