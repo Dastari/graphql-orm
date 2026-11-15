@@ -10,6 +10,10 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.24.0
+
+Declare Rust 1.97 as the minimum supported compiler; verify explicit feature graphs in CI.
+
 ## Unreleased - 0.23.0
 
 - Generated aggregate bounds use the canonical `groupLimit` or `group_limit` argument spelling. The host injects the bound from the plan maximum; models cannot supply it.

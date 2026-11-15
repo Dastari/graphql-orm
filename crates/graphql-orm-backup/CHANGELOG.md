@@ -10,6 +10,10 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.24.0
+
+Declare Rust 1.97 as the minimum supported compiler; verify explicit feature graphs in CI.
+
 ## 0.23.0 (unreleased)
 
 - PostgreSQL ORM restores resolve bare mixed-case entity table names with the

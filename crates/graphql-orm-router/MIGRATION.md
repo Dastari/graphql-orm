@@ -10,6 +10,10 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.16.0
+
+**Action needed:** build with Rust 1.97 or newer. No data migration is needed.
+
 ## 0.15.3 to 0.15.4
 
 No consumer migration is required. Only the wire tests change; router

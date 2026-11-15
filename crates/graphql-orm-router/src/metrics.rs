@@ -428,8 +428,7 @@ impl ByteRouteCounters {
 }
 
 fn decrement(counter: &AtomicUsize, count: usize) {
-    // Keep the atomic saturating update compatible with the Rust 1.90 MSRV;
-    // current Rust deprecates fetch_update in favor of the newer try_update.
+    // Saturate without wrapping, retrying if another request updates the counter.
     let mut current = counter.load(Ordering::Relaxed);
     loop {
         match counter.compare_exchange_weak(

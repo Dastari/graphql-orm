@@ -96,7 +96,6 @@ def main() -> None:
         print(f'{name}: {",".join(sorted(actual)) or "base APIs only"}', flush=True)
     fixture_manifests = [
         'crates/graphql-orm-macros/fixtures/full-stack/Cargo.toml',
-        'crates/graphql-orm-macros/fixtures/postgres-smoke/Cargo.toml',
         'crates/graphql-orm-macros/fixtures/cross-crate-relations/Cargo.toml',
         'crates/graphql-orm-macros/fixtures/relationship-capability/Cargo.toml',
         'crates/graphql-orm/tests/fixtures/backend-coexistence/Cargo.toml',

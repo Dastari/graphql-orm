@@ -16,9 +16,12 @@ backends are alternative configurations, so never use workspace
 
 Full release validation follows the stable compiler used by CI (Rust 1.97.1
 at the current release preparation). Compile-failure snapshots track that
-compiler's diagnostics, and the locked S3/Azure SDK lane requires Rust 1.94.1
-or newer. Rust 1.90.0 is the separate router minimum-version lane; it is not
-a workspace-wide compiler requirement.
+compiler's diagnostics. Rust 1.97 is the workspace minimum; the MSRV lane checks all workspace
+packages and explicit backend/provider graphs with 1.97.1.
+
+The UI snapshot lane requires `rust-src` so standard-library panic excerpts
+match across local and CI runs. The repository toolchain and ORM CI jobs install
+that component explicitly.
 
 ## Workflow dependencies and permissions
 

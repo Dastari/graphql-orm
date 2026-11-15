@@ -10,6 +10,10 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.146.0
+
+Declare Rust 1.97 as the minimum supported compiler; verify explicit feature graphs in CI.
+
 ## Unreleased - 0.145.0
 
 - **Added:** per-message structured entity references (#397). `SendAiMessageInput.references` takes a bounded list of `{kind, id}` pairs. A host `AiEntityReferenceRegistry` declares the accepted kinds and the `AiEntityReferenceResolver` hook; install it with `AiRuntimeBuilder::entity_references` and `OrmAiSessionService::with_entity_references`. Only the handle is stored. The hook is called again, with the principal acting at that moment, when a client reads the transcript and at every provider dispatch. A reference never grants access, an unknown kind is rejected, and a missing, denied, revoked, failed, oversized or over-cap reference becomes one fixed unavailable marker, so a reference is not an existence oracle. Resolved data reaches the model as a provenance-tagged envelope marked as data, not instructions. See [entity references](docs/entity-references.md).

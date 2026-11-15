@@ -20,7 +20,7 @@ on:
           - full
           - replay-scoped-positive-v1
       release_approval_reference:
-        description: Required scoped publication approval binding target_ref, profile and retained gaps
+        description: Same-repository merged PR or approved review URL binding target_ref, profile and retained gaps
         required: false
         type: string
       include_router_artifact:
@@ -29,7 +29,7 @@ on:
         default: false
         type: boolean
       router_distribution_approval:
-        description: Required approval/evidence reference when attaching the router binary
+        description: Same-repository merged PR or approved review URL authorizing router binary distribution
         required: false
         type: string
       prerelease:
@@ -113,6 +113,7 @@ jobs:
     permissions:
       contents: read
       actions: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -158,15 +159,14 @@ jobs:
             echo "release tag already exists: ${RELEASE_ID}" >&2
             exit 1
           fi
-          if [[ "${INCLUDE_ROUTER}" == "true" && -z "${ROUTER_APPROVAL}" ]]; then
-            echo "router_distribution_approval is required for a router binary" >&2
-            exit 1
+          if [[ "${INCLUDE_ROUTER}" == "true" ]]; then
+            python3 scripts/check-release-approval.py "${ROUTER_APPROVAL}"
           fi
           case "${VALIDATION_PROFILE}" in
             full) ;;
             replay-scoped-positive-v1)
               test "${INCLUDE_ROUTER}" = false
-              test -n "${RELEASE_APPROVAL}"
+              python3 scripts/check-release-approval.py "${RELEASE_APPROVAL}"
               python3 scripts/replay_release.py reuse --ref "${TARGET_REF}" \
                 --output "${RUNNER_TEMP}/scoped-admission.json"
               ;;
@@ -202,6 +202,7 @@ jobs:
         run: |
           python3 scripts/check-workflow-supply-chain.py
           python3 scripts/test-workflow-supply-chain.py
+          python3 scripts/test-release-approval.py
 
   neutral-packages:
     if: inputs.validation_profile == 'full'
@@ -272,7 +273,7 @@ jobs:
           ref: ${{ inputs.target_ref }}
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
         with:
-          components: clippy
+          components: clippy,rust-src
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Verify the ORM default suite, Clippy and Rustdoc
         run: |
@@ -295,7 +296,7 @@ jobs:
           ref: ${{ inputs.target_ref }}
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
         with:
-          components: clippy
+          components: clippy,rust-src
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Execute opt-in runtime GraphQL reads and mutations on owned backends
         env:
@@ -318,7 +319,7 @@ jobs:
           ref: ${{ inputs.target_ref }}
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
         with:
-          components: clippy
+          components: clippy,rust-src
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       # Fixture workspaces build into the shared target/fixtures directory used
       # by the fixture runner tests, never into the source tree. The default
@@ -568,10 +569,10 @@ jobs:
 
   router-msrv:
     if: inputs.validation_profile == 'full'
-    name: Router minimum supported Rust version
+    name: Workspace minimum supported Rust version
     needs: guard
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -579,12 +580,11 @@ jobs:
           ref: ${{ inputs.target_ref }}
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
-          toolchain: 1.90.0
+          toolchain: 1.97.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - name: Verify router minimum supported Rust version
+      - name: Verify workspace minimum supported Rust version
         run: |
-          cargo test -p graphql-orm-router-protocol --locked
-          cargo test -p graphql-orm-router --locked
+          scripts/check-msrv.sh
 
   schema-export:
     if: inputs.validation_profile == 'full'

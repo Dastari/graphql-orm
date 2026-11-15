@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-operation-catalog`
 
+Version 0.9.0 declares Rust 1.97 as the minimum supported compiler. CI verifies
+the workspace and explicit backend/provider graphs with Rust 1.97.1.
+
 Version `0.8.0` (**breaking Rust API**) adds the host-only `generated_input_members` contract to entity
 metadata. ORM/macros 0.149.0 supplies exact types for generated members that
 remain undisclosed. The sidecar is omitted from serde, Debug output, SDL and

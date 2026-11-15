@@ -10,6 +10,10 @@ supersedes: []
 
 # Migration Guide
 
+## 0.24.0
+
+**Action needed:** build with Rust 1.97 or newer. No data migration is needed.
+
 ## To 0.23.0: PostgreSQL mixed-case table restore
 
 When using the optional PostgreSQL ORM adapter, upgrade ORM/macros to 0.159.0

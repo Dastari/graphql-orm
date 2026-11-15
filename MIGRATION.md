@@ -10,6 +10,13 @@ supersedes: []
 
 # Migration Guide
 
+## 0.159.0 to 0.160.0: process and toolchain
+
+**Action needed:** use Rust 1.97 or newer (development/CI pin 1.97.1).
+No data migration is needed. Tiberius remains on the reviewed 0.12.4 revision.
+Release operators must supply a same-repository merged PR URL or approved
+review URL for scoped publication and router binary distribution.
+
 ## 0.158.0 to 0.159.0: PostgreSQL table-name case
 
 Upgrade ORM and macros together. Static PostgreSQL table references now agree

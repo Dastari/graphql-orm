@@ -70,9 +70,15 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): `graphql-orm` 0.159.0, `graphql-orm-macros` 0.159.0; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.15.0; `graphql-orm-backup` 0.23.0; `graphql-orm-ai-tool-profiles` 0.23.0; `graphql-orm-ai` 0.145.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
-
-No unreleased entries yet. Add new entries here.
+- **Action needed** — ORM/macros 0.160.0: build with Rust 1.97 or newer; no data migration. [migration](../../MIGRATION.md#01590-to-01600-process-and-toolchain)
+- **Action needed** — ORM/macros 0.160.0 release operations: scoped publication and router distribution require a same-repository merged PR or approved-review URL. [migration](../../MIGRATION.md#01590-to-01600-process-and-toolchain)
+- **Action needed** — Operation catalogue 0.9.0: build with Rust 1.97 or newer; serialized contracts are unchanged. [changelog](../../CHANGELOG.md#unreleased---ormmacros-01600)
+- **Action needed** — Storage 0.16.0: build with Rust 1.97 or newer; no data migration. [migration](../../crates/graphql-orm-storage/MIGRATION.md#0160)
+- **Action needed** — Backup 0.24.0: build with Rust 1.97 or newer; no data migration. [migration](../../crates/graphql-orm-backup/MIGRATION.md#0240)
+- **Action needed** — AI tool profiles 0.24.0: build with Rust 1.97 or newer; no data migration. [migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0240)
+- **Action needed** — AI 0.146.0: build with Rust 1.97 or newer; no data migration. [migration](../../crates/graphql-orm-ai/MIGRATION.md#01460)
+- **Action needed** — Router protocol 0.3.0: build with Rust 1.97 or newer; no data migration. [migration](../../crates/graphql-orm-router-protocol/MIGRATION.md#030)
+- **Action needed** — Router 0.16.0: build with Rust 1.97 or newer; no data migration. [migration](../../crates/graphql-orm-router/MIGRATION.md#0160)
 
 ### workspace-2026.11.15.6
 

@@ -10,6 +10,10 @@ supersedes: []
 
 # Migration Guide
 
+## 0.24.0
+
+**Action needed:** build with Rust 1.97 or newer. No data migration is needed.
+
 ## 0.22.0 to 0.23.0: explicit handwritten input disclosure
 
 Generated aggregate roots accept their canonical `groupLimit` or `group_limit`

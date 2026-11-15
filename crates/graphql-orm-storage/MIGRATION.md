@@ -10,6 +10,10 @@ supersedes: []
 
 # Migration Guide
 
+## 0.16.0
+
+**Action needed:** build with Rust 1.97 or newer. No data migration is needed.
+
 ## 0.14.0 to 0.15.0: bounded SMB destructor cleanup
 
 Update the storage requirement to 0.15.0 and refresh the consumer lockfile. No

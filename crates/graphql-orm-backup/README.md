@@ -10,6 +10,9 @@ supersedes: []
 
 # graphql-orm-backup
 
+Version 0.24.0 declares Rust 1.97 as the minimum supported compiler. CI verifies
+the workspace and explicit backend/provider graphs with Rust 1.97.1.
+
 Version 0.23.0 fixes PostgreSQL ORM restore for mixed-case entity table names.
 The optional ORM adapter uses ORM 0.159.0's shared table rendering for target
 clear and emptiness checks. Existing manifests and tables need no conversion.

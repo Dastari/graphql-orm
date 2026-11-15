@@ -10,6 +10,10 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.16.0
+
+Declare Rust 1.97 as the minimum supported compiler; verify explicit feature graphs in CI.
+
 ## 0.15.4 (unreleased)
 
 - Tests: the wire-test WebSocket client completes the closing handshake,

@@ -42,9 +42,10 @@ and its subsequent default-alteration/unsupported-change sections. Review actual
 physical state and guarded repair versions; do not rewrite migration history to
 hide an ineffective earlier alteration.
 
-The updated S3 SDK requires Rust 1.94.1 or later for S3-enabled builds; validate
-the application's selected provider toolchain independently of router-only MSRV
-checks. The storage migration guide records the owning dependency transition.
+Build workspace packages with Rust 1.97 or later (CI pins 1.97.1). Validate
+the application's selected provider graph as well; workspace MSRV checks do not
+qualify custom dependency selections. The storage migration guide records the
+earlier SDK transition.
 
 Hosts implementing the router's `AuthenticationProvider` must also migrate
 custom `current_time` overrides to return `Result<SystemTime, AuthenticationError>`.

@@ -14,6 +14,23 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.160.0
+
+- The operation catalogue 0.9.0 and companion package releases declare the same
+  minimum compiler; serialized contracts and stored data remain unchanged.
+- Refresh eight root-collision diagnostic snapshots for the pinned Rust 1.97.1
+  panic-display excerpt and require `rust-src` in the toolchain/ORM CI setup; collision rejection and error messages are unchanged.
+- Declare Rust 1.97 consistently across published packages, pin development to
+  1.97.1 and verify workspace/backend/provider MSRV graphs in CI (#501).
+- Retire the obsolete macros postgres-smoke fixture and its floating PostgreSQL
+  image (#684; removes its #615 pin only).
+- Validate scoped-release and router-binary approval URLs through the GitHub API
+  using the guard job token with read-only PR permission (#499).
+- Retain Tiberius 0.12.4: unpatched upstream 0.13.0 cannot compile the existing
+  query-notification API. See the SQL Server reference for exact errors (#516).
+- Record dated advisory exceptions, release/changelog policy, generator split
+  and security property-testing scope (#504, #505, #513).
+
 ## Unreleased - ORM/macros 0.159.0
 
 - Fix PostgreSQL static entities with bare mixed-case table names (#716). Render quoted table references with the historical PostgreSQL folding of bare table components, and resolve declared names during introspection. Create/alter/index/trigger/RLS statements, reads and writes, catalog checks and search helpers address the same table while metadata and helper digests remain unchanged. Existing folded installs need no migration; lower-case names are unchanged. See [migration guidance](MIGRATION.md#01580-to-01590-postgresql-table-name-case).

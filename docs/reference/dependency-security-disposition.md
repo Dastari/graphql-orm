@@ -27,6 +27,29 @@ publication gates; this reference creates no additional approval process.
 Application rollout steps belong to the
 [security upgrade guide](../how-to/upgrade-security-remediation.md).
 
+
+## Dated third-party advisory exceptions
+
+Accepted on **2026-11-15** under the maintainer policy: minor or theoretical
+advisories are accepted; never fork or patch a third-party crate; re-check when
+upstream ships a fix. These exceptions retain the path conditions below and
+the machine-readable review expiry; they do not authorize new private-key or
+untrusted-parser uses. A serious, actually reachable vulnerability requires
+maintainer review. Existing vendor/fork history is not permission for new patches.
+
+| Accepted date | Advisory/package/version | One-line reason |
+| --- | --- | --- |
+| 2026-11-15 | `RUSTSEC-2023-0071:rsa:0.9.10` | JWT verification/signing and optional SMB NTLM paths do not expose a private RSA decryption oracle; no fixed compatible release. Review crypto API/key reuse changes. |
+| 2026-11-15 | `RUSTSEC-2023-0089:atomic-polyfill:1.0.3` | Optional heapless/rstar spatial compatibility bridge; obsolete upstream owner. Retained in fixture/root resolution, not a claim of selected runtime reachability. |
+| 2026-11-15 | `RUSTSEC-2024-0449:unsafe-libyaml:0.2.11` | Hive telemetry/VRL serde_yaml owner is unmaintained; replacement crosses owning dependency/API boundaries. No universal unreachable claim. |
+| 2026-11-15 | `RUSTSEC-2026-0194:quick-xml:0.39.4` | Hive object_store 0.13 reader requires quick-xml 0.39; fixed owner 0.14 crosses its range. Typed router config excludes storage/credential XML initialization; host extensions invalidate this condition. |
+| 2026-11-15 | `RUSTSEC-2026-0195:quick-xml:0.39.4` | Hive object_store 0.13 reader requires quick-xml 0.39; fixed owner 0.14 crosses its range. Typed router config excludes storage/credential XML initialization; host extensions invalidate this condition. |
+| 2026-11-15 | `RUSTSEC-2026-0253:lru:0.16.3` | async-graphql/libdd retain incompatible old ranges; fixed lru starts at 0.18.2. Generated DataLoaders use NoCache; router does not initialize Datadog. Generic host caches remain exposed to panicking-key destructors. |
+| 2026-11-15 | `RUSTSEC-2026-0253:lru:0.16.4` | async-graphql/libdd retain incompatible old ranges; fixed lru starts at 0.18.2. Generated DataLoaders use NoCache; router does not initialize Datadog. Generic host caches remain exposed to panicking-key destructors. |
+| 2026-11-15 | `RUSTSEC-2026-0387:crypto-bigint:0.5.5` | Pinned agql-auth/jsonwebtoken RustCrypto elliptic-curve path; no compatible fixed release. Existing owner acceptance excludes private EC operations; auth pin move requires maintainer approval. |
+| 2026-11-15 | `RUSTSEC-2026-0441:pin-utils:0.1.0` | aws-smithy-runtime (S3), sspi -> async-dnssd (optional SMB), and Hive reqwest-retry -> wasmtimer retain the unmaintained utility. Requires owning upstream migrations; maintenance status is not treated as a vulnerability exclusion. |
+| 2026-11-15 | `RUSTSEC-2026-0459:libsqlite3-sys:0.30.1` | sqlx 0.8.6 -> sqlx-sqlite -> libsqlite3-sys 0.30.1. Fixed 0.39 requires an incompatible SQLx owner migration and backend/API review. SQLite accepts application SQL/data; no unreachability exemption claimed. |
+
 ## Owner-accepted crypto-bigint 0.5.5 disposition
 
 **RUSTSEC-2026-0387; scope: `crypto-bigint` version `0.5.5` only.**
@@ -239,7 +262,7 @@ invalidate the corresponding condition immediately, before the scheduled review.
 ## Automated review on 2026-11-14
 
 CI and full release validation install cargo-audit 0.22.2 with its locked build
-graph and scan all eleven tracked lockfiles against the current RustSec database.
+graph and scan all tracked lockfiles against the current RustSec database.
 Raw JSON reports, including retained findings and the database revision, are
 uploaded even on scan failure. New advisory IDs, affected package versions,
 maintenance warnings and yanks fail the gate. Scanner execution/parse failures
@@ -247,8 +270,7 @@ also fail. No severity threshold or blanket ignore applies.
 
 The single machine-readable [disposition file](../../dependency-audit-dispositions.json)
 contains exact advisory/package/version identities, reasons and expiry dates. Changing
-or renewing it requires ordinary repository review. These are technical dispositions,
-not new assertions of owner risk acceptance. The existing crypto-bigint owner acceptance
+or renewing it requires ordinary repository review. The dated exceptions above record the maintainer acceptance policy. The existing crypto-bigint owner acceptance
 above remains limited to its original conditions. CI warns during the fourteen days
 before expiry, fails after expiry, and fails on identities absent from every tracked
 lock. Remove obsolete entries during review; follow the [release review
