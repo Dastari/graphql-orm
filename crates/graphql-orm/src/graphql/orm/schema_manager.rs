@@ -328,6 +328,17 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
     {
         ensure_planning_policy(self.policy(), "plan schema target")?;
         target.schema.validate_physical_contract()?;
+        // The plan would install the change journal recorder. Refuse a target
+        // in which the database changes rows the journal cannot record.
+        if cfg!(feature = "change-journal")
+            && B::DIALECT == super::DatabaseBackend::Postgres
+            && matches!(
+                self.policy(),
+                SchemaPolicy::Managed | SchemaPolicy::PlanOnly
+            )
+        {
+            super::rls::refuse_change_journal_cascade_gaps(&target.schema)?;
+        }
         let version = version.into();
         let description = description.into();
         let current = B::introspect_schema_including(
@@ -345,17 +356,6 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
             &target.schema,
         )?;
         refuse_taken_search_helpers::<B>(self.database.pool(), &migration).await?;
-        // The plan would install the change journal recorder. Refuse a target
-        // in which the database changes rows the journal cannot record.
-        if cfg!(feature = "change-journal")
-            && B::DIALECT == super::DatabaseBackend::Postgres
-            && matches!(
-                self.policy(),
-                SchemaPolicy::Managed | SchemaPolicy::PlanOnly
-            )
-        {
-            super::rls::refuse_change_journal_cascade_gaps(&target.schema)?;
-        }
         let rls = build_schema_target_rls_plan(B::DIALECT, self.policy(), target);
         let mut statements = migration.statements.clone();
         statements.extend(rls.statements.clone());

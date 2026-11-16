@@ -339,7 +339,8 @@ async fn a_cascade_into_a_table_without_a_recorder_is_refused()
         .expect_err("the plan is refused");
     assert_eq!(
         ChangeJournalCascadeGap::from_error(&refused),
-        Some(&gaps[0])
+        Some(&gaps[0]),
+        "{refused}"
     );
     let reported = journal_errors(&database.schema().validate_target(&target).await?);
     assert!(
