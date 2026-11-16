@@ -66,6 +66,12 @@ under a crate add package-local invariants.
   changes unless compatibility requires them together.
 - Update package changelogs, migration notes, versions, and examples according
   to each crate's local release rules.
+- Every release-bearing PR adds or updates its entry in
+  `docs/reference/upgrade-guide.md` under `### Unreleased`: one line per
+  host-facing change, marked **Action needed** or **No action**, naming the
+  package version and linking the detailed `MIGRATION.md` or `CHANGELOG.md`
+  section. After a workspace release is published, move its entries under a
+  heading for the new workspace tag with the published package versions.
 
 ## Documentation authority
 
