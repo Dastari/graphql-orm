@@ -2,13 +2,13 @@
 set -euo pipefail
 
 if [[ $# -gt 1 ]]; then
-  echo "usage: scripts/run-owned-database-lanes.sh [sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|mssql|runtime-live|runtime-search-catalog|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|changed-subscriptions|bulk-write-targets|query-loader-batch|page-limit-contract|all]" >&2
+  echo "usage: scripts/run-owned-database-lanes.sh [sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|mssql|runtime-live|runtime-search-catalog|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|changed-subscriptions|bulk-write-targets|query-loader-batch|page-limit-contract|callback-errors|all]" >&2
   exit 2
 fi
 
 lane=${1:-all}
 case "${lane}" in
-  sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|mssql|runtime-live|runtime-search-catalog|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|changed-subscriptions|bulk-write-targets|query-loader-batch|page-limit-contract|all) ;;
+  sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|mssql|runtime-live|runtime-search-catalog|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|changed-subscriptions|bulk-write-targets|query-loader-batch|page-limit-contract|callback-errors|all) ;;
   *)
     echo "owned-database-lanes: unsupported lane: ${lane}" >&2
     exit 2
@@ -230,6 +230,13 @@ case "${lane}" in
       cargo test -p graphql-orm --locked --no-default-features --features "${backend}" \
         --test query_loader_batch --test order_aggregate_visibility -- --include-ignored --test-threads=1
     done
+    ;;
+  callback-errors)
+    cargo test -p graphql-orm --locked --no-default-features --features sqlite \
+      --test mutation_hook_public_errors --test sqlite_compat --test keyset_pagination
+    cargo test -p graphql-orm --locked --no-default-features --features postgres \
+      --test mutation_hook_public_errors --test postgres_compat --test keyset_pagination \
+      -- --include-ignored --test-threads=1
     ;;
   page-limit-contract)
     for backend in sqlite postgres mssql; do
