@@ -1334,7 +1334,7 @@ where
         }
         let limit = db
             .client_pagination_config()
-            .with_read_maximum(base.max_limit)
+            .with_read_maximum(self.max_limit)
             .resolve_client_page(
                 Some(&PageInput {
                     limit: page.limit,
