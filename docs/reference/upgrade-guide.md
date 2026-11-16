@@ -22,6 +22,34 @@ each change requires (see
 This guide is an index into them. Each summary is a short extract from the
 linked section. Read the linked section before you act on an entry.
 
+## Breaking release (unreleased): ORM and macros 0.160.0
+
+Upgrade runtime and macros together. The integration release number will be
+assigned when the breaking batch reaches main. See the authoritative
+[breaking migration steps](../../MIGRATION.md#breaking-release-unreleased).
+
+- **Action needed — #667 / #674:** Declare `schema_roots!(max_page_limit: N)`
+  when the database maximum differs from 100. Schema construction refuses a
+  mismatched or unbounded database. Internal repository, transaction and keyset
+  reads above their maximum fail with `PAGE_LIMIT_EXCEEDED`; page with cursors
+  or raise the maximum for one trusted read with `with_max_limit(n)`.
+- **Action needed — #528 (4):** Runtime `RecordVersion` and integer live keys
+  use decimal strings and `RuntimeInt64` by default. Update clients and regenerate
+  descriptors and approvals. `with_legacy_int_identities()` allows transition.
+- **Action needed — #666 (A):** To adopt key-only delete notifications, add
+  `#[graphql_entity(key_only_deletes)]`. Only exact `Key` / `Keys` subscribers
+  receive them; primary-key read policies make this attribute a compile error.
+  Review the key-existence disclosure described in the migration steps.
+- **Action needed — #445:** Replace the removed policy-free
+  `graphql::orm::RelationLoader` preload methods with generated relation
+  resolvers or authorized repository / transaction queries.
+- **Action needed — #682 (A):** Give deliberate callback refusals public codes.
+  Uncoded text now becomes `INTERNAL_ERROR` with the default message. Hosts
+  may explicitly opt in through `expose_uncoded_callback_messages(true)`.
+
+The #485 changelog correction is included in PR #733; nested router directive
+enforcement remains tracked separately in #729.
+
 ## How to upgrade across many releases
 
 Choose the target workspace release, then work in this order.

@@ -14,7 +14,7 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - breaking batch (ORM/macros 0.162.0 placeholder)
+## Unreleased - breaking batch (ORM/macros 0.160.0 placeholder)
 
 - ORM and macros, **breaking**; see the [migration guide](MIGRATION.md#breaking-release-unreleased). The release number is assigned when the batch merges.
   - **Breaking:** every `schema_roots!` schema has a compile-time maximum page limit (`max_page_limit: N`, 100 when omitted). The schema builders panic for a `Database` that applies another maximum or none, so the semantic catalogue and the relation complexity estimate always agree with the database ([#674](https://github.com/Dastari/graphql-orm/issues/674), [#667](https://github.com/Dastari/graphql-orm/issues/667)).

@@ -10,7 +10,7 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.162.0 (placeholder for the breaking batch) fixes each schema's
+Version 0.160.0 (placeholder for the breaking batch) fixes each schema's
 maximum page limit at compile time (`schema_roots!(max_page_limit: N)`, 100
 when omitted) and refuses a `Database` configured differently; host-side
 keyset pages refuse a limit above the maximum instead of returning fewer
