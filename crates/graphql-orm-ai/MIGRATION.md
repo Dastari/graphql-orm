@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## ORM/macros 0.165.0: guarded dependent deletes
+## ORM/macros 0.166.0: guarded dependent deletes
 
 **No action** for unchanged hosts. No data or schema migration is needed.
 For the opt-in AI dependent-effect policy, implement the authenticated

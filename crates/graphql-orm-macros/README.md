@@ -10,11 +10,16 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.165.0 adds opt-in transaction-bound dependent-effect verification.
+Version 0.166.0 adds opt-in transaction-bound dependent-effect verification.
 `DependentDeleteGuard` compares declarations with the introspected delete plan
 and enforces dependent row limits before writes. Generated physical opt-out and
 bulk deletes refuse guarded requests. Unchanged hosts keep existing behavior.
-See the [migration guide](../../MIGRATION.md#ormmacros-01650-guarded-dependent-deletes).
+See the [migration guide](../../MIGRATION.md#ormmacros-01660-guarded-dependent-deletes).
+
+Version 0.165.0 preserves the stored value of an optional field when its
+write policy denies an upsert update and the host opts to ignore that denial.
+Recompile entities with aligned ORM/macros versions. See the
+[migration guide](../../MIGRATION.md#01640-to-01650-atomic-restore-search-reset-and-kept-values-on-ignored-denials).
 
 Version 0.164.0 adds opt-in contract settings and one stable code. A GraphQL
 page limit above the maximum can be refused with `PAGE_LIMIT_EXCEEDED` instead

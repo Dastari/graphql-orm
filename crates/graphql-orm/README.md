@@ -10,11 +10,19 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.165.0 adds opt-in transaction-bound dependent-effect verification.
+Version 0.166.0 adds opt-in transaction-bound dependent-effect verification.
 `DependentDeleteGuard` compares declarations with the introspected delete plan
 and enforces dependent row limits before writes. Generated physical opt-out and
 bulk deletes refuse guarded requests. Unchanged hosts keep existing behavior.
-See the [migration guide](../../MIGRATION.md#ormmacros-01650-guarded-dependent-deletes).
+See the [migration guide](../../MIGRATION.md#ormmacros-01660-guarded-dependent-deletes).
+
+Version 0.165.0 makes snapshot restore atomic on SQLite and PostgreSQL,
+resets restored runtime search indexes, and preserves denied fields on upsert.
+MSSQL hosts must install `dbo.__graphql_orm_restore_marker` with
+`MssqlPool::install_restore_marker()` and grant runtime roles SELECT before
+serving ORM work. Missing or unreadable restore state fails closed with
+`RestoreStateUnavailable`, whose reason names the fix. See the
+[migration guide](../../MIGRATION.md#01640-to-01650-atomic-restore-search-reset-and-kept-values-on-ignored-denials).
 
 Version 0.164.0 adds opt-in contract settings and one stable code. A GraphQL
 page limit above the maximum can be refused with `PAGE_LIMIT_EXCEEDED` instead

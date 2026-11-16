@@ -3,7 +3,7 @@ title: Full-text search on runtime collections
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-04
+last_reviewed: 2026-11-15
 review_by: 2027-04-30
 supersedes: []
 ---
@@ -241,10 +241,12 @@ a prefix therefore keep separate documents.
 
 ## Backup and restore
 
-graphql-orm-backup snapshots only the static entities the host passes to it.
-- **Not in its snapshots:** runtime collection tables and every search table: `__graphql_orm_search_metadata`, `__graphql_orm_fts_<table>` and `__graphql_orm_search_<table>`. A graphql-orm-backup restore therefore never writes a runtime index or its readiness.
+graphql-orm-backup snapshots the tables whose descriptors the host passes to it.
+- **Never in its snapshots:** the search tables `__graphql_orm_search_metadata`, `__graphql_orm_fts_<table>` and `__graphql_orm_search_<table>`. A restore never writes search documents; it only resets a restored table's runtime index, as described below.
 - **Whole-database copies** taken from one consistent snapshot (`pg_dump`, the SQLite backup API) contain rows, documents and readiness from the same instant, so a restored index is `ready` only with documents that match its rows.
-- **Restoring runtime rows any other way**, for example a row-level import into a database whose index is already `ready`, does not update documents or reset readiness. Until [#280](https://github.com/Dastari/graphql-orm/issues/280) adds a reset, rebuild the index explicitly: migrate the collection without search, then with search again, so the index is recreated `building` and backfilled.
+- **A snapshot restore through `restore_backup_rows`** (which a host can give descriptors of runtime collection tables) resets the index of every restored table in the restore's own transaction: the documents are deleted and readiness becomes `building`. Search is refused with `search_index_not_ready` until `backfill_runtime_search` completes.
+- **Restoring runtime rows any other way**, for example a row-level import into a database whose index is already `ready`, does not update documents or reset readiness. Call `SchemaManager::reset_runtime_search(schema, collection)` afterwards, then `backfill_runtime_search`. The reset deletes the collection's documents and sets readiness to `building` in one transaction; on an index that is already `building` it restarts the backfill from the first row.
+- **Static search entities** do not track readiness. A restore inserts their rows without rebuilding their search documents; rebuild those with the entity's own write path or a whole-database copy.
 
 ## Not included
 

@@ -140,7 +140,10 @@ pub use object_index::{BackupObjectIndex, BackupObjectRef};
 #[cfg(feature = "orm")]
 pub use orm::{OrmBackupAdapter, OrmBackupObjectIndex, OrmObjectIndexColumns};
 pub use planner::{FullBackupPlan, plan_full_backup};
-pub use prune::{DeleteSnapshotResult, KeepPolicy, PruneResult, delete_snapshot, prune};
+pub use prune::{
+    DeleteSnapshotResult, DeletedSnapshotLog, KeepPolicy, PruneResult, SnapshotDeletionObserver,
+    delete_snapshot, delete_snapshot_observed, prune, prune_observed,
+};
 pub use repository::{BackupRepository, BlobStoreBackupRepository};
 pub use restore::{
     BlobStoreRestoreObjectSink, RestoreContext, RestoreFailurePhase, RestoreFailureProgress,

@@ -8,6 +8,76 @@ use crate::{
     manifest::required_authenticator, snapshot_manifest_key,
 };
 
+/// Told about every snapshot [`prune_observed`] and
+/// [`delete_snapshot_observed`] delete, before they delete it.
+///
+/// This is how a host keeps its snapshot records (see
+/// [`crate::ManifestAuthenticator::with_revoked_snapshots`] and
+/// [`crate::ManifestAuthenticator::with_known_snapshots`]) complete. The id
+/// arrives before the snapshot's first blob is removed, so whatever happens
+/// next (a later deletion that fails, a cancelled call, a repository lock
+/// that cannot be released) the host has already recorded every snapshot
+/// that was deleted. It may also have recorded one whose deletion then
+/// failed; revoking a snapshot that is still stored is safe, and a later
+/// prune removes it.
+#[async_trait::async_trait]
+pub trait SnapshotDeletionObserver: Send + Sync {
+    /// Called under the repository lock, immediately before the blobs of
+    /// `snapshot_id` are deleted. Make the id durable before returning.
+    ///
+    /// # Errors
+    ///
+    /// An error aborts the operation before this snapshot is touched.
+    async fn snapshot_will_be_deleted(&self, snapshot_id: Uuid) -> Result<(), BackupError>;
+}
+
+/// A [`SnapshotDeletionObserver`] that collects the ids in memory, for hosts
+/// that persist them right after the call returns, whether it succeeded or
+/// failed. Hosts that must survive a crash during the call implement the
+/// trait and persist each id as it arrives.
+#[derive(Debug, Default)]
+pub struct DeletedSnapshotLog {
+    snapshot_ids: std::sync::Mutex<Vec<Uuid>>,
+}
+
+impl DeletedSnapshotLog {
+    /// An empty log.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The ids reported so far, in the order they were reported.
+    #[must_use]
+    pub fn snapshot_ids(&self) -> Vec<Uuid> {
+        self.snapshot_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl SnapshotDeletionObserver for DeletedSnapshotLog {
+    async fn snapshot_will_be_deleted(&self, snapshot_id: Uuid) -> Result<(), BackupError> {
+        self.snapshot_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(snapshot_id);
+        Ok(())
+    }
+}
+
+/// Observer of the unobserved entry points.
+struct Unobserved;
+
+#[async_trait::async_trait]
+impl SnapshotDeletionObserver for Unobserved {
+    async fn snapshot_will_be_deleted(&self, _: Uuid) -> Result<(), BackupError> {
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// Retention policy for repository pruning.
 pub struct KeepPolicy {
@@ -72,6 +142,25 @@ pub async fn prune(
     repository: &dyn BackupRepository,
     keep_policy: &KeepPolicy,
 ) -> Result<PruneResult, BackupError> {
+    prune_observed(repository, keep_policy, &Unobserved).await
+}
+
+/// [`prune`], reporting each expired snapshot to `observer` before deleting
+/// it.
+///
+/// Use this to keep the host's snapshot records: the observer has every
+/// deleted snapshot id whether the call returns `Ok`, fails partway, or
+/// fails only to release the repository lock. Expired snapshots are deleted
+/// in ascending id order.
+///
+/// # Errors
+///
+/// As [`prune`], and any error the observer returns.
+pub async fn prune_observed(
+    repository: &dyn BackupRepository,
+    keep_policy: &KeepPolicy,
+    observer: &dyn SnapshotDeletionObserver,
+) -> Result<PruneResult, BackupError> {
     if keep_policy.keep_last == 0 {
         return Err(BackupError::InvalidRetentionPolicy {
             reason: "keep_last must be at least 1; 0 would delete every snapshot".to_string(),
@@ -80,13 +169,14 @@ pub async fn prune(
     // Refuse before the lock write: without a key no manifest can be trusted.
     required_authenticator(repository)?;
     let lock = RepositoryLock::acquire_for(repository, &keep_policy.lock, "prune").await?;
-    let result = prune_inner(repository, keep_policy).await;
+    let result = prune_inner(repository, keep_policy, observer).await;
     lock.finish(result, |_| None).await
 }
 
 async fn prune_inner(
     repository: &dyn BackupRepository,
     keep_policy: &KeepPolicy,
+    observer: &dyn SnapshotDeletionObserver,
 ) -> Result<PruneResult, BackupError> {
     let mut manifests = load_all_manifests(repository).await?;
     ensure_listed_parents(repository, &manifests).await?;
@@ -117,13 +207,16 @@ async fn prune_inner(
     }
 
     let all_ids = manifest_ids(&manifests);
-    let expired_ids = all_ids
+    let mut expired_ids = all_ids
         .difference(&retained_ids)
         .copied()
         .collect::<Vec<_>>();
+    expired_ids.sort();
 
     let mut deleted_blobs = 0_usize;
     for snapshot_id in &expired_ids {
+        // Record first, then delete: a failure below must not lose the id.
+        observer.snapshot_will_be_deleted(*snapshot_id).await?;
         for key in snapshot_blob_keys(repository, *snapshot_id).await? {
             repository.delete_blob(&key).await?;
             deleted_blobs += 1;
@@ -198,6 +291,13 @@ pub struct DeleteSnapshotResult {
 /// snapshot or any object is deleted, and the manifest set is checked again
 /// before the object sweep.
 ///
+/// A snapshot the host's snapshot records do not admit (see
+/// [`crate::ManifestAuthenticator::with_revoked_snapshots`]) can still be
+/// deleted, which is how a deleted snapshot that was put back into the
+/// repository is removed: its own manifest is then not read or trusted, and
+/// every other manifest must still verify. [`prune`] refuses to run while
+/// such a snapshot is listed.
+///
 /// # Errors
 ///
 /// Returns [`BackupError`] if the snapshot is missing, another manifest depends
@@ -208,24 +308,48 @@ pub async fn delete_snapshot(
     snapshot_id: Uuid,
     lock_options: &RepositoryLockOptions,
 ) -> Result<DeleteSnapshotResult, BackupError> {
+    delete_snapshot_observed(repository, snapshot_id, lock_options, &Unobserved).await
+}
+
+/// [`delete_snapshot`], reporting the snapshot to `observer` after every
+/// check has passed and before its first blob is deleted. See
+/// [`prune_observed`].
+///
+/// # Errors
+///
+/// As [`delete_snapshot`], and any error the observer returns.
+pub async fn delete_snapshot_observed(
+    repository: &dyn BackupRepository,
+    snapshot_id: Uuid,
+    lock_options: &RepositoryLockOptions,
+    observer: &dyn SnapshotDeletionObserver,
+) -> Result<DeleteSnapshotResult, BackupError> {
     required_authenticator(repository)?;
     let lock = RepositoryLock::acquire_for(repository, lock_options, "delete_snapshot").await?;
-    let result = delete_snapshot_inner(repository, snapshot_id).await;
+    let result = delete_snapshot_inner(repository, snapshot_id, observer).await;
     lock.finish(result, |_| None).await
 }
 
 async fn delete_snapshot_inner(
     repository: &dyn BackupRepository,
     snapshot_id: Uuid,
+    observer: &dyn SnapshotDeletionObserver,
 ) -> Result<DeleteSnapshotResult, BackupError> {
-    let manifests = load_all_manifests(repository).await?;
+    // A snapshot the host's records refuse is deleted without reading its
+    // manifest, which is not trusted. Its payload keys come from the listing.
+    let unadmitted = !required_authenticator(repository)?.admits_snapshot(snapshot_id);
+    let listed_ids = list_manifest_ids(repository).await?;
+    let mut manifests = Vec::new();
+    for listed in &listed_ids {
+        if unadmitted && *listed == snapshot_id {
+            continue;
+        }
+        manifests.push(load_manifest(repository, *listed).await?);
+    }
     ensure_listed_parents(repository, &manifests).await?;
     // A listing that hid a child would pass the dependency check below.
-    ensure_stable_listing(repository, &manifest_ids(&manifests)).await?;
-    if !manifests
-        .iter()
-        .any(|manifest| manifest.snapshot_id == snapshot_id)
-    {
+    ensure_stable_listing(repository, &listed_ids).await?;
+    if !listed_ids.contains(&snapshot_id) {
         return Err(BackupError::MissingBlob {
             key: snapshot_manifest_key(snapshot_id),
         });
@@ -242,6 +366,8 @@ async fn delete_snapshot_inner(
         });
     }
 
+    // Record first, then delete: a failure below must not lose the id.
+    observer.snapshot_will_be_deleted(snapshot_id).await?;
     let mut deleted_blobs = 0_usize;
     for key in snapshot_blob_keys(repository, snapshot_id).await? {
         repository.delete_blob(&key).await?;
@@ -270,7 +396,7 @@ async fn delete_snapshot_inner(
 
     Ok(DeleteSnapshotResult {
         deleted_blobs,
-        retained_snapshots: manifests.len() - 1,
+        retained_snapshots: remaining_ids.len(),
     })
 }
 
