@@ -256,7 +256,7 @@ pub(super) async fn open(
     Ok(plaintext)
 }
 fn key_too_large() -> RuntimeGraphqlError {
-    RuntimeGraphqlError::new(crate::graphql::orm::RuntimeQueryErrorCode::CursorKeyTooLarge.as_str())
+    RuntimeGraphqlError::new("cursor_key_too_large")
 }
 pub(super) async fn seal(
     provider: &dyn RuntimeCursorProtector,

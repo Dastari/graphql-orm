@@ -68,6 +68,12 @@ changelog to decide.
 
 ### Unreleased
 
+- **No action** — ORM/macros 0.163.0: opt-in page-limit refusal and declared maxima with schema-local complexity bounds; existing `PaginationConfig` literals remain valid. See [migration details](../../MIGRATION.md#01620-to-01630-page-limits-64-bit-identities-cursor-keys-and-subscription-lag).
+- **No action** — ORM/macros 0.163.0: per-read keyset and authorized-scan maxima through `EntityQuery::with_max_limit`. See [migration details](../../MIGRATION.md#01620-to-01630-page-limits-64-bit-identities-cursor-keys-and-subscription-lag).
+- **No action** — ORM/macros 0.163.0: opt-in runtime 64-bit identity strings. See [migration details](../../MIGRATION.md#01620-to-01630-page-limits-64-bit-identities-cursor-keys-and-subscription-lag).
+- **No action** — ORM/macros 0.163.0: cursor-key refusal details preserve exhaustive error-enum matches. See [migration details](../../MIGRATION.md#01620-to-01630-page-limits-64-bit-identities-cursor-keys-and-subscription-lag).
+- **Action needed** — ORM/macros 0.163.0: clients expecting immediate subscription lag termination must allow termination at the next authority tick. See [migration details](../../MIGRATION.md#01620-to-01630-page-limits-64-bit-identities-cursor-keys-and-subscription-lag).
+
 Changes merged to main after the latest workspace release.
 
 Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.162.0, `graphql-orm-macros` 0.162.0**; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.15.0; `graphql-orm-backup` 0.23.0; `graphql-orm-ai-tool-profiles` 0.23.0; `graphql-orm-ai` 0.145.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
@@ -76,13 +82,12 @@ Versions on main (bold where they differ from the latest release): **`graphql-or
 #### Breaking integration release (version provisional)
 
 - **Action needed** — ORM/macros 0.160.0: declare the schema page maximum and migrate oversized internal reads to exact-or-refused paging (#667/#674). [Migration](../../MIGRATION.md#breaking-release-unreleased)
-- **Action needed** — ORM/macros 0.160.0: add `refuse_oversized_limit` to full `PaginationConfig` struct literals, or use `..Default::default()`. [Migration](../../MIGRATION.md#breaking-release-unreleased)
 - **Action needed** — ORM/macros 0.160.0: handle `CursorKeyTooLarge` in exhaustive runtime query/relation error matches (#580). [Migration](../../MIGRATION.md#breaking-release-unreleased)
 - **Action needed** — ORM/macros 0.160.0: use decimal strings for runtime `RecordVersion` and integer live keys, and regenerate descriptors (#528, item 4). [Migration](../../MIGRATION.md#breaking-release-unreleased)
 - **Action needed** — ORM/macros 0.160.0: review key-existence disclosure before adopting key-only deletes; only exact-key subscribers qualify and primary-key read policies are refused (#666). [Migration](../../MIGRATION.md#breaking-release-unreleased)
 - **Action needed** — ORM/macros 0.160.0: replace policy-free relation preload methods with authorized queries (#445). [Migration](../../MIGRATION.md#breaking-release-unreleased)
 - **Action needed** — ORM/macros 0.160.0: assign public codes to deliberate callback refusals, or explicitly opt in to uncoded text exposure (#682). [Migration](../../MIGRATION.md#breaking-release-unreleased)
-- **No action** — ORM/macros 0.161.0, PR #733: #485 corrects the nested router directive claim; enforcement remains separately tracked in #729. [Changelog](../../CHANGELOG.md#unreleased---ormmacros-01610)
+- **No action** — ORM/macros 0.163.0, PR #733: #485 corrects the nested router directive claim; enforcement remains separately tracked in #729. [Changelog](../../CHANGELOG.md#unreleased---ormmacros-01630)
 
 ### workspace-2026.11.15.6
 

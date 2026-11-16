@@ -234,7 +234,7 @@ computes page counts from `totalCount` and the size it asked for then gets
 them wrong, and cannot tell a reduced page from a last page.
 
 Set `DatabaseBuilder::refuse_oversized_page_limit(true)` (or
-`PaginationConfig::with_oversized_limit_refusal(true)`) to refuse instead.
+`Database::with_oversized_page_limit_refusal(true)`) to refuse instead.
 An explicit `page.limit` on a list root, to-many relation or search
 connection, or an explicit `limit`, `first` or `last` on a keyset connection,
 above the maximum then fails with `PAGE_LIMIT_EXCEEDED` before any row is
@@ -242,7 +242,7 @@ read. The message names the limit asked for and the maximum. A limit at the
 maximum and an omitted limit are served as before. The setting is off by
 default, so existing responses do not change. A custom resolver that takes a
 client `PageInput` should resolve it with
-`PaginationConfig::resolve_client_page` so the setting covers it too.
+`Database::client_pagination_config().resolve_client_page` so the setting covers it too.
 
 A schema's maximum page limit is fixed at compile time:
 `schema_roots!(max_page_limit: N, ...)`, or 100 when the declaration is
@@ -251,8 +251,8 @@ semantic catalogue publishes it as the ceiling of every pageable relationship
 list, the relation complexity estimate caps a requested page at it, and
 building the schema panics when the `Database` applies a different maximum or
 none. The published bound and the estimate therefore always agree with what
-the database applies. With several schemas in one process the complexity
-estimate uses the largest of their maxima.
+the database applies. With several schemas in one process each complexity
+estimate uses its own schema data; bounds are never shared between schemas.
 
 Rust repository reads are separate: trusted code gets the rows it asked for
 or an error. `limit(n)` on a repository or transaction builder is exact or

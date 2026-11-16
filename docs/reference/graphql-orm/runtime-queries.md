@@ -210,10 +210,10 @@ the host's authenticated encryption by default.
 
 A cursor carries the order values of its row. When they do not fit
 `max_cursor_bytes` (16 KiB by default), usually because of one long stored
-string sort key, the page is refused with `cursor_key_too_large`
-(`RuntimeQueryErrorCode::CursorKeyTooLarge`, and
-`RuntimeRelationErrorCode::CursorKeyTooLarge` for a relation layer) instead of
-the request's `resource_limit`. Every row on the page gets a cursor, so one
+string sort key, runtime GraphQL refuses the page with `cursor_key_too_large`.
+Host query and relation errors use the `CursorKeyTooLarge` enum variant,
+and also expose `detail() == Some("cursor_key_too_large")`. Every row on the
+page gets a cursor, so one
 such row refuses each page that contains it in that order. Order by a bounded
 field, or raise the limit.
 

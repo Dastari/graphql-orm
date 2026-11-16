@@ -235,7 +235,7 @@ then `complete`.
 
 Receiver overflow and preparation-buffer exhaustion (lag) are detected before
 key filtering, so writes to keys a subscriber did not ask for, or may not see,
-can cause them. Since 0.161.0 a lagging stream does not end when the lag is
+can cause them. Since 0.163.0 a lagging stream does not end when the lag is
 detected. It delivers nothing more and ends on its next tick of an
 independent, jittered period fixed at registration
 (`Database::with_subscription_authority_recheck_interval`, 30 seconds by

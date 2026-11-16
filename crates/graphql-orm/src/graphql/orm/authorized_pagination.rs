@@ -1213,7 +1213,9 @@ where
         base.order_values.clear();
         // A per-read maximum set with `with_max_limit` replaces the
         // database's for this page, as it does for `fetch_all`.
-        let page_config = db.pagination_config().with_read_maximum(base.max_limit);
+        let page_config = db
+            .client_pagination_config()
+            .with_read_maximum(base.max_limit);
         match (ctx, requested_limit) {
             // A trusted Rust caller: a limit above the maximum is an error,
             // never a shorter page than the caller asked for.
@@ -1340,7 +1342,9 @@ where
         if page.include_total_count && visibility.requires_residual_checks() {
             return Err(input_error());
         }
-        let page_config = db.pagination_config().with_read_maximum(self.max_limit);
+        let page_config = db
+            .client_pagination_config()
+            .with_read_maximum(self.max_limit);
         if let (None, Some(requested)) = (ctx, page.limit) {
             // A trusted Rust caller's limit is honoured exactly or refused.
             page_config

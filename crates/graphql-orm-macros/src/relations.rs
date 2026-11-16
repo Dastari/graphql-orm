@@ -732,7 +732,7 @@ pub(crate) fn generate_graphql_relations(
 
         let relation_query_key = quote! {{
             let __gom_relation_page =
-                db.pagination_config().resolve_client_page(page.as_ref(), true).map_err(|error| error.into_graphql_error())?;
+                db.client_pagination_config().resolve_client_page(page.as_ref(), true).map_err(|error| error.into_graphql_error())?;
             let __gom_relation_pagination =
                 if __gom_relation_page.limit.is_some() || __gom_relation_page.offset > 0 {
                     Some(__gom_relation_page.clone())
@@ -923,7 +923,7 @@ pub(crate) fn generate_graphql_relations(
                         }
 
                         let resolved_page =
-                            db.pagination_config().resolve_client_page(page.as_ref(), true).map_err(|error| error.into_graphql_error())?;
+                            db.client_pagination_config().resolve_client_page(page.as_ref(), true).map_err(|error| error.into_graphql_error())?;
                         if resolved_page.limit.is_some() || resolved_page.offset > 0 {
                             query = query.paginate(&::graphql_orm::graphql::orm::PageInput {
                                 limit: resolved_page.limit,

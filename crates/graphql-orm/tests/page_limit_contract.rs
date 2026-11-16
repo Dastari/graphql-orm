@@ -9,7 +9,7 @@
 //! pages, on every backend.
 //!
 //! By default a client page limit above the database's maximum is reduced to
-//! it. With `PaginationConfig::refuse_oversized_limit` the request fails with
+//! it. With `DatabaseBuilder::refuse_oversized_page_limit` the request fails with
 //! `PAGE_LIMIT_EXCEEDED` instead, on list roots, to-many relations and keyset
 //! connections. A schema's maximum is fixed at compile time and a `Database`
 //! that applies another is refused. Trusted Rust code gives one keyset read
@@ -292,10 +292,7 @@ fn edges(mut data: Value, path: &[&str]) -> usize {
 async fn oversized_client_limits_are_reduced_unless_the_refusal_is_enabled(
     db: &Database,
 ) -> TestResult {
-    let refusing = db
-        .clone()
-        .with_pagination_config(db.pagination_config().with_oversized_limit_refusal(true));
-    assert!(!db.pagination_config().refuse_oversized_limit);
+    let refusing = db.clone().with_oversized_page_limit_refusal(true);
     for (name, query, path) in PAGES {
         let oversized = query.replace("LIMIT", "3");
         let at_maximum = query.replace("LIMIT", "2");
@@ -494,7 +491,7 @@ async fn host_keyset_reads_take_a_per_read_maximum(db: &Database) -> TestResult 
 /// #674: a declared maximum is the one the catalogue publishes and the
 /// complexity estimate uses, and a `Database` that applies another is refused.
 fn declared_maximum_is_published_and_a_mismatched_database_is_refused(db: &Database) {
-    use graphql_orm::graphql::orm::{GraphqlSemanticTypeRef, page_complexity_maximum};
+    use graphql_orm::graphql::orm::GraphqlSemanticTypeRef;
     assert_eq!(GRAPHQL_ORM_MAX_PAGE_LIMIT, Some(MAXIMUM as u32));
     let catalog = graphql_orm_semantic_catalog();
     let cards = catalog
@@ -522,7 +519,6 @@ fn declared_maximum_is_published_and_a_mismatched_database_is_refused(db: &Datab
     // Building the schema for the matching database records the bound the
     // relation complexity estimate caps a requested page at.
     let _ = schema_builder(db.clone()).finish();
-    assert_eq!(page_complexity_maximum(), MAXIMUM);
 
     // A schema that declares no maximum has the default of 100 and refuses
     // this fixture's database, whose maximum is 2.
@@ -567,8 +563,68 @@ fn declared_maximum_is_published_and_a_mismatched_database_is_refused(db: &Datab
     }
 }
 
+mod large_declared {
+    use super::*;
+    #[cfg(feature = "sqlite")]
+    schema_roots! { backend: "sqlite", max_page_limit: 200, query_custom_ops: [], entities: [LimitBoard, LimitCard], }
+    #[cfg(feature = "postgres")]
+    schema_roots! { backend: "postgres", max_page_limit: 200, query_custom_ops: [], entities: [LimitBoard, LimitCard], }
+    #[cfg(feature = "mssql")]
+    schema_roots! { backend: "mssql", schema_policy: "external_writable", max_page_limit: 200, query_custom_ops: [], entities: [LimitBoard, LimitCard], }
+}
+
+async fn schema_complexity_bounds_are_isolated(db: &Database) -> TestResult {
+    let query =
+        "{ limitBoard(id: \"board\") { cards(page: { limit: 100 }) { edges { node { id } } } } }";
+    // Build the declaration first: it must never lower the undeclared bound.
+    let declared = schema_builder(db.clone()).limit_complexity(50).finish();
+    let ordinary_db = db
+        .clone()
+        .with_pagination_config(PaginationConfig::secure());
+    let ordinary = undeclared::schema_builder(ordinary_db.clone())
+        .limit_complexity(50)
+        .finish();
+    let request = || async_graphql::Request::new(query).data(AuthSubject::new("reader"));
+    let response = declared.execute(request()).await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    assert_eq!(
+        edges(response.data.into_json()?, &["limitBoard", "cards"]),
+        2
+    );
+    assert!(
+        !ordinary.execute(request()).await.errors.is_empty(),
+        "the undeclared schema must budget for 100 rows"
+    );
+    // A larger declaration must not raise an undeclared schema's estimate either.
+    let _large = large_declared::schema_builder(
+        db.clone()
+            .with_pagination_config(PaginationConfig::secure().with_max_limit(Some(200))),
+    )
+    .finish();
+    let moderate = undeclared::schema_builder(ordinary_db.clone())
+        .limit_complexity(500)
+        .finish();
+    let large_request = async_graphql::Request::new(query.replace("limit: 100", "limit: 200"))
+        .data(AuthSubject::new("reader"));
+    let response = moderate.execute(large_request).await;
+    assert!(
+        response.errors.is_empty(),
+        "a declaration above 100 must not reject an ordinary query: {:?}",
+        response.errors
+    );
+    let ordinary = undeclared::schema_builder(ordinary_db).finish();
+    let response = ordinary.execute(request()).await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    assert_eq!(
+        edges(response.data.into_json()?, &["limitBoard", "cards"]),
+        CARDS
+    );
+    Ok(())
+}
+
 async fn run() -> TestResult {
     let fixture = fixture().await?;
+    schema_complexity_bounds_are_isolated(&fixture.db).await?;
     declared_maximum_is_published_and_a_mismatched_database_is_refused(&fixture.db);
     oversized_client_limits_are_reduced_unless_the_refusal_is_enabled(&fixture.db).await?;
     host_keyset_reads_take_a_per_read_maximum(&fixture.db).await?;

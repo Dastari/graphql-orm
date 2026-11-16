@@ -18,10 +18,7 @@ Upgrade runtime and macros together.
 
 ### ORM and macros: page limits, identities, subscriptions, preloads and callback errors
 
-- **`PaginationConfig` gains a field. Action needed** for exhaustive struct
-  literals: add `refuse_oversized_limit: false` or use `..Default::default()`.
-  The public field form is confined to the breaking branch; #733's
-  source-compatible revision uses an additive database builder setting.
+
 - **Runtime cursor error enums gain a variant. Action needed** for exhaustive
   matches on `RuntimeQueryErrorCode` or `RuntimeRelationErrorCode`: handle
   `CursorKeyTooLarge`. A stored order value that cannot fit a cursor refuses
@@ -110,28 +107,8 @@ Upgrade runtime and macros together.
   attribute is a compile error when a primary-key field declares a
   `read_policy` ([#666](https://github.com/Dastari/graphql-orm/issues/666)).
 
-## 0.162.0: context-bound authorized pages
 
-**No action.** Upgrade ORM and macros together. This release only adds API:
-generated pagination, `EntityQuery::fetch_authorized_scan`,
-`AuthorizedScanConfig` and every existing cursor are unchanged, and no schema,
-data or generated SDL changes.
-
-To adopt the new API in a handwritten resolver, a host:
-
-1. generates a random 32-byte secret owned by the service, stores it in the
-   service's encrypted settings, and installs it with
-   `Database::with_authorized_page_config(AuthorizedPageConfig::new(AuthorizedPageKeys::new(key_id, key)?, batch_size, max_scanned_rows)?)`
-   on every replica. Never derive the key from a provider credential or a
-   client value;
-2. builds an `AuthorizedPageBinding` from server state on every request and
-   calls `EntityQuery::fetch_authorized_page` with
-   `AuthorizedPageRequest::new(binding).after(after).limit(limit)`.
-
-See [context-bound authorized pages](docs/reference/graphql-orm/pagination-migration.md#context-bound-authorized-pages-for-handwritten-resolvers-01620)
-for the binding, bounds, errors and key rotation.
-
-## 0.159.0 to 0.161.0: page limits, 64-bit identities, cursor keys and subscription lag
+## 0.162.0 to 0.163.0: page limits, 64-bit identities, cursor keys and subscription lag
 
 Upgrade runtime and macros together. No schema or data migration is needed.
 Generated SDL, operation catalogues and fingerprints are unchanged unless you
@@ -149,9 +126,12 @@ turn on one of the new settings.
   refetch. A runtime live client must now treat `authorization_denied` as a
   terminal frame. Source closure, host continuity signals and schema-revision
   changes still end at once.
-- **Runtime cursor keys that are too long. No action.** Runtime GraphQL
-  reports `cursor_key_too_large` when a stored sort key cannot fit a cursor.
-  The public Rust enum additions are deferred to the breaking release above.
+- **Runtime cursor keys that are too long. No action.** Runtime GraphQL returns
+  `cursor_key_too_large`. Host errors retain the existing `ResourceLimit` category
+  and expose `Some("cursor_key_too_large")` through `detail()`. The public enums
+  and existing `PaginationConfig` struct literals remain source-compatible.
+  Dedicated enum variants (and any `#[non_exhaustive]` change) belong to
+  `next/breaking`, in `breaking/orm-contract`.
 - **Refusing oversized page limits. No action.** Off by default. To let a
   client tell a reduced page from a last page, set
   `DatabaseBuilder::refuse_oversized_page_limit(true)`: an explicit GraphQL
@@ -181,6 +161,28 @@ turn on one of the new settings.
 - **Keyset cursor documentation. No action.** Static keyset cursors were never
   tamper-evident; the documentation now says so. Do not treat a cursor as
   proof of anything: authorization is applied to every page.
+
+## 0.162.0: context-bound authorized pages
+
+**No action.** Upgrade ORM and macros together. This release only adds API:
+generated pagination, `EntityQuery::fetch_authorized_scan`,
+`AuthorizedScanConfig` and every existing cursor are unchanged, and no schema,
+data or generated SDL changes.
+
+To adopt the new API in a handwritten resolver, a host:
+
+1. generates a random 32-byte secret owned by the service, stores it in the
+   service's encrypted settings, and installs it with
+   `Database::with_authorized_page_config(AuthorizedPageConfig::new(AuthorizedPageKeys::new(key_id, key)?, batch_size, max_scanned_rows)?)`
+   on every replica. Never derive the key from a provider credential or a
+   client value;
+2. builds an `AuthorizedPageBinding` from server state on every request and
+   calls `EntityQuery::fetch_authorized_page` with
+   `AuthorizedPageRequest::new(binding).after(after).limit(limit)`.
+
+See [context-bound authorized pages](docs/reference/graphql-orm/pagination-migration.md#context-bound-authorized-pages-for-handwritten-resolvers-01620)
+for the binding, bounds, errors and key rotation.
+
 ## 0.158.0 to 0.159.0: PostgreSQL table-name case
 
 Upgrade ORM and macros together. Static PostgreSQL table references now agree

@@ -532,7 +532,7 @@ pub struct EntitySearchQuery<'a, T, W, B: OrmBackend> {
     pool: &'a B::Pool,
     search: SearchInput,
     query: EntityQuery<T, B>,
-    pagination_config: PaginationConfig,
+    pagination_config: super::ClientPaginationConfig,
     /// The limit set through [`Self::limit`], checked rather than clamped.
     explicit_limit: Option<i64>,
     _where: PhantomData<W>,
@@ -573,7 +573,7 @@ where
             db,
             auth: None,
             query: EntitySearchQuery::new(db.pool(), search)
-                .pagination_config(db.pagination_config()),
+                .client_pagination_config(db.client_pagination_config()),
             limit: None,
             offset: 0,
             max_scanned_rows: None,
@@ -791,7 +791,7 @@ where
                     limit: Some(batch.fetch),
                     offset: Some(batch.offset),
                 }),
-                PaginationConfig::unbounded(),
+                PaginationConfig::unbounded().into(),
             );
             let hits = match page
                 .try_fetch_native_observed(self.auth.as_ref(), Some(self.db))
@@ -890,14 +890,18 @@ where
             pool,
             search,
             query: EntityQuery::new(),
-            pagination_config: PaginationConfig::default(),
+            pagination_config: PaginationConfig::default().into(),
             explicit_limit: None,
             _where: PhantomData,
         }
     }
 
     /// A copy of this search with another page and pagination configuration.
-    fn copy_with_page(&self, page: Option<PageInput>, pagination_config: PaginationConfig) -> Self {
+    fn copy_with_page(
+        &self,
+        page: Option<PageInput>,
+        pagination_config: super::ClientPaginationConfig,
+    ) -> Self {
         let mut query = self.query.clone();
         query.page = page;
         Self {
@@ -912,7 +916,13 @@ where
 
     /// Apply runtime pagination defaults and caps to connection-style search execution.
     pub fn pagination_config(mut self, pagination_config: PaginationConfig) -> Self {
-        self.pagination_config = pagination_config;
+        self.pagination_config = pagination_config.into();
+        self
+    }
+
+    /// Apply a client page policy, including opt-in oversized-limit refusal.
+    pub fn client_pagination_config(mut self, config: super::ClientPaginationConfig) -> Self {
+        self.pagination_config = config;
         self
     }
 
@@ -978,7 +988,7 @@ where
 
     fn check_explicit_limit(&self) -> crate::Result<()> {
         // The opt-in refusal of an oversized client page; see
-        // `PaginationConfig::refuse_oversized_limit`.
+        // `ClientPaginationConfig::with_oversized_limit_refusal`.
         self.pagination_config
             .admit_client_limit(self.query.page.as_ref().and_then(|page| page.limit))
             .map_err(crate::graphql::errors::sqlx_error_from_public)?;
@@ -1419,7 +1429,7 @@ where
             return Err(invalid());
         }
         let resolved = db
-            .pagination_config()
+            .client_pagination_config()
             .resolve_client_page(page.as_ref(), true)
             .map_err(|error| error.into_graphql_error())?;
         let offset = resolved.offset.max(0) as usize;
@@ -1427,7 +1437,7 @@ where
         let window = offset
             .saturating_add(limit)
             .min(config.max_scanned_rows as usize);
-        self.pagination_config = PaginationConfig::unbounded();
+        self.pagination_config = PaginationConfig::unbounded().into();
         let mut native = None;
         let mut scanned = 0_u32;
         let mut total = 0_i64;
