@@ -70,10 +70,17 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.168.0, `graphql-orm-macros` 0.168.0**; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.16.0; `graphql-orm-backup` 0.26.0; **`graphql-orm-ai-tool-profiles` 0.24.0**; **`graphql-orm-ai` 0.146.0**; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.168.0, `graphql-orm-macros` 0.168.0**; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.16.0; `graphql-orm-backup` 0.26.0; `graphql-orm-ai-tool-profiles` 0.24.0; `graphql-orm-ai` 0.146.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
 
 - **No action** — ORM/macros 0.168.0: opt-in client page offset bound on every backend (`DatabaseBuilder::max_page_offset`), refused with `PAGE_LIMIT_EXCEEDED`; offsets stay unbounded by default. A SQL Server `DECIMAL(38,38)` value is a decode error instead of a driver panic, and rendered `ALTER COLUMN` keeps a column's collation. [Migration](../../MIGRATION.md#01660-to-01680-sql-server-correctness-and-a-client-offset-bound) · [changelog](../../CHANGELOG.md#unreleased---ormmacros-01680)
 - **Action needed** — ORM/macros 0.168.0: only if you read `introspect_mssql_schema`, compare SQL Server `ColumnDef::sql_type`, or hand-made the restore marker table: introspection now returns indexes and no invented `[id]` key, SQL Server key `String` columns are `NVARCHAR(450)`, and `install_restore_marker` checks the marker's primary key and `CHECK` constraint. [Migration](../../MIGRATION.md#01660-to-01680-sql-server-correctness-and-a-client-offset-bound)
+
+### workspace-2026.11.16.4
+
+Commit `9674f5c71677` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.16.4)
+
+Packages (changed in bold): **`graphql-orm` 0.166.0, `graphql-orm-macros` 0.166.0**; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.16.0; `graphql-orm-backup` 0.26.0; **`graphql-orm-ai-tool-profiles` 0.24.0**; **`graphql-orm-ai` 0.146.0**; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
+
 - **No action** — ORM/macros 0.166.0: opt-in dependent-delete effect verification and transaction-bound row limits; unsupported plans refuse [migration](../../MIGRATION.md#ormmacros-01660-guarded-dependent-deletes)
 - **No action** — AI 0.146.0: delivery selection stays unchanged unless the host opts into `prefer_fixed_broker_for_large_surfaces`; opting in requires a retained-session rebind [migration](../../crates/graphql-orm-ai/MIGRATION.md#01450-to-01460-capability-scale) · [changelog](../../crates/graphql-orm-ai/CHANGELOG.md#unreleased---01460)
 - **No action** — AI 0.146.0: fixed-broker `describe` returns each repeated input type once under `planSchema.types`; execute arguments and fingerprints are unchanged [migration](../../crates/graphql-orm-ai/MIGRATION.md#01450-to-01460-capability-scale) · [changelog](../../crates/graphql-orm-ai/CHANGELOG.md#unreleased---01460)
