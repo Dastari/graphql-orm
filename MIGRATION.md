@@ -39,7 +39,11 @@ together; each section names the package it changes.
   on an `@interfaceObject` type.
   - A graph is refused when it is built if a `@requiresScopes` argument is an
     empty list, contains an empty set, or contains a scope that is not a
-    non-empty string. Fix such declarations before upgrading.
+    non-empty string; if a directive named `requiresScopes` or
+    `authenticated` (or an import alias of either), with or without a
+    `<prefix>__`, does not resolve to Federation's directive; or if either
+    directive is placed on an argument, input field, enum value, union, input
+    object or the schema. Fix such declarations before upgrading.
   - Find the directives in each subgraph's SDL and confirm every client that
     selects such a field presents a bearer and, for `@requiresScopes`, one
     complete scope set. A field selected through an interface needs the rules

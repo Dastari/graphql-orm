@@ -42,9 +42,13 @@ operation, at the root and below it, before any downstream request opens.
   matcher, and implies authentication.
 - Composition merges the `@requiresScopes` sets of several subgraphs into one
   list of alternatives. The router instead keeps each subgraph's declaration,
-  read from its SDL, and requires all of them. A malformed declaration, or a
-  composed set the declarations do not account for, refuses the graph, so
-  the last-known-good graph stays active.
+  read from its SDL with composition's directive-name resolution, and
+  requires all of them. A malformed declaration, a directive application
+  composition could read as either directive that does not resolve to one,
+  either directive on a location the router cannot enforce (arguments, input
+  fields, enum values, unions, input objects, the schema), or a composed
+  directive the declarations do not account for, refuses the graph, so the
+  last-known-good graph stays active.
 - A refused selection refuses the whole operation, with `UNAUTHENTICATED` or
   `FORBIDDEN` errors that name only the response path. The router does not
   trim the operation or return partial data for it.

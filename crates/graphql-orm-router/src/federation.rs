@@ -301,6 +301,7 @@ fn compose_candidate(inputs: &[CandidateSubgraph]) -> Result<ComposedCandidate, 
         scope_requirements.record(&input.name, &source)?;
     }
     let mut document = adapt_composed_supergraph(&sdl, &root_participation)?;
+    refuse_unsupported_authorization_locations(&document)?;
     declaration_order.restore(&mut document);
     let normalized_sdl: Arc<str> = Arc::from(document.to_string());
 
@@ -474,6 +475,91 @@ fn add_authorization_security_links(
         }
     }
 
+    Ok(())
+}
+
+/// Refuses a composed `@authenticated` or `@requiresScopes` anywhere the
+/// router does not enforce it: arguments, input fields, enum values, unions,
+/// input objects, directive definitions, and the schema. Only object,
+/// interface, scalar and enum types and object and interface fields are
+/// enforced.
+fn refuse_unsupported_authorization_locations(
+    document: &hive_router::graphql_tools::static_graphql::schema::Document,
+) -> Result<(), FederationError> {
+    let authorization = |directives: &[Directive]| {
+        directives.iter().any(|directive| {
+            let base = directive
+                .name
+                .split_once("__")
+                .map_or(directive.name.as_str(), |(_, rest)| rest);
+            matches!(base, "authenticated" | "requiresScopes")
+        })
+    };
+    let unsupported = |location: String| {
+        Err(FederationError::SupergraphSdl {
+            details: format!(
+                "an authorization directive on `{location}` is not supported; it applies only to object, interface, scalar and enum types and to object and interface fields"
+            ),
+        })
+    };
+    let arguments = |owner: &str,
+                     fields: &[hive_router::graphql_tools::static_graphql::schema::Field]|
+     -> Result<(), FederationError> {
+        for field in fields {
+            for argument in &field.arguments {
+                if authorization(&argument.directives) {
+                    return unsupported(format!("{owner}.{}({}:)", field.name, argument.name));
+                }
+            }
+        }
+        Ok(())
+    };
+    for definition in &document.definitions {
+        match definition {
+            Definition::SchemaDefinition(schema) => {
+                if authorization(&schema.directives) {
+                    return unsupported("schema".to_owned());
+                }
+            }
+            Definition::DirectiveDefinition(directive) => {
+                for argument in &directive.arguments {
+                    if authorization(&argument.directives) {
+                        return unsupported(format!("@{}({}:)", directive.name, argument.name));
+                    }
+                }
+            }
+            Definition::TypeDefinition(TypeDefinition::Object(object)) => {
+                arguments(&object.name, &object.fields)?;
+            }
+            Definition::TypeDefinition(TypeDefinition::Interface(interface)) => {
+                arguments(&interface.name, &interface.fields)?;
+            }
+            Definition::TypeDefinition(TypeDefinition::Union(union)) => {
+                if authorization(&union.directives) {
+                    return unsupported(union.name.clone());
+                }
+            }
+            Definition::TypeDefinition(TypeDefinition::InputObject(input)) => {
+                if authorization(&input.directives) {
+                    return unsupported(input.name.clone());
+                }
+                for field in &input.fields {
+                    if authorization(&field.directives) {
+                        return unsupported(format!("{}.{}", input.name, field.name));
+                    }
+                }
+            }
+            Definition::TypeDefinition(TypeDefinition::Enum(enumeration)) => {
+                for value in &enumeration.values {
+                    if authorization(&value.directives) {
+                        return unsupported(format!("{}.{}", enumeration.name, value.name));
+                    }
+                }
+            }
+            Definition::TypeDefinition(TypeDefinition::Scalar(_))
+            | Definition::TypeExtension(_) => {}
+        }
+    }
     Ok(())
 }
 

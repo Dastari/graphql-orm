@@ -298,9 +298,19 @@ checked against the new scopes.
 - When several subgraphs declare `@requiresScopes` on the same type or field,
   every subgraph's declaration must hold. Composition merges them into one
   list of alternatives, so the router reads each subgraph's own declaration.
-  A graph whose declarations are malformed (an empty list or set, or a scope
-  that is not a non-empty string), or whose composed sets cannot be matched
-  to the declarations they came from, is refused when it is built.
+  Directive names are resolved as composition resolves them: `@link`
+  imports and `as:` renames, the link's namespace prefix, an unknown prefix
+  stripped, and the unprefixed names when Federation v2 is not linked or the
+  composite-schemas specification is.
+- A graph is refused when it is built if a declaration is malformed (an
+  empty list or set, or a scope that is not a non-empty string); if a
+  directive application whose name, with or without a `<prefix>__`, is
+  `requiresScopes`, `authenticated` or an import alias of either does not
+  resolve to Federation's directive; if either directive is placed on an
+  argument, input field, enum value, union, input object, directive argument
+  or the schema; or if the composed directives cannot be matched to the
+  declarations they came from. Every declaration is recorded on its own, so
+  one whose scope sets also appear in another declaration still applies.
 - Fragments marked `@defer` and fields marked `@stream` are checked like any
   other selection.
 - `@skip` and `@include` are applied as for root fields: a selection left out

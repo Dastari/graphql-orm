@@ -32,8 +32,11 @@ supersedes: []
 - Per-subgraph scope requirements are combined with AND semantics.
   Composition merges the `@requiresScopes` sets that several subgraphs
   declare for one type or field into a single list of alternatives; the
-  router reads each subgraph's declaration from its SDL (following `@link`
-  imports, `as:` renames and namespace prefixes) and requires every one.
+  router reads each subgraph's declaration from its SDL, resolving directive
+  names as composition does (`@link` imports and `as:` renames, namespace
+  prefixes, an unknown prefix stripped, and the unprefixed names when
+  Federation v2 is not linked or the composite-schemas specification is), and
+  requires every one. `@authenticated` is resolved the same way.
   ([#729](https://github.com/Dastari/graphql-orm/issues/729))
 - A refused selection refuses the whole operation with no `data`, as a refused
   root field does. Each error is `UNAUTHENTICATED` (no caller) or `FORBIDDEN`
@@ -47,8 +50,13 @@ supersedes: []
 - Graph construction fails, so the last-known-good graph stays active, when a
   subgraph's `@requiresScopes` argument is not a non-empty list of non-empty
   lists of non-empty strings (an empty set, or a value composition would drop,
-  is refused rather than read as always satisfied), or when the composed
-  scope sets do not match the subgraph declarations they came from.
+  is refused rather than read as always satisfied); when a directive
+  application that composition could read as `@requiresScopes` or
+  `@authenticated` does not resolve to one; when either directive is placed
+  on an argument, input field, enum value, union, input object, directive
+  argument or the schema, in a subgraph or the composed supergraph; or when
+  the composed directives do not match the subgraph declarations they came
+  from.
 - Each distinct rule is evaluated once per operation, and selection sets that
   cannot reach a rule are not walked. A graph with no composed directives
   skips the walk.

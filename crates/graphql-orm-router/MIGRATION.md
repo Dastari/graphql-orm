@@ -28,8 +28,12 @@ operation returns no `data`, only errors with `UNAUTHENTICATED` or
    interface needs the rules of every implementation of that field, and a
    type-level rule applies to every field of the type and to fragments on it.
 3. Fix any `@requiresScopes` argument that is an empty list, contains an
-   empty set, or contains a scope that is not a non-empty string: the router
-   now refuses such a graph when it is built. Where several subgraphs declare
+   empty set, or contains a scope that is not a non-empty string; any
+   directive named `requiresScopes` or `authenticated` (or an import alias of
+   either), with or without a `<prefix>__`, that is not Federation's
+   directive; and either directive on an argument, input field, enum value,
+   union, input object or the schema. The router now refuses such a graph
+   when it is built. Where several subgraphs declare
    scopes on one shared type or field, a caller needs a set from every one of
    them, and a field of an interface implementation also needs the rules
    declared on the interface or an `@interfaceObject` type.

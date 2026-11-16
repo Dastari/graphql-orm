@@ -28,8 +28,8 @@
 //!   authentication. Several scope requirements on one selection must all
 //!   hold, and each subgraph's declaration on a shared type or field is its
 //!   own requirement: composition merges them into one list of alternatives,
-//!   so they are read from each subgraph's SDL and checked against the
-//!   composed sets.
+//!   so they are read from each subgraph's SDL (see
+//!   `federation::scope_sites`) and checked against the composed directives.
 //! - `__typename` is answered without a subgraph and is never refused.
 //!   `__schema` and `__type` are governed by the router's introspection
 //!   policy, before this check.
@@ -198,10 +198,11 @@ impl NestedAuthorization {
         }
         // Every subgraph declaration must land on a composed site. One that
         // does not cannot be enforced, so the graph is refused.
-        if let Some(((type_name, field), _)) = declared
+        if let Some((type_name, field)) = declared
             .sites
-            .iter()
-            .find(|(site, _)| !visited.contains(*site))
+            .keys()
+            .chain(&declared.authenticated)
+            .find(|site| !visited.contains(*site))
         {
             return Err(unmapped(type_name, field.as_deref()));
         }
@@ -572,6 +573,10 @@ fn site_requirement<'a>(
         (type_name, None) => type_name.clone(),
     };
     let composed = requirement(authenticated, composed, &label)?;
+    // Composition applies `@authenticated` when any subgraph declares it.
+    if authenticated != declared.authenticated.contains(site) {
+        return Err(unmapped(&site.0, site.1.as_deref()));
+    }
     let declared = declared.sites.get(site).cloned().unwrap_or_default();
     let composed_sets = composed.scopes.iter().flatten().collect::<BTreeSet<_>>();
     let declared_sets = declared.iter().flatten().collect::<BTreeSet<_>>();
@@ -592,7 +597,7 @@ fn unmapped(type_name: &str, field: Option<&str>) -> RouterError {
     RouterError::new(
         RouterErrorKind::AuthorizationMetadata,
         format!(
-            "@requiresScopes on `{site}` cannot be matched to the subgraph declarations it was composed from"
+            "authorization directives on `{site}` cannot be matched to the subgraph declarations they were composed from"
         ),
     )
 }
@@ -1395,22 +1400,57 @@ mod tests {
     }
 
     #[test]
-    fn a_declaration_that_cannot_be_matched_refuses_the_graph() {
-        // Composition reads `@other__requiresScopes` as the imported directive,
-        // which the router does not recognize; the composed site then has no
-        // matching declaration.
+    fn declarations_that_do_not_match_the_composed_sets_refuse_the_graph() {
+        // Composition reads `@other__requiresScopes` as the imported
+        // directive, and so does the router.
         let graph = graph_of(&[(
             "odd",
             r#"
-            extend schema @link(url: "https://specs.apollo.dev/federation/v2.7", import: ["@requiresScopes"])
-            type Query { status: String @other__requiresScopes(scopes: [["a"]]) }
+            extend schema @link(url: "https://specs.apollo.dev/federation/v2.7", import: ["@requiresScopes", "@authenticated"])
+            type Query {
+                status: String @other__requiresScopes(scopes: [["a"]])
+                viewer: String @authenticated
+            }
             "#,
         )]);
-        assert!(graph.supergraph_sdl.contains("@requiresScopes"));
         assert_eq!(
-            public_catalog(&graph).unwrap_err().kind(),
-            RouterErrorKind::AuthorizationMetadata
+            check_graph(&graph, "{ status }", Some(&[])),
+            vec![refused("FORBIDDEN", &["status"])]
         );
+        let state = &graph.hive.snapshot().planner.supergraph;
+        let site = |field: &str| ("Query".to_owned(), Some(field.to_owned()));
+        let mismatched = [
+            // Missing declarations.
+            SubgraphScopeRequirements::default(),
+            // A different scope set.
+            SubgraphScopeRequirements {
+                sites: BTreeMap::from([(site("status"), vec![vec![vec!["b".to_owned()]]])]),
+                authenticated: BTreeSet::from([site("viewer")]),
+            },
+            // A declaration with no composed site.
+            SubgraphScopeRequirements {
+                sites: BTreeMap::from([
+                    (site("status"), vec![vec![vec!["a".to_owned()]]]),
+                    (site("absent"), vec![vec![vec!["a".to_owned()]]]),
+                ]),
+                authenticated: BTreeSet::from([site("viewer")]),
+            },
+            // `@authenticated` the composed graph does not carry.
+            SubgraphScopeRequirements {
+                sites: BTreeMap::from([(site("status"), vec![vec![vec!["a".to_owned()]]])]),
+                authenticated: BTreeSet::from([site("viewer"), site("status")]),
+            },
+        ];
+        for declared in mismatched {
+            assert_eq!(
+                NestedAuthorization::build(state, &declared)
+                    .unwrap_err()
+                    .kind(),
+                RouterErrorKind::AuthorizationMetadata,
+                "{declared:?}"
+            );
+        }
+        assert!(NestedAuthorization::build(state, &graph.scope_requirements).is_ok());
     }
 
     #[test]
@@ -1436,5 +1476,132 @@ mod tests {
             ),
             vec![refused("UNAUTHENTICATED", &["search", "owner"])]
         );
+    }
+
+    const OVERLAP_ALPHA: &str = r#"
+        extend schema @link(
+            url: "https://specs.apollo.dev/federation/v2.7"
+            import: ["@key", "@shareable", "@requiresScopes"]
+        )
+        type Query { item: Item }
+        type Item @key(fields: "id") {
+            id: ID!
+            name: String @shareable @requiresScopes(scopes: [["a"], ["b"]])
+        }
+    "#;
+
+    fn overlap_beta(link: &str, directive: &str) -> String {
+        format!(
+            r#"
+            extend schema {link}
+            type Item @key(fields: "id") {{
+                id: ID!
+                name: String @shareable {directive}
+            }}
+            "#
+        )
+    }
+
+    const PREFIX_LINK: &str = r#"@link(url: "https://specs.apollo.dev/federation/v2.7", import: ["@key", "@shareable", "@requiresScopes", "@authenticated"])"#;
+    const RENAMED_LINK: &str = r#"@link(url: "https://specs.apollo.dev/federation/v2.7", import: ["@key", "@shareable", { name: "@requiresScopes", as: "@scopes" }, { name: "@authenticated", as: "@signedIn" }])"#;
+    const COMPOSITE_LINK: &str = r#"@link(url: "https://specs.apollo.dev/federation/v2.7", import: ["@key", "@shareable"]) @link(url: "https://specs.grafbase.com/composite-schemas/v1")"#;
+
+    #[test]
+    fn every_composition_spelling_of_a_shared_requirement_is_enforced() {
+        let spellings = [
+            (PREFIX_LINK, r#"@zzz__requiresScopes(scopes: [["a"]])"#),
+            (RENAMED_LINK, r#"@zzz__scopes(scopes: [["a"]])"#),
+            (COMPOSITE_LINK, r#"@requiresScopes(scopes: [["a"]])"#),
+        ];
+        for (link, directive) in spellings {
+            let beta = overlap_beta(link, directive);
+            let graph = graph_of(&[("alpha", OVERLAP_ALPHA), ("beta", &beta)]);
+            // `b` meets alpha's alternatives but not beta's requirement.
+            assert_eq!(
+                check_graph(&graph, "{ item { name } }", Some(&["b"])),
+                vec![refused("FORBIDDEN", &["item", "name"])],
+                "{directive}"
+            );
+            assert!(
+                check_graph(&graph, "{ item { name } }", Some(&["a"])).is_empty(),
+                "{directive}"
+            );
+        }
+        // Two spellings on one field of one subgraph.
+        let doubled = OVERLAP_ALPHA.replace(
+            r#"@requiresScopes(scopes: [["a"], ["b"]])"#,
+            r#"@requiresScopes(scopes: [["a"], ["b"]]) @zzz__requiresScopes(scopes: [["a"]])"#,
+        );
+        let graph = graph_of(&[("alpha", &doubled)]);
+        assert_eq!(
+            check_graph(&graph, "{ item { name } }", Some(&["b"])),
+            vec![refused("FORBIDDEN", &["item", "name"])]
+        );
+        assert!(check_graph(&graph, "{ item { name } }", Some(&["a"])).is_empty());
+    }
+
+    #[test]
+    fn a_unique_alternative_from_another_spelling_is_also_required() {
+        let beta = overlap_beta(PREFIX_LINK, r#"@zzz__requiresScopes(scopes: [["c"]])"#);
+        let graph = graph_of(&[("alpha", OVERLAP_ALPHA), ("beta", &beta)]);
+        for scopes in [&["a"][..], &["b"], &["c"]] {
+            assert_eq!(
+                check_graph(&graph, "{ item { name } }", Some(scopes)),
+                vec![refused("FORBIDDEN", &["item", "name"])],
+                "{scopes:?}"
+            );
+        }
+        assert!(check_graph(&graph, "{ item { name } }", Some(&["b", "c"])).is_empty());
+    }
+
+    #[test]
+    fn every_composition_spelling_of_authenticated_is_enforced() {
+        let alpha = OVERLAP_ALPHA.replace(r#" @requiresScopes(scopes: [["a"], ["b"]])"#, "");
+        for (link, directive) in [
+            (PREFIX_LINK, "@zzz__authenticated"),
+            (RENAMED_LINK, "@zzz__signedIn"),
+            (COMPOSITE_LINK, "@authenticated"),
+        ] {
+            let beta = overlap_beta(link, directive);
+            let graph = graph_of(&[("alpha", &alpha), ("beta", &beta)]);
+            assert_eq!(
+                check_graph(&graph, "{ item { id name } }", None),
+                vec![refused("UNAUTHENTICATED", &["item", "name"])],
+                "{directive}"
+            );
+            assert!(
+                check_graph(&graph, "{ item { id name } }", Some(&[])).is_empty(),
+                "{directive}"
+            );
+        }
+    }
+
+    #[test]
+    fn authorization_directives_on_arguments_and_inputs_fail_graph_construction() {
+        for body in [
+            r#"type Query { item(x: String @requiresScopes(scopes: [["a"]])): String }"#,
+            "type Query { item(x: String @authenticated): String }",
+            r#"type Query { item(x: Filter): String } input Filter { name: String @requiresScopes(scopes: [["a"]]) }"#,
+        ] {
+            let sdl = format!(
+                r#"
+                extend schema @link(url: "https://specs.apollo.dev/federation/v2.7", import: ["@requiresScopes", "@authenticated"])
+                {body}
+                "#
+            );
+            let built =
+                crate::federation::GraphStore::new(&[crate::federation::CandidateSubgraph::new(
+                    "args",
+                    "http://args.test/graphql",
+                    &sdl,
+                )]);
+            assert!(
+                matches!(
+                    built,
+                    Err(crate::federation::FederationError::SourceSdl { .. })
+                ),
+                "{body}"
+            );
+        }
     }
 }
