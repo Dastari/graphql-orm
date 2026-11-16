@@ -268,11 +268,9 @@ pub fn authenticate_manifest(
 /// Returns [`BackupError::UnsupportedManifestFormat`],
 /// [`BackupError::ChecksumMismatch`],
 /// [`BackupError::ManifestAuthenticationFailed`],
-/// [`BackupError::LegacyManifestRefused`] or
-/// [`BackupError::InvalidManifestEntry`]. A snapshot the host's snapshot
-/// records do not admit is refused with
-/// [`BackupError::ManifestAuthenticationFailed`]; see
-/// [`BackupError::is_snapshot_not_admitted`].
+/// [`BackupError::LegacyManifestRefused`],
+/// [`BackupError::SnapshotNotAdmitted`] or
+/// [`BackupError::InvalidManifestEntry`].
 pub fn verify_manifest_authenticity(
     authenticator: &ManifestAuthenticator,
     manifest: &BackupSnapshotManifest,

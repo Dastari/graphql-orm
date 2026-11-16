@@ -236,6 +236,13 @@ async fn plan_pending_schema_stages<B: MigrationBackend>(
     )
     .await?;
     let live_schema_hash = current_schema.stable_hash();
+    // The stages are the record of what the ORM manages. A live table that no
+    // stage declares belongs to the host or another application: it is left
+    // out of the plan, so no stage drops it.
+    super::schema_manager::retain_stage_tables(
+        &mut current_schema,
+        stages.iter().map(|stage| &stage.target_schema),
+    );
     let mut planned = Vec::new();
 
     for stage in stages {

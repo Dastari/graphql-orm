@@ -5573,25 +5573,38 @@ impl Default for ApplyOptions {
 }
 
 /// Options that affect how migration plans are built.
+///
+/// The default is [`PlanOptions::managed_tables_only`]: a plan never drops a
+/// live table merely because the target schema does not declare it. The ORM
+/// keeps no record of which tables it created, so an undeclared table may
+/// belong to the host or to another application in a shared database.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlanOptions {
     /// Ignore live tables that are not present in the target schema.
     ///
-    /// Existing behavior treats extra live tables as drift and plans drops for
-    /// them. Enable this when graphql-orm owns only a subset of tables in a
-    /// shared database.
+    /// `true` by default. With `false`, every live table the target does not
+    /// declare is treated as drift and a `DROP TABLE` is planned for it,
+    /// whoever created it.
     pub ignore_unmanaged_tables: bool,
 }
 
 impl PlanOptions {
-    /// Plan against the full current and target schemas.
+    /// Plan against the full current and target schemas: every live table the
+    /// target does not declare gets a destructive `DropTable` step.
+    ///
+    /// This is an explicit statement that the ORM owns every table the
+    /// introspected schema reports. Use it to remove a table whose entity was
+    /// deleted, in a database (or PostgreSQL schema) that holds no tables of
+    /// the host's own. Applying the drops still needs
+    /// [`ApplyOptions::allow_destructive`].
     pub const fn strict() -> Self {
         Self {
             ignore_unmanaged_tables: false,
         }
     }
 
-    /// Plan only tables present in the target schema and ignore unrelated live tables.
+    /// Plan only tables present in the target schema and ignore unrelated
+    /// live tables. This is the default.
     pub const fn managed_tables_only() -> Self {
         Self {
             ignore_unmanaged_tables: true,
@@ -5601,7 +5614,7 @@ impl PlanOptions {
 
 impl Default for PlanOptions {
     fn default() -> Self {
-        Self::strict()
+        Self::managed_tables_only()
     }
 }
 

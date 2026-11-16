@@ -99,28 +99,58 @@ Each `PlannedMigrationStep` carries a `MigrationRisk`:
 - `Risky`
 - `Destructive`
 
-A table's risk is the highest risk among its steps. PostgreSQL and SQL Server plans drop a removed
-table's own foreign keys first, so the first step for that table is a `Risky` `DropForeignKey` and
-the `Destructive` `DropTable` follows.
+A table's risk is the highest risk among its steps. `ApplyOptions::default()` applies everything up
+to `Risky` and refuses `Destructive` steps until `allow_destructive` is set.
+
+| Step | Risk |
+| --- | --- |
+| `CreateTable`, `CreateIndex`, `CreateSearchIndex`, `EnableExtension`, `SetAppendOnly { enabled: true }`, `AddColumn` (nullable or defaulted) | `Additive` |
+| `AlterColumn` without a type change (other than tightening nullability) | `Compatible` |
+| `AddColumn` (required, no default), `AlterColumn` that tightens nullability, `AlterColumn` with a lossless type widening, `AddForeignKey`, `DropSearchIndex`, `AlterSearchIndex`, `SetCompositeUniques` or `SetCheckConstraints` that only adds constraints | `Risky` |
+| `DropTable`, `DropColumn`, `AlterColumn` with any other type change, `DropIndex`, `DropForeignKey`, `SetAppendOnly { enabled: false }`, `SetCompositeUniques` or `SetCheckConstraints` that removes or changes a constraint | `Destructive` |
+
+- **Type changes.** PostgreSQL renders `ALTER COLUMN ... TYPE` without a `USING` clause, so a
+  narrowing conversion rounds or truncates stored values. Only a closed set of widenings keeps
+  every stored value and stays `Risky`: a larger integer; an integer into an exact numeric with
+  enough integer digits, or into a float that represents it exactly (`SMALLINT` into `REAL`, up to
+  `INTEGER` into `DOUBLE PRECISION`); `REAL` into `DOUBLE PRECISION`; a numeric with at least the
+  same integer digits and scale; and a longer or unlimited `VARCHAR`, `NVARCHAR` or `TEXT`. The
+  classifier recognises the PostgreSQL, SQLite and SQL Server spellings of those types. Every other
+  change, including one between types it does not know, is `Destructive`.
+- **Integrity-removing steps.** Dropping an index (the step does not say whether it is unique), a
+  foreign key, append-only enforcement, or an existing composite-unique or check constraint
+  removes a guarantee that later writes depended on, so it needs the same explicit opt-in as a
+  data-losing step. A changed index or foreign key is planned as a drop and a create, and so is
+  `Destructive` as well.
+- PostgreSQL and SQL Server plans drop a removed table's own foreign keys first, so that table's
+  first step is a `DropForeignKey` and the `DropTable` follows; both are `Destructive`.
 
 Rendered SQL is available as `plan.statements`, but callers should treat it as an artifact of the plan rather than the migration source of truth.
 
-When `graphql-orm` owns only a subset of tables in a shared database, plan with
-`PlanOptions::managed_tables_only()` so unrelated live tables are not treated as destructive drift:
+Plans ignore live tables the target does not declare. `PlanOptions::default()` is
+`PlanOptions::managed_tables_only()`: the ORM keeps no record of which tables it created, so an
+undeclared table may be the host's own or another application's, and no `DROP TABLE` is planned
+for it.
+
+To remove a table whose entity was deleted, opt in explicitly:
 
 ```rust
+// Every live table the target does not declare gets a destructive DropTable step.
 let plan = database
     .schema()
     .plan_migration_to_entities_with_options(
-        "2026-07-06-add-cache",
-        "add cache tables",
-        &[CacheEntry::metadata()],
-        PlanOptions::managed_tables_only(),
+        "2026-07-06-remove-cache",
+        "remove cache tables",
+        &graphql_orm_entity_metadata(),
+        PlanOptions::strict(),
     )
     .await?;
 ```
 
-The default planning mode remains strict and will report extra live tables.
+`PlanOptions::strict()` states that the ORM owns every table the introspected schema reports. In a
+shared database, plan the drop from a current model that names only the tables to remove, with
+`plan_migration_with_options(version, description, &current, &target, PlanOptions::strict())`.
+Applying a drop always needs `allow_destructive`.
 
 ### Compatible existing-schema adoption
 
@@ -286,10 +316,11 @@ database
 - Every pending stage is planned, classified and risk-checked before any stage
   SQL runs. A refusal names the stage version and step, and leaves all pending
   stages unapplied.
-- The first pending stage is planned from the live schema. Live tables or
-  columns absent from a stage target, such as a newer release's schema after a
-  rollback or unmanaged host tables, appear as destructive steps and are
-  refused by default.
+- The first pending stage is planned from the live schema, limited to the
+  tables that some stage declares. A table or column of those that is absent
+  from the stage target, such as a newer release's schema after a rollback,
+  appears as a destructive step and is refused by default. A live table that
+  no stage declares is not the stages' to drop and is left alone.
 - `additive_only` refuses any step that is not additive.
 - `dry_run` returns one report per pending stage without running stage SQL;
   planning may still prepare the migration ledger table.

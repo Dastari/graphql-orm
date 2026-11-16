@@ -208,8 +208,27 @@ PostgreSQL only the owner can add the column; for any other role the call leaves
 unchanged. Positions kept from an export made before the upgrade are entry ids and cannot be
 converted: take a full backup, then start incremental exports from the position it returns.
 
-The journal does not record `TRUNCATE`, or rows that a foreign-key cascade deletes from a table
-without a recorder (a composite-key table, for example). Take a full backup after either.
+The journal cannot record a `TRUNCATE`, or rows the database changes through a foreign key in a
+table without a recorder (a composite-key table, for example). On PostgreSQL both are refused
+rather than left unjournaled:
+
+- Every journaled table carries a `BEFORE TRUNCATE` statement trigger,
+  `graphql_orm_change_journal_truncate`. `TRUNCATE` fails with SQLSTATE `0A000` and a message that
+  starts `graphql-orm change journal refuses TRUNCATE`, including when `TRUNCATE ... CASCADE`
+  reaches the table from another one. Delete the rows instead. A transaction that sets
+  `graphql_orm.change_journal` (`CHANGE_JOURNAL_SETTING`) to `off` declares that it writes without
+  journaling, as a restore does, and may truncate; take a full backup afterwards.
+  `validate_target` reports a journaled table without the guard.
+- A foreign key from a table without a recorder to a journaled table, whose delete action is
+  `CASCADE` or `SET NULL`, is refused when the recorder is planned (`plan_schema_target`) or
+  installed (`ensure_change_journal_recorder`), with `ChangeJournalCascadeGap`, and is an error
+  in `validate_target`. The install also checks the catalog, so it refuses such a foreign key
+  (including `ON UPDATE` actions) on a table no schema target declares. Give the table a
+  single-column primary key, or make the foreign key restrict the delete.
+- A cascade into a journaled table is recorded by that table's own recorder.
+
+SQLite writes journal entries from the ORM's own statements and has no `TRUNCATE`; rows changed by
+raw SQL or by a database-side cascade are not journaled there. SQL Server has no change journal.
 
 On PostgreSQL only privileged roles can read or write the journal. It has RLS enabled and no
 policies, so a role subject to RLS can neither read nor write entries; the recorder runs as the

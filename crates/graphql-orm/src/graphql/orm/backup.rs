@@ -377,8 +377,9 @@ impl crate::db::Database {
         }
         #[cfg(feature = "postgres")]
         {
-            let tables =
-                super::rls::change_journal_tables(&super::SchemaModel::from_entities(entities));
+            let schema = super::SchemaModel::from_entities(entities);
+            super::rls::refuse_change_journal_cascade_gaps(&schema)?;
+            let tables = super::rls::change_journal_tables(&schema);
             let mut tx = self.pool().begin().await?;
             for statement in super::rls::postgres_change_journal_recorder_sql(&tables) {
                 sqlx::query(&statement).execute(&mut *tx).await?;

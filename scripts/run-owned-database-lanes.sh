@@ -45,7 +45,7 @@ run_sqlite() {
   cargo test -p graphql-orm --locked --no-default-features --features sqlite,runtime-graphql \
     --lib --test runtime_graphql --test runtime_strings --test runtime_queries --test runtime_relations \
     --test runtime_mutations --test runtime_migrations --test runtime_schema_ir --test runtime_migration_memory \
-    --test migration_planner --test migration_apply --test legacy_migration_history \
+    --test migration_planner --test migration_apply --test migration_safety --test legacy_migration_history \
     --test runtime_compat_goldens --test runtime_typed_defaults --test runtime_field_formats \
     --test runtime_graphql_formats \
     --test runtime_search_graphql --test runtime_search_writes --test runtime_search_ir --test runtime_search_long_tables \
@@ -71,7 +71,7 @@ run_postgres() {
   cargo test -p graphql-orm --locked --no-default-features --features postgres --test read_predicate --test visible_row_pages --test like_escape_matrix --test loader_chunks_postgres --test query_loader_batch --test order_aggregate_visibility -- --include-ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features postgres,runtime-graphql \
     --lib --test runtime_graphql --test runtime_mutations --test runtime_migrations --test runtime_schema_ir --test runtime_migration_memory \
-    --test migration_planner --test migration_apply --test legacy_migration_history \
+    --test migration_planner --test migration_apply --test migration_safety --test legacy_migration_history \
     --test runtime_compat_goldens --test runtime_typed_defaults --test runtime_field_formats \
     --test runtime_graphql_formats \
     --test runtime_search_graphql --test runtime_search_writes --test runtime_search_ir --test runtime_search_long_tables \
@@ -138,7 +138,7 @@ run_postgres_legacy() {
     --test uuid_contract \
     -- --include-ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features postgres,change-journal \
-    --test postgres_rls_coverage --test postgres_change_journal_paths \
+    --test postgres_rls_coverage --test postgres_change_journal_paths --test postgres_change_journal_truncate \
     --test dependent_delete_repro --test backup_roundtrip \
     -- --include-ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features postgres,change-journal \
@@ -149,7 +149,7 @@ run_postgres_legacy() {
 
 run_mssql() {
   cargo test -p graphql-orm --locked --no-default-features --features mssql \
-    --test migration_composite_uniques -- --include-ignored --test-threads=1
+    --test migration_composite_uniques --test migration_safety -- --include-ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features mssql --test dependent_delete_ui
   cargo test -p graphql-orm --locked --no-default-features --features mssql \
     --lib delivery_is_at_least_once_through_failures_and_cancellation -- --ignored --test-threads=1

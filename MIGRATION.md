@@ -10,6 +10,111 @@ supersedes: []
 
 # Migration Guide
 
+## Breaking release (unreleased)
+
+Entries for the next breaking release, collected on the `next/breaking`
+branch. Version numbers are assigned when the batch is released.
+
+### Backup: result and error types
+
+- **`PruneResult`, `DeleteSnapshotResult` and `BackupError` are
+  `#[non_exhaustive]`, the results gain `deleted_snapshot_ids`, and an
+  unadmitted snapshot is refused with `BackupError::SnapshotNotAdmitted`.
+  Action needed** for struct literals, exhaustive destructuring and
+  wildcard-free matches on those types; see the
+  [backup migration guide](crates/graphql-orm-backup/MIGRATION.md#to-0250-result-and-error-types-target-clear-on-journaled-databases).
+
+### Migration plans: undeclared tables, lossy type changes and integrity removal
+
+Upgrade ORM and macros together. Generated SDL, operation catalogues and
+fingerprints are unchanged. Stored plan hashes change for plans that contain a
+reclassified step, because the hash covers each step's risk.
+
+- **Plans no longer drop undeclared tables by default. Action needed** for
+  hosts that rely on a default plan to remove a table whose entity was
+  deleted. `PlanOptions::default()` is now `managed_tables_only()`, so
+  `plan_migration`, `plan_migration_to_entities` and `plan_schema_target`
+  ignore every live table the target does not declare. The ORM keeps no
+  record of which tables it created, and the old default planned a
+  `DROP TABLE` for a host's own tables too. To drop tables:
+  - pass `PlanOptions::strict()` to the `_with_options` planner when every
+    table the database (or PostgreSQL schema) holds is the ORM's; or
+  - in a shared database, plan from a current model that names only the
+    tables to remove:
+    `plan_migration_with_options(version, description, &current, &target, PlanOptions::strict())`.
+  Either way the drops are `Destructive` and need
+  `ApplyOptions::allow_destructive`. Hosts that already pass
+  `managed_tables_only()` or `strict()` explicitly see no change.
+- **Schema stages and ABI upgrades drop only tables a stage declared. Action
+  needed** only for hosts that used a stage to drop a table no stage ever
+  declared. `plan_schema_stages`, `apply_schema_stages` and
+  `plan_upgrade`/`apply_upgrade` now leave such tables out of the plan. A
+  table that an earlier stage declared and a later stage omits is still
+  dropped, as a destructive step.
+- **Lossy column type changes are `Destructive`. Action needed** for hosts
+  that apply type changes under `ApplyOptions::default()`. A type change is
+  `Risky`, as before, only when it is a known lossless widening: a larger
+  integer, an integer into a wide enough exact numeric or a float that holds
+  it exactly, `REAL` into `DOUBLE PRECISION`, a numeric with at least the
+  same integer digits and scale, and a longer or unlimited
+  `VARCHAR`/`NVARCHAR`/`TEXT`. Every other type change, including one between
+  types the classifier does not know, is now `Destructive`: PostgreSQL
+  applies it with `ALTER COLUMN ... TYPE` and no `USING` clause, which rounds
+  or truncates stored values (`DOUBLE PRECISION` to `INTEGER`, a smaller
+  `NUMERIC` scale, `TIMESTAMPTZ` to `DATE`). Review the plan, then apply it
+  with `allow_destructive: true`.
+- **Integrity-removing steps are `Destructive`. Action needed** for hosts
+  whose plans or stages contain them and apply under
+  `ApplyOptions::default()`: `SetAppendOnly { enabled: false }`, `DropIndex`
+  (the step does not say whether the index is unique), `DropForeignKey`, and
+  a `SetCompositeUniques` or `SetCheckConstraints` step that removes or
+  changes an existing constraint. Steps that only add a constraint stay
+  `Risky`. This also covers changes the planner renders as a drop followed by
+  a create, such as a changed index definition or a foreign key whose delete
+  action changes. Review the plan, then apply it with
+  `allow_destructive: true`.
+- No new option was added: the existing `allow_destructive` gate covers all
+  of the above, for planned migrations, schema targets, schema stages, ABI
+  upgrades and owned (runtime) migrations.
+
+### PostgreSQL change journal: TRUNCATE and unjournaled cascades are refused
+
+Only hosts that build with the `change-journal` feature on PostgreSQL are
+affected.
+
+- **Re-apply the schema target. Action needed.** The recorder now installs a
+  `BEFORE TRUNCATE` statement trigger, `graphql_orm_change_journal_truncate`,
+  on every journaled table. Until the schema target is applied again (or
+  `Database::ensure_change_journal_recorder` is run) as the owner of the
+  tables, `validate_target` reports
+  `Missing change journal TRUNCATE guard` for each journaled table.
+- **`TRUNCATE` on a journaled table is refused. Action needed** for hosts or
+  operators that truncate entity tables. The statement fails with SQLSTATE
+  `0A000` and a message that starts
+  `graphql-orm change journal refuses TRUNCATE`, also when it reaches the
+  table through `TRUNCATE ... CASCADE`. The journal cannot record a truncate,
+  and an incremental restore would bring the rows back. Delete the rows
+  instead. A transaction that runs
+  `SET LOCAL graphql_orm.change_journal = 'off'` (the public constant
+  `CHANGE_JOURNAL_SETTING`) declares that it writes without journaling and may
+  truncate; take a full backup afterwards.
+- **A cascade into a table without a recorder is refused. Action needed** for
+  schemas where a table with a composite primary key (which the journal
+  cannot record) has a foreign key to a journaled table with
+  `ON DELETE CASCADE` or `SET NULL`. `plan_schema_target` and
+  `ensure_change_journal_recorder` fail with `ChangeJournalCascadeGap`
+  (`ChangeJournalCascadeGap::from_error`), `validate_target` reports
+  `Unjournaled cascade`, and the recorder install also refuses, from the
+  catalog, any such foreign key on a table no schema target declares
+  (including `ON UPDATE` actions). Give the table a single-column primary
+  key, or make the foreign key restrict the delete and delete the rows
+  through the ORM.
+- **Backup adapter.** `OrmBackupAdapter::clear_restore_target` clears a
+  PostgreSQL target inside a transaction that turns the journal setting off,
+  so it keeps working on journaled databases. No action.
+- SQLite records journal entries from the ORM's own writes and has no
+  `TRUNCATE` statement; SQL Server has no change journal. Neither changes.
+
 ## 0.159.0 to 0.160.0: atomic restore, search reset and kept values on ignored denials
 
 Upgrade ORM and macros together. Generated SDL, operation catalogues and

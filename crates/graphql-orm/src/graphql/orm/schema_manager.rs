@@ -345,6 +345,17 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
             &target.schema,
         )?;
         refuse_taken_search_helpers::<B>(self.database.pool(), &migration).await?;
+        // The plan would install the change journal recorder. Refuse a target
+        // in which the database changes rows the journal cannot record.
+        if cfg!(feature = "change-journal")
+            && B::DIALECT == super::DatabaseBackend::Postgres
+            && matches!(
+                self.policy(),
+                SchemaPolicy::Managed | SchemaPolicy::PlanOnly
+            )
+        {
+            super::rls::refuse_change_journal_cascade_gaps(&target.schema)?;
+        }
         let rls = build_schema_target_rls_plan(B::DIALECT, self.policy(), target);
         let mut statements = migration.statements.clone();
         statements.extend(rls.statements.clone());
@@ -548,18 +559,26 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
             &declared_tables(path.iter().map(|stage| &stage.target_schema)),
         )
         .await?;
+        let mut source_schema_hash = current_schema.stable_hash();
+        // A live table that no stage of the ABI declares is not the ORM's to
+        // drop: it is left out of the plan.
+        retain_stage_tables(
+            &mut current_schema,
+            abi.stages.iter().map(|stage| &stage.target_schema),
+        );
         let mut stages = Vec::new();
 
         for stage in path {
             let planned = plan_migration_for_backend::<B>(
                 stage.version.clone(),
                 stage.description.clone(),
-                Some(current_schema.stable_hash()),
+                Some(source_schema_hash),
                 stage.target_schema_hash.clone(),
                 &current_schema,
                 &stage.target_schema,
             )?;
             current_schema = stage.target_schema.clone();
+            source_schema_hash = current_schema.stable_hash();
             stages.push(planned);
         }
 
@@ -867,6 +886,21 @@ pub(super) fn declared_tables<'a>(
         .flat_map(|target| target.tables.iter())
         .map(|table| table.table_name.as_str())
         .collect()
+}
+
+/// Keep only the live tables that some stage declares.
+pub(super) fn retain_stage_tables<'a>(
+    current: &mut SchemaModel,
+    stages: impl IntoIterator<Item = &'a SchemaModel>,
+) {
+    let declared = stages
+        .into_iter()
+        .flat_map(|target| target.tables.iter())
+        .map(|table| table.table_name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    current
+        .tables
+        .retain(|table| declared.contains(table.table_name.as_str()));
 }
 
 fn schema_current_for_plan(

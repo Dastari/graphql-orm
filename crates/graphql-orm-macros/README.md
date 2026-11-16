@@ -10,6 +10,12 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.161.0 (breaking batch) makes migration planning safer by default:
+plans no longer drop tables the target does not declare, lossy column type
+changes and integrity-removing steps need `allow_destructive`, and the
+PostgreSQL change journal refuses `TRUNCATE` and unjournaled cascades. See the
+[migration guide](../../MIGRATION.md#breaking-release-unreleased).
+
 Version 0.160.0 restores a snapshot in one transaction on PostgreSQL and
 SQLite, adds `SchemaManager::reset_runtime_search` and a restore-in-progress
 marker for host-run SQL Server restores, and keeps the stored value when an

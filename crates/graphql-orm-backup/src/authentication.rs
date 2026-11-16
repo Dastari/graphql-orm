@@ -335,9 +335,9 @@ impl ManifestAuthenticator {
 }
 
 fn not_admitted(snapshot_id: Uuid, why: &str) -> BackupError {
-    BackupError::ManifestAuthenticationFailed {
-        key: crate::snapshot_manifest_key(snapshot_id),
-        reason: format!("{}: {why}", crate::error::SNAPSHOT_NOT_ADMITTED),
+    BackupError::SnapshotNotAdmitted {
+        snapshot_id,
+        reason: why.to_string(),
     }
 }
 

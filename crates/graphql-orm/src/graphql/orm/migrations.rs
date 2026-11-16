@@ -1232,6 +1232,99 @@ fn postgres_binary_compatible_widening(before: &str, after: &str) -> bool {
     }
 }
 
+/// The value domain of a column type, as far as the risk classifier knows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ValueDomain {
+    /// An integer of this many bits.
+    Integer(u32),
+    /// IEEE 754 single precision.
+    Real,
+    /// IEEE 754 double precision.
+    Double,
+    /// Exact decimal with `(precision, scale)`, or unconstrained.
+    Numeric(Option<(u32, u32)>),
+    /// Variable-length text with a length limit, or unlimited.
+    Text(Option<u32>),
+}
+
+/// The domain of the closed set of types whose widenings are known to keep
+/// every stored value. Spellings of PostgreSQL, SQLite and SQL Server are
+/// recognised; anything else has no known domain.
+fn value_domain(sql_type: &str) -> Option<ValueDomain> {
+    if let Some(name) = postgres_type_name(sql_type) {
+        if name.array {
+            return None;
+        }
+        return match (name.base, name.modifiers.as_slice()) {
+            ("smallint", []) => Some(ValueDomain::Integer(16)),
+            ("integer", []) => Some(ValueDomain::Integer(32)),
+            ("bigint", []) => Some(ValueDomain::Integer(64)),
+            ("real", []) => Some(ValueDomain::Real),
+            ("double precision", []) => Some(ValueDomain::Double),
+            ("numeric", []) => Some(ValueDomain::Numeric(None)),
+            ("numeric", [precision, scale]) => {
+                Some(ValueDomain::Numeric(Some((*precision, *scale))))
+            }
+            ("character varying", []) => Some(ValueDomain::Text(None)),
+            ("character varying", [length]) => Some(ValueDomain::Text(Some(*length))),
+            _ => None,
+        };
+    }
+    let name = sql_type
+        .split_ascii_whitespace()
+        .collect::<String>()
+        .to_ascii_lowercase();
+    match name.as_str() {
+        "text" | "varchar(max)" | "nvarchar(max)" => Some(ValueDomain::Text(None)),
+        "tinyint" => Some(ValueDomain::Integer(8)),
+        _ => name
+            .strip_prefix("nvarchar(")
+            .and_then(|rest| rest.strip_suffix(')'))
+            .and_then(|length| length.parse().ok())
+            .map(|length| ValueDomain::Text(Some(length))),
+    }
+}
+
+/// Whether changing a column from `before` to `after` keeps every value the
+/// column can hold, exactly. Only a closed set of widenings qualifies: a
+/// larger integer, an integer into a wide enough exact numeric or a float
+/// that represents it exactly, single into double precision, a numeric with
+/// at least the same integer digits and scale, and a longer or unlimited
+/// text. Everything else, including every type this function does not
+/// recognise, may round, truncate or reject stored values.
+fn lossless_type_widening(before: &str, after: &str) -> bool {
+    use ValueDomain::{Double, Integer, Numeric, Real, Text};
+    let (Some(before), Some(after)) = (value_domain(before), value_domain(after)) else {
+        return false;
+    };
+    // Decimal digits that hold every value of an integer of `bits` bits.
+    let digits = |bits: u32| match bits {
+        8 => 3,
+        16 => 5,
+        32 => 10,
+        _ => 19,
+    };
+    match (before, after) {
+        (Integer(before), Integer(after)) => after >= before,
+        (Integer(_), Numeric(None)) => true,
+        (Integer(bits), Numeric(Some((precision, scale)))) => {
+            precision.saturating_sub(scale) >= digits(bits)
+        }
+        // A float represents every integer up to its mantissa width.
+        (Integer(bits), Real) => bits <= 16,
+        (Integer(bits), Double) => bits <= 32,
+        (Real, Double) => true,
+        (Numeric(_), Numeric(None)) => true,
+        (Numeric(Some((before_precision, before_scale))), Numeric(Some((precision, scale)))) => {
+            scale >= before_scale
+                && precision.saturating_sub(scale) >= before_precision.saturating_sub(before_scale)
+        }
+        (Text(_), Text(None)) => true,
+        (Text(Some(before)), Text(Some(after))) => after >= before,
+        _ => false,
+    }
+}
+
 /// Whether a PostgreSQL `AlterColumn` renders `ALTER COLUMN ... TYPE`.
 fn postgres_type_changed(before: &ColumnModel, after: &ColumnModel) -> bool {
     !postgres_types_equivalent(&before.sql_type, &after.sql_type)
@@ -3722,25 +3815,41 @@ pub(super) fn classify_migration_step_view(step: &StepRef<'_>) -> (MigrationRisk
             "drops an existing column and its data",
         ),
         StepRef::AlterColumn { before, after, .. } => {
-            if before.nullable && !after.nullable {
+            let type_changed = !postgres_types_equivalent(&before.sql_type, &after.sql_type);
+            // A type change that can lose stored values outranks every other
+            // change the same step makes.
+            if type_changed && !lossless_type_widening(&before.sql_type, &after.sql_type) {
+                (
+                    MigrationRisk::Destructive,
+                    "changes an existing column to a type that may round, truncate, or reject stored values",
+                )
+            } else if before.nullable && !after.nullable {
                 (
                     MigrationRisk::Risky,
                     "tightens nullability on an existing column",
                 )
-            } else if before.sql_type == after.sql_type {
+            } else if !type_changed {
                 (
                     MigrationRisk::Compatible,
                     "changes column metadata without changing the SQL type",
                 )
             } else {
-                (MigrationRisk::Risky, "changes an existing column type")
+                (
+                    MigrationRisk::Risky,
+                    "widens an existing column type without losing stored values",
+                )
             }
         }
         StepRef::CreateIndex { .. } => (
             MigrationRisk::Additive,
             "creates an index without changing row data",
         ),
-        StepRef::DropIndex { .. } => (MigrationRisk::Risky, "drops an existing index"),
+        // The step names the index but not whether it is unique, and a unique
+        // index is a constraint: every index drop needs the destructive gate.
+        StepRef::DropIndex { .. } => (
+            MigrationRisk::Destructive,
+            "drops an existing index and any uniqueness it enforces",
+        ),
         StepRef::CreateSearchIndex { .. } => (
             MigrationRisk::Additive,
             "creates full-text search structures without backfilling row data",
@@ -3757,7 +3866,7 @@ pub(super) fn classify_migration_step_view(step: &StepRef<'_>) -> (MigrationRisk
             "adds a constraint that may reject existing rows",
         ),
         StepRef::DropForeignKey { .. } => (
-            MigrationRisk::Risky,
+            MigrationRisk::Destructive,
             "drops an existing referential constraint",
         ),
         StepRef::SetAppendOnly { enabled: true, .. } => (
@@ -3765,16 +3874,32 @@ pub(super) fn classify_migration_step_view(step: &StepRef<'_>) -> (MigrationRisk
             "adds database enforcement that prevents row mutation",
         ),
         StepRef::SetAppendOnly { enabled: false, .. } => (
-            MigrationRisk::Risky,
+            MigrationRisk::Destructive,
             "removes append-only database enforcement",
         ),
+        StepRef::SetCompositeUniques { before, after, .. }
+            if before.iter().any(|unique| !after.contains(unique)) =>
+        {
+            (
+                MigrationRisk::Destructive,
+                "removes or changes existing composite uniqueness",
+            )
+        }
         StepRef::SetCompositeUniques { .. } => (
             MigrationRisk::Risky,
-            "changes composite uniqueness and may reject existing duplicate rows",
+            "adds composite uniqueness that may reject existing duplicate rows",
         ),
+        StepRef::SetCheckConstraints { before, after, .. }
+            if before.iter().any(|constraint| !after.contains(constraint)) =>
+        {
+            (
+                MigrationRisk::Destructive,
+                "removes or changes existing same-row check constraints",
+            )
+        }
         StepRef::SetCheckConstraints { .. } => (
             MigrationRisk::Risky,
-            "adds, removes, or changes same-row check constraints",
+            "adds same-row check constraints that may reject existing rows",
         ),
     };
 
@@ -5623,6 +5748,35 @@ async fn postgres_rls_enforcement(
             config: row.try_get("config")?,
             security_definer: row.try_get("security_definer")?,
         });
+    }
+    live.change_journal_truncate_function = sqlx::query_scalar(
+        "SELECT p.prosrc::pg_catalog.text FROM pg_catalog.pg_proc p
+         JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+         WHERE n.nspname = 'graphql_orm' AND p.proname = $1 AND p.pronargs = 0",
+    )
+    .bind(super::rls::CHANGE_JOURNAL_TRUNCATE_FUNCTION)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let truncate_guards = sqlx::query(
+        "SELECT n.nspname::pg_catalog.text AS schema_name, c.relname::pg_catalog.text AS table_name
+         FROM pg_catalog.pg_trigger t
+         JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+         WHERE NOT t.tgisinternal AND t.tgname = $1 AND t.tgenabled = 'O'
+           AND t.tgtype::pg_catalog.int4 = $2 AND t.tgqual IS NULL
+           AND t.tgfoid = pg_catalog.to_regprocedure(pg_catalog.format('graphql_orm.%I()', $3::pg_catalog.text))",
+    )
+    .bind(super::rls::CHANGE_JOURNAL_TRUNCATE_TRIGGER)
+    .bind(super::rls::CHANGE_JOURNAL_TRUNCATE_TRIGGER_TYPE)
+    .bind(super::rls::CHANGE_JOURNAL_TRUNCATE_FUNCTION)
+    .fetch_all(&mut *conn)
+    .await?;
+    for row in truncate_guards {
+        live.change_journal_truncate_guards
+            .insert(super::rls::change_journal_table_key(
+                &row.try_get::<String, _>("schema_name")?,
+                &row.try_get::<String, _>("table_name")?,
+            ));
     }
     Ok(live)
 }

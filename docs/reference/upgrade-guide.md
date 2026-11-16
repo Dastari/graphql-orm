@@ -72,7 +72,12 @@ Changes merged to main after the latest workspace release.
 
 Versions on main (bold where they differ from the latest release): `graphql-orm` 0.159.0, `graphql-orm-macros` 0.159.0; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.15.0; `graphql-orm-backup` 0.23.0; `graphql-orm-ai-tool-profiles` 0.23.0; `graphql-orm-ai` 0.145.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
 
-No unreleased entries yet. Add new entries here.
+Breaking batch (ORM/macros 0.161.0, backup 0.25.0):
+
+- **Action needed — ORM/macros 0.161.0:** default plans preserve undeclared host tables; use explicit strict planning to remove them. [Migration defaults](../../MIGRATION.md#migration-plans-undeclared-tables-lossy-type-changes-and-integrity-removal).
+- **Action needed — ORM/macros 0.161.0:** lossy type conversions and integrity-removing migration steps require the existing destructive gate. Re-plan and review pending migrations. [Risk classification](../../MIGRATION.md#migration-plans-undeclared-tables-lossy-type-changes-and-integrity-removal).
+- **Action needed — ORM 0.161.0:** re-install PostgreSQL journal recorders; TRUNCATE and cascades into tables without recorders fail closed. [Journal upgrade](../../MIGRATION.md#postgresql-change-journal-truncate-and-unjournaled-cascades-are-refused).
+- **Action needed — backup 0.25.0:** deletion results expose snapshot ids, and result/error types are non-exhaustive with a dedicated snapshot admission error. Update literals and exhaustive matches. [Backup API](../../MIGRATION.md#backup-result-and-error-types).
 
 ### workspace-2026.11.15.6
 

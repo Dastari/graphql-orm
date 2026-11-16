@@ -174,6 +174,11 @@ impl OrmBackupAdapter {
     /// Deletes all rows from every backup-enabled table so an
     /// empty-database restore can run against a previously used database.
     ///
+    /// On PostgreSQL the clear runs in a transaction that sets
+    /// `graphql_orm.change_journal` to `off`: the change journal's `TRUNCATE`
+    /// guard admits only such a transaction, and the clear is not journaled.
+    /// Start a new backup chain with a full backup after restoring.
+    ///
     /// `RESTRICT` foreign keys are enforced immediately on both backends, so
     /// PostgreSQL clears with one `TRUNCATE ... CASCADE` statement and SQLite
     /// suspends `PRAGMA foreign_keys` on a dedicated connection around a
@@ -204,10 +209,28 @@ impl OrmBackupAdapter {
                 .map(|descriptor| quote_table_identifier(&descriptor.table_name))
                 .collect::<Vec<_>>()
                 .join(", ");
-            graphql_orm::sqlx::query(&format!("TRUNCATE TABLE {tables} CASCADE"))
-                .execute(self.database.pool())
+            // A journaled table refuses `TRUNCATE` unless the transaction
+            // declares that it writes without journaling, as a restore does.
+            let mut tx = self
+                .database
+                .pool()
+                .begin()
                 .await
                 .map_err(database_error("clear restore target"))?;
+            graphql_orm::sqlx::query(&format!(
+                "SET LOCAL {} = 'off'",
+                graphql_orm::graphql::orm::CHANGE_JOURNAL_SETTING
+            ))
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error("suspend change journal"))?;
+            graphql_orm::sqlx::query(&format!("TRUNCATE TABLE {tables} CASCADE"))
+                .execute(&mut *tx)
+                .await
+                .map_err(database_error("clear restore target"))?;
+            tx.commit()
+                .await
+                .map_err(database_error("clear restore target commit"))?;
             Ok(())
         }
     }
