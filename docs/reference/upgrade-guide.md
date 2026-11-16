@@ -97,13 +97,14 @@ Versions on main (bold where they differ from the latest release): **`graphql-or
 
 #### Breaking integration release (version provisional)
 
-- **Action needed** — ORM/macros 0.160.0: declare the schema page maximum and migrate oversized internal reads to exact-or-refused paging (#667/#674). [Migration](../../MIGRATION.md#breaking-release-unreleased)
-- **Action needed** — ORM/macros 0.160.0: handle `CursorKeyTooLarge` in exhaustive runtime query/relation error matches (#580). [Migration](../../MIGRATION.md#breaking-release-unreleased)
+- **Action needed** — ORM/macros 0.160.0: declare the schema page maximum and migrate oversized internal reads, including host `EntityQuery::paginate`/`EntitySearchQuery::paginate` reads, to exact-or-refused paging; resolve client pages in custom resolvers with `resolve_client_page` (#667/#674). [Migration](../../MIGRATION.md#breaking-release-unreleased)
+- **Action needed** — ORM/macros 0.160.0: handle `CursorKeyTooLarge` in exhaustive runtime query/relation error matches, and match it instead of `ResourceLimit` plus `detail()` (#580). [Migration](../../MIGRATION.md#breaking-release-unreleased)
 - **Action needed** — ORM/macros 0.160.0: use decimal strings for runtime `RecordVersion` and integer live keys, and regenerate descriptors (#528, item 4). [Migration](../../MIGRATION.md#breaking-release-unreleased)
-- **Action needed** — ORM/macros 0.160.0: review key-existence disclosure before adopting key-only deletes; only exact-key subscribers qualify and primary-key read policies are refused (#666). [Migration](../../MIGRATION.md#breaking-release-unreleased)
-- **Action needed** — ORM/macros 0.160.0: replace policy-free relation preload methods with authorized queries (#445). [Migration](../../MIGRATION.md#breaking-release-unreleased)
-- **Action needed** — ORM/macros 0.160.0: assign public codes to deliberate callback refusals, or explicitly opt in to uncoded text exposure (#682). [Migration](../../MIGRATION.md#breaking-release-unreleased)
+- **No action** — ORM/macros 0.160.0: opt-in key-only deletes; review key-existence disclosure before adopting them. Only exact-key subscribers with entity and key-field access qualify; key fields with a read policy, `subscribe = false` or `graphql(skip)` are refused (#666). [Migration](../../MIGRATION.md#breaking-release-unreleased)
+- **Action needed** — ORM/macros 0.160.0: replace policy-free relation preload methods and string-key `RelationLoader` loads with authorized queries (#445). [Migration](../../MIGRATION.md#breaking-release-unreleased)
+- **Action needed** — ORM/macros 0.160.0: assign public codes to deliberate callback refusals, or opt in to uncoded text exposure per `Database`/schema (#682). [Migration](../../MIGRATION.md#breaking-release-unreleased)
 - **Action needed** — ORM/macros 0.160.0: verify subgraph guards if relying on the old router nested-directive claim corrected in PR #733 (#485); router enforcement remains in #729. [Migration](../../MIGRATION.md#breaking-release-unreleased) · [Correction](../../CHANGELOG.md#unreleased---ormmacros-01640)
+- **No action** — Tool profiles 0.24.0 and AI 0.146.0: runtime live key inputs compile under default string identities. [Migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0230-to-0240-runtime-live-keys-under-default-identities)
 
 ### workspace-2026.11.15.6
 

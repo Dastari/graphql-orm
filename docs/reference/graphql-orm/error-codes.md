@@ -25,7 +25,7 @@ constraint names, filesystem paths, and configuration strings stay server-side.
 | `CONFLICT` | State conflict |
 | `CONSTRAINT_VIOLATION` | Database constraint failed without schema leak |
 | `CURSOR_INVALID` | Pagination cursor malformed, corrupted, bound to another entity, order or filter, or of another version. A static keyset cursor is not authenticated; see [what a keyset cursor is bound to](pagination-migration.md#what-a-keyset-cursor-is-bound-to) |
-| `PAGE_LIMIT_EXCEEDED` | A Rust repository `limit` exceeds the configured maximum, a GraphQL page limit exceeds it while `DatabaseBuilder::refuse_oversized_page_limit(true)` is set (by default it is reduced instead), a visible-row scan ran out of budget, or a generated GraphQL bulk write selects more rows than `PaginationConfig::max_bulk_write_rows` |
+| `PAGE_LIMIT_EXCEEDED` | A Rust repository `limit`, a host keyset or scan page size, or a host `EntityQuery::paginate`/`EntitySearchQuery::paginate` limit exceeds the configured (or per-read) maximum, a GraphQL page limit exceeds it while `DatabaseBuilder::refuse_oversized_page_limit(true)` is set (by default it is reduced instead), a visible-row scan ran out of budget, or a generated GraphQL bulk write selects more rows than `PaginationConfig::max_bulk_write_rows` |
 | `SERVICE_UNAVAILABLE` | Temporary dependency failure |
 | `INTERNAL_ERROR` | Unexpected failure |
 | `AUTHORIZATION_MISCONFIGURED` | A declared policy key has no provider. Under `DeclaredPoliciesRequired` this covers every key; in every mode it covers an entity `write_policy` without a row provider on generated writes |
@@ -102,8 +102,8 @@ The text of an uncoded callback error is a server-side diagnostic only, on
 these paths and for every other callback family (entity policy, row policy,
 write-input transform and mutation hook), also when a custom resolver maps a
 repository error with `graphql_error_from_sqlx`. Generated GraphQL operations
-report it as `INTERNAL_ERROR` with the default message unless the host called
-`expose_uncoded_callback_messages(true)`. The rule is stated once in
+report it as `INTERNAL_ERROR` with the default message unless the schema's
+`Database` opted in with `DatabaseBuilder::expose_uncoded_callback_messages(true)`. The rule is stated once in
 [policy callback errors](strict-authorization.md#policy-callback-errors). A missing field policy provider for a declared key
 is `AUTHORIZATION_MISCONFIGURED` in both strict modes.
 

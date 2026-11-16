@@ -507,14 +507,42 @@ where
                 column.name == *key || B::DIALECT.quote_identifier_path(column.name) == *key
             })
             .ok_or_else(|| OrmPublicError::forbidden().into_graphql_error())?;
-        check_field::<T, B>(db, ctx, row, column.api_name).await?;
+        check_field::<T, B>(db, ctx, Some(row), column.api_name).await?;
     }
     Ok(())
 }
+
+/// Check key-field authority before a key-only `DELETED` event is released.
+///
+/// The deleted row is gone, so each primary-key field is checked as
+/// [`authorize_subscription_keys`] does, with no record: the field must be
+/// exposed on change events, and its declared and host field read policies
+/// must allow it.
+#[doc(hidden)]
+pub async fn authorize_subscription_key_fields<T, B>(
+    db: &Database<B>,
+    ctx: &Context<'_>,
+) -> async_graphql::Result<()>
+where
+    B: OrmBackend,
+    T: Entity + Send + Sync + 'static,
+{
+    for key in T::PRIMARY_KEYS {
+        let column = T::columns()
+            .iter()
+            .find(|column| {
+                column.name == *key || B::DIALECT.quote_identifier_path(column.name) == *key
+            })
+            .ok_or_else(|| OrmPublicError::forbidden().into_graphql_error())?;
+        check_field::<T, B>(db, ctx, None, column.api_name).await?;
+    }
+    Ok(())
+}
+
 async fn check_field<T, B>(
     db: &Database<B>,
     ctx: &Context<'_>,
-    row: &T,
+    row: Option<&T>,
     field: &str,
 ) -> async_graphql::Result<()>
 where
@@ -526,8 +554,14 @@ where
     if !allowed {
         return Err(OrmPublicError::forbidden().into_graphql_error());
     }
-    db.ensure_readable_field(ctx, T::entity_name(), api_name, policy, Some(row))
-        .await
+    db.ensure_readable_field(
+        ctx,
+        T::entity_name(),
+        api_name,
+        policy,
+        row.map(|row| row as &(dyn std::any::Any + Send + Sync)),
+    )
+    .await
 }
 fn check_delete_target<'a, 'ctx, T, B>(
     db: &'a Database<B>,
@@ -583,8 +617,8 @@ where
         .await?
         .ok_or_else(|| OrmPublicError::forbidden().into_graphql_error())?;
         authorize_subscription_keys::<T, B>(db, ctx, &row).await?;
-        check_field::<T, B>(db, ctx, &row, column.api_name).await?;
-        check_field::<T, B>(db, ctx, &row, relation).await
+        check_field::<T, B>(db, ctx, Some(&row), column.api_name).await?;
+        check_field::<T, B>(db, ctx, Some(&row), relation).await
     })
 }
 
@@ -655,15 +689,15 @@ where
         .ok_or_else(denied)?;
         authorize_subscription_keys::<S, B>(db, ctx, &row).await?;
         for field in source_fields {
-            check_field::<S, B>(db, ctx, &row, field).await?;
+            check_field::<S, B>(db, ctx, Some(&row), field).await?;
         }
-        check_field::<S, B>(db, ctx, &row, relation).await?;
+        check_field::<S, B>(db, ctx, Some(&row), relation).await?;
         let target = authorize_subscription_row::<T, B>(db, ctx, target_keys, None)
             .await?
             .ok_or_else(denied)?;
         authorize_subscription_keys::<T, B>(db, ctx, &target).await?;
         for field in target_fields {
-            check_field::<T, B>(db, ctx, &target, field).await?;
+            check_field::<T, B>(db, ctx, Some(&target), field).await?;
         }
         Ok(())
     })
@@ -848,7 +882,7 @@ where
                 {
                     return Err(OrmPublicError::forbidden().into_graphql_error());
                 }
-                check_field::<T, B>(db, &scalar_ctx, row, name).await?;
+                check_field::<T, B>(db, &scalar_ctx, Some(row), name).await?;
             }
         }
     }

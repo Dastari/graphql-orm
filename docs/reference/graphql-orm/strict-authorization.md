@@ -466,9 +466,13 @@ refusal: an error with no `code` extension, such as a plain
 `async_graphql::Error::new(text)`, is not a public refusal and renders as
 `INTERNAL_ERROR` with the default message, its text logged only. A host whose
 uncoded callback text is safe for clients can restore the earlier rendering
-for the whole process with
-`graphql_orm::graphql::errors::expose_uncoded_callback_messages(true)`, called
-once at start-up. `INTERNAL_ERROR`, whether set as a string `code` or on a
+for one schema: `DatabaseBuilder::expose_uncoded_callback_messages(true)` or
+`Database::with_uncoded_callback_messages_exposed(true)` on the `Database` the
+schema serves. Generated `schema_builder`s then install the
+`graphql_orm::graphql::errors::UncodedCallbackMessages` extension, which
+applies to the queries, mutations and subscriptions of that schema only; a
+handwritten schema installs the extension itself. Work outside a schema, such
+as a task the host spawns, keeps the default. `INTERNAL_ERROR`, whether set as a string `code` or on a
 typed `OrmPublicError`, always renders the default message. Custom `From` conversions leaving that field empty preserve their text
 and extensions. Direct SQLx sources retain their safe bulk category; other
 sources become `INTERNAL_ERROR`. Internal details use the existing opt-in

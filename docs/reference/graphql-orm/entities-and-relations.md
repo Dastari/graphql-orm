@@ -535,13 +535,16 @@ subscriber whose `Key` or `Keys` argument names the deleted row's complete key
 receives `DELETED` with `id` (and `key` for a composite key) and a null entity.
 Unkeyed subscribers, and subscribers of other keys, receive nothing, as
 without the attribute. The subscriber's resolver authentication, scopes,
-assurance and entity access are checked before and after the payload is
-prepared. Row and field policy are not, because there is no row: a subscriber
-with entity access who names a key learns that a row with that key was
-deleted, whether or not it could read that row. Use the attribute only where
-that is acceptable. It is a compile error when a primary-key field declares a
-`read_policy`, and it applies to direct deletes only, not to propagated
-events.
+assurance and entity access, and its read access to every key field, are
+checked before and after the payload is prepared. A key field must be
+exposed on change events and pass the host field policy, which is asked with
+no record. Row policy is not checked, because there is no row: a subscriber
+with entity and key-field access who names a key learns that a row with that
+key was deleted, whether or not it could read that row. Use the attribute
+only where that is acceptable. It is a compile error when a primary-key field
+declares a `read_policy`, sets `subscribe = false`, is `graphql(skip)` or is
+not GraphQL-readable, and it applies to direct deletes only, not to
+propagated events.
 
 Direct generated deleted preimages default to suppression. They require an
 explicit `RowPolicy::can_read_deleted_preimage` opt-in under callback-only or

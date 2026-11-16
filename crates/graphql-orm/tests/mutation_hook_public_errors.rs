@@ -865,6 +865,68 @@ async fn graphql_refusals_match_repository_refusals() {
     owner.cleanup().unwrap();
 }
 
+/// #682: the opt-in that renders an uncoded callback error as written belongs
+/// to the schema built from the opted-in `Database`. A second schema in the
+/// same process, run in between and concurrently, keeps the default.
+async fn uncoded_callback_messages_are_scoped_to_the_opted_in_schema() {
+    let (db, mut owner, hook) = fixture().await;
+    assert!(!db.exposes_uncoded_callback_messages());
+    let exposed_db = db.clone().with_uncoded_callback_messages_exposed(true);
+    assert!(exposed_db.exposes_uncoded_callback_messages());
+    let exposing = schema_builder(exposed_db)
+        .data(AuthSubject::new("test-principal"))
+        .finish();
+    let default = schema_builder(db.clone())
+        .data(AuthSubject::new("test-principal"))
+        .finish();
+    let mutation = "mutation { createHookRecord(input: {recordKey: \"scoped\", status: \"before\"}) { success } }";
+    let code = |response: &async_graphql::Response| {
+        response.errors[0]
+            .extensions
+            .as_ref()
+            .and_then(|ext| ext.get("code"))
+            .cloned()
+    };
+    *hook.phase.lock().unwrap() = Some((MutationPhase::Before, Failure::Uncoded));
+    for _ in 0..2 {
+        let response = exposing.execute(mutation).await;
+        assert_eq!(response.errors.len(), 1, "{response:?}");
+        assert_eq!(response.errors[0].message, SECRET, "opted-in schema");
+        let response = default.execute(mutation).await;
+        assert_eq!(response.errors.len(), 1, "{response:?}");
+        assert_eq!(
+            response.errors[0].message, "internal error",
+            "default schema"
+        );
+        assert_eq!(
+            code(&response),
+            Some(async_graphql::Value::from("INTERNAL_ERROR"))
+        );
+    }
+    let (exposed, hidden) = tokio::join!(exposing.execute(mutation), default.execute(mutation));
+    assert_eq!(
+        exposed.errors[0].message, SECRET,
+        "concurrent opted-in schema"
+    );
+    assert_eq!(
+        hidden.errors[0].message, "internal error",
+        "concurrent default schema"
+    );
+    // Outside any schema the default applies to the opted-in handle too.
+    let repository = HookRecord::insert(
+        &db.clone().with_uncoded_callback_messages_exposed(true),
+        create("repository"),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        OrmPublicError::from(repository).message,
+        OrmErrorCode::InternalError.default_message()
+    );
+    *hook.phase.lock().unwrap() = None;
+    owner.cleanup().unwrap();
+}
+
 macro_rules! case {
     ($name:ident) => {
         #[tokio::test]
@@ -886,4 +948,5 @@ mod cases {
     case!(retention_purge_entity_denial_reports_forbidden);
     case!(nested_hook_write_refusals_keep_their_code_and_safe_text);
     case!(graphql_refusals_match_repository_refusals);
+    case!(uncoded_callback_messages_are_scoped_to_the_opted_in_schema);
 }

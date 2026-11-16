@@ -10,6 +10,11 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.146.0
+
+- **Fixed:** adopts tool profiles 0.24.0, so runtime-composed collections with live subscriptions, a node identity and a UUID or integer key compile as query, mutation and subscription capability catalogues under the ORM's default `RuntimeInt64` identities and under `with_legacy_int_identities()`. A regression test covers each key shape in both modes. No AI schema module change and no data migration.
+- **Fixed:** session retention scans candidate sessions in pages no larger than the database's maximum page limit. Under the ORM breaking batch a host keyset page above that maximum is refused, so a database configured below `maximum_sessions` (50 by default) failed every retention pass; the scan used to be shortened silently and continues through its cursor, as before.
+
 ## Unreleased - 0.145.0
 
 - **Added:** per-message structured entity references (#397). `SendAiMessageInput.references` takes a bounded list of `{kind, id}` pairs. A host `AiEntityReferenceRegistry` declares the accepted kinds and the `AiEntityReferenceResolver` hook; install it with `AiRuntimeBuilder::entity_references` and `OrmAiSessionService::with_entity_references`. Only the handle is stored. The hook is called again, with the principal acting at that moment, when a client reads the transcript and at every provider dispatch. A reference never grants access, an unknown kind is rejected, and a missing, denied, revoked, failed, oversized or over-cap reference becomes one fixed unavailable marker, so a reference is not an existence oracle. Resolved data reaches the model as a provenance-tagged envelope marked as data, not instructions. See [entity references](docs/entity-references.md).

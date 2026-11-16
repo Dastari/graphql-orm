@@ -4930,6 +4930,16 @@ fn generated_shape_matches(
     }
     // The runtime emits stored scalar keys without live subscriptions and
     // derived key scalars with live subscriptions. Select one complete mode.
+    // A UUID key member is `UUID` in both identity modes. An integer member
+    // is `RuntimeInt64` by default and `Int` under legacy int identities,
+    // which the module's `RecordVersion` scalar (`RuntimeInt64!` or `Int!`)
+    // identifies.
+    let record_version = entity
+        .fields
+        .iter()
+        .find(|field| field.field_name == "RecordVersion")
+        .map(|field| render_type_ref(&field.type_ref));
+    let legacy_int_keys = record_version.as_deref() == Some("Int!");
     let live_key_contract = input_name == format!("{}KeyInput", entity.entity_name)
         && entity.record_version.as_ref().is_some_and(|version| {
             version.mode == graphql_orm_operation_catalog::GraphqlRecordVersionMode::Managed
@@ -4938,22 +4948,25 @@ fn generated_shape_matches(
             .fields
             .iter()
             .any(|field| field.field_name == "NodeId" && render_type_ref(&field.type_ref) == "ID!")
-        && entity.fields.iter().any(|field| {
-            field.field_name == "RecordVersion" && render_type_ref(&field.type_ref) == "Int!"
-        })
+        && matches!(record_version.as_deref(), Some("Int!" | "RuntimeInt64!"))
         && fields.iter().any(|(name, field)| {
             entity.fields.iter().any(|semantic| {
                 semantic.field_name == *name
-                    && matches!(
-                        (
-                            render_type_ref(&semantic.type_ref).as_str(),
-                            field.ty.as_str()
-                        ),
-                        ("RuntimeInt64!", "Int!") | ("RuntimeUuid!", "UUID!")
-                    )
+                    && match (
+                        render_type_ref(&semantic.type_ref).as_str(),
+                        field.ty.as_str(),
+                    ) {
+                        ("RuntimeInt64!", "Int!") => legacy_int_keys,
+                        ("RuntimeUuid!", "UUID!") => true,
+                        _ => false,
+                    }
             }) || hidden.iter().any(|member| {
                 member.field_name == *name
-                    && matches!(render_type_ref(&member.type_ref).as_str(), "Int!" | "UUID!")
+                    && match render_type_ref(&member.type_ref).as_str() {
+                        "Int!" => legacy_int_keys,
+                        "UUID!" => true,
+                        _ => false,
+                    }
             })
         });
     let public_fields = fields
@@ -5131,7 +5144,7 @@ fn generated_shape_matches(
                 // NodeId and RecordVersion are the live module's fixed outputs.
                 if live_key_contract {
                     let alias = match generated.as_str() {
-                        "RuntimeInt64!" => Some("Int"),
+                        "RuntimeInt64!" if legacy_int_keys => Some("Int"),
                         "RuntimeUuid!" => Some("UUID"),
                         _ => None,
                     };

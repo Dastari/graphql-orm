@@ -1124,6 +1124,115 @@ async fn key_only_deletes_reach_exact_key_subscribers_only(db: &Database) -> Tes
     Ok(())
 }
 
+/// Key-only delete authority: `mallory` loses entity access after admission
+/// and `eve` may not read the key field. Neither gets a key-only event.
+struct KeyOnlyAuthority(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+fn actor_of(ctx: &async_graphql::Context<'_>) -> Option<String> {
+    ctx.auth_subject_opt().map(|subject| subject.id.clone())
+}
+
+impl EntityPolicy for KeyOnlyAuthority {
+    fn can_access_entity<'a>(
+        &'a self,
+        ctx: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database,
+        entity: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessKind,
+        _: EntityAccessSurface,
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async move {
+            let revoked = self.0.load(std::sync::atomic::Ordering::SeqCst);
+            Ok(!(revoked
+                && entity == KeyedTicket::metadata().entity_name
+                && ctx.and_then(actor_of).as_deref() == Some("mallory")))
+        })
+    }
+}
+
+impl FieldPolicy for KeyOnlyAuthority {
+    fn can_read_field<'a>(
+        &'a self,
+        ctx: &'a async_graphql::Context<'_>,
+        _: &'a Database,
+        entity: &'static str,
+        field: &'static str,
+        _: Option<&'static str>,
+        _: Option<&'a (dyn std::any::Any + Send + Sync)>,
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async move {
+            Ok(!(entity == KeyedTicket::metadata().entity_name
+                && field.eq_ignore_ascii_case("id")
+                && actor_of(ctx).as_deref() == Some("eve")))
+        })
+    }
+
+    fn can_write_field<'a>(
+        &'a self,
+        _: &'a async_graphql::Context<'_>,
+        _: &'a Database,
+        _: &'static str,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: Option<&'a (dyn std::any::Any + Send + Sync)>,
+        _: Option<&'a (dyn std::any::Any + Send + Sync)>,
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(true) })
+    }
+}
+
+/// A key-only `DELETED` event is released only under current subscriber
+/// authority: entity access, and read access to every key field through the
+/// host field policy. A keyed subscriber without either gets nothing.
+async fn key_only_deletes_require_entity_and_key_field_access(db: &Database) -> TestResult {
+    KeyedTicket::insert(
+        db,
+        CreateKeyedTicketInput {
+            id: "t3".to_string(),
+            owner: "alice".to_string(),
+            label: "created".to_string(),
+        },
+    )
+    .await?;
+    let revoked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut restricted = db.clone();
+    restricted.set_entity_policy(KeyOnlyAuthority(revoked.clone()));
+    restricted.set_field_policy(KeyOnlyAuthority(revoked.clone()));
+    let key = argument_name("key");
+    let changed = resolver_name("keyedTicketChanged");
+    let mut allowed = open(
+        &restricted,
+        ticket_subscription(&keys_argument(&["t3"])),
+        "alice",
+    );
+    let mut without_access = open(
+        &restricted,
+        ticket_subscription(&keys_argument(&["t3"])),
+        "mallory",
+    );
+    let mut without_key_field = open(
+        &restricted,
+        ticket_subscription(&format!("({key}: \"t3\")")),
+        "eve",
+    );
+    for stream in [&mut allowed, &mut without_access, &mut without_key_field] {
+        admitted(stream).await;
+    }
+    revoked.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    assert!(KeyedTicket::delete_by_id(db, &"t3".to_string()).await?);
+
+    // The control subscriber proves the key-only event was emitted.
+    let event = next_event(&mut allowed, changed).await;
+    assert_eq!(event[field_name("action")], "DELETED", "{event}");
+    assert_eq!(id_of(&event), "t3");
+    assert!(event[field_name("keyedTicket")].is_null(), "{event}");
+    quiet(&mut without_access, "subscriber without entity access").await;
+    quiet(&mut without_key_field, "subscriber denied the key field").await;
+    Ok(())
+}
+
 macro_rules! scenarios {
     ($($scenario:ident),* $(,)?) => {
         #[cfg(feature = "sqlite")]
@@ -1170,4 +1279,5 @@ scenarios![
     a_lagging_subscriber_gets_one_continuity_error_whatever_it_filters,
     a_replaced_event_channel_ends_its_subscribers,
     key_only_deletes_reach_exact_key_subscribers_only,
+    key_only_deletes_require_entity_and_key_field_access,
 ];

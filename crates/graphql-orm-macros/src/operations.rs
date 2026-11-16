@@ -1756,22 +1756,49 @@ fn generate_graphql_operations_unfiltered(
         }
     }
     let has_composite_primary_key = primary_key_fields.len() > 1;
-    if let Some(span) = entity_meta.key_only_deletes
-        && let Some(key) = primary_key_fields
-            .iter()
-            .find(|key| key.meta.read_policy.is_some())
-    {
+    if let Some(span) = entity_meta.key_only_deletes {
         // A key-only event releases the key with no row to check a field
-        // policy against, so a policy on a key field cannot be honoured.
-        let mut error = syn::Error::new(
-            span,
-            "key_only_deletes cannot be combined with a read_policy on a primary-key field: a key-only DELETED event would release the key without evaluating that policy",
-        );
-        error.combine(syn::Error::new_spanned(
-            &key.field_name,
-            "this primary-key field declares a read_policy",
-        ));
-        return Err(error);
+        // policy against, so every key field must be one a subscriber may
+        // read on a change event with nothing but field read access.
+        let refusal = primary_key_fields.iter().find_map(|key| {
+            if key.meta.read_policy.is_some() {
+                Some((
+                    key,
+                    "a read_policy",
+                    "this primary-key field declares a read_policy",
+                ))
+            } else if !key.meta.subscribe {
+                Some((
+                    key,
+                    "`subscribe = false`",
+                    "this primary-key field is excluded from change events",
+                ))
+            } else if key.meta.graphql_skip {
+                Some((
+                    key,
+                    "`graphql(skip)`",
+                    "this primary-key field is skipped from GraphQL",
+                ))
+            } else if !key.meta.graphql_readable() {
+                Some((
+                    key,
+                    "an unreadable key",
+                    "this primary-key field is not GraphQL-readable",
+                ))
+            } else {
+                None
+            }
+        });
+        if let Some((key, cause, detail)) = refusal {
+            let mut error = syn::Error::new(
+                span,
+                format!(
+                    "key_only_deletes cannot be combined with {cause} on a primary-key field: a key-only DELETED event would release the key without evaluating that restriction"
+                ),
+            );
+            error.combine(syn::Error::new_spanned(&key.field_name, detail));
+            return Err(error);
+        }
     }
     if entity_meta.append_only && schema_policy_read_only {
         return Err(syn::Error::new_spanned(
@@ -2499,8 +2526,9 @@ fn generate_graphql_operations_unfiltered(
     // `key_only_deletes`: when a generated delete's event cannot be released
     // with its row (no preimage grant), a subscriber whose `Key`/`Keys`
     // filter names that exact key still learns that it was deleted. The
-    // event carries the key only. Subscriber-level authority is checked
-    // before and after the payload is prepared; no row or field is read.
+    // event carries the key only. Subscriber-level authority and key-field
+    // read access are checked before and after the payload is prepared; no
+    // row is read.
     let key_only_delete_fallback = if entity_meta.key_only_deletes.is_some() {
         let key_only_release_key_field = if has_composite_primary_key {
             quote! { key: event.key.clone(), }
@@ -2521,6 +2549,9 @@ fn generate_graphql_operations_unfiltered(
                         <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
                         ::graphql_orm::graphql::orm::EntityAccessKind::Read,
                         ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlSubscription).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
+                    // The released key fields: exposed on change events and
+                    // allowed by their declared and host field read policies.
+                    ::graphql_orm::graphql::subscriptions::authorize_subscription_key_fields::<#struct_name, #backend_marker>(&db, ctx).await?;
                     #struct_name::__gom_authorize_changed_operation(ctx)?;
                     Ok::<(), ::graphql_orm::async_graphql::Error>(())
                 };
@@ -8894,8 +8925,14 @@ fn generate_graphql_operations_unfiltered(
                     }
 
                     query = query.with_read_visibility(&visibility)?;
+                    // Client page semantics: reduce, or refuse when the host opted in,
+                    // before the exact host connection read.
                     if let Some(ref p) = page {
-                        query = query.paginate(p);
+                        let resolved_page = db.client_pagination_config().resolve_client_page(Some(p), true).map_err(|error| error.into_graphql_error())?;
+                        query = query.paginate(&::graphql_orm::graphql::orm::PageInput {
+                            limit: resolved_page.limit,
+                            offset: Some(resolved_page.offset),
+                        });
                     }
 
                     let mut generic_conn = query
@@ -9579,8 +9616,14 @@ fn generate_graphql_operations_unfiltered(
                 }
 
                 query = query.with_read_visibility(&visibility)?;
+                // Client page semantics: reduce, or refuse when the host opted in,
+                // before the exact host connection read.
                 if let Some(ref p) = page {
-                    query = query.paginate(p);
+                    let resolved_page = db.client_pagination_config().resolve_client_page(Some(p), true).map_err(|error| error.into_graphql_error())?;
+                    query = query.paginate(&::graphql_orm::graphql::orm::PageInput {
+                        limit: resolved_page.limit,
+                        offset: Some(resolved_page.offset),
+                    });
                 }
 
                 let mut generic_conn = query

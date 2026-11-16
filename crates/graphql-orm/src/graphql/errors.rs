@@ -449,8 +449,8 @@ pub fn graphql_error_from_loader(error: String) -> async_graphql::Error {
 ///
 /// An error with no `code` extension is not a deliberate public refusal: it
 /// reads as `INTERNAL_ERROR` with the default message on every surface, and
-/// its text is kept as a server-side diagnostic, unless the host opted in
-/// with [`expose_uncoded_callback_messages`]. An error with an
+/// its text is kept as a server-side diagnostic, unless the schema serving
+/// the request opted in with [`UncodedCallbackMessages`]. An error with an
 /// application-defined code reads as `INTERNAL_ERROR` with the default
 /// message for repository callers, while
 /// [`OrmPublicError::into_graphql_error`] renders it as the callback wrote it.
@@ -458,14 +458,20 @@ pub fn graphql_error_from_loader(error: String) -> async_graphql::Error {
 pub fn sqlx_error_from_graphql(error: async_graphql::Error) -> sqlx::Error {
     classify_callback_error(
         error,
-        EXPOSE_UNCODED_CALLBACK_MESSAGES.load(std::sync::atomic::Ordering::Relaxed),
+        EXPOSING_UNCODED_CALLBACK_MESSAGES
+            .try_with(|expose| *expose)
+            .unwrap_or(false),
     )
 }
 
-static EXPOSE_UNCODED_CALLBACK_MESSAGES: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+// The opt-in belongs to one schema. Its extension carries it for the
+// request or subscription it serves; scopes restore on exit and are never
+// shared between schemas or concurrent tasks. Work outside the scope, such
+// as a task the host spawns, keeps the default.
+tokio::task_local! { static EXPOSING_UNCODED_CALLBACK_MESSAGES: bool; }
 
-/// Let the text of an uncoded host callback error reach GraphQL clients.
+/// Let the text of an uncoded host callback error reach the clients of one
+/// GraphQL schema.
 ///
 /// By default an error that an entity policy, row policy, write-input
 /// transform or mutation hook returns with a plain message and no `code`
@@ -475,14 +481,54 @@ static EXPOSE_UNCODED_CALLBACK_MESSAGES: std::sync::atomic::AtomicBool =
 /// `OrmPublicError::with_message(OrmErrorCode::Forbidden, text)`, and always
 /// keeps its code and message.
 ///
-/// `true` restores the earlier contract, in which generated GraphQL
-/// operations and [`graphql_error_from_sqlx`] render an uncoded error as the
-/// callback wrote it. The setting is process-wide: set it once at start-up,
-/// before serving requests, and only when every callback's uncoded text is
-/// safe for clients. Repository callers reading `OrmPublicError::message`
-/// see the default message either way.
-pub fn expose_uncoded_callback_messages(expose: bool) {
-    EXPOSE_UNCODED_CALLBACK_MESSAGES.store(expose, std::sync::atomic::Ordering::Relaxed);
+/// `UncodedCallbackMessages(true)`, installed on a schema, restores the
+/// earlier contract for the queries, mutations and subscriptions that schema
+/// executes: generated GraphQL operations and [`graphql_error_from_sqlx`]
+/// render an uncoded error as the callback wrote it. Generated
+/// `schema_builder`s install it from
+/// [`Database::exposes_uncoded_callback_messages`](crate::db::Database::exposes_uncoded_callback_messages),
+/// so set the opt-in on the `Database` the schema serves, with
+/// [`DatabaseBuilder::expose_uncoded_callback_messages`](crate::db::DatabaseBuilder::expose_uncoded_callback_messages)
+/// or [`Database::with_uncoded_callback_messages_exposed`](crate::db::Database::with_uncoded_callback_messages_exposed).
+/// Another schema in the same process is unaffected. A handwritten schema
+/// installs the extension itself. Opt in only when every callback's uncoded
+/// text is safe for that schema's clients. Repository callers reading
+/// `OrmPublicError::message` see the default message either way.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UncodedCallbackMessages(pub bool);
+
+impl async_graphql::extensions::ExtensionFactory for UncodedCallbackMessages {
+    fn create(&self) -> std::sync::Arc<dyn async_graphql::extensions::Extension> {
+        std::sync::Arc::new(*self)
+    }
+}
+
+#[async_graphql::async_trait::async_trait]
+impl async_graphql::extensions::Extension for UncodedCallbackMessages {
+    async fn execute(
+        &self,
+        ctx: &async_graphql::extensions::ExtensionContext<'_>,
+        operation_name: Option<&str>,
+        next: async_graphql::extensions::NextExecute<'_>,
+    ) -> async_graphql::Response {
+        EXPOSING_UNCODED_CALLBACK_MESSAGES
+            .scope(self.0, next.run(ctx, operation_name))
+            .await
+    }
+
+    fn subscribe<'s>(
+        &self,
+        ctx: &async_graphql::extensions::ExtensionContext<'_>,
+        stream: futures::stream::BoxStream<'s, async_graphql::Response>,
+        next: async_graphql::extensions::NextSubscribe<'_>,
+    ) -> futures::stream::BoxStream<'s, async_graphql::Response> {
+        let expose = self.0;
+        let mut inner = next.run(ctx, stream);
+        Box::pin(futures::stream::poll_fn(move |cx| {
+            EXPOSING_UNCODED_CALLBACK_MESSAGES
+                .sync_scope(expose, || futures::Stream::poll_next(inner.as_mut(), cx))
+        }))
+    }
 }
 
 fn classify_callback_error(error: async_graphql::Error, expose_uncoded: bool) -> sqlx::Error {
@@ -550,8 +596,8 @@ fn classify_callback_error(error: async_graphql::Error, expose_uncoded: bool) ->
 /// Apply the bulk callback refusal classifier at a GraphQL callback boundary.
 ///
 /// Failures without a string `code` extension receive a safe ORM category and
-/// the default message, unless the host called
-/// [`expose_uncoded_callback_messages`]. Coded refusals retain their message
+/// the default message, unless the schema opted in with
+/// [`UncodedCallbackMessages`]. Coded refusals retain their message
 /// and all extensions. Internal
 /// diagnostics use the same opt-in server reporting path as repository failures.
 #[doc(hidden)]

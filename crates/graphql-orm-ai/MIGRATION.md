@@ -10,6 +10,14 @@ supersedes: []
 
 # Migration Guide
 
+## 0.145.0 to 0.146.0: runtime live keys under default identities
+
+**No action.** Tool profiles 0.24.0 accept the runtime live key inputs of the
+ORM's default string identities and of the opt-in legacy `Int` identities.
+Session retention keeps paging candidate sessions within the database's
+maximum page limit, now that the ORM refuses oversized host keyset pages.
+No AI schema module change, no SDL change and no data migration.
+
 ## 0.144.0 to 0.145.0: entity references
 
 Apply AI schema module `0.81.0` before starting workers. It changes no table,

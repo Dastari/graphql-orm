@@ -19,11 +19,18 @@ Upgrade runtime and macros together.
 ### ORM and macros: page limits, identities, subscriptions, preloads and callback errors
 
 
-- **Runtime cursor error enums gain a variant. Action needed** for exhaustive
-  matches on `RuntimeQueryErrorCode` or `RuntimeRelationErrorCode`: handle
-  `CursorKeyTooLarge`. A stored order value that cannot fit a cursor refuses
-  the page with `cursor_key_too_large`. The public enum additions ship only
-  in this breaking release; PR #733 keeps its main-branch Rust API compatible
+- **Runtime cursor errors have their own code. Action needed** for exhaustive
+  matches on `RuntimeQueryErrorCode` or `RuntimeRelationErrorCode`, and for
+  code that matches the 0.164.0 pair. Both enums gain `CursorKeyTooLarge`, so
+  an exhaustive match needs an arm. `RuntimeQueryError::code()` and
+  `RuntimeRelationError::code()` now return `CursorKeyTooLarge` for a stored
+  order value that cannot fit a cursor, not `ResourceLimit` with
+  `detail() == Some("cursor_key_too_large")` as in 0.164.0. A host that
+  matches `ResourceLimit` and then checks `detail()` must match
+  `CursorKeyTooLarge` instead; `detail()` still returns
+  `Some("cursor_key_too_large")`, and `as_str()` is `cursor_key_too_large`,
+  the code runtime GraphQL already returns. PR #733 keeps its main-branch Rust API
+  compatible; the dedicated variant ships only in this breaking release
   ([#580](https://github.com/Dastari/graphql-orm/issues/580)).
 - **A schema's maximum page limit is fixed at compile time. Action needed** if
   the `Database` a generated schema serves sets a maximum page limit other
@@ -52,9 +59,25 @@ Upgrade runtime and macros together.
   or call the helper on a handle with a raised maximum. An omitted limit still
   uses the default limit, reduced to the maximum. GraphQL clients are
   unaffected: their oversized limits are reduced, or refused when
-  `refuse_oversized_page_limit` is set. `paginate(PageInput)` on the
-  pool-bound `EntityQuery` and on search queries keeps GraphQL page semantics
-  and still reduces (#667).
+  `refuse_oversized_page_limit` is set (#667).
+- **Host-side `paginate(PageInput)` reads refuse a limit above the maximum.
+  Action needed** if Rust code calls `EntityQuery::paginate(page)` followed by
+  `fetch_connection`, `fetch_connection_with_auth` or
+  `fetch_connection_selected_with_auth`, or `EntitySearchQuery::paginate(page)`
+  followed by any fetch, with `page.limit` above the maximum page limit. These
+  reads used to return the maximum number of rows without saying so, whether
+  or not `refuse_oversized_page_limit` was set; they now fail with
+  `PAGE_LIMIT_EXCEEDED`, and a negative limit with `INVALID_INPUT`. A limit at
+  or below the maximum is honoured exactly. Give one connection read a larger
+  maximum with `EntityQuery::with_max_limit(n)`, and one search with
+  `.pagination_config(config.with_max_limit(Some(n)))`. A custom resolver that
+  passes a client-supplied `PageInput` to `paginate` must resolve it first,
+  as generated resolvers now do:
+  `db.client_pagination_config().resolve_client_page(page.as_ref(), true)?`,
+  then paginate with the resolved `limit` and `offset`; the client's oversized
+  limit is then reduced, or refused when the opt-in is set, as before.
+  Generated GraphQL list roots, relations and search connections are
+  unchanged (#667).
 - **Runtime `RecordVersion` and integer live keys are strings. Action needed**
   for runtime GraphQL modules with a node identity or live subscriptions on an
   integer key. `RecordVersion`, the `…Changed` `keys` argument, the members of
@@ -80,10 +103,17 @@ Upgrade runtime and macros together.
   `OrmPublicError::with_message(OrmErrorCode::Conflict, "seat taken").into_graphql_error()`
   (or return the `OrmPublicError` with `?`); it then keeps its code and
   message on every surface. An error with an application-defined `code`
-  extension is still rendered as written by GraphQL. To restore the old
-  behaviour for the whole process, call
-  `graphql_orm::graphql::errors::expose_uncoded_callback_messages(true)` once
-  at start-up ([#682](https://github.com/Dastari/graphql-orm/issues/682)).
+  extension is still rendered as written by GraphQL. At relation boundaries
+  (relation authorization, including a relation field's read policy) an
+  authored error without a public code stays `FORBIDDEN` with no message, as
+  before. To restore the old rendering for one schema, opt in on the
+  `Database` it serves: `DatabaseBuilder::expose_uncoded_callback_messages(true)`
+  or `Database::with_uncoded_callback_messages_exposed(true)`. Generated
+  `schema_builder`s install the `graphql::errors::UncodedCallbackMessages`
+  extension from that setting, so another schema in the process keeps the
+  default; a handwritten schema installs the extension itself. Repository
+  callers see the default message either way
+  ([#682](https://github.com/Dastari/graphql-orm/issues/682)).
 - **The policy-free relation preload API is removed. Action needed** if code
   calls `load_relations`, `bulk_load_relations`, `load_relations_with_auth` or
   `bulk_load_relations_with_auth`, or implements
@@ -91,21 +121,32 @@ Upgrade runtime and macros together.
   implementations are gone: they filled relation fields without entity, row
   or field policy. Read related rows through the generated relation resolvers,
   the repository builders, or `tx.query::<T>()`, which apply policy. Delete
-  any handwritten implementation; nothing calls it. The
-  `graphql::loaders::RelationLoader` data loader is a different type and is
-  unchanged ([#445](https://github.com/Dastari/graphql-orm/issues/445)).
-- **Key-only delete signals are available per entity. Action needed** only to
-  adopt them. `#[graphql_entity(key_only_deletes)]` sends a `DELETED` event
+  any handwritten implementation; nothing calls it.
+  The `graphql::loaders::RelationLoader` data loader (also in the prelude) is
+  a different type. It keeps its relation-key loads, which generated relation
+  resolvers authorize before loading, but loses its `Loader<String>` impl:
+  that load by a bare batch-column string ran `SELECT … WHERE column IN (…)`
+  with no entity, row or field policy. Code that calls `load_one`/`load_many`
+  with string keys on a `DataLoader<RelationLoader<T>>` no longer compiles;
+  read related rows through the generated relation resolvers, the repository
+  builders or `tx.query::<T>()`. `BatchLoadEntity` is no longer used by the
+  ORM; existing implementations still compile and can be deleted
+  ([#445](https://github.com/Dastari/graphql-orm/issues/445)).
+- **Key-only delete signals are available per entity. No action**; this is
+  an opt-in. `#[graphql_entity(key_only_deletes)]` sends a `DELETED` event
   with the key and a null entity to a `Changed` subscriber whose `Key` or
   `Keys` argument names the deleted row's complete key, when the delete
   releases no row because the row policy grants no deleted preimage. Unkeyed
-  subscribers get nothing, as before. The subscriber's resolver
-  authentication, scopes, assurance and entity access are checked; row policy
-  cannot be, because the row is gone. A subscriber with entity access who
-  names a key therefore learns that a row with that key was deleted, whether
-  or not it could read the row. Opt in only where that is acceptable. The
-  attribute is a compile error when a primary-key field declares a
-  `read_policy` ([#666](https://github.com/Dastari/graphql-orm/issues/666)).
+  subscribers get nothing, as before. Before each key-only event, the
+  subscriber's resolver authentication, scopes, assurance and entity access
+  are checked, and so is read access to every key field through the host
+  field policy (with no record). Row policy cannot be, because the row is
+  gone. A subscriber with entity and key-field access who names a key
+  therefore learns that a row with that key was deleted, whether or not it
+  could read the row. Opt in only where that is acceptable. The attribute is
+  a compile error when a primary-key field declares a `read_policy`, sets
+  `subscribe = false`, is `graphql(skip)`, or is not GraphQL-readable
+  ([#666](https://github.com/Dastari/graphql-orm/issues/666)).
 
 - **Nested router directives still require subgraph enforcement. Action needed**
   if a deployment relied on the old changelog claim that the router enforces
@@ -114,6 +155,17 @@ Upgrade runtime and macros together.
   protection. PR #733 corrects the claim for #485; implementing router-side
   nested enforcement remains separately tracked in #729. This batch adds no
   router enforcement.
+
+### AI tool profiles 0.24.0 and AI 0.146.0: runtime live keys under default identities
+
+- **Runtime live key inputs compile under string identities. No action.**
+  With live subscriptions and a node identity, a runtime collection with a
+  UUID key failed every query, mutation and subscription capability catalogue
+  under the new default identities (`InvalidConfiguration("generated input
+  <Object>KeyInput.<field> differs from its canonical contract")`). Tool
+  profiles 0.24.0 accept the default `RuntimeInt64` and the legacy `Int`
+  identity alike; AI 0.146.0 adopts them. See the
+  [tool-profiles migration guide](crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0230-to-0240-runtime-live-keys-under-default-identities).
 
 ## 0.163.0 to 0.164.0: page limits, 64-bit identities, cursor keys and subscription lag
 

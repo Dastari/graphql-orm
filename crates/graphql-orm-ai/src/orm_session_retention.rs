@@ -526,30 +526,35 @@ impl OrmAiSessionRetentionService {
 
     async fn candidates(&self, after: Option<String>) -> Result<SessionCandidatePage, AiError> {
         validate_cursor(after.as_deref())?;
-        let connection =
-            AiSessionRecord::keyset_connection_page(
-                &self.database,
-                AiSessionRecordWhereInput {
-                    state: Some(StringFilter {
-                        in_list: Some(vec![
-                            "active".to_owned(),
-                            "archived".to_owned(),
-                            "deleting".to_owned(),
-                        ]),
-                        ..Default::default()
-                    }),
+        let connection = AiSessionRecord::keyset_connection_page(
+            &self.database,
+            AiSessionRecordWhereInput {
+                state: Some(StringFilter {
+                    in_list: Some(vec![
+                        "active".to_owned(),
+                        "archived".to_owned(),
+                        "deleting".to_owned(),
+                    ]),
                     ..Default::default()
-                },
-                KeysetConnectionInput {
-                    after,
-                    first: Some(i64::try_from(self.limits.maximum_sessions).map_err(|_| {
+                }),
+                ..Default::default()
+            },
+            KeysetConnectionInput {
+                after,
+                // A host keyset page above the database maximum is refused,
+                // never shortened, so each scan page stays within it; the
+                // cursor continues through the remaining sessions.
+                first: Some(crate::orm_read_bounds::client_page_limit(
+                    self.database.pagination_config(),
+                    i64::try_from(self.limits.maximum_sessions).map_err(|_| {
                         AiError::InvalidConfiguration("invalid scan limit".to_owned())
-                    })?),
-                    ..Default::default()
-                },
-            )
-            .await
-            .map_err(map_orm)?;
+                    })?,
+                )),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(map_orm)?;
         let next_cursor = connection
             .page_info
             .has_next_page

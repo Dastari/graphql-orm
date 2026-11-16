@@ -56,7 +56,7 @@ surface. In a build with more than one backend feature, `backend` is required.
 | `ai_mutations` | `(create = "…", upsert = "…", update = "…", update_many = "…", delete = "…", delete_many = "…")` | each value is `"automatic"`, `"approval_required"`, or `"prohibited"`; omitted categories are prohibited |
 | `retention_purge` | nonempty policy-key string | absent |
 | `keyset`, `read_policy`, `write_policy`, `notify`, `notify_with` | string | absent |
-| `key_only_deletes` | flag | absent; a `Key`/`Keys` subscriber of the exact key gets a key-only `DELETED` event when a delete releases no row. Not allowed when a primary-key field declares a `read_policy`. See [subscription release authorization](entities-and-relations.md#subscription-release-authorization) |
+| `key_only_deletes` | flag | absent; a `Key`/`Keys` subscriber of the exact key gets a key-only `DELETED` event when a delete releases no row. Not allowed when a primary-key field declares a `read_policy`, sets `subscribe = false`, is `graphql(skip)` or is not GraphQL-readable. See [subscription release authorization](entities-and-relations.md#subscription-release-authorization) |
 | `policy` | `"open"` | absent; records that the entity deliberately declares no `read_policy` or `write_policy`, for `schema_roots!` `require_policies`. No run-time effect; cannot be combined with a policy key |
 | `notify_on_error` | `"propagate"` or `"report"` | `"propagate"`; single-row GraphQL notification failure policy |
 | `backup_export_order`, `backup_restore_order` | integer | absent |
@@ -316,17 +316,9 @@ equivalent to `#[graphql(complex, rename_fields = "PascalCase")]`. A relation wi
 the primary-key field as its source. The one exception is an entity with `schema_only = true`,
 which has no generated object. A relation target needs no loader implementation: generated
 relations take their keys from the relation, and every generated entity is a `RelationTarget`.
-`BatchLoadEntity` is needed only to load an entity through `RelationLoader`'s single-column
-`Loader<String>` form from handwritten code:
-
-```rust,ignore
-impl BatchLoadEntity for Account {
-    fn batch_column() -> &'static str { "id" }
-    fn batch_key_from_row(row: &graphql_orm::DbRow) -> graphql_orm::Result<String> {
-        row.try_get("id")
-    }
-}
-```
+`BatchLoadEntity` is no longer used: `RelationLoader`'s single-column `Loader<String>` form,
+which read rows without entity, row or field policy, was removed in the breaking release.
+Existing implementations still compile and can be deleted.
 
 `GraphQLRelations` adds generated `NodeId` (when `node_id` is enabled) and
 `RecordVersion` (for an exported managed version) to its complex object.

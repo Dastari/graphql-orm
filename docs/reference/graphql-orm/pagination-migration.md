@@ -241,13 +241,12 @@ above the maximum then fails with `PAGE_LIMIT_EXCEEDED` before any row is
 read. The message names the limit asked for and the maximum. A limit at the
 maximum and an omitted limit are served as before. The setting is off by
 default, so existing responses do not change. A custom resolver that takes a
-client `PageInput` should resolve it with
-`Database::client_pagination_config().resolve_client_page` so the setting covers it too.
-The setting also covers Rust reads that take a `PageInput`: with refusal on,
-an `EntityQuery::paginate(page)` read through `fetch_connection`,
-`fetch_connection_with_auth` or `fetch_connection_selected_with_auth`, and an
-`EntitySearchQuery::paginate(page)` read, fail with `PAGE_LIMIT_EXCEEDED` when
-`page.limit` is above the maximum instead of being reduced.
+client `PageInput` must resolve it with
+`Database::client_pagination_config().resolve_client_page` before passing it
+to `paginate`, as generated resolvers do, so the client's limit is reduced, or
+refused when the setting is on. The setting does not apply to host reads: a
+`PageInput` that reaches `paginate` directly is a trusted request and is
+exact or refused, as below.
 
 A schema's maximum page limit is fixed at compile time:
 `schema_roots!(max_page_limit: N, ...)`, or 100 when the declaration is
@@ -266,12 +265,21 @@ the 0.128.0 migration note). The keyset helpers (`Record::keyset_page`,
 `keyset_connection_page`, `tx.keyset_page`, and `fetch_authorized_keyset*` or
 `fetch_authorized_scan` called without a GraphQL context) follow the same
 rule: an explicit limit above the maximum fails with `PAGE_LIMIT_EXCEEDED`,
-and an omitted limit uses the default limit, reduced to the maximum. Only
-`paginate(PageInput)` on the pool-bound `EntityQuery` and on search queries
-keeps GraphQL page semantics and reduces. To read more rows a page from
-trusted code, page with
-`EntityQuery::<Record>::new().with_max_limit(n).fetch_authorized_keyset(&db, None, None, page)`,
-or call the helper on a handle with a raised maximum:
+and an omitted limit uses the default limit, reduced to the maximum. Called
+with a GraphQL context, `fetch_authorized_keyset*` and `fetch_authorized_scan`
+treat the limit as a client's: it is reduced, or refused when
+`refuse_oversized_page_limit` is set. `paginate(PageInput)` follows the same
+host rule: `EntityQuery::paginate(page)` read through `fetch_connection`,
+`fetch_connection_with_auth` or `fetch_connection_selected_with_auth`, and
+`EntitySearchQuery::paginate(page)` read through any fetch, honour
+`page.limit` exactly or fail with `PAGE_LIMIT_EXCEEDED` (a negative limit with
+`INVALID_INPUT`), whatever `refuse_oversized_page_limit` says. Before the
+breaking release these two reduced the limit to the maximum without saying
+so. To read more rows a page from trusted code, give the read its own
+maximum: `EntityQuery::<Record>::new().with_max_limit(n)` before
+`fetch_authorized_keyset(&db, None, None, page)` or `paginate(page)` and a
+`fetch_connection*` call, or `.pagination_config(config.with_max_limit(Some(n)))`
+on a search. A handle with a raised maximum works too:
 `db.clone().with_pagination_config(db.pagination_config().with_max_limit(Some(n)))`.
 Either way the page is bounded by `n`, and `pageInfo.hasNextPage` and the end
 cursor page through a larger set.

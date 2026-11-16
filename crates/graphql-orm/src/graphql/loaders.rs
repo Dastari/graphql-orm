@@ -133,6 +133,14 @@ impl RelationKey {
     }
 }
 
+/// A handwritten single-batch-column description of an entity.
+///
+/// The ORM no longer loads through this trait: the policy-free
+/// `Loader<String>` form of [`RelationLoader`] that used it was removed,
+/// because it read rows without entity, row or field policy. Existing
+/// implementations still compile. Read related rows through generated
+/// relation resolvers, repository builders or `tx.query::<T>()`, which apply
+/// policy.
 pub trait BatchLoadEntity<B: OrmBackend = DefaultBackend>:
     crate::graphql::orm::DatabaseEntity
     + crate::graphql::orm::FromSqlRow<B>
@@ -157,9 +165,8 @@ pub trait BatchLoadEntity<B: OrmBackend = DefaultBackend>:
 /// contract and row decoding. Implemented for every such type, so a relation
 /// target needs no hand-written loader trait.
 ///
-/// [`BatchLoadEntity`] is needed only by the single-column
-/// `Loader<String>` form of [`RelationLoader`], which generated relations do
-/// not use.
+/// [`RelationLoader`] loads through relation query keys only; it has no
+/// single-column form.
 pub trait RelationTarget<B: OrmBackend = DefaultBackend>:
     crate::graphql::orm::DatabaseEntity
     + crate::graphql::orm::FromSqlRow<B>
@@ -1363,6 +1370,13 @@ where
     Ok(results)
 }
 
+/// The relation data loader that generated schemas register.
+///
+/// It loads [`RelationQueryKey`] and [`CompositeRelationQueryKey`] batches.
+/// Generated relation resolvers authorize the relation and attach its read
+/// visibility to each key's `filter` before loading. A key built by hand is
+/// a trusted query and applies nothing beyond what it carries. There is no
+/// load by a bare key string.
 pub struct RelationLoader<T, B: OrmBackend = DefaultBackend> {
     db: crate::db::Database<B>,
     _marker: PhantomData<(T, B)>,
@@ -1373,65 +1387,6 @@ impl<T, B: OrmBackend> RelationLoader<T, B> {
         Self {
             db,
             _marker: PhantomData,
-        }
-    }
-}
-
-impl<T, B> Loader<String> for RelationLoader<T, B>
-where
-    B: OrmBackend,
-    T: BatchLoadEntity<B>,
-{
-    type Value = Vec<T>;
-    type Error = String;
-
-    fn load(
-        &self,
-        keys: &[String],
-    ) -> impl std::future::Future<Output = Result<HashMap<String, Self::Value>, Self::Error>> + Send
-    {
-        let keys = keys.to_vec();
-        let db = self.db.clone();
-        async move {
-            use crate::graphql::orm::{SqlDialect, SqlValue};
-
-            if keys.is_empty() {
-                return Ok(HashMap::new());
-            }
-
-            let backend = B::DIALECT;
-            let batch_column = backend.quote_identifier_path(T::batch_column());
-            let mut grouped: HashMap<String, Vec<T>> =
-                keys.iter().cloned().map(|key| (key, Vec::new())).collect();
-
-            for keys in bind_limited_groups(backend, keys, 1, 0)? {
-                let params = (1..=keys.len())
-                    .map(|index| backend.placeholder(index))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let sql = format!(
-                    "SELECT {} FROM {} WHERE {} IN ({})",
-                    T::column_names().join(", "),
-                    backend.render_identifier_path(T::TABLE_NAME),
-                    batch_column,
-                    params
-                );
-                let values = keys.into_iter().map(SqlValue::String).collect::<Vec<_>>();
-
-                let rows = B::fetch_rows(db.pool(), &sql, &values)
-                    .await
-                    .map_err(crate::graphql::errors::loader_error_from_sqlx)?;
-
-                for row in rows {
-                    let key = T::batch_key_from_row(&row)
-                        .map_err(crate::graphql::errors::loader_error_from_sqlx)?;
-                    let entity = T::from_row(&row)
-                        .map_err(crate::graphql::errors::loader_error_from_sqlx)?;
-                    grouped.entry(key).or_default().push(entity);
-                }
-            }
-
-            Ok(grouped)
         }
     }
 }

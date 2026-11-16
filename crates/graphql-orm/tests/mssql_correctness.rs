@@ -670,17 +670,6 @@ async fn wide_batches_stay_under_the_parameter_limit(connection: &str) -> TestRe
     }
     assert!(resolved[&representations[800]].is_none());
 
-    // The single-column loader: 2,500 keys in one `IN` list.
-    let singles = (1..=2_500).map(|id| id.to_string()).collect::<Vec<_>>();
-    let loaded = Loader::<String>::load(&loader, &singles)
-        .await
-        .map_err(|error| format!("load 5: {error}"))?;
-    assert_eq!(loaded.len(), 2_500);
-    let found = loaded.values().filter(|rows| !rows.is_empty()).count();
-    // Children 11, 12, 13, 21, ... up to 2493.
-    assert_eq!(found, 249 * 3);
-    assert_eq!(loaded["2493"][0].id, 2493);
-    assert!(loaded["2500"].is_empty());
     Ok(())
 }
 

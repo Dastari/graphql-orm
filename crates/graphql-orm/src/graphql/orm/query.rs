@@ -4985,14 +4985,25 @@ where
         self
     }
 
+    /// Read the offset/limit page `page`.
+    ///
+    /// A trusted connection read (`fetch_connection`,
+    /// `fetch_connection_with_auth`, `fetch_connection_selected_with_auth`)
+    /// honours `page.limit` exactly, or fails with
+    /// `PAGE_LIMIT_EXCEEDED` when the limit is above the maximum page limit
+    /// (or this query's [`Self::with_max_limit`]); it never reduces the limit.
+    /// An omitted limit uses the default limit. To apply GraphQL client page
+    /// semantics to a client-supplied page, resolve it first with
+    /// [`ClientPaginationConfig::resolve_client_page`] and paginate with the
+    /// result.
     pub fn paginate(mut self, page: &PageInput) -> Self {
         self.page = Some(page.clone());
         self
     }
 
-    /// Override the database's maximum page limit for this query's keyset
-    /// and authorized-scan pages (`fetch_authorized_keyset*`,
-    /// `fetch_authorized_scan`).
+    /// Override the database's maximum page limit for this query's
+    /// connection, keyset and authorized-scan pages (`fetch_connection*`,
+    /// `fetch_authorized_keyset*`, `fetch_authorized_scan`).
     ///
     /// Trusted Rust code that pages through a set, or reads `bound + 1` rows
     /// to detect an overflow, uses this to ask for more rows a page than
@@ -5848,20 +5859,38 @@ where
         Ok((rendered.sql, rendered.values))
     }
 
+    /// The page configuration of one trusted connection read: the provider's,
+    /// with this query's [`Self::with_max_limit`] maximum.
+    ///
+    /// An explicit [`Self::paginate`] limit is honoured exactly or refused,
+    /// never reduced: a limit above the maximum fails with
+    /// `PAGE_LIMIT_EXCEEDED`, and a negative one with `INVALID_INPUT`.
+    /// Generated GraphQL resolvers resolve the client page first with
+    /// [`ClientPaginationConfig::resolve_client_page`].
+    fn connection_pagination_config<P>(&self, provider: &P) -> crate::Result<PaginationConfig>
+    where
+        P: PoolProvider<B> + ?Sized,
+    {
+        let config = provider
+            .pagination_config()
+            .with_read_maximum(self.max_limit);
+        if let Some(limit) = self.page.as_ref().and_then(|page| page.limit) {
+            config
+                .checked_explicit_limit(limit)
+                .map_err(crate::graphql::errors::sqlx_error_from_public)?;
+        }
+        Ok(config)
+    }
+
     pub async fn fetch_connection<P>(&self, provider: &P) -> crate::Result<Connection<T>>
     where
         P: PoolProvider<B> + ?Sized,
     {
-        provider
-            .client_pagination_config()
-            .admit_client_limit(self.page.as_ref().and_then(|page| page.limit))
-            .map_err(crate::graphql::errors::sqlx_error_from_public)?;
+        let pagination_config = self.connection_pagination_config(provider)?;
         if self.requires_in_memory_filtering() {
             let nodes = self.fetch_unpaged_filtered(provider).await?;
             let total = nodes.len() as i64;
-            let page = provider
-                .pagination_config()
-                .resolve_page(self.page.as_ref(), true);
+            let page = pagination_config.resolve_page(self.page.as_ref(), true);
             let offset = page.offset.max(0) as usize;
             let limit = page.limit.map(|limit| limit.max(0) as usize);
             let page_nodes = if offset >= nodes.len() {
@@ -5893,7 +5922,6 @@ where
                 edges,
             });
         }
-        let pagination_config = provider.pagination_config();
         let page = pagination_config.resolve_page(self.page.as_ref(), true);
         let offset = page.offset.max(0) as usize;
         let mut count_query = self.build_select_query()?;
@@ -5954,15 +5982,12 @@ where
     where
         P: PoolProvider<B> + ?Sized,
     {
-        provider
-            .client_pagination_config()
-            .admit_client_limit(self.page.as_ref().and_then(|page| page.limit))
-            .map_err(crate::graphql::errors::sqlx_error_from_public)?;
+        let pagination_config = self.connection_pagination_config(provider)?;
         self.ensure_filter_valid()?;
         if self.requires_in_memory_filtering() || (selection.rows && selection.count) {
             return self.fetch_connection_with_auth(provider, auth).await;
         }
-        let config = provider.pagination_config();
+        let config = pagination_config;
         let page = config.resolve_page(self.page.as_ref(), true);
         let offset = page.offset.max(0);
         let limit = page.limit;
@@ -6048,18 +6073,13 @@ where
     where
         P: PoolProvider<B> + ?Sized,
     {
-        provider
-            .client_pagination_config()
-            .admit_client_limit(self.page.as_ref().and_then(|page| page.limit))
-            .map_err(crate::graphql::errors::sqlx_error_from_public)?;
+        let pagination_config = self.connection_pagination_config(provider)?;
         if self.requires_in_memory_filtering() {
             let nodes = self
                 .fetch_unpaged_filtered_with_auth(provider, auth)
                 .await?;
             let total = nodes.len() as i64;
-            let page = provider
-                .pagination_config()
-                .resolve_page(self.page.as_ref(), true);
+            let page = pagination_config.resolve_page(self.page.as_ref(), true);
             let offset = page.offset.max(0) as usize;
             let limit = page.limit.map(|limit| limit.max(0) as usize);
             let page_nodes = if offset >= nodes.len() {
@@ -6096,7 +6116,6 @@ where
         count_query.pagination = None;
         count_query.sorts.clear();
         let count_rendered = render_select_query(B::DIALECT, &count_query);
-        let pagination_config = provider.pagination_config();
         let row_rendered = render_select_query(
             B::DIALECT,
             &self.build_select_query_with_config(pagination_config, true)?,

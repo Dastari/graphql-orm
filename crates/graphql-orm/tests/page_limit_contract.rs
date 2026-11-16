@@ -622,12 +622,80 @@ async fn schema_complexity_bounds_are_isolated(db: &Database) -> TestResult {
     Ok(())
 }
 
+/// #667: a trusted `EntityQuery::paginate` connection read is exact or
+/// refused, never reduced, with or without the client refusal opt-in. A
+/// per-read `with_max_limit` admits a larger exact page.
+async fn host_connection_reads_are_exact_or_refused(db: &Database) -> TestResult {
+    use graphql_orm::graphql::pagination::ConnectionSelection;
+    let oversized = PageInput {
+        limit: Some(MAXIMUM + 1),
+        offset: Some(0),
+    };
+    let query = || EntityQuery::<LimitCard, Backend>::new().paginate(&oversized);
+    let selection = ConnectionSelection {
+        rows: true,
+        count: false,
+        has_next_page: true,
+    };
+    let refused = |result: graphql_orm::Result<Connection<LimitCard>>, name: &str| {
+        let error = OrmPublicError::from(result.expect_err(name));
+        assert_eq!(
+            error.code,
+            OrmErrorCode::PageLimitExceeded,
+            "{name}: {error:?}"
+        );
+    };
+    for handle in [
+        db.clone(),
+        db.clone().with_oversized_page_limit_refusal(true),
+    ] {
+        refused(query().fetch_connection(&handle).await, "fetch_connection");
+        refused(
+            query().fetch_connection_with_auth(&handle, None).await,
+            "fetch_connection_with_auth",
+        );
+        refused(
+            query()
+                .fetch_connection_selected_with_auth(&handle, None, selection)
+                .await,
+            "fetch_connection_selected_with_auth",
+        );
+        let exact = || query().with_max_limit(MAXIMUM + 1);
+        for (name, connection) in [
+            ("fetch_connection", exact().fetch_connection(&handle).await?),
+            (
+                "fetch_connection_with_auth",
+                exact().fetch_connection_with_auth(&handle, None).await?,
+            ),
+            (
+                "fetch_connection_selected_with_auth",
+                exact()
+                    .fetch_connection_selected_with_auth(&handle, None, selection)
+                    .await?,
+            ),
+        ] {
+            assert_eq!(connection.edges.len() as i64, MAXIMUM + 1, "{name}");
+            assert!(connection.page_info.has_next_page, "{name}");
+        }
+        // A limit above the per-read maximum is still refused.
+        refused(
+            query()
+                .with_max_limit(MAXIMUM)
+                .fetch_connection(&handle)
+                .await,
+            "per-read maximum",
+        );
+    }
+    Ok(())
+}
+
 async fn run() -> TestResult {
     let fixture = fixture().await?;
     schema_complexity_bounds_are_isolated(&fixture.db).await?;
     declared_maximum_is_published_and_a_mismatched_database_is_refused(&fixture.db);
     oversized_client_limits_are_reduced_unless_the_refusal_is_enabled(&fixture.db).await?;
     host_keyset_reads_take_a_per_read_maximum(&fixture.db).await?;
+    host_connection_reads_are_exact_or_refused(&fixture.db).await?;
     fixture.finish()
 }
 

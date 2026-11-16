@@ -99,6 +99,7 @@ pub struct Database<B: OrmBackend = DefaultBackend> {
     schema_policy: SchemaPolicy,
     pagination_config: PaginationConfig,
     refuse_oversized_limit: bool,
+    expose_uncoded_callback_messages: bool,
     authorization_mode: AuthorizationMode,
     event_senders: Arc<EventSenders>,
     scan_config: Option<crate::graphql::orm::AuthorizedScanConfig>,
@@ -125,6 +126,7 @@ impl<B: OrmBackend> Clone for Database<B> {
             schema_policy: self.schema_policy,
             pagination_config: self.pagination_config,
             refuse_oversized_limit: self.refuse_oversized_limit,
+            expose_uncoded_callback_messages: self.expose_uncoded_callback_messages,
             authorization_mode: self.authorization_mode,
             event_senders: self.event_senders.clone(),
             scan_config: self.scan_config.clone(),
@@ -202,6 +204,7 @@ impl<B: OrmBackend> Database<B> {
             schema_policy,
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
+            expose_uncoded_callback_messages: false,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
@@ -234,6 +237,7 @@ impl<B: OrmBackend> Database<B> {
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
+            expose_uncoded_callback_messages: false,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
@@ -263,6 +267,7 @@ impl<B: OrmBackend> Database<B> {
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
+            expose_uncoded_callback_messages: false,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
@@ -292,6 +297,7 @@ impl<B: OrmBackend> Database<B> {
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
+            expose_uncoded_callback_messages: false,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
@@ -321,6 +327,7 @@ impl<B: OrmBackend> Database<B> {
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
+            expose_uncoded_callback_messages: false,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
@@ -353,6 +360,7 @@ impl<B: OrmBackend> Database<B> {
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
+            expose_uncoded_callback_messages: false,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
@@ -392,6 +400,7 @@ impl<B: OrmBackend> Database<B> {
             schema_policy: Self::default_schema_policy(),
             pagination_config: PaginationConfig::default(),
             refuse_oversized_limit: false,
+            expose_uncoded_callback_messages: false,
             authorization_mode: AuthorizationMode::default(),
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
@@ -435,6 +444,27 @@ impl<B: OrmBackend> Database<B> {
     /// Set whether oversized GraphQL page limits are refused instead of reduced.
     pub fn with_oversized_page_limit_refusal(mut self, refuse: bool) -> Self {
         self.refuse_oversized_limit = refuse;
+        self
+    }
+
+    /// Whether schemas built from this handle render uncoded host callback
+    /// errors as written; see
+    /// [`UncodedCallbackMessages`](crate::graphql::errors::UncodedCallbackMessages).
+    /// Off by default.
+    pub fn exposes_uncoded_callback_messages(&self) -> bool {
+        self.expose_uncoded_callback_messages
+    }
+
+    /// Return a copy whose generated schemas render, or hide, the text of an
+    /// uncoded entity-policy, row-policy, write-transform or mutation-hook
+    /// error; see
+    /// [`UncodedCallbackMessages`](crate::graphql::errors::UncodedCallbackMessages).
+    ///
+    /// The setting applies only to schemas built from the returned handle
+    /// (or a clone of it) after the call. Off by default: an uncoded error is
+    /// `INTERNAL_ERROR` with the default message.
+    pub fn with_uncoded_callback_messages_exposed(mut self, expose: bool) -> Self {
+        self.expose_uncoded_callback_messages = expose;
         self
     }
 
@@ -2238,6 +2268,14 @@ impl<B: OrmBackend> DatabaseBuilder<B> {
     /// [`Self::refuse_oversized_page_limit`].
     pub fn refuse_oversized_page_limit(mut self, refuse: bool) -> Self {
         self.database.refuse_oversized_limit = refuse;
+        self
+    }
+
+    /// Let generated schemas built from this database render the text of an
+    /// uncoded host callback error; see
+    /// [`Database::with_uncoded_callback_messages_exposed`]. Off by default.
+    pub fn expose_uncoded_callback_messages(mut self, expose: bool) -> Self {
+        self.database.expose_uncoded_callback_messages = expose;
         self
     }
 
