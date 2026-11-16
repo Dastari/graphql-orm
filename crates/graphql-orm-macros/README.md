@@ -16,6 +16,12 @@ is refused with `invalid_graphql_input` before any resolver runs. Recompile
 entities with aligned ORM/macros versions. See the
 [migration guide](../../MIGRATION.md#01660-to-01670-input-object-values-on-static-schemas-and-bulk-write-filter-authority).
 
+Version 0.166.0 adds opt-in transaction-bound dependent-effect verification.
+`DependentDeleteGuard` compares declarations with the introspected delete plan
+and enforces dependent row limits before writes. Generated physical opt-out and
+bulk deletes refuse guarded requests. Unchanged hosts keep existing behavior.
+See the [migration guide](../../MIGRATION.md#ormmacros-01660-guarded-dependent-deletes).
+
 Version 0.165.0 preserves the stored value of an optional field when its
 write policy denies an upsert update and the host opts to ignore that denial.
 Recompile entities with aligned ORM/macros versions. See the

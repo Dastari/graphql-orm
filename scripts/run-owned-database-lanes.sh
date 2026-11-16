@@ -161,6 +161,9 @@ run_mssql() {
 }
 
 run_ai_postgres() {
+  # The AI effect guard is enforced by the ORM's transaction-bound planner.
+  cargo test -p graphql-orm --locked --no-default-features --features postgres \
+    --test dependent_delete_repro transaction_effect_guard -- --ignored --test-threads=1
   cargo test -p graphql-orm-ai --no-default-features \
     --features postgres,provider-openai --test postgres_parity --locked \
     -- --test-threads=1

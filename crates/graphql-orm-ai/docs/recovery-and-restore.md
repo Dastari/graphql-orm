@@ -3,7 +3,7 @@ title: "Recovery, Retention, Backup, and Restore"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-11-10
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -286,9 +286,64 @@ After any restore, stop every worker and writer, then:
    them is safe.
 
 A file-level or physical database restore carries the `recorded_locally_at`
-marker with the rows, so the crate cannot detect it. Run the same steps after
-any such restore, before starting a worker. Use the same steps for a store
-restored from a pre-epoch backup; never `acknowledge_in_place_upgrade`.
+marker with the rows, so the ledger alone cannot detect it. Run the same steps
+after any such restore, before starting a worker. Use the same steps for a
+store restored from a pre-epoch backup; never `acknowledge_in_place_upgrade`.
+
+### Detecting a file-level restore with a host-held anchor
+
+`OrmAiRuntimeRecoveryService::with_epoch_anchor` makes a file-level restore
+start closed without relying on that operator step. The host supplies an
+`AiRuntimeEpochAnchorStore`: storage for one small value, kept outside the
+database and outside anything restored together with it. A file on a volume
+the database backup does not include, a secret or configuration store entry,
+or a row in a different database are all suitable. The value is two random
+identifiers and is not a secret.
+
+Every successful `readiness_proof` writes a new random generation to the
+store's live epoch and to the anchor. A copied SQLite file or a PostgreSQL
+base backup carries the generation it had when it was taken. Once the
+deployment has opened again, the anchor has moved on, and `readiness_proof`
+on the restored image returns `RuntimeNotReady`: the start gate stays closed
+and nothing in the store changes. The operator then runs the reconcile,
+review and acknowledge steps above; the acknowledgement records a new live
+epoch and re-establishes the anchor.
+
+An ordinary restart keeps its live epoch, so leases stay valid; only the
+generation rotates. The new generation is staged in the anchor before the
+transaction and committed to it afterwards, so a crash or a failed anchor
+write between the two does not close the store.
+
+The anchor also refuses, with the same `RuntimeNotReady`:
+
+- an anchored store when the anchor is empty or lost;
+- an empty ledger while the anchor holds a generation, because the host
+  opened some other store with it.
+
+The first open after the anchor is enabled adopts a live epoch that was never
+anchored.
+
+Operate it with these rules:
+
+- **One anchor per store, shared by every instance.** Every service that
+  mints proofs or acknowledges restores for a store must use the same anchor
+  storage. A per-instance anchor makes each instance's rotation look like a
+  restore to the others. Two instances opening at the same moment are
+  serialized by the host store's `lock_rotation` lease, held through the
+  database commit and finalization. It must work across processes, not just
+  service clones. `compare_exchange` must atomically compare the entire value
+  (including absence and pending generation) and durably write only on a match.
+  A lost CAS returns `Conflict` without overwriting the winning anchor.
+- **What it does not detect.** A restore of an image taken since the last
+  rotation is not detected, because nothing outside the database has changed
+  in that window. Call `readiness_proof` on a timer to bound the window; each
+  call rotates. A service built without the anchor ignores it, so remove the
+  unanchored path once the anchor is enabled.
+- **Losing the anchor closes the runtime.** Recover with reconcile and
+  acknowledge, as after a restore.
+
+No schema change is involved: the generation lives in the live epoch's
+existing redacted `action_counts` value.
 
 ## Remaining restore work
 

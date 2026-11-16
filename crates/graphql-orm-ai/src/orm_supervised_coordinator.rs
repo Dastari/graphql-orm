@@ -164,10 +164,15 @@ impl AiSupervisedAgentTurnPlan {
     ///
     /// # Errors
     /// Rejects non-native/client-deferred turns, different offered definitions, or a different session binding.
+    /// Returns [`AiError::Forbidden`] when the turn's hierarchical rules do not admit every
+    /// brokered static tool as an approval-free read tool.
     pub fn with_capability_delivery(
         mut self,
         delivery: crate::AiCapabilityDeliveryTurn,
     ) -> Result<Self, AiError> {
+        if !crate::orm_coordinator::brokered_static_tools_follow_rules(&delivery, &self.rules) {
+            return Err(AiError::Forbidden);
+        }
         if !self.native
             || delivery.mode() == crate::AiCapabilityDeliveryMode::ClientDeferred
             || !delivery.matches_offered_tools(self.provider_call.offered_tools())

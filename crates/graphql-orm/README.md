@@ -16,6 +16,12 @@ any resolver runs, as runtime GraphQL schemas do. Valid requests are
 unchanged and no action is needed. See the
 [migration guide](../../MIGRATION.md#01660-to-01670-input-object-values-on-static-schemas-and-bulk-write-filter-authority).
 
+Version 0.166.0 adds opt-in transaction-bound dependent-effect verification.
+`DependentDeleteGuard` compares declarations with the introspected delete plan
+and enforces dependent row limits before writes. Generated physical opt-out and
+bulk deletes refuse guarded requests. Unchanged hosts keep existing behavior.
+See the [migration guide](../../MIGRATION.md#ormmacros-01660-guarded-dependent-deletes).
+
 Version 0.165.0 makes snapshot restore atomic on SQLite and PostgreSQL,
 resets restored runtime search indexes, and preserves denied fields on upsert.
 MSSQL hosts must install `dbo.__graphql_orm_restore_marker` with
