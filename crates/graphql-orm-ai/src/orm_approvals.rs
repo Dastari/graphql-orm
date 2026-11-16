@@ -1582,17 +1582,22 @@ impl AiApprovalService for OrmAiApprovalService {
         {
             return Err(AiError::NotFound);
         }
-        let connection = AiApprovalRecord::keyset_connection_page(
-            &self.database,
-            AiApprovalRecordWhereInput {
+        let connection = {
+            let filter = AiApprovalRecordWhereInput {
                 session_id: Some(UuidFilter {
                     eq: Some(session_id.0),
                     ..Default::default()
                 }),
                 ..Default::default()
-            },
-            page_input(&page),
-        )
+            };
+            crate::orm_read_bounds::keyset_window(
+                self.database.pagination_config().max_limit,
+                page_input(&page),
+                move |chunk| {
+                    AiApprovalRecord::keyset_connection_page(&self.database, filter.clone(), chunk)
+                },
+            )
+        }
         .await
         .map_err(map_orm)?;
         let mut edges = Vec::with_capacity(connection.edges.len());

@@ -13,7 +13,7 @@ supersedes: []
 ## Unreleased - 0.147.0
 
 - **Fixed:** adopts tool profiles 0.25.0, so runtime-composed collections with live subscriptions, a node identity and a UUID or integer key compile as query, mutation and subscription capability catalogues under the ORM's default `RuntimeInt64` identities and under `with_legacy_int_identities()`. A regression test covers each key shape in both modes. No AI schema module change and no data migration.
-- **Fixed:** session retention scans candidate sessions in pages no larger than the database's maximum page limit. Under the ORM breaking batch a host keyset page above that maximum is refused, so a database configured below `maximum_sessions` (50 by default) failed every retention pass; the scan used to be shortened silently and continues through its cursor, as before.
+- **Fixed:** every keyset window the runtime reads for itself is read completely, in pages no larger than the database's maximum page limit. Under the ORM breaking batch a host keyset page above that maximum is refused instead of being shortened, so any window larger than a host's maximum failed: conversation bootstraps and message windows (up to 200 messages against the default maximum of 100), session, attachment, approval, proposal and usage lists, the session-retention candidate scan (`maximum_sessions`), attachment and artifact cleanup batches, and pending secret cleanups. Each now returns exactly the window it asked for, with the same cursors and has-page flags; before the batch these windows were shortened to the maximum without notice. No AI schema module change and no data migration.
 
 ## Unreleased - 0.146.0
 

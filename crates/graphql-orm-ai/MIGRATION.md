@@ -14,9 +14,12 @@ supersedes: []
 
 **No action.** Tool profiles 0.25.0 accept the runtime live key inputs of the
 ORM's default string identities and of the opt-in legacy `Int` identities.
-Session retention keeps paging candidate sessions within the database's
-maximum page limit, now that the ORM refuses oversized host keyset pages.
-No AI schema module change, no SDL change and no data migration.
+Keyset windows the runtime reads for itself (message and list windows,
+bootstraps, retention and cleanup scans) are now read completely, in pages
+within the database's maximum page limit, now that the ORM refuses oversized
+host keyset pages. A window larger than a host's maximum returns every row it
+asks for instead of being shortened to the maximum. No AI schema module
+change, no SDL change and no data migration.
 
 ## 0.145.0 to 0.146.0: fingerprints, fixed-broker sessions, approvals and unique indexes
 
