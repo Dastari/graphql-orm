@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use graphql_orm_storage::{
     StorageByteStream, StorageError, collect_storage_stream, validate_blob_key,
-    validate_object_bucket, validate_portable_blob_key,
+    validate_canonical_blob_key, validate_object_bucket, validate_portable_blob_key,
 };
 
 #[test]
@@ -147,5 +147,49 @@ fn validate_portable_blob_key_refuses_windows_unsafe_names() {
         );
         // The public message never reveals the rejected key.
         assert_eq!(error.to_string(), "invalid storage key");
+    }
+}
+
+/// Canonical keys are portable and lowercase ASCII, so no two distinct ones
+/// alias on a target that ignores case or Unicode normalisation (#482).
+#[test]
+fn validate_canonical_blob_key_accepts_only_portable_lowercase_ascii() {
+    for key in [
+        "snapshots/0b6f2c1e-8d1a-4f2e-9c3b-7a5d6e4f3a21/manifest.json",
+        "objects/sha256/aa/bb/0123456789abcdef",
+        "snapshots/x/database/tables/order_items.jsonl.zst",
+        "media/report.final-2.pdf",
+        "media/.hidden",
+        "a~b!@#$%^&()_+=-[]{};',",
+    ] {
+        assert!(validate_canonical_blob_key(key).is_ok(), "{key}");
+        assert!(validate_portable_blob_key(key).is_ok(), "{key}");
+    }
+    for key in [
+        // Case aliases.
+        "Report.pdf",
+        "media/REPORT.pdf",
+        "objects/sha256/AA/bb/hash",
+        // Unicode, including both normalisation forms of one name.
+        "media/caf\u{e9}.txt",
+        "media/cafe\u{301}.txt",
+        "media/na\u{ef}ve.txt",
+        "\u{131}ndex",
+        "\u{212a}elvin",
+        // Everything the portable rules refuse.
+        "",
+        "../escape",
+        ".graphql-orm-storage/x",
+        "a:b",
+        "a?b",
+        "report.",
+        "con.txt",
+        "lpt1",
+    ] {
+        let refused = validate_canonical_blob_key(key);
+        assert!(
+            matches!(refused, Err(StorageError::InvalidStorageKey { .. })),
+            "{key}: {refused:?}"
+        );
     }
 }

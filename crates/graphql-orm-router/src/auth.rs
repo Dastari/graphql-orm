@@ -23,6 +23,10 @@ use hive_router::{
 
 use crate::{RouterError, RouterErrorKind, federation::ActiveGraph};
 
+mod nested;
+
+use nested::NestedAuthorization;
+
 type RootFieldKey = (RootOperationType, String);
 type RootArgumentContract = BTreeMap<String, String>;
 type GraphRootContract = BTreeMap<RootFieldKey, RootArgumentContract>;
@@ -282,6 +286,8 @@ impl ScopeMatcher for ExactScopeMatcher {
 pub(crate) struct AuthorizationCatalog {
     graph_fingerprint: String,
     operations: BTreeMap<(RootOperationType, String), OperationDescriptor>,
+    root_types: BTreeMap<RootOperationType, String>,
+    nested: NestedAuthorization,
 }
 
 impl AuthorizationCatalog {
@@ -378,9 +384,23 @@ impl AuthorizationCatalog {
                 details,
             ));
         }
+        let state = &graph.hive.snapshot().planner.supergraph;
+        let root_types = [
+            (RootOperationType::Query, Some(state.query_type.clone())),
+            (RootOperationType::Mutation, state.mutation_type.clone()),
+            (
+                RootOperationType::Subscription,
+                state.subscription_type.clone(),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(root, name)| name.map(|name| (root, name)))
+        .collect();
         Ok(Self {
             graph_fingerprint: graph.fingerprint.clone(),
             operations,
+            root_types,
+            nested: NestedAuthorization::build(state, &graph.scope_requirements)?,
         })
     }
 
@@ -424,7 +444,7 @@ impl AuthorizationCatalog {
             variable_resolution,
             &mut fields,
         );
-        fields
+        let root_denials = fields
             .into_iter()
             .filter_map(|field| {
                 // `__typename` is the only root field answered without a
@@ -439,6 +459,7 @@ impl AuthorizationCatalog {
                     return Some(AuthorizationDenial {
                         code: "FORBIDDEN",
                         message: "operation is not described by authorization metadata",
+                        path: None,
                     });
                 };
                 match authorize_field(
@@ -453,7 +474,27 @@ impl AuthorizationCatalog {
                     AuthorizationDecision::Denied(denial) => Some(denial),
                 }
             })
-            .collect()
+            .collect::<Vec<_>>();
+        // A refused root field already refuses the operation. Otherwise the
+        // composed directives decide every selected field at every depth.
+        if !root_denials.is_empty() {
+            return root_denials;
+        }
+        let Some(root_type_name) = self.root_types.get(&root_type) else {
+            return vec![AuthorizationDenial {
+                code: "FORBIDDEN",
+                message: "operation is not described by authorization metadata",
+                path: None,
+            }];
+        };
+        self.nested.authorize(
+            root_type_name,
+            &operation.selection_set.items,
+            &effective_variables,
+            variable_resolution,
+            principal,
+            matcher,
+        )
     }
 }
 
@@ -467,6 +508,9 @@ pub(crate) enum VariableResolution {
 pub(crate) struct AuthorizationDenial {
     pub(crate) code: &'static str,
     pub(crate) message: &'static str,
+    /// Response path of a refused selection below or at the root, by response
+    /// key. Descriptor refusals of root fields carry none.
+    pub(crate) path: Option<Vec<String>>,
 }
 
 enum AuthorizationDecision {
@@ -494,6 +538,7 @@ fn authorize_field(
                 AuthorizationDecision::Denied(AuthorizationDenial {
                     code: "UNAUTHENTICATED",
                     message: "authentication is required",
+                    path: None,
                 })
             };
         }
@@ -507,6 +552,7 @@ fn authorize_field(
         return AuthorizationDecision::Denied(AuthorizationDenial {
             code: "UNAUTHENTICATED",
             message: "authentication is required",
+            path: None,
         });
     };
 
@@ -550,6 +596,7 @@ fn authorize_field(
         AuthorizationDecision::Denied(AuthorizationDenial {
             code: "FORBIDDEN",
             message: "required scope is missing",
+            path: None,
         })
     }
 }
@@ -1115,6 +1162,7 @@ mod tests {
                     vec![AuthorizationDenial {
                         code: "FORBIDDEN",
                         message: "operation is not described by authorization metadata",
+                        path: None,
                     }],
                     "{query} under {resolution:?}"
                 );
@@ -1162,6 +1210,7 @@ mod tests {
                     vec![AuthorizationDenial {
                         code: "FORBIDDEN",
                         message: "operation is not described by authorization metadata",
+                        path: None,
                     }],
                     "{name} under {resolution:?}"
                 );
@@ -1245,7 +1294,7 @@ mod tests {
         );
     }
 
-    fn descriptor(operations: Vec<OperationDescriptor>) -> SubgraphDescriptor {
+    pub(super) fn descriptor(operations: Vec<OperationDescriptor>) -> SubgraphDescriptor {
         let endpoint = |value: &str| AdvertisedEndpoint::try_from(value.to_owned()).unwrap();
         let mut descriptor = SubgraphDescriptor {
             protocol_version: ProtocolVersion { major: 1, minor: 0 },

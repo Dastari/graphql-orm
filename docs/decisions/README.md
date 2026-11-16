@@ -30,5 +30,7 @@ unchanged and discoverable.
 
 - [ADR-0013: Explicit source-only release verification profiles](ADR-0013-explicit-source-only-release-verification-profiles.md)
 
+- [ADR-0014: Router enforces composed authorization directives](ADR-0014-router-enforces-composed-authorization-directives.md)
+
 Use the [ADR template](../templates/adr.md) for a genuinely durable decision,
 not for feature chronology or implementation status.

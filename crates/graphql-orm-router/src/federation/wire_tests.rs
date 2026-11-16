@@ -95,6 +95,26 @@ const REVIEWS: &str = r#"
     type Review { body: String! }
 "#;
 
+/// Products whose nested `name` requires a scope set, for nested directive
+/// enforcement.
+const PRODUCTS_NESTED_DIRECTIVES: &str = r#"
+    extend schema @link(url: "https://specs.apollo.dev/federation/v2.7", import: ["@key", "@requiresScopes"])
+    type Query { product(id: ID!): Product }
+    type Mutation { renameProduct(id: ID!, name: String!): Product }
+    type Subscription { productChanged(id: ID!): Product! }
+    type Product @key(fields: "id") {
+        id: ID!
+        name: String! @requiresScopes(scopes: [["products.p1.read"], ["products.admin"]])
+    }
+"#;
+
+/// Reviews whose joined `reviews` field requires authentication.
+const REVIEWS_NESTED_DIRECTIVES: &str = r#"
+    extend schema @link(url: "https://specs.apollo.dev/federation/v2.7", import: ["@key", "@external", "@authenticated"])
+    type Product @key(fields: "id") { id: ID! @external, reviews: [Review!]! @authenticated }
+    type Review { body: String! }
+"#;
+
 const CONFLICTING_REVIEWS: &str = r#"
     extend schema @link(url: "https://specs.apollo.dev/federation/v2.7", import: ["@key"])
     type Query { review: String }
@@ -2537,6 +2557,171 @@ fn authenticated_static_router_denies_before_downstream_and_expands_templates() 
     }
     let typename = router.graphql_at("/api/graphql", json!({"query": "{ __typename }"}), &[]);
     assert_eq!(typename["data"]["__typename"], "Query", "{typename}");
+
+    router.stop();
+}
+
+#[test]
+fn authenticated_router_refuses_nested_directive_fields_before_downstream() {
+    let products = LoopbackSubgraph::start(SubgraphKind::Products);
+    let reviews = LoopbackSubgraph::start(SubgraphKind::Reviews);
+    let products_sdl = LoopbackSdl::start(PRODUCTS_NESTED_DIRECTIVES);
+    let reviews_sdl = LoopbackSdl::start(REVIEWS_NESTED_DIRECTIVES);
+    let id_argument = || ArgumentDescriptor {
+        name: "id".to_owned(),
+        graphql_type: "ID!".to_owned(),
+        required: true,
+    };
+    // Every root field is public, so only the composed nested directives can
+    // refuse these operations.
+    let products_protocol = LoopbackProtocol::start(protocol_descriptor(
+        "products",
+        products.endpoint(),
+        products_sdl.endpoint(),
+        vec![
+            OperationDescriptor {
+                root_type: RootOperationType::Query,
+                field_name: "product".to_owned(),
+                arguments: vec![id_argument()],
+                authorization: AuthorizationRequirement::Public,
+            },
+            OperationDescriptor {
+                root_type: RootOperationType::Mutation,
+                field_name: "renameProduct".to_owned(),
+                arguments: vec![
+                    id_argument(),
+                    ArgumentDescriptor {
+                        name: "name".to_owned(),
+                        graphql_type: "String!".to_owned(),
+                        required: true,
+                    },
+                ],
+                authorization: AuthorizationRequirement::Public,
+            },
+            OperationDescriptor {
+                root_type: RootOperationType::Subscription,
+                field_name: "productChanged".to_owned(),
+                arguments: vec![id_argument()],
+                authorization: AuthorizationRequirement::Public,
+            },
+        ],
+    ));
+    let reviews_protocol = LoopbackProtocol::start(protocol_descriptor(
+        "reviews",
+        reviews.endpoint(),
+        reviews_sdl.endpoint(),
+        Vec::new(),
+    ));
+    let mut router = TestRouter::spawn_authenticated_subscriptions(
+        products.endpoint(),
+        reviews.endpoint(),
+        products_sdl.endpoint(),
+        reviews_sdl.endpoint(),
+        products_protocol.endpoint(),
+        reviews_protocol.endpoint(),
+    );
+    router.wait_until_ready();
+    let opens = || products.opens() + reviews.opens();
+
+    let opens_before = opens();
+    for (query, bearer, code, path) in [
+        (
+            "query { product(id: \"p1\") { id reviews { body } } }",
+            None,
+            "UNAUTHENTICATED",
+            json!(["product", "reviews"]),
+        ),
+        (
+            "query { product(id: \"p1\") { id label: name } }",
+            Some("Bearer product-writer"),
+            "FORBIDDEN",
+            json!(["product", "label"]),
+        ),
+        (
+            "query { product(id: \"p1\") { ...Naming } } fragment Naming on Product { name }",
+            Some("Bearer product-writer"),
+            "FORBIDDEN",
+            json!(["product", "name"]),
+        ),
+        (
+            "query { product(id: \"p1\") { ... on Product { name } } }",
+            None,
+            "UNAUTHENTICATED",
+            json!(["product", "name"]),
+        ),
+        (
+            "mutation { renameProduct(id: \"p1\", name: \"renamed\") { name } }",
+            Some("Bearer product-writer"),
+            "FORBIDDEN",
+            json!(["renameProduct", "name"]),
+        ),
+    ] {
+        let headers = bearer
+            .map(|bearer| vec![("authorization", bearer)])
+            .unwrap_or_default();
+        let refused = router.graphql_at("/api/graphql", json!({"query": query}), &headers);
+        assert_eq!(
+            refused["errors"][0]["extensions"]["code"], code,
+            "{query}: {refused}"
+        );
+        assert_eq!(refused["errors"][0]["path"], path, "{query}: {refused}");
+        assert!(refused["data"].is_null(), "{query}: {refused}");
+        assert_eq!(opens(), opens_before, "{query} opened a subgraph request");
+    }
+
+    let public = router.graphql_at(
+        "/api/graphql",
+        json!({"query": "query { product(id: \"p1\") { __typename id } }"}),
+        &[],
+    );
+    assert_eq!(public["data"]["product"]["id"], "p1", "{public}");
+    assert_eq!(
+        public["data"]["product"]["__typename"], "Product",
+        "{public}"
+    );
+
+    for bearer in ["Bearer product-p1", "Bearer product-admin"] {
+        let allowed = router.graphql_at(
+            "/api/graphql",
+            json!({"query": "query { product(id: \"p1\") { id name reviews { body } } }"}),
+            &[("authorization", bearer)],
+        );
+        assert_eq!(allowed["data"]["product"]["name"], "desk", "{allowed}");
+        assert_eq!(
+            allowed["data"]["product"]["reviews"][0]["body"], "excellent",
+            "{allowed}"
+        );
+    }
+
+    // The WebSocket gateway applies the same check at subscription admission.
+    let opens_before = opens();
+    let mut socket = TestWebSocket::connect_at(router.address, "/api/graphql");
+    socket.connection_init_bearer("product-events");
+    socket.subscribe(
+        "nested",
+        "subscription { productChanged(id: \"p1\") { id name } }",
+    );
+    let denial = socket.wait_for_operation_message("nested", "next");
+    assert_eq!(
+        denial["payload"]["errors"][0]["extensions"]["code"], "FORBIDDEN",
+        "{denial}"
+    );
+    assert_eq!(
+        denial["payload"]["errors"][0]["path"],
+        json!(["productChanged", "name"]),
+        "{denial}"
+    );
+    assert_eq!(opens(), opens_before);
+    socket.subscribe(
+        "allowed",
+        "subscription { productChanged(id: \"p1\") { id } }",
+    );
+    let event = socket.wait_for_operation_message("allowed", "next");
+    assert_eq!(
+        event["payload"]["data"]["productChanged"]["id"], "p1",
+        "{event}"
+    );
+    socket.close();
 
     router.stop();
 }

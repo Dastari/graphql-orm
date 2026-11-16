@@ -20,7 +20,7 @@
 use super::backend::OrmBackend;
 
 /// Table that holds the marker row while a host-run restore is in progress.
-pub const RESTORE_MARKER_TABLE: &str = "__graphql_orm_restore_marker";
+pub const RESTORE_MARKER_TABLE: &str = "dbo.__graphql_orm_restore_marker";
 
 /// A host-run restore started and has not finished.
 ///
@@ -32,8 +32,9 @@ pub const RESTORE_MARKER_TABLE: &str = "__graphql_orm_restore_marker";
 #[non_exhaustive]
 pub struct RestoreInProgress {
     /// The identifier the host gave the restore, for example a snapshot id.
-    /// Empty when the restore holds its lock but has not recorded its marker
-    /// yet.
+    /// Empty, with `started_at` zero, when the restore holds its lock but has
+    /// not recorded its marker yet. A marker that cannot be read is not
+    /// reported here but as [`RestoreStateUnavailable`].
     pub restore_id: String,
     /// When the restore started, as UTC Unix seconds on the database clock.
     pub started_at: i64,
@@ -73,8 +74,108 @@ impl RestoreInProgress {
     }
 }
 
+/// Why SQL Server restore state could not be read.
+///
+/// Carried by [`RestoreStateUnavailable`]. The variants are a diagnosis for
+/// the operator; none of them means a restore is running.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum RestoreStateUnavailableReason {
+    /// `dbo.__graphql_orm_restore_marker` does not exist. Install it with
+    /// `MssqlPool::install_restore_marker()` as schema owner.
+    MarkerNotInstalled,
+    /// The login may not read the marker table. Grant it SELECT.
+    PermissionDenied,
+    /// The database could not be reached, or did not answer in time (a pool,
+    /// network, TLS or timeout failure). Nothing is wrong with the marker.
+    ConnectionFailed,
+    /// Any other failure reading the marker, such as a table of the wrong shape.
+    Other,
+}
+
+/// SQL Server restore state could not be determined, so every statement is
+/// refused (fail closed).
+///
+/// This is distinct from [`RestoreInProgress`]: no restore is known to be
+/// running. Returned by
+/// [`Database::restore_in_progress`](crate::db::Database::restore_in_progress),
+/// and carried by the error of every SQL Server ORM transaction, autocommit
+/// statement and schema validation attempted while the marker table is
+/// missing or unreadable. Read it with [`Self::from_error`].
+///
+/// The message names the fix and never contains SQL text. The driver or
+/// server error that caused it is kept as [`std::error::Error::source`], for
+/// server-side diagnostics only.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct RestoreStateUnavailable {
+    /// The category of failure.
+    pub reason: RestoreStateUnavailableReason,
+    source: Option<Box<dyn std::error::Error + Send + Sync>>,
+}
+
+impl std::fmt::Display for RestoreStateUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.reason {
+            RestoreStateUnavailableReason::MarkerNotInstalled => write!(
+                formatter,
+                "restore state unavailable: {RESTORE_MARKER_TABLE} is not installed, so statements are refused; \
+                 as schema owner call MssqlPool::install_restore_marker() (or run the documented CREATE TABLE) \
+                 and grant SELECT on it to the runtime role"
+            ),
+            RestoreStateUnavailableReason::PermissionDenied => write!(
+                formatter,
+                "restore state unavailable: SELECT on {RESTORE_MARKER_TABLE} is denied, so statements are refused; \
+                 grant SELECT on it to the runtime role (a restore role also needs INSERT and DELETE)"
+            ),
+            RestoreStateUnavailableReason::ConnectionFailed => write!(
+                formatter,
+                "restore state unavailable: the database could not be reached to read {RESTORE_MARKER_TABLE}, \
+                 so statements are refused; this is not a restore in progress. Check the connection and retry"
+            ),
+            _ => write!(
+                formatter,
+                "restore state unavailable: {RESTORE_MARKER_TABLE} could not be read, so statements are refused; \
+                 check that MssqlPool::install_restore_marker() ran, that the runtime role has SELECT on it, \
+                 and that the table has the documented shape"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RestoreStateUnavailable {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source
+            .as_deref()
+            .map(|source| source as &(dyn std::error::Error + 'static))
+    }
+}
+
+impl RestoreStateUnavailable {
+    /// The value carried by `error`, if that is what it reports.
+    pub fn from_error(error: &crate::Error) -> Option<&Self> {
+        match error {
+            sqlx::Error::Decode(source) => source.downcast_ref::<Self>(),
+            _ => None,
+        }
+    }
+
+    #[cfg_attr(not(feature = "mssql"), allow(dead_code))]
+    pub(crate) fn new(
+        reason: RestoreStateUnavailableReason,
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    ) -> Self {
+        Self { reason, source }
+    }
+
+    #[cfg_attr(not(feature = "mssql"), allow(dead_code))]
+    pub(crate) fn into_error(self) -> crate::Error {
+        sqlx::Error::Decode(Box::new(self))
+    }
+}
+
 /// Read the marker. Backends that restore transactionally have none, and a
-/// database without the marker table has no restore in progress.
+/// SQL Server database with missing or unreadable infrastructure fails closed.
 pub(crate) async fn read_restore_marker<B: OrmBackend>(
     pool: &B::Pool,
 ) -> crate::Result<Option<RestoreInProgress>> {
@@ -103,6 +204,12 @@ impl<B: OrmBackend> crate::db::Database<B> {
     ///
     /// Always `None` on PostgreSQL and SQLite, where a snapshot restores in
     /// one transaction and no marker is kept.
+    ///
+    /// # Errors
+    ///
+    /// Fails with an error carrying [`RestoreStateUnavailable`] when the
+    /// marker table is missing, unreadable or the database cannot be reached;
+    /// that is not a restore in progress.
     pub async fn restore_in_progress(&self) -> crate::Result<Option<RestoreInProgress>> {
         read_restore_marker::<B>(self.pool()).await
     }
@@ -118,7 +225,9 @@ impl<B: OrmBackend> crate::db::Database<B> {
     /// # Errors
     ///
     /// Fails with an error carrying [`RestoreInProgress`] (see
-    /// [`RestoreInProgress::from_error`]) while a marker is present, or with a
+    /// [`RestoreInProgress::from_error`]) while a marker is present, with an
+    /// error carrying [`RestoreStateUnavailable`] when the marker table is
+    /// missing, unreadable or the database cannot be reached, or with a
     /// database failure.
     pub async fn ensure_no_restore_in_progress(&self) -> crate::Result<()> {
         refuse_while_restoring::<B>(self.pool()).await
@@ -140,16 +249,18 @@ impl crate::db::Database<super::MssqlBackend> {
     /// the marker stays: statements remain refused until
     /// [`Self::resume_restore`] adopts the marker and the restore is finished.
     ///
-    /// The marker is one row in `__graphql_orm_restore_marker`, which this
-    /// call creates in the connection's default schema when it is missing.
-    /// It needs an external-writable pool whose login may create that table,
-    /// or a table created beforehand by the schema owner.
+    /// The marker is one row in `dbo.__graphql_orm_restore_marker`.
+    /// Before runtime use, the schema owner must install this infrastructure
+    /// with `MssqlPool::install_restore_marker`. Runtime roles need SELECT;
+    /// the restore role additionally needs INSERT and DELETE.
     ///
     /// # Errors
     ///
     /// Fails with an error carrying [`RestoreInProgress`] when the lock is
-    /// not granted within `wait` or another restore's marker is present, and
-    /// with a database failure otherwise.
+    /// not granted within `wait` or another restore's marker is present, with
+    /// an error carrying [`RestoreStateUnavailable`] when the marker table is
+    /// missing or the role may not use it, and with a database failure
+    /// otherwise.
     pub async fn begin_restore(
         &self,
         restore_id: &str,

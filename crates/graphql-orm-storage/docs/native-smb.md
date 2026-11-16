@@ -221,6 +221,26 @@ Reads, deletes and listings keep the ordinary validation, so objects written
 before the mode was enabled stay listed, readable and deletable. The mode does
 not resolve case-folding or Unicode-normalisation aliasing: keys that differ
 only in case, or only in normalisation, can name one file on such a server.
+By default, and on Samba's default `case sensitive = auto` for SMB2 and SMB3
+clients, `Report.bin` and `report.bin` name one file, so a write to either
+replaces the other.
+
+Call `SmbStorageBackend::with_canonical_keys(true)` after `connect` to refuse
+that aliasing on new writes. Keys must then pass
+`validate_canonical_blob_key`: portable, as above, and lowercase ASCII, so no
+two distinct keys can name one file. The written path, `root_prefix`
+included, must also be portable; the prefix need not be lowercase, since
+every key shares it. A refused `put_blob`, `put_blob_if_not_exists` or
+`copy_blob` destination fails with `InvalidStorageKey` before any request.
+Reads, deletes and listings keep the ordinary validation, so objects written
+earlier, including two spellings stored before the mode was enabled, stay
+readable, listed and deletable. The default is unchanged. See
+[canonical keys](blob-store.md#key-safety) for why lowercase ASCII rather than
+NFC with a case fold, and why there is no per-write collision check.
+
+`BlobPutOptions::content_type` is ignored: SMB files have no content type,
+and the backend keeps no metadata beside them. See
+[content type](blob-store.md#content-type).
 Samba's default `mangled names = yes` lists a stored name that Windows cannot
 represent under an 8.3 alias, such as `CSHOFG~F.TXT` for `CON.txt`, with or
 without this mode.

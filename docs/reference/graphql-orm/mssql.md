@@ -148,18 +148,37 @@ restore.finish().await?;
   cannot race: a transaction that began before the restore holds the shared
   lock until it ends, and one that begins later cannot obtain it.
 - **The marker.** `begin_restore` also records one row in
-  `__graphql_orm_restore_marker`. The gate that takes the shared lock refuses
+  `dbo.__graphql_orm_restore_marker`. The gate that takes the shared lock refuses
   while that row exists. This covers a restore whose process died: its lock
-  is released with its session, its partial rows remain. The table is created
-  in the login's default schema when it is missing; create it beforehand as
-  the schema owner when the runtime login may not run DDL (the statement is
-  in the
-  [migration guide](../../../MIGRATION.md#01590-to-01600-atomic-restore-search-reset-and-kept-values-on-ignored-denials)).
+  is released with its session, its partial rows remain. Before runtime access, the schema owner must call
+  `MssqlPool::install_restore_marker()` as part of schema installation.
+  MSSQL schemas are externally managed; install this infrastructure even on
+  hosts that never restore. Runtime roles need SELECT on the table; restore
+  roles also need INSERT and DELETE. `install_restore_marker` needs an
+  external-writable pool, is idempotent and race-safe (replicas may install at
+  the same time; it serialises on an application lock, accepts a table another
+  installer created, and verifies the table's shape). A missing table or
+  denied access fails closed as unavailable restore state, even when no marker
+  is visible. See the
+  [migration guide](../../../MIGRATION.md#01640-to-01650-atomic-restore-search-reset-and-kept-values-on-ignored-denials).
 - **The refusal.** A refused transaction or statement fails before it reads
   or writes, with an error carrying `RestoreInProgress` (read it with
-  `RestoreInProgress::from_error`). `restore_id` is empty in the short window
-  where the restore holds the lock and has not recorded its marker yet.
-  `Database::restore_in_progress` reads the marker without failing, and
+  `RestoreInProgress::from_error`). `restore_id` is empty, with `started_at`
+  zero, in the short window where the restore holds the lock and has not
+  recorded its marker yet.
+- **Unavailable restore state.** When the marker table is missing or
+  unreadable the gate still refuses every statement, but with an error
+  carrying `RestoreStateUnavailable` (`RestoreStateUnavailable::from_error`),
+  never `RestoreInProgress`. Its `reason` says what to fix:
+  `MarkerNotInstalled` (run `MssqlPool::install_restore_marker()` or the
+  documented DDL), `PermissionDenied` (grant the runtime role SELECT),
+  `ConnectionFailed` (the database could not be reached or timed out while
+  reading the marker; nothing to install), or `Other` (for example a table of
+  the wrong shape). The message names the fix and never contains SQL text; the
+  driver or server error is its `source()`, for logs. `begin_restore` and
+  `resume_restore` report a missing table or denied permission the same way.
+  `Database::restore_in_progress` reads the marker during a restore, failing
+  closed when it cannot read the table;
   `Database::ensure_no_restore_in_progress`,
   `SchemaManager::validate_against_entities` and `validate_target` refuse on
   it, for a service that wants one check at start.

@@ -3,7 +3,7 @@ title: graphql-orm-router configuration reference
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-11-14
+last_reviewed: 2026-11-16
 review_by: 2027-02-07
 supersedes: []
 ---
@@ -270,6 +270,66 @@ environment proxy, and a 30-second unknown-key refresh cooldown.
 Leeway may not exceed five minutes; insecure HTTP is an explicit loopback-only
 development setting. These fields are configured by the `with_*` methods in
 the [source type](../src/jwt.rs).
+
+### Nested directive authorization
+
+An authenticated router also evaluates the Federation `@authenticated` and
+`@requiresScopes` directives that composition kept in the supergraph, on every
+selected field of the normalized operation, at the root and below it. It runs
+in the same two places as the descriptor check: when the request is analysed,
+and again with complete variables before execution, so no subgraph request
+opens for a refused operation. Subscriptions are checked at admission; a
+connection whose scopes change ends its subscriptions, and a resubscription is
+checked against the new scopes.
+
+- A field `P.f` returning named type `R` requires the rules on `P`, on `P.f`,
+  and on `R`, all of them.
+- A field selected on an interface also requires, for every object type that
+  implements it, the rules on that type, on its field, and on that field's
+  return type, because the field may resolve on any of them.
+- A field of a type that implements an interface also requires the rules
+  declared on the same field of that interface and on the interface itself,
+  including rules a subgraph declares on an `@interfaceObject` type.
+- An inline fragment, or a fragment spread (normalized into one), requires
+  the rule on its type condition. Aliases change only the reported path.
+- `@requiresScopes(scopes: [["a", "b"], ["c"]])` holds when every scope of at
+  least one inner list is granted, matched with the configured scope matcher.
+  It implies authentication.
+- When several subgraphs declare `@requiresScopes` on the same type or field,
+  every subgraph's declaration must hold. Composition merges them into one
+  list of alternatives, so the router reads each subgraph's own declaration.
+  Directive names are resolved as composition resolves them: `@link`
+  imports and `as:` renames, the link's namespace prefix, an unknown prefix
+  stripped, and the unprefixed names when Federation v2 is not linked or the
+  composite-schemas specification is.
+- A graph is refused when it is built if a declaration is malformed (an
+  empty list or set, or a scope that is not a non-empty string); if a
+  directive application whose name, with or without a `<prefix>__`, is
+  `requiresScopes`, `authenticated` or an import alias of either does not
+  resolve to Federation's directive; if either directive is placed on an
+  argument, input field, enum value, union, input object, directive argument
+  or the schema; or if the composed directives cannot be matched to the
+  declarations they came from. Every declaration is recorded on its own, so
+  one whose scope sets also appear in another declaration still applies.
+- Fragments marked `@defer` and fields marked `@stream` are checked like any
+  other selection.
+- `@skip` and `@include` are applied as for root fields: a selection left out
+  by its condition is not checked.
+- `__typename` is never refused. `__schema` and `__type` follow the
+  introspection setting.
+
+A refused selection refuses the whole operation, as a refused root field does:
+the response has no `data`, and each error carries `UNAUTHENTICATED` (no
+caller) or `FORBIDDEN` (a scope is missing) and the selection's `path` by
+response key, without naming the rule. At most 32 errors are reported. This is
+the Federation "reject" mode for unauthorized fields; the router does not
+offer the mode that removes the field and returns partial data. Each distinct
+rule is evaluated once per operation, and selection sets that cannot reach a
+rule are not walked.
+
+The router never grants: a selection the directives allow is still authorized
+by its subgraph's resolver guards and policies. Anonymous development mode has
+no authorization catalogue and evaluates no directives.
 
 ## Static subgraphs and secrets
 
