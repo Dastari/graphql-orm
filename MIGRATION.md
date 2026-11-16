@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.164.0 to 0.164.0: atomic restore, search reset and kept values on ignored denials
+## 0.163.0 to 0.164.0: atomic restore, search reset and kept values on ignored denials
 
 Upgrade ORM and macros together. Generated SDL, operation catalogues and
 fingerprints are unchanged.
