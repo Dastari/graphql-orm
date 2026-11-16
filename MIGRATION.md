@@ -76,7 +76,9 @@ Upgrade runtime and macros together.
   `async_graphql::Error::new("seat taken")`, and clients are meant to read
   that text. Generated GraphQL operations and `graphql_error_from_sqlx` used
   to return the text as written; they now return `INTERNAL_ERROR` with the
-  default message and log the text. Give each deliberate refusal a public
+  default message and retain server-side diagnostics. The existing
+  `GRAPHQL_ORM_LOG_INTERNAL_ERRORS` setting controls logging of diagnostic
+  text. Give each deliberate refusal a public
   code, for example
   `OrmPublicError::with_message(OrmErrorCode::Conflict, "seat taken").into_graphql_error()`
   (or return the `OrmPublicError` with `?`); it then keeps its code and
