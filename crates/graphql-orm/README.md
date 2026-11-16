@@ -10,6 +10,12 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.167.0 refuses, on generated static schemas, a value that is not an
+object where an input object is expected, with `invalid_graphql_input` before
+any resolver runs, as runtime GraphQL schemas do. Valid requests are
+unchanged and no action is needed. See the
+[migration guide](../../MIGRATION.md#01660-to-01670-input-object-values-on-static-schemas-and-bulk-write-filter-authority).
+
 Version 0.165.0 makes snapshot restore atomic on SQLite and PostgreSQL,
 resets restored runtime search indexes, and preserves denied fields on upsert.
 MSSQL hosts must install `dbo.__graphql_orm_restore_marker` with

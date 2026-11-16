@@ -10,6 +10,31 @@ supersedes: []
 
 # Migration Guide
 
+## 0.166.0 to 0.167.0: input-object values on static schemas and bulk-write filter authority
+
+Upgrade ORM and macros together and recompile entities. Generated SDL,
+operation catalogues and fingerprints are unchanged.
+
+- **Input-object values on generated static schemas. No action.** A request
+  that sends a scalar, list or enum where an input object is expected (as a
+  literal, a variable or a variable default, at any depth) is now refused as
+  a whole before any resolver runs, with message and `extensions.code`
+  `invalid_graphql_input`. It used to fail while that field resolved, with an
+  uncoded async-graphql coercion message, after earlier fields had run.
+  Requests whose values are valid behave as before. Generated
+  `schema_builder` helpers install `GeneratedInputValidation`; a schema built
+  by hand from generated roots keeps the previous behaviour until it adds
+  `.extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)`.
+- **Bulk-write filter authority. No action.** Generated `updateMany` and
+  `deleteMany` keep authorizing every filter field with its read policy before
+  any SQL, as they have since 0.129.0, and report a denial in the payload
+  with the list query's message and code. This release adds SQLite and
+  PostgreSQL tests and reference documentation. The repository helpers
+  (`update_where`, `delete_where` and their bounded and `MutationContext`
+  forms) still run host-built filters without field read checks; a host
+  resolver that passes a client-supplied filter to one should call
+  `authorize_read_fields` first.
+
 ## 0.164.0 to 0.165.0: atomic restore, search reset and kept values on ignored denials
 
 Upgrade ORM and macros together. Generated SDL, operation catalogues and

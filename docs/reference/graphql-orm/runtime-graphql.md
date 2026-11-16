@@ -216,7 +216,9 @@ selected operation again, including `RuntimeHostField` and host type arguments:
 each variable value once against its declared type, and each argument with its
 variable references in place. Runtime scalars use their input bounds; a value
 that is not an object for an input object, and a missing non-null value, are
-refused with `invalid_graphql_input` before any resolver runs. Composition
+refused with `invalid_graphql_input` before any resolver runs. Generated static
+schemas share this check through `GeneratedInputValidation`; see
+[input object values](entities-and-relations.md#input-object-values). Composition
 (`finish`) refuses with `invalid_composition` any argument default, on a host
 field, a type added with `register` or a host subscription root, that is not a
 valid value of its type: async-graphql never validates schema defaults.

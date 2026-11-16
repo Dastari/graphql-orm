@@ -52,7 +52,8 @@ run_sqlite() {
     --test runtime_many_to_many --test runtime_relation_bind_limit \
     -- --test-threads=1
   cargo test -p graphql-orm --no-default-features --features sqlite \
-    --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial --locked
+    --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial \
+    --test bulk_write_filter_authority --test static_input_object_shape --locked
   cargo test -p graphql-orm --no-default-features --features sqlite \
     --test grouped_aggregates --test complete_group_pages --test portable_group_pages --test host_timestamps --test implicit_timestamp_defaults --locked
   cargo test --manifest-path \
@@ -68,7 +69,7 @@ run_postgres() {
     --test runtime_many_to_many -- --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
     --test static_related_filter -- --ignored --test-threads=1
-  cargo test -p graphql-orm --locked --no-default-features --features postgres --test read_predicate --test visible_row_pages --test like_escape_matrix --test loader_chunks_postgres --test query_loader_batch --test order_aggregate_visibility --test authorized_page_context_binding -- --include-ignored --test-threads=1
+  cargo test -p graphql-orm --locked --no-default-features --features postgres --test read_predicate --test visible_row_pages --test like_escape_matrix --test loader_chunks_postgres --test query_loader_batch --test order_aggregate_visibility --test authorized_page_context_binding --test bulk_write_filter_authority -- --include-ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features postgres,runtime-graphql \
     --lib --test runtime_graphql --test runtime_mutations --test runtime_migrations --test runtime_schema_ir --test runtime_migration_memory \
     --test migration_planner --test migration_apply --test legacy_migration_history \

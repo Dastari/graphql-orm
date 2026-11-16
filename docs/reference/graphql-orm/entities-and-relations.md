@@ -364,7 +364,19 @@ policy as a selected field, before any SQL runs:
 - every search source, as described under [Full-Text Search](#full-text-search).
 
 A denied field returns `FORBIDDEN`. A field missing from the entity's policy
-metadata is refused the same way. `order_expression` terms are trusted SQL
+metadata is refused the same way. Every field a filter names counts, directly and
+inside `and`, `or` and `not` at any depth.
+
+A bulk write checks its filter after the entity write decision and before it
+selects, locks or asks about any target row. A denial is reported in the
+payload with `success: false`, a zero count, and the list query's public
+message in `error` and code in `errorCode`, so neither the count nor a later
+row refusal depends on a field the caller cannot read. Related-row filters
+are refused for bulk writes with `INVALID_INPUT` whatever the caller may
+read. The repository helpers (`update_where`, `delete_where`, their bounded
+and `MutationContext` forms) run host-built filters and do not ask field read
+policies; a host resolver that passes a client-supplied filter to one should
+call `authorize_read_fields` first, as described below. `order_expression` terms are trusted SQL
 declared by the entity author and are not checked field by field; do not
 declare one over a field that callers may be denied.
 
@@ -382,6 +394,27 @@ Host callback failures on these paths, and on generated federation `_entities`,
 list visibility and scalar field reads, pass through the same sanitizer as the
 rest of the generated surface: an authored refusal keeps its public code, and
 any other failure is reported as `INTERNAL_ERROR` without its text.
+
+## Input object values
+
+async-graphql 7.2.1 accepts any value where an input object is expected while
+it validates a request, and leaves an omitted variable's default unchecked until
+execution. Such a value used to fail later, while its field resolved, with an
+uncoded coercion message, after earlier fields of the same operation, including
+mutations, had already run.
+
+Generated `schema_builder` helpers install
+`graphql_orm::graphql::input_validation::GeneratedInputValidation`. After
+async-graphql's validation it checks every argument of the selected operation
+with the values execution resolves: each variable's value, or its default when
+the request omits it, once against the variable's declared type, then each
+argument, in fragments too. A scalar, list or enum sent for an input object, at
+any depth, refuses the whole request before any resolver, policy callback or
+SQL runs, with the error runtime GraphQL schemas return: message and
+`extensions.code` both `invalid_graphql_input`, without a position or the
+offending value. `null` for an optional input object is still accepted, and
+async-graphql still refuses `null` for a required one. A schema built by hand
+from generated roots should install the extension too.
 
 ## Relation target auth mode and operation scopes
 
