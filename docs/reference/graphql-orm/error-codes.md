@@ -41,6 +41,14 @@ Default extensions:
 }
 ```
 
+A `CURSOR_INVALID` error from `EntityQuery::fetch_authorized_page` adds a
+`reason` extension in two cases: `AUTHORIZED_PAGE_CURSOR_EXPIRED` for a cursor
+that authenticated under the current context binding and is past its lifetime,
+and `AUTHORIZED_PAGE_CURSOR_KEY_UNAVAILABLE` for a cursor that names a key
+identifier the service does not accept. Every other refused cursor has no
+reason. See
+[context-bound authorized pages](pagination-migration.md#context-bound-authorized-pages-for-handwritten-resolvers-01620).
+
 ## Database constraint classification
 
 `OrmPublicError::from_sqlx` maps unique, foreign-key and check violations reported

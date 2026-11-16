@@ -10,7 +10,7 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.161.0 adds opt-in contract settings and one stable code. A GraphQL
+Version 0.163.0 adds opt-in contract settings and one stable code. A GraphQL
 page limit above the maximum can be refused with `PAGE_LIMIT_EXCEEDED` instead
 of being reduced (`DatabaseBuilder::refuse_oversized_page_limit`), and
 `schema_roots!(max_page_limit: N)` publishes the real maximum in the semantic
@@ -20,7 +20,16 @@ serve `RecordVersion` and integer live keys as `RuntimeInt64` strings
 long for a cursor is refused with `cursor_key_too_large`. A subscriber that
 lagged now ends on the next authority tick instead of at once. Defaults are
 unchanged except for that timing. See the
-[migration guide](../../MIGRATION.md#01590-to-01610-page-limits-64-bit-identities-cursor-keys-and-subscription-lag).
+[migration guide](../../MIGRATION.md#01620-to-01630-page-limits-64-bit-identities-cursor-keys-and-subscription-lag).
+
+Version 0.162.0 adds context-bound authorized pages for handwritten GraphQL
+resolvers and query builders. `EntityQuery::fetch_authorized_page` seals its
+continuation with a service-owned key under a server-authored
+`AuthorizedPageBinding`, refuses a continuation from a different context
+before any row is read, and resolves entity, row and field authorization again
+on every page. The API is additive and needs no action. See the
+[migration guide](../../MIGRATION.md#01620-context-bound-authorized-pages) and the
+[reference](../../docs/reference/graphql-orm/pagination-migration.md#context-bound-authorized-pages-for-handwritten-resolvers-01620).
 
 Version 0.159.0 fixes PostgreSQL static tables declared with mixed-case bare
 names. Table references follow PostgreSQL's historical folding, so migrations,
