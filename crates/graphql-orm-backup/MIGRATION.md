@@ -10,9 +10,9 @@ supersedes: []
 
 # Migration Guide
 
-## To 0.24.0: host-held snapshot records
+## To 0.26.0: host-held snapshot records
 
-Upgrade backup to 0.24.0 and, when using the optional ORM adapter, ORM/macros
+Upgrade backup to 0.26.0 and, when using the optional ORM adapter, ORM/macros
 to 0.165.0 on the same reviewed revision. Existing manifests, keys and
 repository identities need no conversion.
 
@@ -50,6 +50,39 @@ repository identities need no conversion.
   that restore the tables of searchable runtime collections must backfill
   their search indexes afterwards; see the
   [workspace migration guide](../../MIGRATION.md#01640-to-01650-atomic-restore-search-reset-and-kept-values-on-ignored-denials).
+
+## To 0.25.0: storage 0.16.0
+
+**Windows local roots — Action needed (Windows hosts):**
+`LocalBackupRepository::new` and `LocalBackupRepository::open_existing` no
+longer exist on Windows, so a Windows build that calls them fails to compile.
+Call `LocalBackupRepository::new_trusted_windows_root` or
+`LocalBackupRepository::open_existing_trusted_windows_root` instead, and only
+when the host protects the repository root, its ancestors and descendants from
+concurrent mutation. Links are not enforced as a security boundary in this
+mode. Hosts that build `LocalStorageBackend` themselves call
+`LocalStorageBackend::new_trusted_windows_root`. The no-follow guarantees below
+apply to Unix; Unix hosts need no change. Windows conditional creation uses
+atomic no-replace rename.
+
+Unix conditional-create fallback retries the temporary unlink and rolls back on
+persistent failure, returning an error rather than success with two links. A
+failed rollback is a single-attempt error that must not be replayed.
+
+Move `graphql-orm-backup` and `graphql-orm-storage` together to one reviewed
+revision and refresh the lockfile. Storage 0.16.0 is required.
+
+- **Unix local repositories and links. Action needed** only if a local
+  repository root contains symbolic links below
+  it, or hard-linked files: storage now refuses every key through a link and
+  every read of a file with more than one hard link, so such a repository
+  fails verification and restore with `InvalidStorageKey` until they are
+  replaced with real directories and independent copies. See the storage
+  [migration guide](../graphql-orm-storage/MIGRATION.md#0150-to-0160-local-links-listing-pages-and-canonical-keys).
+- **Restore reads and content type. No action.** The documented three reads
+  per object and two per payload, and the content type local and SMB stores
+  do not keep, are existing behaviour. See
+  [repository reads](docs/restore-semantics.md#repository-reads).
 
 ## To 0.23.0: PostgreSQL mixed-case table restore
 
@@ -570,7 +603,6 @@ cleanup/disarm may leave an orphan lock until offline recovery.
 
 The snapshot format, repository layout and restore preflight are unchanged. No snapshot/data migration is required. Regenerate `Cargo.lock`
 after updating the reviewed monorepo revision.
-
 
 ### Single-attempt error classification
 

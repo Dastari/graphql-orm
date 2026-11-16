@@ -6,9 +6,13 @@ use graphql_orm_storage::{
 
 #[tokio::main]
 async fn main() -> Result<(), graphql_orm_storage::StorageError> {
-    let service = StorageService::new(Arc::new(LocalStorageBackend::new(
-        "./target/graphql-orm-storage-example",
-    )));
+    let root = "./target/graphql-orm-storage-example";
+    // Windows has no plain constructor: the host must own the whole tree.
+    #[cfg(windows)]
+    let backend = LocalStorageBackend::new_trusted_windows_root(root);
+    #[cfg(not(windows))]
+    let backend = LocalStorageBackend::new(root);
+    let service = StorageService::new(Arc::new(backend));
     let object = service
         .put_object(StoragePutRequest {
             namespace: StorageNamespace::Originals,

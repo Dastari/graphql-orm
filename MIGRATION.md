@@ -82,7 +82,7 @@ fingerprints are unchanged.
   access and reconcile any old marker into the canonical table before restarting;
   do not clear a stale marker until its partial restore has been recovered.
 - Backup users also upgrade to
-  [backup 0.24.0](crates/graphql-orm-backup/MIGRATION.md#to-0240-host-held-snapshot-records).
+  [backup 0.26.0](crates/graphql-orm-backup/MIGRATION.md#to-0260-host-held-snapshot-records).
 
 ## 0.159.0 to 0.163.0: wrapper object compile cost
 

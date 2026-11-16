@@ -1,5 +1,7 @@
 //! Manifest authentication, snapshot identity and restore-target constraints.
 
+#![cfg(not(windows))]
+
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
