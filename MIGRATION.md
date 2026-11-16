@@ -12,7 +12,7 @@ supersedes: []
 
 ## 0.159.0 to 0.160.0: process and toolchain
 
-**Action needed:** use Rust 1.97 or newer (development/CI pin 1.97.1).
+**Action needed:** use Rust 1.97.1 or newer (development/CI pin 1.97.1).
 No data migration is needed. Tiberius remains on the reviewed 0.12.4 revision.
 Release operators must supply a same-repository merged PR URL or approved
 review URL for scoped publication and router binary distribution.

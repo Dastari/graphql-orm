@@ -519,10 +519,13 @@ it never fills or rewrites the raw reports' missing metadata.
 ## Approval reference validation
 
 Scoped source publication and router binary distribution each require a URL
-`https://github.com/Dastari/graphql-orm/pull/<number>` to a merged PR, or that
-PR URL with `#pullrequestreview-<id>` naming a currently APPROVED human review.
+`https://github.com/Dastari/graphql-orm/pull/<number>` to a PR merged into `main`, or that
+PR URL with `#pullrequestreview-<id>` naming a currently APPROVED human review on a PR targeting `main`.
+The review must have `author_association` OWNER, MEMBER or COLLABORATOR;
+CONTRIBUTOR, NONE, FIRST_TIME_CONTRIBUTOR and missing associations are rejected.
 The guard queries the GitHub API and rejects foreign repositories, unmerged
-PRs, dismissed/non-approved reviews, malformed URLs and API failures. It uses
+PRs, PRs targeting another branch, dismissed/non-approved or unaffiliated reviews,
+malformed URLs and API failures. It uses
 its job token with `pull-requests: read`, alongside the existing contents/actions
 read permissions. This validates the reference; reviewers still check that its
 content authorizes the chosen source, profile and retained gaps.

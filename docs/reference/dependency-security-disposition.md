@@ -48,7 +48,7 @@ maintainer review. Existing vendor/fork history is not permission for new patche
 | 2026-11-15 | `RUSTSEC-2026-0253:lru:0.16.4` | async-graphql/libdd retain incompatible old ranges; fixed lru starts at 0.18.2. Generated DataLoaders use NoCache; router does not initialize Datadog. Generic host caches remain exposed to panicking-key destructors. |
 | 2026-11-15 | `RUSTSEC-2026-0387:crypto-bigint:0.5.5` | Pinned agql-auth/jsonwebtoken RustCrypto elliptic-curve path; no compatible fixed release. Existing owner acceptance excludes private EC operations; auth pin move requires maintainer approval. |
 | 2026-11-15 | `RUSTSEC-2026-0441:pin-utils:0.1.0` | aws-smithy-runtime (S3), sspi -> async-dnssd (optional SMB), and Hive reqwest-retry -> wasmtimer retain the unmaintained utility. Requires owning upstream migrations; maintenance status is not treated as a vulnerability exclusion. |
-| 2026-11-15 | `RUSTSEC-2026-0459:libsqlite3-sys:0.30.1` | sqlx 0.8.6 -> sqlx-sqlite -> libsqlite3-sys 0.30.1. Fixed 0.39 requires an incompatible SQLx owner migration and backend/API review. SQLite accepts application SQL/data; no unreachability exemption claimed. |
+| 2026-11-15 | `RUSTSEC-2026-0459:libsqlite3-sys:0.30.1` | Exploitation requires opening an attacker-written database file together with its -wal; backup restore is logical, not file-level, so the risk is theoretical. |
 
 ## Owner-accepted crypto-bigint 0.5.5 disposition
 
@@ -286,7 +286,7 @@ locks receive the same compatible rustix patch where present.
 | Retained identity | Owning path and disposition |
 | --- | --- |
 | crypto-bigint 0.5.5 / RUSTSEC-2026-0387 | agql-auth → jsonwebtoken 10 and router jsonwebtoken 11 → p256/p384 → elliptic-curve. Existing conditional acceptance above; no auth pin change authorized. |
-| libsqlite3-sys 0.30.1 / RUSTSEC-2026-0459 | sqlx 0.8.6 → sqlx-sqlite. Fixed 0.39 is outside SQLx's range. Requires an owning SQLx migration and all-backend/API review; application SQL/data can reach SQLite, so this is retained risk rather than an unreachable path. |
+| libsqlite3-sys 0.30.1 / RUSTSEC-2026-0459 | Exploitation requires opening an attacker-written database file together with its -wal; backup restore is logical, not file-level, so the risk is theoretical. |
 | quick-xml 0.39.4 / RUSTSEC-2026-0194, RUSTSEC-2026-0195 | hive-router → object_store 0.13. Fixed object_store owner crosses Hive's range. Router XML initialization conditions above apply. |
 | rsa 0.9.10 / RUSTSEC-2023-0071 | JWT RustCrypto and optional SMB crypto owners; no compatible fixed release. RSA operations and credentials conditions above apply. |
 | lru 0.16.3 and fixture 0.16.4 / RUSTSEC-2026-0253 | async-graphql DataLoader and Hive/libdd owners; neither range accepts fixed 0.18.2. NoCache/exporter/key conditions above apply; generic host caches remain exposed. |

@@ -10,7 +10,7 @@ supersedes: []
 
 # graphql-orm-storage
 
-Version 0.16.0 declares Rust 1.97 as the minimum supported compiler. CI verifies
+Version 0.16.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
 the workspace and explicit backend/provider graphs with Rust 1.97.1.
 
 Provider-neutral object storage primitives for `graphql-orm` applications.

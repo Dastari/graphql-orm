@@ -20,7 +20,7 @@ for historical context.
   minimum compiler; serialized contracts and stored data remain unchanged.
 - Refresh eight root-collision diagnostic snapshots for the pinned Rust 1.97.1
   panic-display excerpt and require `rust-src` in the toolchain/ORM CI setup; collision rejection and error messages are unchanged.
-- Declare Rust 1.97 consistently across published packages, pin development to
+- Declare Rust 1.97.1 consistently across published packages, pin development to
   1.97.1 and verify workspace/backend/provider MSRV graphs in CI (#501).
 - Retire the obsolete macros postgres-smoke fixture and its floating PostgreSQL
   image (#684; removes its #615 pin only).

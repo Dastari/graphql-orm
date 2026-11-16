@@ -10,7 +10,7 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.160.0 declares Rust 1.97 as the minimum supported compiler. CI verifies
+Version 0.160.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
 the workspace and explicit backend/provider graphs with Rust 1.97.1.
 
 Version 0.159.0 fixes PostgreSQL static tables declared with mixed-case bare

@@ -1,5 +1,5 @@
 [package]
-rust-version = "1.97"
+rust-version = "1.97.1"
 name = "graphql-orm-router"
 version = "0.16.0"
 edition = "2024"

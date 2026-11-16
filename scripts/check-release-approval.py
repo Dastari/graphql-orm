@@ -20,12 +20,15 @@ def check(reference, repository, api=github_api):
     pr = api(path)
     if pr.get('base', {}).get('repo', {}).get('full_name') != repository:
         raise ValueError('approval PR belongs to another repository')
+    if pr.get('base', {}).get('ref') != 'main':
+        raise ValueError('approval PR must target main')
     if review is None:
         if pr.get('merged') is not True:
             raise ValueError('approval PR is not merged')
     else:
         result = api(f'{path}/reviews/{review}')
-        if (result.get('state') != 'APPROVED' or result.get('id') != int(review)
+        if (result.get('author_association') not in {'OWNER', 'MEMBER', 'COLLABORATOR'}
+                or result.get('state') != 'APPROVED' or result.get('id') != int(review)
                 or result.get('user', {}).get('type') != 'User'
                 or result.get('pull_request_url') != f'https://api.github.com/{path}'):
             raise ValueError('review is not an approved human review of this PR')

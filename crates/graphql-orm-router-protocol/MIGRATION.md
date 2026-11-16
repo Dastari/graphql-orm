@@ -12,7 +12,7 @@ supersedes: []
 
 ## 0.3.0
 
-**Action needed:** build with Rust 1.97 or newer. No data migration is needed.
+**Action needed:** build with Rust 1.97.1 or newer. No data migration is needed.
 
 ## Crate 0.2.0 to 0.2.1 (protocol major remains 1)
 

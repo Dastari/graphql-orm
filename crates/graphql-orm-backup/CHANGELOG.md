@@ -12,7 +12,7 @@ supersedes: []
 
 ## Unreleased - 0.24.0
 
-Declare Rust 1.97 as the minimum supported compiler; verify explicit feature graphs in CI.
+Declare Rust 1.97.1 as the minimum supported compiler; verify explicit feature graphs in CI.
 
 ## 0.23.0 (unreleased)
 

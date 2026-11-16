@@ -1,5 +1,5 @@
 [package]
-rust-version = "1.97"
+rust-version = "1.97.1"
 name = "graphql-orm"
 version = "0.160.0"
 edition = "2024"

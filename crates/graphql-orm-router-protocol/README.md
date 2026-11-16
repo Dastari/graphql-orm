@@ -10,7 +10,7 @@ supersedes: []
 
 # graphql-orm-router-protocol
 
-Version 0.3.0 declares Rust 1.97 as the minimum supported compiler. CI verifies
+Version 0.3.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
 the workspace and explicit backend/provider graphs with Rust 1.97.1.
 
 Versioned, serializable declarations that a GraphQL subgraph advertises to a

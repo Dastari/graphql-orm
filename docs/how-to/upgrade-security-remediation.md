@@ -42,7 +42,7 @@ and its subsequent default-alteration/unsupported-change sections. Review actual
 physical state and guarded repair versions; do not rewrite migration history to
 hide an ineffective earlier alteration.
 
-Build workspace packages with Rust 1.97 or later (CI pins 1.97.1). Validate
+Build workspace packages with Rust 1.97.1 or later (CI pins 1.97.1). Validate
 the application's selected provider graph as well; workspace MSRV checks do not
 qualify custom dependency selections. The storage migration guide records the
 earlier SDK transition.

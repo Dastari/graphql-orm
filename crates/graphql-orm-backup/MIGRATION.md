@@ -12,7 +12,7 @@ supersedes: []
 
 ## 0.24.0
 
-**Action needed:** build with Rust 1.97 or newer. No data migration is needed.
+**Action needed:** build with Rust 1.97.1 or newer. No data migration is needed.
 
 ## To 0.23.0: PostgreSQL mixed-case table restore
 

@@ -10,7 +10,7 @@ supersedes: []
 
 # graphql-orm-ai
 
-Version 0.146.0 declares Rust 1.97 as the minimum supported compiler. CI verifies
+Version 0.146.0 declares Rust 1.97.1 as the minimum supported compiler. CI verifies
 the workspace and explicit backend/provider graphs with Rust 1.97.1.
 
 AI 0.145.0 adds per-message structured [entity references](docs/entity-references.md): only the `{kind, id}` handle is stored, cloned or retried; a host hook resolves it for the current principal when the transcript is read and inside the provider-call executor at every dispatch; a reference never grants access or reveals whether an entity exists; and resolved data reaches the model as provenance-tagged data. **Breaking** for custom `AiProvider` implementations and `SendAiMessageInput` literals. Apply AI schema module `0.81.0`; see [migration guidance](MIGRATION.md#01440-to-01450-entity-references).

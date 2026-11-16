@@ -12,7 +12,7 @@ supersedes: []
 
 ## 0.16.0
 
-**Action needed:** build with Rust 1.97 or newer. No data migration is needed.
+**Action needed:** build with Rust 1.97.1 or newer. No data migration is needed.
 
 ## 0.15.3 to 0.15.4
 

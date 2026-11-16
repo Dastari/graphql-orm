@@ -16,7 +16,7 @@ backends are alternative configurations, so never use workspace
 
 Full release validation follows the stable compiler used by CI (Rust 1.97.1
 at the current release preparation). Compile-failure snapshots track that
-compiler's diagnostics. Rust 1.97 is the workspace minimum; the MSRV lane checks all workspace
+compiler's diagnostics. Rust 1.97.1 is the workspace minimum; the MSRV lane checks all workspace
 packages and explicit backend/provider graphs with 1.97.1.
 
 The UI snapshot lane requires `rust-src` so standard-library panic excerpts
