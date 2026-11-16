@@ -189,7 +189,7 @@ where
 {
 }
 
-/// A single-column relation batch key. Only generated code constructs it.
+/// A single-column relation batch key, built by generated relation resolvers.
 #[derive(Clone, Debug)]
 pub struct RelationQueryKey {
     pub(crate) relation: &'static str,
@@ -206,9 +206,11 @@ pub struct RelationQueryKey {
 }
 
 impl RelationQueryKey {
-    /// Generated relation resolvers build this key; hosts cannot. A key
-    /// carries the relation's authorized read visibility in its `filter`, and
-    /// the loader applies nothing beyond what the key carries.
+    /// Generated-only: relation resolvers build this key with the relation's
+    /// authorized read visibility in its `filter`. Hidden and outside semver.
+    /// The loader applies nothing beyond what a key carries, so a key built
+    /// by hand applies no entity, row or field policy; read related rows
+    /// through the generated relation resolvers instead.
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn __generated(
@@ -240,8 +242,8 @@ impl RelationQueryKey {
     }
 }
 
-/// A relation batch key over a complete parent key. Only generated code
-/// constructs it.
+/// A relation batch key over a complete parent key, built by generated
+/// relation resolvers.
 #[derive(Clone, Debug)]
 pub struct CompositeRelationQueryKey {
     pub(crate) relation: &'static str,
@@ -259,9 +261,11 @@ pub struct CompositeRelationQueryKey {
 }
 
 impl CompositeRelationQueryKey {
-    /// Generated relation resolvers build this key; hosts cannot. A key
-    /// carries the relation's authorized read visibility in its `filter`, and
-    /// the loader applies nothing beyond what the key carries.
+    /// Generated-only: relation resolvers build this key with the relation's
+    /// authorized read visibility in its `filter`. Hidden and outside semver.
+    /// The loader applies nothing beyond what a key carries, so a key built
+    /// by hand applies no entity, row or field policy; read related rows
+    /// through the generated relation resolvers instead.
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn __generated(
@@ -1454,12 +1458,14 @@ where
 ///
 /// It loads [`RelationQueryKey`], [`CompositeRelationQueryKey`] and
 /// [`SelectedRelationQueryKey`] batches, applying nothing beyond what a key
-/// carries. Only generated relation resolvers can build those keys: they
-/// authorize the relation and attach its read visibility to each key before
-/// loading. Generated `schema_builder`s register the loader; a handwritten
-/// schema whose objects use generated relation resolvers registers it with
-/// [`relation_data_loader`]. Hosts cannot build a key, so a host holding the
-/// loader cannot read through it.
+/// carries. Generated relation resolvers build those keys: they authorize the
+/// relation and attach its read visibility to each key before loading. The
+/// key constructors are generated-only, `#[doc(hidden)]` and outside semver,
+/// and a key built by hand applies no entity, row or field policy. Generated
+/// `schema_builder`s register the loader; a handwritten schema whose objects
+/// use generated relation resolvers registers it with
+/// [`relation_data_loader`]. Host code reads related rows through those
+/// resolvers, the repository builders or `tx.query::<T>()`, which apply policy.
 pub struct RelationLoader<T, B: OrmBackend = DefaultBackend> {
     db: crate::db::Database<B>,
     _marker: PhantomData<(T, B)>,
@@ -1481,8 +1487,9 @@ impl<T, B: OrmBackend> RelationLoader<T, B> {
 /// `SchemaBuilder::data`, for each relation target whose generated relation
 /// resolvers it serves. Generated `schema_builder`s register it themselves.
 ///
-/// The loader serves only the authorized relation keys those resolvers build;
-/// it has no load a host can call.
+/// The loader serves the authorized relation keys those resolvers build. It
+/// has no public key constructor; the hidden generated-only constructors are
+/// outside semver and apply no policy if called by hand.
 pub fn relation_data_loader<T, B>(
     db: crate::db::Database<B>,
 ) -> async_graphql::dataloader::DataLoader<RelationLoader<T, B>>
@@ -2263,9 +2270,11 @@ pub struct SelectedRelationQueryKey {
 }
 
 impl SelectedRelationQueryKey {
-    /// Generated relation resolvers build this key; hosts cannot. A key
-    /// carries the relation's authorized read visibility in its `filter`, and
-    /// the loader applies nothing beyond what the key carries.
+    /// Generated-only: relation resolvers build this key with the relation's
+    /// authorized read visibility in its `filter`. Hidden and outside semver.
+    /// The loader applies nothing beyond what a key carries, so a key built
+    /// by hand applies no entity, row or field policy; read related rows
+    /// through the generated relation resolvers instead.
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn __generated(

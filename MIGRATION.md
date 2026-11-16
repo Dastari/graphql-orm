@@ -453,12 +453,14 @@ detect accidental divergence only; see
   needed** if code uses `graphql::loaders::RelationLoader` directly. It loaded
   whatever key it was given with no entity, row or field policy; generated
   relation resolvers attach the authorized read to each key before loading.
-  Hosts can no longer build the loader or its keys:
+  It is now generated-resolver plumbing:
   - `RelationLoader` is no longer in the prelude, and `RelationLoader::new`
     is gone.
   - `RelationQueryKey`, `CompositeRelationQueryKey` and
     `SelectedRelationQueryKey` have private fields, so a struct literal no
-    longer compiles.
+    longer compiles. Their `#[doc(hidden)]` constructors are generated-only
+    and outside semver; a key built with one by hand applies no entity, row
+    or field policy, so do not call them.
   - The `Loader<String>` impl (a bare batch-column `SELECT … WHERE column IN
     (…)`) is removed, so `load_one`/`load_many` with string keys no longer
     compiles.

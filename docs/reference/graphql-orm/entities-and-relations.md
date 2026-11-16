@@ -914,7 +914,8 @@ and execution-pruned skip/include selections retain their field identities.
 
 The generated batch hook uses `DataLoader<RelationLoader<T, B>>` with its default
 `NoCache` storage. The loader and its keys are generated-resolver plumbing:
-hosts cannot construct a key, and a handwritten schema registers the loader
+its key constructors are generated-only, hidden and outside semver, and apply
+no policy if called by hand. A handwritten schema registers the loader
 with `graphql::loaders::relation_data_loader::<T, B>(db)`. It batches concurrent loads without reusing results across
 requests; other cache types are not accepted as authoritative targets and the
 resolver falls back to a fresh typed query. Current visibility predicates and
