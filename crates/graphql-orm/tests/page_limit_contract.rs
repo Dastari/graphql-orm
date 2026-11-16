@@ -398,6 +398,28 @@ async fn host_keyset_reads_take_a_per_read_maximum(db: &Database) -> TestResult 
         refused.code,
         graphql_orm::graphql::errors::OrmErrorCode::PageLimitExceeded
     );
+    let refused = db
+        .transaction(TransactionMode::StateMachine, |tx| {
+            Box::pin(async move {
+                tx.keyset_page::<LimitCard>(
+                    LimitCardWhereInput::default(),
+                    KeysetPageInput {
+                        limit: Some(MAXIMUM + 1),
+                        ..Default::default()
+                    },
+                )
+                .await
+            })
+        })
+        .await
+        .expect_err("a transaction keyset limit above the maximum is refused");
+    let TransactionError::Rejected(error) = refused else {
+        panic!("expected a rejected transaction, got {refused:?}");
+    };
+    assert_eq!(
+        error.code,
+        graphql_orm::graphql::errors::OrmErrorCode::PageLimitExceeded
+    );
     let at_maximum = LimitCard::keyset_page(db, LimitCardWhereInput::default(), page(MAXIMUM))
         .await
         .map_err(|error| error.message)?;
