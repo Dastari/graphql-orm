@@ -10,7 +10,7 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.166.0 (breaking batch) makes migration planning safer by default:
+Version 0.167.0 (breaking batch) makes migration planning safer by default:
 plans no longer drop tables the target does not declare, lossy column type
 changes and integrity-removing steps need `allow_destructive`, and the
 PostgreSQL change journal refuses `TRUNCATE` and unjournaled cascades. See the

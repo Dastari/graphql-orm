@@ -72,7 +72,7 @@ Changes merged to main after the latest workspace release.
 
 Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.166.0, `graphql-orm-macros` 0.166.0**; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.16.0; `graphql-orm-backup` 0.26.0; **`graphql-orm-ai-tool-profiles` 0.24.0**; **`graphql-orm-ai` 0.146.0**; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
 
-Breaking batch, collected on `next/breaking` (ORM/macros 0.166.0, backup 0.27.0, AI 0.148.0, catalogue 0.9.0, AI tool profiles 0.25.0, router 0.16.0; versions are placeholders):
+Breaking batch, collected on `next/breaking` (ORM/macros 0.167.0, backup 0.27.0, AI 0.148.0, catalogue 0.9.0, AI tool profiles 0.25.0, router 0.16.0; versions are placeholders):
 
 - **Action needed — AI 0.148.0, AI tool profiles 0.25.0:** capability broker version 2 (compact signatures and `describe_type`, one entity capability per entity, inverted-index search) and the fixed broker by default for large surfaces, with an opt-out. Retained fixed-broker sessions rebind once; host capability policy must decide entity entries. [Migration](../../MIGRATION.md#capability-broker-version-2-compact-signatures-entity-capabilities-and-the-fixed-broker-default-551) · [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01470-to-01480-capability-broker-version-2)
 
