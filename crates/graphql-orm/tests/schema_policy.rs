@@ -209,9 +209,13 @@ async fn managed_rejects_destructive_migration_by_default() -> Result<(), Box<dy
         extensions: Vec::new(),
         tables: vec![],
     };
-    let plan = database
-        .schema()
-        .plan_migration("2", "drop users", &current, &target)?;
+    let plan = database.schema().plan_migration_with_options(
+        "2",
+        "drop users",
+        &current,
+        &target,
+        graphql_orm::graphql::orm::PlanOptions::strict(),
+    )?;
 
     assert_eq!(plan.steps[0].risk, MigrationRisk::Destructive);
     let err = database

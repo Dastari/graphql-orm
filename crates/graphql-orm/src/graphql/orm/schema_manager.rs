@@ -9,7 +9,8 @@ use super::execution::{
     applied_migration_records, applied_version_set, ensure_managed_policy, ensure_planning_policy,
 };
 use super::migrations::{
-    build_migration_plan, classify_migration_steps, validate_migration_step_capabilities,
+    build_migration_plan, classify_migration_steps_for_backend,
+    validate_migration_step_capabilities,
 };
 use super::owned_schema::{SchemaRef, StepRef};
 use super::rls::{
@@ -64,6 +65,11 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
     }
 
     /// Introspect the live database and compare it to metadata from generated entities.
+    ///
+    /// On SQL Server this fails with an error carrying
+    /// [`RestoreInProgress`](super::RestoreInProgress) while a host-run
+    /// restore's marker is present; see
+    /// [`Database::ensure_no_restore_in_progress`](crate::db::Database::ensure_no_restore_in_progress).
     pub async fn validate_against_entities(
         &self,
         entities: &[&'static EntityMetadata],
@@ -71,6 +77,8 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
     where
         B: IntrospectionBackend,
     {
+        // A partly restored database must not pass a start-up validation.
+        super::restore_marker::refuse_while_restoring::<B>(self.database.pool()).await?;
         let target = SchemaModel::from_entities(entities);
         let current =
             B::introspect_schema_including(self.database.pool(), &declared_tables([&target]))
@@ -100,6 +108,10 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
     /// a policy whose command, `PERMISSIVE` mode or roles differ, is an error,
     /// as is an expression PostgreSQL could not render. Rendering needs the
     /// `TEMP` privilege, which PostgreSQL grants to `PUBLIC` by default.
+    ///
+    /// On SQL Server this fails with an error carrying
+    /// [`RestoreInProgress`](super::RestoreInProgress) while a host-run
+    /// restore's marker is present.
     pub async fn validate_target(
         &self,
         target: &SchemaTarget,
@@ -107,6 +119,8 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
     where
         B: IntrospectionBackend + RlsIntrospectionBackend,
     {
+        // A partly restored database must not pass a start-up validation.
+        super::restore_marker::refuse_while_restoring::<B>(self.database.pool()).await?;
         let current = B::introspect_schema_including(
             self.database.pool(),
             &declared_tables([&target.schema]),
@@ -315,6 +329,17 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
     {
         ensure_planning_policy(self.policy(), "plan schema target")?;
         target.schema.validate_physical_contract()?;
+        // The plan would install the change journal recorder. Refuse a target
+        // in which the database changes rows the journal cannot record.
+        if cfg!(feature = "change-journal")
+            && B::DIALECT == super::DatabaseBackend::Postgres
+            && matches!(
+                self.policy(),
+                SchemaPolicy::Managed | SchemaPolicy::PlanOnly
+            )
+        {
+            super::rls::refuse_change_journal_cascade_gaps(&target.schema)?;
+        }
         let version = version.into();
         let description = description.into();
         let current = B::introspect_schema_including(
@@ -537,18 +562,26 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
             &declared_tables(path.iter().map(|stage| &stage.target_schema)),
         )
         .await?;
+        let mut source_schema_hash = current_schema.stable_hash();
+        // A live table that no stage of the ABI declares is not the ORM's to
+        // drop: it is left out of the plan.
+        retain_stage_tables(
+            &mut current_schema,
+            abi.stages.iter().map(|stage| &stage.target_schema),
+        );
         let mut stages = Vec::new();
 
         for stage in path {
             let planned = plan_migration_for_backend::<B>(
                 stage.version.clone(),
                 stage.description.clone(),
-                Some(current_schema.stable_hash()),
+                Some(source_schema_hash),
                 stage.target_schema_hash.clone(),
                 &current_schema,
                 &stage.target_schema,
             )?;
             current_schema = stage.target_schema.clone();
+            source_schema_hash = current_schema.stable_hash();
             stages.push(planned);
         }
 
@@ -858,6 +891,21 @@ pub(super) fn declared_tables<'a>(
         .collect()
 }
 
+/// Keep only the live tables that some stage declares.
+pub(super) fn retain_stage_tables<'a>(
+    current: &mut SchemaModel,
+    stages: impl IntoIterator<Item = &'a SchemaModel>,
+) {
+    let declared = stages
+        .into_iter()
+        .flat_map(|target| target.tables.iter())
+        .map(|table| table.table_name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    current
+        .tables
+        .retain(|table| declared.contains(table.table_name.as_str()));
+}
+
 fn schema_current_for_plan(
     current: &SchemaModel,
     target: &SchemaModel,
@@ -1024,7 +1072,7 @@ fn plan_migration_for_backend<B: OrmBackend>(
     }
     let plan = build_migration_plan(B::DIALECT, current, target);
     validate_migration_step_capabilities(B::DIALECT, plan.steps.iter().map(StepRef::from))?;
-    let steps = classify_migration_steps(&plan.steps);
+    let steps = classify_migration_steps_for_backend(B::DIALECT, &plan.steps, current);
     let plan_hash = stable_plan_hash(B::DIALECT.name(), &steps, &plan.statements);
     Ok(PlannedMigration {
         version,

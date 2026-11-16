@@ -79,6 +79,35 @@ with `LegacyManifestRefused` unless the host opts in with a
 - Do not emit change journal entries during restore.
 - Do not run normal GraphQL row policies during restore.
 - Refuse non-empty target databases in `EmptyDatabase` mode.
+- Refuse a snapshot the host's snapshot records do not admit (a revoked id, or
+  one missing from the known-snapshot list) before writing.
+
+## Atomicity
+
+What a failed restore leaves behind depends on the database adapter:
+
+| Target | Full restore (`restore_full`) | After a failure |
+| --- | --- | --- |
+| PostgreSQL, SQLite through `OrmBackupAdapter` | One transaction for all tables, including the row-count and row-hash checks | The target is unchanged; retry without cleanup |
+| SQL Server, or any host-written adapter | Whatever the adapter implements; may commit table by table | The target may be partly restored |
+
+An adapter that cannot restore in one transaction should keep readers and
+writers away from the target while it restores, and leave evidence of a
+restore that did not finish. For SQL Server, `graphql-orm` provides both:
+`Database::begin_restore` returns a guard that holds an exclusive application
+lock which every ORM transaction and statement takes in shared mode, and
+records a marker row that keeps them refused after a crash until
+`resume_restore` and `finish`. Run the adapter's restore statements through
+that guard.
+
+A chain restore is still several stages: the full stage, then each incremental
+stage. Only the full stage of `OrmBackupAdapter` is atomic; the orchestration
+does not hold a transaction across stages and reports how far a failed chain
+got in `RestoreFailureProgress`.
+
+`OrmBackupAdapter` also clears the runtime search index of every restored
+table and marks it `building`, in the restore's transaction. Backfill those
+indexes before serving search.
 
 ## Object Restore
 

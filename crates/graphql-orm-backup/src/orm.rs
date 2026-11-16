@@ -38,6 +38,14 @@ use crate::{
 /// Full export and restore delegate to the `GraphqlOrmBackupRuntime`
 /// implementation shipped with `graphql-orm`. Incremental export and restore
 /// are unsupported until a change-journal integration lands.
+///
+/// [`GraphqlOrmBackupAdapter::restore_full`] restores every table of the
+/// snapshot in one database transaction on PostgreSQL and SQLite. A failure
+/// in any table, or in the row-count and row-hash checks that follow the
+/// import, rolls the whole restore back and leaves the target as it was, so
+/// the restore can be retried without cleanup. The same transaction clears
+/// the runtime search index of every restored table and marks it `building`,
+/// so search is refused until the host backfills it.
 pub struct OrmBackupAdapter {
     database: Arc<Database>,
     entities: Vec<&'static EntityMetadata>,
@@ -166,6 +174,11 @@ impl OrmBackupAdapter {
     /// Deletes all rows from every backup-enabled table so an
     /// empty-database restore can run against a previously used database.
     ///
+    /// On PostgreSQL the clear runs in a transaction that sets
+    /// `graphql_orm.change_journal` to `off`: the change journal's `TRUNCATE`
+    /// guard admits only such a transaction, and the clear is not journaled.
+    /// Start a new backup chain with a full backup after restoring.
+    ///
     /// `RESTRICT` foreign keys are enforced immediately on both backends, so
     /// PostgreSQL clears with one `TRUNCATE ... CASCADE` statement and SQLite
     /// suspends `PRAGMA foreign_keys` on a dedicated connection around a
@@ -196,10 +209,28 @@ impl OrmBackupAdapter {
                 .map(|descriptor| quote_table_identifier(&descriptor.table_name))
                 .collect::<Vec<_>>()
                 .join(", ");
-            graphql_orm::sqlx::query(&format!("TRUNCATE TABLE {tables} CASCADE"))
-                .execute(self.database.pool())
+            // A journaled table refuses `TRUNCATE` unless the transaction
+            // declares that it writes without journaling, as a restore does.
+            let mut tx = self
+                .database
+                .pool()
+                .begin()
                 .await
                 .map_err(database_error("clear restore target"))?;
+            graphql_orm::sqlx::query(&format!(
+                "SET LOCAL {} = 'off'",
+                graphql_orm::graphql::orm::CHANGE_JOURNAL_SETTING
+            ))
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error("suspend change journal"))?;
+            graphql_orm::sqlx::query(&format!("TRUNCATE TABLE {tables} CASCADE"))
+                .execute(&mut *tx)
+                .await
+                .map_err(database_error("clear restore target"))?;
+            tx.commit()
+                .await
+                .map_err(database_error("clear restore target commit"))?;
             Ok(())
         }
     }

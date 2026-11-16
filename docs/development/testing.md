@@ -304,11 +304,12 @@ scripts/run-owned-database-lanes.sh ai-postgres
 
 `scripts/run-owned-database-lanes.sh page-limit-contract` runs
 `page_limit_contract` (the opt-in oversized page refusal, the declared
-`schema_roots!` maximum, host keyset maxima and exact host connection pages) on SQLite, an owned PostgreSQL
+`schema_roots!` maximum, host keyset maxima and exact host `paginate` reads) on SQLite, an owned PostgreSQL
 container and an owned SQL Server container.
 `scripts/run-owned-database-lanes.sh authorized-page` runs the context-bound
 authorized page regressions (`authorized_page_context_binding`) on SQLite,
 PostgreSQL and SQL Server. The `postgres` lane includes the same test binary.
+
 `scripts/run-owned-database-lanes.sh unique-index-preflight` runs the conditional
 unique-index regressions on SQLite and test-owned PostgreSQL: a newly added
 predicate column, duplicate keys inside the filter, and duplicates outside it.
@@ -391,3 +392,9 @@ CI and full release validation. Run it on a selected branch with
 It does not create skipped check runs for CI's other jobs or share CI's main
 concurrency group. The runner has a 120-minute timeout and reclaims disk before
 executing the two owned PostgreSQL test families. No release is triggered.
+
+The focused `bash scripts/run-owned-database-lanes.sh migration-journal` lane
+executes the PostgreSQL journal and TRUNCATE regressions, journaled dependent
+deletes, catalog-read cancellation, and the PostgreSQL router fixture using
+test-owned disposable databases. Use it to repeat the journal portion of
+`postgres-legacy` after a recorder change.

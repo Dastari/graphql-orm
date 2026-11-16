@@ -236,7 +236,9 @@ and names the public field on both surfaces: the message is
 `extensions.deniedWriteField` (see
 [denied generated field writes](#denied-generated-field-writes)).
 `ignore_denied_field_write` still turns a denied optional GraphQL input into
-an omission.
+an omission. On an upsert that resolves to an existing row the omission is
+real: the denied column is left out of the conflict update, so its stored
+value is kept.
 
 **What the repository callbacks receive.** Generated repository reads and
 writes call `can_read_repository_field` and `can_write_repository_field` with
@@ -488,8 +490,11 @@ updates check only supplied fields, including explicit nulls.
 
 `FieldPolicy::ignore_denied_field_write(entity_name, field_name)` defaults to
 `false`. Override it to return `true` for selected GraphQL fields (or all fields)
-to restore legacy input omission. Required create/upsert inputs still fail on
-denial. Errors from a policy and missing policy providers are never ignored.
+to restore legacy input omission. An omitted field is never written: a create
+or an inserting upsert stores the column's default, and an update or an upsert
+onto an existing row keeps the stored value (the column is left out of the
+statement, and out of the changes mutation hooks see). Required create/upsert
+inputs still fail on denial. Errors from a policy and missing policy providers are never ignored.
 Repository field checks retain their existing fail-closed contract. See the
 [migration guide](../../../MIGRATION.md#0911-to-0920-rejected-field-writes-fail-the-mutation).
 

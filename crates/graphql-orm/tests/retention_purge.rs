@@ -446,9 +446,26 @@ async fn bounded_retention_is_opt_in_policy_gated_and_schema_enforced()
         &weakened_context,
         &target,
     )?;
+    assert!(
+        context_repair
+            .steps
+            .iter()
+            .any(|step| step.risk == graphql_orm::graphql::orm::MigrationRisk::Destructive)
+    );
     database
         .schema()
         .apply_migration(&context_repair, ApplyOptions::default())
+        .await
+        .expect_err("re-enabling retention purge requires destructive admission");
+    database
+        .schema()
+        .apply_migration(
+            &context_repair,
+            ApplyOptions {
+                allow_destructive: true,
+                ..ApplyOptions::default()
+            },
+        )
         .await?;
     let repaired_context = introspect_sqlite_schema(&database).await?;
     assert!(

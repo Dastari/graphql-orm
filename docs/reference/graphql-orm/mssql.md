@@ -3,7 +3,7 @@ title: "Microsoft SQL Server Backend"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-12
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -86,7 +86,8 @@ An entity declared with `schema_policy = "external_read_only"` does not contain:
 - mutation repository helpers or subscriptions
 - migration runners
 - schema diffing or schema creation APIs
-- backup/restore APIs
+- backup/restore APIs (a host-run restore records the
+  [restore-in-progress marker](#restore-in-progress-marker))
 
 An entity declared with `schema_policy = "external_writable"` may generate the normal applicable
 repository and GraphQL DML surface: insert/bulk insert, key and bounded predicate update/delete,
@@ -117,6 +118,68 @@ fixture checks an untrusted private CA, an explicitly trusted CA, and a
 mismatched hostname. The transport fixture checks the encryption default, each
 explicit opt-in, session reset between checkouts, pool timeouts and a server
 default of `NOCOUNT ON`.
+
+## Restore-in-progress marker
+
+The ORM does not restore SQL Server databases. A host that restores one with
+its own statements may commit table by table, so a failure can leave the
+database partly restored, and a service that is already running must not read
+or write the tables meanwhile. A lock and a marker provide that:
+
+```rust
+let mut restore = database
+    .begin_restore("snapshot-2026-11-15", std::time::Duration::from_secs(60))
+    .await?;
+restore.execute("DELETE FROM dbo.Jobs", &[]).await?;
+// ... the rest of the restore, through the guard ...
+restore.finish().await?;
+```
+
+- **The lock.** Every ORM transaction and every autocommit ORM statement
+  takes the application lock `graphql_orm_restore` in shared mode
+  (`sp_getapplock`), in the same batch as the statement or `BEGIN
+  TRANSACTION`. Transactions and autocommit reads pay no extra round trip.
+  An autocommit write releases the lock in one short follow-up batch, because
+  a release inside its own batch would replace the row count SQL Server
+  reports for it. `begin_restore` takes it
+  exclusively on a dedicated connection and holds it until `finish`. It waits
+  up to `wait` for ORM work already in flight in any process, and from then on
+  each new transaction or statement waits 250 ms and is refused. The check
+  cannot race: a transaction that began before the restore holds the shared
+  lock until it ends, and one that begins later cannot obtain it.
+- **The marker.** `begin_restore` also records one row in
+  `__graphql_orm_restore_marker`. The gate that takes the shared lock refuses
+  while that row exists. This covers a restore whose process died: its lock
+  is released with its session, its partial rows remain. The table is created
+  in the login's default schema when it is missing; create it beforehand as
+  the schema owner when the runtime login may not run DDL (the statement is
+  in the
+  [migration guide](../../../MIGRATION.md#01590-to-01600-atomic-restore-search-reset-and-kept-values-on-ignored-denials)).
+- **The refusal.** A refused transaction or statement fails before it reads
+  or writes, with an error carrying `RestoreInProgress` (read it with
+  `RestoreInProgress::from_error`). `restore_id` is empty in the short window
+  where the restore holds the lock and has not recorded its marker yet.
+  `Database::restore_in_progress` reads the marker without failing, and
+  `Database::ensure_no_restore_in_progress`,
+  `SchemaManager::validate_against_entities` and `validate_target` refuse on
+  it, for a service that wants one check at start.
+- **After a crash.** `Database::resume_restore(restore_id, wait)` takes the
+  lock again and adopts the marker of that restore, and of no other. Complete
+  the restore, or remove its partial rows, through the guard, then `finish`.
+  `finish` fails, leaving the marker, while the guard's connection has an
+  open transaction.
+- **What the guard is for.** The restore's own statements go through
+  `MssqlRestore::execute` and `fetch_rows`, on the connection that holds the
+  lock; the same statements sent through the ORM would be refused. Statements
+  a host or tool sends on connections of its own are outside the lock: they
+  are neither refused nor waited for.
+
+A raw statement sent through the ORM runs inside the batch that takes and
+releases the shared lock. A statement that SQL Server requires to be alone in
+its batch (`CREATE VIEW`, `CREATE PROCEDURE`, `CREATE FUNCTION`,
+`CREATE TRIGGER`, `CREATE SCHEMA`, and their `ALTER` forms) is sent as it is.
+PostgreSQL and SQLite restore a snapshot in one transaction and keep no lock
+or marker.
 
 ## Connections
 

@@ -521,8 +521,93 @@ async fn private_modules_round_trip_through_graphql_orm_016(
     Ok(())
 }
 
+/// `restore_full` restores every table in one transaction: a later table the
+/// database refuses rolls back the tables restored before it, so the target is
+/// empty again and the same restore can be retried without cleanup.
+#[tokio::test]
+#[cfg_attr(
+    feature = "orm-postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
+async fn a_failed_table_leaves_the_restore_target_empty() -> Result<(), Box<dyn std::error::Error>>
+{
+    let pool = setup_pool().await?;
+    let database = Arc::new(graphql_orm::db::Database::new(pool.clone()));
+    let catalog = catalog()?;
+    apply_schema(database.as_ref(), &catalog).await?;
+    insert_fixture(&pool).await?;
+    let adapter = OrmBackupAdapter::new(database.clone(), catalog.entities().to_vec())
+        .with_column_backup_policy(
+            "conformance_activity_events",
+            "note",
+            ColumnBackupPolicy::Redact,
+        );
+    let schema = adapter.schema_snapshot().await?;
+    let export = adapter.export_full().await?;
+    adapter.clear_restore_target().await?;
+
+    // Events restore after the accounts they reference.
+    #[cfg(feature = "orm-sqlite")]
+    let (refuse, allow): (&[&str], &str) = (
+        &["CREATE TRIGGER conformance_refuse BEFORE INSERT ON conformance_activity_events BEGIN SELECT RAISE(ABORT, 'events are refused'); END"],
+        "DROP TRIGGER conformance_refuse",
+    );
+    #[cfg(feature = "orm-postgres")]
+    let (refuse, allow): (&[&str], &str) = (
+        &[
+            "CREATE OR REPLACE FUNCTION conformance_refuse() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'events are refused'; END $$",
+            "CREATE TRIGGER conformance_refuse BEFORE INSERT ON conformance_activity_events FOR EACH ROW EXECUTE FUNCTION conformance_refuse()",
+        ],
+        "DROP TRIGGER conformance_refuse ON conformance_activity_events",
+    );
+    for statement in refuse {
+        graphql_orm::sqlx::query(statement).execute(&pool).await?;
+    }
+    let error = adapter
+        .restore_full(
+            schema.clone(),
+            export.clone(),
+            RestoreContext::empty_database(),
+        )
+        .await
+        .expect_err("the events table is refused");
+    assert!(error.to_string().contains("events are refused"), "{error}");
+    assert!(
+        adapter.restore_target_is_empty().await?,
+        "the accounts restored before the failure are rolled back"
+    );
+
+    graphql_orm::sqlx::query(allow).execute(&pool).await?;
+    adapter
+        .restore_full(schema, export, RestoreContext::empty_database())
+        .await?;
+    assert_restored_rows(&pool).await?;
+    Ok(())
+}
+
 fn test_manifest_authenticator() -> graphql_orm_backup::ManifestAuthenticator {
     graphql_orm_backup::ManifestAuthenticator::new(
         graphql_orm_backup::ManifestKey::from_bytes(&[7; 32]).expect("test manifest key"),
     ).with_repository_identity(uuid::Uuid::from_u128(1))
+}
+
+#[cfg(feature = "orm-postgres")]
+#[tokio::test]
+#[ignore = "requires test-owned PostgreSQL and graphql-orm/change-journal; run the backup-postgres owned lane"]
+async fn journaled_target_clear_uses_the_restore_transaction()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pool = setup_pool().await?;
+    let database = Arc::new(graphql_orm::db::Database::new(pool.clone()));
+    let catalog = catalog()?;
+    apply_schema(database.as_ref(), &catalog).await?;
+    insert_fixture(&pool).await?;
+    database.ensure_change_journal_recorder(catalog.entities()).await?;
+    graphql_orm::sqlx::query("TRUNCATE conformance_activity_events")
+        .execute(&pool)
+        .await
+        .expect_err("ordinary truncation must be refused by the installed recorder");
+    let adapter = OrmBackupAdapter::new(database, catalog.entities().to_vec());
+    adapter.clear_restore_target().await?;
+    assert!(adapter.restore_target_is_empty().await?);
+    Ok(())
 }

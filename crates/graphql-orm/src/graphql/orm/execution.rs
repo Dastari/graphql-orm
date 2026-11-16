@@ -3,9 +3,7 @@ use super::core::{
     MigrationApplicationMetadata, PlannedSchemaStage, SchemaPolicy, SchemaStage, SqlValue,
     record_executed_query,
 };
-use super::migrations::{
-    build_migration_plan, classify_migration_steps, validate_migration_step_capabilities,
-};
+use super::migrations::{build_migration_plan, validate_migration_step_capabilities};
 use super::owned_schema::StepRef;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 use super::runtime_migration::{OwnedPlannedMigration, RuntimeMigrationError};
@@ -236,6 +234,13 @@ async fn plan_pending_schema_stages<B: MigrationBackend>(
     )
     .await?;
     let live_schema_hash = current_schema.stable_hash();
+    // The stages are the record of what the ORM manages. A live table that no
+    // stage declares belongs to the host or another application: it is left
+    // out of the plan, so no stage drops it.
+    super::schema_manager::retain_stage_tables(
+        &mut current_schema,
+        stages.iter().map(|stage| &stage.target_schema),
+    );
     let mut planned = Vec::new();
 
     for stage in stages {
@@ -251,8 +256,8 @@ async fn plan_pending_schema_stages<B: MigrationBackend>(
             description: stage.description.clone(),
             target_schema_hash: stage.target_schema_hash.clone(),
             plan,
+            source_schema: std::mem::replace(&mut current_schema, stage.target_schema.clone()),
         });
-        current_schema = stage.target_schema.clone();
     }
 
     Ok((live_schema_hash, planned))
@@ -260,7 +265,7 @@ async fn plan_pending_schema_stages<B: MigrationBackend>(
 
 /// Run the shared migration risk gate over one planned stage.
 fn admit_schema_stage(stage: &PlannedSchemaStage, options: &ApplyOptions) -> crate::Result<()> {
-    let steps = classify_migration_steps(&stage.plan.steps);
+    let steps = stage.steps();
     reject_migration_risks(
         &stage.version,
         steps

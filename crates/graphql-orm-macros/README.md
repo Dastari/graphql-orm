@@ -10,18 +10,24 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.161.0 (placeholder for the breaking batch) fixes each schema's
+Version 0.166.0 (placeholder for the breaking batch) fixes each schema's
 maximum page limit at compile time (`schema_roots!(max_page_limit: N)`, 100
 when omitted) and refuses a `Database` configured differently; host-side
-keyset pages and host `paginate(PageInput)` connection and search reads
+keyset pages and host `paginate(PageInput)` reads
 refuse a limit above the maximum instead of returning fewer rows; runtime
 GraphQL serves `RecordVersion` and integer live keys as `RuntimeInt64`
 strings; an uncoded host callback error reads as `INTERNAL_ERROR` unless the
 schema's `Database` opts in; and the policy-free relation preload API and
-string-key relation loads are removed. `#[graphql_entity(key_only_deletes)]`
+direct relation data-loader use are removed. `#[graphql_entity(key_only_deletes)]`
 adds an opt-in key-only delete signal for `Key`/`Keys` subscribers. See the
 [migration guide](../../MIGRATION.md#breaking-release-unreleased) for which
 items need action.
+
+Version 0.164.0 (breaking batch) makes migration planning safer by default:
+plans no longer drop tables the target does not declare, lossy column type
+changes and integrity-removing steps need `allow_destructive`, and the
+PostgreSQL change journal refuses `TRUNCATE` and unjournaled cascades. See the
+[migration guide](../../MIGRATION.md#breaking-release-unreleased).
 
 Version 0.160.0 (placeholder, **breaking fingerprints**) uses operation
 catalogue 0.9.0: generated-operation fingerprints no longer include the Rust
@@ -55,6 +61,12 @@ Version 0.162.0 is released with `graphql-orm` 0.162.0, which adds
 context-bound authorized pages for handwritten resolvers. The macros are
 unchanged. See the
 [migration guide](../../MIGRATION.md#01620-context-bound-authorized-pages).
+
+Version 0.160.0 restores a snapshot in one transaction on PostgreSQL and
+SQLite, adds `SchemaManager::reset_runtime_search` and a restore-in-progress
+marker for host-run SQL Server restores, and keeps the stored value when an
+upsert's denied field write is ignored. See the
+[migration guide](../../MIGRATION.md#01590-to-01600-atomic-restore-search-reset-and-kept-values-on-ignored-denials).
 
 Version 0.159.0 fixes PostgreSQL static tables declared with mixed-case bare
 names. Table references follow PostgreSQL's historical folding, so migrations,

@@ -83,7 +83,9 @@ a GraphQL entity:
    refers to generated types such as `OrderQueries`.
 6. Add validators, a transform or a hook only if the fields need them.
 7. Plan a migration with a new version, passing **every** entity, as
-   `&graphql_orm_entity_metadata()`. An entity left out is planned as a `DROP TABLE`.
+   `&graphql_orm_entity_metadata()`. The default plan leaves the table of an entity left out in
+   place; only a plan made with `PlanOptions::strict()` drops it, and applying the drop needs
+   `allow_destructive: true`.
 
 ## Worked example
 
