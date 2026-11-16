@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.166.0 to 0.167.0: input-object values on static schemas and bulk-write filter authority
+## 0.167.0 to 0.168.0: input-object values on static schemas and bulk-write filter authority
 
 Upgrade ORM and macros together and recompile entities. Generated SDL,
 operation catalogues and fingerprints are unchanged.
@@ -55,6 +55,11 @@ operation catalogues and fingerprints are unchanged.
   forms) still run host-built filters without field read checks; a host
   resolver that passes a client-supplied filter to one should call
   `authorize_read_fields` first.
+
+## ORM/macros 0.167.0: test-only, backend-agnostic macros unit tests
+
+**No action.** Generated code, schemas and runtime behavior are unchanged. The
+macros unit tests no longer assume the SQLite backend (#735).
 
 ## ORM/macros 0.166.0: guarded dependent deletes
 

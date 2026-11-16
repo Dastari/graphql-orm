@@ -10,11 +10,15 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.167.0 installs `GeneratedInputValidation` in the generated schema
+Version 0.168.0 installs `GeneratedInputValidation` in the generated schema
 builders, so a value that is not an object where an input object is expected
 is refused with `invalid_graphql_input` before any resolver runs. Recompile
 entities with aligned ORM/macros versions. See the
-[migration guide](../../MIGRATION.md#01660-to-01670-input-object-values-on-static-schemas-and-bulk-write-filter-authority).
+[migration guide](../../MIGRATION.md#01670-to-01680-input-object-values-on-static-schemas-and-bulk-write-filter-authority).
+
+Version 0.167.0 changes test code only: the macros unit tests no longer assume
+the SQLite backend, so they run under each backend feature. No generated code
+or behavior changes.
 
 Version 0.166.0 adds opt-in transaction-bound dependent-effect verification.
 `DependentDeleteGuard` compares declarations with the introspected delete plan
