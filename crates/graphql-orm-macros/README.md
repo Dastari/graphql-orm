@@ -17,6 +17,11 @@ impls instead of a `SimpleObject` derive. Generated SDL, catalogues and
 fingerprints are byte-identical; no action is needed. See the
 [migration guide](../../MIGRATION.md#01590-to-01630-wrapper-object-compile-cost).
 
+Version 0.162.0 is released with `graphql-orm` 0.162.0, which adds
+context-bound authorized pages for handwritten resolvers. The macros are
+unchanged. See the
+[migration guide](../../MIGRATION.md#01620-context-bound-authorized-pages).
+
 Version 0.159.0 fixes PostgreSQL static tables declared with mixed-case bare
 names. Table references follow PostgreSQL's historical folding, so migrations,
 reads/writes, RLS and search helpers resolve the same table while declared
