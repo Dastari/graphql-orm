@@ -341,11 +341,11 @@ The `key` field and `Debug` output hold it for host diagnostics only.
 Use a root managed by the trusted storage deployment, and restrict
 permissions on the root and its descendants so untrusted local users and
 applications cannot create or replace storage entries. This applies equally
-to local backups and OS-mounted shares using this backend. The backend
+to local backups and OS-mounted shares using this backend. On Unix, the backend
 enforces the boundary below the root itself; it does not rely on the tree
 being free of links.
 
-**Root-relative, no-follow resolution.** Every local operation (reads,
+**Root-relative, no-follow resolution on Unix.** Every local operation (reads,
 writes and publication, renames, deletes, listings, metadata, streaming
 objects, multipart staging and completion, and the temporary-file sweep)
 opens the configured root and reaches its target one component at a time,
@@ -357,13 +357,13 @@ Leaf operations act on the held parent directory, never on a full path:
 | Linux and Android | A directory chain is opened in one `openat2` call with `RESOLVE_BENEATH \| RESOLVE_NO_SYMLINKS \| RESOLVE_NO_MAGICLINKS`. Where the kernel lacks `openat2` or a sandbox refuses it, each component is opened with `openat(O_DIRECTORY \| O_NOFOLLOW)` relative to its parent's descriptor. |
 | Other Unix | Each component is opened with `openat(O_DIRECTORY \| O_NOFOLLOW)` relative to its parent's descriptor. |
 | All Unix | Files are opened with `openat(O_NOFOLLOW)`, created with `O_CREAT \| O_EXCL \| O_NOFOLLOW`, published with `renameat` (conditional creates with `renameat2(RENAME_NOREPLACE)` on Linux and `RENAME_EXCL` on Apple platforms), removed with `unlinkat`, created with `mkdirat` and inspected with `fstatat(AT_SYMLINK_NOFOLLOW)`, all on the held parent descriptor. Directory syncs use the held descriptors. |
-| Windows | Each directory from the root down is opened as itself (`FILE_FLAG_OPEN_REPARSE_POINT`), refused when it is a reparse point, and held without `FILE_SHARE_DELETE` for the whole operation, so no directory on the chain can be renamed, removed or replaced while the operation runs. Files are opened as their reparse point first; a name surrogate (symbolic link, junction, mount point) is refused, and any other reparse point, such as a deduplicated or cloud file, is reopened through its file system filter and must be the same file. After a file is created or opened, or a directory created, the held parent is checked again, so an empty directory turned into a junction in between is refused. |
+| Windows | `LocalStorageBackend::new` panics before constructing storage. A host must explicitly use `LocalStorageBackend::new_trusted_windows_root` for a trusted root tree. This mode uses path-based operations and does **not** enforce a race-safe link boundary. Protect the root, its ancestors and descendants from concurrent mutation. Existing reparse-point checks are best effort only. Conditional creation uses atomic `MoveFileExW` without replacement, never hard links. |
 
-A directory replaced by a link after an operation resolved it never
+On Unix, a directory replaced by a link after an operation resolved it never
 redirects that operation: it keeps using the handle it holds, and the next
 operation is refused.
 
-**What is refused.** A key whose path below the root names or passes through
+**What is refused on Unix.** A key whose path below the root names or passes through
 a symbolic link (on Windows, also a junction, mount point, other name-surrogate
 reparse point, or reparse-point directory), wherever it points, fails with
 `StorageError::InvalidStorageKey` before the link's target is touched. Writes
@@ -380,17 +380,20 @@ and multipart manifests, receipts and part data) refuses a regular file with
 more than one hard link with `InvalidStorageKey`, because such a file may share
 its data with a file outside the root. Neither storage nor backup leaves a
 second hard link on a file it wrote: writes publish by renaming a unique
-temporary file, and conditional creates rename without replacing. Only where
-the platform or file system has no non-replacing rename (Unix other than Linux
-and Apple platforms, a Linux file system that refuses `RENAME_NOREPLACE`, and
-Windows) does a conditional create link the temporary file at the key and then
-unlink it, and a read of that key in the moment between can be refused. A
-delete of a hard-linked key removes only the link inside the root.
+temporary file, and conditional creates rename without replacing. On Unix filesystems without a non-replacing rename, conditional creation
+links the temporary file at the key and then unlinks the temporary name. A
+concurrent read may refuse the two-link file. Temporary unlink is checked and
+retried once. If both attempts fail, publication is rolled back only after
+verifying the published inode is the one we linked, and the call returns an
+error. Rollback failures also return an error; success is never reported with
+both names left behind. Hosts must resolve persistent filesystem errors before
+retrying. Windows uses an atomic no-replace rename and never this fallback.
+A delete of a hard-linked key removes only the link inside the root.
 
 **What is not covered.** The root itself, and anything that can change the
 files the root's own directories hold, such as a process with the storage
 account's permissions writing file contents directly, are the deployment's to
-protect. On Windows, local storage holds directory handles that deny delete
+protect. On Windows, trusted-root local storage holds directory handles that deny write and delete
 sharing while an operation runs, so another process that removes or renames a
 storage directory at that moment fails with a sharing violation.
 

@@ -13,14 +13,11 @@
 //!   `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` call where the kernel
 //!   supports it. A directory replaced by a link after it was opened is
 //!   never entered: the operation keeps using the descriptor it holds.
-//! - On Windows, which has no portable handle-relative open in the standard
-//!   library, each directory from the root down is opened as itself
-//!   (`FILE_FLAG_OPEN_REPARSE_POINT`), refused when it is a reparse point,
-//!   and held without `FILE_SHARE_DELETE` for the whole operation, so no
-//!   directory on the chain can be renamed, removed or replaced while the
-//!   operation runs. Leaf files are opened as themselves too, and the held
-//!   parent is checked again after a leaf is created or opened, so an empty
-//!   directory turned into a junction in between is refused.
+//! - Windows is available only through explicit trusted-root construction.
+//!   It retains path-based operations and best-effort reparse checks; it does
+//!   not promise a race-safe link boundary. The host must prevent concurrent
+//!   mutation of the complete tree. Conditional creation uses a no-replace
+//!   rename and never creates hard links.
 //!
 //! The configured root itself is opened by its path and may be a link: the
 //! host chose it.
@@ -178,6 +175,14 @@ impl Dir {
         })
     }
 
+    /// Compares identities obtained from two opened child directory handles.
+    pub(crate) fn same_child_directory(&self, first: &str, second: &str) -> io::Result<bool> {
+        let (Some(first), Some(second)) = (self.child_dir(first)?, self.child_dir(second)?) else {
+            return Ok(false);
+        };
+        Ok(sys::directory_identity(&first.handle)? == sys::directory_identity(&second.handle)?)
+    }
+
     /// Creates the child directory `name`. Returns `false` when an entry of
     /// that name already exists.
     pub(crate) fn create_dir(&self, name: &str) -> io::Result<bool> {
@@ -219,8 +224,10 @@ impl Dir {
     /// Linux and Apple platforms rename without replacing in one call
     /// (`RENAME_NOREPLACE`, `RENAME_EXCL`), so `to` never has a second hard
     /// link. Elsewhere, or on a file system that refuses that flag, `from` is
-    /// linked at `to` and then unlinked, and for that moment `to` has two
-    /// hard links.
+    /// linked at `to` and then unlinked. Unlink is retried once; persistent
+    /// failure rolls back the matching published inode and returns an error.
+    /// Success is never reported while both names remain. Windows uses an
+    /// atomic no-replace rename.
     pub(crate) fn rename_noreplace(&self, from: &str, to: &str) -> io::Result<()> {
         sys::rename_noreplace(self, from, to)
     }
@@ -344,6 +351,11 @@ mod sys {
         )
         .map(Handle)
         .map_err(io::Error::from)
+    }
+
+    pub(super) fn directory_identity(handle: &Handle) -> io::Result<(u64, u64)> {
+        let info = from_stat(&rfs::fstat(&handle.0)?);
+        Ok(info.identity)
     }
 
     pub(super) fn try_clone(handle: &Handle) -> io::Result<Handle> {
@@ -486,13 +498,62 @@ mod sys {
             Err(Errno::INVAL | Errno::NOSYS | Errno::NOTSUP) => {}
             Err(errno) => return Err(errno.into()),
         }
+        link_noreplace(dir, from, to)
+    }
+
+    fn link_noreplace(dir: &Dir, from: &str, to: &str) -> io::Result<()> {
+        // Retain the source inode while checking a rollback candidate. A
+        // replacement at the destination must never be removed as ours.
+        let source = rfs::openat(
+            fd(dir),
+            from,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        let identity = from_stat(&rfs::fstat(&source)?).identity;
         match rfs::linkat(fd(dir), from, fd(dir), to, AtFlags::empty()) {
             Ok(()) => {}
             Err(Errno::EXIST) => return Err(io::Error::from(io::ErrorKind::AlreadyExists)),
             Err(errno) => return Err(errno.into()),
         }
-        let _ = rfs::unlinkat(fd(dir), from, AtFlags::empty());
+        if let Err(first) = unlink_temp(dir, from)
+            && let Err(second) = unlink_temp(dir, from)
+        {
+            rollback_link(dir, to, identity).map_err(|rollback| {
+                io::Error::other(format!(
+                    "temporary unlink failed ({first}; {second}); publication rollback failed: {rollback}"
+                ))
+            })?;
+            return Err(second);
+        }
         Ok(())
+    }
+
+    fn rollback_link(dir: &Dir, name: &str, identity: (u64, u64)) -> io::Result<()> {
+        match info(dir, name)? {
+            None => Ok(()),
+            Some(found) if found.identity == identity => remove_file(dir, name),
+            Some(_) => Err(io::Error::other(
+                "publication identity changed before rollback",
+            )),
+        }
+    }
+
+    #[cfg(test)]
+    std::thread_local! {
+        static UNLINK_FAILURES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    fn unlink_temp(dir: &Dir, name: &str) -> io::Result<()> {
+        #[cfg(test)]
+        if UNLINK_FAILURES.with(|left| {
+            let count = left.get();
+            left.set(count.saturating_sub(1));
+            count > 0
+        }) {
+            return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+        }
+        rfs::unlinkat(fd(dir), name, AtFlags::empty()).map_err(io::Error::from)
     }
 
     pub(super) fn remove_file(dir: &Dir, name: &str) -> io::Result<()> {
@@ -570,6 +631,44 @@ mod sys {
             identity: (stat.st_dev as u64, stat.st_ino as u64),
         }
     }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn directory_identity_uses_opened_handles_and_refuses_links() {
+            let temp = tempfile::tempdir().unwrap();
+            let dir = Dir::open_root(temp.path()).unwrap().unwrap();
+            dir.create_dir("a").unwrap();
+            dir.create_dir("b").unwrap();
+            assert!(dir.same_child_directory("a", "a").unwrap());
+            assert!(!dir.same_child_directory("a", "b").unwrap());
+            std::os::unix::fs::symlink(temp.path().join("a"), temp.path().join("alias")).unwrap();
+            assert!(dir.same_child_directory("a", "alias").is_err());
+        }
+
+        #[test]
+        fn fallback_retries_temp_unlink() {
+            let temp = tempfile::tempdir().unwrap();
+            let dir = Dir::open_root(temp.path()).unwrap().unwrap();
+            dir.create_new("temp").unwrap();
+            UNLINK_FAILURES.with(|left| left.set(1));
+            link_noreplace(&dir, "temp", "published").unwrap();
+            assert!(dir.info("temp").unwrap().is_none());
+            assert_eq!(dir.info("published").unwrap().unwrap().links, 1);
+        }
+
+        #[test]
+        fn fallback_rolls_back_when_temp_unlink_keeps_failing() {
+            let temp = tempfile::tempdir().unwrap();
+            let dir = Dir::open_root(temp.path()).unwrap().unwrap();
+            dir.create_new("temp").unwrap();
+            UNLINK_FAILURES.with(|left| left.set(2));
+            assert!(link_noreplace(&dir, "temp", "published").is_err());
+            assert!(dir.info("published").unwrap().is_none());
+            assert_eq!(dir.info("temp").unwrap().unwrap().links, 1);
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -592,8 +691,8 @@ mod sys {
     const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
-    /// Every directory from the root to this one, held open without
-    /// `FILE_SHARE_DELETE`, so none of them can be renamed or removed while
+    /// Every directory from the root to this one, held with read sharing
+    /// only (neither write nor delete), so none can be renamed or removed while
     /// the handle lives.
     pub(super) struct Handle(Arc<Vec<File>>);
 
@@ -610,7 +709,7 @@ mod sys {
         }
         OpenOptions::new()
             .read(true)
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .share_mode(FILE_SHARE_READ)
             .custom_flags(flags)
             .open(path)
     }
@@ -630,6 +729,11 @@ mod sys {
 
     pub(super) fn open_root(root: &Path) -> io::Result<Handle> {
         Ok(Handle(Arc::new(vec![open_directory(root, true)?])))
+    }
+
+    pub(super) fn directory_identity(handle: &Handle) -> io::Result<(u64, u64)> {
+        let (volume, index, _) = identity(handle.last())?;
+        Ok((volume, index))
     }
 
     pub(super) fn try_clone(handle: &Handle) -> io::Result<Handle> {
@@ -668,6 +772,7 @@ mod sys {
     }
 
     pub(super) fn create_dir(dir: &Dir, name: &str) -> io::Result<bool> {
+        check_intact(dir)?;
         let created = match std::fs::create_dir(dir.path.join(name)) {
             Ok(()) => true,
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => false,
@@ -797,8 +902,29 @@ mod sys {
     }
 
     pub(super) fn rename_noreplace(dir: &Dir, from: &str, to: &str) -> io::Result<()> {
-        std::fs::hard_link(dir.path.join(from), dir.path.join(to))?;
-        let _ = std::fs::remove_file(dir.path.join(from));
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+
+        let from: Vec<u16> = dir
+            .path
+            .join(from)
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        let to: Vec<u16> = dir
+            .path
+            .join(to)
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        // SAFETY: both arguments are live, NUL-terminated UTF-16 strings.
+        // Zero flags excludes MOVEFILE_REPLACE_EXISTING and COPY_ALLOWED:
+        // an existing target fails atomically, with no link/unlink fallback.
+        if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
         Ok(())
     }
 

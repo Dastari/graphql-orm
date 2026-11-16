@@ -98,9 +98,10 @@ This crate is a reusable storage companion for applications that use `graphql-or
 - Local storage reaches every file through `local_fs`: open the root, then
   resolve one component at a time relative to held directory handles without
   following links, and act on leaves through the held parent (`*at` calls on
-  Unix, held `FILE_FLAG_OPEN_REPARSE_POINT` handles without delete sharing on
-  Windows). Never open, create, rename or remove anything below the root by a
+  Unix). Never open, create, rename or remove anything below a Unix root by a
   full path, and never read a regular file with more than one hard link.
+  Windows refuses construction by default; only explicit
+  `new_trusted_windows_root` opts into path-based access with links not enforced.
   Writes publish by renaming a unique temporary file; conditional creates use
   `Dir::rename_noreplace`, so the store never leaves a second hard link.
 - `validate_blob_key` reserves the internal `.graphql-orm-storage` namespace

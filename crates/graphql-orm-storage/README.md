@@ -10,6 +10,11 @@ supersedes: []
 
 # graphql-orm-storage
 
+Windows local storage requires explicit `LocalStorageBackend::new_trusted_windows_root`
+construction for a host-protected tree; `new` panics on Windows. This mode does
+not enforce links as a security boundary. Unix keeps its no-follow boundary.
+See the storage [trust boundary documentation](docs/blob-store.md#local-filesystem-trust-boundary).
+
 Provider-neutral object storage primitives for `graphql-orm` applications.
 Use it to keep object bytes in a storage backend while your application owns
 database metadata, authorization, upload/download routes, and workflow.
@@ -22,7 +27,7 @@ The local backend requires a trusted, exclusively managed filesystem root and
 restrictive permissions. See the [local filesystem trust boundary](docs/blob-store.md#local-filesystem-trust-boundary)
 before using local directories or OS-mounted shares.
 
-Version 0.16.0 resolves every local storage operation relative to held
+Version 0.16.0 resolves every Unix local storage operation relative to held
 directory handles without following links, so local storage refuses every
 read, write, copy and delete through a filesystem link below its root, even
 one swapped in while the operation runs, skips links in listings, and refuses

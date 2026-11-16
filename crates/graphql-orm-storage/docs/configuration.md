@@ -10,6 +10,11 @@ supersedes: []
 
 # Storage configuration and limits
 
+Windows local storage requires explicit `LocalStorageBackend::new_trusted_windows_root`
+construction for a host-protected tree; `new` panics on Windows. This mode does
+not enforce links as a security boundary. Unix keeps its no-follow boundary.
+See the storage [trust boundary documentation](blob-store.md#local-filesystem-trust-boundary).
+
 This is the complete public configuration and request-type index for this
 crate. The linked Rust source is canonical for a field's exact type and error
 contract; no default is implied where a type has no `Default` implementation.

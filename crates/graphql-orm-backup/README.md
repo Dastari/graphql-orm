@@ -10,7 +10,12 @@ supersedes: []
 
 # graphql-orm-backup
 
-Version 0.25.0 requires storage 0.16.0, whose local backend refuses keys
+Windows local storage requires explicit `LocalStorageBackend::new_trusted_windows_root`
+construction for a host-protected tree; `new` panics on Windows. This mode does
+not enforce links as a security boundary. Unix keeps its no-follow boundary.
+See the storage [trust boundary documentation](../graphql-orm-storage/docs/blob-store.md#local-filesystem-trust-boundary).
+
+Version 0.25.0 requires storage 0.16.0, whose Unix local backend refuses keys
 through filesystem links below its root. It documents that a full restore
 reads each object from the repository three times and each payload twice,
 and that objects restored to local or SMB storage keep no content type. See

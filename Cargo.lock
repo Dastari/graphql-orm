@@ -3304,7 +3304,6 @@ dependencies = [
  "picky",
  "picky-krb",
  "rustix",
- "same-file",
  "secrecy",
  "serde",
  "serde_json",
@@ -3323,6 +3322,7 @@ dependencies = [
  "tracing",
  "uuid",
  "winapi-util",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

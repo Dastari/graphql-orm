@@ -12,7 +12,16 @@ supersedes: []
 
 ## 0.16.0 (unreleased)
 
-- Local storage never follows a filesystem link below its root, including
+**Windows local roots — Action needed:** `LocalStorageBackend::new` now refuses
+construction (panics) on Windows. Explicitly use
+`LocalStorageBackend::new_trusted_windows_root` only when the host protects the
+root, its ancestors and descendants from concurrent mutation. Links are not
+enforced as a security boundary in this mode. The no-follow guarantees below
+apply to Unix. Windows conditional creation uses atomic no-replace rename.
+Unix conditional-create fallback retries temporary unlink and rolls back on
+persistent failure, returning an error rather than success with two links.
+
+- Unix local storage never follows a filesystem link below its root, including
   one that replaces a directory while an operation runs. Every local
   operation (reads, writes and publication, renames, deletes, listings,
   metadata, streaming objects, multipart staging and completion, and the
@@ -20,10 +29,8 @@ supersedes: []
   a time relative to held directory handles, without following links:
   `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` on Linux where available,
   `openat(O_NOFOLLOW | O_DIRECTORY)` walks otherwise, and `*at` leaf
-  operations on the parent descriptor; on Windows, held
-  `FILE_FLAG_OPEN_REPARSE_POINT` handles without delete sharing. A key whose
-  path below the root names or passes through a symbolic link (on Windows,
-  also a junction, mount point or other name-surrogate reparse point) fails
+  operations on the parent descriptor. A key whose
+  path below the root names or passes through a symbolic link fails
   with `StorageError::InvalidStorageKey` before it touches the link's target.
   Listings neither list nor enter links, and a listing whose prefix directory
   is reached through a link is refused; a link cycle no longer fails a
@@ -32,8 +39,8 @@ supersedes: []
   link. Conditional creates publish with a non-replacing rename
   (`RENAME_NOREPLACE`, `RENAME_EXCL`) instead of a hard link where the
   platform supports it. New Unix dependency: `rustix` (already in the
-  workspace lock); new Windows dependency: `winapi-util` (already in the
-  lock).
+  workspace lock); new Windows dependencies: `winapi-util` and `windows-sys` (already in the
+  lock), the latter for atomic no-replace publication.
   ([#540](https://github.com/Dastari/graphql-orm/issues/540))
 - Local reads refuse a regular file with more than one hard link with
   `InvalidStorageKey`, since it may share its data with a file outside the

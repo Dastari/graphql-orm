@@ -12,11 +12,20 @@ supersedes: []
 
 ## To 0.25.0: storage 0.16.0
 
+**Windows local roots — Action needed:** `LocalStorageBackend::new` now refuses
+construction (panics) on Windows. Explicitly use
+`LocalStorageBackend::new_trusted_windows_root` only when the host protects the
+root, its ancestors and descendants from concurrent mutation. Links are not
+enforced as a security boundary in this mode. The no-follow guarantees below
+apply to Unix. Windows conditional creation uses atomic no-replace rename.
+Unix conditional-create fallback retries temporary unlink and rolls back on
+persistent failure, returning an error rather than success with two links.
+
 Move `graphql-orm-backup` and `graphql-orm-storage` together to one reviewed
 revision and refresh the lockfile. Storage 0.16.0 is required.
 
-- **Local repositories and links. Action needed** only if a local
-  repository root contains symbolic links, junctions or mount points below
+- **Unix local repositories and links. Action needed** only if a local
+  repository root contains symbolic links below
   it, or hard-linked files: storage now refuses every key through a link and
   every read of a file with more than one hard link, so such a repository
   fails verification and restore with `InvalidStorageKey` until they are
@@ -546,7 +555,6 @@ cleanup/disarm may leave an orphan lock until offline recovery.
 
 The snapshot format, repository layout and restore preflight are unchanged. No snapshot/data migration is required. Regenerate `Cargo.lock`
 after updating the reviewed monorepo revision.
-
 
 ### Single-attempt error classification
 

@@ -68,6 +68,11 @@ changelog to decide.
 
 ### Unreleased
 
+- **Action needed (Windows local storage):** construction via `LocalStorageBackend::new`
+  panics; explicitly use `new_trusted_windows_root` only for a host-protected tree.
+  Links are not enforced as a security boundary in that mode. Unix keeps its
+  enforced boundary and now checks and rolls back failed fallback publication cleanup.
+
 Changes merged to main after the latest workspace release.
 
 Versions on main (bold where they differ from the latest release): `graphql-orm` 0.159.0, `graphql-orm-macros` 0.159.0; `graphql-orm-operation-catalog` 0.8.0; **`graphql-orm-storage` 0.16.0**; **`graphql-orm-backup` 0.25.0**; `graphql-orm-ai-tool-profiles` 0.23.0; `graphql-orm-ai` 0.145.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.

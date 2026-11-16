@@ -12,10 +12,19 @@ supersedes: []
 
 ## 0.15.0 to 0.16.0: local links, listing pages and canonical keys
 
+**Windows local roots — Action needed:** `LocalStorageBackend::new` now refuses
+construction (panics) on Windows. Explicitly use
+`LocalStorageBackend::new_trusted_windows_root` only when the host protects the
+root, its ancestors and descendants from concurrent mutation. Links are not
+enforced as a security boundary in this mode. The no-follow guarantees below
+apply to Unix. Windows conditional creation uses atomic no-replace rename.
+Unix conditional-create fallback retries temporary unlink and rolls back on
+persistent failure, returning an error rather than success with two links.
+
 Update the storage requirement to 0.16.0 and refresh the consumer lockfile.
 
-1. **Local storage refuses links and hard-linked files. Action needed** only
-   if a local root contains symbolic links, junctions or mount points below
+1. **Unix local storage refuses links and hard-linked files. Action needed** only
+   if a local root contains symbolic links below
    it, or files hard-linked from elsewhere. Every operation on a key whose path
    names or passes through a link now fails with
    `StorageError::InvalidStorageKey`, wherever the link points, listings skip
@@ -25,9 +34,7 @@ Update the storage requirement to 0.16.0 and refresh the consumer lockfile.
    root itself may stay a link. A FIFO, socket or device file at a key is
    refused too. Resolution is now relative to held directory handles, so a
    directory replaced by a link while an operation runs no longer redirects
-   it. On Windows, local operations hold the directories on their path open
-   without delete sharing, so another process that renames or removes one of
-   them at that moment fails with a sharing violation. Hosts with neither
+   it. Hosts with neither
    links nor hard links below the root need no change. See
    [local filesystem trust boundary](docs/blob-store.md#local-filesystem-trust-boundary).
 2. **Local listing pages. Action needed** only for code that calls
@@ -516,7 +523,6 @@ migration guide for coordinated upgrades and offline lock recovery.
 Provider configuration, storage keys and stored data are unchanged. No data
 migration is required. Update all selected workspace packages to one reviewed
 revision and regenerate `Cargo.lock`.
-
 
 ### Single-attempt error classification
 

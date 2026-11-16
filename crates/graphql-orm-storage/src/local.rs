@@ -40,20 +40,13 @@ const MAX_DURABLE_DIRS: usize = 4_096;
 /// filesystem permissions should keep untrusted local actors from writing to
 /// it.
 ///
-/// The backend never follows a filesystem link below the root, and never
-/// reads a file with more than one hard link. Every operation opens the
-/// root and reaches its target one component at a time relative to the
-/// directory handle it holds, without following links (`openat2` with
-/// `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS` or `openat(O_NOFOLLOW)` walks on
-/// Unix, held `FILE_FLAG_OPEN_REPARSE_POINT` handles on Windows), and leaf
-/// operations act on the held parent directory, never on a full path. A
-/// key whose path below the root names or passes through a symbolic link
-/// (on Windows, also a junction, mount point or other name-surrogate
-/// reparse point), or a read of a file another hard link shares, fails with
-/// [`StorageError::InvalidStorageKey`] without touching the link's target,
-/// including when the link replaces a directory while the operation runs.
-/// Listings neither list nor enter links. The configured root itself may be
-/// a link; the host chose it.
+/// On Unix, operations resolve through held directory handles and refuse
+/// symbolic links below the root and reads of files with multiple hard links.
+/// The configured root itself may be a link.
+///
+/// On Windows, [`Self::new`] refuses construction. Hosts must explicitly use
+/// [`Self::new_trusted_windows_root`] and protect the complete root tree from
+/// concurrent mutation; links are not enforced as a security boundary there.
 #[derive(Clone, Debug)]
 pub struct LocalStorageBackend {
     root: PathBuf,
@@ -68,10 +61,36 @@ pub struct LocalStorageBackend {
 
 impl LocalStorageBackend {
     /// Creates a local storage backend rooted at the given directory.
+    ///
+    /// # Panics
+    /// On Windows: use [`Self::new_trusted_windows_root`] only for a trusted tree.
     #[must_use]
     pub fn new(root: impl Into<PathBuf>) -> Self {
+        if cfg!(windows) {
+            panic!(
+                "Windows local storage requires explicit trusted-root opt-in via new_trusted_windows_root; links are not enforced"
+            );
+        }
+        Self::from_root(root.into())
+    }
+
+    /// Constructs storage for a host-controlled Windows root.
+    ///
+    /// The host must prevent other processes from changing the root, its
+    /// ancestors and descendants while storage runs. Windows path operations
+    /// do not enforce a race-safe link boundary. Prefer Unix or native SMB
+    /// storage when this trust requirement cannot be met.
+    ///
+    /// On Unix this is equivalent to [`Self::new`]; the link boundary remains
+    /// enforced. The method is available there to support portable hosts.
+    #[must_use]
+    pub fn new_trusted_windows_root(root: impl Into<PathBuf>) -> Self {
+        Self::from_root(root.into())
+    }
+
+    fn from_root(root: PathBuf) -> Self {
         Self {
-            root: root.into(),
+            root,
             multipart_max_part_size: crate::local_multipart::DEFAULT_MAX_PART_SIZE,
             canonical_keys: false,
             durable_dirs: Arc::default(),
@@ -227,10 +246,6 @@ impl LocalStorageBackend {
 }
 
 impl LocalStorageBackend {
-    fn internal_dir(&self) -> PathBuf {
-        self.root.join(INTERNAL_STORAGE_DIR)
-    }
-
     /// Creates the internal directory if it is missing. Writes call this before
     /// they check names, so a name that a case-insensitive or aliasing
     /// filesystem resolves to the internal directory can never claim it first:
@@ -243,12 +258,15 @@ impl LocalStorageBackend {
         }
     }
 
-    /// Whether `path` resolves to the internal directory, whatever its
-    /// spelling: another case, a Unicode case fold or a Windows short name.
-    /// A path that does not exist or cannot be opened is not an alias; the
-    /// operation on it fails or creates an ordinary entry.
-    fn aliases_internal_dir(&self, path: &Path) -> bool {
-        same_file::is_same_file(path, self.internal_dir()).unwrap_or(false)
+    /// Compares opened directory handles, never reopening either by path.
+    fn aliases_internal_dir(&self, name: &str) -> bool {
+        let Ok(Some(root)) = Dir::open_root(&self.root) else {
+            return false;
+        };
+        // A no-follow refusal is itself an invalid caller name, including
+        // when listing would otherwise skip the link and return an empty page.
+        root.same_child_directory(name, INTERNAL_STORAGE_DIR)
+            .unwrap_or_else(|error| local_fs::is_refusal(&error))
     }
 
     /// Local checks for a caller's root-relative key, listing prefix or bucket,
@@ -258,7 +276,7 @@ impl LocalStorageBackend {
     pub(crate) fn check_root_name(&self, name: &str) -> Result<(), StorageError> {
         refuse_colon(name)?;
         let first = name.split('/').next().unwrap_or_default();
-        if !first.is_empty() && self.aliases_internal_dir(&self.root.join(first)) {
+        if !first.is_empty() && self.aliases_internal_dir(first) {
             return Err(StorageError::InvalidStorageKey {
                 key: name.to_string(),
             });
@@ -2894,5 +2912,20 @@ mod listing_work_tests {
             }
         }
         assert_eq!(pages, 50);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_construction_tests {
+    use super::LocalStorageBackend;
+
+    #[test]
+    fn default_construction_refuses_before_touching_the_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("not-created");
+        assert!(std::panic::catch_unwind(|| LocalStorageBackend::new(&root)).is_err());
+        assert!(!root.exists());
+        let _trusted = LocalStorageBackend::new_trusted_windows_root(&root);
+        assert!(!root.exists());
     }
 }
