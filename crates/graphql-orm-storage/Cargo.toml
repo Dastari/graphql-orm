@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm-storage"
-version = "0.15.0"
+version = "0.16.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Dastari/graphql-orm"
@@ -9,7 +9,7 @@ publish = false
 
 [features]
 default = ["local"]
-local = ["dep:same-file", "dep:serde_json", "dep:tokio", "dep:tokio-util"]
+local = ["dep:rustix", "dep:serde_json", "dep:tokio", "dep:tokio-util", "dep:winapi-util", "dep:windows-sys"]
 s3 = ["dep:aws-credential-types", "dep:aws-sdk-s3", "dep:base64", "dep:md-5", "dep:tokio", "dep:tokio-util"]
 smb = [
     "dep:binrw",
@@ -41,7 +41,6 @@ futures-util = "0.3"
 md-5 = { version = "0.10", optional = true }
 picky = { version = "=7.0.0-rc.15", optional = true, default-features = false }
 picky-krb = { version = "=0.11.1", optional = true }
-same-file = { version = "1.0.6", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", optional = true }
 secrecy = { version = "0.10", optional = true }
@@ -60,6 +59,14 @@ tokio-util = { version = "0.7", features = ["io"], optional = true }
 tracing = { version = "0.1", optional = true }
 uuid = { version = "1", features = ["serde", "v4"] }
 
+# Root-relative, no-follow file access for local storage (`local_fs`).
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.4", optional = true, default-features = false, features = ["fs", "std"] }
+
+[target.'cfg(windows)'.dependencies]
+winapi-util = { version = "0.1.11", optional = true }
+windows-sys = { version = "0.61.2", optional = true, features = ["Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 serde_json = "1"
 tempfile = "3"
@@ -77,6 +84,11 @@ required-features = ["local"]
 [[test]]
 name = "local_blob"
 path = "tests/local_blob.rs"
+required-features = ["local"]
+
+[[test]]
+name = "local_links"
+path = "tests/local_links.rs"
 required-features = ["local"]
 
 [[test]]

@@ -1,5 +1,7 @@
 //! Snapshot lifecycle, locking and capacity regressions (#476, #477, #480, #481).
 
+#![cfg(not(windows))]
+
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},

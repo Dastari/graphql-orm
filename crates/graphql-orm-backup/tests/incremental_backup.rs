@@ -1,3 +1,7 @@
+// `LocalBackupRepository::new` does not exist on Windows; see
+// `new_trusted_windows_root`.
+#![cfg(not(windows))]
+
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
