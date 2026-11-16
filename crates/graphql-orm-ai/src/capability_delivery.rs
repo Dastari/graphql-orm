@@ -3226,7 +3226,12 @@ mod tests {
                 registration.identity(),
             )
             .unwrap();
-            assert!(registration.with_capability_binding(wrong_index).is_err());
+            // 6A: a FixedBroker binding is catalogue-independent. A different
+            // index fingerprint is validated and dropped, so the binding is
+            // identical and still admitted; describe/execute revalidate drift.
+            assert_eq!(wrong_index.fingerprint(), binding.fingerprint());
+            assert_eq!(wrong_index.capability_index_fingerprint(), None);
+            assert!(registration.with_capability_binding(wrong_index).is_ok());
         }
         assert!(
             surface
