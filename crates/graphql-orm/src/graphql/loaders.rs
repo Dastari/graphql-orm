@@ -293,6 +293,11 @@ impl CompositeRelationQueryKey {
             auth_context,
         }
     }
+
+    /// The parent key values this key loads related rows for.
+    pub fn parent_values(&self) -> &[crate::graphql::orm::SqlValue] {
+        &self.parent_values
+    }
 }
 
 /// Structural equality that stays reflexive for a bound `NaN`: values that

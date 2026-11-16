@@ -572,7 +572,7 @@ async fn wide_batches_stay_under_the_parameter_limit(connection: &str) -> TestRe
             .await
             .map_err(|error| format!("duplicates, paged {paged}: {error}"))?;
         for key in &keys {
-            let n = match &key.parent_values[0] {
+            let n = match &key.parent_values()[0] {
                 SqlValue::Int(n) => *n,
                 other => panic!("{other:?}"),
             };
