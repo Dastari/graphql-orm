@@ -376,7 +376,15 @@ async fn sqlite_schema_stage_rebuilds_related_tables_in_one_stage()
     .execute(&pool)
     .await?;
 
-    database.apply_schema_stages(&stages).await?;
+    database
+        .apply_schema_stages_with_options(
+            &stages,
+            graphql_orm::graphql::orm::ApplyOptions {
+                allow_destructive: true,
+                ..Default::default()
+            },
+        )
+        .await?;
 
     let row = sqlx::query(
         "SELECT vocabularies.slug AS slug, vocabulary_terms.term AS term

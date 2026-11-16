@@ -127,9 +127,13 @@ async fn managed_table_planning_can_ignore_unmanaged_live_tables() -> graphql_or
     current.tables.push(external_table);
     let target = SchemaModel::from_entities(&[SqlxBoundaryItem::metadata()]);
 
-    let strict = database
-        .schema()
-        .plan_migration("strict", "strict", &current, &target)?;
+    let strict = database.schema().plan_migration_with_options(
+        "strict",
+        "strict",
+        &current,
+        &target,
+        PlanOptions::strict(),
+    )?;
     assert!(strict.steps.iter().any(|step| {
         matches!(
             step.step,
