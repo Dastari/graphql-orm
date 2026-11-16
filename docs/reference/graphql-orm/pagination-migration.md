@@ -398,9 +398,9 @@ server already keeps in canonical form.
 **The cursor.** A continuation is `gomp1.<key id>.<sealed bytes>`: codec
 version 1, the public identifier of the sealing key, and the
 XChaCha20-Poly1305 ciphertext of the scan position and an expiry time under a
-random nonce. The binding, the entity name and the key identifier are
-authenticated as associated data and are not in the cursor; the keyset order
-and the caller-visible filter are part of the sealed position. The codec is
+random nonce. The binding, the entity name, the key identifier and the
+fingerprint of the keyset order and caller-visible filter are authenticated as
+associated data; the binding is not in the cursor. The codec is
 internal: there is no public encoder, decoder or signer hook, and a later
 codec version gets a new prefix rather than reinterpreting `gomp1` cursors.
 
@@ -409,7 +409,9 @@ read, when it was issued under a different binding, entity, order, filter or
 key, was altered or truncated, has another prefix (including `goms1` scan
 cursors), or is longer than the configured bound. These cases are
 indistinguishable to the caller. Two more cases carry a `reason` extension
-because they concern a cursor that is otherwise acceptable:
+because they concern a cursor that is otherwise acceptable. Expiry is
+reported only for a cursor that authenticates under the same binding, entity,
+order, filter and key:
 
 | `reason` | Meaning | Client action |
 | --- | --- | --- |
@@ -435,7 +437,7 @@ caller's own decisions.
 | Candidates examined per request | `AuthorizedPageConfig::new(.., max_scanned_rows)` | required |
 | Page size | `with_max_page_size` | 100 |
 | Cursor bytes | `with_max_cursor_bytes` (256 to 65536) | 8192 |
-| Cursor lifetime | `with_cursor_ttl` (up to 30 days) | 1 hour |
+| Cursor lifetime | `with_cursor_ttl` (1 millisecond to 30 days) | 1 hour |
 | Binding bytes | fixed | 4096 |
 
 A `limit` above the page-size bound is refused with `PAGE_LIMIT_EXCEEDED`; it

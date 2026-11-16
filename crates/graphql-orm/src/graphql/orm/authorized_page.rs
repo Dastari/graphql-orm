@@ -353,11 +353,12 @@ impl AuthorizedPageConfig {
 
     /// How long a continuation stays usable after the page that issued it.
     /// Each page issues a fresh continuation, so this bounds the pause between
-    /// two requests, not the whole traversal. Non-zero, at most
+    /// two requests, not the whole traversal. At least one millisecond (the
+    /// codec's resolution; a shorter lifetime is refused, not rounded), at most
     /// [`AUTHORIZED_PAGE_CURSOR_TTL_CEILING`]. Replicas compare it with their
     /// own clocks.
     pub fn with_cursor_ttl(mut self, ttl: Duration) -> Result<Self, AuthorizedPageConfigError> {
-        if ttl.is_zero() || ttl > AUTHORIZED_PAGE_CURSOR_TTL_CEILING {
+        if ttl.as_millis() == 0 || ttl > AUTHORIZED_PAGE_CURSOR_TTL_CEILING {
             return Err(AuthorizedPageConfigError::InvalidBound);
         }
         self.cursor_ttl = ttl;
@@ -452,7 +453,7 @@ impl AuthorizedPageConfig {
                 &nonce,
                 Payload {
                     msg: &plaintext,
-                    aad: &associated_data(key_id, entity, binding),
+                    aad: &associated_data(key_id, entity, fingerprint, binding),
                 },
             )
             .map_err(|_| unavailable())?;
@@ -498,14 +499,14 @@ impl AuthorizedPageConfig {
             ));
         };
         let (nonce, ciphertext) = sealed.split_at(NONCE_BYTES);
-        // Tampering, truncation, a wrong key and a changed binding or entity
-        // all fail here, indistinguishably, before the position is read.
+        // Tampering, truncation, a wrong key and a changed binding, entity,
+        // order or filter all fail here, indistinguishably, before the position is read.
         let plaintext = XChaCha20Poly1305::new(key.into())
             .decrypt(
                 nonce.into(),
                 Payload {
                     msg: ciphertext,
-                    aad: &associated_data(key_id, entity, binding),
+                    aad: &associated_data(key_id, entity, fingerprint, binding),
                 },
             )
             .map_err(|_| invalid())?;
@@ -529,13 +530,22 @@ fn invalid_with_reason(reason: &'static str) -> async_graphql::Error {
         .extend_with(|_, extensions| extensions.set("reason", reason))
 }
 
-fn associated_data(key_id: &str, entity: &str, binding: &AuthorizedPageBinding) -> Vec<u8> {
-    let mut bytes =
-        Vec::with_capacity(AAD_DOMAIN.len() + key_id.len() + entity.len() + binding.0.len() + 16);
+/// Everything a cursor is bound to. A cursor reaches the expiry check only
+/// when all of it matches, so a mismatch never reveals that a cursor expired.
+fn associated_data(
+    key_id: &str,
+    entity: &str,
+    fingerprint: &str,
+    binding: &AuthorizedPageBinding,
+) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(
+        AAD_DOMAIN.len() + key_id.len() + entity.len() + fingerprint.len() + binding.0.len() + 20,
+    );
     for part in [
         AAD_DOMAIN,
         key_id.as_bytes(),
         entity.as_bytes(),
+        fingerprint.as_bytes(),
         binding.0.as_slice(),
     ] {
         push_part(&mut bytes, part);
@@ -634,7 +644,13 @@ mod tests {
         let body = URL_SAFE_NO_PAD
             .decode(token.rsplit('.').next().unwrap())
             .unwrap();
-        for needle in [b"secret-id".as_slice(), b"snapshot", b"g1", b"w1"] {
+        // Long needles only: a short one can occur in random bytes by chance.
+        for needle in [
+            b"secret-id".as_slice(),
+            b"snapshot",
+            b"workspace",
+            b"page:Record",
+        ] {
             assert!(!body.windows(needle.len()).any(|window| window == needle));
             assert!(!token.contains(std::str::from_utf8(needle).unwrap()));
         }
@@ -665,6 +681,16 @@ mod tests {
         }
         // A wrong binding does not learn that the cursor has expired.
         assert_eq!(refused(open(&binding("g2"), 9_999)), None);
+        // Nor does a replay under another entity, order or filter: only a
+        // fully authentic cursor reaches the expiry check.
+        for (entity, order) in [
+            ("Other", ORDER),
+            (ENTITY, "page:Record:rank desc, id asc"),
+            (ENTITY, "page:Record:rank asc, id asc:filter-v1:00"),
+        ] {
+            let replay = config.open_at(&binding("g1"), entity, order, 2, &token, 9_999);
+            assert_eq!(refused(replay), None);
+        }
     }
 
     #[test]
@@ -839,7 +865,24 @@ mod tests {
                 .with_max_cursor_bytes(AUTHORIZED_PAGE_CURSOR_BYTES_CEILING + 1)
                 .is_err()
         );
-        assert!(config.clone().with_cursor_ttl(Duration::ZERO).is_err());
+        // A lifetime below the codec's millisecond resolution is refused
+        // rather than truncated to an immediately expired cursor.
+        for ttl in [
+            Duration::ZERO,
+            Duration::from_nanos(1),
+            Duration::from_micros(999),
+        ] {
+            assert_eq!(
+                config.clone().with_cursor_ttl(ttl).unwrap_err(),
+                C::InvalidBound
+            );
+        }
+        assert!(
+            config
+                .clone()
+                .with_cursor_ttl(Duration::from_millis(1))
+                .is_ok()
+        );
         assert!(
             config
                 .clone()

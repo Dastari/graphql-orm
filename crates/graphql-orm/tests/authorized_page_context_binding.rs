@@ -1079,6 +1079,47 @@ async fn pages_fail_closed_unconfigured_and_stay_separate_from_existing_scans()
         .await;
     assert!(error.is_ok());
 
+    // An expired continuation replayed under another filter gets the generic
+    // refusal; only the context it was issued in learns that it expired.
+    let reason = |error: async_graphql::Error| match error.extensions.unwrap().get("reason") {
+        Some(async_graphql::Value::String(reason)) => Some(reason.clone()),
+        _ => None,
+    };
+    let brief = fixture.bare.clone().with_authorized_page_config(
+        page_config(keys("k1", KEY)).with_cursor_ttl(Duration::from_millis(50))?,
+    );
+    let expiring = query()
+        .filter_with_entity_matching(&owned_by("alice"))
+        .fetch_authorized_page(&brief, None, None, request(None).limit(Some(3)))
+        .await
+        .unwrap()
+        .page_info
+        .continuation
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    fixture.capture.take();
+    for other in [
+        query(),
+        query().filter_with_entity_matching(&owned_by("bob")),
+    ] {
+        let error = other
+            .fetch_authorized_page(&brief, None, None, request(Some(expiring.clone())))
+            .await
+            .unwrap_err();
+        assert_eq!(error.message, "invalid cursor");
+        assert_eq!(reason(error), None);
+    }
+    let error = query()
+        .filter_with_entity_matching(&owned_by("alice"))
+        .fetch_authorized_page(&brief, None, None, request(Some(expiring)))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        reason(error).as_deref(),
+        Some(AUTHORIZED_PAGE_CURSOR_EXPIRED_REASON)
+    );
+    assert!(fixture.capture.take().is_empty());
+
     fixture.owner.cleanup()?;
     Ok(())
 }
