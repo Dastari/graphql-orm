@@ -381,7 +381,7 @@ fn invalid(message: &str) -> AiError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     use AiMutationExecutionPolicy::{ApprovalRequired, Automatic, Prohibited};
@@ -649,7 +649,7 @@ mod tests {
         assert_eq!(decoded, declared);
     }
 
-    mod registered_capabilities {
+    pub(crate) mod registered_capabilities {
         use graphql_orm_operation_catalog::{
             GraphqlEntitySemanticMetadata, GraphqlOperationCatalog, GraphqlOperationKind,
             GraphqlSemanticArgumentDescriptor, GraphqlSemanticCatalog,
@@ -676,7 +676,7 @@ mod tests {
             type Document { id: String!, title: String! }
         "#;
 
-        fn entity(name: &str, field: &str) -> GraphqlEntitySemanticMetadata {
+        pub(crate) fn entity(name: &str, field: &str) -> GraphqlEntitySemanticMetadata {
             let scalar = |field_name: &str| GraphqlSemanticFieldMetadata {
                 field_name: field_name.to_owned(),
                 description: format!("Reviewed public {field_name}."),
@@ -710,7 +710,7 @@ mod tests {
 
         /// A mutation root carrying the generated category and entity the
         /// ORM records for its own delete and update roots.
-        fn generated(
+        pub(crate) fn generated(
             field: &str,
             entity: &str,
             category: GeneratedGraphqlOperationCategory,

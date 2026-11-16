@@ -14,6 +14,7 @@ supersedes: []
 
 - Keep 1A delivery selection opt-in; unchanged retained bindings stay stable.
 - Verify dependent-delete declarations and row bounds with the ORM transaction planner; unsupported executors and plans refuse.
+- With a dependent-effect policy installed, a generated delete whose capability or declaration cannot be looked up when its guard is built refuses with `Forbidden`. A host executor that runs the delete without attaching the guard is detected only after the write commits, by the missing ORM commit receipt.
 - Serialize host-anchor rotations and finalize with compare-and-swap.
 
 Capability scale (part of #551), with tool profiles 0.24.0. No GraphQL SDL, persistent schema or data migration change; `AI_SCHEMA_MODULE_VERSION` stays `0.81.0`. Capability, index, broker-definition and session-binding fingerprints are unchanged for a host that changes nothing. See the [migration guide](MIGRATION.md#01450-to-01460-capability-scale).

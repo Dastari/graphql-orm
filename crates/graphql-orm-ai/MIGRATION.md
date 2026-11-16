@@ -15,7 +15,9 @@ supersedes: []
 **No action** for unchanged hosts. No data or schema migration is needed.
 For the opt-in AI dependent-effect policy, implement the authenticated
 executor's `execute_registered_with_effect_guard` method and attach its guard
-to request data. The ORM checks the physical graph and locked row counts before
+to request data. Test that attachment: an executor that skips it runs an
+unguarded delete that commits before the bridge refuses the missing ORM commit
+receipt. The ORM checks the physical graph and locked row counts before
 writes; mismatched or unknown effects refuse and excess bounds roll back.
 Unsupported physical opt-out, bulk and unprovable ORM-managed paths refuse.
 

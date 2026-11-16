@@ -1906,3 +1906,163 @@ async fn owned_postgres_epoch_anchor_rotates_and_refuses_a_generation_it_does_no
         acknowledged.epoch_id()
     );
 }
+
+/// Parity anchor storage that can hold one finalizing write (one that clears
+/// the pending generation), which an open makes after its database commit.
+#[derive(Default)]
+struct GatedParityAnchor {
+    value: std::sync::Mutex<Option<AiRuntimeEpochAnchor>>,
+    rotation: Arc<tokio::sync::Mutex<()>>,
+    lease_requests: std::sync::atomic::AtomicUsize,
+    gate: std::sync::Mutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
+}
+
+impl GatedParityAnchor {
+    fn held(&self) -> AiRuntimeEpochAnchor {
+        self.value
+            .lock()
+            .expect("anchor")
+            .clone()
+            .expect("an anchor should be stored")
+    }
+}
+
+#[async_trait]
+impl AiRuntimeEpochAnchorStore for GatedParityAnchor {
+    async fn load(&self) -> Result<Option<AiRuntimeEpochAnchor>, AiError> {
+        Ok(self.value.lock().expect("anchor").clone())
+    }
+
+    async fn lock_rotation(&self) -> Result<Box<dyn Send>, AiError> {
+        self.lease_requests
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Box::new(self.rotation.clone().lock_owned().await))
+    }
+
+    async fn compare_exchange(
+        &self,
+        expected: Option<&AiRuntimeEpochAnchor>,
+        anchor: &AiRuntimeEpochAnchor,
+    ) -> Result<bool, AiError> {
+        if anchor.pending_generation().is_none() {
+            let gate = self.gate.lock().expect("gate").take();
+            if let Some((reached, release)) = gate {
+                let _ = reached.send(());
+                let _ = release.await;
+            }
+        }
+        let mut value = self.value.lock().expect("anchor");
+        if value.as_ref() != expected {
+            return Ok(false);
+        }
+        *value = Some(anchor.clone());
+        Ok(true)
+    }
+}
+
+/// Racer A commits its generation on PostgreSQL and is then held before its
+/// final anchor write while racer B attempts a full rotation. The rotation
+/// lease makes B wait for A, so the anchor ends on B's generation and a fresh
+/// open succeeds. Without the lease, A's late write strands the store.
+#[tokio::test]
+async fn owned_postgres_rotation_held_after_commit_cannot_strand_a_later_rotation() {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let Some(container) = OwnedPostgres::start().expect("owned PostgreSQL should start") else {
+        return;
+    };
+    let database = Database::<PostgresBackend>::connect_postgres(container.connection_url())
+        .await
+        .expect("ORM should connect only to the owned container");
+    let plan = database
+        .schema()
+        .plan_migration_to_entities(
+            "ai-epoch-anchor-race-v1",
+            "graphql-orm-ai epoch anchor race parity",
+            AiSchemaModule.entities(),
+        )
+        .await
+        .expect("AI schema should plan");
+    database
+        .schema()
+        .apply_migration(&plan, ApplyOptions::default())
+        .await
+        .expect("AI schema should apply");
+    let clock: Arc<dyn Clock> = Arc::new(FixedClock::new(OffsetDateTime::now_utc()));
+    let anchor = Arc::new(GatedParityAnchor::default());
+    let recovery = |anchor: &Arc<GatedParityAnchor>| {
+        OrmAiRuntimeRecoveryService::new(database.clone(), clock.clone())
+            .with_epoch_anchor(anchor.clone())
+    };
+    let epoch = recovery(&anchor)
+        .readiness_proof()
+        .await
+        .expect("first open")
+        .epoch_id();
+
+    let (reached_signal, reached) = tokio::sync::oneshot::channel();
+    let (release, release_signal) = tokio::sync::oneshot::channel();
+    *anchor.gate.lock().expect("gate") = Some((reached_signal, release_signal));
+    let racer_a = tokio::spawn({
+        let recovery = recovery(&anchor);
+        async move { recovery.readiness_proof().await }
+    });
+    reached
+        .await
+        .expect("racer A commits and reaches its final anchor write");
+    let committed_by_a = anchor
+        .held()
+        .pending_generation()
+        .map(str::to_owned)
+        .expect("racer A staged its generation");
+
+    let leases_before_b = anchor.lease_requests.load(SeqCst);
+    let racer_b = tokio::spawn({
+        let recovery = recovery(&anchor);
+        async move { recovery.readiness_proof().await }
+    });
+    // Let B run until it either finishes a whole rotation or waits on the
+    // lease racer A still holds.
+    let b_rotated_while_a_was_held = loop {
+        if racer_b.is_finished() {
+            break true;
+        }
+        if anchor.lease_requests.load(SeqCst) > leases_before_b
+            && anchor.rotation.try_lock().is_err()
+        {
+            break false;
+        }
+        tokio::time::sleep(StdDuration::from_millis(5)).await;
+    };
+
+    release.send(()).expect("racer A is still held");
+    let a = racer_a.await.expect("racer A task");
+    let b = racer_b.await.expect("racer B task");
+    assert!(
+        matches!(a, Ok(_) | Err(AiError::Conflict)),
+        "racer A either finishes or refuses cleanly: {a:?}"
+    );
+    assert_eq!(b.expect("racer B rotates").epoch_id(), epoch);
+    assert_ne!(
+        anchor.held().generation(),
+        Some(committed_by_a.as_str()),
+        "racer A's late write replaced racer B's anchor \
+         (B rotated while A was held: {b_rotated_while_a_was_held})"
+    );
+    assert_eq!(anchor.held().pending_generation(), None);
+    assert_eq!(
+        recovery(&anchor)
+            .readiness_proof()
+            .await
+            .expect("a fresh open succeeds after both rotations")
+            .epoch_id(),
+        epoch
+    );
+    drop(database);
+    drop(container);
+}

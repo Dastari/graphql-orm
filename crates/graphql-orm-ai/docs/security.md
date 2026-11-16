@@ -124,8 +124,17 @@ Restrict edges with matching rows refuse through the ORM planner.
 The authenticated executor must implement
 `execute_registered_with_effect_guard`, attach the supplied guard clone to
 GraphQL request data, and preserve the ordinary binding and authorization.
-The bridge requires an ORM commit receipt. Unsupported executors refuse by
-default. Use `StaticDependentDeletes` with all participating entities registered.
+Unsupported executors refuse by default, before anything runs. After the
+executor returns, the bridge checks the ORM commit receipt
+(`DependentDeleteGuard::was_committed`) and refuses the result with
+`Authorization` when it is missing.
+
+That receipt check is detection, not prevention. A host executor that
+implements the guarded method but skips attaching the guard breaches the host
+contract: the ORM then runs an ordinary unguarded delete, which commits, and
+the missing receipt is detected only after that write. The refusal keeps the
+result from the model and the run, but it cannot undo the delete. Test the host
+executor's guard attachment before enabling generated deletes. Use `StaticDependentDeletes` with all participating entities registered.
 Unknown physical dependents, unmanaged relation semantics and ORM-managed
 relations that this planner cannot prove refuse. Physical opt-out and bulk
 deletes also refuse when guarded; they cannot silently bypass the policy.

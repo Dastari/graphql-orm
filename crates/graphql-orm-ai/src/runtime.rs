@@ -1837,6 +1837,9 @@ fn is_supervised_one_shot_mutation(descriptor: &AiToolDescriptor) -> bool {
         )
 }
 
+#[cfg(all(test, feature = "sqlite"))]
+mod dependent_effect_guard_tests;
+
 #[cfg(test)]
 mod mutation_binding_tests {
     use serde_json::json;
