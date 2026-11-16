@@ -145,6 +145,29 @@ never receive the bytes. A custom streaming sink must likewise discard a
 body whose stream ends in an error. A sink that returns success without
 reading the whole stream also fails with `ChecksumMismatch`.
 
+`BlobStoreRestoreObjectSink` passes each object's manifest `mime_type` as the
+`content_type` of its write. S3 stores it. Local and SMB storage ignore it,
+since a file has no content type there, so an object restored to them keeps
+its bytes and key but no content type; serve the type from the host's own
+object records. This is accepted behaviour.
+
+### Repository reads
+
+A full restore reads each object blob from the repository three times and
+each table or change payload twice. `restore_snapshot` first verifies the
+whole snapshot, reading every payload and object to check its size and
+digest. Then it reads each payload again to decode it. `restore_objects`
+reads each object once to check its size and digest before calling the sink,
+and once more as the digest-checked stream the sink consumes.
+
+This is accepted and intended. A repository can serve different bytes on a
+later read than it served to verification, so every read whose bytes are
+used is checked again, and an object's size is known before the sink sees
+any of it. Plan restore time and repository egress for about three times the
+object bytes and twice the payload bytes. A single verified streaming pass
+would need a sink that can stage and roll back unverified bytes, which the
+`RestoreObjectSink` contract does not require.
+
 A successful database restore does not imply that external objects,
 credentials, provider continuations, application reconciliation, or runtime
 readiness exist. Hosts must verify and reconcile those separately.

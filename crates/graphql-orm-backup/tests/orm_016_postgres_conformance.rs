@@ -1,3 +1,7 @@
+// The shared conformance suite builds `LocalBackupRepository::new`, which does
+// not exist on Windows.
+#![cfg(not(windows))]
+
 #[allow(dead_code)]
 #[path = "support/owned_postgres.rs"]
 mod owned_postgres;

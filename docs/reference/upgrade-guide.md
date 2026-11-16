@@ -70,7 +70,7 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.163.0, `graphql-orm-macros` 0.163.0**; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.15.0; `graphql-orm-backup` 0.23.0; `graphql-orm-ai-tool-profiles` 0.23.0; `graphql-orm-ai` 0.145.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.166.0, `graphql-orm-macros` 0.166.0**; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.16.0; `graphql-orm-backup` 0.26.0; **`graphql-orm-ai-tool-profiles` 0.24.0**; **`graphql-orm-ai` 0.146.0**; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
 
 Breaking batch, collected on `next/breaking` (ORM/macros 0.164.0, backup 0.25.0, AI 0.147.0, catalogue 0.9.0, AI tool profiles 0.24.0; versions are placeholders):
 
@@ -87,7 +87,46 @@ Breaking batch, collected on `next/breaking` (ORM/macros 0.164.0, backup 0.25.0,
 - **Action needed** — AI 0.146.0: `HighImpact` approvals always require recent MFA; approval lifetime cap has a 7-day ceiling [migration](../../MIGRATION.md#breaking-release-unreleased) · [changelog](../../crates/graphql-orm-ai/CHANGELOG.md#unreleased---01460)
 - **Action needed** — AI 0.146.0 (schema module `0.82.0`), ORM/macros 0.160.0: three AI unique indexes; applying a migration refuses repeated unique keys before any DDL [migration](../../MIGRATION.md#breaking-release-unreleased) · [changelog](../../crates/graphql-orm-ai/CHANGELOG.md#unreleased---01460)
 
+- **No action** — ORM/macros 0.166.0: opt-in dependent-delete effect verification and transaction-bound row limits; unsupported plans refuse [migration](../../MIGRATION.md#ormmacros-01660-guarded-dependent-deletes)
+- **No action** — AI 0.146.0: delivery selection stays unchanged unless the host opts into `prefer_fixed_broker_for_large_surfaces`; opting in requires a retained-session rebind [migration](../../crates/graphql-orm-ai/MIGRATION.md#01450-to-01460-capability-scale) · [changelog](../../crates/graphql-orm-ai/CHANGELOG.md#unreleased---01460)
+- **No action** — AI 0.146.0: fixed-broker `describe` returns each repeated input type once under `planSchema.types`; execute arguments and fingerprints are unchanged [migration](../../crates/graphql-orm-ai/MIGRATION.md#01450-to-01460-capability-scale) · [changelog](../../crates/graphql-orm-ai/CHANGELOG.md#unreleased---01460)
+- **No action** — AI 0.146.0: opt-in reviewed static read tools behind the fixed broker, host-held epoch anchor for file-level restores, and dependent-effect policy for generated deletes [migration](../../crates/graphql-orm-ai/MIGRATION.md#01450-to-01460-capability-scale) · [changelog](../../crates/graphql-orm-ai/CHANGELOG.md#unreleased---01460)
+- **No action** — Tool profiles 0.24.0: one oversized generated root is excluded and reported instead of failing its target; opt-in strict query roots; shared type dictionary rendering; precomputed search terms [migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0230-to-0240-capability-scale) · [changelog](../../crates/graphql-orm-ai-tool-profiles/CHANGELOG.md#unreleased---0240)
+
+### workspace-2026.11.16.3
+
+Commit `cd8072d8e576` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.16.3)
+
+Packages (changed in bold): **`graphql-orm` 0.165.0, `graphql-orm-macros` 0.165.0**; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.16.0; **`graphql-orm-backup` 0.26.0**; `graphql-orm-ai-tool-profiles` 0.23.0; `graphql-orm-ai` 0.145.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
+
+- **Action needed** — ORM/macros 0.165.0: MSSQL hosts must install the canonical restore marker table (`MssqlPool::install_restore_marker()` on an external-writable pool) and grant the runtime role SELECT on it; until then every statement is refused with `RestoreStateUnavailable`, which names the missing install or grant (it is not `RestoreInProgress`). Hosts restoring runtime search must backfill after restore; ignored field-write denials now preserve stored values. [Migration](../../MIGRATION.md#01640-to-01650-atomic-restore-search-reset-and-kept-values-on-ignored-denials) · [changelog](../../CHANGELOG.md#unreleased---ormmacros-01650-backup-0260)
+- **No action** — ORM/macros 0.165.0: SQLite and PostgreSQL snapshot restores now commit atomically. [Migration](../../MIGRATION.md#01640-to-01650-atomic-restore-search-reset-and-kept-values-on-ignored-denials)
+- **Action needed** — Backup 0.26.0: opt in to host-held snapshot records and record snapshot ids before deletion to prevent replay of pruned snapshots. Existing APIs remain source compatible (**No action** to keep compiling). [Migration](../../crates/graphql-orm-backup/MIGRATION.md#to-0260-host-held-snapshot-records) · [changelog](../../crates/graphql-orm-backup/CHANGELOG.md)
+
+### workspace-2026.11.16.2
+
+Commit `a59874e8973f` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.16.2)
+
+Packages (changed in bold): **`graphql-orm` 0.164.0, `graphql-orm-macros` 0.164.0**; `graphql-orm-operation-catalog` 0.8.0; **`graphql-orm-storage` 0.16.0**; **`graphql-orm-backup` 0.25.0**; `graphql-orm-ai-tool-profiles` 0.23.0; `graphql-orm-ai` 0.145.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
+
+- **No action** — ORM/macros 0.164.0: opt-in page-limit refusal and declared maxima with schema-local complexity bounds; existing `PaginationConfig` literals remain valid. See [migration details](../../MIGRATION.md#01630-to-01640-page-limits-64-bit-identities-cursor-keys-and-subscription-lag).
+- **No action** — ORM/macros 0.164.0: per-read keyset and authorized-scan maxima through `EntityQuery::with_max_limit`. See [migration details](../../MIGRATION.md#01630-to-01640-page-limits-64-bit-identities-cursor-keys-and-subscription-lag).
+- **No action** — ORM/macros 0.164.0: opt-in runtime 64-bit identity strings. See [migration details](../../MIGRATION.md#01630-to-01640-page-limits-64-bit-identities-cursor-keys-and-subscription-lag).
+- **Action needed** — ORM/macros 0.164.0: only if you match the codes for a cursor key that is too long: runtime GraphQL returns `cursor_key_too_large` instead of `invalid_request` or `invalid_cursor`, and host errors return `ResourceLimit` with `detail() == Some("cursor_key_too_large")` instead of `InvalidRequest`; error enums stay source-compatible. See [migration details](../../MIGRATION.md#01630-to-01640-page-limits-64-bit-identities-cursor-keys-and-subscription-lag).
+- **Action needed** — ORM/macros 0.164.0: clients expecting immediate subscription lag termination must allow termination at the next authority tick. See [migration details](../../MIGRATION.md#01630-to-01640-page-limits-64-bit-identities-cursor-keys-and-subscription-lag).
+- **Action needed** — Storage 0.16.0 / Backup 0.25.0: Windows hosts only. `LocalStorageBackend::new`, `LocalBackupRepository::new` and `LocalBackupRepository::open_existing` no longer exist on Windows; call `LocalStorageBackend::new_trusted_windows_root`, `LocalBackupRepository::new_trusted_windows_root` or `LocalBackupRepository::open_existing_trusted_windows_root` only for a host-protected tree (links are not enforced as a security boundary in that mode). On Unix, a failed fallback-publication rollback is a non-retryable, outcome-unknown error [migration](../../crates/graphql-orm-storage/MIGRATION.md#0150-to-0160-local-links-listing-pages-and-canonical-keys) · [changelog](../../crates/graphql-orm-storage/CHANGELOG.md#0160-unreleased)
 - **No action** — ORM/macros 0.163.0: hand-emitted wrapper objects reduce compile cost; generated SDL, catalogues and fingerprints are unchanged [migration](../../MIGRATION.md#01590-to-01630-wrapper-object-compile-cost) · [changelog](../../CHANGELOG.md#unreleased---ormmacros-01630)
+- **Action needed** — Storage 0.16.0: Unix local storage refuses filesystem links and hard-linked files below its root, resolving every operation relative to held directory handles; only for roots that contain links or hard links [migration](../../crates/graphql-orm-storage/MIGRATION.md#0150-to-0160-local-links-listing-pages-and-canonical-keys) · [changelog](../../crates/graphql-orm-storage/CHANGELOG.md#0160-unreleased)
+- **Action needed** — Storage 0.16.0: a local listing page can hold fewer keys than its limit while it returns a continuation; only for code that calls `list_blobs_page` directly and stops at a short page [migration](../../crates/graphql-orm-storage/MIGRATION.md#0150-to-0160-local-links-listing-pages-and-canonical-keys) · [changelog](../../crates/graphql-orm-storage/CHANGELOG.md#0160-unreleased)
+- **No action** — Storage 0.16.0: opt-in canonical keys for SMB and local targets (`validate_canonical_blob_key`, `with_canonical_keys`); `content_type` is ignored on local and SMB, now documented [migration](../../crates/graphql-orm-storage/MIGRATION.md#0150-to-0160-local-links-listing-pages-and-canonical-keys) · [changelog](../../crates/graphql-orm-storage/CHANGELOG.md#0160-unreleased)
+- **Action needed** — Backup 0.25.0: storage 0.16.0; only for local repositories whose root contains links or hard links [migration](../../crates/graphql-orm-backup/MIGRATION.md#to-0250-storage-0160) · [changelog](../../crates/graphql-orm-backup/CHANGELOG.md#0250-unreleased)
+
+### workspace-2026.11.16.1
+
+Commit `1a4706bd119a` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.16.1)
+
+Packages (changed in bold): **`graphql-orm` 0.162.0, `graphql-orm-macros` 0.162.0**; `graphql-orm-operation-catalog` 0.8.0; `graphql-orm-storage` 0.15.0; `graphql-orm-backup` 0.23.0; `graphql-orm-ai-tool-profiles` 0.23.0; `graphql-orm-ai` 0.145.0; `graphql-orm-router-protocol` 0.2.1; `graphql-orm-router` 0.15.4.
+
 - **No action** — ORM/macros 0.162.0: context-bound authorized pages for handwritten resolvers (`EntityQuery::fetch_authorized_page`); additive [migration](../../MIGRATION.md#01620-context-bound-authorized-pages) · [changelog](../../CHANGELOG.md#unreleased---ormmacros-01620)
 
 ### workspace-2026.11.15.6

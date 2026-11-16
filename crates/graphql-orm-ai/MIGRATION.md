@@ -71,6 +71,84 @@ In order:
 
 No GraphQL SDL change.
 
+## ORM/macros 0.166.0: guarded dependent deletes
+
+**No action** for unchanged hosts. No data or schema migration is needed.
+For the opt-in AI dependent-effect policy, implement the authenticated
+executor's `execute_registered_with_effect_guard` method and attach its guard
+to request data. Test that attachment: an executor that skips it runs an
+unguarded delete that commits before the bridge refuses the missing ORM commit
+receipt. The ORM checks the physical graph and locked row counts before
+writes; mismatched or unknown effects refuse and excess bounds roll back.
+Unsupported physical opt-out, bulk and unprovable ORM-managed paths refuse.
+
+The opt-in epoch anchor now requires atomic `compare_exchange` and an exclusive
+`lock_rotation` lease shared across processes through commit and finalization.
+Existing unanchored hosts are unaffected.
+
+## 0.145.0 to 0.146.0: capability scale
+
+Upgrade tool profiles to 0.24.0 with this release. There is no GraphQL SDL,
+persistent schema or data migration; AI schema module stays `0.81.0`.
+Capability, index, broker-definition and session-binding fingerprints are
+unchanged for a host that changes nothing.
+
+- **Delivery-mode selection. No action.** Existing hosts keep native deferred
+  selection and their exact retained binding. Opt in with
+  `AiCapabilityDeliveryLimits::prefer_fixed_broker_for_large_surfaces` to
+  prefer the fixed broker above the eager limits; opting in requires rebinding.
+- **Shared type dictionary in describe. No action.** Fixed-broker `describe`
+  now returns `planSchema` with repeated input types under `planSchema.types`
+  and `{"$ref": "#/types/<Name>"}` at each use. Execute arguments, plan
+  validation and every fingerprint are unchanged. A host that parses describe
+  output itself should expand the references, or call
+  `AiCapabilityBrokerSession::with_inline_describe_schema` to get the previous
+  inline schema.
+- **Static tools behind the broker. No action** unless you want it. To move
+  reviewed static read tools off the provider surface, pass their descriptor
+  fingerprints to `AiCapabilityBrokerSession::with_brokered_static_tools` and
+  remove the same fingerprints from the session binding's bootstrap set and
+  from the offered definitions. Removing bootstrap fingerprints changes the
+  session binding, so that retained session rebinds once; later changes to the
+  brokered list do not. Your `AiCapabilityAuthorityPolicy` now receives
+  `ReviewedStatic` entries for the brokered tools at discover, describe and
+  execute; a policy that denies that kind keeps them invisible. Hierarchical
+  rules that list allowed tool fingerprints must list the brokered ones too.
+  Tools that need approval, are not read-only, declare result media, are
+  classified `Restricted` or higher, or whose executor requires
+  `AiToolExecutionProvenance` must stay bootstrap definitions.
+- **Excluded capabilities. No action**, but check
+  `excluded_capabilities()` on your catalogues at startup, or watch for the
+  registration warning. A target that used to fail to compile because one
+  root's schema was too large now compiles without that root.
+- **Epoch anchor. No action** unless you want file-level restores detected.
+  Implement `AiRuntimeEpochAnchorStore` over storage outside the database and
+  pass it to `OrmAiRuntimeRecoveryService::with_epoch_anchor` on every
+  service that mints proofs or acknowledges restores for that store. The
+  first open adopts the existing live epoch. See
+  [recovery and restore](docs/recovery-and-restore.md#detecting-a-file-level-restore-with-a-host-held-anchor)
+  for placement, the multi-instance rule and what is not detected.
+- **Dependent-effect policy. No action** unless you want generated deletes
+  held to their dependents' AI policy. Installing
+  `AiRuntimeBuilder::dependent_effect_policy` refuses every generated delete
+  whose root is not declared, so declare every delete root you intend to
+  allow, with an empty effect set where it has no dependents. See
+  [security](docs/security.md#dependent-effects-of-generated-deletes).
+- **Strict query roots. No action.** The default is unchanged. See the
+  [tool profiles migration guide](../graphql-orm-ai-tool-profiles/MIGRATION.md#0230-to-0240-capability-scale).
+
+Rust API: `AiCapabilityExecution::capability_kind`,
+`AiCapabilityBrokerSession::{with_brokered_static_tools,
+brokered_static_tool_fingerprints, with_inline_describe_schema,
+uses_inline_describe_schema}`,
+`AiCapabilityDescription::with_shared_type_plan_schema`,
+`AiToolCatalog::query_capability_shared_type_plan_schema`,
+`AiRuntimeEpochAnchor`, `AiRuntimeEpochAnchorStore`,
+`OrmAiRuntimeRecoveryService::with_epoch_anchor`, `AiDependentEffectPolicy`,
+`AiDependentEffect`, `AiDependentEffectKind`, `AiDependentEffectRefusal`,
+`AiRuntimeBuilder::dependent_effect_policy` and
+`AiRuntime::dependent_effect_policy` are additions. Nothing was removed.
+
 ## 0.144.0 to 0.145.0: entity references
 
 Apply AI schema module `0.81.0` before starting workers. It changes no table,

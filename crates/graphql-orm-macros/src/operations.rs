@@ -2478,6 +2478,16 @@ fn generate_graphql_operations_unfiltered(
     let update_many_scope_enforcement = scope_enforcement("update_many")?;
     let delete_scope_enforcement = scope_enforcement("delete")?;
     let delete_many_scope_enforcement = scope_enforcement("delete_many")?;
+    let reject_unplanned_delete_effects = if entity_meta.dependent_deletes {
+        quote! {}
+    } else {
+        quote! {
+            if ctx.data_opt::<::graphql_orm::graphql::orm::DependentDeleteGuard>().is_some() {
+                return Err(::graphql_orm::async_graphql::Error::new("Dependent delete effect plan unavailable"));
+            }
+        }
+    };
+
     let subscription_scope_enforcement = scope_enforcement("subscription")?;
     let key_bind_from_key_tokens = if has_composite_primary_key {
         primary_key_fields
@@ -5977,7 +5987,7 @@ fn generate_graphql_operations_unfiltered(
                 #filter_read_authorization
 
                 let mut query = #struct_name::search(pool, search)
-                    .pagination_config(db.pagination_config());
+                    .client_pagination_config(db.client_pagination_config());
                 if let Some(ref filter) = where_input {
                     query = query.filter(filter.clone());
                 }
@@ -8812,7 +8822,7 @@ fn generate_graphql_operations_unfiltered(
                         Some(ctx), ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
                     ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                     if visibility.requires_residual_checks() {
-                        let resolved_page = db.pagination_config().resolve_page(page.as_ref(), true);
+                        let resolved_page = db.client_pagination_config().resolve_client_page(page.as_ref(), true).map_err(|error| error.into_graphql_error())?;
                         let authorized_page = ::graphql_orm::graphql::loaders::scan_authorized_query(
                             db, ctx, query, auth_context.as_ref(), &visibility, resolved_page,
                             ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
@@ -9497,7 +9507,7 @@ fn generate_graphql_operations_unfiltered(
                     Some(ctx), ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                 if visibility.requires_residual_checks() {
-                    let resolved_page = db.pagination_config().resolve_page(page.as_ref(), true);
+                    let resolved_page = db.client_pagination_config().resolve_client_page(page.as_ref(), true).map_err(|error| error.into_graphql_error())?;
                     let authorized_page = ::graphql_orm::graphql::loaders::scan_authorized_query(
                         db, ctx, query, auth_context.as_ref(), &visibility, resolved_page,
                         ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
@@ -9623,6 +9633,7 @@ fn generate_graphql_operations_unfiltered(
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, SqlValue};
                 let __gom_expected_version: Option<i64> = #expected_version_binding;
 
+                #reject_unplanned_delete_effects
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                 #delete_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
@@ -9764,6 +9775,7 @@ fn generate_graphql_operations_unfiltered(
             ) -> ::graphql_orm::async_graphql::Result<#delete_many_result_type> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery};
 
+                #reject_unplanned_delete_effects
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                 #delete_many_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(

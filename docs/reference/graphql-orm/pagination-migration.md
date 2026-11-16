@@ -3,7 +3,7 @@ title: "Pagination Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-06
+last_reviewed: 2026-11-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -225,10 +225,70 @@ Use the standalone authorized executor for the new capability. Handwritten
 pool-bound queries are still low-level queries and do not automatically apply
 application authorization.
 
+### Page size: reduced by default, refused on request
+
+A generated GraphQL page that asks for more rows than the database's maximum
+page limit (`PaginationConfig::max_limit`, `100` by default) is served the
+maximum, and nothing in the response says the size was reduced. A client that
+computes page counts from `totalCount` and the size it asked for then gets
+them wrong, and cannot tell a reduced page from a last page.
+
+Set `DatabaseBuilder::refuse_oversized_page_limit(true)` (or
+`Database::with_oversized_page_limit_refusal(true)`) to refuse instead.
+An explicit `page.limit` on a list root, to-many relation or search
+connection, or an explicit `limit`, `first` or `last` on a keyset connection,
+above the maximum then fails with `PAGE_LIMIT_EXCEEDED` before any row is
+read. The message names the limit asked for and the maximum. A limit at the
+maximum and an omitted limit are served as before. The setting is off by
+default, so existing responses do not change. A custom resolver that takes a
+client `PageInput` should resolve it with
+`Database::client_pagination_config().resolve_client_page` so the setting covers it too.
+The setting also covers Rust reads that take a `PageInput`: with refusal on,
+an `EntityQuery::paginate(page)` read through `fetch_connection`,
+`fetch_connection_with_auth` or `fetch_connection_selected_with_auth`, and an
+`EntitySearchQuery::paginate(page)` read, fail with `PAGE_LIMIT_EXCEEDED` when
+`page.limit` is above the maximum instead of being reduced.
+
+`schema_roots!(max_page_limit: N, ...)` declares the maximum at compile time.
+The generated module then exposes it as `GRAPHQL_ORM_MAX_PAGE_LIMIT`, the
+semantic catalogue publishes `N` as the ceiling of every pageable
+relationship list (in place of the compile-time default of 100), the relation
+complexity estimate caps a requested page at `N`, and building the schema
+panics when the `Database` applies a different maximum or none. Without the
+declaration nothing changes: the catalogue and the complexity estimate use
+100 whatever the database is configured with. With several declaring schemas
+in one process each complexity estimate uses its own schema data; undeclared schemas retain the default estimate of 100.
+
+Rust repository reads are separate. `limit(n)` on a repository or transaction
+builder is exact or refused, and `with_max_limit(n)` gives one trusted read
+its own maximum (see the 0.128.0 migration note). The keyset helpers
+(`Record::keyset_page`, `keyset_connection_page`, `tx.keyset_page`) keep GraphQL
+page semantics and reduce an oversized limit. To read more rows a page from
+trusted code, page with
+`EntityQuery::<Record>::new().with_max_limit(n).fetch_authorized_keyset(&db, None, None, page)`,
+or call the helper on a handle with a raised maximum:
+`db.clone().with_pagination_config(db.pagination_config().with_max_limit(Some(n)))`.
+Either way the page is bounded by `n`, and `pageInfo.hasNextPage` and the end
+cursor page through a larger set.
+
 ### What a keyset cursor is bound to
 
 A generated keyset cursor (`gomk1.`) holds the order values of one row. It is
-refused with `CURSOR_INVALID` unless it matches all of:
+hex-encoded JSON with a checksum that uses no secret. The checksum catches
+corruption and the bindings below; it does not authenticate the cursor. A
+client can read the order values in a cursor it was given, and can write a
+cursor with other values and a recomputed checksum. Such a cursor is accepted
+and only moves the resume position within the same order: every page is read
+under the caller's entity, row and field policies, exactly as a first page is,
+so a rewritten cursor returns no row the caller could not already list.
+Ordering by a field therefore discloses its values to whoever receives the
+cursor; `keyset_cursor_field_authority.rs` covers the order-field checks.
+Treat a cursor as a position, never as an authorization token.
+`a_rewritten_cursor_only_moves_the_position_and_row_policy_still_applies` in
+`crates/graphql-orm/tests/keyset_cursor_binding.rs` pins this. The cursor
+length is bounded only by the request size the host accepts.
+
+A cursor is refused with `CURSOR_INVALID` unless it matches all of:
 
 | Bound to | Mismatch |
 | --- | --- |
@@ -271,7 +331,7 @@ resumes "after these values", so a cursor taken before a row's order values
 change is still accepted, and the next page reflects the new values: a row
 moved before the cursor is not returned again, a row moved after it is returned
 (possibly a second time), and a deleted cursor row changes nothing. Only a
-cursor that is malformed, tampered with, or bound to something else (above) is
+cursor that is malformed, corrupted, or bound to something else (above) is
 refused. The ORM does not try to detect this; doing so would need row versions
 or snapshots, which keyset pagination exists to avoid. Clients that need a
 stable view should page inside one transaction or order by an immutable column

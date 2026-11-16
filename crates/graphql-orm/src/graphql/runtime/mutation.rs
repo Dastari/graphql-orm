@@ -252,7 +252,7 @@ pub(super) fn types(module: &RuntimeGraphqlModule) -> Result<Vec<Type>, RuntimeG
                     InputValue::new(
                         &f.api_name,
                         TypeRef::named_nn(if c.live_subscriptions.is_some() {
-                            super::live::key_scalar(f.value_kind)
+                            super::live::key_scalar(module, f.value_kind)
                         } else {
                             super::scalar::name(f.value_kind)
                         }),
@@ -594,7 +594,7 @@ fn input_fields(
             let value = if value == &Value::Null {
                 RuntimeValue::Null
             } else if c.live_subscriptions.is_some() && c.primary_key.contains(&field.id) {
-                super::live::decode_key_value(field.value_kind, value, limits.scalars)?
+                super::live::decode_key_value(module, field.value_kind, value, limits.scalars)?
             } else {
                 super::scalar::decode(field.value_kind, value, limits.scalars)?
             };
@@ -1096,6 +1096,14 @@ async fn execute<B: RuntimeMutationBackend>(
     // Unprepared first: over `execute_stream` neither value is present, and the
     // refusal must not name an internal type.
     let results = super::execution::Results::prepared(&ctx)?;
+    if ctx
+        .data_opt::<crate::graphql::orm::DependentDeleteGuard>()
+        .is_some()
+    {
+        // This runtime path does not yet provide a physical effect receipt.
+        // Refuse before dispatch rather than detecting missing proof after writes.
+        return Err(wire_error("unsupported_capability"));
+    }
     let context = ctx
         .data_opt::<RuntimeGraphqlRequest<B>>()
         .ok_or_else(|| wire_error("authorization_missing"))?;

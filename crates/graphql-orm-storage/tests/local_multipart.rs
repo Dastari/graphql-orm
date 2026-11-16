@@ -1,4 +1,4 @@
-#![cfg(feature = "local")]
+#![cfg(all(feature = "local", not(windows)))]
 //! Resumable multipart uploads on local storage.
 
 #[path = "support/multipart_conformance.rs"]

@@ -869,16 +869,50 @@ pub(crate) fn subscription_end(code: &'static str, message: &'static str) -> asy
     async_graphql::Error::new(message).extend_with(|_, extensions| extensions.set("code", code))
 }
 
+/// Private marker carried in the `source` of a continuity error caused by
+/// channel lag. A `source` is never serialized. The authority watcher reads
+/// it to defer the error to its next tick and removes it before the error is
+/// released.
+#[derive(Debug)]
+pub(crate) struct LagEnd;
+
+/// The continuity error for a subscriber that fell behind its channel.
+pub(crate) fn lag_end() -> async_graphql::Error {
+    let mut error = subscription_end(
+        SUBSCRIPTION_CONTINUITY_LOST,
+        "subscription lost event continuity; subscribe again, then refetch",
+    );
+    error.source = Some(std::sync::Arc::new(LagEnd));
+    error
+}
+
+/// Take the lag marker off an error, reporting whether it was there.
+pub(crate) fn take_lag_marker(error: &mut async_graphql::Error) -> bool {
+    let lagged = error
+        .source
+        .as_ref()
+        .is_some_and(|source| source.is::<LagEnd>());
+    if lagged {
+        error.source = None;
+    }
+    lagged
+}
+
 /// Events of one generated subscription's channel, checked for continuity
 /// before any filter.
 ///
 /// Every event is passed on in order. When the subscriber fell behind and the
 /// channel dropped events, or the channel closed, the stream yields exactly one
 /// error and ends. Neither error carries a skipped-event count, identifier or
-/// payload. A lag error's occurrence and timing still reveal that the shared channel
-/// exceeded this receiver's capacity, which hidden writes can cause. Lag is
-/// checked before authorization and can end a revoked stream before its next
-/// independent authority check.
+/// payload.
+///
+/// Lag is detected before authorization, and writes hidden from the
+/// subscriber can cause it. The lag error is therefore marked, and
+/// [`watch_subscription_authority`] holds it until its next independent
+/// authority tick: a subscriber whose authority is gone then ends with
+/// `FORBIDDEN`, and any other subscriber with `SUBSCRIPTION_CONTINUITY_LOST`.
+/// No event is delivered while the error is held. That lag happened is still
+/// visible to an authorized subscriber; its timing is blurred to the tick.
 #[doc(hidden)]
 pub fn continuity_events<T>(
     receiver: tokio::sync::broadcast::Receiver<T>,
@@ -892,13 +926,7 @@ where
         let mut events = events?;
         match events.next().await {
             Some(Ok(event)) => Some((Ok(event), Some(events))),
-            Some(Err(BroadcastStreamRecvError::Lagged(_))) => Some((
-                Err(subscription_end(
-                    SUBSCRIPTION_CONTINUITY_LOST,
-                    "subscription lost event continuity; subscribe again, then refetch",
-                )),
-                None,
-            )),
+            Some(Err(BroadcastStreamRecvError::Lagged(_))) => Some((Err(lag_end()), None)),
             None => Some((
                 Err(subscription_end(
                     SUBSCRIPTION_SOURCE_CLOSED,
@@ -929,7 +957,7 @@ pub use super::subscription_admission::GeneratedSubscriptionAdmission;
 #[doc(hidden)]
 pub use super::subscription_admission::admit_generated_operation;
 
-fn authority_recheck_delay(interval: std::time::Duration) -> std::time::Duration {
+pub(crate) fn authority_recheck_delay(interval: std::time::Duration) -> std::time::Duration {
     let interval = interval.clamp(
         std::time::Duration::from_secs(1),
         std::time::Duration::from_secs(300),
@@ -988,6 +1016,8 @@ fn authority_check_end(error: async_graphql::Error) -> async_graphql::Error {
 ///
 /// Event filtering must never yield a forbidden item. Only this timer converts
 /// a definite subscriber denial to FORBIDDEN; host failures lose continuity.
+/// A lag error from [`continuity_events`] is held until the next tick and is
+/// replaced by that tick's refusal when authority is gone.
 /// The deadline is established before polling the source and is never reset by
 /// events. A due timer takes priority over the source, including an in-flight
 /// asynchronous event filter. As with every stream, progress requires polling.
@@ -1129,7 +1159,18 @@ where
                             .reset(tokio::time::Instant::now() + next_delay());
                     }
                     Either::Right((item, _)) => {
-                        let item = item?;
+                        let mut item = item?;
+                        if let Err(error) = &mut item
+                            && take_lag_marker(error)
+                        {
+                            // Lag can be caused by writes this subscriber may
+                            // not see. Deliver nothing more, wait for the
+                            // independent tick, and let lost authority win.
+                            timer.as_mut().await;
+                            if let Err(denied) = authorize().await {
+                                item = Err(authority_check_end(denied));
+                            }
+                        }
                         let ended = item.is_err();
                         return Some((item, (stream, timer, authorize, next_delay, ended)));
                     }
@@ -1207,6 +1248,92 @@ mod authority_timer_tests {
             assert!(stream.next().await.is_none());
         }
         assert_eq!(checks.load(Ordering::SeqCst), 2);
+    }
+
+    fn end_code(error: &async_graphql::Error) -> Option<String> {
+        match error.extensions.as_ref()?.get("code")? {
+            async_graphql::Value::String(code) => Some(code.clone()),
+            _ => None,
+        }
+    }
+
+    /// A receiver that has already fallen behind its channel.
+    fn lagged_events() -> impl futures::Stream<Item = async_graphql::Result<u8>> {
+        let (sender, receiver) = tokio::sync::broadcast::channel::<u8>(1);
+        for event in 0..4 {
+            sender.send(event).unwrap();
+        }
+        continuity_events(receiver)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn lag_ends_at_the_authority_tick_with_continuity_loss_for_an_authorized_subscriber() {
+        let deadline = Duration::from_millis(1037);
+        let checks = Arc::new(AtomicUsize::new(0));
+        let counted = checks.clone();
+        let mut stream = Box::pin(watch_authority_with_delay(
+            lagged_events(),
+            move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+                futures::future::ready(Ok(()))
+            },
+            move || deadline,
+        ));
+        // The lag is already observable to the watcher, yet nothing is
+        // released, and no authority check runs, before the tick.
+        for _ in 0..103 {
+            poll_fn(|cx| match stream.poll_next_unpin(cx) {
+                Poll::Pending => Poll::Ready(()),
+                Poll::Ready(_) => panic!("lag must not end the stream before the authority tick"),
+            })
+            .await;
+            tokio::time::advance(Duration::from_millis(10)).await;
+        }
+        assert_eq!(checks.load(Ordering::SeqCst), 0);
+        tokio::time::advance(Duration::from_millis(7)).await;
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert_eq!(
+            end_code(&error).as_deref(),
+            Some(SUBSCRIPTION_CONTINUITY_LOST)
+        );
+        assert!(error.source.is_none(), "the private lag marker is removed");
+        assert_eq!(checks.load(Ordering::SeqCst), 1);
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn lag_of_a_revoked_subscriber_ends_forbidden_at_the_authority_tick() {
+        let deadline = Duration::from_millis(1037);
+        let mut stream = Box::pin(watch_authority_with_delay(
+            lagged_events(),
+            || futures::future::ready(Err(OrmPublicError::forbidden().into_graphql_error())),
+            move || deadline,
+        ));
+        poll_fn(|cx| match stream.poll_next_unpin(cx) {
+            Poll::Pending => Poll::Ready(()),
+            Poll::Ready(_) => panic!("lag must not end the stream before the authority tick"),
+        })
+        .await;
+        tokio::time::advance(deadline).await;
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert_eq!(end_code(&error).as_deref(), Some("FORBIDDEN"));
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_closed_source_still_ends_at_once() {
+        let (sender, receiver) = tokio::sync::broadcast::channel::<u8>(1);
+        drop(sender);
+        let mut stream = Box::pin(watch_authority_with_delay(
+            continuity_events(receiver),
+            || futures::future::ready(Ok(())),
+            || Duration::from_secs(60),
+        ));
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert_eq!(
+            end_code(&error).as_deref(),
+            Some(SUBSCRIPTION_SOURCE_CLOSED)
+        );
     }
 
     #[tokio::test(start_paused = true)]

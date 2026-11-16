@@ -30,6 +30,32 @@ dependencies come from metadata, not SQL text; predicates that cannot be
 analysed must likewise defer to database enforcement. Upgrade ORM/macros together; see the
 [migration guide](../../MIGRATION.md#breaking-release-unreleased).
 
+Version 0.166.0 adds opt-in transaction-bound dependent-effect verification.
+`DependentDeleteGuard` compares declarations with the introspected delete plan
+and enforces dependent row limits before writes. Generated physical opt-out and
+bulk deletes refuse guarded requests. Unchanged hosts keep existing behavior.
+See the [migration guide](../../MIGRATION.md#ormmacros-01660-guarded-dependent-deletes).
+
+Version 0.165.0 makes snapshot restore atomic on SQLite and PostgreSQL,
+resets restored runtime search indexes, and preserves denied fields on upsert.
+MSSQL hosts must install `dbo.__graphql_orm_restore_marker` with
+`MssqlPool::install_restore_marker()` and grant runtime roles SELECT before
+serving ORM work. Missing or unreadable restore state fails closed with
+`RestoreStateUnavailable`, whose reason names the fix. See the
+[migration guide](../../MIGRATION.md#01640-to-01650-atomic-restore-search-reset-and-kept-values-on-ignored-denials).
+
+Version 0.164.0 adds opt-in contract settings and one stable code. A GraphQL
+page limit above the maximum can be refused with `PAGE_LIMIT_EXCEEDED` instead
+of being reduced (`DatabaseBuilder::refuse_oversized_page_limit`), and
+`schema_roots!(max_page_limit: N)` publishes the real maximum in the semantic
+catalogue and refuses a `Database` configured differently. Runtime GraphQL can
+serve `RecordVersion` and integer live keys as `RuntimeInt64` strings
+(`with_int64_identity_strings`). A runtime page whose stored sort key is too
+long for a cursor is refused with `cursor_key_too_large`. A subscriber that
+lagged now ends on the next authority tick instead of at once. Defaults are
+unchanged except for that timing. See the
+[migration guide](../../MIGRATION.md#01630-to-01640-page-limits-64-bit-identities-cursor-keys-and-subscription-lag).
+
 Version 0.163.0 lowers the compile cost of `GraphQLOperations`. The seven
 per-entity wrapper objects (edges, connections, mutation results, change
 events, bulk results and authorized scan pages) carry hand-emitted output
@@ -45,12 +71,6 @@ before any row is read, and resolves entity, row and field authorization again
 on every page. The API is additive and needs no action. See the
 [migration guide](../../MIGRATION.md#01620-context-bound-authorized-pages) and the
 [reference](../../docs/reference/graphql-orm/pagination-migration.md#context-bound-authorized-pages-for-handwritten-resolvers-01620).
-
-Version 0.160.0 restores a snapshot in one transaction on PostgreSQL and
-SQLite, adds `SchemaManager::reset_runtime_search` and a restore-in-progress
-marker for host-run SQL Server restores, and keeps the stored value when an
-upsert's denied field write is ignored. See the
-[migration guide](../../MIGRATION.md#01590-to-01600-atomic-restore-search-reset-and-kept-values-on-ignored-denials).
 
 Version 0.159.0 fixes PostgreSQL static tables declared with mixed-case bare
 names. Table references follow PostgreSQL's historical folding, so migrations,

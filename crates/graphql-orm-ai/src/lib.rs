@@ -33,6 +33,7 @@ mod control_plane;
 // Used by the ORM persistence services, which exist for these backends only.
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod custody_field_policy;
+mod dependent_effects;
 mod domain;
 mod egress;
 mod entity_references;
@@ -172,6 +173,9 @@ pub use capability_delivery::*;
 pub use configuration::*;
 pub use content_protection::*;
 pub use control_plane::ai_control_plane_root_fields;
+pub use dependent_effects::{
+    AiDependentEffect, AiDependentEffectKind, AiDependentEffectPolicy, AiDependentEffectRefusal,
+};
 pub use domain::*;
 pub use egress::*;
 pub use entity_references::{
