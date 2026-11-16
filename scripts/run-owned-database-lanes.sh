@@ -2,13 +2,13 @@
 set -euo pipefail
 
 if [[ $# -gt 1 ]]; then
-  echo "usage: scripts/run-owned-database-lanes.sh [sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|mssql|runtime-live|runtime-search-catalog|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|changed-subscriptions|bulk-write-targets|query-loader-batch|authorized-page|all]" >&2
+  echo "usage: scripts/run-owned-database-lanes.sh [sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|migration-journal|mssql|runtime-live|runtime-search-catalog|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|changed-subscriptions|bulk-write-targets|query-loader-batch|authorized-page|all]" >&2
   exit 2
 fi
 
 lane=${1:-all}
 case "${lane}" in
-  sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|mssql|runtime-live|runtime-search-catalog|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|changed-subscriptions|bulk-write-targets|query-loader-batch|authorized-page|all) ;;
+  sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|migration-journal|mssql|runtime-live|runtime-search-catalog|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|changed-subscriptions|bulk-write-targets|query-loader-batch|authorized-page|all) ;;
   *)
     echo "owned-database-lanes: unsupported lane: ${lane}" >&2
     exit 2
@@ -147,6 +147,19 @@ run_postgres_legacy() {
     --test federation_end_to_end_fixture -- --ignored node_lookup_through_the_router_on_owned_postgres
 }
 
+# Focused recovery lane for the journal portion of postgres-legacy.
+run_migration_journal() {
+  cargo test -p graphql-orm --locked --no-default-features --features postgres,change-journal \
+    --test dependent_delete_repro dependent_deletes_are_journaled -- --include-ignored --test-threads=1
+  cargo test -p graphql-orm --locked --no-default-features --features postgres,change-journal \
+    --test postgres_rls_coverage --test postgres_change_journal_paths --test postgres_change_journal_truncate \
+    --test backup_roundtrip -- --include-ignored --test-threads=1
+  cargo test -p graphql-orm --locked --no-default-features --features postgres,change-journal \
+    --lib catalog_read_cancellation -- --include-ignored --test-threads=1
+  cargo test -p graphql-orm --locked --no-default-features --features sqlite \
+    --test federation_end_to_end_fixture -- --ignored node_lookup_through_the_router_on_owned_postgres
+}
+
 run_mssql() {
   cargo test -p graphql-orm --locked --no-default-features --features mssql \
     --test migration_composite_uniques --test migration_safety -- --include-ignored --test-threads=1
@@ -268,6 +281,7 @@ case "${lane}" in
   sqlite) run_sqlite ;;
   postgres) run_postgres ;;
   postgres-legacy) run_postgres_legacy ;;
+  migration-journal) run_migration_journal ;;
   mssql) run_mssql ;;
   ai-postgres) run_ai_postgres ;;
   all)

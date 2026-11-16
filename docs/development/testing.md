@@ -375,3 +375,9 @@ CI and full release validation. Run it on a selected branch with
 It does not create skipped check runs for CI's other jobs or share CI's main
 concurrency group. The runner has a 120-minute timeout and reclaims disk before
 executing the two owned PostgreSQL test families. No release is triggered.
+
+The focused `bash scripts/run-owned-database-lanes.sh migration-journal` lane
+executes the PostgreSQL journal and TRUNCATE regressions, journaled dependent
+deletes, catalog-read cancellation, and the PostgreSQL router fixture using
+test-owned disposable databases. Use it to repeat the journal portion of
+`postgres-legacy` after a recorder change.

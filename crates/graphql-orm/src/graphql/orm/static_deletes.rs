@@ -327,7 +327,8 @@ async fn postgres_dependency_reads_for_entities(
     // journal trigger only appends to the journal, which likewise holds
     // no foreign keys or entity rows; it is exempt only when it fires
     // normally, has the exact type, and calls the unmodified recorder
-    // owned by the table owner.
+    // owned by the table owner. Statement-level TRUNCATE guards cannot fire
+    // during these row mutations, so only INSERT/UPDATE/DELETE triggers count.
     let owned_tables = declared_tables
         .iter()
         .map(|table| super::dialect::postgres_resolved_identifier(table))
@@ -348,6 +349,7 @@ async fn postgres_dependency_reads_for_entities(
             LEFT JOIN pg_catalog.pg_constraint con ON con.oid OPERATOR(pg_catalog.=) tr.tgconstraint
             WHERE n.nspname OPERATOR(pg_catalog.=) pg_catalog.current_schema()
               AND t.relname::pg_catalog.text OPERATOR(pg_catalog.=) ANY ($1::pg_catalog.text[])
+              AND (tr.tgtype::pg_catalog.int4 OPERATOR(pg_catalog.&) 28) OPERATOR(pg_catalog.<>) 0
               AND NOT COALESCE(tr.tgisinternal AND pn.nspname OPERATOR(pg_catalog.=) 'pg_catalog'::pg_catalog.name
                                AND con.contype OPERATOR(pg_catalog.=) ANY (ARRAY['f', 'u', 'x']::pg_catalog.\"char\"[]), false)
               AND NOT (NOT tr.tgisinternal AND tr.tgname::pg_catalog.text OPERATOR(pg_catalog.=) $2::pg_catalog.text
