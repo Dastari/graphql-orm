@@ -10,6 +10,13 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.163.0 lowers the compile cost of `GraphQLOperations`. The seven
+per-entity wrapper objects (edges, connections, mutation results, change
+events, bulk results and authorized scan pages) carry hand-emitted output
+impls instead of a `SimpleObject` derive. Generated SDL, catalogues and
+fingerprints are byte-identical; no action is needed. See the
+[migration guide](../../MIGRATION.md#01590-to-01630-wrapper-object-compile-cost).
+
 Version 0.162.0 is released with `graphql-orm` 0.162.0, which adds
 context-bound authorized pages for handwritten resolvers. The macros are
 unchanged. See the
