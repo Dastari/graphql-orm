@@ -887,8 +887,14 @@ impl AuthenticatedToolBridge {
             descriptor,
             &request,
         )?;
-        self.execute_with_binding_and_effect_guard(principal_reference, descriptor, request, binding, effect_guard)
-            .await
+        self.execute_with_binding_and_effect_guard(
+            principal_reference,
+            descriptor,
+            request,
+            binding,
+            effect_guard,
+        )
+        .await
     }
 
     pub(crate) async fn execute_with_binding(
@@ -898,7 +904,14 @@ impl AuthenticatedToolBridge {
         request: ToolGraphqlRequest,
         binding: AiRegisteredToolExecutionBinding,
     ) -> Result<(ToolGraphqlResponse, AiToolAuthorizationDecision), ToolExecutionError> {
-        self.execute_with_binding_and_effect_guard(principal_reference, descriptor, request, binding, None).await
+        self.execute_with_binding_and_effect_guard(
+            principal_reference,
+            descriptor,
+            request,
+            binding,
+            None,
+        )
+        .await
     }
 
     async fn execute_with_binding_and_effect_guard(
@@ -951,20 +964,27 @@ impl AuthenticatedToolBridge {
             })?;
         let expected_request = request.clone();
         let response = match &effect_guard {
-            Some(guard) => self.executor.execute_registered_with_effect_guard(context, &binding, request, guard.clone()).await,
-            None => self.executor.execute_registered(context, &binding, request).await,
+            Some(guard) => {
+                self.executor
+                    .execute_registered_with_effect_guard(context, &binding, request, guard.clone())
+                    .await
+            }
+            None => {
+                self.executor
+                    .execute_registered(context, &binding, request)
+                    .await
+            }
         }
-            .map_err(|error| match error {
-                ToolExecutionError::RejectedBeforeExecution(proof) => {
-                    crate::execution_rejection::validate_rejection(
-                        &binding,
-                        &expected_request,
-                        proof,
-                    )
-                }
-                error => error,
-            })?;
-        if effect_guard.as_ref().is_some_and(|guard| !guard.was_committed()) {
+        .map_err(|error| match error {
+            ToolExecutionError::RejectedBeforeExecution(proof) => {
+                crate::execution_rejection::validate_rejection(&binding, &expected_request, proof)
+            }
+            error => error,
+        })?;
+        if effect_guard
+            .as_ref()
+            .is_some_and(|guard| !guard.was_committed())
+        {
             return Err(ToolExecutionError::Authorization);
         }
         Ok((response, authorization))
@@ -1103,20 +1123,29 @@ impl AuthenticatedToolBridge {
             })?;
         let expected_request = request.clone();
         let response = match &effect_guard {
-            Some(guard) => self.executor.execute_registered_with_effect_guard(context, &binding, request, guard.clone()).await,
-            None => self.executor.execute_registered(context, &binding, request).await,
+            Some(guard) => {
+                self.executor
+                    .execute_registered_with_effect_guard(context, &binding, request, guard.clone())
+                    .await
+            }
+            None => {
+                self.executor
+                    .execute_registered(context, &binding, request)
+                    .await
+            }
         }
-            .map_err(|error| match error {
-                ToolExecutionError::RejectedBeforeExecution(proof) => {
-                    crate::execution_rejection::validate_rejection(
-                        &binding,
-                        &expected_request,
-                        proof,
-                    )
-                }
-                error => error,
-            })?;
-        if effect_guard.as_ref().is_some_and(|guard| !guard.was_committed()) { return Err(ToolExecutionError::Authorization); }
+        .map_err(|error| match error {
+            ToolExecutionError::RejectedBeforeExecution(proof) => {
+                crate::execution_rejection::validate_rejection(&binding, &expected_request, proof)
+            }
+            error => error,
+        })?;
+        if effect_guard
+            .as_ref()
+            .is_some_and(|guard| !guard.was_committed())
+        {
+            return Err(ToolExecutionError::Authorization);
+        }
         Ok((response, authorization))
     }
 }

@@ -1096,7 +1096,10 @@ async fn execute<B: RuntimeMutationBackend>(
     // Unprepared first: over `execute_stream` neither value is present, and the
     // refusal must not name an internal type.
     let results = super::execution::Results::prepared(&ctx)?;
-    if ctx.data_opt::<crate::graphql::orm::DependentDeleteGuard>().is_some() {
+    if ctx
+        .data_opt::<crate::graphql::orm::DependentDeleteGuard>()
+        .is_some()
+    {
         // This runtime path does not yet provide a physical effect receipt.
         // Refuse before dispatch rather than detecting missing proof after writes.
         return Err(wire_error("unsupported_capability"));

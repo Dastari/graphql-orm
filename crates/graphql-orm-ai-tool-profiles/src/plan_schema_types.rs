@@ -77,10 +77,7 @@ impl AiSharedTypePlanSchema {
         if let (Some(object), Some(description)) = (schema.as_object_mut(), description) {
             object.insert(DESCRIPTION_KEY.to_owned(), description.clone());
         }
-        Ok(Self {
-            schema,
-            types,
-        })
+        Ok(Self { schema, types })
     }
 
     /// Stable lookup key of one subschema for the `type_names` map of
@@ -165,7 +162,27 @@ impl AiSharedTypePlanSchema {
                 }
                 let mut expanded = Map::new();
                 for (key, child) in object {
-                    expanded.insert(key.clone(), self.expand_value(child, depth + 1)?);
+                    let child = match (key.as_str(), child) {
+                        ("properties" | "patternProperties", Value::Object(members)) => {
+                            Value::Object(
+                                members
+                                    .iter()
+                                    .map(|(name, member)| {
+                                        Ok((name.clone(), self.expand_value(member, depth + 1)?))
+                                    })
+                                    .collect::<Result<_, AiError>>()?,
+                            )
+                        }
+                        (
+                            "items" | "additionalProperties" | "propertyNames" | "not" | "contains",
+                            Value::Object(_),
+                        )
+                        | ("anyOf" | "oneOf" | "allOf" | "prefixItems", Value::Array(_)) => {
+                            self.expand_value(child, depth + 1)?
+                        }
+                        _ => child.clone(),
+                    };
+                    expanded.insert(key.clone(), child);
                 }
                 Ok(Value::Object(expanded))
             }
@@ -419,7 +436,15 @@ impl<'a> Arena<'a> {
                 Value::Object(
                     object
                         .iter()
-                        .map(|(key, child)| (key.clone(), self.emit_shape(child, names)))
+                        .map(|(key, child)| {
+                            let child = match (key.as_str(), child) {
+                                ("properties" | "patternProperties", Value::Object(members)) => Value::Object(members.iter().map(|(name, member)| (name.clone(), self.emit_shape(member, names))).collect()),
+                                ("items" | "additionalProperties" | "propertyNames" | "not" | "contains", Value::Object(_))
+                                | ("anyOf" | "oneOf" | "allOf" | "prefixItems", Value::Array(_)) => self.emit_shape(child, names),
+                                _ => child.clone(),
+                            };
+                            (key.clone(), child)
+                        })
                         .collect(),
                 )
             }
@@ -556,15 +581,23 @@ mod tests {
 
     #[test]
     fn every_fixture_round_trips_with_root_annotations() {
-        let fixtures = [json!({"type":"object"}), string_filter(), where_input(), plan_schema()];
+        let fixtures = [
+            json!({"type":"object"}),
+            string_filter(),
+            where_input(),
+            plan_schema(),
+        ];
         for fixture in fixtures {
             for description in [json!("x"), json!(null), json!({"extension":true})] {
                 let mut schema = fixture.clone();
                 let root = schema.as_object_mut().unwrap();
                 root.insert("description".into(), description);
                 root.insert("title".into(), json!("Root"));
-                root.insert("examples".into(), json!([{}, {"description":"data"}]));
-                root.insert("default".into(), json!({"title":"data"}));
+                root.insert(
+                    "examples".into(),
+                    json!([{}, {"description":"data", "$ref":"#/types/literal"}]),
+                );
+                root.insert("default".into(), json!({"title":"data", "\u{0}node":0}));
                 let compiled = AiSharedTypePlanSchema::compile(&schema, &names()).unwrap();
                 assert_eq!(compiled.expand().unwrap(), schema);
             }

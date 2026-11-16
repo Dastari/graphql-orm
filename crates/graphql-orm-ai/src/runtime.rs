@@ -966,7 +966,10 @@ impl AiRuntime {
         )
     }
 
-    fn mutation_effect_guard(&self, prepared: &AiPreparedGraphqlMutation) -> Option<graphql_orm::graphql::orm::DependentDeleteGuard> {
+    fn mutation_effect_guard(
+        &self,
+        prepared: &AiPreparedGraphqlMutation,
+    ) -> Option<graphql_orm::graphql::orm::DependentDeleteGuard> {
         self.dependent_effect_policy.as_ref().and_then(|policy| {
             let capability = self.tool_catalog.mutation_capability(&prepared.descriptor.id)?;
             if !matches!(capability.generated_category(), Some(graphql_orm_operation_catalog::GeneratedGraphqlOperationCategory::Delete | graphql_orm_operation_catalog::GeneratedGraphqlOperationCategory::DeleteMany)) { return None; }

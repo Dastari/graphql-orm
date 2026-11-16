@@ -75,7 +75,9 @@ pub struct AiCapabilityDeliveryLimits {
     pub maximum_describe_bytes: u32,
 }
 
-fn is_false(value: &bool) -> bool { !value }
+fn is_false(value: &bool) -> bool {
+    !value
+}
 
 const fn default_maximum_retained_searches() -> u16 {
     4
@@ -530,7 +532,9 @@ pub fn select_capability_delivery_mode(
         Some(AiCapabilityDeliveryMode::EagerExact)
     } else if supported.contains(&AiCapabilityDeliveryMode::ProviderDeferred) {
         if limits.prefer_fixed_broker_for_large_surfaces
-            && !eager_fits && supported.contains(&AiCapabilityDeliveryMode::FixedBroker) {
+            && !eager_fits
+            && supported.contains(&AiCapabilityDeliveryMode::FixedBroker)
+        {
             // Never choose a mode whose request size grows with the
             // catalogue while a constant-size one is available.
             Some(AiCapabilityDeliveryMode::FixedBroker)
@@ -3133,16 +3137,41 @@ mod tests {
             ..ProviderCapabilities::default()
         };
         let selected = select_capability_delivery_mode(
-            &provider, 55, 4_917_706, false, AiCapabilityDeliveryLimits::default()
-        ).unwrap().mode();
+            &provider,
+            55,
+            4_917_706,
+            false,
+            AiCapabilityDeliveryLimits::default(),
+        )
+        .unwrap()
+        .mode();
         assert_eq!(selected, AiCapabilityDeliveryMode::ProviderDeferred);
-        let binding = |mode| AiProviderCapabilitySessionBinding::new(
-            mode, "a".repeat(64), BTreeSet::new(), "v1", "model",
-            ModelReasoningEffort::default(), "b".repeat(64)
-        ).unwrap();
-        assert_eq!(binding(selected).fingerprint(), binding(AiCapabilityDeliveryMode::ProviderDeferred).fingerprint());
-        assert_eq!(binding(selected).fingerprint(), "525f9e792f18b8e566073f853724cd03161da7535a59dd5d9d9c1420e501f9dc");
-        assert!(serde_json::to_value(AiCapabilityDeliveryLimits::default()).unwrap().get("prefer_fixed_broker_for_large_surfaces").is_none());
+        let binding = |mode| {
+            AiProviderCapabilitySessionBinding::new(
+                mode,
+                "a".repeat(64),
+                BTreeSet::new(),
+                "v1",
+                "model",
+                ModelReasoningEffort::default(),
+                "b".repeat(64),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            binding(selected).fingerprint(),
+            binding(AiCapabilityDeliveryMode::ProviderDeferred).fingerprint()
+        );
+        assert_eq!(
+            binding(selected).fingerprint(),
+            "525f9e792f18b8e566073f853724cd03161da7535a59dd5d9d9c1420e501f9dc"
+        );
+        assert!(
+            serde_json::to_value(AiCapabilityDeliveryLimits::default())
+                .unwrap()
+                .get("prefer_fixed_broker_for_large_surfaces")
+                .is_none()
+        );
     }
 
     #[test]
