@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.165.0 preserves the stored value of an optional field when its
+write policy denies an upsert update and the host opts to ignore that denial.
+Recompile entities with aligned ORM/macros versions. See the
+[migration guide](../../MIGRATION.md#01640-to-01650-atomic-restore-search-reset-and-kept-values-on-ignored-denials).
+
 Version 0.164.0 adds opt-in contract settings and one stable code. A GraphQL
 page limit above the maximum can be refused with `PAGE_LIMIT_EXCEEDED` instead
 of being reduced (`DatabaseBuilder::refuse_oversized_page_limit`), and

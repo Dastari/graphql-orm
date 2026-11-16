@@ -1103,3 +1103,108 @@ async fn journal_upgrade_rolls_back_when_it_is_cancelled() -> Result<(), Box<dyn
     std::fs::remove_dir_all(&directory)?;
     Ok(())
 }
+
+/// A snapshot restores in one transaction: when a later table fails in the
+/// database, the tables imported before it are rolled back too, so the target
+/// is still empty and the restore can simply be retried.
+#[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
+async fn a_failed_table_rolls_back_the_whole_snapshot_restore()
+-> Result<(), Box<dyn std::error::Error>> {
+    let source_pool = setup_pool().await?;
+    let source = graphql_orm::db::Database::new(source_pool.clone());
+    apply_schema(&source, "2026111501_backup_atomic_source").await?;
+    let account = BackupRtAccount::insert(
+        &source_pool,
+        CreateBackupRtAccountInput {
+            email: "atomic@example.com".to_string(),
+            password_hash: "secret-hash".to_string(),
+            reset_token: None,
+            profile: BackupProfile::default(),
+            preferences: None,
+            avatar: vec![1],
+            nickname: None,
+            balance: Decimal::new(1, 0),
+            credit_limit: None,
+        },
+    )
+    .await?;
+    BackupRtNote::insert(
+        &source_pool,
+        CreateBackupRtNoteInput {
+            account_id: account.id,
+            body: "atomic".to_string(),
+        },
+    )
+    .await?;
+    let schema_snapshot =
+        source.schema_snapshot("2026111501_backup_atomic", &graphql_orm_entity_metadata());
+    let mut snapshot = source.begin_consistent_snapshot().await?;
+    let mut rows_by_table = BTreeMap::new();
+    for descriptor in source.list_backup_entities(&graphql_orm_entity_metadata()) {
+        let rows = source.export_table_rows(&mut snapshot, &descriptor).await?;
+        rows_by_table.insert(descriptor.table_name, rows);
+    }
+    drop(snapshot);
+
+    let dest_pool = setup_pool().await?;
+    let dest = graphql_orm::db::Database::new(dest_pool.clone());
+    apply_schema(&dest, "2026111502_backup_atomic_dest").await?;
+    // The notes table restores after the accounts table. Its rows pass every
+    // check made before the first write and are then refused by the database.
+    #[cfg(feature = "sqlite")]
+    let refuse: &[&str] = &[
+        "CREATE TRIGGER backup_rt_notes_refuse BEFORE INSERT ON backup_rt_notes BEGIN SELECT RAISE(ABORT, 'notes are refused'); END",
+    ];
+    #[cfg(feature = "postgres")]
+    let refuse: &[&str] = &[
+        "CREATE OR REPLACE FUNCTION backup_rt_notes_refuse() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'notes are refused'; END $$",
+        "CREATE TRIGGER backup_rt_notes_refuse BEFORE INSERT ON backup_rt_notes FOR EACH ROW EXECUTE FUNCTION backup_rt_notes_refuse()",
+    ];
+    for statement in refuse {
+        sqlx::query(statement).execute(&dest_pool).await?;
+    }
+
+    let error = dest
+        .restore_backup_rows(
+            &schema_snapshot,
+            &schema_snapshot,
+            &rows_by_table,
+            &RestoreContext::empty_database(),
+        )
+        .await
+        .expect_err("the notes table is refused");
+    assert!(error.to_string().contains("notes are refused"), "{error}");
+    for table in ["backup_rt_accounts", "backup_rt_notes"] {
+        let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+            .fetch_one(&dest_pool)
+            .await?;
+        assert_eq!(
+            count, 0,
+            "{table} must be rolled back with the failed table"
+        );
+    }
+
+    // With the fault removed the same restore succeeds, with no cleanup.
+    #[cfg(feature = "sqlite")]
+    let allow = "DROP TRIGGER backup_rt_notes_refuse";
+    #[cfg(feature = "postgres")]
+    let allow = "DROP TRIGGER backup_rt_notes_refuse ON backup_rt_notes";
+    sqlx::query(allow).execute(&dest_pool).await?;
+    dest.restore_backup_rows(
+        &schema_snapshot,
+        &schema_snapshot,
+        &rows_by_table,
+        &RestoreContext::empty_database(),
+    )
+    .await?;
+    assert!(
+        BackupRtAccount::get(&dest_pool, &account.id)
+            .await?
+            .is_some()
+    );
+    Ok(())
+}

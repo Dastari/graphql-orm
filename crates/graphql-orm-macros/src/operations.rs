@@ -2982,6 +2982,14 @@ fn generate_graphql_operations_unfiltered(
                                 };
                                 if !__gom_field_write_allowed {
                                     input.#field_name = None;
+                                    // The host ignores this denial. On an
+                                    // existing row the conflict update must
+                                    // then leave the column alone: writing
+                                    // the cleared input would overwrite the
+                                    // stored value the policy protects.
+                                    if current_entity.is_some() {
+                                        __gom_denied_upsert_columns.push(#db_col);
+                                    }
                                 }
                             }
                         } else {
@@ -4496,6 +4504,33 @@ fn generate_graphql_operations_unfiltered(
     } else {
         quote! { String::new() }
     };
+    // The GraphQL upsert drops update candidates whose denied write the host
+    // ignores, so its conflict update is assembled per statement.
+    let upsert_graphql_sql_expression = if upsert_config.is_some() {
+        quote! {
+            {
+                let __gom_update_candidates: &[(&'static str, &'static str)] = &[
+                    #((#upsert_change_field_literals, #upsert_update_column_literals)),*
+                ];
+                let __gom_update_columns: Vec<&'static str> = __gom_update_candidates
+                    .iter()
+                    .filter(|(column, _)| !__gom_denied_upsert_columns.contains(column))
+                    .map(|(_, rendered)| *rendered)
+                    .collect();
+                ::graphql_orm::graphql::orm::build_upsert_sql_with_managed_version(
+                    #table_name,
+                    &[#(#upsert_insert_column_literals),*],
+                    &[#(#upsert_insert_value_literals),*],
+                    &[#(#upsert_conflict_column_literals),*],
+                    &__gom_update_columns,
+                    #has_updated_at_column,
+                    #managed_version_column_option,
+                )
+            }
+        }
+    } else {
+        quote! { String::new() }
+    };
     let composite_upsert_policy_guard = if composite_repository_mutations {
         quote! { Self::__gom_require_repository_write_policy(&db)?; }
     } else {
@@ -4699,6 +4734,10 @@ fn generate_graphql_operations_unfiltered(
                         current_entity as &(dyn ::std::any::Any + Send + Sync),
                     ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                 }
+                // Update candidates whose write the policy denied and the host
+                // chose to ignore: they stay out of the conflict update.
+                #[allow(unused_mut)]
+                let mut __gom_denied_upsert_columns: Vec<&'static str> = Vec::new();
                 #(#upsert_policy_checks_graphql)*
 
                 #created_pk_init
@@ -4718,7 +4757,7 @@ fn generate_graphql_operations_unfiltered(
                     .unwrap_or_else(|| #created_pk_id_string);
                 let lookup_input = input.clone();
                 let change_input = input.clone();
-                let sql = #struct_name::__gom_rebind_sql(&#upsert_sql_expression, 1);
+                let sql = #struct_name::__gom_rebind_sql(&#upsert_graphql_sql_expression, 1);
                 let mut bind_values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
                 #prepend_pk_bind
                 #(#insert_binds_graphql)*
@@ -4726,7 +4765,9 @@ fn generate_graphql_operations_unfiltered(
                     let input = change_input;
                     let mut bind_values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
                     #(#upsert_change_binds_graphql)*
-                    ::graphql_orm::graphql::orm::mutation_changes(&[#(#upsert_change_field_literals),*], &bind_values)
+                    let mut changes = ::graphql_orm::graphql::orm::mutation_changes(&[#(#upsert_change_field_literals),*], &bind_values);
+                    changes.retain(|change| !__gom_denied_upsert_columns.contains(&change.field.as_str()));
+                    changes
                 } else {
                     ::graphql_orm::graphql::orm::mutation_changes(&[#(#create_mutation_field_literals),*], &bind_values)
                 };

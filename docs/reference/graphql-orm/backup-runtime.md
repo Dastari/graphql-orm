@@ -99,18 +99,30 @@ shapes and value kinds (including canonical portable DateTime text), in-snapshot
 in `EmptyDatabase` mode the emptiness of all target tables. `DryRun` performs the input checks
 without importing rows. A late invalid row shape or value therefore leaves every target table untouched.
 
-Imports use one transaction per table, with row-count checks and post-commit re-export/hash
-verification. A later database failure or verification failure can leave earlier tables committed;
-restore does not promise a transaction across all tables.
+`restore_backup_rows` imports every table of the snapshot in one transaction, on PostgreSQL and
+SQLite. Each table's row count and re-exported row hashes are checked inside that transaction, and
+it commits once at the end. A table the database refuses, or a failed check, rolls back every table
+imported before it: the target is as it was, and the restore can be retried without cleanup. The
+transaction stays open for the whole restore, so size the restoring role's PostgreSQL
+`statement_timeout` and `idle_in_transaction_session_timeout` for the largest snapshot.
+`import_table_rows` restores one table in a transaction of its own.
+
+The same transaction resets the runtime search index of every restored table: its documents are
+deleted and its readiness set to `building`, so search is refused until
+`backfill_runtime_search` rebuilds it (see
+[runtime search](runtime-search.md#backup-and-restore)). Static search documents are not rebuilt.
+
+SQL Server has no ORM restore. A host that restores it with its own statements records a
+[restore-in-progress marker](mssql.md#restore-in-progress-marker) instead.
 
 A single-key table whose dependency targets its own key restores parent-first. Rows that
 parent-first order cannot place (rows on a self-reference cycle, and the rows below them) are
 inserted after the others with placeholder self-reference values: `NULL` in a nullable column, the
 row's own key in a non-null one (a row that references itself satisfies its foreign key at the end
-of the statement). Each row is then updated to its stored values, in the table's import
+of the statement). Each row is then updated to its stored values, in the restore's
 transaction, before count and hash validation. `NULL` placeholders never collide on a `UNIQUE`
 column. A non-null `UNIQUE` self-reference cycle cannot be staged that way, and an append-only
-table refuses the update; the table's transaction rolls back and the error carries
+table refuses the update; the restore's transaction rolls back and the error carries
 `BackupSelfReferenceCycle` (read it with `BackupSelfReferenceCycle::from_error`). Constraint
 violations and explicit trigger refusals (SQLite `SQLITE_CONSTRAINT_TRIGGER`; PostgreSQL
 `raise_exception`, `triggered_action_exception`, or `triggered_data_change_violation`) receive this

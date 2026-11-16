@@ -72,7 +72,7 @@ struct Deny {
 }
 impl FieldPolicy for Deny {
     fn ignore_denied_field_write(&self, entity: &'static str, field: &'static str) -> bool {
-        self.legacy && entity == "WriteRecord" && matches!(field, "optional" | "required")
+        self.legacy && entity == "WriteRecord" && matches!(field, "optional" | "required" | "note")
     }
     fn can_read_field<'a>(
         &'a self,
@@ -342,13 +342,31 @@ async fn run(operation: &str, field: &str, legacy: bool, fail: bool) {
     if ignored {
         assert!(rows.iter().any(|row| row.2 == "after"), "{rows:?}");
         assert!(
-            rows.iter().all(|row| if field == "optional" {
-                row.1.as_deref() != Some("after")
-            } else {
-                row.0 != "after"
+            rows.iter().all(|row| match field {
+                "optional" => row.1.as_deref() != Some("after"),
+                "note" => true,
+                _ => row.0 != "after",
             }),
             "{rows:?}"
         );
+        // An ignored denial never changes the stored value of an existing
+        // row: the denied column is left out of the write, not cleared.
+        if operation != "create" && operation != "upsert_new" {
+            let kept = if field == "note" {
+                existing_note.clone()
+            } else {
+                let index = rows.iter().position(|row| row.2 == "after").unwrap();
+                match field {
+                    "optional" => rows[index].1.clone(),
+                    _ => Some(rows[index].0.clone()),
+                }
+            };
+            assert_eq!(
+                kept.as_deref(),
+                Some("before"),
+                "{operation}/{field}: {rows:?}"
+            );
+        }
     } else {
         assert_eq!(
             rows,
@@ -361,7 +379,9 @@ async fn run(operation: &str, field: &str, legacy: bool, fail: bool) {
     owner.cleanup().unwrap();
 }
 fn ignored_operation(operation: &str, field: &str, legacy: bool, fail: bool) -> bool {
-    legacy && !fail && (field == "optional" || matches!(operation, "update" | "bulk"))
+    legacy
+        && !fail
+        && (matches!(field, "optional" | "note") || matches!(operation, "update" | "bulk"))
 }
 macro_rules! case {
     ($name:ident, $op:literal, $field:literal) => {
@@ -396,6 +416,21 @@ async fn explicit_opt_out_preserves_legacy_omission() {
         for field in ["optional", "required"] {
             run(operation, field, true, false).await;
         }
+    }
+}
+/// An upsert that resolves to an existing row keeps the stored value of a
+/// field whose denied write the host ignores: the column is left out of the
+/// conflict update instead of being written as NULL. This holds for a field
+/// with a declared policy key and for a key-less optional field the client
+/// left out.
+#[tokio::test]
+#[cfg_attr(
+    any(feature = "postgres", feature = "mssql"),
+    ignore = "requires test-owned disposable database"
+)]
+async fn ignored_denial_keeps_the_stored_value_on_an_existing_row_upsert() {
+    for field in ["optional", "note"] {
+        run("upsert_existing", field, true, false).await;
     }
 }
 #[tokio::test]

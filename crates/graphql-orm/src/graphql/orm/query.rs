@@ -4119,6 +4119,15 @@ pub fn render_upsert_sql_with_managed_version(
             assignments.push(format!("target.{quoted} = target.{quoted} + 1"));
             predicates.push(format!("target.{quoted} < {}", i64::MAX));
         }
+        // With nothing to set, the update still has to find the existing row
+        // (its row count decides whether the insert runs), so it assigns one
+        // conflict column its own stored value.
+        if assignments.is_empty()
+            && let Some(column) = conflict_columns.first()
+        {
+            let quoted = dialect.quote_identifier_path(column);
+            assignments.push(format!("target.{quoted} = target.{quoted}"));
+        }
         let predicates = predicates.join(" AND ");
         let source_projection = insert_values
             .iter()
@@ -4184,6 +4193,14 @@ pub fn render_upsert_sql_with_managed_version(
         let quoted = dialect.quote_identifier_path(column);
         set_clauses.push(format!("{quoted} = {quoted_table}.{quoted} + 1"));
         version_guard = format!(" WHERE {quoted_table}.{quoted} < {}", i64::MAX);
+    }
+    // `DO UPDATE` needs an assignment. With nothing to set, keep one conflict
+    // column at its stored value: the statement still resolves to the row.
+    if set_clauses.is_empty()
+        && let Some(column) = conflict_columns.first()
+    {
+        let quoted = dialect.quote_identifier_path(column);
+        set_clauses.push(format!("{quoted} = {quoted_table}.{quoted}"));
     }
 
     format!(

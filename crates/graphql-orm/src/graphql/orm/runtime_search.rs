@@ -367,10 +367,93 @@ pub(crate) fn metadata_ready(config: Option<&serde_json::Value>) -> bool {
         == Some(READINESS_READY)
 }
 
+/// Mark a readiness-tracked index configuration `building` with no resume
+/// point. Returns `false`, changing nothing, for a configuration that does not
+/// track readiness (a static search index).
+pub(crate) fn mark_building(config: &mut serde_json::Value) -> bool {
+    let Some(object) = config.as_object_mut() else {
+        return false;
+    };
+    if !object.contains_key("readiness") {
+        return false;
+    }
+    object.insert("readiness".into(), READINESS_BUILDING.into());
+    object.remove("backfill_after");
+    true
+}
+
+/// The storage that holds the search documents of `table`.
+fn document_table(backend: DatabaseBackend, table: &str) -> Option<String> {
+    match backend {
+        DatabaseBackend::Postgres => Some(super::search::search_table_name(table)),
+        DatabaseBackend::Sqlite => Some(super::search::sqlite_fts_table_name(table)),
+        DatabaseBackend::Mysql | DatabaseBackend::Mssql => None,
+    }
+}
+
 impl<B> super::SchemaManager<'_, B>
 where
     B: super::RuntimeMutationBackend + super::runtime_migration::RuntimeMigrationBackend,
 {
+    /// Discard a runtime collection's search documents and mark its index
+    /// `building`, in one transaction, so its `search` argument is refused
+    /// until [`Self::backfill_runtime_search`] rebuilds the index.
+    ///
+    /// Call it after the collection's rows were written by anything other
+    /// than the ORM's own writes, for example a row-level import: the index
+    /// would otherwise stay `ready` with documents that no longer match its
+    /// rows. A whole-snapshot restore through `restore_backup_rows` (PostgreSQL
+    /// and SQLite) does this itself for every restored table. Resetting an index that is already
+    /// `building` restarts its backfill from the first row.
+    ///
+    /// On PostgreSQL the reset holds the index's metadata row, so it waits
+    /// for a running backfill batch and the next batch starts from the reset
+    /// state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeMigrationDiagnosticCode::SearchNotDeclared`](super::RuntimeMigrationDiagnosticCode::SearchNotDeclared)
+    /// when the collection has no search or its search storage does not
+    /// exist, or a database failure.
+    pub async fn reset_runtime_search(
+        &self,
+        schema: &ValidatedRuntimeSchema,
+        collection: &CollectionId,
+    ) -> Result<(), super::runtime_migration::RuntimeMigrationError> {
+        let found = schema
+            .schema()
+            .collections
+            .iter()
+            .find(|candidate| &candidate.id == collection)
+            .filter(|candidate| candidate.search.is_some())
+            .ok_or_else(|| not_declared(collection))?;
+        let table = found.physical_table.clone();
+        let documents =
+            document_table(B::DIALECT, &table).ok_or_else(|| not_declared(collection))?;
+        let reset = self
+            .database
+            .transaction(super::TransactionMode::Default, move |tx| {
+                Box::pin(async move {
+                    let Some(mut config) = read_metadata_with(tx, &table, true).await? else {
+                        return Ok(false);
+                    };
+                    if !mark_building(&mut config) {
+                        return Ok(false);
+                    }
+                    tx.execute(&format!("DELETE FROM {documents}"), &[]).await?;
+                    write_metadata(tx, &table, &config).await?;
+                    Ok(true)
+                })
+            })
+            .await
+            .map_err(transaction_failure)?;
+        if reset {
+            Ok(())
+        } else {
+            Err(not_declared(collection))
+        }
+    }
+
     /// Whether a runtime collection's search index is `ready`, so its `search`
     /// argument is admitted.
     ///
