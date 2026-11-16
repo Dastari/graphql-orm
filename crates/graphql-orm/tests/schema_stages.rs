@@ -376,7 +376,15 @@ async fn sqlite_schema_stage_rebuilds_related_tables_in_one_stage()
     .execute(&pool)
     .await?;
 
-    database.apply_schema_stages(&stages).await?;
+    database
+        .apply_schema_stages_with_options(
+            &stages,
+            graphql_orm::graphql::orm::ApplyOptions {
+                allow_destructive: true,
+                ..Default::default()
+            },
+        )
+        .await?;
 
     let row = sqlx::query(
         "SELECT vocabularies.slug AS slug, vocabulary_terms.term AS term
@@ -1012,5 +1020,68 @@ async fn abi_upgrade_checks_the_baseline_hash_once_before_any_stage()
     assert!(tables.contains(&"gate_abi_two".to_string()));
     assert!(tables.contains(&"gate_abi_three".to_string()));
     assert_eq!(applied_stage_count(&pool, &prefix).await?, 3);
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
+async fn stages_and_abi_upgrades_preserve_undeclared_host_tables()
+-> Result<(), Box<dyn std::error::Error>> {
+    use graphql_orm::graphql::orm::{ApplyOptions, MigrationRisk, SchemaAbi, SchemaStageRunner};
+
+    for use_abi in [false, true] {
+        let pool = setup_pool().await?;
+        let database = graphql_orm::db::Database::new(pool.clone());
+        sqlx::query("CREATE TABLE safety_host (id TEXT PRIMARY KEY NOT NULL)")
+            .execute(&pool)
+            .await?;
+        sqlx::query("INSERT INTO safety_host VALUES ('retained')")
+            .execute(&pool)
+            .await?;
+        let prefix = gate_prefix("managed_only")?;
+        let v1 = format!("{prefix}_01");
+        let v2 = format!("{prefix}_02");
+        let stages = vec![
+            gate_stage(&v1, vec![gate_table("safety_owned", &[])]),
+            gate_stage(&v2, vec![]),
+        ];
+        let plans = database.plan_schema_stages(&stages).await?;
+        assert_eq!(plans.len(), 2);
+        assert!(
+            plans[0]
+                .steps()
+                .iter()
+                .all(|step| step.risk != MigrationRisk::Destructive)
+        );
+        assert!(
+            plans[1]
+                .steps()
+                .iter()
+                .any(|step| step.risk == MigrationRisk::Destructive)
+        );
+        let options = ApplyOptions {
+            allow_destructive: true,
+            ..ApplyOptions::default()
+        };
+        if use_abi {
+            database
+                .schema()
+                .apply_upgrade(&SchemaAbi::new(stages)?, &v2, options)
+                .await?;
+        } else {
+            database
+                .apply_schema_stages_with_options(&stages, options)
+                .await?;
+        }
+        assert_eq!(gate_row_count(&pool, "safety_host").await?, 1);
+        assert!(
+            !gate_table_names(&pool)
+                .await?
+                .contains(&"safety_owned".to_string())
+        );
+    }
     Ok(())
 }

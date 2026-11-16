@@ -655,3 +655,142 @@ fn non_searchable_module_keeps_original_list_arguments() {
         ["where", "orderBy", "first", "after", "last", "before"]
     );
 }
+
+/// Rows written outside the ORM's own writes (a row-level import, or a
+/// snapshot restore) leave a `ready` index describing other rows. A reset, or
+/// the restore itself, discards the documents and refuses search with
+/// `search_index_not_ready` until a backfill rebuilds the index.
+#[tokio::test]
+async fn restored_rows_reset_readiness_until_a_backfill_completes() {
+    #[cfg(feature = "postgres")]
+    let owned = owned_postgres::OwnedPostgres::start("runtime-search-reset").unwrap();
+    #[cfg(feature = "postgres")]
+    let database = Database::<Backend>::connect_postgres(&owned.url)
+        .await
+        .unwrap();
+    #[cfg(feature = "sqlite")]
+    let database = Database::<Backend>::connect_sqlite("sqlite::memory:")
+        .await
+        .unwrap();
+    let records = CollectionId::new("records").unwrap();
+    let not_ready = Err("\"search_index_not_ready\"".to_owned());
+    let run = |sql: &'static str| {
+        let database = database.clone();
+        async move {
+            graphql_orm::sqlx::query(sql)
+                .execute(database.pool())
+                .await
+                .unwrap();
+        }
+    };
+
+    let schema = Arc::new(definition().validate().unwrap());
+    migrate_deferred(&database, "init", &schema).await;
+    run("INSERT INTO gql_search_records (id, tenant, title, body) VALUES (1, 'north', 'Harbour bridge', 'steel')").await;
+    let backfill = || async {
+        database
+            .schema()
+            .backfill_runtime_search(&schema, &records, Default::default())
+            .await
+            .unwrap()
+    };
+    assert!(backfill().await.ready);
+    assert_eq!(
+        search_ids(&database, &schema, "bridge").await.unwrap(),
+        ["1"]
+    );
+
+    // A row-level import replaces the rows behind a `ready` index.
+    run("DELETE FROM gql_search_records").await;
+    run("INSERT INTO gql_search_records (id, tenant, title, body) VALUES (2, 'north', 'Ferry wharf', 'timber')").await;
+    database
+        .schema()
+        .reset_runtime_search(&schema, &records)
+        .await
+        .unwrap();
+    assert_eq!(search_ids(&database, &schema, "wharf").await, not_ready);
+    // A reset of an index that is already `building` is repeatable.
+    database
+        .schema()
+        .reset_runtime_search(&schema, &records)
+        .await
+        .unwrap();
+    let rebuilt = backfill().await;
+    assert!(rebuilt.ready && rebuilt.processed == 1, "{rebuilt:?}");
+    assert_eq!(
+        search_ids(&database, &schema, "wharf").await.unwrap(),
+        ["2"]
+    );
+    assert!(
+        search_ids(&database, &schema, "bridge")
+            .await
+            .unwrap()
+            .is_empty(),
+        "the reset discarded the document of the replaced row"
+    );
+
+    // A snapshot restore into the emptied table resets the index itself.
+    let descriptor = EntityBackupDescriptor {
+        entity_name: "Record".into(),
+        table_name: "gql_search_records".into(),
+        primary_key_column: "id".into(),
+        primary_key_columns: Vec::new(),
+        retention_purge: false,
+        export_order: 10,
+        restore_order: 10,
+        columns: [
+            ("id", BackupValueKind::Integer, true),
+            ("tenant", BackupValueKind::String, false),
+            ("title", BackupValueKind::String, false),
+            ("body", BackupValueKind::String, false),
+        ]
+        .into_iter()
+        .map(|(name, kind, key)| ColumnBackupDescriptor {
+            column_name: name.into(),
+            rust_field_name: name.into(),
+            logical_type: kind,
+            decimal: None,
+            nullable: false,
+            is_primary_key: key,
+            is_generated: false,
+            backup_policy: ColumnBackupPolicy::Include,
+        })
+        .collect(),
+        dependencies: vec![],
+    };
+    let entities = vec![descriptor.clone()];
+    let snapshot = GraphqlOrmSchemaSnapshot {
+        backend: format!("{:?}", Backend::DIALECT),
+        migration_version: "search".into(),
+        schema_hash: stable_schema_hash(&entities),
+        entities,
+    };
+    let mut export = database.begin_consistent_snapshot().await.unwrap();
+    let rows = database
+        .export_table_rows(&mut export, &descriptor)
+        .await
+        .unwrap();
+    drop(export);
+    assert_eq!(rows.len(), 1);
+    run("DELETE FROM gql_search_records").await;
+    assert_eq!(
+        search_ids(&database, &schema, "wharf").await.unwrap(),
+        Vec::<String>::new(),
+        "the index is still ready, with a document for a row that is gone"
+    );
+    database
+        .restore_backup_rows(
+            &snapshot,
+            &snapshot,
+            &std::collections::BTreeMap::from([("gql_search_records".to_string(), rows)]),
+            &RestoreContext::empty_database(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(search_ids(&database, &schema, "wharf").await, not_ready);
+    assert!(backfill().await.ready);
+    assert_eq!(
+        search_ids(&database, &schema, "wharf").await.unwrap(),
+        ["2"]
+    );
+}

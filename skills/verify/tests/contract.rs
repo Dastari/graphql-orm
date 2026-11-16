@@ -1479,40 +1479,80 @@ async fn repository_entities_persist_without_a_graphql_surface() {
 }
 
 #[tokio::test]
-async fn a_migration_plan_drops_entities_left_out_of_it() {
+async fn a_migration_plan_drops_entities_left_out_of_it_only_when_strict() {
+    use graphql_orm::graphql::orm::PlanOptions;
+
     let db = database().await;
+    // The default plan leaves every table the target does not declare alone.
     let partial = db
         .schema()
         .plan_migration_to_entities("partial", "partial", &[Customer::metadata()])
         .await
         .unwrap();
     assert!(
-        partial
+        !partial
             .statements
             .iter()
             .any(|sql| sql.contains("DROP TABLE")),
         "{:?}",
         partial.statements
     );
+    // A strict plan drops them, and the drop needs destructive admission.
+    let strict = db
+        .schema()
+        .plan_migration_to_entities_with_options(
+            "partial",
+            "partial",
+            &[Customer::metadata()],
+            PlanOptions::strict(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        strict
+            .statements
+            .iter()
+            .any(|sql| sql.contains("DROP TABLE")),
+        "{:?}",
+        strict.statements
+    );
     assert!(
         db.schema()
-            .apply_migration(&partial, ApplyOptions::default())
+            .apply_migration(&strict, ApplyOptions::default())
             .await
             .is_err()
     );
+    assert_eq!(Order::count_all(&db).await.unwrap(), 0);
 }
 
 #[tokio::test]
 async fn a_schema_stage_that_drops_entities_is_refused_without_opt_in() {
-    use graphql_orm::graphql::orm::{SchemaStage, SchemaStageRunner};
+    use graphql_orm::graphql::orm::{MigrationStep, SchemaStage, SchemaStageRunner};
 
     let db = database().await;
     seed(&db).await;
-    let stages = [SchemaStage::from_entities(
-        "partial-stage",
-        "partial stage",
-        &[Customer::metadata()],
-    )];
+    // A stage never drops a table that no stage declared.
+    let undeclared = db
+        .plan_schema_stages(&[SchemaStage::from_entities(
+            "customer-only-stage",
+            "customer only",
+            &[Customer::metadata()],
+        )])
+        .await
+        .unwrap();
+    assert!(
+        undeclared.iter().all(|stage| stage
+            .plan
+            .steps
+            .iter()
+            .all(|step| !matches!(step, MigrationStep::DropTable { .. }))),
+        "{undeclared:?}"
+    );
+    // A later stage that omits a table an earlier stage declared drops it.
+    let stages = [
+        SchemaStage::from_entities("full-stage", "full stage", &entities()),
+        SchemaStage::from_entities("partial-stage", "partial stage", &[Customer::metadata()]),
+    ];
     let refusal = db.apply_schema_stages(&stages).await.unwrap_err();
     assert!(
         matches!(
@@ -1538,10 +1578,17 @@ async fn a_schema_stage_that_drops_entities_is_refused_without_opt_in() {
 
 #[tokio::test]
 async fn additive_only_rejects_a_plan_with_a_non_additive_step() {
+    use graphql_orm::graphql::orm::PlanOptions;
+
     let db = database().await;
     let partial = db
         .schema()
-        .plan_migration_to_entities("partial", "partial", &[Customer::metadata()])
+        .plan_migration_to_entities_with_options(
+            "partial",
+            "partial",
+            &[Customer::metadata()],
+            PlanOptions::strict(),
+        )
         .await
         .unwrap();
     let options = ApplyOptions {

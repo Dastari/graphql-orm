@@ -10,6 +10,72 @@ supersedes: []
 
 # Migration Guide
 
+## To 0.25.0: result and error types, target clear on journaled databases
+
+Upgrade backup and, for the optional ORM adapter, ORM/macros to 0.163.0 on
+the same reviewed revision.
+
+- **`PruneResult`, `DeleteSnapshotResult` and `BackupError` are
+  `#[non_exhaustive]`. Action needed** for code that builds one of the result
+  structs with a struct literal or destructures it without `..`, and for a
+  `match` on `BackupError` without a wildcard arm: read fields by name, and
+  add a `_` arm.
+- **`deleted_snapshot_ids` on both results. No action.** It lists the
+  snapshots whose deletion completed. Keep recording ids through the
+  `SnapshotDeletionObserver`: a call that fails returns no result.
+- **`BackupError::SnapshotNotAdmitted`. Action needed** only for code that
+  matched the refusal of a revoked or unlisted snapshot as
+  `ManifestAuthenticationFailed`: match the new variant, or call
+  `is_snapshot_not_admitted()`, which is unchanged.
+- **Target clear. No action.** ORM 0.163.0 makes journaled PostgreSQL tables
+  refuse `TRUNCATE`; `OrmBackupAdapter::clear_restore_target` now turns the
+  journal setting off in its own transaction, which the guard admits. Hosts
+  that clear a restore target with their own `TRUNCATE` must do the same, or
+  delete the rows; see the
+  [workspace migration guide](../../MIGRATION.md#breaking-release-unreleased).
+  Take a full backup after a restore to start a new incremental chain.
+
+## To 0.24.0: host-held snapshot records
+
+Upgrade backup to 0.24.0 and, when using the optional ORM adapter, ORM/macros
+to 0.160.0 on the same reviewed revision. Existing manifests, keys and
+repository identities need no conversion.
+
+- **Source compatible. No action** to keep compiling: no existing type,
+  field, variant or function signature changed.
+- **Snapshot records are opt-in. Action needed** to close the replay gap:
+  until a record is configured, a pruned snapshot that is put back into the
+  repository still verifies. Keep one of these outside the repository and
+  pass it to the authenticator on every start:
+  1. a revocation list: record every id your `SnapshotDeletionObserver` is
+     told about and configure `with_revoked_snapshots(ids)`; or
+  2. a known-snapshot list: add the id of every snapshot a backup or
+     compaction returns, remove the ids the observer is told about, and
+     configure `with_known_snapshots(ids)`. This also refuses a snapshot the
+     host never wrote down, at the cost of updating the record on every
+     backup.
+- **Use `prune_observed` and `delete_snapshot_observed`** in place of `prune`
+  and `delete_snapshot` to learn the ids. The observer is called under the
+  repository lock before each snapshot's first blob is deleted, and its error
+  aborts before that snapshot is touched. Make the id durable inside the
+  callback: the host then has every deleted id when the call fails after its
+  first deletion, is cancelled, or finishes but cannot release the lock
+  (`LockReleaseFailed`). It may also hold the id of a snapshot whose deletion
+  then failed; revoking a snapshot that is still stored is safe, and the next
+  prune removes it. `DeletedSnapshotLog` is an in-memory observer for hosts
+  that persist right after the call instead.
+- **Detecting a refused snapshot.** The refusal is
+  `BackupError::ManifestAuthenticationFailed`; `error.is_snapshot_not_admitted()`
+  tells it apart from a bad seal, also through a restore's
+  `RestoreStageFailed`.
+- **Removing a replayed snapshot.** `prune` fails with such an error while
+  one is listed. Delete it with `delete_snapshot(repository, id, ..)`.
+- **ORM adapter restore is one transaction. No action.** A failed
+  `restore_full` on PostgreSQL or SQLite now leaves the target empty. Hosts
+  that restore the tables of searchable runtime collections must backfill
+  their search indexes afterwards; see the
+  [workspace migration guide](../../MIGRATION.md#01590-to-01600-atomic-restore-search-reset-and-kept-values-on-ignored-denials).
+
 ## To 0.23.0: PostgreSQL mixed-case table restore
 
 When using the optional PostgreSQL ORM adapter, upgrade ORM/macros to 0.159.0

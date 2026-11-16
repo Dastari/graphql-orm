@@ -158,7 +158,13 @@ async fn populated_table_remove_add_change_and_duplicate_refusal()
         .await?;
     assert!(!remove.steps.is_empty());
     manager
-        .apply_migration(&remove, ApplyOptions::default())
+        .apply_migration(
+            &remove,
+            ApplyOptions {
+                allow_destructive: true,
+                ..ApplyOptions::default()
+            },
+        )
         .await?;
     let same = manager
         .plan_migration_to_entities_with_options(
@@ -253,7 +259,13 @@ async fn populated_table_remove_add_change_and_duplicate_refusal()
         .await?;
     assert!(!change.steps.is_empty());
     manager
-        .apply_migration(&change, ApplyOptions::default())
+        .apply_migration(
+            &change,
+            ApplyOptions {
+                allow_destructive: true,
+                ..ApplyOptions::default()
+            },
+        )
         .await?;
     sqlx::query("INSERT INTO unique_delta VALUES ('four','owner','name')")
         .execute(db.pool())
@@ -427,7 +439,13 @@ async fn sqlite_composite_rebuild_refuses_mixed_policy_changes()
         )
         .await?;
     db.schema()
-        .apply_migration(&plan, ApplyOptions::default())
+        .apply_migration(
+            &plan,
+            ApplyOptions {
+                allow_destructive: true,
+                ..ApplyOptions::default()
+            },
+        )
         .await?;
     sqlx::query("INSERT INTO unique_delta VALUES ('one','o','n')")
         .execute(db.pool())
@@ -445,7 +463,13 @@ async fn sqlite_composite_rebuild_refuses_mixed_policy_changes()
         .await?;
     let error = db
         .schema()
-        .apply_migration(&plan, ApplyOptions::default())
+        .apply_migration(
+            &plan,
+            ApplyOptions {
+                allow_destructive: true,
+                ..ApplyOptions::default()
+            },
+        )
         .await
         .unwrap_err();
     assert!(error.to_string().contains("UnsupportedCapability"));
@@ -795,7 +819,13 @@ async fn postgres_paired_fk_type_change_detaches_and_applies()
             );
         }
         db.schema()
-            .apply_migration(&plan, ApplyOptions::default())
+            .apply_migration(
+                &plan,
+                ApplyOptions {
+                    allow_destructive: true,
+                    ..ApplyOptions::default()
+                },
+            )
             .await?;
         if label == "create" {
             sqlx::query(&format!(
@@ -1024,7 +1054,13 @@ async fn postgres_member_column_change_applies_without_detaching_foreign_keys()
             );
         }
         db.schema()
-            .apply_migration(&plan, ApplyOptions::default())
+            .apply_migration(
+                &plan,
+                ApplyOptions {
+                    allow_destructive: true,
+                    ..ApplyOptions::default()
+                },
+            )
             .await?;
         if label == "create" {
             for table in ["accounts", "records"] {
@@ -1069,7 +1105,13 @@ async fn postgres_exclusion_constraint_index_is_not_an_ordinary_index()
         PlanOptions::managed_tables_only(),
     )?;
     db.schema()
-        .apply_migration(&plan, ApplyOptions::default())
+        .apply_migration(
+            &plan,
+            ApplyOptions {
+                allow_destructive: true,
+                ..ApplyOptions::default()
+            },
+        )
         .await?;
     sqlx::query(
         "ALTER TABLE accounts ADD CONSTRAINT accounts_name_exclusive \
@@ -1171,7 +1213,13 @@ async fn postgres_fk_target_keys_apply_drop_and_replan() -> Result<(), Box<dyn s
             )?;
             assert!(
                 db.schema()
-                    .apply_migration(&failed, ApplyOptions::default())
+                    .apply_migration(
+                        &failed,
+                        ApplyOptions {
+                            allow_destructive: true,
+                            ..ApplyOptions::default()
+                        },
+                    )
                     .await
                     .is_err()
             );
@@ -1387,7 +1435,13 @@ async fn sqlite_scheduled_removal_fixture()
             PlanOptions::managed_tables_only(),
         )?;
         db.schema()
-            .apply_migration(&plan, ApplyOptions::default())
+            .apply_migration(
+                &plan,
+                ApplyOptions {
+                    allow_destructive: true,
+                    ..ApplyOptions::default()
+                },
+            )
             .await?;
     }
     sqlx::query("INSERT INTO accounts VALUES ('parent', 'owner', 'name')")
@@ -1490,7 +1544,13 @@ async fn sqlite_scheduled_fk_removal_with_parent_key_removal_preserves_rows()
     let (db, without, _) = sqlite_scheduled_removal_fixture().await?;
     let plan = sqlite_scheduled_removal_plan(&db, &without).await?;
     db.schema()
-        .apply_migration(&plan, ApplyOptions::default())
+        .apply_migration(
+            &plan,
+            ApplyOptions {
+                allow_destructive: true,
+                ..ApplyOptions::default()
+            },
+        )
         .await?;
     let physical = introspect_sqlite_schema(db.pool()).await?;
     let same = db.schema().plan_migration_with_options(
@@ -1545,7 +1605,13 @@ async fn sqlite_scheduled_fk_removal_rolls_back_with_a_failed_plan()
         "INSERT INTO scheduled_removal_missing_table VALUES (1)".into(),
     );
     db.schema()
-        .apply_migration(&plan, ApplyOptions::default())
+        .apply_migration(
+            &plan,
+            ApplyOptions {
+                allow_destructive: true,
+                ..ApplyOptions::default()
+            },
+        )
         .await
         .expect_err("the failing statement must fail the plan");
     assert_sqlite_scheduled_removal_untouched(&db, &with).await
@@ -1571,7 +1637,13 @@ async fn sqlite_parent_key_removal_is_still_refused_without_a_scheduled_fk_remov
     plan.statements.swap(child, parent);
     let error = db
         .schema()
-        .apply_migration(&plan, ApplyOptions::default())
+        .apply_migration(
+            &plan,
+            ApplyOptions {
+                allow_destructive: true,
+                ..ApplyOptions::default()
+            },
+        )
         .await
         .unwrap_err();
     assert!(
@@ -1608,7 +1680,13 @@ async fn sqlite_parent_key_removal_is_still_refused_without_a_scheduled_fk_remov
     let plan = sqlite_scheduled_removal_plan(&db, &without).await?;
     let error = db
         .schema()
-        .apply_migration(&plan, ApplyOptions::default())
+        .apply_migration(
+            &plan,
+            ApplyOptions {
+                allow_destructive: true,
+                ..ApplyOptions::default()
+            },
+        )
         .await
         .unwrap_err();
     assert!(
@@ -1882,8 +1960,8 @@ async fn postgres_alias_types_replan_empty_and_paired_widening_keeps_the_foreign
 }
 
 /// #598: dropping a table is `Destructive` on every backend. PostgreSQL and
-/// SQL Server first drop the table's own foreign keys, a `Risky` step for the
-/// same table, so the table's risk is the highest of its steps.
+/// SQL Server first drop the table's own foreign keys, also `Destructive`;
+/// both steps preserve the destructive classification of the table.
 #[test]
 fn dropping_a_table_with_foreign_keys_is_destructive_on_every_backend() {
     let (_, with) = dependency_schemas(false, Shape::Issue);

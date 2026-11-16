@@ -2,13 +2,13 @@
 set -euo pipefail
 
 if [[ $# -gt 1 ]]; then
-  echo "usage: scripts/run-owned-database-lanes.sh [unique-index-preflight|sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|mssql|runtime-live|runtime-search-catalog|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|changed-subscriptions|bulk-write-targets|query-loader-batch|all]" >&2
+  echo "usage: scripts/run-owned-database-lanes.sh [unique-index-preflight|sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|migration-journal|mssql|runtime-live|runtime-search-catalog|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|changed-subscriptions|bulk-write-targets|query-loader-batch|authorized-page|all]" >&2
   exit 2
 fi
 
 lane=${1:-all}
 case "${lane}" in
-  unique-index-preflight|sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|mssql|runtime-live|runtime-search-catalog|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|changed-subscriptions|bulk-write-targets|query-loader-batch|all) ;;
+  unique-index-preflight|sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|migration-journal|mssql|runtime-live|runtime-search-catalog|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|changed-subscriptions|bulk-write-targets|query-loader-batch|authorized-page|all) ;;
   *)
     echo "owned-database-lanes: unsupported lane: ${lane}" >&2
     exit 2
@@ -26,7 +26,7 @@ repository_root=$(git rev-parse --show-toplevel)
 cd "${repository_root}"
 
 run_backup_postgres() {
-  cargo test -p graphql-orm-backup --locked --no-default-features --features local,orm-postgres \
+  cargo test -p graphql-orm-backup --locked --no-default-features --features local,orm-postgres,graphql-orm/change-journal \
     --test orm_016_postgres_conformance -- --include-ignored --test-threads=1
 }
 
@@ -45,7 +45,7 @@ run_sqlite() {
   cargo test -p graphql-orm --locked --no-default-features --features sqlite,runtime-graphql \
     --lib --test runtime_graphql --test runtime_strings --test runtime_queries --test runtime_relations \
     --test runtime_mutations --test runtime_migrations --test runtime_schema_ir --test runtime_migration_memory \
-    --test migration_planner --test migration_apply --test legacy_migration_history \
+    --test migration_planner --test migration_apply --test migration_safety --test legacy_migration_history \
     --test runtime_compat_goldens --test runtime_typed_defaults --test runtime_field_formats \
     --test runtime_graphql_formats \
     --test runtime_search_graphql --test runtime_search_writes --test runtime_search_ir --test runtime_search_long_tables \
@@ -62,16 +62,16 @@ run_sqlite() {
 
 run_postgres() {
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
-    --test postgres_table_case --test migration_composite_uniques --test postgres_qualified_tables --test retention_purge_postgres \
+    --test postgres_table_case --test migration_safety --test migration_composite_uniques --test postgres_qualified_tables --test retention_purge_postgres \
     -- --include-ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features postgres,runtime-graphql \
     --test runtime_many_to_many -- --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
     --test static_related_filter -- --ignored --test-threads=1
-  cargo test -p graphql-orm --locked --no-default-features --features postgres --test read_predicate --test visible_row_pages --test like_escape_matrix --test loader_chunks_postgres --test query_loader_batch --test order_aggregate_visibility -- --include-ignored --test-threads=1
+  cargo test -p graphql-orm --locked --no-default-features --features postgres --test read_predicate --test visible_row_pages --test like_escape_matrix --test loader_chunks_postgres --test query_loader_batch --test order_aggregate_visibility --test authorized_page_context_binding -- --include-ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features postgres,runtime-graphql \
     --lib --test runtime_graphql --test runtime_mutations --test runtime_migrations --test runtime_schema_ir --test runtime_migration_memory \
-    --test migration_planner --test migration_apply --test legacy_migration_history \
+    --test migration_planner --test migration_apply --test migration_safety --test legacy_migration_history \
     --test runtime_compat_goldens --test runtime_typed_defaults --test runtime_field_formats \
     --test runtime_graphql_formats \
     --test runtime_search_graphql --test runtime_search_writes --test runtime_search_ir --test runtime_search_long_tables \
@@ -138,7 +138,7 @@ run_postgres_legacy() {
     --test uuid_contract \
     -- --include-ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features postgres,change-journal \
-    --test postgres_rls_coverage --test postgres_change_journal_paths \
+    --test postgres_rls_coverage --test postgres_change_journal_paths --test postgres_change_journal_truncate \
     --test dependent_delete_repro --test backup_roundtrip \
     -- --include-ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features postgres,change-journal \
@@ -147,14 +147,27 @@ run_postgres_legacy() {
     --test federation_end_to_end_fixture -- --ignored node_lookup_through_the_router_on_owned_postgres
 }
 
+# Focused recovery lane for the journal portion of postgres-legacy.
+run_migration_journal() {
+  cargo test -p graphql-orm --locked --no-default-features --features postgres,change-journal \
+    --test dependent_delete_repro dependent_deletes_are_journaled -- --include-ignored --test-threads=1
+  cargo test -p graphql-orm --locked --no-default-features --features postgres,change-journal \
+    --test postgres_rls_coverage --test postgres_change_journal_paths --test postgres_change_journal_truncate \
+    --test backup_roundtrip -- --include-ignored --test-threads=1
+  cargo test -p graphql-orm --locked --no-default-features --features postgres,change-journal \
+    --lib catalog_read_cancellation -- --include-ignored --test-threads=1
+  cargo test -p graphql-orm --locked --no-default-features --features sqlite \
+    --test federation_end_to_end_fixture -- --ignored node_lookup_through_the_router_on_owned_postgres
+}
+
 run_mssql() {
   cargo test -p graphql-orm --locked --no-default-features --features mssql \
-    --test migration_composite_uniques -- --include-ignored --test-threads=1
+    --test migration_composite_uniques --test migration_safety -- --include-ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features mssql --test dependent_delete_ui
   cargo test -p graphql-orm --locked --no-default-features --features mssql \
     --lib delivery_is_at_least_once_through_failures_and_cancellation -- --ignored --test-threads=1
   cargo test -p graphql-orm --no-default-features --features mssql \
-    --test mssql_writes --test mssql_trigger_writes --test mssql_integration --test mssql_correctness --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial --test implicit_timestamp_defaults --test read_predicate --test point_read_visibility_backends --test visible_row_pages --test query_loader_batch --test order_aggregate_visibility --locked -- --ignored --test-threads=1
+    --test mssql_writes --test mssql_trigger_writes --test mssql_restore_marker --test mssql_integration --test mssql_correctness --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial --test implicit_timestamp_defaults --test read_predicate --test point_read_visibility_backends --test visible_row_pages --test query_loader_batch --test order_aggregate_visibility --locked -- --ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features sqlite \
     --test federation_end_to_end_fixture -- --ignored node_lookup_through_the_router_on_owned_mssql
 }
@@ -237,6 +250,12 @@ case "${lane}" in
         --test query_loader_batch --test order_aggregate_visibility -- --include-ignored --test-threads=1
     done
     ;;
+  authorized-page)
+    for backend in sqlite postgres mssql; do
+      cargo test -p graphql-orm --locked --no-default-features --features "${backend}" \
+        --test authorized_page_context_binding -- --include-ignored --test-threads=1
+    done
+    ;;
   changed-subscriptions)
     for backend in sqlite postgres mssql; do
       cargo test -p graphql-orm --locked --no-default-features --features "${backend}" \
@@ -268,6 +287,7 @@ case "${lane}" in
   sqlite) run_sqlite ;;
   postgres) run_postgres ;;
   postgres-legacy) run_postgres_legacy ;;
+  migration-journal) run_migration_journal ;;
   mssql) run_mssql ;;
   ai-postgres) run_ai_postgres ;;
   all)

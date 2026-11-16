@@ -377,8 +377,9 @@ impl crate::db::Database {
         }
         #[cfg(feature = "postgres")]
         {
-            let tables =
-                super::rls::change_journal_tables(&super::SchemaModel::from_entities(entities));
+            let schema = super::SchemaModel::from_entities(entities);
+            super::rls::refuse_change_journal_cascade_gaps(&schema)?;
+            let tables = super::rls::change_journal_tables(&schema);
             let mut tx = self.pool().begin().await?;
             for statement in super::rls::postgres_change_journal_recorder_sql(&tables) {
                 sqlx::query(&statement).execute(&mut *tx).await?;
@@ -508,32 +509,109 @@ pub async fn restore_backup_rows(
             .unwrap_or_default();
         validate_import_rows(entity, rows)?;
     }
-    // These checks also precede every write. Runtime database failures retain per-table
-    // transaction boundaries; the restore does not promise cross-table transactionality.
+    // These checks also precede every write.
     validate_backup_references(&current_snapshot.entities, rows_by_table)?;
-    if context.mode == RestoreMode::EmptyDatabase {
-        let mut tx = database.pool().begin().await?;
-        for entity in &current_snapshot.entities {
-            let count = table_row_count_on(&mut tx, &entity.table_name).await?;
-            if count != 0 {
-                return Err(sqlx::Error::Protocol(format!(
-                    "cannot restore table {} in EmptyDatabase mode because it already contains {} rows",
-                    entity.table_name, count
-                )));
-            }
-        }
-        tx.rollback().await?;
-    }
 
     let mut entities = current_snapshot.entities.clone();
     entities.sort_by_key(|entity| (entity.restore_order, entity.table_name.clone()));
+    let empty_rows = Vec::new();
     let mut reports = Vec::new();
-    for entity in entities {
-        let empty_rows = Vec::new();
-        let rows = rows_by_table.get(&entity.table_name).unwrap_or(&empty_rows);
-        reports.push(database.import_table_rows(&entity, rows, context).await?);
+    if context.mode != RestoreMode::EmptyDatabase {
+        // `DryRun` validates and `ReplaceExisting` is refused; neither writes.
+        for entity in &entities {
+            let rows = rows_by_table.get(&entity.table_name).unwrap_or(&empty_rows);
+            reports.push(database.import_table_rows(entity, rows, context).await?);
+        }
+        return Ok(reports);
     }
+
+    // One transaction for the whole snapshot: every table's rows, their
+    // row-count and row-hash checks, and the runtime search reset commit
+    // together. Any error drops the transaction, which rolls all of it back,
+    // so a failed restore leaves the target as it was.
+    let mut restore = begin_restore_transaction(database.pool()).await?;
+    for entity in &entities {
+        let count = table_row_count_on(&mut restore.tx, &entity.table_name).await?;
+        if count != 0 {
+            return Err(sqlx::Error::Protocol(format!(
+                "cannot restore table {} in EmptyDatabase mode because it already contains {} rows",
+                entity.table_name, count
+            )));
+        }
+    }
+    for entity in &entities {
+        let rows = rows_by_table.get(&entity.table_name).unwrap_or(&empty_rows);
+        reports.push(import_table_rows_on(&mut restore, entity, rows).await?);
+    }
+    // The restored rows replace whatever a runtime search index was built
+    // from. Clear each restored table's readiness-tracked index and leave it
+    // `building`, so search is refused until a backfill rebuilds it.
+    for entity in &entities {
+        reset_restored_runtime_search(&mut restore, &entity.table_name).await?;
+    }
+    restore.tx.commit().await?;
     Ok(reports)
+}
+
+/// Clear the readiness-tracked (runtime) search index of `table_name`, if it
+/// has one, and mark it `building`. Static search indexes do not track
+/// readiness and are left alone.
+async fn reset_restored_runtime_search(
+    restore: &mut BackupSnapshot,
+    table_name: &str,
+) -> crate::Result<()> {
+    let backend = current_backend();
+    let metadata_table = super::search::search_metadata_table_name();
+    // Probe the catalog first: a failed statement would abort the PostgreSQL
+    // transaction, and most databases have no search metadata at all.
+    let exists_sql = match backend {
+        DatabaseBackend::Postgres => "SELECT pg_catalog.to_regclass($1) IS NOT NULL",
+        _ => "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+    };
+    let exists: bool = sqlx::query_scalar(exists_sql)
+        .bind(metadata_table)
+        .fetch_one(&mut *restore.tx)
+        .await?;
+    if !exists {
+        return Ok(());
+    }
+    let select_sql = match backend {
+        DatabaseBackend::Postgres => format!(
+            "SELECT config_json::text FROM {metadata_table} WHERE table_name = $1 FOR UPDATE"
+        ),
+        _ => format!("SELECT config_json FROM {metadata_table} WHERE table_name = ?1"),
+    };
+    let stored: Option<String> = sqlx::query_scalar(&select_sql)
+        .bind(table_name)
+        .fetch_optional(&mut *restore.tx)
+        .await?;
+    let Some(mut config) =
+        stored.and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+    else {
+        return Ok(());
+    };
+    if !super::runtime_search::mark_building(&mut config) {
+        return Ok(());
+    }
+    let documents = match backend {
+        DatabaseBackend::Postgres => super::search::search_table_name(table_name),
+        _ => super::search::sqlite_fts_table_name(table_name),
+    };
+    sqlx::query(&format!("DELETE FROM {documents}"))
+        .execute(&mut *restore.tx)
+        .await?;
+    let update_sql = match backend {
+        DatabaseBackend::Postgres => {
+            format!("UPDATE {metadata_table} SET config_json = $1::jsonb WHERE table_name = $2")
+        }
+        _ => format!("UPDATE {metadata_table} SET config_json = ?1 WHERE table_name = ?2"),
+    };
+    sqlx::query(&update_sql)
+        .bind(config.to_string())
+        .bind(table_name)
+        .execute(&mut *restore.tx)
+        .await?;
+    Ok(())
 }
 
 #[cfg(feature = "sqlite")]
@@ -1458,6 +1536,15 @@ async fn import_table_rows(
     }
 
     validate_import_rows(entity, rows)?;
+    let mut restore = begin_restore_transaction(pool).await?;
+    let report = import_table_rows_on(&mut restore, entity, rows).await?;
+    restore.tx.commit().await?;
+    Ok(report)
+}
+
+/// Begin the transaction a restore writes in.
+async fn begin_restore_transaction(pool: &DbPool) -> crate::Result<BackupSnapshot> {
+    #[cfg_attr(not(feature = "postgres"), allow(unused_mut))]
     let mut tx = pool.begin().await?;
     // Restore never journals, even when a role or database default turns the
     // recording setting on for every session.
@@ -1468,7 +1555,19 @@ async fn import_table_rows(
     ))
     .execute(&mut *tx)
     .await?;
-    let count = table_row_count_on(&mut tx, &entity.table_name).await?;
+    Ok(BackupSnapshot { tx })
+}
+
+/// Import one table's rows inside `restore` and check the stored rows against
+/// the backup's row count and row hashes. Nothing is committed: an error
+/// leaves the caller to roll the transaction back by dropping it.
+async fn import_table_rows_on(
+    restore: &mut BackupSnapshot,
+    entity: &EntityBackupDescriptor,
+    rows: &[BackupRow],
+) -> crate::Result<ImportReport> {
+    let tx = &mut restore.tx;
+    let count = table_row_count_on(tx, &entity.table_name).await?;
     if count != 0 {
         return Err(sqlx::Error::Protocol(format!(
             "cannot restore table {} in EmptyDatabase mode because it already contains {} rows",
@@ -1511,7 +1610,7 @@ async fn import_table_rows(
             .iter()
             .map(|column| stored(row, column))
             .collect::<Result<Vec<_>, _>>()?;
-        execute_import_statement(&mut tx, &insert_sql, &values).await?;
+        execute_import_statement(tx, &insert_sql, &values).await?;
     }
     if !order.deferred.is_empty() {
         // Rows on (or below) a self-reference cycle. Insert each with placeholder self-reference
@@ -1547,7 +1646,7 @@ async fn import_table_rows(
                     }
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            execute_import_statement(&mut tx, &insert_sql, &values).await?;
+            execute_import_statement(tx, &insert_sql, &values).await?;
         }
         let update_sql = format!(
             "UPDATE {} SET {} WHERE {} = {}",
@@ -1570,7 +1669,7 @@ async fn import_table_rows(
                 .map(|column| stored(row, column))
                 .collect::<Result<Vec<_>, _>>()?;
             values.push(stored(row, key_column)?);
-            match execute_import_statement(&mut tx, &update_sql, &values).await {
+            match execute_import_statement(tx, &update_sql, &values).await {
                 Err(error) if is_staged_cycle_refusal(&error) => {
                     return Err(sqlx::Error::Decode(Box::new(BackupCycleFailure {
                         cycle: BackupSelfReferenceCycle {
@@ -1589,9 +1688,8 @@ async fn import_table_rows(
         }
     }
 
-    let imported_count = table_row_count_on(&mut tx, &entity.table_name).await? as usize;
+    let imported_count = table_row_count_on(tx, &entity.table_name).await? as usize;
     if imported_count != rows.len() {
-        let _ = tx.rollback().await;
         return Err(sqlx::Error::Protocol(format!(
             "restore row count validation failed for {}: imported {}, expected {}",
             entity.table_name,
@@ -1599,10 +1697,10 @@ async fn import_table_rows(
             rows.len()
         )));
     }
-    tx.commit().await?;
 
-    let mut snapshot = begin_consistent_snapshot(pool).await?;
-    let exported = export_table_rows(&mut snapshot, entity).await?;
+    // Read the rows back in the same transaction, so a mismatch rolls the
+    // import back instead of leaving it committed.
+    let exported = export_table_rows(restore, entity).await?;
     let expected_hashes = rows
         .iter()
         .map(|row| (row.primary_key.as_str(), row.row_hash.as_str()))

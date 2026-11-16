@@ -22,6 +22,154 @@ Placeholder versions: ORM and macros 0.160.0, operation catalogue 0.9.0, AI
 tool profiles 0.24.0, AI 0.146.0 (AI schema module `0.82.0`). Upgrade them
 together.
 
+### Migration safety and live journal validation
+
+- **Action needed:** replan pending migrations. Removing column-level UNIQUE or
+  primary-key enforcement is `Destructive` and requires `allow_destructive`.
+  Of the append-only steps, only enabling retention purge can need it:
+  `SetAppendOnly { enabled: true, retention_purge: true }` is `Destructive` on
+  a table that is already append-only without purge, and when the prior state
+  is unknown (the public `classify_migration_step`). It is `Additive` on a
+  table without append-only enforcement. Enabling enforcement without purge,
+  or turning purge off, stays `Additive`, and disabling append-only
+  enforcement stays `Destructive`. `additive_only` refuses every
+  `Destructive` step.
+- **Action needed** for hosts that apply schema stages with `additive_only`
+  or inspect `PlannedSchemaStage::steps()`: stages now classify against the
+  schema they are planned from, exposed as the new public field
+  `PlannedSchemaStage::source_schema`, instead of an empty schema. Enabling
+  append-only enforcement in a stage is `Additive` again, and enabling purge
+  on an append-only table needs `allow_destructive`. Code that builds a
+  `PlannedSchemaStage` with a struct literal must set `source_schema`.
+- **Action needed:** review type conversions using the actual backend. The
+  classifier treats these as lossy, so they are `Destructive`: on SQL Server,
+  `NVARCHAR` into `VARCHAR`, `CHARACTER VARYING` or `TEXT` (code-page types
+  that may replace Unicode characters), any change into a length-less
+  `VARCHAR`, `NVARCHAR`, `CHAR` or `NCHAR` (one character wide), and a
+  numeric or integer into bare `DECIMAL`/`NUMERIC` that `(18,0)` cannot hold;
+  on SQLite, bare `NUMERIC` is also read as `(18,0)`, and `INTEGER` is 64-bit,
+  so `INTEGER` into `DOUBLE PRECISION` is lossy. PostgreSQL reads bare
+  `NUMERIC` as unconstrained and a length-less `VARCHAR` as unlimited, as
+  before. Without a backend, `classify_migration_step` admits a widening only
+  when it is lossless on every backend.
+- **Action needed:** PostgreSQL `validate_target` now reports cascading foreign
+  keys into unjournaled live tables, including constraints added outside the ORM
+  after recorder installation. Journal those tables or use restrictive FK actions.
+- **Action needed:** never set `graphql_orm.change_journal = off` as a role-level
+  or database-level default. The TRUNCATE guard reads the effective
+  `current_setting`, so those defaults also disable the guard. Limit the opt-out
+  to a trusted restore transaction using `SET LOCAL`, then take a full backup.
+
+### Backup: result and error types
+
+- **`PruneResult`, `DeleteSnapshotResult` and `BackupError` are
+  `#[non_exhaustive]`, the results gain `deleted_snapshot_ids`, and an
+  unadmitted snapshot is refused with `BackupError::SnapshotNotAdmitted`.
+  Action needed** for struct literals, exhaustive destructuring and
+  wildcard-free matches on those types; see the
+  [backup migration guide](crates/graphql-orm-backup/MIGRATION.md#to-0250-result-and-error-types-target-clear-on-journaled-databases).
+
+### Migration plans: undeclared tables, lossy type changes and integrity removal
+
+Upgrade ORM and macros together. Generated SDL, operation catalogues and
+fingerprints are unchanged. Stored plan hashes change for plans that contain a
+reclassified step, because the hash covers each step's risk.
+
+- **Plans no longer drop undeclared tables by default. Action needed** for
+  hosts that rely on a default plan to remove a table whose entity was
+  deleted. `PlanOptions::default()` is now `managed_tables_only()`, so
+  `plan_migration`, `plan_migration_to_entities` and `plan_schema_target`
+  ignore every live table the target does not declare. The ORM keeps no
+  record of which tables it created, and the old default planned a
+  `DROP TABLE` for a host's own tables too. To drop tables:
+  - pass `PlanOptions::strict()` to the `_with_options` planner when every
+    table the database (or PostgreSQL schema) holds is the ORM's; or
+  - in a shared database, plan from a current model that names only the
+    tables to remove:
+    `plan_migration_with_options(version, description, &current, &target, PlanOptions::strict())`.
+  Either way the drops are `Destructive` and need
+  `ApplyOptions::allow_destructive`. Hosts that already pass
+  `managed_tables_only()` or `strict()` explicitly see no change.
+- **Schema stages and ABI upgrades drop only tables a stage declared. Action
+  needed** only for hosts that used a stage to drop a table no stage ever
+  declared. `plan_schema_stages`, `apply_schema_stages` and
+  `plan_upgrade`/`apply_upgrade` now leave such tables out of the plan. A
+  table that an earlier stage declared and a later stage omits is still
+  dropped, as a destructive step.
+- **Lossy column type changes are `Destructive`. Action needed** for hosts
+  that apply type changes under `ApplyOptions::default()`. A type change is
+  `Risky`, as before, only when it is a known lossless widening: a larger
+  integer, an integer into a wide enough exact numeric or a float that holds
+  it exactly, `REAL` into `DOUBLE PRECISION`, a numeric with at least the
+  same integer digits and scale, and a longer or unlimited
+  `VARCHAR`/`NVARCHAR`/`TEXT`. Every other type change, including one between
+  types the classifier does not know, is now `Destructive`: PostgreSQL
+  applies it with `ALTER COLUMN ... TYPE` and no `USING` clause, which rounds
+  or truncates stored values (`DOUBLE PRECISION` to `INTEGER`, a smaller
+  `NUMERIC` scale, `TIMESTAMPTZ` to `DATE`). Review the plan, then apply it
+  with `allow_destructive: true`.
+- **Integrity-removing steps are `Destructive`. Action needed** for hosts
+  whose plans or stages contain them and apply under
+  `ApplyOptions::default()`: `SetAppendOnly { enabled: false }`, `DropIndex`
+  (the step does not say whether the index is unique), `DropForeignKey`, and
+  a `SetCompositeUniques` or `SetCheckConstraints` step that removes or
+  changes an existing constraint. Steps that only add a constraint stay
+  `Risky`. This also covers changes the planner renders as a drop followed by
+  a create, such as a changed index definition or a foreign key whose delete
+  action changes. Review the plan, then apply it with
+  `allow_destructive: true`.
+- No new option was added: the existing `allow_destructive` gate covers all
+  of the above, for planned migrations, schema targets, schema stages, ABI
+  upgrades and owned (runtime) migrations.
+
+### AI 0.147.0: webhook-receipt index replacement admission
+
+- **Action needed** for hosts that compose `AiSchemaModule` and upgrade a
+  store whose webhook-receipt table still has a legacy AI index. The upgrade
+  drops that index and creates the current composite one, and the drop is now
+  `Destructive`. Pass the plan's options through
+  `AiSchemaModule::admit_index_replacements(&plan, options)`, which admits
+  destructive steps only when every one is that known index replacement. See
+  the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01460-to-01470-webhook-receipt-index-replacement-admission).
+
+### PostgreSQL change journal: TRUNCATE and unjournaled cascades are refused
+
+Only hosts that build with the `change-journal` feature on PostgreSQL are
+affected.
+
+- **Re-apply the schema target. Action needed.** The recorder now installs a
+  `BEFORE TRUNCATE` statement trigger, `graphql_orm_change_journal_truncate`,
+  on every journaled table. Until the schema target is applied again (or
+  `Database::ensure_change_journal_recorder` is run) as the owner of the
+  tables, `validate_target` reports
+  `Missing change journal TRUNCATE guard` for each journaled table.
+- **`TRUNCATE` on a journaled table is refused. Action needed** for hosts or
+  operators that truncate entity tables. The statement fails with SQLSTATE
+  `0A000` and a message that starts
+  `graphql-orm change journal refuses TRUNCATE`, also when it reaches the
+  table through `TRUNCATE ... CASCADE`. The journal cannot record a truncate,
+  and an incremental restore would bring the rows back. Delete the rows
+  instead. A transaction that runs
+  `SET LOCAL graphql_orm.change_journal = 'off'` (the public constant
+  `CHANGE_JOURNAL_SETTING`) declares that it writes without journaling and may
+  truncate; take a full backup afterwards.
+- **A cascade into a table without a recorder is refused. Action needed** for
+  schemas where a table with a composite primary key (which the journal
+  cannot record) has a foreign key to a journaled table with
+  `ON DELETE CASCADE` or `SET NULL`. `plan_schema_target` and
+  `ensure_change_journal_recorder` fail with `ChangeJournalCascadeGap`
+  (`ChangeJournalCascadeGap::from_error`), `validate_target` reports
+  `Unjournaled cascade`, and the recorder install also refuses, from the
+  catalog, any such foreign key on a table no schema target declares
+  (including `ON UPDATE` actions). Give the table a single-column primary
+  key, or make the foreign key restrict the delete and delete the rows
+  through the ORM.
+- **Backup adapter.** `OrmBackupAdapter::clear_restore_target` clears a
+  PostgreSQL target inside a transaction that turns the journal setting off,
+  so it keeps working on journaled databases. No action.
+- SQLite records journal entries from the ORM's own writes and has no
+  `TRUNCATE` statement; SQL Server has no change journal. Neither changes.
+
 ### Generated-operation fingerprints no longer include the Rust module path (#683)
 
 **Action needed.** Every generated-operation fingerprint, catalogue
@@ -189,6 +337,95 @@ unique, and mutation rows leave it `NULL`; SQL Server would admit only one
 The AI tables are a trusted store. Their integrity hashes are unkeyed and
 detect accidental divergence only; see
 [the AI security guide](crates/graphql-orm-ai/docs/security.md#database-trust-boundary).
+
+## 0.159.0 to 0.163.0: wrapper object compile cost
+
+- **Hand-emitted wrapper objects.** No action. Upgrade ORM and macros
+  together. The generated edge, connection, mutation result, change event,
+  bulk delete and bulk update result, and authorized scan page types no longer
+  derive `async_graphql::SimpleObject`; the macros emit the equivalent output
+  impls. Generated SDL, operation and semantic catalogues and fingerprints are
+  byte-identical, and the types keep their fields, derives other than
+  `SimpleObject`, and `async fn` field getters. The new hidden
+  `graphql_orm::graphql::wrapper_object` module is for generated code only.
+
+## 0.162.0: context-bound authorized pages
+
+**No action.** Upgrade ORM and macros together. This release only adds API:
+generated pagination, `EntityQuery::fetch_authorized_scan`,
+`AuthorizedScanConfig` and every existing cursor are unchanged, and no schema,
+data or generated SDL changes.
+
+To adopt the new API in a handwritten resolver, a host:
+
+1. generates a random 32-byte secret owned by the service, stores it in the
+   service's encrypted settings, and installs it with
+   `Database::with_authorized_page_config(AuthorizedPageConfig::new(AuthorizedPageKeys::new(key_id, key)?, batch_size, max_scanned_rows)?)`
+   on every replica. Never derive the key from a provider credential or a
+   client value;
+2. builds an `AuthorizedPageBinding` from server state on every request and
+   calls `EntityQuery::fetch_authorized_page` with
+   `AuthorizedPageRequest::new(binding).after(after).limit(limit)`.
+
+See [context-bound authorized pages](docs/reference/graphql-orm/pagination-migration.md#context-bound-authorized-pages-for-handwritten-resolvers-01620)
+for the binding, bounds, errors and key rotation.
+
+## 0.159.0 to 0.160.0: atomic restore, search reset and kept values on ignored denials
+
+Upgrade ORM and macros together. Generated SDL, operation catalogues and
+fingerprints are unchanged.
+
+- **Upsert with an ignored field-write denial. Action needed** only for hosts
+  that return `true` from `FieldPolicy::ignore_denied_field_write` and relied
+  on a denied optional field being cleared. A GraphQL upsert that resolves to
+  an existing row now leaves the denied column out of the conflict update, so
+  its stored value is kept; it used to be written as `NULL`. This applies to
+  fields with a declared `write_policy` and to key-less optional fields, on
+  SQLite, PostgreSQL and SQL Server. An upsert that inserts, updates, bulk
+  updates and required fields are unchanged. To clear such a field, allow the
+  write in `can_write_field`. `MutationEvent::changes` of that upsert no
+  longer lists the column. Recompile entities to pick up the generated code.
+- **Snapshot restore is one transaction. No action.** On PostgreSQL and SQLite
+  `restore_backup_rows` (and the backup adapter's `restore_full`) now commits
+  all tables together or not at all. A failed restore no longer needs the
+  target cleared before a retry. Row-hash validation runs before the commit; a
+  mismatch used to be reported after the table was already committed. Very
+  large restores hold one transaction for their whole duration: size the
+  PostgreSQL `statement_timeout` and `idle_in_transaction_session_timeout` of
+  the restoring role accordingly.
+- **Restore resets runtime search. Action needed** only for hosts that restore
+  the tables of searchable runtime collections with `restore_backup_rows`:
+  the restore leaves each such index `building`, so run
+  `backfill_runtime_search` for those collections before serving search.
+  Hosts that import runtime rows another way should call the new
+  `SchemaManager::reset_runtime_search` afterwards.
+- **SQL Server restore lock. No action** for hosts that do not restore SQL
+  Server databases with their own statements. Every SQL Server ORM
+  transaction and autocommit statement now takes a shared application lock
+  (`sp_getapplock`, resource `graphql_orm_restore`) in the batch that begins
+  it, and checks for a restore marker. Transactions and autocommit reads pay
+  no extra round trip; an autocommit write (a raw statement outside a
+  transaction) pays one short batch to release the lock. The login
+  needs no new permission: `sp_getapplock` is granted to `public`. Raw
+  statements sent through the ORM run inside that wrapper batch; a statement
+  that must be alone in its batch (`CREATE VIEW`, `CREATE PROCEDURE`,
+  `CREATE TRIGGER` and similar) is sent unwrapped.
+- **Restoring a SQL Server database. Action needed** to get the exclusion:
+  call `Database::begin_restore(restore_id, wait)`, run the restore's
+  statements through the returned `MssqlRestore` guard (`execute`,
+  `fetch_rows`), then `finish()`. Statements a host runs on its own
+  connections are not covered by the lock. While the restore runs, and after
+  a restore whose process died, ORM work fails with an error carrying
+  `RestoreInProgress` (`RestoreInProgress::from_error`); after a crash, call
+  `Database::resume_restore(restore_id, wait)`, complete the restore or
+  remove its partial rows through the guard, and `finish()`. The first
+  `begin_restore` creates `__graphql_orm_restore_marker` in the login's
+  default schema; create it beforehand as the schema owner when the runtime
+  login may not run DDL:
+  `CREATE TABLE __graphql_orm_restore_marker (marker_key TINYINT NOT NULL PRIMARY KEY CHECK (marker_key = 1), restore_id NVARCHAR(200) NOT NULL, started_at BIGINT NOT NULL)`.
+- Backup users also upgrade to
+  [backup 0.24.0](crates/graphql-orm-backup/MIGRATION.md#to-0240-host-held-snapshot-records).
+
 
 ## 0.158.0 to 0.159.0: PostgreSQL table-name case
 

@@ -85,8 +85,8 @@ enables `sqlite,auth-agql` and runs `current_authority`, `authorization_mode`,
 These cover accepted-request coherence and revocation, strict policy modes,
 bounded authorized pagination, event-time authority and private provenance.
 
-The `orm-security-portable` matrix runs `subscription_portable_authorization` and
-`bounded_protected_scans` with exactly one backend selected: SQLite, PostgreSQL
+The `orm-security-portable` matrix runs `subscription_portable_authorization`,
+`bounded_protected_scans` and `authorized_page_context_binding` with exactly one backend selected: SQLite, PostgreSQL
 or MSSQL. SQLite uses temporary in-memory databases. The other profiles create
 their own disposable loopback containers with random ownership identities and
 exact-identity cleanup; they do not take an application database URL. These
@@ -106,8 +106,8 @@ resource-controlled runner:
 
 ```sh
 bash scripts/run-security-test-targets.sh sqlite,auth-agql current_authority authorization_mode authorized_pagination subscription_release_authorization subscription_provenance_authorization subscription_repository_provenance
-bash scripts/run-security-test-targets.sh postgres subscription_portable_authorization bounded_protected_scans
-bash scripts/run-security-test-targets.sh mssql subscription_portable_authorization bounded_protected_scans
+bash scripts/run-security-test-targets.sh postgres subscription_portable_authorization bounded_protected_scans authorized_page_context_binding
+bash scripts/run-security-test-targets.sh mssql subscription_portable_authorization bounded_protected_scans authorized_page_context_binding
 ```
 
 Nested fixture Cargo commands inherit the caller's `CARGO_BUILD_JOBS` budget.
@@ -293,6 +293,10 @@ scripts/run-owned-database-lanes.sh mssql
 scripts/run-owned-database-lanes.sh ai-postgres
 ```
 
+`scripts/run-owned-database-lanes.sh authorized-page` runs the context-bound
+authorized page regressions (`authorized_page_context_binding`) on SQLite,
+PostgreSQL and SQL Server. The `postgres` lane includes the same test binary.
+
 `scripts/run-owned-database-lanes.sh unique-index-preflight` runs the conditional
 unique-index regressions on SQLite and test-owned PostgreSQL: a newly added
 predicate column, duplicate keys inside the filter, and duplicates outside it.
@@ -375,3 +379,9 @@ CI and full release validation. Run it on a selected branch with
 It does not create skipped check runs for CI's other jobs or share CI's main
 concurrency group. The runner has a 120-minute timeout and reclaims disk before
 executing the two owned PostgreSQL test families. No release is triggered.
+
+The focused `bash scripts/run-owned-database-lanes.sh migration-journal` lane
+executes the PostgreSQL journal and TRUNCATE regressions, journaled dependent
+deletes, catalog-read cancellation, and the PostgreSQL router fixture using
+test-owned disposable databases. Use it to repeat the journal portion of
+`postgres-legacy` after a recorder change.

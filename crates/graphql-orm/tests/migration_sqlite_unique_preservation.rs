@@ -1,6 +1,15 @@
 #![cfg(all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))))]
 use graphql_orm::{graphql::orm::*, prelude::*};
 
+// These tests exercise the rebuild contract after approval; migration_safety
+// covers refusing constraint removal under default options.
+fn approved_options() -> ApplyOptions {
+    ApplyOptions {
+        allow_destructive: true,
+        ..Default::default()
+    }
+}
+
 async fn setup(sql: &[&str]) -> graphql_orm::Result<Database<SqliteBackend>> {
     let db = Database::<SqliteBackend>::connect_sqlite_with_options(
         "sqlite::memory:",
@@ -28,7 +37,7 @@ async fn remove(db: &Database<SqliteBackend>) -> graphql_orm::Result<SchemaModel
         .plan_migration("remove", "composite only", &current, &target)?;
     assert!(!plan.steps.is_empty());
     db.schema()
-        .apply_migration(&plan, ApplyOptions::default())
+        .apply_migration(&plan, approved_options())
         .await?;
     clean(db, &target).await?;
     Ok(target)
@@ -167,7 +176,7 @@ async fn mixed_case_unique_identifiers_are_idempotent_and_order_is_retained()
         .plan_migration_to_entities("initial", "case", &[CaseProbe::metadata()])
         .await?;
     db.schema()
-        .apply_migration(&initial, ApplyOptions::default())
+        .apply_migration(&initial, approved_options())
         .await?;
     let target = SchemaModel::from_entities(&[CaseProbe::metadata()]);
     clean(&db, &target).await?;
@@ -183,7 +192,7 @@ async fn mixed_case_unique_identifiers_are_idempotent_and_order_is_retained()
         .plan_migration("reverse", "order", &actual, &reversed)?;
     assert!(!plan.steps.is_empty());
     db.schema()
-        .apply_migration(&plan, ApplyOptions::default())
+        .apply_migration(&plan, approved_options())
         .await?;
     clean(&db, &reversed).await
 }
@@ -213,6 +222,7 @@ async fn unsupported_shapes_refuse_without_touching_schema_or_rows() -> graphql_
             .apply_migration(
                 &plan,
                 ApplyOptions {
+                    allow_destructive: true,
                     record_history: false,
                     ..Default::default()
                 },
@@ -267,6 +277,7 @@ async fn virtual_and_shadow_tables_refuse_before_mutation() -> graphql_orm::Resu
             .apply_migration(
                 &plan,
                 ApplyOptions {
+                    allow_destructive: true,
                     record_history: false,
                     ..Default::default()
                 },
@@ -317,6 +328,7 @@ async fn unsupported_ddl_and_temporary_collisions_refuse_before_other_plan_write
             .apply_migration(
                 &plan,
                 ApplyOptions {
+                    allow_destructive: true,
                     record_history: false,
                     ..Default::default()
                 },
@@ -394,7 +406,7 @@ async fn owned_migrations_use_the_same_lossless_directive() -> Result<(), Box<dy
         )
         .await?;
     db.schema()
-        .apply_owned_migration(&plan, ApplyOptions::default())
+        .apply_owned_migration(&plan, approved_options())
         .await?;
     let row: (i64, String) = sqlx::query_as("SELECT rowid,g FROM probe")
         .fetch_one(db.pool())
@@ -442,7 +454,7 @@ async fn isolated_steps_are_safe_and_external_sql_execution_fails_closed() -> gr
     let mut plan = plan;
     plan.statements = sql;
     db.schema()
-        .apply_migration(&plan, ApplyOptions::default())
+        .apply_migration(&plan, approved_options())
         .await?;
     let rowid: i64 = sqlx::query_scalar("SELECT rowid FROM probe")
         .fetch_one(db.pool())
@@ -503,7 +515,7 @@ async fn unowned_incoming_fks_refuse_key_removal_but_allow_retained_keys() -> gr
             .await?;
     let error = db
         .schema()
-        .apply_migration(&plan, ApplyOptions::default())
+        .apply_migration(&plan, approved_options())
         .await
         .unwrap_err();
     assert!(error.to_string().contains("UnsupportedCapability"));
@@ -522,7 +534,7 @@ async fn unowned_incoming_fks_refuse_key_removal_but_allow_retained_keys() -> gr
         PlanOptions::managed_tables_only(),
     )?;
     db.schema()
-        .apply_migration(&plan, ApplyOptions::default())
+        .apply_migration(&plan, approved_options())
         .await?;
     let mut expected = current;
     expected
@@ -576,7 +588,7 @@ async fn legacy_cleanup_is_not_introduced_into_owned_column_rebuilds()
         .await?;
     assert!(
         db.schema()
-            .apply_owned_migration(&plan, ApplyOptions::default())
+            .apply_owned_migration(&plan, approved_options())
             .await
             .is_err()
     );
@@ -607,7 +619,7 @@ async fn delimiter_shaped_catalog_names_refuse_without_copying_wrong_columns()
             .await?;
     let error = db
         .schema()
-        .apply_migration(&plan, ApplyOptions::default())
+        .apply_migration(&plan, approved_options())
         .await
         .unwrap_err();
     assert!(error.to_string().contains("UnsupportedCapability"));
@@ -648,7 +660,7 @@ async fn case_variant_temp_rebuild_names_cannot_shadow_main_data() -> graphql_or
         .await?;
         let error = db
             .schema()
-            .apply_migration(&plan, ApplyOptions::default())
+            .apply_migration(&plan, approved_options())
             .await
             .unwrap_err();
         assert!(error.to_string().contains("UnsupportedCapability"));

@@ -10,6 +10,12 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.147.0
+
+- **Added:** `AiSchemaModule::admit_index_replacements(&plan, options)` admits an upgrade that only replaces an AI-owned webhook-receipt index. ORM 0.164.0 classifies every index drop as `Destructive`, so `ApplyOptions::default()` now refuses the upgrade from a store created before `provider_kind` joined the receipt primary key, or before module 0.72.0's composite index was renamed (including the 63-byte name PostgreSQL stored). The method sets `allow_destructive` only when every destructive step in the plan drops one of those known, non-unique legacy index names and the same plan creates the current composite index; any other destructive step leaves the options unchanged, and the gate refuses the plan.
+
+No GraphQL SDL, persistent schema or data migration change; `AI_SCHEMA_MODULE_VERSION` stays `0.82.0`. See the migration guide.
+
 ## Unreleased - 0.146.0
 
 Part of the single breaking release; see the root [migration guide](../../MIGRATION.md#breaking-release-unreleased). Requires ORM/macros 0.160.0, operation catalogue 0.9.0 and AI tool profiles 0.24.0.

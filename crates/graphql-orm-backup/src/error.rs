@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum BackupError {
     /// A configured buffering or decoding byte limit was exceeded.
     #[error("backup payload exceeds configured byte limit {limit_bytes}")]
@@ -54,6 +55,18 @@ pub enum BackupError {
     /// does not match its contents.
     #[error("manifest authentication failed for {key}: {reason}")]
     ManifestAuthenticationFailed { key: String, reason: String },
+
+    /// The host's snapshot records do not admit this snapshot: it is on the
+    /// revocation list, or missing from the known-snapshot list, of the
+    /// repository's [`crate::ManifestAuthenticator`]. Its seal may be valid;
+    /// a deleted snapshot that was put back into the repository fails here.
+    #[error("snapshot {snapshot_id} is not admitted by the host's snapshot records: {reason}")]
+    SnapshotNotAdmitted {
+        /// Snapshot that was refused.
+        snapshot_id: uuid::Uuid,
+        /// Which record refused it.
+        reason: String,
+    },
 
     /// An unauthenticated legacy manifest was refused by the configured
     /// [`crate::LegacyManifestPolicy`].
@@ -265,6 +278,25 @@ impl From<graphql_orm_storage::StorageError> for BackupError {
             graphql_orm_storage::StorageError::MissingBlob { key } => Self::MissingBlob { key },
             graphql_orm_storage::StorageError::Io { path, source } => Self::Io { path, source },
             source => Self::Storage { source },
+        }
+    }
+}
+
+impl BackupError {
+    /// Whether this error refuses a snapshot because the host's snapshot
+    /// records do not admit it: it is on the revocation list, or missing from
+    /// the known-snapshot list, of the repository's
+    /// [`crate::ManifestAuthenticator`]. Its seal may be valid; a deleted
+    /// snapshot that was put back into the repository fails this way.
+    ///
+    /// True for [`BackupError::SnapshotNotAdmitted`], also when a restore
+    /// reports it as the `source` of [`BackupError::RestoreStageFailed`].
+    #[must_use]
+    pub fn is_snapshot_not_admitted(&self) -> bool {
+        match self {
+            Self::SnapshotNotAdmitted { .. } => true,
+            Self::RestoreStageFailed { source, .. } => source.is_snapshot_not_admitted(),
+            _ => false,
         }
     }
 }

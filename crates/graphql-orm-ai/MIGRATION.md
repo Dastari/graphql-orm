@@ -10,6 +10,32 @@ supersedes: []
 
 # Migration Guide
 
+## 0.146.0 to 0.147.0: webhook-receipt index replacement admission
+
+Requires `graphql-orm` 0.164.0. No schema-module, SDL or data change.
+
+- **Action needed** for hosts upgrading an AI store whose webhook-receipt
+  table still has a legacy index: the single-column `provider_kind` index from
+  before `provider_kind` joined the receipt primary key, or module 0.72.0's
+  composite index under its full name or the 63-byte name PostgreSQL stored.
+  The upgrade plan drops that index and creates the current composite index.
+  ORM 0.164.0 classifies the drop as `Destructive`, so
+  `apply_migration(&plan, ApplyOptions::default())` refuses it. Apply the plan
+  with the options the module returns:
+
+  ```rust,ignore
+  let options = AiSchemaModule.admit_index_replacements(&plan, ApplyOptions::default());
+  database.schema().apply_migration(&plan, options).await?;
+  ```
+
+  The returned options admit destructive steps only when every one is such a
+  known index replacement and the plan creates the replacement. If your
+  composed plan also contains host-owned destructive steps, the options are
+  unchanged and the plan stays refused: review those steps and apply with
+  `allow_destructive: true` yourself.
+- Stores created on a current module see no index replacement and need no
+  action.
+
 ## 0.145.0 to 0.146.0: fingerprints, fixed-broker sessions, approvals and unique indexes
 
 **Action needed.** This is the AI part of the single breaking release. The
