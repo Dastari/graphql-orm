@@ -402,6 +402,7 @@ fn application_tool_failure_code(value: &str) -> Option<crate::AiApplicationTool
         "result_budget_exceeded" => Code::ResultBudgetExceeded,
         "tool_call_limit_reached" => Code::ToolCallLimitReached,
         "capability_stale" => Code::CapabilityStale,
+        "selection_stale" => Code::SelectionStale,
         "authorization_denied" => Code::AuthorizationDenied,
         "preflight_authentication_required" => Code::AuthenticationRequired,
         "preflight_authorization_denied" => Code::PreflightAuthorizationDenied,
@@ -428,6 +429,7 @@ const fn exhaustive_browser_failure_code(
         | Code::ResultBudgetExceeded
         | Code::ToolCallLimitReached
         | Code::CapabilityStale
+        | Code::SelectionStale
         | Code::AuthorizationDenied
         | Code::AuthenticationRequired
         | Code::PreflightAuthorizationDenied

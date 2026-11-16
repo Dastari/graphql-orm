@@ -8678,7 +8678,7 @@ pub(crate) mod tests {
 
         let wrong_identity = AiProviderCapabilitySessionBinding::new(
             crate::AiCapabilityDeliveryMode::FixedBroker,
-            binding.capability_index_fingerprint(),
+            "c".repeat(64),
             binding.static_bootstrap_tool_fingerprints().clone(),
             binding.provider_projection_version(),
             binding.model(),
@@ -8695,7 +8695,7 @@ pub(crate) mod tests {
 
         let wrong_model = AiProviderCapabilitySessionBinding::new(
             crate::AiCapabilityDeliveryMode::FixedBroker,
-            binding.capability_index_fingerprint(),
+            "c".repeat(64),
             binding.static_bootstrap_tool_fingerprints().clone(),
             binding.provider_projection_version(),
             "other-model",
@@ -9556,8 +9556,7 @@ pub(crate) mod tests {
 
     #[test]
     fn fixed_broker_definitions_project_their_nullable_scalar_unions_for_codex() {
-        let definitions = crate::capability_broker_definitions(&"a".repeat(64))
-            .expect("fixed broker definitions should compile");
+        let definitions = crate::capability_broker_definitions();
         assert_eq!(definitions.len(), 3);
         let projected = project_codex_dynamic_tools(&definitions)
             .expect("every crate-authored fixed broker schema should project");

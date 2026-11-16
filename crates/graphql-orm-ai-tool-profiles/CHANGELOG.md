@@ -10,6 +10,10 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.24.0
+
+- **Breaking (fingerprints, #683):** requires operation catalogue 0.9.0, whose generated-operation fingerprint algorithm is `graphql-orm-sha256-len-v2`. Operation contracts and tool manifests record that name. A manifest or contract bound under `graphql-orm-sha256-len-v1` is refused as stale; regenerate it. No Rust API change. See the root [migration guide](../../MIGRATION.md#breaking-release-unreleased).
+
 ## Unreleased - 0.23.0
 
 - Generated aggregate bounds use the canonical `groupLimit` or `group_limit` argument spelling. The host injects the bound from the plan maximum; models cannot supply it.

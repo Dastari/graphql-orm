@@ -100,11 +100,13 @@ the generated GraphQL operation fingerprint.
 ## Fingerprints
 
 `GRAPHQL_OPERATION_FINGERPRINT_ALGORITHM` identifies
-`graphql-orm-sha256-len-v1`. Version 1 hashes a domain-separated sequence of
+`graphql-orm-sha256-len-v2`. Version 2 does not hash the Rust module path of
+the entity, which version 1 did; every value differs from its version 1 value.
+It hashes a domain-separated sequence of
 UTF-8 label/value fields. Labels and values are each prefixed with an unsigned
 eight-byte big-endian length. Digests are lowercase SHA-256 hex:
 
-- a generated descriptor fingerprint binds its entity/type identity, backend,
+- a generated descriptor fingerprint binds its entity name and table, backend,
   operation coordinate/category, argument/result declarations, and canonical
   derive-owned schema signature;
 - a resolved descriptor fingerprint additionally binds the schema-root

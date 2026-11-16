@@ -10,6 +10,8 @@ supersedes: []
 
 # graphql-orm-ai
 
+AI 0.146.0 (placeholder, **breaking**) is the AI part of the single breaking release: fixed-broker provider sessions keep their binding across schema and catalogue changes, with `capability_stale` and the new `selection_stale` as separate recoverable model-facing codes; generated-operation fingerprints change once (catalogue 0.9.0); `HighImpact` approvals always require recent MFA and the approval lifetime cap has a 7-day ceiling; AI schema module `0.82.0` adds three unique indexes. Rebind, re-approve and migrate once; see the [migration guide](MIGRATION.md#01450-to-01460-fingerprints-fixed-broker-sessions-approvals-and-unique-indexes).
+
 AI 0.145.0 adds per-message structured [entity references](docs/entity-references.md): only the `{kind, id}` handle is stored, cloned or retried; a host hook resolves it for the current principal when the transcript is read and inside the provider-call executor at every dispatch; a reference never grants access or reveals whether an entity exists; and resolved data reaches the model as provenance-tagged data. **Breaking** for custom `AiProvider` implementations and `SendAiMessageInput` literals. Apply AI schema module `0.81.0`; see [migration guidance](MIGRATION.md#01440-to-01450-entity-references).
 
 AI 0.144.0 adds a pinned Anthropic model-snapshot mapping and an exact OpenAI stored-response deletion adapter, fixes a missed cancellation wake-up, bounds published skill schemas, and documents the lease clock contract and the limits of content protection. AI schema module stays `0.80.0`; see [migration guidance](MIGRATION.md#01430-to-01440-ai-follow-ups).

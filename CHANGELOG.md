@@ -14,6 +14,16 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - breaking release: ORM/macros 0.160.0, catalogue 0.9.0, AI tool profiles 0.24.0, AI 0.146.0
+
+Collected on the `next/breaking` integration branch; versions are placeholders.
+Host steps are in the [migration guide](MIGRATION.md#breaking-release-unreleased).
+
+- **Breaking (fingerprints, #683):** generated-operation fingerprints no longer include the Rust module path. `GRAPHQL_OPERATION_FINGERPRINT_ALGORITHM` is `graphql-orm-sha256-len-v2`; the catalogue is ordered by entity name and table, not by Rust path. Moving or re-exporting an entity no longer changes any fingerprint. Every operation, catalogue and router-export fingerprint changes once. `stable_type_id` is still accepted and no longer affects fingerprints. AI tool profiles 0.24.0 writes and requires the new algorithm name in tool manifests.
+- **Added (migrations, #532):** `SchemaManager::apply_migration` and `apply_schema_target` refuse a plan, before any statement runs, when existing rows repeat the key of a unique index the plan creates. The error is read with `UniqueIndexDuplicates::from_error` and names the table, index and key columns only. Previously the database rejected the `CREATE UNIQUE INDEX` statement during the apply and the transaction rolled back with an untyped error.
+- **Fixed (migrations):** conditional unique-index duplicate preflights skip indexes whose predicate column is added by the same plan. Existing-column predicates still restrict the duplicate check to included rows.
+- **AI 0.146.0:** fixed-broker sessions survive catalogue changes, `capability_stale` and `selection_stale` are separate model-facing codes (#551), HighImpact approvals force step-up and the approval lifetime cap has a 7-day ceiling (#465), and AI schema module `0.82.0` adds three unique indexes (#532). See the [AI changelog](crates/graphql-orm-ai/CHANGELOG.md).
+
 ## Unreleased - ORM/macros 0.159.0
 
 - Fix PostgreSQL static entities with bare mixed-case table names (#716). Render quoted table references with the historical PostgreSQL folding of bare table components, and resolve declared names during introspection. Create/alter/index/trigger/RLS statements, reads and writes, catalog checks and search helpers address the same table while metadata and helper digests remain unchanged. Existing folded installs need no migration; lower-case names are unchanged. See [migration guidance](MIGRATION.md#01580-to-01590-postgresql-table-name-case).
