@@ -76,6 +76,7 @@ Versions on main (bold where they differ from the latest release): **`graphql-or
 #### Breaking integration release (version provisional)
 
 - **Action needed** — ORM/macros 0.160.0: declare the schema page maximum and migrate oversized internal reads to exact-or-refused paging (#667/#674). [Migration](../../MIGRATION.md#breaking-release-unreleased)
+- **Action needed** — ORM/macros 0.160.0: add `refuse_oversized_limit` to full `PaginationConfig` struct literals, or use `..Default::default()`. [Migration](../../MIGRATION.md#breaking-release-unreleased)
 - **Action needed** — ORM/macros 0.160.0: handle `CursorKeyTooLarge` in exhaustive runtime query/relation error matches (#580). [Migration](../../MIGRATION.md#breaking-release-unreleased)
 - **Action needed** — ORM/macros 0.160.0: use decimal strings for runtime `RecordVersion` and integer live keys, and regenerate descriptors (#528, item 4). [Migration](../../MIGRATION.md#breaking-release-unreleased)
 - **Action needed** — ORM/macros 0.160.0: review key-existence disclosure before adopting key-only deletes; only exact-key subscribers qualify and primary-key read policies are refused (#666). [Migration](../../MIGRATION.md#breaking-release-unreleased)
